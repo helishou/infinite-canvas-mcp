@@ -175,4 +175,4 @@ if (typeof window !== "undefined") {
     });
 }
 
-export { syncAssetsToBackend, hydrateAssets };
+export { syncAssetsToBackend };
