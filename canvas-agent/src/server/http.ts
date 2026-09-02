@@ -14,7 +14,6 @@ import { CONFIG_DIR, DEFAULT_PORT, ensureSiteWorkspace, loadConfig, saveConfig, 
 import { logger } from "../utils/logger.js";
 import { checkVersions } from "../version-check.js";
 import { SkillStore, SkillStoreError } from "../skills/store.js";
-import { BackendClient } from "../runtime/backend-client.js";
 import { backendComfyUi, createBackendClient, resolveComfyTask, type ComfyUiClient } from "../runtime/comfy-client.js";
 import { loadPluginMcpDeclarationsFromBackend, savePluginMcpDeclarationsToBackend, type PluginMcpDeclaration } from "./plugin-mcp.js";
 
