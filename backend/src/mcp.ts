@@ -42,7 +42,17 @@ export async function startBackendMcpServer() {
     registerBrowserCompatibilityTools(server, config);
     const context = buildPluginMcpContext({ url: config.url, token: config.token, backendUrl: config.url }, directBackend, comfyClient);
     const registry = new PluginMcpRegistry(server, context);
-    await registry.apply(db.listPluginDeclarations().map((item): PluginMcpDeclaration => ({ id: item.id, name: item.name, version: item.version, mcp: { enabled: item.enabled, tools: item.tools as never } })));
+    const readDeclarations = () => db.listPluginDeclarations().map((item): PluginMcpDeclaration => ({
+        id: item.id,
+        name: item.name,
+        version: item.version,
+        mcp: { enabled: item.enabled, tools: item.tools as never },
+    }));
+    await registry.apply(readDeclarations());
+    const declarationSync = setInterval(() => {
+        void registry.apply(readDeclarations()).catch((error) => console.error("plugin MCP sync failed", error));
+    }, 3000);
+    declarationSync.unref();
     await server.connect(new StdioServerTransport());
 }
 
