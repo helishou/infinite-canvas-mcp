@@ -77,9 +77,29 @@ export function H3RulerScrubber({ ctx, total, previewH, libraryW }: { ctx: Canva
     return <div className="minimax-ruler-scrubber" style={{ left: `calc(${libraryW}px + 68px)`, top: `calc(50px + ${previewH}px + 8px)` }} onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); apply(event); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) apply(event); }} />;
 }
 
-export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, timelineOffset = 0, clipDuration, playRequest, onEnded }: { ctx: CanvasNodeContext; url: string; kind: H3Ref["type"]; storageKey?: string; name?: string; playhead: number; timelineOffset?: number; clipDuration?: number; playRequest: number; onEnded?: () => void }) {
+export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, timelineOffset = 0, clipDuration, playRequest, nextUrl, onEnded }: { ctx: CanvasNodeContext; url: string; kind: H3Ref["type"]; storageKey?: string; name?: string; playhead: number; timelineOffset?: number; clipDuration?: number; playRequest: number; nextUrl?: string; onEnded?: () => void }) {
     const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
+    const preloadRef = useRef<HTMLVideoElement | null>(null);
+    const onEndedRef = useRef(onEnded);
+    useEffect(() => { onEndedRef.current = onEnded; }, [onEnded]);
+    // 监听 video/audio 原生 ended 事件（视频完整播完后触发，驱动 advancePlayback 换段）
+    useEffect(() => {
+        const media = mediaRef.current;
+        if (!media) return;
+        const handler = () => { onEndedRef.current?.(); };
+        media.addEventListener("ended", handler);
+        return () => media.removeEventListener("ended", handler);
+    }, [url]);
     useEffect(() => { const media = mediaRef.current; if (!media || !playRequest) return; if (media.paused) void media.play().catch(() => undefined); else media.pause(); }, [playRequest]);
+    // 预加载下一个 clip 的视频（只暖缓存，不手动切 DOM；切换统一走 advancePlayback → React 更新 src）
+    useEffect(() => {
+        if (!nextUrl) { preloadRef.current = null; return; }
+        const video = document.createElement("video");
+        video.src = nextUrl;
+        video.preload = "auto";
+        video.muted = true;
+        preloadRef.current = video;
+    }, [nextUrl]);
     // 支持把输出视频/图片拖到画布变成独立节点（复用 storageKey，不重新上传）
     const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
         const payload = JSON.stringify({ url, type: kind, kind, name: name || "H3 输出", storageKey });
@@ -91,5 +111,5 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     if (!url) return <div className="minimax-player-content"><div className="minimax-player-empty">连接视频和角色参考图</div></div>;
     if (kind === "image") return <div className="minimax-player-content minimax-player-image" draggable onDragStart={handleDragStart}><img src={url} alt="H3 reference" draggable={false} /></div>;
     if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio ref={(node) => { mediaRef.current = node; }} src={url} controls preload="metadata" draggable={false} /></div></div>;
-    return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><video ref={(node) => { mediaRef.current = node; }} src={resultUrl(url)} controls muted playsInline draggable={false} onLoadedMetadata={(event) => { event.currentTarget.currentTime = Math.max(0, Math.min(Number(event.currentTarget.duration || Infinity), playhead)); }} onTimeUpdate={(event) => { const media = event.currentTarget; const local = Math.max(0, Math.min(Number(media.currentTime || 0), Number(clipDuration || Infinity))); if (Number.isFinite(Number(clipDuration)) && media.currentTime > Number(clipDuration)) { media.currentTime = Number(clipDuration); media.pause(); } const time = timelineOffset + local; if (Math.abs(time - Number(ctx.node.metadata?.playhead || 0)) > 0.2) ctx.updateMetadata({ playhead: time }); }} onEnded={(event) => { const local = Math.min(Number(event.currentTarget.duration || 0), Number(clipDuration || Infinity)); ctx.updateMetadata({ playhead: timelineOffset + Math.max(0, local) }); onEnded?.(); }} /></div>;
+    return <div className="minimax-player-content"><video ref={(node) => { mediaRef.current = node; }} src={resultUrl(url)} controls muted playsInline draggable={false} onLoadedMetadata={(event) => { event.currentTarget.currentTime = Math.max(0, Math.min(Number(event.currentTarget.duration || Infinity), playhead)); }} onTimeUpdate={(event) => { const media = event.currentTarget; const dur = Number(media.duration || 0); const effectiveDur = Number.isFinite(Number(clipDuration)) && Number(clipDuration) > 0 ? Math.min(Number(clipDuration), dur || Number(clipDuration)) : dur; const local = Math.max(0, Math.min(Number(media.currentTime || 0), effectiveDur)); const time = timelineOffset + local; if (Math.abs(time - Number(ctx.node.metadata?.playhead || 0)) > 0.2) ctx.updateMetadata({ playhead: time }); }} /></div>;
 }
