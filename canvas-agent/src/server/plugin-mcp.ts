@@ -292,7 +292,8 @@ function jsonTypeToZod(node: unknown): ZodTypeAny {
 /** 构造并接入插件 MCP 注册表(供 startMcpServer 调用)。 */
 export async function startPluginMcp(server: McpServer): Promise<PluginMcpRegistry> {
     const config = loadConfig(true);
-    const runtimeDb = new RuntimeDatabase();
+    // MCP 声明、任务和媒体均由 Backend 持久化；这里只保留内存兼容对象。
+    const runtimeDb = new RuntimeDatabase(":memory:");
     const backend = createBackendClient(config.backendUrl || `http://127.0.0.1:17370`);
     /** ComfyUI 走 backend(总后台权威),MCP 侧不再直连本地 ComfyUI 实例。 */
     const comfyUi = backendComfyUi(backend, () => []);

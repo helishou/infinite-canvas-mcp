@@ -35,7 +35,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     const initialWorkspace = ensureSiteWorkspace(config);
     const session = new CanvasSession(initialWorkspace.activeThreadId || "");
     const skillStore = new SkillStore(initialWorkspace.workspacePath);
-    const runtimeDb = new RuntimeDatabase();
+    // 嵌入 Backend 时禁止创建第二份持久化业务库；兼容 standalone 才保留旧库。
+    const runtimeDb = new RuntimeDatabase(options.listen === false ? ":memory:" : undefined);
     const backendUrl = options.backendUrl || config.backendUrl || `http://127.0.0.1:17370`;
     const backend = createBackendClient(backendUrl, { ...process.env, ...(options.backendToken ? { INFINITE_CANVAS_BACKEND_TOKEN: options.backendToken } : {}) });
     const localComfy = new ComfyUiBridge(runtimeDb);

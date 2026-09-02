@@ -11,6 +11,9 @@ import { ComfyUiBackend } from "./comfyui/bridge.js";
 import { registerComfyRoutes } from "./server/comfy-routes.js";
 import { BackendEventBus } from "./events.js";
 import { createBackendRuntimeContext } from "./runtime/context.js";
+import { RunningHubBackend } from "./runtime/runninghub.js";
+import { VideoConcatBackend } from "./runtime/video-concat.js";
+import { registerAgentRuntimeRoutes } from "./server/agent-runtime-routes.js";
 import { createAgentApp } from "@basketikun/canvas-agent";
 
 const logger = createLogger("main");
@@ -24,9 +27,12 @@ const stores = createStores(db);
 const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings });
 const events = new BackendEventBus();
 const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
+const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings);
+const videoConcat = new VideoConcatBackend(runtime.tasks);
 
 const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: runtime.events });
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
+registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat);
 const agent = createAgentApp({ listen: false, backendUrl: config.url, backendToken: config.token });
 app.use("/agent", agent.app);
 
