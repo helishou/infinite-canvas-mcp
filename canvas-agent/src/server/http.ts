@@ -16,7 +16,7 @@ import { checkVersions } from "../version-check.js";
 import { SkillStore, SkillStoreError } from "../skills/store.js";
 import { RuntimeDatabase } from "../runtime/database.js";
 import { BackendClient } from "../runtime/backend-client.js";
-import { createBackendClient, proxyComfyUi, resolveComfyTask, type ComfyUiClient } from "../runtime/comfy-client.js";
+import { backendComfyUi, createBackendClient, proxyComfyUi, resolveComfyTask, type ComfyUiClient } from "../runtime/comfy-client.js";
 import { loadPluginMcpDeclarationsFromBackend, savePluginMcpDeclarationsToBackend, type PluginMcpDeclaration } from "./plugin-mcp.js";
 import { ComfyUiBridge } from "../runtime/comfyui.js";
 import { RunningHubBridge } from "../runtime/runninghub.js";
@@ -40,8 +40,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     const backendUrl = options.backendUrl || config.backendUrl || `http://127.0.0.1:17370`;
     const backend = createBackendClient(backendUrl, { ...process.env, ...(options.backendToken ? { INFINITE_CANVAS_BACKEND_TOKEN: options.backendToken } : {}) });
     const localComfy = new ComfyUiBridge(runtimeDb);
-    /** ComfyUI：backend 权威，Agent 本地 bridge 做离线兜底（见 comfy-client.ts）。 */
-    const comfyUi: ComfyUiClient = proxyComfyUi(backend, localComfy);
+    /** 嵌入 Backend 时只允许使用总后台 ComfyUI；standalone 保留过渡 fallback。 */
+    const comfyUi: ComfyUiClient = options.listen === false ? backendComfyUi(backend, () => localComfy.presets()) : proxyComfyUi(backend, localComfy);
     const runningHub = new RunningHubBridge(runtimeDb);
     const videoConcat = new VideoConcatService(runtimeDb);
     /** 将 Agent 事件广播到所属线程或全部网页。 */

@@ -1,7 +1,6 @@
 import { readFile } from "node:fs/promises";
 
 import { createBackendClient, resolveComfyTask } from "../../runtime/comfy-client.js";
-import { storeRuntimeMedia } from "../../runtime/media.js";
 import { loadConfig } from "../../config.js";
 import type { AgentCanvasNode, McpToolHandler, PluginMcpContext, PluginMcpModule, PluginMcpToolWire } from "../../server/plugin-mcp.js";
 
@@ -124,22 +123,22 @@ function collectRefs(segment: H3Segment): { images: H3Ref[]; videos: H3Ref[]; au
 }
 
 /** 将参考条目(url/dataURL/本地路径)落地为 Agent 运行时媒体路径,供 ComfyUIBridge 上传。 */
-async function resolveRefToPath(ref: H3Ref): Promise<string> {
+async function resolveRefToPath(context: PluginMcpContext, ref: H3Ref): Promise<string> {
     const url = ref.url || "";
     const name = ref.name || "ref";
     if (!url) throw new Error(`参考条目缺少可读取地址:${name}`);
-    if (url.startsWith("data:")) return (await storeRuntimeMedia(name, url)).path;
+    if (url.startsWith("data:")) return (await context.backend.runtimeMediaStore(name, url)).path;
     if (/^https?:\/\//i.test(url)) {
         const response = await fetch(url);
         if (!response.ok) throw new Error(`读取参考失败 HTTP ${response.status}:${name}`);
         const buffer = Buffer.from(await response.arrayBuffer());
         const mime = response.headers.get("content-type") || "application/octet-stream";
-        return (await storeRuntimeMedia(name, `data:${mime};base64,${buffer.toString("base64")}`)).path;
+        return (await context.backend.runtimeMediaStore(name, `data:${mime};base64,${buffer.toString("base64")}`)).path;
     }
     // 本地文件
     const buffer = await readFile(url);
     const mime = /\.png$/i.test(name) ? "image/png" : /\.jpe?g$/i.test(name) ? "image/jpeg" : /\.webp$/i.test(name) ? "image/webp" : /\.mp4$/i.test(name) ? "video/mp4" : /\.mp3$/i.test(name) ? "audio/mpeg" : "application/octet-stream";
-    return (await storeRuntimeMedia(name, `data:${mime};base64,${buffer.toString("base64")}`)).path;
+    return (await context.backend.runtimeMediaStore(name, `data:${mime};base64,${buffer.toString("base64")}`)).path;
 }
 
 function extractParams(segment: H3Segment, override: Record<string, unknown> = {}): Record<string, unknown> {
@@ -168,9 +167,9 @@ async function runSegment(context: PluginMcpContext, node: AgentCanvasNode, inde
     const { segment } = selectSegment(segments, index);
     const { images, videos, audios } = collectRefs(segment);
     const [imagePaths, videoPaths, audioPaths] = await Promise.all([
-        Promise.all(images.map(resolveRefToPath)),
-        Promise.all(videos.map(resolveRefToPath)),
-        Promise.all(audios.map(resolveRefToPath)),
+        Promise.all(images.map((ref) => resolveRefToPath(context, ref))),
+        Promise.all(videos.map((ref) => resolveRefToPath(context, ref))),
+        Promise.all(audios.map((ref) => resolveRefToPath(context, ref))),
     ]);
     const input = {
         prompt: String(segment.prompt || ""),

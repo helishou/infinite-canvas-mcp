@@ -1,7 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, type ZodRawShape, type ZodTypeAny } from "zod";
 
-import { RuntimeDatabase } from "../runtime/database.js";
 import { BackendClient } from "../runtime/backend-client.js";
 import { backendComfyUi, createBackendClient, type ComfyUiClient } from "../runtime/comfy-client.js";
 import { loadConfig, type CanvasAgentConfig } from "../config.js";
@@ -39,7 +38,6 @@ export type PluginMcpDeclaration = {
 export type PluginMcpContext = {
     endpoint: string;
     token: string;
-    runtimeDb: RuntimeDatabase;
     /** 画布/素材/媒体/日志的唯一业务数据源。 */
     backend: BackendClient;
     /** ComfyUI 能力（backend 权威 + 本地兜底；见 comfy-client.ts）。 */
@@ -68,17 +66,6 @@ export const KNOWN_FIRST_PARTY: Record<string, FirstPartyEntry> = {
     },
 };
 
-const SETTING_KEY = "plugins.mcp.declarations";
-
-export function loadPluginMcpDeclarations(db: RuntimeDatabase): PluginMcpDeclaration[] {
-    const value = db.getSetting(SETTING_KEY);
-    return Array.isArray(value) ? (value as PluginMcpDeclaration[]) : [];
-}
-
-export function savePluginMcpDeclarations(db: RuntimeDatabase, declarations: PluginMcpDeclaration[]) {
-    db.setSetting(SETTING_KEY, declarations);
-}
-
 export async function loadPluginMcpDeclarationsFromBackend(backend: BackendClient): Promise<PluginMcpDeclaration[]> {
     const declarations = await backend.listPluginDeclarations();
     return declarations.flatMap((value) => {
@@ -100,7 +87,7 @@ export async function savePluginMcpDeclarationsToBackend(backend: BackendClient,
 }
 
 // 构造插件 MCP 运行上下文(Agent 侧)
-export function buildPluginMcpContext(config: CanvasAgentConfig, runtimeDb: RuntimeDatabase, backend: BackendClient, comfyUi: ComfyUiClient): PluginMcpContext {
+export function buildPluginMcpContext(config: CanvasAgentConfig, backend: BackendClient, comfyUi: ComfyUiClient): PluginMcpContext {
     const readNodes = async (): Promise<AgentCanvasNode[]> => {
         const projects = await backend.listCanvasProjects() as Array<{ nodes?: AgentCanvasNode[] }>;
         return projects.flatMap((project) => (Array.isArray(project.nodes) ? project.nodes : []) as AgentCanvasNode[]);
@@ -108,7 +95,6 @@ export function buildPluginMcpContext(config: CanvasAgentConfig, runtimeDb: Runt
     return {
         endpoint: config.url,
         token: config.token,
-        runtimeDb,
         comfyUi,
         getCanvasNodes: readNodes,
         getCanvasNode: async (id) => (await readNodes()).find((node) => node.id === id) ?? null,
@@ -292,12 +278,10 @@ function jsonTypeToZod(node: unknown): ZodTypeAny {
 /** 构造并接入插件 MCP 注册表(供 startMcpServer 调用)。 */
 export async function startPluginMcp(server: McpServer): Promise<PluginMcpRegistry> {
     const config = loadConfig(true);
-    // MCP 声明、任务和媒体均由 Backend 持久化；这里只保留内存兼容对象。
-    const runtimeDb = new RuntimeDatabase(":memory:");
     const backend = createBackendClient(config.backendUrl || `http://127.0.0.1:17370`);
     /** ComfyUI 走 backend(总后台权威),MCP 侧不再直连本地 ComfyUI 实例。 */
     const comfyUi = backendComfyUi(backend, () => []);
-    const context = buildPluginMcpContext(config, runtimeDb, backend, comfyUi);
+    const context = buildPluginMcpContext(config, backend, comfyUi);
     const registry = new PluginMcpRegistry(server, context);
     // 冷启动:从 SQLite 读取已启用插件
     await registry.apply(await loadPluginMcpDeclarationsFromBackend(backend));
