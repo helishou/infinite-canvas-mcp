@@ -17,6 +17,7 @@ import {
     fetchBackendProjects,
     saveBackendAssets,
     fetchBackendAssets,
+    fetchBackendGenerationLogs,
     uploadBackendMediaDataUrl,
     createBackendGenerationLog,
     deleteBackendMedia,
@@ -54,17 +55,19 @@ export function isMigrationDone(): boolean {
 
 /** 从总后台拉取已有数据，构建去重集合。 */
 async function buildDedupSets() {
-    try {
-        const existingProjects = await fetchBackendProjects();
-        (existingProjects.projects || []).forEach((p) => { if (p.id) MIGRATION_DEDUP.existingProjectIds.add(String(p.id)); });
-    } catch { /* first run */ }
-    try {
-        const existingAssets = await fetchBackendAssets();
-        (existingAssets.assets || []).forEach((a) => {
-            const record = a as Record<string, unknown>;
-            if (record.id) MIGRATION_DEDUP.existingAssetIds.add(String(record.id));
-        });
-    } catch { /* first run */ }
+    const [existingProjects, existingAssets, existingLogs] = await Promise.all([
+        fetchBackendProjects(), fetchBackendAssets(), fetchBackendGenerationLogs({ limit: 5000 }),
+    ]);
+    (existingProjects.projects || []).forEach((p) => { if (p.id) MIGRATION_DEDUP.existingProjectIds.add(String(p.id)); });
+    (existingAssets.assets || []).forEach((a) => {
+        const record = a as Record<string, unknown>;
+        if (record.id) MIGRATION_DEDUP.existingAssetIds.add(String(record.id));
+    });
+    (existingLogs.logs || []).forEach((log) => {
+        const params = log.params && typeof log.params === "object" ? log.params as Record<string, unknown> : {};
+        const legacyId = typeof params.legacyLogId === "string" ? params.legacyLogId : log.id;
+        if (legacyId) MIGRATION_DEDUP.existingLogIds.add(legacyId);
+    });
 }
 
 /** 执行一次性 IndexedDB → 总后台迁移。 */
@@ -73,8 +76,10 @@ export async function migrateIndexDBToBackend(): Promise<MigrationResult> {
     if (isMigrationDone()) return { success: true, projectsMigrated: 0, assetsMigrated: 0, mediaUploaded: 0, logsMigrated: 0 };
     migrationRunning = true;
     const uploadedMedia: string[] = [];
+    let backendCommitted = false;
 
     try {
+        resetDedupSets();
         await buildDedupSets();
 
         // 1. 从 IndexedDB 读取画布项目
@@ -100,7 +105,9 @@ export async function migrateIndexDBToBackend(): Promise<MigrationResult> {
                 for (const asset of assets) {
                     mediaUploaded += await migrateAssetMedia(asset, uploadedMedia);
                 }
-                await saveBackendAssets(assets.map((asset) => rewriteStorageKeys(asset)) as unknown[], folders as unknown[]);
+                const existing = await fetchBackendAssets();
+                const mergedAssets = mergeById(existing.assets || [], assets.map((asset) => rewriteStorageKeys(asset)) as unknown[]);
+                await saveBackendAssets(mergedAssets, mergeById(existing.folders || [], folders));
                 assets.forEach((a) => MIGRATION_DEDUP.existingAssetIds.add(a.id));
                 assetsMigrated = assets.length;
             }
@@ -109,7 +116,9 @@ export async function migrateIndexDBToBackend(): Promise<MigrationResult> {
         await migrateReferencedMedia([...projects, ...(Array.isArray(rawAssets) ? rawAssets : [])], uploadedMedia);
 
         if (projects.length) {
-            await saveBackendProjects(projects.map((project) => rewriteStorageKeys(project)) as unknown as Record<string, unknown>[]);
+            const existing = await fetchBackendProjects();
+            const mergedProjects = mergeById(existing.projects || [], projects.map((project) => rewriteStorageKeys(project)) as unknown[]);
+            await saveBackendProjects(mergedProjects);
             projects.forEach((project) => MIGRATION_DEDUP.existingProjectIds.add(project.id));
             projectsMigrated = projects.length;
         }
@@ -153,15 +162,16 @@ export async function migrateIndexDBToBackend(): Promise<MigrationResult> {
         }
 
         // 5. 写完成标记
-        localStorage.setItem(MIGRATION_MARKER_KEY, "true");
+        backendCommitted = true;
 
-        // 6. 清理旧 IndexedDB 业务数据
+        // 5. 清理旧 IndexedDB 业务数据；清理成功后才写完成标记
         await clearLocalForageBusinessData();
+        localStorage.setItem(MIGRATION_MARKER_KEY, "true");
 
         return { success: true, projectsMigrated, assetsMigrated, mediaUploaded, logsMigrated };
     } catch (error) {
         // 清理孤立媒体
-        for (const key of uploadedMedia) {
+        if (!backendCommitted) for (const key of uploadedMedia) {
             try { await deleteBackendMedia(key); } catch { /* ignore */ }
         }
         return {
@@ -292,6 +302,26 @@ function rewriteStorageKeys<T>(value: T): T {
             ? MIGRATION_DEDUP.mediaKeyMap.get(item) || item
             : rewriteStorageKeys(item),
     ])) as T;
+}
+
+function mergeById<T>(existing: T[], incoming: T[]): T[] {
+    const merged = new Map<string, T>();
+    for (const item of existing) {
+        const id = item && typeof item === "object" ? String((item as Record<string, unknown>).id || "") : "";
+        if (id) merged.set(id, item);
+    }
+    for (const item of incoming) {
+        const id = item && typeof item === "object" ? String((item as Record<string, unknown>).id || "") : "";
+        if (id) merged.set(id, item);
+    }
+    return [...merged.values()];
+}
+
+function resetDedupSets() {
+    MIGRATION_DEDUP.existingProjectIds.clear();
+    MIGRATION_DEDUP.existingAssetIds.clear();
+    MIGRATION_DEDUP.existingLogIds.clear();
+    MIGRATION_DEDUP.mediaKeyMap.clear();
 }
 
 async function clearLocalForageBusinessData() {

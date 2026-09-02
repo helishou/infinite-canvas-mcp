@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [优化] 前端工作台日志、画布和素材改为按 Backend 逐条读写，并接入 Backend SSE，避免 localforage 日志和全量替换造成双写或覆盖。
++ [修复] 加固 IndexedDB 一次性迁移的去重、合并、校验与清理顺序，迁移失败时保留原始数据和已存在的 Backend 数据。
 + [优化] Backend 收敛为 Agent、ComfyUI、RunningHub、FFmpeg、任务、媒体和插件 MCP 的统一运行时，standalone canvas-agent 改为兼容代理。
 + [修复] ComfyUI 生成结果和 H3 Motion Context 合并视频统一落入 Backend media_files，并通过任务 SSE 发布运行中、完成和失败状态。
 + [修复] RunningHub 与 FFmpeg 输出媒体统一登记到 Backend media_files，保留原有输出路径和远程地址兼容字段。

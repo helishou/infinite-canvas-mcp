@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import i18n from "@/i18n";
 
+import { getBackendToken, getBackendUrl } from "@/services/backend-api";
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
@@ -39,9 +40,7 @@ export type AgentConversationState = {
 };
 export type AgentPanelTab = "chat" | "setup" | "history" | "skills" | "log";
 
-const CONNECT_TIMEOUT_MS = 6000;
 let agentSource: EventSource | null = null;
-let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
 type AgentStore = {
     width: number;
@@ -101,8 +100,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     panelMounted: true,
     panelClosing: false,
     canvasContext: null,
-    url: typeof window === "undefined" ? "http://127.0.0.1:17371" : localStorage.getItem("canvas-agent-url") || "http://127.0.0.1:17371",
-    token: typeof window === "undefined" ? "" : localStorage.getItem("canvas-agent-token") || "",
+    url: getBackendUrl().replace(/\/$/, "") + "/agent",
+    token: getBackendToken(),
     connected: false,
     enabled: false,
     silentConnect: false,
@@ -155,17 +154,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         } catch {
             return set({ connectError: silent ? "" : i18n.t("agent.state.invalidUrl") });
         }
-        localStorage.setItem("canvas-agent-url", endpoint);
-        localStorage.setItem("canvas-agent-token", token);
-        window.dispatchEvent(new Event("canvas-agent-connected"));
         // Only set enabled here; LocalAgentPanel's effect owns SSE initialization.
-        set({ url: endpoint, token, enabled: true, silentConnect: silent, fragmentBootstrap: false, activity: i18n.t("agent.status.connecting"), connectError: "" });
+        set({ enabled: true, silentConnect: silent, fragmentBootstrap: false, activity: i18n.t("agent.status.connecting"), connectError: "" });
     },
     disconnectAgent: (patch = {}) => {
         agentSource?.close();
         agentSource = null;
-        if (connectTimer) clearTimeout(connectTimer);
-        connectTimer = null;
         set({ enabled: false, connected: false, silentConnect: false, fragmentBootstrap: false, activity: i18n.t("agent.state.offline"), conversation: { revision: 0, conversationId: "", threadId: "", status: "idle", mcpStatuses: {} }, bootstrapStatus: null, mcpStartupStatuses: {}, ...patch });
     },
     addMessage: (item) => set((state) => ({ messages: [...state.messages, item] })),

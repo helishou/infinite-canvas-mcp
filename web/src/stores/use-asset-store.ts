@@ -3,7 +3,7 @@ import { create } from "zustand";
 import { nanoid } from "nanoid";
 import { cleanupUnusedImages } from "@/services/image-storage";
 import { cleanupUnusedMedia } from "@/services/file-storage";
-import { fetchBackendAssets, saveBackendAssets } from "@/services/backend-api";
+import { deleteBackendAsset, deleteBackendAssetFolder, fetchBackendAssets, upsertBackendAsset, upsertBackendAssetFolder } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
 export type AssetKind = "text" | "image" | "video" | "audio" | "composite";
@@ -54,10 +54,22 @@ type AssetStore = {
 };
 
 /** 同步素材到总后台。 */
+let knownAssetIds = new Set<string>();
+let knownFolderIds = new Set<string>();
+
 async function syncAssetsToBackend(assets: Asset[], folders: AssetFolder[]) {
     if (!useBackendStore.getState().connected) return;
     try {
-        await saveBackendAssets(assets as unknown[], folders as unknown[]);
+        const assetIds = new Set(assets.map((asset) => asset.id));
+        const folderIds = new Set(folders.map((folder) => folder.id));
+        await Promise.all([
+            ...assets.map((asset) => upsertBackendAsset(asset as unknown as Record<string, unknown>)),
+            ...folders.map((folder) => upsertBackendAssetFolder(folder as unknown as Record<string, unknown>)),
+            ...[...knownAssetIds].filter((id) => !assetIds.has(id)).map((id) => deleteBackendAsset(id)),
+            ...[...knownFolderIds].filter((id) => !folderIds.has(id)).map((id) => deleteBackendAssetFolder(id)),
+        ]);
+        knownAssetIds = assetIds;
+        knownFolderIds = folderIds;
     } catch { /* Backend 是唯一写入目标，失败由下一次同步重试 */ }
 }
 
@@ -67,6 +79,8 @@ async function hydrateAssetsFromBackend() {
         const response = await fetchBackendAssets();
         const remoteAssets = Array.isArray(response.assets) ? response.assets as unknown as Asset[] : [];
         const remoteFolders = Array.isArray(response.folders) ? response.folders as unknown as AssetFolder[] : [];
+        knownAssetIds = new Set(remoteAssets.map((asset) => asset.id));
+        knownFolderIds = new Set(remoteFolders.map((folder) => folder.id));
         useAssetStore.setState({ assets: remoteAssets, folders: remoteFolders });
         return true;
     } catch {
@@ -74,7 +88,7 @@ async function hydrateAssetsFromBackend() {
     }
 }
 
-async function hydrateAssets() {
+export async function hydrateAssets() {
     await hydrateAssetsFromBackend();
     useAssetStore.setState({ hydrated: true });
 }

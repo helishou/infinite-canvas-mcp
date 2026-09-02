@@ -78,6 +78,10 @@ export function upsertBackendProject(project: Record<string, unknown>) {
     return request<{ ok: boolean; project?: Record<string, unknown> }>("POST", "/canvas/projects", project);
 }
 
+export function deleteBackendProject(id: string) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/projects/${encodeURIComponent(id)}`);
+}
+
 // ── Assets ───────────────────────────────────────────────────────────────
 
 export function fetchBackendAssets(options: { kind?: string; folderId?: string } = {}) {
@@ -94,6 +98,18 @@ export function saveBackendAssets(assets: unknown[], folders: unknown[]) {
 
 export function upsertBackendAsset(asset: Record<string, unknown>) {
     return request<{ ok: boolean; asset?: Record<string, unknown> }>("POST", "/canvas/assets", asset);
+}
+
+export function deleteBackendAsset(id: string) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/assets/${encodeURIComponent(id)}`);
+}
+
+export function upsertBackendAssetFolder(folder: Record<string, unknown>) {
+    return request<{ ok: boolean; folder?: Record<string, unknown> }>("POST", "/canvas/assets/folders", folder);
+}
+
+export function deleteBackendAssetFolder(id: string) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/assets/folders/${encodeURIComponent(id)}`);
 }
 
 // ── Media ────────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
-import { createBackendGenerationLog, fetchBackendProjects, saveBackendProjects } from "@/services/backend-api";
+import { createBackendGenerationLog, deleteBackendProject, fetchBackendProjects, upsertBackendProject } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
 export type CanvasProject = {
@@ -36,10 +36,16 @@ type CanvasStore = {
 
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let knownProjectIds = new Set<string>();
 
 async function syncCanvasProjects(projects: CanvasProject[]) {
     if (!useBackendStore.getState().connected) return;
-    try { await saveBackendProjects(projects as unknown as Record<string, unknown>[]); } catch { /* Backend 是唯一写入目标，失败由下一次同步重试 */ }
+    try {
+        const ids = new Set(projects.map((project) => project.id));
+        await Promise.all(projects.map((project) => upsertBackendProject(project as unknown as Record<string, unknown>)));
+        await Promise.all([...knownProjectIds].filter((id) => !ids.has(id)).map((id) => deleteBackendProject(id)));
+        knownProjectIds = ids;
+    } catch { /* Backend 是唯一写入目标，失败由下一次同步重试 */ }
 }
 
 async function hydrateCanvasProjectsFromBackend() {
@@ -48,6 +54,7 @@ async function hydrateCanvasProjectsFromBackend() {
     try {
         const response = await fetchBackendProjects();
         const remoteProjects = Array.isArray(response.projects) ? response.projects as unknown as CanvasProject[] : [];
+        knownProjectIds = new Set(remoteProjects.map((project) => project.id));
         useCanvasStore.setState({ projects: remoteProjects });
         return true;
     } catch {
@@ -55,7 +62,7 @@ async function hydrateCanvasProjectsFromBackend() {
     }
 }
 
-async function hydrateCanvasProjects() {
+export async function hydrateCanvasProjects() {
     await hydrateCanvasProjectsFromBackend();
     useCanvasStore.setState({ hydrated: true });
 }

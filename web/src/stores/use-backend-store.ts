@@ -12,6 +12,35 @@ type BackendStore = {
     reset: () => void;
 };
 
+let backendEvents: EventSource | null = null;
+const seenBackendEventIds = new Set<string>();
+
+function stopBackendEvents() {
+    backendEvents?.close();
+    backendEvents = null;
+}
+
+function startBackendEvents(url: string, token: string) {
+    if (typeof window === "undefined" || !token) return;
+    stopBackendEvents();
+    const source = new EventSource(`${url.replace(/\/$/, "")}/events?token=${encodeURIComponent(token)}`);
+    backendEvents = source;
+    const handleMessage = (message: MessageEvent<string>) => {
+        try {
+            const event = JSON.parse(message.data) as { id?: string; type?: string; entityId?: string; payload?: unknown };
+            if (!event.id || seenBackendEventIds.has(event.id)) return;
+            seenBackendEventIds.add(event.id);
+            if (seenBackendEventIds.size > 500) seenBackendEventIds.delete(seenBackendEventIds.values().next().value as string);
+            window.dispatchEvent(new CustomEvent("backend-event", { detail: event }));
+            if (event.type === "canvas.updated") void import("@/stores/canvas/use-canvas-store").then(({ hydrateCanvasProjects }) => hydrateCanvasProjects());
+            if (event.type === "asset.updated") void import("@/stores/use-asset-store").then(({ hydrateAssets }) => hydrateAssets());
+        } catch { /* SSE 单条消息损坏时交给下一次快照恢复 */ }
+    };
+    for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "asset.updated"]) {
+        source.addEventListener(eventType, handleMessage);
+    }
+}
+
 /** 总后台连接状态 store。自动在启动时检测连通性。 */
 export const useBackendStore = create<BackendStore>((set, get) => ({
     url: getBackendUrl(),
@@ -32,6 +61,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         const wasConnected = get().connected;
         const health = await backendHealth();
         if (!health.ok) {
+            stopBackendEvents();
             set({ connected: false, checking: false, error: `无法连接总后台 ${getBackendUrl()}` });
             return;
         }
@@ -55,9 +85,10 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         }
         set({ connected: true, checking: false, error: "" });
         if (!wasConnected) window.dispatchEvent(new Event("backend-connected"));
+        startBackendEvents(getBackendUrl(), get().token);
     },
 
-    reset: () => set({ connected: false, checking: false, error: "" }),
+    reset: () => { stopBackendEvents(); set({ connected: false, checking: false, error: "" }); },
 }));
 
 /** 启动时自动检测总后台连接。首次连接时先完成一次性 IndexedDB 迁移。 */
