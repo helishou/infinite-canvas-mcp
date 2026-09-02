@@ -244,6 +244,9 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.put("/plugins/mcp", (req, res) => {
         const declarations = Array.isArray(req.body?.declarations) ? req.body.declarations : [];
         const result = db.replacePluginDeclarations(declarations);
+        // 声明是完整快照：卸载/移除的插件必须从权威清单删除；清理放在成功 upsert 后。
+        if (result.length) db.db.prepare(`DELETE FROM plugin_declarations WHERE id NOT IN (${result.map(() => "?").join(",")})`).run(...result.map((item) => item.id));
+        else db.db.prepare("DELETE FROM plugin_declarations").run();
         events.publish({ type: "plugin.updated", payload: { declarations: result } });
         res.json({ ok: true, declarations: result });
     });
