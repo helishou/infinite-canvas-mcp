@@ -15,6 +15,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
+    "@basketikun/canvas-agent": "file:../canvas-agent",
     "express": "^5.1.0",
     "winston": "^3.19.0"
   },

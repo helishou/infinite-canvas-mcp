@@ -120,6 +120,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         emit("agent_bootstrap", { type: "codex.prepare_failed", threadId, sourceClientId: clientId || undefined, error: text });
     };
     const app = express();
+    const agentRoute = (routePath: string) => options.listen === false ? routePath : `/agent${routePath}`;
     app.disable("x-powered-by");
     app.use(express.json({ limit: "30mb" }));
     app.use((req, res, next) => {
@@ -132,7 +133,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         });
         next();
     });
-    app.use((req, res, next) => {
+    if (options.listen !== false) app.use((req, res, next) => {
         const url = requestUrl(req, config);
         if (!setCors(req, res, url, config)) return void res.status(403).json({ ok: false, error: "origin not allowed" });
         if (req.method === "OPTIONS") return void res.json({});
@@ -140,7 +141,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     });
     app.get("/health", (_req, res) => res.json(session.health()));
     app.get("/config", (_req, res) => res.json({ ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, url: config.url, hasToken: true }));
-    app.use((req, res, next) => {
+    if (options.listen !== false) app.use((req, res, next) => {
         if (validToken(req, requestUrl(req, config), config.token)) return next();
         res.status(401).json({ ok: false, error: "invalid token" });
     });
@@ -244,27 +245,27 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     app.post("/runninghub/tasks/:id/cancel", (req, res) => res.json({ ok: true, task: runningHub.cancel(routeParam(req.params.id)) }));
     app.get("/ffmpeg/status", route(async (_req, res) => res.json({ ok: true, ...(await videoConcat.status()) })));
     app.post("/video-concat/tasks", route(async (req, res) => res.status(202).json({ ok: true, task: await videoConcat.run(Array.isArray(req.body?.videos) ? req.body.videos.map(String) : [], String(req.body?.output || ""), req.body?.longEdge === "auto" || req.body?.longEdge === undefined ? "auto" : Number(req.body.longEdge)) })));
-    app.get("/agent/attachments/:attachmentId", route(async (req, res) => {
+    app.get(agentRoute("/attachments/:attachmentId"), route(async (req, res) => {
         const attachment = session.getTurnAttachment(String(req.query.clientId || ""), routeParam(req.params.attachmentId));
         const data = attachment.dataUrl.split(",", 2)[1];
         if (!data) throw new Error("图片附件内容无效");
         res.setHeader("Cache-Control", "no-store");
         res.type(attachment.type).send(Buffer.from(data, "base64"));
     }));
-    app.get("/agent/message-assets/:messageKey/:assetFile", route(async (req, res) => {
+    app.get(agentRoute("/message-assets/:messageKey/:assetFile"), route(async (req, res) => {
         const asset = await messageMetadataStore.readAsset(routeParam(req.params.messageKey), routeParam(req.params.assetFile));
         if (!asset) return void res.status(404).json({ ok: false, error: "message asset not found" });
         res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
         res.type(asset.contentType).send(asset.data);
     }));
-    app.post("/agent/local-file/reveal", route(async (req, res) => {
+    app.post(agentRoute("/local-file/reveal"), route(async (req, res) => {
         const filePath = String(req.body?.path || "");
         if (!path.isAbsolute(filePath)) return res.status(400).json({ ok: false, error: "文件路径必须是绝对路径" });
         const file = await stat(filePath);
         await revealLocalFile(filePath, file.isDirectory());
         res.json({ ok: true });
     }));
-    app.post("/agent/local-image", route(async (req, res) => {
+    app.post(agentRoute("/local-image"), route(async (req, res) => {
         const filePath = String(req.body?.path || "");
         if (!path.isAbsolute(filePath) || !/\.(?:avif|gif|jpe?g|png|webp)$/i.test(filePath)) return res.status(400).json({ ok: false, error: "图片路径无效" });
         const file = await stat(filePath);
@@ -297,17 +298,17 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     app.get("/api/plugins/mcp", route(async (_req, res) => {
         res.json({ ok: true, plugins: await loadPluginMcpDeclarationsFromBackend(backend) });
     }));
-    app.get("/agent/codex/workspace", (_req, res) => {
+    app.get(agentRoute("/codex/workspace"), (_req, res) => {
         const workspace = ensureSiteWorkspace(config);
         res.json({ ok: true, workspace, conversation: session.conversationStateSnapshot });
     });
-    app.get("/agent/codex/models", route(async (_req, res) => res.json({ ok: true, ...(await listCodexModels(emit)) })));
-    app.get("/agent/codex/skills", route(async (req, res) => {
+    app.get(agentRoute("/codex/models"), route(async (_req, res) => res.json({ ok: true, ...(await listCodexModels(emit)) })));
+    app.get(agentRoute("/codex/skills"), route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const result = await listCodexSkills(emit, workspace.workspacePath, String(req.query.forceReload || "") === "1");
         res.json({ ok: true, data: result.skills.map((skill) => ({ ...skill, managed: skillStore.isManagedPath(skill.path) })), errors: result.errors });
     }));
-    app.post("/agent/codex/skills/draft", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/skills/draft"), codexMutation(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const source = String(req.body?.source || "");
         if (source !== "conversation" && source !== "canvas") return res.status(400).json({ ok: false, error: "Skill 草稿来源无效" });
@@ -340,15 +341,15 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             session.setCodexState(previousCodexState, { preserveReplay: true });
         }
     }));
-    app.get("/agent/codex/skills/:name", route(async (req, res) => {
+    app.get(agentRoute("/codex/skills/:name"), route(async (req, res) => {
         res.json({ ok: true, data: await skillStore.get(routeParam(req.params.name)) });
     }));
-    app.post("/agent/codex/skills", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/skills"), codexMutation(async (req, res) => {
         const data = await skillStore.create(req.body);
         session.emitAll("skills_changed", { forceReload: true });
         res.status(201).json({ ok: true, data });
     }));
-    app.post("/agent/codex/skills/:name/enabled", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/skills/:name/enabled"), codexMutation(async (req, res) => {
         if (typeof req.body?.enabled !== "boolean") return res.status(400).json({ ok: false, error: "Skill 启用状态无效" });
         const workspace = ensureSiteWorkspace(config);
         const selector = skillSelector(req.body);
@@ -357,47 +358,47 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         session.emitAll("skills_changed", { forceReload: true });
         res.json({ ok: true, data });
     }));
-    app.post("/agent/codex/skills/:name/delete", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/skills/:name/delete"), codexMutation(async (req, res) => {
         await skillStore.delete(routeParam(req.params.name), String(req.body?.expectedRevision || ""));
         session.emitAll("skills_changed", { forceReload: true });
         res.json({ ok: true });
     }));
-    app.post("/agent/codex/skills/:name", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/skills/:name"), codexMutation(async (req, res) => {
         const data = await skillStore.update(routeParam(req.params.name), req.body);
         session.emitAll("skills_changed", { forceReload: true });
         res.json({ ok: true, data });
     }));
-    app.get("/agent/codex/threads", route(async (req, res) => {
+    app.get(agentRoute("/codex/threads"), route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const result = await listCodexThreads(emit, { cwd: workspace.workspacePath, searchTerm: String(req.query.searchTerm || "") });
         res.json({ ok: true, workspace, conversation: session.conversationStateSnapshot, ...result });
     }));
-    app.post("/agent/codex/threads/new", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/threads/new"), codexMutation(async (req, res) => {
         const clientId = String(req.body?.clientId || "");
         session.beginConversation({ sourceClientId: clientId });
         setActiveThread("", { emptyThread: true, draftThread: true, sourceClientId: clientId }, true);
         const thread = await prepareDraftThread(clientId, permissionMode(req.body?.permissionMode));
         res.json({ ok: true, workspace: ensureSiteWorkspace(config), conversation: session.conversationStateSnapshot, thread: summarizeCodexThread(thread), messages: [] });
     }));
-    app.post("/agent/codex/threads/reset", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/threads/reset"), codexMutation(async (req, res) => {
         const clientId = String(req.body?.clientId || "");
         session.beginConversation({ sourceClientId: clientId });
         setActiveThread("", { emptyThread: true, draftThread: true, sourceClientId: clientId }, true);
         await prepareDraftThread(clientId, permissionMode(req.body?.permissionMode));
         res.json({ ok: true, workspace: ensureSiteWorkspace(config), conversation: session.conversationStateSnapshot });
     }));
-    app.get("/agent/codex/threads/:threadId", route(async (req, res) => {
+    app.get(agentRoute("/codex/threads/:threadId"), route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const threadId = routeParam(req.params.threadId);
         res.json({ ok: true, workspace, conversation: session.conversationStateSnapshot, ...(await readCodexThread(emit, threadId, workspace.workspacePath)) });
     }));
-    app.post("/agent/codex/history/ack", (req, res) => {
+    app.post(agentRoute("/codex/history/ack"), (req, res) => {
         const threadId = String(req.body?.threadId || "");
         const turnIds = Array.isArray(req.body?.turnIds) ? req.body.turnIds.map(String) : [];
         session.acknowledgeCodexHistory(threadId, turnIds);
         res.json({ ok: true });
     });
-    app.post("/agent/codex/threads/:threadId/resume", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/threads/:threadId/resume"), codexMutation(async (req, res) => {
         const threadId = routeParam(req.params.threadId);
         const clientId = String(req.body?.clientId || "");
         try {
@@ -409,14 +410,14 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             throw error;
         }
     }));
-    app.post("/agent/codex/threads/:threadId/delete", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/threads/:threadId/delete"), codexMutation(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const threadId = routeParam(req.params.threadId);
         await archiveCodexThread(emit, threadId, workspace.workspacePath);
         const nextWorkspace = setActiveThread(workspace.activeThreadId === threadId ? "" : workspace.activeThreadId || "", { sourceClientId: String(req.body?.clientId || "") });
         res.json({ ok: true, workspace: nextWorkspace, conversation: session.conversationStateSnapshot });
     }));
-    app.post("/agent/codex/turn", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/turn"), codexMutation(async (req, res) => {
         const attachments = Array.isArray(req.body?.attachments) ? (req.body.attachments as AgentAttachment[]) : [];
         const workspace = ensureSiteWorkspace(config);
         const prompt = String(req.body?.prompt || "");
@@ -537,17 +538,17 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             }
         });
     }
-    app.post("/agent/codex/approval", route(async (req, res) => {
+    app.post(agentRoute("/codex/approval"), route(async (req, res) => {
         const decision = String(req.body?.decision || "");
         if (!["accept", "acceptForSession", "decline", "cancel"].includes(decision)) return res.status(400).json({ ok: false, error: "无效的审批决定" });
         const ok = await resolveCodexApproval(String(req.body?.requestId || ""), decision);
         res.status(ok ? 200 : 409).json({ ok, ...(ok ? {} : { error: "审批请求已失效" }) });
     }));
-    app.post("/agent/codex/interrupt", route(async (req, res) => {
+    app.post(agentRoute("/codex/interrupt"), route(async (req, res) => {
         const ok = await interruptCodexTurn(skillDraftRunning ? undefined : String(req.body?.threadId || ""));
         res.status(ok ? 200 : 409).json({ ok, ...(ok ? {} : { error: "当前没有可停止的任务" }) });
     }));
-    app.post("/agent/claude/turn", (req, res) => {
+    app.post(agentRoute("/claude/turn"), (req, res) => {
         runClaudeTurn(String(req.body?.prompt || ""), emit);
         res.json({ ok: true });
     });

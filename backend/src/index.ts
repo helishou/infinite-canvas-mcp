@@ -11,6 +11,7 @@ import { ComfyUiBackend } from "./comfyui/bridge.js";
 import { registerComfyRoutes } from "./server/comfy-routes.js";
 import { BackendEventBus } from "./events.js";
 import { createBackendRuntimeContext } from "./runtime/context.js";
+import { createAgentApp } from "@basketikun/canvas-agent";
 
 const logger = createLogger("main");
 
@@ -26,6 +27,8 @@ const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
 
 const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: runtime.events });
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
+const agent = createAgentApp({ listen: false });
+app.use("/agent", agent.app);
 
 const server = app.listen(config.port, "127.0.0.1", () => {
     logger.info(`总后台已启动 http://127.0.0.1:${config.port}`, { pid: process.pid, version: readVersion() });
