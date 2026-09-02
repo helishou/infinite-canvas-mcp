@@ -139,31 +139,43 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
             ? body.folders.filter((f): f is AssetFolder => f && typeof f === "object" && !Array.isArray(f) && !!f.id)
             : [];
         stores.assets.replaceAll(assets, folders);
-        res.json({ ok: true, assets: stores.assets.list(), folders: stores.assets.folders() });
+        const result = { assets: stores.assets.list(), folders: stores.assets.folders() };
+        events.publish({ type: "asset.updated", payload: result });
+        res.json({ ok: true, ...result });
     });
     app.post("/canvas/assets", (req, res) => {
         const asset = req.body as Asset;
         if (!asset?.id) return void res.status(400).json({ ok: false, error: "asset.id 必填" });
-        res.status(201).json({ ok: true, asset: stores.assets.upsert(asset) });
+        const result = stores.assets.upsert(asset);
+        events.publish({ type: "asset.updated", entityId: result.id, payload: result });
+        res.status(201).json({ ok: true, asset: result });
     });
     app.patch("/canvas/assets/:id", (req, res) => {
         const current = stores.assets.get(req.params.id);
         if (!current) return void res.status(404).json({ ok: false, error: "asset not found" });
         const next = { ...current, ...(req.body as Partial<Asset>), id: current.id, updatedAt: new Date().toISOString() };
-        res.json({ ok: true, asset: stores.assets.upsert(next) });
+        const result = stores.assets.upsert(next);
+        events.publish({ type: "asset.updated", entityId: result.id, payload: result });
+        res.json({ ok: true, asset: result });
     });
     app.delete("/canvas/assets/:id", (req, res) => {
-        res.json({ ok: true, deleted: stores.assets.delete(req.params.id) });
+        const deleted = stores.assets.delete(req.params.id);
+        events.publish({ type: "asset.updated", entityId: req.params.id, payload: { deleted } });
+        res.json({ ok: true, deleted });
     });
 
     // ── Asset folders ────────────────────────────────────────────────────
     app.post("/canvas/assets/folders", (req, res) => {
         const folder = req.body as AssetFolder;
         if (!folder?.id) return void res.status(400).json({ ok: false, error: "folder.id 必填" });
-        res.status(201).json({ ok: true, folder: stores.assets.upsertFolder(folder) });
+        const result = stores.assets.upsertFolder(folder);
+        events.publish({ type: "asset.updated", entityId: result.id, payload: result });
+        res.status(201).json({ ok: true, folder: result });
     });
     app.delete("/canvas/assets/folders/:id", (req, res) => {
-        res.json({ ok: true, deleted: stores.assets.deleteFolder(req.params.id) });
+        const deleted = stores.assets.deleteFolder(req.params.id);
+        events.publish({ type: "asset.updated", entityId: req.params.id, payload: { deleted } });
+        res.json({ ok: true, deleted });
     });
 
     // ── Media ────────────────────────────────────────────────────────────
