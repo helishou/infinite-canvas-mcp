@@ -32,8 +32,6 @@ function startBackendEvents(url: string, token: string) {
             seenBackendEventIds.add(event.id);
             if (seenBackendEventIds.size > 500) seenBackendEventIds.delete(seenBackendEventIds.values().next().value as string);
             window.dispatchEvent(new CustomEvent("backend-event", { detail: event }));
-            if (event.type === "canvas.updated") void import("@/stores/canvas/use-canvas-store").then(({ hydrateCanvasProjects }) => hydrateCanvasProjects());
-            if (event.type === "asset.updated") void import("@/stores/use-asset-store").then(({ hydrateAssets }) => hydrateAssets());
         } catch { /* SSE 单条消息损坏时交给下一次快照恢复 */ }
     };
     for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "asset.updated"]) {
