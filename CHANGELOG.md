@@ -2,6 +2,9 @@
 
 ## Unreleased
 
++ [修复] 修复生图结果图开发模式下的 CORS 跨域问题：为 Vite 增加 `/media` 代理（同源转发到总后台 17370），并让 `backendMediaUrl` 在 dev 本地模式返回同源相对路径，媒体请求不再直连 127.0.0.1:17370，彻底绕开跨域 CORS；生产/远程 backend 仍走绝对 URL（依赖总后台 CORS 白名单）。
++ [修复] 重建 canvas-agent dist 并修复 `plugin-mcp.ts` 两处类型错误（缺失 `backend` 字段、`PluginMcpBackend` 缺 `replacePluginDeclarations`），使 `npm run build` 通过、Backend 可正常导入 `@basketikun/canvas-agent/runtime/agent-runtime` 启动。
++ [修复] 生图工作台结果图片改用后端媒体绝对 URL（带当前 token）显示/下载/再上传，修复开发模式下相对路径请求到 Vite 服务导致裂图的问题。
 + [优化] 前端工作台日志、画布和素材改为按 Backend 逐条读写，并接入 Backend SSE，避免 localforage 日志和全量替换造成双写或覆盖。
 + [修复] 加固 IndexedDB 一次性迁移的去重、合并、校验与清理顺序，迁移失败时保留原始数据和已存在的 Backend 数据。
 + [优化] Backend 收敛为 Agent、ComfyUI、RunningHub、FFmpeg、任务、媒体和插件 MCP 的统一运行时，standalone canvas-agent 改为兼容代理。

@@ -45,7 +45,7 @@ async function storeImage(blob: Blob, options?: ImageReadOptions): Promise<Uploa
         if (!useBackendStore.getState().connected) throw new Error("总后台未连接，无法上传图片");
         throwIfAborted(options?.signal);
         const result = await uploadBackendMedia({ name: `${localKey}.png`, blob, mimeType: blob.type || "image/png", width: meta.width, height: meta.height });
-        return { url: result.url, storageKey: result.storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: result.mimeType };
+        return { url: backendMediaUrl(result.storageKey), storageKey: result.storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: result.mimeType };
     } catch (error) {
         URL.revokeObjectURL(url);
         throw error;

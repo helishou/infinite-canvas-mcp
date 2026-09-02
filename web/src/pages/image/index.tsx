@@ -15,6 +15,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { requestEdit, requestGeneration } from "@/services/api/image";
+import { backendMediaUrl } from "@/services/backend-api";
 import { deleteStoredImages, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
@@ -239,17 +240,17 @@ export default function ImagePage() {
     }, [autoRunToken]);
 
     const downloadImage = (image: GeneratedImage, index: number) => {
-        saveAs(image.dataUrl, `image-${index + 1}.png`);
+        saveAs(image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl, `image-${index + 1}.png`);
     };
 
     const addResultToReferences = async (image: GeneratedImage, index: number) => {
-        const stored = await uploadImage(image.dataUrl);
+        const stored = await uploadImage(image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl);
         setReferences((value) => [...value, { id: nanoid(), name: `result-${index + 1}.png`, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
         message.success(t("imageWorkbench.addedReference"));
     };
 
     const saveResultToAssets = async (image: GeneratedImage, index: number) => {
-        const stored = await uploadImage(image.dataUrl);
+        const stored = await uploadImage(image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl);
         addAsset({
             kind: "image",
             title: t("imageWorkbench.resultTitle", { count: index + 1 }),
@@ -616,7 +617,7 @@ function ResultImageCard({
     const { t } = useTranslation();
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            <Image src={image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
+            <Image src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
             <div className="space-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
                 <div className="flex min-w-0 gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
                     <span>
@@ -864,6 +865,6 @@ function buildLog({
         quality: logConfig.quality,
         status,
         images,
-        thumbnails: images.map((image) => image.dataUrl).filter(Boolean),
+        thumbnails: images.map((image) => (image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl)).filter(Boolean),
     };
 }

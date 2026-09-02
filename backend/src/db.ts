@@ -280,8 +280,8 @@ export class BackendDatabase {
                 tags_json = excluded.tags_json, folder_id = excluded.folder_id,
                 data_json = excluded.data_json, note = excluded.note, source = excluded.source,
                 metadata_json = excluded.metadata_json, updated_at = excluded.updated_at
-        `).run(
-            asset.id, asset.kind, asset.title,
+        `        ).run(
+            asset.id, asset.kind, asset.title ?? "",
             asset.coverUrl ?? "", JSON.stringify(asset.tags ?? []),
             asset.folderId ?? null, JSON.stringify(asset.data ?? {}),
             asset.note ?? null, asset.source ?? null,
@@ -292,6 +292,7 @@ export class BackendDatabase {
     }
 
     replaceAssets(assets: Asset[], folders: AssetFolder[]) {
+        const now = new Date().toISOString();
         this.db.exec("BEGIN IMMEDIATE");
         try {
             this.db.prepare("DELETE FROM assets").run();
@@ -304,9 +305,9 @@ export class BackendDatabase {
             `);
             for (const asset of assets) {
                 insertAsset.run(
-                    asset.id, asset.kind, asset.title, asset.coverUrl, JSON.stringify(asset.tags),
-                    asset.folderId, JSON.stringify(asset.data), asset.note, asset.source,
-                    JSON.stringify(asset.metadata), asset.createdAt, asset.updatedAt,
+                    asset.id, asset.kind, asset.title ?? "", asset.coverUrl ?? "", JSON.stringify(asset.tags ?? []),
+                    asset.folderId ?? null, JSON.stringify(asset.data ?? {}), asset.note ?? null, asset.source ?? null,
+                    JSON.stringify(asset.metadata ?? {}), asset.createdAt ?? now, asset.updatedAt ?? now,
                 );
             }
             this.db.exec("COMMIT");

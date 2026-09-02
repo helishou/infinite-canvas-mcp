@@ -146,7 +146,14 @@ export async function uploadBackendMediaDataUrl(options: {
 }
 
 export function backendMediaUrl(storageKey: string): string {
-    return `${getBackendUrl().replace(/\/$/, "")}/media/${encodeURIComponent(storageKey)}?token=${encodeURIComponent(getBackendToken())}`;
+    const token = encodeURIComponent(getBackendToken());
+    const key = encodeURIComponent(storageKey);
+    const isDev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
+    const base = getBackendUrl().replace(/\/$/, "");
+    // 开发模式且指向本地总后台时，走 Vite 代理（同源相对路径），避免跨域 CORS。
+    const isLocal = base === DEFAULT_URL || base === "http://localhost:17370" || base === "";
+    if (isDev && isLocal) return `/media/${key}?token=${token}`;
+    return `${base}/media/${key}?token=${token}`;
 }
 
 export function deleteBackendMedia(storageKey: string) {

@@ -41,6 +41,13 @@ function localPluginsManifest(): Plugin {
 export default defineConfig({
     base: process.env.VITE_BASE || "/",
     plugins: [react(), localPluginsManifest()],
+    // 开发模式下把总后台媒体接口代理为同源，避免前端直连 127.0.0.1:17370 触发跨域 CORS。
+    // 仅代理 /media（web 无 /media 客户端路由，不会与 SPA 冲突）；/canvas 等已存在 SPA 路由，不可代理。
+    server: {
+        proxy: {
+            "/media": { target: "http://127.0.0.1:17370", changeOrigin: true },
+        },
+    },
     resolve: {
         alias: {
             "@": resolve(webDir, "src"),

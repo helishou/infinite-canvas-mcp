@@ -51,6 +51,7 @@ export type PluginMcpContext = {
 export type PluginMcpBackend = {
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
     replaceCanvasProjects(projects: Record<string, unknown>[]): Promise<Record<string, unknown>[]>;
+    replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
     runtimeMediaStore(name: string, dataUrl: string): Promise<{ path: string }>;
     runtimeMediaPath?(ref: string): Promise<string>;
     comfyModels(signal?: AbortSignal): Promise<{ models: string[]; loras: string[]; refreshedAt: string; error?: string }>;
@@ -107,6 +108,7 @@ export function buildPluginMcpContext(config: CanvasAgentConfig, backend: Plugin
     return {
         endpoint: config.url,
         token: config.token,
+        backend,
         comfyUi,
         getCanvasNodes: readNodes,
         getCanvasNode: async (id) => (await readNodes()).find((node) => node.id === id) ?? null,
