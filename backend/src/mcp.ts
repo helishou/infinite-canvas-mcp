@@ -22,6 +22,14 @@ export async function startBackendMcpServer() {
         listCanvasProjects: async () => db.listCanvasProjects(),
         replaceCanvasProjects: async (projects) => db.replaceCanvasProjects(projects),
         runtimeMediaStore: async (name, dataUrl) => ({ path: stores.media.storeDataUrl(dataUrl, name).path }),
+        runtimeMediaPath: async (ref) => {
+            const url = new URL(ref || "", config.url);
+            if (!url.pathname.startsWith("/media/")) return ref;
+            const storageKey = decodeURIComponent(url.pathname.slice("/media/".length));
+            const media = stores.media.meta(storageKey);
+            if (!media) throw new Error(`media not found: ${storageKey}`);
+            return media.filePath;
+        },
         comfyModels: (signal) => comfy.models(signal),
         comfyRun: (preset, input, params) => comfy.run(preset, input, params),
         comfyGetTask: async (id, after = 0) => {

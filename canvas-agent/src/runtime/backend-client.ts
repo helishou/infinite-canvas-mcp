@@ -164,6 +164,18 @@ export class BackendClient {
         return res.arrayBuffer();
     }
 
+    async runtimeMediaPath(ref: string): Promise<string> {
+        if (path.isAbsolute(ref)) return ref;
+        const url = new URL(ref, this.backendUrl);
+        if (!url.pathname.startsWith("/media/")) return ref;
+        const storageKey = decodeURIComponent(url.pathname.slice("/media/".length));
+        const response = await fetch(`${this.backendUrl}/media/${encodeURIComponent(storageKey)}?token=${encodeURIComponent(this.backendToken)}`, { signal: AbortSignal.timeout(30_000) });
+        if (!response.ok) throw new Error(`Backend media read failed: HTTP ${response.status}`);
+        const mimeType = response.headers.get("content-type") || "application/octet-stream";
+        const name = `h3-motion-context-${storageKey}`;
+        return (await this.runtimeMediaStore(name, `data:${mimeType};base64,${Buffer.from(await response.arrayBuffer()).toString("base64")}`)).path;
+    }
+
     // ── ComfyUI Bridge（总后台权威 /comfy/*） ─────────────────────────────
 
     async comfyStatus(): Promise<Record<string, unknown>> {

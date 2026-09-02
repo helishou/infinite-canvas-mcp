@@ -160,7 +160,7 @@ function selectSegment(segments: H3Segment[], index?: number): { segment: H3Segm
     return { segment: segments[chosen], index: chosen };
 }
 
-async function runSegment(context: PluginMcpContext, node: AgentCanvasNode, index: number | undefined, override: Record<string, unknown>) {
+async function runSegment(context: PluginMcpContext, node: AgentCanvasNode, index: number | undefined, override: Record<string, unknown>, previousVideo = "") {
     const segments = segmentsOf(node);
     const { segment } = selectSegment(segments, index);
     const { images, videos, audios } = collectRefs(segment);
@@ -174,9 +174,27 @@ async function runSegment(context: PluginMcpContext, node: AgentCanvasNode, inde
         references: imagePaths,
         audios: audioPaths,
         video: videoPaths[0],
+        ...(previousVideo ? { previousVideo } : {}),
     };
     const params = extractParams(segment, override);
     return context.comfyUi.run("minimax-h3", input, params);
+}
+
+async function waitForTask(context: PluginMcpContext, taskId: string) {
+    for (;;) {
+        const current = await context.backend.comfyGetTask(taskId);
+        if (current.task.status === "succeeded") return current.task;
+        if (current.task.status === "failed" || current.task.status === "cancelled") throw new Error(current.task.error || `H3 任务${current.task.status}`);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+}
+
+async function previousVideoPath(context: PluginMcpContext, task: Record<string, unknown>) {
+    if (!context.backend.runtimeMediaPath) return "";
+    const result = task.result && typeof task.result === "object" ? task.result as Record<string, unknown> : {};
+    const media = Array.isArray(result.media) ? result.media : [];
+    const video = media.find((item) => item && typeof item === "object" && String((item as Record<string, unknown>).mimeType || "").startsWith("video/")) as Record<string, unknown> | undefined;
+    return video?.url ? context.backend.runtimeMediaPath(String(video.url)) : "";
 }
 
 export const pluginMcp: PluginMcpModule = {
@@ -231,13 +249,21 @@ export const pluginMcp: PluginMcpModule = {
                 for (const node of nodes) {
                     const segments = segmentsOf(node);
                     if (!segments.length) continue;
+                    let previousVideo = "";
                     for (let i = 0; i < segments.length; i++) {
-                        if (segments[i].result || segments[i].status === "succeeded") continue;
+                        if (segments[i].result || segments[i].status === "succeeded") {
+                            const previous = String(segments[i].result || "");
+                            if (previous && context.backend.runtimeMediaPath) previousVideo = await context.backend.runtimeMediaPath(previous);
+                            continue;
+                        }
                         try {
-                            const task = await runSegment(context, node, i, override);
+                            const started = await runSegment(context, node, i, override, previousVideo);
+                            const task = await waitForTask(context, started.id);
+                            previousVideo = await previousVideoPath(context, task as unknown as Record<string, unknown>);
                             tasks.push({ nodeId: node.id, segmentIndex: i, task });
                         } catch (error) {
                             tasks.push({ nodeId: node.id, segmentIndex: i, error: error instanceof Error ? error.message : String(error) });
+                            break;
                         }
                     }
                 }
