@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import crypto from "node:crypto";
 
 import { loadConfig } from "./config.js";
 import { BackendDatabase } from "./db.js";
@@ -8,6 +9,8 @@ import { ComfyUiBackend } from "./comfyui/bridge.js";
 import { createStores } from "./stores/index.js";
 import { PluginMcpRegistry, buildPluginMcpContext, type PluginMcpDeclaration, type PluginMcpBackend } from "@basketikun/canvas-agent/plugin-mcp";
 import type { ComfyUiClient } from "@basketikun/canvas-agent/runtime/comfy-client";
+import { toolDescriptions, toolInputSchemas, type ToolName } from "@basketikun/canvas-agent/schemas";
+import { buildCanvasToolRequest } from "@basketikun/canvas-agent/operations";
 
 /** Backend 进程外的 MCP stdio 入口：直接打开 Backend 数据库和 ComfyUI Bridge。 */
 export async function startBackendMcpServer() {
@@ -34,11 +37,63 @@ export async function startBackendMcpServer() {
         getUrl: async () => comfy.getUrl(), setUrl: async (url) => comfy.setUrl(url),
     };
     const server = new McpServer({ name: "infinite-canvas-backend", version: "0.1.0" });
+    registerDirectCanvasTools(server, db, stores);
     registerDirectComfyTools(server, comfy, stores);
     const context = buildPluginMcpContext({ url: config.url, token: config.token, backendUrl: config.url }, directBackend, comfyClient);
     const registry = new PluginMcpRegistry(server, context);
     await registry.apply(db.listPluginDeclarations().map((item): PluginMcpDeclaration => ({ id: item.id, name: item.name, version: item.version, mcp: { enabled: item.enabled, tools: item.tools as never } })));
     await server.connect(new StdioServerTransport());
+}
+
+const DIRECT_CANVAS_TOOLS = [
+    "canvas_list_projects", "canvas_get_state", "canvas_get_selection", "canvas_export_snapshot", "canvas_apply_ops",
+    "canvas_create_node", "canvas_create_text_node", "canvas_create_text_nodes", "canvas_create_config_node",
+    "canvas_create_image_prompt_flow", "canvas_create_generation_flow", "canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio",
+    "canvas_update_node", "canvas_update_node_text", "canvas_move_nodes", "canvas_resize_node", "canvas_delete_nodes", "canvas_connect_nodes", "canvas_select_nodes", "canvas_set_viewport",
+] as ToolName[];
+
+function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, stores: ReturnType<typeof createStores>) {
+    for (const name of DIRECT_CANVAS_TOOLS) {
+        const schema = toolInputSchemas[name];
+        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput) => {
+            const input = schema.parse(rawInput) as Record<string, unknown>;
+            if (name === "canvas_list_projects") return textResult(db.listCanvasProjects().map((project) => ({ id: project.id, title: project.title, updatedAt: project.updatedAt, nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0, connectionCount: Array.isArray(project.connections) ? project.connections.length : 0 })));
+            const project = currentProject(db); const state = project as Record<string, unknown>;
+            if (name === "canvas_get_state" || name === "canvas_export_snapshot") return textResult(compactProject(state));
+            if (name === "canvas_get_selection") { const ids = new Set(Array.isArray(state.selectedNodeIds) ? state.selectedNodeIds.map(String) : []); return textResult({ nodes: nodesOf(state).filter((node) => ids.has(String(node.id))) }); }
+            const request = buildCanvasToolRequest(name, input, { nodes: nodesOf(state), connections: connectionsOf(state), viewport: state.viewport as never } as never);
+            applyCanvasOps(state, Array.isArray(request.input.ops) ? request.input.ops as Array<Record<string, unknown>> : []);
+            state.updatedAt = new Date().toISOString(); db.upsertCanvasProject(state as never);
+            return textResult({ ok: true, projectId: project.id, state: compactProject(state) });
+        });
+    }
+    for (const name of ["assets_list", "assets_add"] as ToolName[]) {
+        const schema = toolInputSchemas[name];
+        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput) => {
+            const input = schema.parse(rawInput) as Record<string, unknown>;
+            if (name === "assets_list") return textResult(stores.assets.list({ kind: input.kind && input.kind !== "all" ? String(input.kind) : undefined }));
+            const now = new Date().toISOString();
+            const asset = stores.assets.upsert({ id: `asset-${crypto.randomUUID()}`, kind: String(input.kind || "text"), title: String(input.title || ""), coverUrl: String(input.imageUrl || ""), tags: Array.isArray(input.tags) ? input.tags.map(String) : [], folderId: null, data: { content: input.content || "", imageUrl: input.imageUrl || "" }, note: input.note ? String(input.note) : null, source: input.source ? String(input.source) : null, metadata: {}, createdAt: now, updatedAt: now });
+            return textResult(asset);
+        });
+    }
+}
+
+function currentProject(db: BackendDatabase) { const project = db.listCanvasProjects()[0]; if (!project) throw new Error("当前没有画布项目"); return project; }
+function nodesOf(project: Record<string, unknown>) { return Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : []; }
+function connectionsOf(project: Record<string, unknown>) { return Array.isArray(project.connections) ? project.connections as Array<Record<string, unknown>> : []; }
+function compactProject(project: Record<string, unknown>) { return { ...project, nodes: nodesOf(project), connections: connectionsOf(project) }; }
+function textResult(value: unknown) { return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] }; }
+function applyCanvasOps(project: Record<string, unknown>, ops: Array<Record<string, unknown>>) {
+    const nodes = nodesOf(project); const connections = connectionsOf(project);
+    for (const op of ops) {
+        if (op.type === "add_node") { const node = { id: String(op.id || `${String(op.nodeType || "node")}-${crypto.randomUUID()}`), type: String(op.nodeType || "text"), title: String(op.title || ""), position: op.position || { x: Number(op.x || 0), y: Number(op.y || 0) }, width: Number(op.width || 320), height: Number(op.height || 240), metadata: op.metadata || {} }; nodes.push(node); }
+        if (op.type === "update_node") { const node = nodes.find((item) => item.id === op.id); if (!node) throw new Error(`找不到节点：${String(op.id)}`); Object.assign(node, op.patch || {}); if (op.metadata) node.metadata = { ...(node.metadata as object || {}), ...(op.metadata as object) }; }
+        if (op.type === "delete_node") { const ids = new Set(Array.isArray(op.ids) ? op.ids.map(String) : [String(op.id || "")]); for (let index = nodes.length - 1; index >= 0; index--) if (ids.has(String(nodes[index].id))) nodes.splice(index, 1); for (let index = connections.length - 1; index >= 0; index--) if (ids.has(String(connections[index].fromNodeId)) || ids.has(String(connections[index].toNodeId))) connections.splice(index, 1); }
+        if (op.type === "connect_nodes") connections.push({ id: `connection-${crypto.randomUUID()}`, fromNodeId: op.fromNodeId, toNodeId: op.toNodeId });
+        if (op.type === "select_nodes") project.selectedNodeIds = Array.isArray(op.ids) ? op.ids : [];
+        if (op.type === "set_viewport") project.viewport = op.viewport;
+    }
 }
 
 function registerDirectComfyTools(server: McpServer, comfy: ComfyUiBackend, stores: ReturnType<typeof createStores>) {

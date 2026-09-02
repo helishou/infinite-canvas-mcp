@@ -8,6 +8,8 @@
     ".": "./dist/index.js",
     "./http": "./dist/server/http.js",
     "./plugin-mcp": "./dist/server/plugin-mcp.js",
+    "./schemas": "./dist/canvas/schemas.js",
+    "./operations": "./dist/canvas/operations.js",
     "./runtime/comfy-client": "./dist/runtime/comfy-client.js"
   },
   "types": "./dist/index.d.ts",
