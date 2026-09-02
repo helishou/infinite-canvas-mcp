@@ -2,6 +2,9 @@
 
 ## Unreleased
 
++ [新增] H3 补齐提示词模型增强状态、Output 全部/当前筛选与未使用输出清理、RunningHub Workflow/App 字段配置和生成任务 Reset 取消入口。
++ [调整] H3 智能分镜改为继承当前 Clip 的参考素材与参数并追加新 Clips，同时将全局提示词合并到新增 Clip。
++ [修复] H3 r2v/i2v 等运行时 400「媒体必须是 base64 data URL」与引用 404：运行器构造 `finalReferences`/`finalVideo`/`finalAudios`/`previousVideo` 时把 `storageKey` 透传给后端，后端媒体直接走 storageKey 复用（raw key 精确匹配）；后端 `/runtime/media` 的 storageKey 分支增加 `decodeURIComponent`，兼容从 URL 反推出的编码 key（如 `image%3A<uuid>`，媒体 key 本身含冒号）。此前只留 `url` 会解出编码 key 导致查不到或退化到 dataUrl 分支。
 + [修复] H3 串 clip 的 previousVideo 不再把已在后端的视频 base64 下载后重新上传（根因 413）：`POST /runtime/media` 支持以 storageKey 复用已有媒体，前端对已落库媒体走复用路径，避免请求体暴涨。
 + [优化] H3 当前 Clip 面板继续拆分为 `H3PromptSection` 与 `H3ClipSettingsPanel`，Prompt 快捷标签和生成参数区域不再压缩在单个超长 JSX 组件中。
 + [修复] H3 运行器拆分后补齐自动分段的默认每段时长与最大段数，避免启用源视频自动分段时引用未定义变量。

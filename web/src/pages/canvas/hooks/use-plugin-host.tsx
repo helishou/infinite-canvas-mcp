@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageQuestion, type AiTextMessage } from "@/services/api/image";
 import { imageToDataUrl } from "@/services/image-storage";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
-import { runLocalH3Task, getLocalH3Task, runRunningHubH3Task, getRunningHubH3Task } from "@/services/api/comfyui";
+import { runLocalH3Task, getLocalH3Task, cancelLocalH3Task, runRunningHubH3Task, getRunningHubH3Task, cancelRunningHubH3Task } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
 import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, updateBackendGenerationLog } from "@/services/backend-api";
 import { useAgentStore } from "@/stores/use-agent-store";
@@ -136,6 +136,12 @@ export function usePluginHost(params: PluginHostParams) {
                 }
                 return task;
             },
+            cancelLocalH3Task: async (taskId) => {
+                const agent = useAgentStore.getState();
+                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法取消 H3 任务");
+                const task = await cancelLocalH3Task(agent.url, agent.token, taskId);
+                return { id: task.id, status: task.status, progress: task.progress, error: task.error, result: null };
+            },
             listLocalH3Models: async () => {
                 const agent = useAgentStore.getState();
                 if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法读取 ComfyUI 模型");
@@ -156,6 +162,12 @@ export function usePluginHost(params: PluginHostParams) {
                     return { ...task, result: await persistH3Result(task.result) };
                 }
                 return task;
+            },
+            cancelRunningHubH3Task: async (taskId) => {
+                const agent = useAgentStore.getState();
+                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法取消 RunningHub H3 任务");
+                const task = await cancelRunningHubH3Task(agent.url, agent.token, taskId);
+                return { id: task.id, status: task.status, progress: task.progress, error: task.error, result: null };
             },
             // List configured models for a capability; labels use the model name without the channel prefix.
             listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: decodeChannelModel(value)?.model || value })),

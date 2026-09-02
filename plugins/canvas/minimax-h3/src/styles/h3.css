@@ -134,3 +134,7 @@
 .minimax-preview-resize { left:calc(var(--minimax-library-w,190px) + 16px); right:8px; top:calc(50px + var(--minimax-preview-h,220px) - 3px); height:6px; cursor:ns-resize; }
 .minimax-video-resize { left:calc(var(--minimax-library-w,190px) + 68px); right:62px; top:calc(50px + var(--minimax-preview-h,220px) + 8px + 28px + var(--minimax-video-h,74px) - 3px); height:6px; cursor:ns-resize; }
 .minimax-ref-resize { left:calc(var(--minimax-library-w,190px) + 68px); right:62px; top:calc(50px + var(--minimax-preview-h,220px) + 8px + 28px + var(--minimax-video-h,74px) + var(--minimax-ref-h,108px) - 3px); height:6px; cursor:ns-resize; }
+
+.minimax-aux-toolbar { position:absolute; left:250px; top:8px; z-index:5; display:flex; gap:6px; align-items:center; }
+.minimax-aux-storyboard { height:22px; padding:0 8px; border:1px solid #3b4048; border-radius:4px; background:#24272b; color:#cbd5e1; font-size:9px; font-weight:800; cursor:pointer; }
+.minimax-aux-storyboard:hover { border-color:#f59e0b; background:#4a3514; color:#fbbf24; }

@@ -10,7 +10,7 @@ export const h3NodeDefinition = {
     description: "H3 视频生成与人物替换节点",
     defaultSize: { width: 980, height: 720 },
     defaultMetadata: {
-        content: "", prompt: defaultPrompt, status: "idle", duration: "8", aspectRatio: "16:9",
+        content: "", prompt: defaultPrompt, status: "idle" as const, duration: "8", aspectRatio: "16:9",
         videoSteps: 8, denoise: 0.65, modelName: defaultH3Model, minimaxBaseModel: defaultH3Model,
         motionContextEnabled: true, motionContextNoiseEnabled: false, smartStoryboardCount: 3, smartStoryboardMode: "ref2va", smartStoryboardSkill: "regular_storyboard",
         segments: [{ id: "segment-1", prompt: defaultPrompt, duration: 8, taskMode: "r2v", status: "idle" }],

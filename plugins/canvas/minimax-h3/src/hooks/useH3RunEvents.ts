@@ -25,6 +25,16 @@ export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3, update: (patc
         void runRef.current(true);
     }), [ctx.node.id]);
 
+    useEffect(() => ctx.on("minimax-h3:cancel", (payload) => {
+        if (!payload || typeof payload !== "object" || String((payload as Record<string, unknown>).nodeId || "") !== ctx.node.id) return;
+        const current = ctx.getNode(ctx.node.id)?.metadata || {};
+        const taskId = String(current.runtimeTaskId || "");
+        if (!taskId) return;
+        const runningHub = String(current.minimaxEngine || "").toLowerCase() === "runninghub";
+        updateRef.current({ cancelRequested: true });
+        void (runningHub ? ctx.ai.cancelRunningHubH3Task(taskId) : ctx.ai.cancelLocalH3Task(taskId)).then(() => updateRef.current({ status: "cancelled", errorDetails: "任务已取消", runProgress: 0, runtimeTaskId: "" })).catch((error) => updateRef.current({ status: "error", errorDetails: error instanceof Error ? error.message : String(error) }));
+    }), [ctx.node.id]);
+
     useEffect(() => {
         const current = ctx.getNode(ctx.node.id)?.metadata || {};
         const requestId = String(current.runRequestId || "");

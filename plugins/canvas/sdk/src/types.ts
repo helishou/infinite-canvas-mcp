@@ -200,9 +200,11 @@ export type CanvasPluginAi = {
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
     runLocalH3: (prompt: string, input: LocalH3Input, params: Record<string, unknown>, options?: LocalH3Options) => Promise<LocalH3Result>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
+    cancelLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
     listLocalH3Models: () => Promise<{ models: string[]; loras: string[] }>;
     runRunningHubH3: (prompt: string, input: LocalH3Input, params: Record<string, unknown>, options?: LocalH3Options) => Promise<LocalH3Result>;
     getRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
+    cancelRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
     // 列出某能力下用户已配置的可选模型;不传能力则返回全部
     listModels: (capability?: ModelCapability) => ModelOption[];
     // 该能力当前默认选中的模型 value(可作为下拉框初始值)

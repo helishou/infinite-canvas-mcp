@@ -3,7 +3,7 @@ import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
 import { defaultH3Model, defaultPrompt } from "../constants";
 import { compatibleH3Settings, normalizeH3Model } from "../services/h3-compatibility";
-import { segmentsFor } from "../hooks/useH3Segments";
+import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
 import { appendVideoMaterials, refsForSegment } from "../services/h3-data";
 import { readH3Refs } from "../services/h3-refs";
 import { createH3Log } from "../services/h3-logs";
@@ -28,6 +28,10 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
     const autoSplit = Boolean(metadata.autoSplit);
     const segmentDuration = Number(metadata.segmentDuration ?? "6");
     const maxSegments = Number(metadata.maxSegments ?? "60");
+    const runningHubFields = Array.isArray(metadata.minimaxRunningHubFields) ? metadata.minimaxRunningHubFields : [];
+    const runningHubParams = metadata.minimaxRunningHubParams && typeof metadata.minimaxRunningHubParams === "object" ? metadata.minimaxRunningHubParams : {};
+    metadata.minimaxRunningHubFields = runningHubFields;
+    metadata.minimaxRunningHubParams = runningHubParams;
     const runInFlightRef = useRef(false);
     const models = ctx.ai.listModels("video");
     const selectedModel = String(metadata.model || ctx.ai.defaultModel("video") || models[0]?.value || "");
@@ -104,7 +108,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 update({ segments: current.map((segment) => requestedIds.has(segment.id) ? { ...segment, ...patch } : segment) });
             };
             markRequestedSegments({ status: "loading", progress: 0 });
-            let previousVideo: { name: string; url: string } | undefined;
+            let previousVideo: { name: string; url: string; storageKey?: string } | undefined;
             let lastResult: Awaited<ReturnType<typeof ctx.ai.runLocalH3>> | undefined;
             const nextSegments: H3Segment[] = [];
             // 用于错误日志记录最后一次提交的信息
@@ -131,9 +135,12 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 const segmentPrompt = promptEnhance ? effectivePrompt : segment.prompt !== undefined ? String(segment.prompt) : effectivePrompt;
                 const promptFlags = `${segment.noDub !== false ? "\nNo dialogue, narration, voiceover, or singing." : ""}${segment.noCaption !== false ? "\nNo subtitles, captions, on-screen text, or text overlays." : ""}`;
                 // 根据任务模式决定提交哪些 refs
-                const finalReferences = isT2v || isV2v ? [] : (segmentImages.length ? segmentImages : isI2vFl2v ? [] : images).map((ref) => ({ name: `${ref.name}.png`, url: ref.url }));
-                const finalVideo = !isT2v && !isI2vFl2v ? (segmentVideo ? { name: `${segmentVideo.name}.mp4`, url: segmentVideo.url } : undefined) : undefined;
-                const finalAudios = isR2vOrRv2v ? (segmentAudios.length ? segmentAudios : audios).map((ref) => ({ name: `${ref.name}.mp3`, url: ref.url })) : [];
+                // 透传 storageKey：后端媒体引用（图片/视频/音频）直接用 storageKey 复用，
+                // 避免只留 url 时 extractStorageKey 反推出被 URL 编码的 key（如 image%3A<uuid>）
+                // 导致后端查不到（404）或退化到 dataUrl 分支（400 畸形 data URL）。
+                const finalReferences = isT2v || isV2v ? [] : (segmentImages.length ? segmentImages : isI2vFl2v ? [] : images).map((ref) => ({ name: `${ref.name}.png`, url: ref.url, storageKey: ref.storageKey }));
+                const finalVideo = !isT2v && !isI2vFl2v ? (segmentVideo ? { name: `${segmentVideo.name}.mp4`, url: segmentVideo.url, storageKey: segmentVideo.storageKey } : undefined) : undefined;
+                const finalAudios = isR2vOrRv2v ? (segmentAudios.length ? segmentAudios : audios).map((ref) => ({ name: `${ref.name}.mp3`, url: ref.url, storageKey: ref.storageKey })) : [];
                 // 记录提交信息用于错误日志
                 lastSubmitted.taskMode = effectiveTaskMode;
                 lastSubmitted.video = finalVideo ? 1 : 0;
@@ -151,7 +158,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                     nextSegments.push(...mapAutoSplitSegments(segment, segmentResult.segments, prompt, Number(segmentDuration)));
                     break;
                 }
-                previousVideo = { name: `h3-segment-${index + 1}.mp4`, url: segmentResult.url };
+                previousVideo = { name: `h3-segment-${index + 1}.mp4`, url: segmentResult.url, storageKey: segmentResult.storageKey };
                 nextSegments.push({ ...segment, prompt: String(segment.prompt || prompt), duration: Number(segment.duration || duration), result: segmentResult.url, resultStorageKey: segmentResult.storageKey, results: [{ url: segmentResult.url, storageKey: segmentResult.storageKey, type: "video", name: `Clip ${index + 1}` }], status: "success", progress: 1 });
             }
             if (!lastResult) throw new Error("没有可运行的 H3 分段");
@@ -167,7 +174,8 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             const current = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || liveMetadata);
             const errorStart = Math.max(0, current.findIndex((segment) => segment.id === liveSelectedId));
             const errorIds = new Set((runFromCurrent ? current.slice(errorStart) : current.filter((segment) => segment.id === liveSelectedId)).map((segment) => segment.id));
-            update({ segments: current.map((segment) => errorIds.has(segment.id) ? { ...segment, status: "error", progress: 0 } : segment), status: "error", errorDetails: enhancedError, runFinishedAt: Date.now() });
+            const cancelled = Boolean((ctx.getNode(ctx.node.id)?.metadata || liveMetadata).cancelRequested);
+            update({ segments: current.map((segment) => errorIds.has(segment.id) ? { ...segment, status: cancelled ? "cancelled" : "error", progress: 0 } : segment), status: cancelled ? "cancelled" : "error", errorDetails: cancelled ? "任务已取消" : enhancedError, runFinishedAt: Date.now(), runtimeTaskId: "" });
             if (generationLogId) void ctx.generationLogs.update(generationLogId, { status: "failed", finishedAt: new Date().toISOString(), durationMs: Date.now() - Number(liveMetadata.runStartedAt || Date.now()), error: enhancedError, params: { ...lastSubmitted } });
         } finally {
             runInFlightRef.current = false;
@@ -179,6 +187,3 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
     return null;
 
 }
-
-
-

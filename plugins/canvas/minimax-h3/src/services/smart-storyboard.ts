@@ -4,6 +4,8 @@ import baseReference from "../storyboard-assets/references/base-en.txt?raw";
 import refReference from "../storyboard-assets/references/ref-en.txt?raw";
 import type { H3Ref } from "../types";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
+import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
+import { refsForSegment } from "./h3-data";
 
 export type StoryboardMode = "ref2va" | "i2va" | "t2va" | "fl2va";
 export type StoryboardSkill = "regular_storyboard" | "ns_storyboard";
@@ -76,8 +78,13 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
         const result = await ctx.ai.generateText(messages[1].content, { system: messages[0].content });
         const parsed = parseStoryboard(result.text, count);
         const taskMode = mode === "t2va" ? "t2v" : mode === "i2va" ? "i2v" : mode === "fl2va" ? "fl2v" : "r2v";
-        const segments = parsed.segments.map((prompt, index) => ({ id: `smart-${Date.now()}-${index}`, prompt, duration, taskMode, status: "idle" }));
-        ctx.updateMetadata({ segments, prompt: segments[0].prompt, smartStoryboardGlobal: parsed.global, smartStoryboardRaw: parsed.raw, smartStoryboardVisionAnalysis: analysisParts.join("\n\n"), smartStoryboardOutputBudget: storyboardOutputBudget(count), status: "success", errorDetails: "" });
+        const metadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        const existing = segmentsFor(metadata);
+        const selected = existing.find((segment) => segment.id === String(metadata.selectedSegmentId || "")) || existing[existing.length - 1];
+        const inherited = selected ? { ...selected, result: "", resultStorageKey: undefined, results: [], status: "idle", progress: 0, runtimeTaskId: "", refs: selected.refs, refItems: refsForSegment(selected) } : { duration, taskMode, status: "idle" as const };
+        const created = parsed.segments.map((prompt, index) => ({ ...inherited, id: `smart-${Date.now()}-${index}`, prompt: parsed.global ? `全局提示词：\n${parsed.global}\n\n${prompt}` : prompt, duration, taskMode, result: "", results: [], status: "idle" }));
+        const segments = compactSegmentStarts([...existing, ...created]);
+        ctx.updateMetadata({ segments, selectedSegmentId: created[0]?.id, prompt: created[0]?.prompt, smartStoryboardGlobal: parsed.global, smartStoryboardRaw: parsed.raw, smartStoryboardVisionAnalysis: analysisParts.join("\n\n"), smartStoryboardOutputBudget: storyboardOutputBudget(count), status: "success", errorDetails: "" });
     } catch (error) {
         ctx.updateMetadata({ status: "error", errorDetails: error instanceof Error ? error.message : String(error) });
     }

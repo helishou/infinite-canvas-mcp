@@ -111,6 +111,10 @@ export async function getLocalH3Task(endpoint: string, token: string, taskId: st
     return { ...response.task, result: { url: media.find((item) => item.mimeType.startsWith("video/"))?.url || media[0]?.url || "", mimeType: media.find((item) => item.mimeType.startsWith("video/"))?.mimeType || media[0]?.mimeType || "video/mp4", taskId: response.task.id, segments: (response.task.result.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })) } };
 }
 
+export async function cancelLocalH3Task(endpoint: string, token: string, taskId: string) {
+    return (await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" })).task;
+}
+
 /** Legacy H3 execution path for nodes migrated from the old RunningHub-backed canvas. */
 export async function runRunningHubH3Task(endpoint: string, token: string, prompt: string, input: LocalH3Input, params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void) {
     const refs = [...(input.references || []), ...(input.audios || []), ...(input.video ? [input.video] : []), ...(input.previousVideo ? [input.previousVideo] : [])];
@@ -137,6 +141,10 @@ export async function getRunningHubH3Task(endpoint: string, token: string, taskI
     const media = task.result.media || [];
     const output = media.find((item) => String(item.mimeType || "video/mp4").startsWith("video/")) || media[0];
     return { ...task, result: output ? { url: output.url, mimeType: output.mimeType || "video/mp4", taskId: task.id } : null };
+}
+
+export async function cancelRunningHubH3Task(endpoint: string, token: string, taskId: string) {
+    return (await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/runninghub/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" })).task;
 }
 
 async function fetchAsDataUrl(url: string, signal?: AbortSignal) {
@@ -202,6 +210,9 @@ async function syncReference(endpoint: string, token: string, reference: LocalRe
             { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: reference.name, storageKey }) },
         );
         return res.media?.path;
+    }
+    if (source.startsWith("data:") && !/^data:([^;,]+);base64,(.+)$/s.test(source)) {
+        throw new Error(`参考「${reference.name}」携带的 data URL 非法（缺少 ;base64, 负载或格式错误），无法上传。请重新添加该素材。`);
     }
     const dataUrl = source.startsWith("data:") ? source : await fetchAsDataUrl(source, signal);
     return (await syncRuntimeMedia(endpoint, token, reference.name, dataUrl)).media?.path;

@@ -253,7 +253,7 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
             // previousVideo 即此情形——上一段视频后端刚生成完，前端却原路下载回来再传一次，
             // 体积暴涨触发 413）。传 storageKey 时直接返回本地路径，不再解码 dataUrl。
             if (storageKey) {
-                const meta = stores.media.meta(storageKey);
+                const meta = stores.media.meta(decodeURIComponent(storageKey));
                 if (!meta) return void res.status(404).json({ ok: false, error: `media not found: ${storageKey}` });
                 return void res.status(201).json({
                     ok: true,

@@ -20,6 +20,7 @@ export function requestH3Run(ctx: CanvasNodeContext, all = false) {
         runRequestId: `h3-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         runRequestAll: all,
         runRequestConsumedId: "",
+        cancelRequested: false,
         runtimeTaskId: "",
         runProgress: 0,
     });
@@ -28,7 +29,7 @@ export function requestH3Run(ctx: CanvasNodeContext, all = false) {
 export function resetH3Run(ctx: CanvasNodeContext) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const segments = segmentsFor(node.metadata || {}).map((segment) => ({ ...segment, result: "", results: [], status: "idle", progress: 0, runtimeTaskId: "" }));
-    ctx.updateMetadata({ content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, materials: [], segments, status: "idle", errorDetails: "", runtimeTaskId: "", runProgress: 0, runRequestId: "", runRequestConsumedId: "", runFinishedAt: undefined });
+    ctx.updateMetadata({ content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, materials: [], segments, status: "idle", errorDetails: "", runtimeTaskId: "", runProgress: 0, runRequestId: "", runRequestConsumedId: "", cancelRequested: false, runFinishedAt: undefined });
 }
 
 export function H3StatusBadge({ status, error, onRetry }: { status: string; error: string; onRetry: () => void }) {

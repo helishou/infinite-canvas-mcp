@@ -7,6 +7,10 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
++ H3 提示词增强与运行取消：验证增强按钮会显示“增强中…”，模型返回后写回当前 Prompt；生成期间按钮显示 Reset，点击后本地 ComfyUI/RunningHub 任务均进入取消状态。
++ H3 Output 管理：验证全部/当前筛选只影响显示，单个输出下载/删除、清理未使用输出不会删除仍被 Clip 引用的结果。
++ H3 RunningHub 参数：验证 Workflow/App 模式、Workflow/App ID、字段 JSON 与参数 JSON 能写入节点并被运行器透传。
++ H3 智能分镜追加：已有多个 Clip 时生成分镜，确认原 Clip 不被覆盖，新 Clip 继承当前 Clip 的 refs/参数并追加到时间轴末尾，全局提示词进入新 Clip Prompt。
 + H3 当前 Clip 子面板：验证 Prompt 快捷标签、参考素材计数、Engine、Duration、MP、比例、Clip settings 和 Generate clip 仍保持原有布局及写回行为。
 + H3 素材库模块：验证 Assets/Output 列表、媒体卡片、删除和产物参数恢复仍正常。
 + H3 运行结果工具拆分：验证源视频自动分段、当前/后续 Clip 运行、Clip 顺序和 Output 素材收集保持一致。

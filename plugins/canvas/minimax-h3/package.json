@@ -15,7 +15,8 @@
         "typescript": "^5"
     },
     "dependencies": {
-        "antd": "^5",
-        "file-saver": "^2.0.5"
+        "antd": "^6.4.2",
+        "file-saver": "^2.0.5",
+        "lucide-react": "^1.39.0"
     }
 }

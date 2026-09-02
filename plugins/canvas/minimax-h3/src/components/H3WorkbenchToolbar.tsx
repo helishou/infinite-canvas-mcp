@@ -6,7 +6,6 @@ import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
 import { resultUrl } from "../services/h3-data";
 import { H3Icon } from "./H3Icon";
-import { buttonStyle } from "./h3-ui";
 
 type Props = {
     ctx: CanvasNodeContext;
@@ -28,9 +27,9 @@ export function H3WorkbenchToolbar({ ctx, metadata, segments, selected, selected
         ctx.updateMetadata({ segments: next, selectedSegmentId: next[next.length - 1].id });
     };
     return <>
-        <div style={{ position: "absolute", left: 250, top: 8, zIndex: 5, display: "flex", gap: 6 }}>
+        <div className="minimax-aux-toolbar">
             <Select className="minimax-prompt-model" size="small" value={promptModel || undefined} placeholder="提示词增强模型" options={models.map((model) => ({ value: model.value, label: model.label }))} onChange={(value) => ctx.updateMetadata({ minimaxLlmModel: value })} style={{ width: 180 }} />
-            <button type="button" onClick={onOpenStoryboard} style={{ ...buttonStyle(ctx), padding: "4px 8px" }}>智能分镜</button>
+            <button type="button" className="minimax-aux-storyboard" onClick={onOpenStoryboard}>智能分镜</button>
         </div>
         <div className="minimax-wb-toolbar">
             <div className="minimax-brand"><H3Icon name="clapperboard" /> <span>MiniMax H3</span><em title="已加载新版 H3 插件">v1.2</em><b>{fmt(playhead)} / {fmt(total)}</b></div>
