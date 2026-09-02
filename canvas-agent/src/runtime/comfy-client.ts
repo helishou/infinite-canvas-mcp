@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { BackendClient } from "./backend-client.js";
-import { ComfyUiBridge, type ComfyModelCatalog, type ComfyPreset } from "./comfyui.js";
+import type { ComfyModelCatalog, ComfyPreset } from "./comfyui-types.js";
 import type { RuntimeTask, RuntimeTaskEvent } from "./types.js";
 
 /** 构造 BackendClient（读 backend.json 或环境变量）。 */
@@ -18,7 +18,7 @@ export function createBackendClient(backendUrl: string, env: Record<string, stri
     return new BackendClient(backendUrl, token);
 }
 
-/** ComfyUI 能力客户端：backend 权威，Agent 本地 ComfyUiBridge 做离线兜底。 */
+/** ComfyUI 能力客户端：Backend 是唯一实现。 */
 export type ComfyUiClient = {
     status(): Promise<Record<string, unknown>>;
     models(signal?: AbortSignal): Promise<ComfyModelCatalog>;
@@ -28,19 +28,6 @@ export type ComfyUiClient = {
     getUrl(): Promise<string>;
     setUrl(url: string): Promise<string>;
 };
-
-/** 把 ComfyUiBridge 包成统一接口（本地模式）。 */
-export function localComfyUi(bridge: ComfyUiBridge): ComfyUiClient {
-    return {
-        status: () => bridge.status(),
-        models: (signal) => bridge.models(signal),
-        presets: () => bridge.presets(),
-        run: (preset, input, params, baseUrl) => bridge.run(preset, input, params, baseUrl),
-        cancel: (id) => Promise.resolve(bridge.cancel(id)),
-        getUrl: async () => bridge.getUrl(),
-        setUrl: async (url) => bridge.setUrl(url),
-    };
-}
 
 /** backend 侧 ComfyUI 客户端（HTTP 到总后台 /comfy/*）。 */
 export function backendComfyUi(client: BackendClient, presets: () => ComfyPreset[]): ComfyUiClient {
@@ -52,20 +39,6 @@ export function backendComfyUi(client: BackendClient, presets: () => ComfyPreset
         cancel: (id) => client.comfyCancel(id),
         getUrl: async () => (await client.comfyConfig()).url,
         setUrl: async (url) => (await client.comfySetConfig(url)).url,
-    };
-}
-
-/** backend 优先、本地兜底的 ComfyUI 客户端（Agent 代理模式）。 */
-export function proxyComfyUi(backend: BackendClient, local: ComfyUiBridge): ComfyUiClient {
-    const back = backendComfyUi(backend, () => local.presets());
-    return {
-        status: () => back.status().catch(() => local.status()),
-        models: (signal) => back.models(signal).catch(() => local.models(signal)),
-        presets: () => local.presets(),
-        run: (preset, input, params, baseUrl) => back.run(preset, input, params, baseUrl).catch(() => local.run(preset, input, params, baseUrl)),
-        cancel: (id) => back.cancel(id).catch(() => local.cancel(id)),
-        getUrl: () => back.getUrl().catch(() => local.getUrl()),
-        setUrl: (url) => back.setUrl(url).catch(() => local.setUrl(url)),
     };
 }
 

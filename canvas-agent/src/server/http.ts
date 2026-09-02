@@ -14,14 +14,9 @@ import { CONFIG_DIR, DEFAULT_PORT, ensureSiteWorkspace, loadConfig, saveConfig, 
 import { logger } from "../utils/logger.js";
 import { checkVersions } from "../version-check.js";
 import { SkillStore, SkillStoreError } from "../skills/store.js";
-import { RuntimeDatabase } from "../runtime/database.js";
 import { BackendClient } from "../runtime/backend-client.js";
-import { backendComfyUi, createBackendClient, proxyComfyUi, resolveComfyTask, type ComfyUiClient } from "../runtime/comfy-client.js";
+import { backendComfyUi, createBackendClient, resolveComfyTask, type ComfyUiClient } from "../runtime/comfy-client.js";
 import { loadPluginMcpDeclarationsFromBackend, savePluginMcpDeclarationsToBackend, type PluginMcpDeclaration } from "./plugin-mcp.js";
-import { ComfyUiBridge } from "../runtime/comfyui.js";
-import { RunningHubBridge } from "../runtime/runninghub.js";
-import { VideoConcatService } from "../runtime/video-concat.js";
-import { runtimeMediaFile } from "../runtime/media.js";
 
 export type AgentHttpOptions = { listen?: boolean; backendUrl?: string; backendToken?: string };
 
@@ -35,15 +30,10 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     const initialWorkspace = ensureSiteWorkspace(config);
     const session = new CanvasSession(initialWorkspace.activeThreadId || "");
     const skillStore = new SkillStore(initialWorkspace.workspacePath);
-    // 嵌入 Backend 时禁止创建第二份持久化业务库；兼容 standalone 才保留旧库。
-    const runtimeDb = new RuntimeDatabase(options.listen === false ? ":memory:" : undefined);
     const backendUrl = options.backendUrl || config.backendUrl || `http://127.0.0.1:17370`;
     const backend = createBackendClient(backendUrl, { ...process.env, ...(options.backendToken ? { INFINITE_CANVAS_BACKEND_TOKEN: options.backendToken } : {}) });
-    const localComfy = new ComfyUiBridge(runtimeDb);
-    /** 嵌入 Backend 时只允许使用总后台 ComfyUI；standalone 保留过渡 fallback。 */
-    const comfyUi: ComfyUiClient = options.listen === false ? backendComfyUi(backend, () => localComfy.presets()) : proxyComfyUi(backend, localComfy);
-    const runningHub = new RunningHubBridge(runtimeDb);
-    const videoConcat = new VideoConcatService(runtimeDb);
+    /** ComfyUI 由 Backend 唯一持有，Agent 只保留协议适配。 */
+    const comfyUi: ComfyUiClient = backendComfyUi(backend, () => []);
     /** 将 Agent 事件广播到所属线程或全部网页。 */
     const emit = (type: string, payload: unknown) => {
         const value = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : { value: payload };
@@ -162,7 +152,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         const ok = session.resolveResult(String(req.query.clientId || ""), req.body);
         res.status(ok ? 200 : 409).json({ ok });
     });
-    app.get("/runtime/status", route(async (_req, res) => res.json({ ok: true, sqlite: true, node: process.version, comfyui: await comfyUi.status(), ffmpeg: await videoConcat.status(), backend: await backend.health() })));
+    app.get("/runtime/status", route(async (_req, res) => res.json({ ok: true, sqlite: false, node: process.version, comfyui: await comfyUi.status(), backend: await backend.health() })));
     app.get("/canvas/projects", route(async (_req, res) => {
         res.json({ ok: true, projects: await backend.listCanvasProjects() });
     }));
@@ -170,7 +160,6 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         const projects = Array.isArray(req.body?.projects) ? req.body.projects.filter((item: unknown): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))) : [];
         res.json({ ok: true, projects: await backend.replaceCanvasProjects(projects) });
     }));
-    app.get("/runtime/tasks/:id", (req, res) => runtimeTaskResponse(req, res, runtimeDb));
     app.get("/runtime/generation-logs", route(async (req, res) => {
         const status = ["queued", "running", "success", "failed", "cancelled"].includes(String(req.query.status)) ? String(req.query.status) as any : undefined;
         const options = { projectId: stringQuery(req.query.projectId), nodeId: stringQuery(req.query.nodeId), status, limit: Number(req.query.limit || 500) };
@@ -202,11 +191,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             const buffer = Buffer.from(await backend.runtimeMediaRead(file));
             res.setHeader("Cache-Control", "private, max-age=3600");
             res.type(path.extname(file)).send(buffer);
-        } catch {
-            const localFile = runtimeMediaFile(file);
-            res.setHeader("Cache-Control", "private, max-age=3600");
-            res.type(path.extname(localFile)).send(await readFile(localFile));
-        }
+        } catch { res.status(404).json({ ok: false, error: "媒体文件不存在" }); }
     }));
     app.get("/comfy/status", route(async (_req, res) => res.json({ ok: true, ...(await comfyUi.status()) })));
     app.get("/comfy/models", route(async (_req, res) => res.json({ ok: true, data: await comfyUi.models() })));
@@ -231,22 +216,6 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         }
     }));
     app.post("/comfy/tasks/:id/cancel", route(async (req, res) => res.json({ ok: true, task: await comfyUi.cancel(routeParam(req.params.id)) })));
-    app.get("/runninghub/status", (_req, res) => res.json({ ok: true, ...runningHub.status() }));
-    app.get("/runninghub/config", (_req, res) => {
-        const value = runningHub.getConfig();
-        res.json({ ok: true, config: maskRunningHubConfig(value) });
-    });
-    app.put("/runninghub/config", (req, res) => {
-        const body = objectBody(req.body);
-        const current = runningHub.getConfig();
-        const patch = { ...body, ...(body.apiKey === "********" ? { apiKey: current.apiKey } : {}), ...(body.walletApiKey === "********" ? { walletApiKey: current.walletApiKey } : {}) };
-        res.json({ ok: true, config: maskRunningHubConfig(runningHub.setConfig(patch)) });
-    });
-    app.post("/runninghub/tasks", route(async (req, res) => res.status(202).json({ ok: true, task: await runningHub.run(objectBody(req.body?.input), objectBody(req.body?.params)) })));
-    app.get("/runninghub/tasks/:id", (req, res) => runtimeTaskResponse(req, res, runtimeDb, "runninghub:"));
-    app.post("/runninghub/tasks/:id/cancel", (req, res) => res.json({ ok: true, task: runningHub.cancel(routeParam(req.params.id)) }));
-    app.get("/ffmpeg/status", route(async (_req, res) => res.json({ ok: true, ...(await videoConcat.status()) })));
-    app.post("/video-concat/tasks", route(async (req, res) => res.status(202).json({ ok: true, task: await videoConcat.run(Array.isArray(req.body?.videos) ? req.body.videos.map(String) : [], String(req.body?.output || ""), req.body?.longEdge === "auto" || req.body?.longEdge === undefined ? "auto" : Number(req.body.longEdge)) })));
     app.get(agentRoute("/attachments/:attachmentId"), route(async (req, res) => {
         const attachment = session.getTurnAttachment(String(req.query.clientId || ""), routeParam(req.params.attachmentId));
         const data = attachment.dataUrl.split(",", 2)[1];
@@ -581,7 +550,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             }).finally(() => session.endCodexMutation()).catch(() => undefined);
         }
     });
-    return { app, config, session, skillStore, runtimeDb, backend, comfyUi };
+    return { app, config, session, skillStore, backend, comfyUi };
 }
 
 /** standalone 兼容入口；新架构由 Backend 持有唯一 HTTP listener。 */
@@ -601,16 +570,6 @@ function routeParam(value: string | string[]) {
 
 function objectBody(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function maskRunningHubConfig(value: { apiKey?: string; walletApiKey?: string } & object) {
-    return { ...value, apiKey: value.apiKey ? "********" : "", walletApiKey: value.walletApiKey ? "********" : "" };
-}
-
-function runtimeTaskResponse(req: Request, res: Response, database: RuntimeDatabase, kindPrefix = "") {
-    const task = database.getTask(routeParam(req.params.id));
-    if (!task || (kindPrefix && !task.kind.startsWith(kindPrefix))) return void res.status(404).json({ ok: false, error: "task not found" });
-    res.json({ ok: true, task, events: database.listEvents(task.id, Number(req.query.after || 0)) });
 }
 
 function stringQuery(value: unknown) { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
