@@ -9,7 +9,7 @@ import { ComfyUiBackend } from "./comfyui/bridge.js";
 import { createStores } from "./stores/index.js";
 import { PluginMcpRegistry, buildPluginMcpContext, type PluginMcpDeclaration, type PluginMcpBackend } from "@basketikun/canvas-agent/plugin-mcp";
 import type { ComfyUiClient } from "@basketikun/canvas-agent/runtime/comfy-client";
-import { toolDescriptions, toolInputSchemas, type ToolName } from "@basketikun/canvas-agent/schemas";
+import { toolDescriptions, toolInputSchemas, toolNames, type ToolName } from "@basketikun/canvas-agent/schemas";
 import { buildCanvasToolRequest } from "@basketikun/canvas-agent/operations";
 
 /** Backend 进程外的 MCP stdio 入口：直接打开 Backend 数据库和 ComfyUI Bridge。 */
@@ -39,6 +39,7 @@ export async function startBackendMcpServer() {
     const server = new McpServer({ name: "infinite-canvas-backend", version: "0.1.0" });
     registerDirectCanvasTools(server, db, stores);
     registerDirectComfyTools(server, comfy, stores);
+    registerBrowserCompatibilityTools(server, config);
     const context = buildPluginMcpContext({ url: config.url, token: config.token, backendUrl: config.url }, directBackend, comfyClient);
     const registry = new PluginMcpRegistry(server, context);
     await registry.apply(db.listPluginDeclarations().map((item): PluginMcpDeclaration => ({ id: item.id, name: item.name, version: item.version, mcp: { enabled: item.enabled, tools: item.tools as never } })));
@@ -51,6 +52,7 @@ const DIRECT_CANVAS_TOOLS = [
     "canvas_create_image_prompt_flow", "canvas_create_generation_flow", "canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio",
     "canvas_update_node", "canvas_update_node_text", "canvas_move_nodes", "canvas_resize_node", "canvas_delete_nodes", "canvas_connect_nodes", "canvas_select_nodes", "canvas_set_viewport", "canvas_run_generation", "generation_get_status",
 ] as ToolName[];
+const DIRECT_TOOL_NAMES = new Set<ToolName>([...DIRECT_CANVAS_TOOLS, "assets_list", "assets_add", "comfyui_status", "comfyui_list_presets", "comfyui_run", "comfyui_get_task", "comfyui_cancel_task", "generation_get_status"]);
 
 function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, stores: ReturnType<typeof createStores>) {
     for (const name of DIRECT_CANVAS_TOOLS) {
@@ -114,4 +116,20 @@ function registerDirectComfyTools(server: McpServer, comfy: ComfyUiBackend, stor
     server.registerTool("comfyui_run", { description: "运行本地 ComfyUI 预设。", inputSchema: z.object({ preset: z.string(), input: z.record(z.unknown()).optional(), params: z.record(z.unknown()).optional() }).shape }, async (input) => ({ content: [{ type: "text", text: JSON.stringify(await comfy.run(input.preset, input.input || {}, input.params || {})) }] }));
     server.registerTool("comfyui_get_task", { description: "查询 ComfyUI 任务。", inputSchema: z.object({ taskId: z.string() }).shape }, async ({ taskId }) => { const task = stores.tasks.get(taskId); if (!task) throw new Error(`task not found: ${taskId}`); return { content: [{ type: "text", text: JSON.stringify({ task, events: stores.tasks.events(taskId) }) }] }; });
     server.registerTool("comfyui_cancel_task", { description: "取消 ComfyUI 任务。", inputSchema: z.object({ taskId: z.string() }).shape }, async ({ taskId }) => ({ content: [{ type: "text", text: JSON.stringify(comfy.cancel(taskId)) }] }));
+}
+
+/** 工作台、网页导航和对话工具仍需要当前浏览器会话，保留旧协议兼容入口。 */
+function registerBrowserCompatibilityTools(server: McpServer, config: ReturnType<typeof loadConfig>) {
+    for (const name of toolNames.filter((item) => !DIRECT_TOOL_NAMES.has(item) && !item.startsWith("h3_"))) {
+        const schema = toolInputSchemas[name];
+        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (input) => {
+            const response = await fetch(`${config.url.replace(/\/$/, "")}/agent/api/tools`, {
+                method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${config.token}` },
+                body: JSON.stringify({ name, input: schema.parse(input) }),
+            });
+            const body = await response.json().catch(() => ({})) as { ok?: boolean; result?: unknown; error?: string };
+            if (!response.ok || !body.ok) throw new Error(body.error || `浏览器 Agent 工具调用失败：HTTP ${response.status}`);
+            return textResult(body.result);
+        });
+    }
 }
