@@ -329,13 +329,17 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         }
     });
 
-    // ── 错误处理（必须位于所有业务路由之后） ─────────────────────────────
+    registerBackendErrorHandler(app);
+
+    return { app: app as Express, stores, events };
+}
+
+/** 在调用方挂载额外路由后再次安装，确保挂载路由也返回统一 JSON 错误。 */
+export function registerBackendErrorHandler(app: Express) {
     type HttpError = Error & { status?: number };
     app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => {
         const status = (error as HttpError).status || 500;
         logger.error(error.message, { stack: error.stack });
         res.status(status).json({ ok: false, error: error.message });
     });
-
-    return { app: app as Express, stores, events };
 }

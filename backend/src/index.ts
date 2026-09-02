@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { loadConfig, saveConfig, ensureDataDirs } from "./config.js";
 import { BackendDatabase } from "./db.js";
-import { startServer } from "./server.js";
+import { registerBackendErrorHandler, startServer } from "./server.js";
 import { createLogger } from "./logger.js";
 import { createStores } from "./stores/index.js";
 import { ComfyUiBackend } from "./comfyui/bridge.js";
@@ -46,6 +46,7 @@ registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.event
 const agent = createAgentRuntime({ backendUrl: config.url, backendToken: config.token });
 runtime.agent = agent;
 app.use("/agent", agent.app);
+registerBackendErrorHandler(app);
 
 const server = app.listen(config.port, "127.0.0.1", () => {
     logger.info(`总后台已启动 http://127.0.0.1:${config.port}`, { pid: process.pid, version: readVersion() });

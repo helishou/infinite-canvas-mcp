@@ -8,6 +8,7 @@
 + [修复] H3 MCP 全部 Clip 改为串行执行并沿用 Motion Context，任务取消只允许作用于 queued/running 状态。
 + [新增] Backend 资产新增、修改、删除和批量替换统一发布 `asset.updated` SSE 事件，供前端增量同步使用。
 + [修复] Backend 业务路由异常统一通过末端错误处理中间件返回 JSON，避免 Agent 接口收到 Express 默认错误页。
++ [修复] Backend 挂载的 ComfyUI、RunningHub、FFmpeg 与 Agent 路由也统一纳入 JSON 错误处理。
 + [优化] 画布、素材、生成日志和媒体统一由总后台 SQLite/media_files 读写，IndexedDB 仅作为一次性迁移来源，Agent 不再提供业务数据回退。
 + [修复] 修复 Store 迁移后的项目、媒体、H3 输出和生成日志恢复链路，避免旧数据被空的 Backend 副本覆盖。
 + [优化] MiniMax H3 插件浏览器端按入口、工作台、类型、常量、服务、hooks 和样式模块拆分，保持现有节点与 Agent MCP 契约不变。
