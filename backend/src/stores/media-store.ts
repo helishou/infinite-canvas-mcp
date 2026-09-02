@@ -52,12 +52,15 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
             const safeName = path.basename(name);
             if (!safeName || safeName.includes("..")) throw new Error("运行时媒体文件名无效");
             const id = cryptoStableId(`runtime-media:${safeName}`);
+            const createdAt = new Date().toISOString();
             const filePath = path.join(MEDIA_DIR, safeName);
             if (fs.existsSync(filePath) && fs.statSync(filePath).size === data.length) {
+                db.upsertMediaFile({ storageKey: id, filePath, mimeType, bytes: data.length, width: null, height: null, durationMs: null, createdAt });
                 return { id, name: safeName, path: filePath, size: data.length, bytes: data.length, mimeType, url: runtimeMediaUrl(safeName) };
             }
             fs.mkdirSync(MEDIA_DIR, { recursive: true, mode: 0o700 });
             fs.writeFileSync(filePath, data, { mode: 0o600 });
+            db.upsertMediaFile({ storageKey: id, filePath, mimeType, bytes: data.length, width: null, height: null, durationMs: null, createdAt });
             return { id, name: safeName, path: filePath, size: data.length, bytes: data.length, mimeType, url: runtimeMediaUrl(safeName) };
         },
 
