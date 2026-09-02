@@ -1,5 +1,6 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -198,8 +199,19 @@ async function prepareH3MotionContext(input: Record<string, unknown>, params: Re
     return { input: { ...input, previousVideo: target }, cleanup: async () => { try { await rm(target, { force: true }); } catch {} } };
 }
 
+function resolveBackendPython(): string {
+    const fromEnv = process.env.PYTHON_PATH;
+    if (fromEnv) return fromEnv;
+    // 项目自带的 venv（backend/venv）：隔离安装 Pillow 等依赖，避免污染系统 python。
+    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+    const venvBin = process.platform === "win32" ? path.join("venv", "Scripts", "python.exe") : path.join("venv", "bin", "python");
+    const venvPython = path.join(packageRoot, venvBin);
+    if (existsSync(venvPython)) return venvPython;
+    return "python";
+}
+
 function runPythonWorker(args: string[]) {
-    const python = process.env.PYTHON_PATH || "python";
+    const python = resolveBackendPython();
     const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
     const script = path.join(packageRoot, args[0]);
     return new Promise<void>((resolve, reject) => {
