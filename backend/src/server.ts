@@ -319,6 +319,36 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         res.json({ ok: true, declarations: result });
     });
 
+    app.get("/plugins/installed", (_req, res) => {
+        const plugins = db.getSetting("plugins.installed");
+        res.json({ ok: true, plugins: Array.isArray(plugins) ? plugins : [] });
+    });
+    app.put("/plugins/installed", (req, res) => {
+        const plugins = Array.isArray(req.body?.plugins) ? req.body.plugins.filter((item: unknown) => item && typeof item === "object" && !Array.isArray(item)) : [];
+        db.setSetting("plugins.installed", plugins);
+        res.json({ ok: true, plugins });
+    });
+    app.get("/plugins/storage", (req, res) => {
+        const pluginId = String(req.query.pluginId || "").trim();
+        const key = String(req.query.key || "").trim();
+        if (!pluginId || !key) return void res.status(400).json({ ok: false, error: "pluginId 和 key 必填" });
+        res.json({ ok: true, value: db.getSetting(`plugin.storage.${pluginId}.${key}`) ?? null });
+    });
+    app.put("/plugins/storage", (req, res) => {
+        const pluginId = String(req.body?.pluginId || "").trim();
+        const key = String(req.body?.key || "").trim();
+        if (!pluginId || !key) return void res.status(400).json({ ok: false, error: "pluginId 和 key 必填" });
+        db.setSetting(`plugin.storage.${pluginId}.${key}`, req.body?.value);
+        res.json({ ok: true });
+    });
+    app.delete("/plugins/storage", (req, res) => {
+        const pluginId = String(req.query.pluginId || "").trim();
+        const key = String(req.query.key || "").trim();
+        if (!pluginId || !key) return void res.status(400).json({ ok: false, error: "pluginId 和 key 必填" });
+        db.db.prepare("DELETE FROM runtime_settings WHERE key = ?").run(`plugin.storage.${pluginId}.${key}`);
+        res.json({ ok: true });
+    });
+
     app.get("/generation-logs", (req, res) => {
         const projectId = req.query.projectId as string | undefined;
         const nodeId = req.query.nodeId as string | undefined;

@@ -237,6 +237,9 @@ export function usePluginHost(params: PluginHostParams) {
     // Load installed remote plugins on startup.
     useEffect(() => {
         void ensurePluginsLoaded();
+        const reloadPlugins = () => void ensurePluginsLoaded();
+        window.addEventListener("backend-connected", reloadPlugins);
+        return () => window.removeEventListener("backend-connected", reloadPlugins);
     }, []);
 
     return { pluginHost, renderPluginPanel, buildNodeToolbarItems };

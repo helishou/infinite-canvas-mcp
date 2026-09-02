@@ -112,6 +112,31 @@ export function deleteBackendAssetFolder(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/assets/folders/${encodeURIComponent(id)}`);
 }
 
+export type InstalledPluginRecord = {
+    id: string; name: string; version: string; description?: string; url: string; source: string;
+    enabled: boolean; local?: boolean; official?: boolean; installedAt: string; mcp?: { enabled: boolean; toolCount: number };
+};
+
+export function fetchBackendInstalledPlugins() {
+    return request<{ ok: boolean; plugins?: InstalledPluginRecord[] }>("GET", "/plugins/installed");
+}
+
+export function saveBackendInstalledPlugins(plugins: InstalledPluginRecord[]) {
+    return request<{ ok: boolean; plugins?: InstalledPluginRecord[] }>("PUT", "/plugins/installed", { plugins });
+}
+
+export function getBackendPluginStorage<T = unknown>(pluginId: string, key: string) {
+    return request<{ ok: boolean; value: T | null }>("GET", `/plugins/storage?pluginId=${encodeURIComponent(pluginId)}&key=${encodeURIComponent(key)}`);
+}
+
+export function setBackendPluginStorage(pluginId: string, key: string, value: unknown) {
+    return request<{ ok: boolean }>("PUT", "/plugins/storage", { pluginId, key, value });
+}
+
+export function deleteBackendPluginStorage(pluginId: string, key: string) {
+    return request<{ ok: boolean }>("DELETE", `/plugins/storage?pluginId=${encodeURIComponent(pluginId)}&key=${encodeURIComponent(key)}`);
+}
+
 // ── Media ────────────────────────────────────────────────────────────────
 
 export async function uploadBackendMedia(options: {

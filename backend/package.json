@@ -9,7 +9,7 @@
   },
   "files": ["dist", "workflows", "workers"],
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx --watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "prepack": "npm run build"

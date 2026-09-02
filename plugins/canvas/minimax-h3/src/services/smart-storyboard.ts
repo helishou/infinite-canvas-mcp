@@ -80,11 +80,12 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
         const parsed = parseStoryboard(result.text, count);
         const taskMode = mode === "t2va" ? "t2v" : mode === "i2va" ? "i2v" : mode === "fl2va" ? "fl2v" : "r2v";
         const metadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        const continuityEnabled = metadata.smartStoryboardContinuityEnabled !== false;
         const existing = segmentsFor(metadata);
         const selected = existing.find((segment) => segment.id === String(metadata.selectedSegmentId || "")) || existing[existing.length - 1];
         const inheritedRefs = selected ? [...refsForSegment(selected).filter((ref) => ref.type !== "image"), ...refs.filter((ref) => ref.url)] : refs.filter((ref) => ref.url);
         const inherited = selected ? { ...selected, ...segmentRefsPatch(inheritedRefs), result: "", resultStorageKey: undefined, results: [], status: "idle", progress: 0, runtimeTaskId: "" } : { ...segmentRefsPatch(inheritedRefs), duration, taskMode, status: "idle" as const };
-        const created = parsed.segments.map((prompt, index) => ({ ...inherited, id: `smart-${Date.now()}-${index}`, prompt: parsed.global ? `全局提示词：\n${parsed.global}\n\n${prompt}` : prompt, duration, taskMode, result: "", results: [], status: "idle" }));
+        const created = parsed.segments.map((prompt, index) => ({ ...inherited, id: `smart-${Date.now()}-${index}`, prompt: parsed.global ? `全局提示词：\n${parsed.global}\n\n${prompt}` : prompt, duration, taskMode, motionContextEnabled: continuityEnabled, result: "", results: [], status: "idle" }));
         const segments = compactSegmentStarts([...existing, ...created]);
         ctx.updateMetadata({ segments, selectedSegmentId: created[0]?.id, prompt: created[0]?.prompt, smartStoryboardGlobal: parsed.global, smartStoryboardRaw: parsed.raw, smartStoryboardVisionAnalysis: analysisParts.join("\n\n"), smartStoryboardOutputBudget: storyboardOutputBudget(count), status: "success", errorDetails: "" });
     } catch (error) {

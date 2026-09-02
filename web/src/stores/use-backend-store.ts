@@ -78,16 +78,6 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
             await get().checkConnection();
             return;
         }
-        if (!wasConnected) {
-            const { migrateIndexDBToBackend } = await import("@/lib/backend-migration");
-            const migration = await migrateIndexDBToBackend();
-            if (!migration.success) {
-                const error = `Backend 数据迁移失败：${migration.error || "未知错误"}`;
-                console.warn("[backend-migration]", error);
-                set({ connected: false, checking: false, error });
-                return;
-            }
-        }
         set({ connected: true, checking: false, error: "" });
         if (!wasConnected) window.dispatchEvent(new Event("backend-connected"));
         startBackendEvents(getBackendUrl(), get().token);
@@ -96,7 +86,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
     reset: () => { stopBackendEvents(); set({ connected: false, checking: false, error: "" }); },
 }));
 
-/** 启动时自动检测总后台连接。首次连接时先完成一次性 IndexedDB 迁移。 */
+/** 启动时自动检测总后台连接。 */
 export function initBackendConnection() {
     if (typeof window === "undefined") return;
     void useBackendStore.getState().checkConnection();

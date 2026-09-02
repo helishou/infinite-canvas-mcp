@@ -10,7 +10,9 @@ import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audi
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { uploadImage } from "@/services/image-storage";
-import { uploadMediaFile } from "@/services/file-storage";
+import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
+import { backendMediaUrl } from "@/services/backend-api";
+import { useBackendStore } from "@/stores/use-backend-store";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
@@ -1364,6 +1366,30 @@ function InfiniteCanvasPage() {
         setSelectedConnectionId(null);
     }, []);
 
+    // 内部引用拖拽（H3 输出视频 / 侧边栏素材）落库生成节点：复用 storageKey，不重新上传。
+    const createNodeFromCanvasRef = useCallback(
+        (ref: { url?: string; dataUrl?: string; storageKey?: string; name?: string; type?: string; kind?: string; width?: number; height?: number; durationMs?: number; bytes?: number; mimeType?: string }, position: Position) => {
+            const type = ref.type || ref.kind || "image";
+            const resolvedUrl = ref.storageKey ? backendMediaUrl(ref.storageKey) : ref.url || ref.dataUrl || "";
+            if (!resolvedUrl) return;
+            const id = `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            if (type === "video") {
+                const size = fitNodeSize(ref.width || 1280, ref.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                setNodes((prev) => [...prev, { id, type: CanvasNodeType.Video, title: ref.name || "视频", position: { x: position.x - size.width / 2, y: position.y - size.height / 2 }, width: size.width, height: size.height, metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", naturalWidth: ref.width, naturalHeight: ref.height, bytes: ref.bytes, mimeType: ref.mimeType || "video/mp4", durationMs: ref.durationMs } }]);
+            } else if (type === "audio") {
+                const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
+                setNodes((prev) => [...prev, { id, type: CanvasNodeType.Audio, title: ref.name || "音频", position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 }, width: spec.width, height: spec.height, metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", bytes: ref.bytes, mimeType: ref.mimeType || "audio/mpeg", durationMs: ref.durationMs } }]);
+            } else {
+                const size = fitNodeSize(ref.width || 512, ref.height || 512);
+                setNodes((prev) => [...prev, { id, type: CanvasNodeType.Image, title: ref.name || "图片", position: { x: position.x - size.width / 2, y: position.y - size.height / 2 }, width: size.width, height: size.height, metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", naturalWidth: ref.width, naturalHeight: ref.height, bytes: ref.bytes, mimeType: ref.mimeType || "image/png" } }]);
+            }
+            setSelectedNodeIds(new Set([id]));
+            setSelectedConnectionId(null);
+            setDialogNodeId(id);
+        },
+        [],
+    );
+
     const createTextNodeFromClipboard = useCallback(
         (text: string) => {
             const trimmed = text.trim();
@@ -2094,6 +2120,21 @@ function InfiniteCanvasPage() {
         (event: ReactDragEvent<HTMLDivElement>) => {
             event.preventDefault();
             if (event.dataTransfer.types.includes("application/x-smart-storyboard-slot")) return;
+
+            // 内部引用拖拽：H3 输出视频 / 侧边栏素材 → 直接落库生成节点（复用 storageKey，不重新上传）
+            const refPayload = event.dataTransfer.getData("application/x-infinite-canvas-ref");
+            if (refPayload) {
+                try {
+                    const ref = JSON.parse(refPayload) as { url?: string; dataUrl?: string; storageKey?: string; name?: string; type?: string; kind?: string; width?: number; height?: number; durationMs?: number; bytes?: number; mimeType?: string };
+                    if (ref.url || ref.dataUrl || ref.storageKey) {
+                        createNodeFromCanvasRef(ref, screenToCanvas(event.clientX, event.clientY));
+                        return;
+                    }
+                } catch {
+                    // 解析失败则继续走外部文件逻辑
+                }
+            }
+
             const files = Array.from(event.dataTransfer.files).filter(
                 (item) => item.type.startsWith("image/") || item.type.startsWith("video/") || isAudioFile(item),
             );
@@ -2113,7 +2154,7 @@ function InfiniteCanvasPage() {
                 }
             }
         },
-        [createAudioFileNode, createImageFileNode, createVideoFileNode, screenToCanvas],
+        [createAudioFileNode, createImageFileNode, createVideoFileNode, createNodeFromCanvasRef, screenToCanvas],
     );
 
     const startTitleEditing = useCallback(() => {

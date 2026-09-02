@@ -62,6 +62,9 @@ const shutdown = (signal: string) => {
 };
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+// tsx --watch 默认用 SIGINT 重启：Express 5 异步关闭、可能不触发 SIGINT 监听器，
+// 补一个 beforeExit 走同样收尾，避免每次热重载都卡到 10s 兜底才退。
+process.on("beforeExit", () => { db.close(); });
 
 function readVersion() {
     try {

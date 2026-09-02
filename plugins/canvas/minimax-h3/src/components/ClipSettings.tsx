@@ -24,16 +24,15 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const labelFor = (value: string) => value.replace(/^.*[\\/]/, "");
     const modelOptions = mergeH3Options(h3ModelOptions, comfyModels.models, labelFor);
     const loraOptions = mergeH3Options(h3LoraOptions, comfyModels.loras, labelFor);
-    const options = (items: { value: string; label: string }[]) => items.map((option) => ({ value: option.value, label: option.label }));
     return <div className="minimax-settings-extra" style={{ display: "contents" }}>
-        <label className="minimax-wide-setting"><span>Task mode</span><Select style={field} value={String(segment.taskMode || "r2v")} options={options([{ value: "t2v", label: "文生视频" }, { value: "i2v", label: "图生视频" }, { value: "fl2v", label: "首尾帧生视频" }, { value: "r2v", label: "参考主体" }, { value: "v2v", label: "视频编辑" }, { value: "rv2v", label: "参考素材改视频" }])} onChange={(value) => patch({ taskMode: value })} /></label>
-        <label className="minimax-wide-setting"><span>加速LoRA</span><Select style={field} value={String(segment.loraName ?? metadata.loraName ?? "")} options={options(loraOptions)} onChange={(value) => patch({ loraName: value })} /></label>
-        <label className="minimax-wide-setting"><span>Base model</span><Select style={field} value={normalizeH3Model(segment.modelName || metadata.minimaxBaseModel || metadata.modelName)} options={options(modelOptions)} onChange={(value) => patch({ modelName: value })} /></label>
+        <label className="minimax-wide-setting"><span>Task mode</span><select style={field} value={String(segment.taskMode || "r2v")} onChange={(event) => patch({ taskMode: event.target.value })}><option value="t2v">文生视频</option><option value="i2v">图生视频</option><option value="fl2v">首尾帧生视频</option><option value="r2v">参考主体</option><option value="v2v">视频编辑</option><option value="rv2v">参考素材改视频</option></select></label>
+        <label className="minimax-wide-setting"><span>加速LoRA</span><Select style={field} value={String(segment.loraName ?? metadata.loraName ?? "")} options={loraOptions.map((option) => ({ value: option.value, label: option.label }))} onChange={(value) => patch({ loraName: value })} /></label>
+        <label className="minimax-wide-setting"><span>Base model</span><Select style={field} value={normalizeH3Model(segment.modelName || metadata.minimaxBaseModel || metadata.modelName)} options={modelOptions.map((option) => ({ value: option.value, label: option.label }))} onChange={(value) => patch({ modelName: value })} /></label>
         <label><span>Video steps</span><InputNumber style={field} min={1} max={60} value={Number(segment.videoSteps || (segment.loraName ? 8 : 20))} onChange={(value) => patch({ videoSteps: Number(value || 0) })} /></label>
         <label><span>Denoise</span><InputNumber style={field} min={0} max={1} step={0.05} value={Number(segment.denoise ?? metadata.denoise ?? 0.65)} onChange={(value) => patch({ denoise: Number(value ?? 0.65) })} /></label>
         <label><span>Seed mode</span><Select style={field} value={segment.noiseSeedMode === "fixed" ? "fixed" : "random"} options={[{ value: "random", label: "随机" }, { value: "fixed", label: "固定" }]} onChange={(value) => patch({ noiseSeedMode: value as "random" | "fixed", noiseSeed: value === "fixed" ? (segment.noiseSeed ?? segment.seed ?? Math.floor(Math.random() * 4294967296)) : undefined })} /></label>
         {segment.noiseSeedMode === "fixed" ? <label><span>Seed</span><InputNumber style={field} min={0} max={4294967295} value={Number(segment.noiseSeed ?? segment.seed ?? 0)} onChange={(value) => patch({ noiseSeed: value ?? undefined, seed: value ?? undefined })} /></label> : null}
-        <label><span>TE speed</span><Select style={field} value={segment.teAccel === true ? "fast" : "std"} options={[{ value: "std", label: "standard" }, { value: "fast", label: "fast" }]} onChange={(value) => patch({ teAccel: value === "fast" })} /></label>
+        <label><span>TE speed</span><Switch checked={segment.teAccel === true} onChange={(checked) => patch({ teAccel: checked })} checkedChildren="开" unCheckedChildren="关" size="small" /></label>
         <label><span>Combat LoRA</span><InputNumber style={field} min={0} max={2} step={0.01} value={Number(segment.combatLoraWeight || 0)} onChange={(value) => patch({ combatLoraWeight: Number(value || 0) })} /></label>
         <label><span>Cinematic LoRA</span><InputNumber style={field} min={0} max={2} step={0.01} value={Number(segment.cinematicLoraWeight || 0)} onChange={(value) => patch({ cinematicLoraWeight: Number(value || 0) })} /></label>
         <SettingToggle ctx={ctx} label="Motion Context" value={segment.motionContextEnabled !== false} onChange={(value) => patch({ motionContextEnabled: value, tailFrameEnabled: value })} />
@@ -45,7 +44,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         <label><span>Global steps</span><InputNumber style={field} min={1} max={60} value={Number(metadata.minimaxGlobalVideoSteps || metadata.videoSteps || 6)} onChange={(value) => ctx.updateMetadata({ minimaxGlobalVideoSteps: Number(value || 0) })} /></label>
         <SettingToggle ctx={ctx} label="Global LoRA" value={metadata.minimaxGlobalLoraEnabled !== false} onChange={(value) => ctx.updateMetadata({ minimaxGlobalLoraEnabled: value })} />
         <SettingToggle ctx={ctx} label="Global TE" value={metadata.minimaxGlobalTeAccel === true} onChange={(value) => ctx.updateMetadata({ minimaxGlobalTeAccel: value })} />
-        <Button type="primary" className="minimax-run-all" onClick={() => { ctx.openPanel(); ctx.emit("minimax-h3:run-all", { nodeId: ctx.node.id }); }}>一键运行全部 Clip</Button>
+        <Button type="primary" className="minimax-run-all" onClick={() => { ctx.openPanel(); ctx.emit("minimax-h3:run-all", { nodeId: ctx.node.id }); }}>运行当前分镜及后续分镜</Button>
         
     </div>
 }

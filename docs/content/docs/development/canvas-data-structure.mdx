@@ -7,7 +7,7 @@ description: Local canvas storage, nodes, media files, and cleanup
 
 ## Storage
 
-Canvas projects and My Assets are stored with localForage in the `infinite-canvas` database and `app_state` store. Image blobs use `image_files`; other media blobs use `media_files`. Project JSON stores display URLs, `storageKey`, and metadata rather than large base64 payloads.
+Canvas projects and My Assets are stored by the Backend in SQLite. Image, video, and audio blobs are stored in the Backend media directory and referenced by `storageKey`; project JSON stores display URLs and metadata rather than large base64 payloads.
 
 ## Project
 

@@ -7,6 +7,19 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
++ Backend 存储替换：刷新页面后确认已安装插件、启用状态和插件私有配置仍能恢复；提示词页刷新后能重新拉取数据；设置页不再出现浏览器数据库统计；Backend 重启后插件数据仍存在。
++ H3 连续播放与空 Clip 预览：点击顶部或时间线播放按钮，确认视频按 Clip1、Clip2、Clip3 自动连续播放；新增空 Clip 并选中后，确认预览区域为空，不显示上一段视频。
++ H3 Refs 时间线：确认 Video 下方显示 Refs 泳道，图片/视频/音频按 Clip 时间段对齐；从 Assets 拖入不同时间段时写入对应 Clip，移除按钮只删除所属 Clip 的参考素材；拖动泳道高度后布局仍正常。
++ H3 Clip settings：确认 Task mode 可切换文生视频、图生视频、首尾帧、参考主体、视频编辑、参考素材改视频，并确认 TE speed 只显示“开/关”且能写回状态。
++ H3 播放头边界：分别播放 Clip1、Clip2、Clip3，确认播放头从各自时间段开始，播放结束不越过对应 Clip 右边界，点击时间轴定位后仍保持全局时间正确。
++ H3 批量结果即时回写：运行当前及后续分镜，确认每个 Clip 成功后立即写入对应 Clip；即使后续 Clip 失败，前面已成功的产物仍保留。
++ H3 Prompt 工具位置：确认快捷结构按钮和语法提示显示在文本输入框上方，按钮仍能在光标位置插入对应结构。
++ 智能分镜段间接续：关闭“段间接续”生成分镜并运行后续 Clip，确认所有 Clip 的 Motion Context 均关闭；开启时确认后续 Clip 使用前一段结果接续。
++ H3 批量运行文案：确认按钮显示“运行当前分镜及后续分镜”，点击后仍从当前 Clip 开始运行到末尾。
++ H3 Motion Context 裁切：启用 Motion Context 运行后续 Clip，确认输出时长约为原时长减去 22 帧/24fps，开头不再重复上一段的连接帧，音频同步裁切。
++ H3 Output 拖放范围：从 Output 拖到 H3 节点内部不创建视频节点，拖到节点外的画布空白区域可以创建视频节点；时间线 Clip 的排序与素材接收仍正常。
++ H3 工作台视觉样式：确认顶部工具栏、Assets/Output、时间线、Prompt 和 Clip settings 在当前画布缩放下字号与间距清晰，当前 Clip 高亮、按钮 hover 和设置控件没有溢出或遮挡。
++ H3 ComfyUI 取消任务：生成期间点击 Reset，确认 ComfyUI 当前任务被中断、排队任务被删除，不会在后台继续生成。
 + H3 生成视频媒体复用：在重建插件产物、重编译 canvas-agent 并重启后端之后，用已在画布中的图片跑一次 r2v/i2v，确认不再出现 400「媒体必须是 base64 data URL」，且已落库的图片不会重新上传。
 + MCP 当前画布上下文：连接 Agent/MCP 后调用读取画布的工具，确认能看到当前打开画布的标题、节点和选中状态；切换画布后确认上下文随之更新。
 + H3 时间线布局：确认 Video 下方不再显示重复 Refs 横栏，当前 Clip 的 Refs 九宫格仍可查看、添加、删除和排序素材。
@@ -82,7 +95,6 @@ The current release needs manual verification in these areas:
 
 - H3 MCP 串行链路：调用 `h3_run_all_clips` 时应按 Clip 顺序等待任务完成，并将上一段视频作为下一段的 Motion Context；已完成 Clip 可恢复上下文，失败后不应继续提交同一节点的后续 Clip。
 
-- 统一存储层：首次连接总后台时，旧版 IndexedDB 的画布、素材、媒体和生成日志完成一次性迁移；迁移后刷新、重启、导入导出和 H3 MCP 均只从 Backend SQLite/media_files 读取和写入，Backend 不可用时不应静默切换到本地或 Agent 业务副本。
 
 - 前端 Backend-only 增量同步：画布、素材、文件夹和图片/视频工作台日志新增或修改后应逐条写入 Backend，删除不应覆盖其他标签页的数据；工作台日志刷新后仍能恢复结果媒体，Backend SSE 的任务/日志事件应触发对应列表更新。
 
@@ -116,11 +128,10 @@ The current release needs manual verification in these areas:
 - Agent header tabs in English and Chinese at different panel widths; labels should collapse to icons and counts before either edge is clipped.
 - Agent message layout, Markdown, code blocks, attachments, token statistics, progress timelines, command groups, and scroll-follow behavior.
 - Agent inline references: type `/` to select an enabled Skill or `@` to select a canvas asset at the caret; tokens should remain aligned with text, support keyboard navigation and hover previews, and preserve their positions after sending or refreshing.
-- Agent message metadata: image attachments, Skills, canvas references, and local previews should survive page refreshes and Agent restarts through exact `clientMessageId`, `threadId`, and `turnId` ownership; protocol upgrades must not reset the independent storage format, unknown or damaged storage must refuse writes without overwriting files, no records may be silently pruned by count or size, and deleting a thread should remove its metadata and preview assets without relying on browser IndexedDB or text matching.
+- Agent message metadata: image attachments, Skills, canvas references, and local previews should survive page refreshes and Agent restarts through exact `clientMessageId`, `threadId`, and `turnId` ownership; protocol upgrades must not reset the independent storage format, unknown or damaged storage must refuse writes without overwriting files, no records may be silently pruned by count or size, and deleting a thread should remove its metadata and preview assets without relying on browser-only storage or text matching.
 - Prompt Center layout, source synchronization, search, asset insertion, prompt detail dialogs, and compact split-layout prompt pickers in the image and video workbenches.
 - Workbench history image cleanup: after generating content in the image or video workbench, deleting an asset, canvas image node, canvas content, or canvas project must not remove thumbnails, results, or references from generation history; deleting a generation record should still remove its dedicated local files.
 - Local mask editing: the dialog footer should offer Reset, Export to canvas, and Generate now. Both actions require a painted area and an edit request; Export to canvas should only write the nodes and connections while prefilling the composed prompt in the result node's prompt panel for manual generation, and Generate now should start the request right after writing the nodes. After painting an area and entering an edit request, confirming should add a mask annotation node below the source image showing the original picture with a translucent blue overlay on the painted area that matches the color and opacity used while painting in the dialog, create the result node to the right, and connect both the source image and the mask annotation to it. The request should be sent as two ordinary reference images with a prompt that names them by index, without the `mask` API parameter, and it should also work for Gemini-format channels; only the marked area should change, and the result must not keep any blue overlay.
 - Settings import/export and WebDAV-related configuration.
-- Local storage settings: the Settings page should provide a Local storage tab that reads only the `infinite-canvas` database and shows IndexedDB usage, total site usage, browser quota, quota percentage, and per-object-store record counts and content size; refreshing after local data changes should update the figures without blocking the rest of the page.
 
 The Chinese version contains the complete item-by-item acceptance checklist.

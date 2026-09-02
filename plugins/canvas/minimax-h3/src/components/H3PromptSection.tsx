@@ -141,6 +141,8 @@ export function H3PromptSection({ ctx, selected, imageRefs, videoRefs, audioRefs
 
     return <label className="minimax-prompt-field minimax-prompt-field--mention">
         <span><H3Icon name="prompt" /> Prompt <button type="button" disabled={enhancing} onClick={() => void enhancePrompt()} title="调用当前文本模型增强提示词">{enhancing ? "增强中…" : "增强提示词"}</button><button type="button" onClick={() => { ctx.openPanel(); if (!prompt.trim()) insertAtCursor(H3_OFFICIAL_BLOCK, { prefixNewline: false }); else if (!/^\s*subject_definitions:\s*\n/.test(prompt)) insertAtCursor(H3_OFFICIAL_BLOCK, { prefixNewline: false, select: true }); }} title="补官方 H3 提示词骨架">补骨架</button>{mentionOpen ? <button type="button" onClick={() => setMentionOpen(false)}>取消 @</button> : null}</span>
+        <div className="minimax-prompt-modes">{H3_PROMPT_TOOLS.map((label) => <button type="button" key={label} onClick={() => insertAtCursor(H3_SECTION_BLOCKS[label])}>{label}</button>)}<button type="button" className="minimax-prompt-help" title="提示词结构说明">说明</button></div>
+        <small className="minimax-prompt-syntax"><code>&lt;Subject P&gt; 指认第 P 张参考图</code> <code>&lt;Picture P&gt; 指认第 P 张参考图</code> <code>&lt;Video V&gt; 指认第 V 段参考视频</code> <code>&lt;Audio A&gt; 指认第 A 段参考音频</code>{ctx.node.metadata?.promptEnhanceError ? <span style={{ color: "#fca5a5" }}>增强失败：{String(ctx.node.metadata.promptEnhanceError)}</span> : null}</small>
         <textarea
             ref={textareaRef}
             value={prompt}
@@ -153,8 +155,6 @@ export function H3PromptSection({ ctx, selected, imageRefs, videoRefs, audioRefs
         />
         {mentionOpen && mentionItems.length ? <div className="minimax-prompt-mentions" role="listbox" onMouseDown={(event) => event.preventDefault()}>{mentionItems.map((item, index) => <MentionRow key={`${item.ref.type}-${item.ref.url}`} item={item} active={index === Math.min(mentionActive, mentionItems.length - 1)} onHover={() => setMentionActive(index)} onPick={() => insertMention(item)} />)}</div> : null}
         {mentionOpen && !mentionItems.length ? <div className="minimax-prompt-mentions"><span className="minimax-prompt-mention-empty">请先在下方添加图片、视频或音频</span></div> : null}
-        <div className="minimax-prompt-modes">{H3_PROMPT_TOOLS.map((label) => <button type="button" key={label} onClick={() => insertAtCursor(H3_SECTION_BLOCKS[label])}>{label}</button>)}<button type="button" className="minimax-prompt-help" title="提示词结构说明">说明</button></div>
-        <small className="minimax-prompt-syntax"><code>&lt;Subject P&gt; 指认第 P 张参考图</code> <code>&lt;Picture P&gt; 指认第 P 张参考图</code> <code>&lt;Video V&gt; 指认第 V 段参考视频</code> <code>&lt;Audio A&gt; 指认第 A 段参考音频</code>{ctx.node.metadata?.promptEnhanceError ? <span style={{ color: "#fca5a5" }}>增强失败：{String(ctx.node.metadata.promptEnhanceError)}</span> : null}</small>
     </label>;
 }
 

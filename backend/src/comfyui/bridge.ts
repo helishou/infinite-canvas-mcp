@@ -34,6 +34,7 @@ export class ComfyUiBackend {
     private url: string;
     private readonly deps: ComfyUiDeps;
     private readonly controllers = new Map<string, AbortController>();
+    private readonly comfyExecutions = new Map<string, { url: string; promptId?: string }>();
 
     constructor(deps: ComfyUiDeps, baseUrl?: string) {
         this.deps = deps;
@@ -87,11 +88,18 @@ export class ComfyUiBackend {
         return task;
     }
 
-    cancel(id: string) { this.controllers.get(id)?.abort(); const task = this.deps.tasks.cancel(id); this.deps.events?.publish({ type: "task.updated", entityId: id, payload: task }); return task; }
+    cancel(id: string) {
+        this.controllers.get(id)?.abort();
+        void this.cancelComfyExecution(id);
+        const task = this.deps.tasks.cancel(id);
+        this.deps.events?.publish({ type: "task.updated", entityId: id, payload: task });
+        return task;
+    }
 
     private async execute(task: RuntimeTask, preset: ComfyPreset, comfyUrl: string) {
         if (this.deps.tasks.get(task.id)?.status === "cancelled") return;
         const controller = new AbortController(); this.controllers.set(task.id, controller);
+        this.comfyExecutions.set(task.id, { url: comfyUrl });
         try {
             this.updateTask(task.id, { status: "running", progress: 0.05 });
             this.deps.tasks.addEvent(task.id, "status", { status: "running" });
@@ -100,7 +108,7 @@ export class ComfyUiBackend {
                 : await this.executeWorkflow(task, preset.id, task.input, task.params, comfyUrl, controller);
             this.updateTask(task.id, { status: "succeeded", progress: 1, result });
             this.deps.tasks.addEvent(task.id, "result", result);
-        } finally { this.controllers.delete(task.id); }
+        } finally { this.controllers.delete(task.id); this.comfyExecutions.delete(task.id); }
     }
 
     private async executeH3Segments(task: RuntimeTask, preset: string, input: Record<string, unknown>, params: Record<string, unknown>, comfyUrl: string, controller: AbortController) {
@@ -138,6 +146,8 @@ export class ComfyUiBackend {
             if (!response.ok) { const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000); throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`); }
             const body = await response.json() as { prompt_id?: string; node_errors?: unknown };
             if (!body.prompt_id) throw new Error(body.node_errors ? JSON.stringify(body.node_errors) : "ComfyUI did not return prompt_id");
+            const execution = this.comfyExecutions.get(task.id);
+            if (execution) execution.promptId = body.prompt_id;
             this.deps.tasks.addEvent(task.id, "submitted", { promptId: body.prompt_id });
             for (;;) {
                 if (controller.signal.aborted) throw new Error("任务已取消");
@@ -151,6 +161,22 @@ export class ComfyUiBackend {
                 await new Promise((resolve) => setTimeout(resolve, 1500));
             }
         } finally { await prepared.cleanup(); }
+    }
+
+    private async cancelComfyExecution(taskId: string) {
+        const execution = this.comfyExecutions.get(taskId);
+        if (!execution) return;
+        const { url, promptId } = execution;
+        try {
+            if (promptId) {
+                await fetch(`${url}/queue`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ delete: [promptId] }) });
+            }
+            // ComfyUI uses /interrupt for the currently executing prompt;
+            // queued prompts are handled by the /queue delete above.
+            await fetch(`${url}/interrupt`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        } catch (error) {
+            this.deps.tasks.addEvent(taskId, "cancel_error", { error: error instanceof Error ? error.message : String(error) });
+        }
     }
 
     private async upload(file: string, signal: AbortSignal, comfyUrl = this.url) {
@@ -403,7 +429,10 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
                 source["9106"] = { class_type: "LoadVideo", inputs: { file: previousName }, _meta: { title: "MiniMax Motion Context previous clip" } };
                 source["9107"] = { class_type: "GetVideoComponents", inputs: { video: ["9106", 0] }, _meta: { title: "MiniMax Motion Context frames" } };
                 source["9108"] = { class_type: "MiniMaxH3MotionContext", inputs: { conditioning: ["136", 0], vae: ["119", 0], latent: ["136", 1], context_frames: ["9107", 0], context_audio: ["9107", 1], audio_vae: ["120", 0], context_length: String(params.motionContextLength || "22"), audio_context_length: Number(params.motionContextAudioLength || 24) }, _meta: { title: "MiniMax H3 Motion Context" } };
+                source["9109"] = { class_type: "MiniMaxH3MotionContextTrim", inputs: { images: ["122", 0], trim_frames: ["9108", 1], audio: ["121", 0], fps: 24, match_tail: true }, _meta: { title: "MiniMax H3 Motion Context Trim" } };
                 source["126"].inputs.conditioning = ["9108", 0];
+                source["130"].inputs.images = ["9109", 0];
+                source["130"].inputs.audio = ["9109", 1];
             }
         }
     }
