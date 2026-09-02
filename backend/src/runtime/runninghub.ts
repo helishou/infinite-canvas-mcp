@@ -27,7 +27,7 @@ export class RunningHubBackend {
     setConfig(patch: Partial<RunningHubConfig>) { const current = this.getConfig(); const next = { ...current, ...patch, baseUrl: normalizeUrl(String(patch.baseUrl ?? current.baseUrl)) }; this.settings.set("runninghub.config", next); return next; }
     status() { const config = this.getConfig(); return { configured: Boolean((config.apiKey || config.walletApiKey) && (config.workflowId || config.appId)), url: config.baseUrl, mode: config.mode, hasApiKey: Boolean(config.apiKey || config.walletApiKey), workflowId: config.workflowId || "", appId: config.appId || "" }; }
     async run(input: Record<string, unknown>, params: Record<string, unknown>) { const task = this.tasks.create("runninghub:minimax-h3", input, params); const controller = new AbortController(); this.controllers.set(task.id, controller); void this.execute(task, controller).catch((error) => this.fail(task.id, error)); return task; }
-    cancel(id: string) { this.controllers.get(id)?.abort(); this.controllers.delete(id); return this.update(id, { status: "cancelled", error: "任务已取消" }); }
+    cancel(id: string) { this.controllers.get(id)?.abort(); this.controllers.delete(id); const task = this.tasks.cancel(id); this.events?.publish({ type: "task.updated", entityId: id, payload: task }); return task; }
 
     private async execute(task: RuntimeTask, controller: AbortController) {
         const config = this.getConfig(); const useWallet = task.params.useWallet === true || config.useWallet === true; const apiKey = useWallet ? config.walletApiKey : config.apiKey;

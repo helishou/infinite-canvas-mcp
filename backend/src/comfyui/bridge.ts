@@ -86,7 +86,7 @@ export class ComfyUiBackend {
         return task;
     }
 
-    cancel(id: string) { this.controllers.get(id)?.abort(); return this.updateTask(id, { status: "cancelled", error: "任务已取消" }); }
+    cancel(id: string) { this.controllers.get(id)?.abort(); const task = this.deps.tasks.cancel(id); this.deps.events?.publish({ type: "task.updated", entityId: id, payload: task }); return task; }
 
     private async execute(task: RuntimeTask, preset: ComfyPreset, comfyUrl: string) {
         if (this.deps.tasks.get(task.id)?.status === "cancelled") return;
