@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { RuntimeTask } from "../db.js";
-import type { SettingStore, TaskStore } from "../stores/types.js";
+import type { MediaStore, SettingStore, TaskStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
 
 type RunningHubField = {
@@ -17,7 +17,7 @@ const DEFAULT_URL = "https://www.runninghub.ai";
 
 export class RunningHubBackend {
     private readonly controllers = new Map<string, AbortController>();
-    constructor(private readonly tasks: TaskStore, private readonly settings: SettingStore, private readonly events?: BackendEventBus) {}
+    constructor(private readonly tasks: TaskStore, private readonly settings: SettingStore, private readonly events?: BackendEventBus, private readonly media?: MediaStore) {}
 
     getConfig(): RunningHubConfig {
         const value = this.settings.get("runninghub.config");
@@ -63,7 +63,7 @@ export class RunningHubBackend {
             if (controller.signal.aborted) throw new Error("任务已取消"); await delay(2500, controller.signal);
             const result = await this.request("/task/openapi/outputs", { apiKey, taskId: remoteId }, controller.signal); const data = result.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {}; const status = String(data.status || "PENDING").toLowerCase();
             this.tasks.addEvent(task.id, "poll", { taskId: remoteId, status });
-            if (["success", "succeeded", "completed"].includes(status)) { const media = extractMedia(data); if (!media.length) throw new Error("RunningHub 任务完成但没有返回媒体"); this.update(task.id, { status: "succeeded", progress: 1, result: { media, taskId: remoteId, backend: "runninghub" } }); return; }
+            if (["success", "succeeded", "completed"].includes(status)) { const media = await materializeMedia(extractMedia(data), this.media, controller.signal); if (!media.length) throw new Error("RunningHub 任务完成但没有返回媒体"); this.update(task.id, { status: "succeeded", progress: 1, result: { media, taskId: remoteId, backend: "runninghub" } }); return; }
             if (["failed", "error"].includes(status)) throw new Error(String(data.failReason || data.message || "RunningHub 任务失败"));
             this.update(task.id, { progress: Math.min(0.95, Number(this.tasks.get(task.id)?.progress || 0.05) + 0.02) });
         }
@@ -77,4 +77,20 @@ function normalizeUrl(value: string) { const url = new URL(value.trim() || DEFAU
 function fieldKind(field: RunningHubField) { const text = `${field.fieldType || ""} ${field.fieldName || ""} ${field.label || ""}`.toLowerCase(); if (/image|图片/.test(text)) return "image" as const; if (/video|视频/.test(text)) return "video" as const; if (/audio|音频|sound/.test(text)) return "audio" as const; if (/prompt|text|提示词|正向|负向/.test(text)) return "prompt" as const; if (/bool/.test(text)) return "boolean" as const; if (/int|float|number|slider|seed/.test(text)) return "number" as const; return "text" as const; }
 function kindForPath(value: string) { return /\.(mp4|webm|mov|m4v|avi|mkv)(\?|$)/i.test(value) ? "video" : /\.(mp3|wav|m4a|aac|ogg|flac)(\?|$)/i.test(value) ? "audio" : "image"; }
 function extractMedia(data: Record<string, unknown>) { const values = [...(Array.isArray(data.image_items) ? data.image_items : []), ...(Array.isArray(data.urls) ? data.urls : [])]; return values.map((item) => typeof item === "string" ? { url: item } : item && typeof item === "object" ? { ...(item as Record<string, unknown>), url: String((item as Record<string, unknown>).url || "") } : null).filter((item): item is { url: string } => Boolean(item?.url)); }
+async function materializeMedia(items: Array<{ url: string; [key: string]: unknown }>, store: MediaStore | undefined, signal: AbortSignal) {
+    if (!store) return items;
+    return Promise.all(items.map(async (item) => {
+        const sourceUrl = item.url;
+        try {
+            const response = await fetch(sourceUrl, { signal });
+            if (!response.ok) return item;
+            const mimeType = response.headers.get("content-type")?.split(";", 1)[0] || "application/octet-stream";
+            const name = path.basename(new URL(sourceUrl).pathname) || `runninghub-${Date.now()}`;
+            const media = store.store(Buffer.from(await response.arrayBuffer()), { name, mimeType });
+            return { ...item, url: store.url(media), storageKey: media.storageKey, mimeType: media.mimeType, sourceUrl };
+        } catch {
+            return item;
+        }
+    }));
+}
 function delay(ms: number, signal: AbortSignal) { return new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, ms); signal.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("任务已取消")); }, { once: true }); }); }
