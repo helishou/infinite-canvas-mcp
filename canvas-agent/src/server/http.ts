@@ -23,7 +23,7 @@ import { RunningHubBridge } from "../runtime/runninghub.js";
 import { VideoConcatService } from "../runtime/video-concat.js";
 import { runtimeMediaFile } from "../runtime/media.js";
 
-export type AgentHttpOptions = { listen?: boolean };
+export type AgentHttpOptions = { listen?: boolean; backendUrl?: string; backendToken?: string };
 
 /** 创建 Agent Express 应用；嵌入 Backend 时不监听端口。 */
 export function createAgentApp(options: AgentHttpOptions = {}) {
@@ -36,7 +36,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     const session = new CanvasSession(initialWorkspace.activeThreadId || "");
     const skillStore = new SkillStore(initialWorkspace.workspacePath);
     const runtimeDb = new RuntimeDatabase();
-    const backend = createBackendClient(config.backendUrl || `http://127.0.0.1:17370`);
+    const backendUrl = options.backendUrl || config.backendUrl || `http://127.0.0.1:17370`;
+    const backend = createBackendClient(backendUrl, { ...process.env, ...(options.backendToken ? { INFINITE_CANVAS_BACKEND_TOKEN: options.backendToken } : {}) });
     const localComfy = new ComfyUiBridge(runtimeDb);
     /** ComfyUI：backend 权威，Agent 本地 bridge 做离线兜底（见 comfy-client.ts）。 */
     const comfyUi: ComfyUiClient = proxyComfyUi(backend, localComfy);

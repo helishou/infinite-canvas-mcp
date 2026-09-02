@@ -27,7 +27,7 @@ const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
 
 const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: runtime.events });
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
-const agent = createAgentApp({ listen: false });
+const agent = createAgentApp({ listen: false, backendUrl: config.url, backendToken: config.token });
 app.use("/agent", agent.app);
 
 const server = app.listen(config.port, "127.0.0.1", () => {
