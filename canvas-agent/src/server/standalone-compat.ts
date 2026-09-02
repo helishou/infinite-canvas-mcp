@@ -14,17 +14,19 @@ export function startStandaloneCompat() {
     app.disable("x-powered-by");
     app.use(express.raw({ type: "*/*", limit: "50mb" }));
     app.use(async (req, res) => {
-        const target = new URL(mapPath(req.originalUrl || "/"), backend.url);
-        const headers = new Headers();
-        for (const [key, value] of Object.entries(req.headers)) if (key.toLowerCase() !== "host" && typeof value === "string") headers.set(key, value);
-        headers.set("authorization", `Bearer ${backend.token}`);
-        const response = await fetch(target, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body as BodyInit });
-        res.status(response.status);
-        response.headers.forEach((value, key) => { if (![
-            "content-encoding", "content-length", "transfer-encoding",
-        ].includes(key)) res.setHeader(key, value); });
-        if (response.body) return void Readable.fromWeb(response.body as never).pipe(res);
-        res.end();
+        try {
+            const target = new URL(mapPath(req.originalUrl || "/"), backend.url);
+            const headers = new Headers();
+            for (const [key, value] of Object.entries(req.headers)) if (key.toLowerCase() !== "host" && typeof value === "string") headers.set(key, value);
+            headers.set("authorization", `Bearer ${backend.token}`);
+            const response = await fetch(target, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body as BodyInit });
+            res.status(response.status);
+            response.headers.forEach((value, key) => { if (![ "content-encoding", "content-length", "transfer-encoding" ].includes(key)) res.setHeader(key, value); });
+            if (response.body) return void Readable.fromWeb(response.body as never).pipe(res);
+            res.end();
+        } catch (error) {
+            if (!res.headersSent) res.status(502).json({ ok: false, error: `Backend 不可用：${error instanceof Error ? error.message : String(error)}` });
+        }
     });
     const server = app.listen(port, "127.0.0.1", () => console.log(`canvas-agent compatibility proxy: http://127.0.0.1:${port} → ${backend.url}/agent`));
     return server;
