@@ -2,6 +2,7 @@ import type { BackendDatabase } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { Stores } from "../stores/types.js";
 import { BackendEventBus } from "../events.js";
+import type { AgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";
 
 /** Backend 统一运行时依赖；Agent 嵌入层只能消费这些实例，不得自行创建业务存储。 */
 export type BackendRuntimeContext = {
@@ -12,7 +13,7 @@ export type BackendRuntimeContext = {
     media: Stores["media"];
     logs: Stores["logs"];
     events: BackendEventBus;
-    agent?: unknown;
+    agent?: AgentRuntime;
 };
 
 export function createBackendRuntimeContext(input: Omit<BackendRuntimeContext, "tasks" | "media" | "logs" | "events"> & { events?: BackendEventBus }): BackendRuntimeContext {

@@ -14,7 +14,7 @@ import { createBackendRuntimeContext } from "./runtime/context.js";
 import { RunningHubBackend } from "./runtime/runninghub.js";
 import { VideoConcatBackend } from "./runtime/video-concat.js";
 import { registerAgentRuntimeRoutes } from "./server/agent-runtime-routes.js";
-import { createAgentApp } from "@basketikun/canvas-agent/http";
+import { createAgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";
 import { startBackendMcpServer } from "./mcp.js";
 
 const logger = createLogger("main");
@@ -43,7 +43,8 @@ const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: 
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
 registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat, runtime.events);
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events, basePath: "/agent" }, runtime.comfy);
-const agent = createAgentApp({ listen: false, backendUrl: config.url, backendToken: config.token });
+const agent = createAgentRuntime({ backendUrl: config.url, backendToken: config.token });
+runtime.agent = agent;
 app.use("/agent", agent.app);
 
 const server = app.listen(config.port, "127.0.0.1", () => {
