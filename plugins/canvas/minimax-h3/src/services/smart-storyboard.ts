@@ -5,7 +5,7 @@ import refReference from "../storyboard-assets/references/ref-en.txt?raw";
 import type { H3Ref } from "../types";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
-import { refsForSegment } from "./h3-data";
+import { refsForSegment, segmentRefsPatch } from "./h3-data";
 
 export type StoryboardMode = "ref2va" | "i2va" | "t2va" | "fl2va";
 export type StoryboardSkill = "regular_storyboard" | "ns_storyboard";
@@ -15,8 +15,8 @@ const modeLabels: Record<StoryboardMode, string> = { ref2va: "多参 Ref2VA", i2
 export function validateStoryboardMode(mode: StoryboardMode, images: H3Ref[]) {
     const count = images.length;
     if (mode === "t2va" && count) throw new Error("T2V 文生视频不能使用参考图片");
-    if (mode === "i2va" && count !== 1) throw new Error("I2V 图生视频必须且只能使用图片1");
-    if (mode === "fl2va" && count !== 2) throw new Error("首尾帧 FL2VA 必须使用图片1和图片2");
+    if (mode === "i2va" && (count !== 1 || images[0]?.slot !== 1)) throw new Error("I2V 图生视频必须且只能使用图片1");
+    if (mode === "fl2va" && (count !== 2 || images[0]?.slot !== 1 || images[1]?.slot !== 2)) throw new Error("首尾帧 FL2VA 必须使用图片1和图片2");
     if (mode === "ref2va" && !count) throw new Error("多参 Ref2VA 至少需要1张参考图片");
 }
 
@@ -34,7 +34,7 @@ function modeContract(mode: StoryboardMode, count: number) {
 }
 
 export function storyboardMessages(skill: string, idea: string, count: number, images: H3Ref[], analysis: string, mode: StoryboardMode, duration: number) {
-    const manifest = images.map((image, index) => `@图片${index + 1}：${image.name}`).join("\n") || "无图片";
+    const manifest = images.map((image, index) => `@图片${image.slot || index + 1}：${image.name}`).join("\n") || "无图片";
     return [{ role: "system" as const, content: `严格执行下面的H3官方提示词Skill和当前模式契约，只输出正式结果，不解释。\n\n${skill}` }, { role: "user" as const, content: `当前官方模式：${modeLabels[mode]}\n硬性时长先决条件：每个分镜对应${duration}秒视频。\n${modeContract(mode, count)}\n\n用户想法：\n${idea || "请根据参考素材合理创作。"}\n\n固定上传槽位：\n${manifest}\n\n逐图看图结果：\n${analysis || "无"}\n\n禁止追问。图片编号严格绑定上传槽位，不重排、不编造；用户原有对白必须保留说话人、原意和顺序。` }];
 }
 
@@ -60,7 +60,7 @@ export function readStoryboardUpload(file: File): Promise<H3Ref> {
 }
 
 export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Ref[]) {
-    const images = refs.filter((ref) => ref.type === "image");
+    const images = refs.filter((ref) => ref.type === "image").map((ref, index) => ({ ...ref, slot: ref.slot || index + 1 }));
     const duration = Number(ctx.node.metadata?.duration || 5);
     const count = Math.max(1, Math.min(12, Number(ctx.node.metadata?.smartStoryboardCount || 3)));
     const mode = String(ctx.node.metadata?.smartStoryboardMode || "ref2va") as StoryboardMode;
@@ -71,8 +71,9 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
         validateStoryboardMode(mode, images);
         const analysisParts: string[] = [];
         for (const [index, image] of images.entries()) {
-            const result = await ctx.ai.generateText(`你现在只分析一张参考图片，固定编号是@图片${index + 1}。严格分类为人物图、场景图、产品或道具图三类之一，并提取身份、外观、服装、姿态、空间结构、光线、时间天气及其在连续视频中的参考职责。只返回分析正文，不要追问。`, { references: [{ url: image.url, name: image.name }], system: "你是南风 H3 逐图视觉分析器。严格按图片槽位编号分析，不改编号，不编造图片内容。" });
-            analysisParts.push(`@图片${index + 1}（${image.name}）：\n${result.text.trim()}`);
+            const slot = image.slot || index + 1;
+            const result = await ctx.ai.generateText(`你现在只分析一张参考图片，固定编号是@图片${slot}。严格分类为人物图、场景图、产品或道具图三类之一，并提取身份、外观、服装、姿态、空间结构、光线、时间天气及其在连续视频中的参考职责。只返回分析正文，不要追问。`, { references: [{ url: image.url, name: image.name }], system: "你是南风 H3 逐图视觉分析器。严格按图片槽位编号分析，不改编号，不编造图片内容。" });
+            analysisParts.push(`@图片${slot}（${image.name}）：\n${result.text.trim()}`);
         }
         const messages = storyboardMessages(storyboardSkill(mode, skillId), String(ctx.node.metadata?.prompt || ""), count, images, analysisParts.join("\n\n"), mode, duration);
         const result = await ctx.ai.generateText(messages[1].content, { system: messages[0].content });
@@ -81,7 +82,8 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
         const metadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
         const existing = segmentsFor(metadata);
         const selected = existing.find((segment) => segment.id === String(metadata.selectedSegmentId || "")) || existing[existing.length - 1];
-        const inherited = selected ? { ...selected, result: "", resultStorageKey: undefined, results: [], status: "idle", progress: 0, runtimeTaskId: "", refs: selected.refs, refItems: refsForSegment(selected) } : { duration, taskMode, status: "idle" as const };
+        const inheritedRefs = selected ? [...refsForSegment(selected).filter((ref) => ref.type !== "image"), ...refs.filter((ref) => ref.url)] : refs.filter((ref) => ref.url);
+        const inherited = selected ? { ...selected, ...segmentRefsPatch(inheritedRefs), result: "", resultStorageKey: undefined, results: [], status: "idle", progress: 0, runtimeTaskId: "" } : { ...segmentRefsPatch(inheritedRefs), duration, taskMode, status: "idle" as const };
         const created = parsed.segments.map((prompt, index) => ({ ...inherited, id: `smart-${Date.now()}-${index}`, prompt: parsed.global ? `全局提示词：\n${parsed.global}\n\n${prompt}` : prompt, duration, taskMode, result: "", results: [], status: "idle" }));
         const segments = compactSegmentStarts([...existing, ...created]);
         ctx.updateMetadata({ segments, selectedSegmentId: created[0]?.id, prompt: created[0]?.prompt, smartStoryboardGlobal: parsed.global, smartStoryboardRaw: parsed.raw, smartStoryboardVisionAnalysis: analysisParts.join("\n\n"), smartStoryboardOutputBudget: storyboardOutputBudget(count), status: "success", errorDetails: "" });

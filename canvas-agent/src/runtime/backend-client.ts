@@ -153,8 +153,15 @@ export class BackendClient {
 
     // ── runtime media（H3 ref 落地，总后台 media store 权威） ─────────────
 
-    async runtimeMediaStore(name: string, dataUrl: string): Promise<{ id: string; path: string; name: string; mimeType: string; bytes: number; url: string }> {
-        const data = await this.post<{ ok: boolean; media: { id: string; path: string; name: string; mimeType: string; bytes: number; url: string } }>("/runtime/media", { name, dataUrl });
+    /**
+     * 落地一个 runtime media。
+     * 传 `storageKey` 时直接复用总后台 media store 里已有的媒体（零拷贝，不回传 base64）；
+     * 否则走 dataUrl 上传。storageKey 可能带 URL 编码（如 `image%3A<uuid>`），
+     * 总后台会自行 decodeURIComponent，这里原样透传即可。
+     */
+    async runtimeMediaStore(name: string, dataUrl: string, storageKey?: string): Promise<{ id: string; path: string; name: string; mimeType: string; bytes: number; url: string }> {
+        const payload = storageKey ? { name, storageKey } : { name, dataUrl };
+        const data = await this.post<{ ok: boolean; media: { id: string; path: string; name: string; mimeType: string; bytes: number; url: string } }>("/runtime/media", payload);
         return data.media;
     }
 
@@ -169,11 +176,8 @@ export class BackendClient {
         const url = new URL(ref, this.backendUrl);
         if (!url.pathname.startsWith("/media/")) return ref;
         const storageKey = decodeURIComponent(url.pathname.slice("/media/".length));
-        const response = await fetch(`${this.backendUrl}/media/${encodeURIComponent(storageKey)}?token=${encodeURIComponent(this.backendToken)}`, { signal: AbortSignal.timeout(30_000) });
-        if (!response.ok) throw new Error(`Backend media read failed: HTTP ${response.status}`);
-        const mimeType = response.headers.get("content-type") || "application/octet-stream";
-        const name = `h3-motion-context-${storageKey}`;
-        return (await this.runtimeMediaStore(name, `data:${mimeType};base64,${Buffer.from(await response.arrayBuffer()).toString("base64")}`)).path;
+        // 直接用 storageKey 复用总后台已有媒体：不再整段下载再 base64 回传（H3 串 clip 时极易撑爆请求体 → 413）
+        return (await this.runtimeMediaStore(`h3-motion-context-${storageKey}`, "", storageKey)).path;
     }
 
     // ── ComfyUI Bridge（总后台权威 /comfy/*） ─────────────────────────────

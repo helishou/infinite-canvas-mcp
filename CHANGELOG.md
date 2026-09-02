@@ -2,9 +2,15 @@
 
 ## Unreleased
 
++ [修复] H3 生成视频 400「媒体必须是 base64 data URL」复发：`canvas-agent` 的 `/runtime/media` 转发只读取 `dataUrl`、完全忽略 `storageKey`，把空字符串传给后端触发校验失败；现该端点支持以 `storageKey` 复用已有媒体（兼容 URL 编码的 `image%3A<uuid>` 形式），缺少参数时返回「缺少 dataUrl 或 storageKey」而不是笼统的 base64 报错。
++ [修复] 后端 `/data-dir` 路由因 `DATA_DIR` 未从 `./config.js` 导入而每次请求抛 `ReferenceError`，补齐导入后正常返回数据目录。
++ [修复] MCP 连接成功后同步当前画布快照到总后台，插件 MCP 工具不再因只读取持久化项目而显示“没有上下文”。
++ [调整] H3 时间线移除 Video 下方重复的 Refs 横栏，参考素材统一在当前 Clip 的 Refs 九宫格中管理。
++ [调整] H3 参考媒体改为仅通过本地 `storageKey` 复用文件，不再把本地图片转成 base64 重新上传；缺少本地媒体键时直接提示重新上传或连接素材。
++ [调整] 普通 ComfyUI 工作流的临时媒体同步也改为二进制上传到本地媒体库，再以 `storageKey` 解析本地文件路径，不再通过 base64 传输。
 + [新增] H3 补齐提示词模型增强状态、Output 全部/当前筛选与未使用输出清理、RunningHub Workflow/App 字段配置和生成任务 Reset 取消入口。
 + [调整] H3 智能分镜改为继承当前 Clip 的参考素材与参数并追加新 Clips，同时将全局提示词合并到新增 Clip。
-+ [修复] H3 r2v/i2v 等运行时 400「媒体必须是 base64 data URL」与引用 404：运行器构造 `finalReferences`/`finalVideo`/`finalAudios`/`previousVideo` 时把 `storageKey` 透传给后端，后端媒体直接走 storageKey 复用（raw key 精确匹配）；后端 `/runtime/media` 的 storageKey 分支增加 `decodeURIComponent`，兼容从 URL 反推出的编码 key（如 `image%3A<uuid>`，媒体 key 本身含冒号）。此前只留 `url` 会解出编码 key 导致查不到或退化到 dataUrl 分支。
++ [修复] H3 r2v/i2v 等运行时引用 404：运行器构造 `finalReferences`/`finalVideo`/`finalAudios`/`previousVideo` 时把 `storageKey` 透传给后端，后端媒体直接走 storageKey 复用（raw key 精确匹配）；后端 `/runtime/media` 的 storageKey 分支增加 `decodeURIComponent`，兼容从 URL 反推出的编码 key（如 `image%3A<uuid>`，媒体 key 本身含冒号）。此前只留 `url` 会解出编码 key 导致查不到或退化到 dataUrl 分支。
 + [修复] H3 串 clip 的 previousVideo 不再把已在后端的视频 base64 下载后重新上传（根因 413）：`POST /runtime/media` 支持以 storageKey 复用已有媒体，前端对已落库媒体走复用路径，避免请求体暴涨。
 + [优化] H3 当前 Clip 面板继续拆分为 `H3PromptSection` 与 `H3ClipSettingsPanel`，Prompt 快捷标签和生成参数区域不再压缩在单个超长 JSX 组件中。
 + [修复] H3 运行器拆分后补齐自动分段的默认每段时长与最大段数，避免启用源视频自动分段时引用未定义变量。

@@ -96,3 +96,9 @@
 - Agent 对话消息必须同时按 `threadId`、`turnId` 和 `itemId` 归属；实时事件只用于补充未物化的 turn，历史快照成为权威后不得重复合并同一条消息。
 - Agent 通信协议版本与消息存储版本必须独立管理；消息存储格式升级时必须先备份再迁移，遇到未知版本、损坏清单或冲突备份时拒绝覆盖原文件，不得按记录数量或文件大小静默裁剪历史元数据。
 - 本地启动或浏览器验收时不要关闭用户已经打开的浏览器窗口或标签页；需要自动化验证时使用独立测试页面，避免打断用户当前页面和对话状态。
+- 改了构建产物的源码就必须重建产物，否则修复不会生效：
+  - 改 `plugins/canvas/*/src` 后，在该插件目录执行 `node build.mjs`，重新生成 `web/public/plugins/*.js`。
+  - 改 `canvas-agent/src` 后，在 `canvas-agent` 目录执行 `node node_modules/typescript/bin/tsc -p tsconfig.json`，重新生成 `dist/`（backend 通过 `node_modules/@basketikun/canvas-agent` 软链加载的是 `dist`，不是源码）。
+  - 这两类产物目录都在 `.gitignore` 中，不随提交分发，**只提交源码等于没改**。
+  - `backend` 用 `tsx src/index.ts` 启动且未开启 watch，改 `backend/src` 或重建 `canvas-agent/dist` 后都要重启 backend 才生效。
+- 排查「改了代码但问题依旧」时，先做两件事再往下查：比对源码与产物的修改时间确认产物已更新；确认请求实际命中的进程与端点，不要假定同名路由是同一个实现（例如插件的媒体上传走 `/agent/runtime/media`，由 canvas-agent 处理，与 backend 的 `/runtime/media` 是两套独立实现）。

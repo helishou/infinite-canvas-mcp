@@ -33,10 +33,8 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const imageRefs = selectedRefs.filter((item) => item.type === "image");
     const videoRefs = selectedRefs.filter((item) => item.type === "video");
     const audioRefs = selectedRefs.filter((item) => item.type === "audio");
-    const refLanes = Math.max(1, selectedRefs.length, ...segments.map((item) => refsForSegment(item).length));
     const previewH = Math.max(130, Math.min(760, Number(metadata.minimaxPreviewH || 220)));
     const videoTrackH = Math.max(48, Math.min(180, Number(metadata.minimaxVideoTrackH || 74)));
-    const refLaneH = Math.max(30, Math.min(130, Number(metadata.minimaxRefLaneH || 36)));
     const libraryW = Math.max(170, Math.min(520, Number(metadata.minimaxLibraryW || 190)));
     const playRequest = Number(metadata.h3PlayRequest || 0);
     const [smartStoryboardOpen, setSmartStoryboardOpen] = useState(false);
@@ -49,12 +47,12 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         <H3PlayheadStyle percent={total ? (playhead / total) * 100 : 0} />
         <H3StatusBadge status={String(metadata.status || selected?.status || "idle")} error={String(metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx)} />
         <H3RulerScrubber ctx={ctx} total={total} previewH={previewH} libraryW={libraryW} />
-        <H3WorkbenchToolbar ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} playhead={playhead} total={total} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
+        <H3WorkbenchToolbar ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} outputs={outputs} playhead={playhead} total={total} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         <SmartStoryboardModal ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
-        <style>{`.minimax-canvas-workbench{--minimax-preview-h:${previewH}px;--minimax-video-h:${videoTrackH}px;--minimax-ref-lane-h:${refLaneH}px;--minimax-ref-h:${Math.max(78, refLanes * refLaneH)}px}.minimax-canvas-workbench .minimax-wb-body{grid-template-columns:${libraryW}px minmax(0,1fr)}.minimax-canvas-workbench .minimax-wb-main{grid-template-rows:var(--minimax-preview-h) calc(28px + var(--minimax-video-h) + var(--minimax-ref-h)) minmax(150px,1fr)}.minimax-canvas-workbench .minimax-edit-timeline{grid-template-rows:28px var(--minimax-video-h) var(--minimax-ref-h)}`}</style>
+        <style>{`.minimax-canvas-workbench{--minimax-preview-h:${previewH}px;--minimax-video-h:${videoTrackH}px}.minimax-canvas-workbench .minimax-wb-body{grid-template-columns:${libraryW}px minmax(0,1fr)}.minimax-canvas-workbench .minimax-wb-main{grid-template-rows:var(--minimax-preview-h) calc(28px + var(--minimax-video-h)) minmax(150px,1fr)}.minimax-canvas-workbench .minimax-edit-timeline{grid-template-rows:28px var(--minimax-video-h)}`}</style>
         <div className="minimax-wb-body"><H3MaterialLibrary ctx={ctx} assets={assets} outputs={outputs} segments={segments} selected={selected} selectedRefs={selectedRefs} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} />
             <main className="minimax-wb-main"><div className="minimax-player-stage"><H3PreviewPlayer ctx={ctx} url={preview} kind={previewKind} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} playRequest={playRequest} /></div>
-                <H3Timeline ctx={ctx} segments={segments} selected={selected} total={total} refLanes={refLanes} onRemoveRef={removeRef} fmt={fmt} />
+                <H3Timeline ctx={ctx} segments={segments} selected={selected} total={total} fmt={fmt} />
                 <H3CurrentClipPanel ctx={ctx} metadata={metadata} selected={selected} selectedIndex={selectedIndex} selectedRefs={selectedRefs} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} />
             </main>
         </div>

@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response, type Express } from "express";
 import path from "node:path";
 
-import { type ResolvedConfig, ensureDataDirs, loadRootConfig, saveRootConfig } from "./config.js";
+import { type ResolvedConfig, DATA_DIR, ensureDataDirs, loadRootConfig, saveRootConfig } from "./config.js";
 import type {
     Asset, AssetFolder, CanvasProject,
     GenerationLog, GenerationLogStatus, RuntimeTask, RuntimeTaskStatus,
@@ -39,7 +39,7 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
             res.setHeader("Vary", "Origin");
         }
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-media-name, x-media-width, x-media-height, x-media-duration-ms");
         // OPTIONS 预检请求直接返回，不进入后续 middleware（auth 等会拦截）。
         if (req.method === "OPTIONS") { res.status(204).end(); return; }
         next();
@@ -194,7 +194,7 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     });
 
     // ── Media ────────────────────────────────────────────────────────────
-    /** 上传媒体（base64 dataUrl，Backend media_files 为唯一业务媒体存储） */
+    /** 上传媒体（JSON 兼容入口；新代码优先使用 /media/upload-binary） */
     app.post("/media/upload", (req, res) => {
         const body = req.body as { name?: string; dataUrl?: string; storageKey?: string; width?: number; height?: number; durationMs?: number };
         if (!body.dataUrl) return void res.status(400).json({ ok: false, error: "需要提供 dataUrl（base64 data URL）" });
@@ -215,6 +215,27 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
                     durationMs: media.durationMs,
                 },
             });
+        } catch (error) {
+            res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
+    /** 上传媒体二进制，避免工作流和本地素材在浏览器与后台之间转 base64。 */
+    app.post("/media/upload-binary", express.raw({ type: "*/*", limit: "100mb" }), (req, res) => {
+        const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+        const encodedName = String(req.headers["x-media-name"] || "media.bin");
+        const name = decodeURIComponent(encodedName);
+        const mimeType = String(req.headers["content-type"] || "application/octet-stream").split(";", 1)[0];
+        if (!body.length) return void res.status(400).json({ ok: false, error: "媒体内容为空" });
+        try {
+            const media = stores.media.store(body, {
+                name,
+                mimeType,
+                width: Number(req.headers["x-media-width"]) || null,
+                height: Number(req.headers["x-media-height"]) || null,
+                durationMs: Number(req.headers["x-media-duration-ms"]) || null,
+            });
+            res.status(201).json({ ok: true, media: { storageKey: media.storageKey, url: stores.media.url(media), mimeType: media.mimeType, bytes: media.bytes, width: media.width, height: media.height, durationMs: media.durationMs } });
         } catch (error) {
             res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
         }

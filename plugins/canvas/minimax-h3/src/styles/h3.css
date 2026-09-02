@@ -26,15 +26,15 @@
 .minimax-player-image,.minimax-player-image img { width:100%; height:100%; object-fit:contain; }
 .minimax-player-stage video,.minimax-player-stage img { width:100%; height:100%; object-fit:contain; background:#0b0c0e; }
 .minimax-player-empty { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:12px; font-weight:850; }
-.minimax-edit-timeline { position:relative; min-width:0; min-height:0; display:grid; grid-template-columns:52px minmax(0,1fr) 54px; grid-template-rows:28px minmax(42px,1fr) minmax(42px,1fr); border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
+.minimax-edit-timeline { position:relative; min-width:0; min-height:0; display:grid; grid-template-columns:52px minmax(0,1fr) 54px; grid-template-rows:28px minmax(42px,1fr); border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
 .minimax-timeline-controls,.minimax-track-label,.minimax-add-gutter { background:#202328; border-right:1px solid #2f3338; border-bottom:1px solid #2f3338; }
 .minimax-timeline-controls { display:flex; align-items:center; justify-content:center; }
 .minimax-ruler { grid-column:2; position:relative; border-bottom:1px solid #2f3338; background:#202328; overflow:hidden; }
-.minimax-track-content,.minimax-ref-content { position:relative; width:100%; min-width:100%; height:100%; }
+.minimax-track-content { position:relative; width:100%; min-width:100%; height:100%; }
 .minimax-tick { position:absolute; top:0; bottom:0; width:1px; background:#343942; }
 .minimax-tick b { position:absolute; top:7px; left:4px; color:#94a3b8; font-size:9.5px; font-weight:800; white-space:nowrap; }
 .minimax-track-label { display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:10px; font-weight:900; }
-.minimax-video-label { position:relative; grid-column:1; grid-row:2; }.minimax-ref-label { grid-column:1; grid-row:3; }
+.minimax-video-label { position:relative; grid-column:1; grid-row:2; }
 .minimax-video-track { grid-column:2; grid-row:2; position:relative; min-width:0; overflow:hidden; background:linear-gradient(90deg,rgba(148,163,184,.14) 1px,transparent 1px) 0 0/12.5% 100%,#141619; }
 .minimax-video-track::after { content:"〰   〰   〰   〰"; position:absolute; left:0; right:0; bottom:0; height:24px; padding:4px 10px; box-sizing:border-box; border-top:1px solid #2f3338; background:repeating-linear-gradient(135deg,#111827 0 4px,#172333 4px 8px); color:#64748b; font-size:12px; letter-spacing:16px; pointer-events:none; }
 .minimax-video-label::after { content:"Motion"; position:absolute; left:0; top:calc(50% + 18px); width:100%; transform:translateY(-50%); color:#64748b; font-size:9px; font-weight:800; pointer-events:none; }
@@ -43,8 +43,6 @@
 .minimax-motion-segment { position:absolute; top:5px; bottom:5px; border-radius:4px; background:repeating-linear-gradient(135deg,#1d2935 0 4px,#253646 4px 8px); border:1px solid #334155; color:#7dd3fc; text-align:center; font-size:12px; line-height:18px; }
 .minimax-clip-motion { position:absolute; left:6px; top:6px; z-index:4; width:22px; height:22px; padding:0; border:1px solid #475569; border-radius:4px; background:#0f172acc; color:#93c5fd; cursor:pointer; }
 .minimax-clip-motion.off { color:#64748b; opacity:.55; }
-.minimax-ref-track { grid-column:2; grid-row:3; position:relative; min-width:0; min-height:0; overflow:auto; background:#15171a; cursor:copy; }
-.minimax-ref-gutter { grid-column:3; grid-row:3; background:#15171a; border-top:1px solid #2f3338; }
 .minimax-tl-clip { position:absolute; top:10px; bottom:10px; min-width:54px; border:1px solid #334155; border-radius:5px; background:#24272b; color:#e5e7eb; overflow:hidden; cursor:pointer; }
 .minimax-tl-clip.active { border-color:#ef4444; background:#334155; box-shadow:0 0 0 1px #ef4444 inset; }
 .minimax-clip-media { position:absolute; inset:0; opacity:.72; }.minimax-clip-media video { width:100%; height:100%; object-fit:cover; }
@@ -53,15 +51,6 @@
 .minimax-clip-meta b { font-size:11px; color:#f8fafc; }.minimax-clip-meta span { font-size:9.5px; color:#cbd5e1; }
 .minimax-clip-ref-count { position:absolute; left:6px; top:6px; z-index:3; padding:2px 6px; border-radius:4px; background:#0f172acc; color:#e5e7eb; font-size:9.5px; font-weight:900; }
 .minimax-clip-delete { position:absolute; right:6px; top:6px; z-index:4; width:24px; height:24px; border:0; border-radius:5px; background:#0f172acc; color:#f8fafc; cursor:pointer; }
-.minimax-ref-lane { position:relative; height:100%; min-height:42px; min-width:100%; border-bottom:1px solid rgba(47,51,56,.72); }
-.minimax-ref-clip { position:absolute; top:5px; bottom:5px; min-width:54px; border:1px solid #2f3338; border-radius:5px; background:#202328; overflow:hidden; }
-.minimax-ref-clip.has-ref { cursor:grab; }
-.minimax-ref-clip.has-ref:active { cursor:grabbing; }
-.minimax-ref-clip.active { border-color:#cbd5e1; background:#29313a; }.minimax-ref-clip.is-empty { opacity:.32; border-style:dashed; }
-.minimax-ref-media { position:absolute; inset:0; opacity:.9; overflow:hidden; }.minimax-ref-media > img,.minimax-ref-media > video { width:100%; height:100%; object-fit:cover; }
-.minimax-ref-clip > div > img,.minimax-ref-clip > div > video { width:100%; height:100%; object-fit:cover; }
-.minimax-ref-clip > div > span { position:absolute; left:4px; bottom:3px; z-index:2; font-size:8px; color:#fff; background:#111c; }
-.minimax-ref-clip button { position:absolute; right:3px; top:3px; z-index:4; width:17px; height:17px; padding:0; border:0; border-radius:4px; background:#0f172acc; color:#fff; }
 .minimax-current-panel { min-width:0; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) 264px; grid-template-rows:34px 64px minmax(0,1fr); overflow:hidden; border:1px solid #111827; border-radius:6px; background:#17191c; }
 .minimax-current-head { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; padding:0 10px; border-bottom:1px solid #2f3338; background:#202328; }
 .minimax-current-title,.minimax-current-refs { display:flex; align-items:center; gap:7px; color:#f8fafc; font-size:10.5px; }.minimax-current-title span:last-child { color:#94a3b8; }
@@ -117,14 +106,8 @@
 .minimax-settings .minimax-reset { border-color:#f59e0b; background:#2a2112; color:#fbbf24; }
 .minimax-settings .minimax-run-all { grid-column:1/-1; width:100%; height:30px; border:1px solid #2563eb; border-radius:5px; background:#2563eb; color:#fff; font-size:11px; font-weight:900; cursor:pointer; }
 .minimax-canvas-workbench .minimax-tl-clip { top:10px; bottom:10px; }
-.minimax-canvas-workbench .minimax-ref-label { grid-row:3; }
-.minimax-canvas-workbench .minimax-ref-track { grid-row:3; }
-.minimax-canvas-workbench .minimax-ref-gutter { grid-row:3; }
 .minimax-canvas-workbench .minimax-video-label::after { display:none; }
 .minimax-video-label { position:relative; grid-row:2; }
-.minimax-ref-label { grid-row:4; }
-.minimax-ref-track { grid-row:4; }
-.minimax-ref-gutter { grid-row:4; }
 .minimax-video-track::after { display:none; }
 .minimax-edit-timeline::before,.minimax-edit-timeline::after { display:none; content:none; }
 .minimax-edit-timeline::after { content:""; display:block; position:absolute; z-index:14; top:0; bottom:0; left:calc(52px + (100% - 106px) * var(--minimax-playhead-pct, 0%)); width:2px; margin-left:-1px; background:#f8fafc; pointer-events:none; box-shadow:0 0 0 1px rgba(0,0,0,.25); }
@@ -133,7 +116,6 @@
 .minimax-library-resize { top:50px; left:calc(var(--minimax-library-w,190px) + 8px); bottom:8px; width:8px; cursor:ew-resize; }
 .minimax-preview-resize { left:calc(var(--minimax-library-w,190px) + 16px); right:8px; top:calc(50px + var(--minimax-preview-h,220px) - 3px); height:6px; cursor:ns-resize; }
 .minimax-video-resize { left:calc(var(--minimax-library-w,190px) + 68px); right:62px; top:calc(50px + var(--minimax-preview-h,220px) + 8px + 28px + var(--minimax-video-h,74px) - 3px); height:6px; cursor:ns-resize; }
-.minimax-ref-resize { left:calc(var(--minimax-library-w,190px) + 68px); right:62px; top:calc(50px + var(--minimax-preview-h,220px) + 8px + 28px + var(--minimax-video-h,74px) + var(--minimax-ref-h,108px) - 3px); height:6px; cursor:ns-resize; }
 
 .minimax-aux-toolbar { position:absolute; left:250px; top:8px; z-index:5; display:flex; gap:6px; align-items:center; }
 .minimax-aux-storyboard { height:22px; padding:0 8px; border:1px solid #3b4048; border-radius:4px; background:#24272b; color:#cbd5e1; font-size:9px; font-weight:800; cursor:pointer; }

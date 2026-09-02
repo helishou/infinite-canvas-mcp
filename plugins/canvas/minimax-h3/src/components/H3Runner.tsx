@@ -127,6 +127,11 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 const segmentVideo = !isT2v && !isI2vFl2v ? (segmentRefs.find((ref) => ref.type === "video") || (index === 0 ? video : undefined)) : undefined;
                 const segmentImages = isT2v || isV2v ? [] : segmentRefs.filter((ref) => ref.type === "image");
                 const segmentAudios = isT2v || isV2v || isI2vFl2v ? [] : segmentRefs.filter((ref) => ref.type === "audio");
+                if (segmentImages.length > 9 || images.length > 9) throw new Error("MiniMax H3 最多支持 9 张参考图片");
+                if (segmentRefs.filter((ref) => ref.type === "video").length > 3 || upstream.filter((ref) => ref.type === "video").length > 3) throw new Error("MiniMax H3 最多支持 3 段参考视频");
+                if (segmentAudios.length > 3 || audios.length > 3) throw new Error("MiniMax H3 最多支持 3 段参考音频");
+                if (requestedTaskMode === "i2v" && segmentImages.length !== 1) throw new Error("I2V 必须且只能使用 1 张图片作为首帧");
+                if (requestedTaskMode === "fl2v" && segmentImages.length !== 2) throw new Error("FL2V 必须使用 2 张图片作为首尾帧");
                 // t2v 模式下不传递任何图片给 compatibleH3Settings，避免影响模型选择
                 const upstreamForSettings = isT2v ? [] : [...images, ...(video ? [video] : [])];
                 const segmentSettings = compatibleH3Settings({ ...segment, taskMode: effectiveTaskMode }, liveModelName, liveLoraName, upstreamForSettings);
@@ -138,7 +143,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 // 透传 storageKey：后端媒体引用（图片/视频/音频）直接用 storageKey 复用，
                 // 避免只留 url 时 extractStorageKey 反推出被 URL 编码的 key（如 image%3A<uuid>）
                 // 导致后端查不到（404）或退化到 dataUrl 分支（400 畸形 data URL）。
-                const finalReferences = isT2v || isV2v ? [] : (segmentImages.length ? segmentImages : isI2vFl2v ? [] : images).map((ref) => ({ name: `${ref.name}.png`, url: ref.url, storageKey: ref.storageKey }));
+                const finalReferences = isT2v || isV2v ? [] : (isI2vFl2v ? segmentImages : (segmentImages.length ? segmentImages : images)).map((ref) => ({ name: `${ref.name}.png`, url: ref.url, storageKey: ref.storageKey }));
                 const finalVideo = !isT2v && !isI2vFl2v ? (segmentVideo ? { name: `${segmentVideo.name}.mp4`, url: segmentVideo.url, storageKey: segmentVideo.storageKey } : undefined) : undefined;
                 const finalAudios = isR2vOrRv2v ? (segmentAudios.length ? segmentAudios : audios).map((ref) => ({ name: `${ref.name}.mp3`, url: ref.url, storageKey: ref.storageKey })) : [];
                 // 记录提交信息用于错误日志

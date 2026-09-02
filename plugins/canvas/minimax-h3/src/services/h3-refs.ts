@@ -2,6 +2,12 @@ import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref } from "../types";
 import { sameRef } from "./h3-compatibility";
 
+function storageKeyOf(value: Record<string, unknown>) {
+    const nested = value.assetRef;
+    const nestedKey = nested && typeof nested === "object" ? (nested as Record<string, unknown>).storageKey : undefined;
+    return String(value.storageKey || nestedKey || "") || undefined;
+}
+
 export function readH3Refs(ctx: CanvasNodeContext): H3Ref[] {
     const currentNode = ctx.getNode(ctx.node.id) || ctx.node;
     const connected = ctx.getUpstream().flatMap((node) => {
@@ -10,7 +16,7 @@ export function readH3Refs(ctx: CanvasNodeContext): H3Ref[] {
         if (!url) return [];
         const mime = String(media.mimeType || "");
         const type = mime.startsWith("video/") || node.type === "video" ? "video" : mime.startsWith("audio/") || node.type === "audio" ? "audio" : "image";
-        return [{ url, type: type as H3Ref["type"], name: node.title || type, storageKey: String(media.storageKey || "") || undefined }];
+        return [{ url, type: type as H3Ref["type"], name: node.title || type, storageKey: storageKeyOf(media) }];
     });
     const characterAssets = currentNode.metadata?.h3CharacterAssets;
     const characterRefs = Array.isArray(characterAssets) ? characterAssets.flatMap((asset) => {
@@ -21,7 +27,7 @@ export function readH3Refs(ctx: CanvasNodeContext): H3Ref[] {
             if (!image || typeof image !== "object") return [];
             const ref = image as Record<string, unknown>;
             const url = String(ref.url || ref.dataUrl || ref.localUrl || ref.originalLocalUrl || ref.sourceUrl || ref.path || "").trim();
-            return url ? [{ url, type: "image" as const, name: `${role} · ${String(ref.name || "角色参考图")}`, storageKey: String(ref.storageKey || "") || undefined }] : [];
+            return url ? [{ url, type: "image" as const, name: `${role} · ${String(ref.name || "角色参考图")}`, storageKey: storageKeyOf(ref) }] : [];
         });
     }) : [];
     const legacy = currentNode.metadata?.h3Refs;
@@ -30,7 +36,7 @@ export function readH3Refs(ctx: CanvasNodeContext): H3Ref[] {
         const item = value as Record<string, unknown>;
         const url = String(item.url || item.dataUrl || item.localUrl || item.originalLocalUrl || item.sourceUrl || item.path || "").trim();
         if (!url) return [];
-        return [{ url, type: (kind === "video" ? "video" : kind === "audio" ? "audio" : "image") as H3Ref["type"], name: String(item.name || `${kind}-ref`), storageKey: String(item.storageKey || "") || undefined }];
+        return [{ url, type: (kind === "video" ? "video" : kind === "audio" ? "audio" : "image") as H3Ref["type"], name: String(item.name || `${kind}-ref`), storageKey: storageKeyOf(item) }];
     })) : [];
     return [...connected, ...characterRefs, ...legacyRefs].filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
 }
@@ -44,5 +50,5 @@ export function normalizeDroppedH3Ref(event: React.DragEvent<HTMLElement>): H3Re
     const url = String(value.url || value.dataUrl || value.localUrl || value.originalLocalUrl || value.sourceUrl || value.path || "").trim();
     if (!url) return null;
     const kind = String(value.kind || value.type || "image").toLowerCase();
-    return { url, name: String(value.name || url.split(/[\\/]/).pop() || "Ref"), type: kind.startsWith("video") ? "video" : kind.startsWith("audio") ? "audio" : "image", storageKey: String(value.storageKey || "") || undefined };
+    return { url, name: String(value.name || url.split(/[\\/]/).pop() || "Ref"), type: kind.startsWith("video") ? "video" : kind.startsWith("audio") ? "audio" : "image", storageKey: storageKeyOf(value) };
 }

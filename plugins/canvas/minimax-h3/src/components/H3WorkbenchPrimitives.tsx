@@ -45,25 +45,25 @@ export function H3PlayheadStyle({ percent }: { percent: number }) {
 }
 
 export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
-    const handle = (pane: "library" | "preview" | "video" | "refs", className: string) => <H3ResizeHandle key={pane} ctx={ctx} pane={pane} className={className} />;
-    return <div style={{ display: "contents" }}>{handle("library", "minimax-pane-resize minimax-library-resize")}{handle("preview", "minimax-pane-resize minimax-preview-resize")}{handle("video", "minimax-pane-resize minimax-video-resize")}{handle("refs", "minimax-pane-resize minimax-ref-resize")}</div>;
+    const handle = (pane: "library" | "preview" | "video", className: string) => <H3ResizeHandle key={pane} ctx={ctx} pane={pane} className={className} />;
+    return <div style={{ display: "contents" }}>{handle("library", "minimax-pane-resize minimax-library-resize")}{handle("preview", "minimax-pane-resize minimax-preview-resize")}{handle("video", "minimax-pane-resize minimax-video-resize")}</div>;
 }
 
-function H3ResizeHandle({ ctx, pane, className }: { ctx: CanvasNodeContext; pane: "library" | "preview" | "video" | "refs"; className: string }) {
+function H3ResizeHandle({ ctx, pane, className }: { ctx: CanvasNodeContext; pane: "library" | "preview" | "video"; className: string }) {
     const drag = useRef<{ x: number; y: number; value: number } | null>(null);
     const onPointerDown = (event: React.PointerEvent<HTMLSpanElement>) => {
         event.preventDefault();
         event.stopPropagation();
         const metadata = ctx.node.metadata || {};
-        const value = pane === "library" ? Number(metadata.minimaxLibraryW || 190) : pane === "preview" ? Number(metadata.minimaxPreviewH || 220) : pane === "video" ? Number(metadata.minimaxVideoTrackH || 74) : Number(metadata.minimaxRefLaneH || 36);
+        const value = pane === "library" ? Number(metadata.minimaxLibraryW || 190) : pane === "preview" ? Number(metadata.minimaxPreviewH || 220) : Number(metadata.minimaxVideoTrackH || 74);
         drag.current = { x: event.clientX, y: event.clientY, value };
         event.currentTarget.setPointerCapture(event.pointerId);
     };
     const onPointerMove = (event: React.PointerEvent<HTMLSpanElement>) => {
         if (!drag.current) return;
-        const bounds: Record<typeof pane, [number, number, number]> = { library: [170, 520, drag.current.value + event.clientX - drag.current.x], preview: [130, 760, drag.current.value + event.clientY - drag.current.y], video: [48, 180, drag.current.value + event.clientY - drag.current.y], refs: [30, 130, drag.current.value + event.clientY - drag.current.y] };
+        const bounds: Record<typeof pane, [number, number, number]> = { library: [170, 520, drag.current.value + event.clientX - drag.current.x], preview: [130, 760, drag.current.value + event.clientY - drag.current.y], video: [48, 180, drag.current.value + event.clientY - drag.current.y] };
         const [min, max, next] = bounds[pane];
-        const key = pane === "library" ? "minimaxLibraryW" : pane === "preview" ? "minimaxPreviewH" : pane === "video" ? "minimaxVideoTrackH" : "minimaxRefLaneH";
+        const key = pane === "library" ? "minimaxLibraryW" : pane === "preview" ? "minimaxPreviewH" : "minimaxVideoTrackH";
         ctx.updateMetadata({ [key]: Math.round(Math.max(min, Math.min(max, next))) });
     };
     return <span className={className} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={(event) => { drag.current = null; event.currentTarget.releasePointerCapture(event.pointerId); }} />;

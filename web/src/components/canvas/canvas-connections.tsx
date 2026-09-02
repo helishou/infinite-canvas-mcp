@@ -1,4 +1,5 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
+import { useState } from "react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -11,6 +12,7 @@ export function ConnectionPath({
     active,
     onSelect,
     onContextMenu,
+    onDelete,
 }: {
     connection: CanvasConnection;
     from: CanvasNodeData;
@@ -18,8 +20,10 @@ export function ConnectionPath({
     active: boolean;
     onSelect: () => void;
     onContextMenu?: (event: ReactMouseEvent<SVGPathElement>) => void;
+    onDelete?: () => void;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const [hovered, setHovered] = useState(false);
     const startX = from.position.x + from.width;
     const startY = from.position.y + from.height / 2;
     const endX = to.position.x;
@@ -28,8 +32,16 @@ export function ConnectionPath({
     const curvature = Math.max(dx * 0.5, 50);
     const pathD = `M ${startX} ${startY} C ${startX + curvature} ${startY}, ${endX - curvature} ${endY}, ${endX} ${endY}`;
 
+    // Cubic Bezier midpoint at t=0.5
+    // B(t) = (1-t)³P0 + 3(1-t)²tP1 + 3(1-t)t²P2 + t³P3, at t=0.5:
+    const midX = (startX + 3 * (startX + curvature) + 3 * (endX - curvature) + endX) / 8;
+    const midY = (startY + 3 * startY + 3 * endY + endY) / 8;
+
     return (
-        <g>
+        <g
+            onMouseEnter={() => setHovered(true)}
+            onMouseLeave={() => setHovered(false)}
+        >
             <path
                 data-connection-id={connection.id}
                 d={pathD}
@@ -55,6 +67,20 @@ export function ConnectionPath({
                 fill="none"
                 style={{ filter: active ? `drop-shadow(0 0 8px ${theme.node.activeStroke}66)` : undefined, pointerEvents: "none" }}
             />
+            {(hovered || active) && onDelete && (
+                <g
+                    transform={`translate(${midX}, ${midY})`}
+                    style={{ cursor: "pointer" }}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onDelete();
+                    }}
+                >
+                    <circle r={9} fill={theme.node.panel} stroke={theme.node.muted} strokeWidth={1.5} />
+                    <line x1={-3.5} y1={-3.5} x2={3.5} y2={3.5} stroke="#ef4444" strokeWidth={1.8} strokeLinecap="round" />
+                    <line x1={3.5} y1={-3.5} x2={-3.5} y2={3.5} stroke="#ef4444" strokeWidth={1.8} strokeLinecap="round" />
+                </g>
+            )}
         </g>
     );
 }

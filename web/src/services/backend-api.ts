@@ -123,13 +123,18 @@ export async function uploadBackendMedia(options: {
     height?: number;
     durationMs?: number;
 }): Promise<BackendMediaResult> {
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ""));
-        reader.onerror = () => reject(reader.error || new Error("Failed to read media"));
-        reader.readAsDataURL(options.blob);
-    });
-    return uploadBackendMediaDataUrl({ name: options.name, storageKey: options.storageKey, dataUrl, mimeType: options.mimeType || options.blob.type || "application/octet-stream", width: options.width, height: options.height, durationMs: options.durationMs });
+    const headers: Record<string, string> = {
+        "content-type": options.mimeType || options.blob.type || "application/octet-stream",
+        "x-media-name": encodeURIComponent(options.name),
+    };
+    if (options.width !== undefined) headers["x-media-width"] = String(options.width);
+    if (options.height !== undefined) headers["x-media-height"] = String(options.height);
+    if (options.durationMs !== undefined) headers["x-media-duration-ms"] = String(options.durationMs);
+    const url = `${getBackendUrl().replace(/\/$/, "")}/media/upload-binary?token=${encodeURIComponent(getBackendToken())}`;
+    const res = await fetch(url, { method: "POST", headers, body: options.blob });
+    const data = (await res.json().catch(() => ({}))) as { media?: BackendMediaResult; error?: string };
+    if (!res.ok || !data.media) throw new Error(`Backend POST /media/upload-binary failed: HTTP ${res.status} ${data.error || ""}`);
+    return data.media;
 }
 
 export async function uploadBackendMediaDataUrl(options: {

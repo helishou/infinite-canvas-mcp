@@ -142,7 +142,13 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         session.openEvents(requestUrl(req, config), res, ensureSiteWorkspace(config).activeThreadId || "");
     });
     app.post("/canvas/state", (req, res) => {
-        session.updateState(req.body, String(req.query.clientId || "") || undefined);
+        const clientId = String(req.query.clientId || "") || undefined;
+        session.updateState(req.body, clientId);
+        const state = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : null;
+        const projectId = String(state?.projectId || "").trim();
+        if (projectId && state?.hasCanvas !== false) {
+            void backend.upsertCanvasProject({ ...state, id: projectId, updatedAt: new Date().toISOString() }).catch((error) => logger.warn("Canvas state backend sync failed", { error: String(error), projectId }));
+        }
         res.json({ ok: true });
     });
     app.post("/canvas/activate", (req, res) => {
@@ -182,8 +188,13 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     }));
     app.post("/runtime/media", route(async (req, res) => {
         const name = String(req.body?.name || "media.bin");
+        // storageKey 优先：调用方（web/H3 运行器）已把媒体落在总后台 media store 时，
+        // 直接复用而不再 base64 下载→重传。缺失时回退到旧的 dataUrl 上传语义。
+        const rawStorageKey = req.body?.storageKey;
+        const storageKey = typeof rawStorageKey === "string" && rawStorageKey.trim() ? rawStorageKey.trim() : "";
         const dataUrl = String(req.body?.dataUrl || "");
-        res.status(201).json({ ok: true, media: await backend.runtimeMediaStore(name, dataUrl) });
+        if (!storageKey && !dataUrl) return void res.status(400).json({ ok: false, error: "缺少 dataUrl 或 storageKey" });
+        res.status(201).json({ ok: true, media: await backend.runtimeMediaStore(name, dataUrl, storageKey || undefined) });
     }));
     app.get("/runtime/media-file", route(async (req, res) => {
         const file = String(req.query.file || req.query.name || "");

@@ -3036,6 +3036,7 @@ function InfiniteCanvasPage() {
                                             setSelectedNodeIds(new Set());
                                             setContextMenu({ type: "connection", x: event.clientX, y: event.clientY, connectionId: connection.id });
                                         }}
+                                        onDelete={() => deleteConnection(connection.id)}
                                     />
                                 );
                             })}

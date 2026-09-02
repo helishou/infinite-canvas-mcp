@@ -3,7 +3,7 @@
 import type { ComponentType, SVGProps } from "react";
 import { Activity, ArrowRight, Clapperboard, Database, Download, MessageSquareText, Paperclip, Play, Plus, Settings, SlidersHorizontal, Sparkles, X } from "lucide-react";
 
-export type H3IconName = "clapperboard" | "play" | "plus" | "download" | "settings" | "database" | "output" | "sparkles" | "paperclip" | "waves" | "trash" | "close" | "prompt" | "sliders";
+export type H3IconName = "clapperboard" | "play" | "plus" | "download" | "settings" | "database" | "folder" | "output" | "sparkles" | "paperclip" | "waves" | "trash" | "close" | "prompt" | "sliders";
 
 const ICONS: Record<H3IconName, ComponentType<SVGProps<SVGSVGElement>>> = {
     clapperboard: Clapperboard,
@@ -12,6 +12,7 @@ const ICONS: Record<H3IconName, ComponentType<SVGProps<SVGSVGElement>>> = {
     download: Download,
     settings: Settings,
     database: Database,
+    folder: Database,
     output: ArrowRight,
     sparkles: Sparkles,
     paperclip: Paperclip,

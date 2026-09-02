@@ -1,5 +1,5 @@
-import { fetchAgentJson, syncRuntimeMedia } from "./canvas-agent";
-import { backendMediaUrl, getBackendToken, getBackendUrl } from "@/services/backend-api";
+import { fetchAgentJson } from "./canvas-agent";
+import { backendMediaUrl, getBackendToken, getBackendUrl, uploadBackendMedia } from "@/services/backend-api";
 
 type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
 type ComfyMedia = { url: string; mimeType: string; storageKey?: string };
@@ -57,7 +57,7 @@ function proxyComfyMedia(item: ComfyMedia, endpoint: string, token: string): Com
 }
 
 export async function runComfyTask(endpoint: string, token: string, comfyUrl: string, preset: string, prompt: string, references: LocalReference[], params: Record<string, unknown>, signal?: AbortSignal) {
-    const synced = await Promise.all(references.map((reference) => syncReference(endpoint, token, reference, signal)));
+    const synced = await Promise.all(references.map((reference) => syncReference(endpoint, token, reference, signal, true)));
     const input: Record<string, unknown> = { prompt };
     if (preset === "flux2-klein") input.references = synced.filter(Boolean);
     if (preset === "flashvsr-1.1" && synced[0]) input.video = synced[0];
@@ -147,7 +147,7 @@ export async function cancelRunningHubH3Task(endpoint: string, token: string, ta
     return (await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/runninghub/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" })).task;
 }
 
-async function fetchAsDataUrl(url: string, signal?: AbortSignal) {
+async function fetchAsBlob(url: string, signal?: AbortSignal) {
     if (!url) throw new Error("本地媒体缺少可读取地址");
     let response: Response;
     try {
@@ -159,10 +159,8 @@ async function fetchAsDataUrl(url: string, signal?: AbortSignal) {
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("text/html")) throw new Error(`媒体地址返回了 HTML 而不是文件：${url}`);
     const blob = await response.blob();
-    if (blob.type && !/^(image|video|audio)\//.test(blob.type)) {
-        throw new Error(`媒体类型无效：${blob.type}（${url}）`);
-    }
-    return await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error || new Error("读取媒体失败")); reader.readAsDataURL(blob); });
+    if (blob.type && !/^(image|video|audio)\//.test(blob.type)) throw new Error(`媒体类型无效：${blob.type}（${url}）`);
+    return blob;
 }
 
 function sourceUrl(reference: LocalReference) {
@@ -201,7 +199,7 @@ function extractStorageKey(url: string): string | null {
  * 若媒体本就在后端（已有 storageKey，或 URL 指向后端 /media/:storageKey），
  * 直接复用而不再 base64 下载→重传，避免 H3 串 clip 时 previousVideo 撑爆请求体（413）。
  */
-async function syncReference(endpoint: string, token: string, reference: LocalReference, signal?: AbortSignal): Promise<string | undefined> {
+async function syncReference(endpoint: string, token: string, reference: LocalReference, signal?: AbortSignal, allowDataUrl = false): Promise<string | undefined> {
     const source = sourceUrl(reference);
     const storageKey = reference.storageKey || extractStorageKey(source);
     if (storageKey) {
@@ -214,6 +212,13 @@ async function syncReference(endpoint: string, token: string, reference: LocalRe
     if (source.startsWith("data:") && !/^data:([^;,]+);base64,(.+)$/s.test(source)) {
         throw new Error(`参考「${reference.name}」携带的 data URL 非法（缺少 ;base64, 负载或格式错误），无法上传。请重新添加该素材。`);
     }
-    const dataUrl = source.startsWith("data:") ? source : await fetchAsDataUrl(source, signal);
-    return (await syncRuntimeMedia(endpoint, token, reference.name, dataUrl)).media?.path;
+    if (allowDataUrl) {
+        const blob = await fetchAsBlob(source, signal);
+        const media = await uploadBackendMedia({ name: reference.name, blob, mimeType: blob.type || undefined });
+        const runtime = await fetchAgentJson<{ media?: { path?: string } }>(endpoint, token, "/runtime/media", {
+            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: reference.name, storageKey: media.storageKey }),
+        });
+        return runtime.media?.path;
+    }
+    throw new Error(`参考「${reference.name}」没有本地 storageKey，H3 不再通过 base64 传输。请重新上传或重新连接该素材。`);
 }
