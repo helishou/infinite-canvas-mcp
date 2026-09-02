@@ -39,12 +39,23 @@ export type PluginMcpContext = {
     endpoint: string;
     token: string;
     /** 画布/素材/媒体/日志的唯一业务数据源。 */
-    backend: BackendClient;
+    backend: PluginMcpBackend;
     /** ComfyUI 能力（backend 权威 + 本地兜底；见 comfy-client.ts）。 */
     comfyUi: ComfyUiClient;
     getCanvasNodes: () => Promise<AgentCanvasNode[]>;
     getCanvasNode: (id: string) => Promise<AgentCanvasNode | null>;
     updateCanvasNode: (id: string, patch: Partial<AgentCanvasNode>, metadataPatch?: Record<string, unknown>) => Promise<void>;
+};
+
+/** H3 MCP 需要的最小后端能力；HTTP BackendClient 和进程内 Store 适配器均可实现。 */
+export type PluginMcpBackend = {
+    listCanvasProjects(): Promise<Record<string, unknown>[]>;
+    replaceCanvasProjects(projects: Record<string, unknown>[]): Promise<Record<string, unknown>[]>;
+    runtimeMediaStore(name: string, dataUrl: string): Promise<{ path: string }>;
+    comfyModels(signal?: AbortSignal): Promise<{ models: string[]; loras: string[]; refreshedAt: string; error?: string }>;
+    comfyRun(preset: string, input: Record<string, unknown>, params: Record<string, unknown>): Promise<import("../runtime/types.js").RuntimeTask>;
+    comfyGetTask(id: string, after?: number): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;
+    comfyCancel(id: string): Promise<import("../runtime/types.js").RuntimeTask>;
 };
 
 export type McpToolHandler = (input: Record<string, unknown>, context: PluginMcpContext) => Promise<unknown>;
@@ -66,7 +77,7 @@ export const KNOWN_FIRST_PARTY: Record<string, FirstPartyEntry> = {
     },
 };
 
-export async function loadPluginMcpDeclarationsFromBackend(backend: BackendClient): Promise<PluginMcpDeclaration[]> {
+export async function loadPluginMcpDeclarationsFromBackend(backend: Pick<BackendClient, "listPluginDeclarations">): Promise<PluginMcpDeclaration[]> {
     const declarations = await backend.listPluginDeclarations();
     return declarations.flatMap((value) => {
         if (!value || typeof value !== "object") return [];
@@ -75,7 +86,7 @@ export async function loadPluginMcpDeclarationsFromBackend(backend: BackendClien
     });
 }
 
-export async function savePluginMcpDeclarationsToBackend(backend: BackendClient, declarations: PluginMcpDeclaration[]) {
+export async function savePluginMcpDeclarationsToBackend(backend: Pick<BackendClient, "replacePluginDeclarations">, declarations: PluginMcpDeclaration[]) {
     await backend.replacePluginDeclarations(declarations.map((declaration) => ({
         id: declaration.id,
         name: declaration.name,
@@ -87,7 +98,7 @@ export async function savePluginMcpDeclarationsToBackend(backend: BackendClient,
 }
 
 // 构造插件 MCP 运行上下文(Agent 侧)
-export function buildPluginMcpContext(config: CanvasAgentConfig, backend: BackendClient, comfyUi: ComfyUiClient): PluginMcpContext {
+export function buildPluginMcpContext(config: CanvasAgentConfig, backend: PluginMcpBackend, comfyUi: ComfyUiClient): PluginMcpContext {
     const readNodes = async (): Promise<AgentCanvasNode[]> => {
         const projects = await backend.listCanvasProjects() as Array<{ nodes?: AgentCanvasNode[] }>;
         return projects.flatMap((project) => (Array.isArray(project.nodes) ? project.nodes : []) as AgentCanvasNode[]);
