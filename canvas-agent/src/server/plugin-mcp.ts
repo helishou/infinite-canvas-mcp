@@ -40,7 +40,7 @@ export type PluginMcpContext = {
     token: string;
     /** 画布/素材/媒体/日志的唯一业务数据源。 */
     backend: PluginMcpBackend;
-    /** ComfyUI 能力（backend 权威 + 本地兜底；见 comfy-client.ts）。 */
+    /** ComfyUI 能力（Backend 唯一权威；见 comfy-client.ts）。 */
     comfyUi: ComfyUiClient;
     getCanvasNodes: () => Promise<AgentCanvasNode[]>;
     getCanvasNode: (id: string) => Promise<AgentCanvasNode | null>;
