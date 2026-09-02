@@ -66,14 +66,6 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         next();
     });
 
-    // ── 错误处理 ─────────────────────────────────────────────────────────
-    type HttpError = Error & { status?: number };
-    app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => {
-        const status = (error as HttpError).status || 500;
-        logger.error(error.message, { stack: error.stack });
-        res.status(status).json({ ok: false, error: error.message });
-    });
-
     // ── 公共路由 ─────────────────────────────────────────────────────────
     app.get("/health", (_req, res) => {
         res.json({ ok: true, protocolVersion: 1, node: process.version, pid: process.pid });
@@ -335,6 +327,14 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         } catch (error) {
             res.status(409).json({ ok: false, error: (error as Error).message });
         }
+    });
+
+    // ── 错误处理（必须位于所有业务路由之后） ─────────────────────────────
+    type HttpError = Error & { status?: number };
+    app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => {
+        const status = (error as HttpError).status || 500;
+        logger.error(error.message, { stack: error.stack });
+        res.status(status).json({ ok: false, error: error.message });
     });
 
     return { app: app as Express, stores, events };
