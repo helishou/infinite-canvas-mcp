@@ -9,6 +9,8 @@ The current release needs manual verification in these areas:
 
 - Backend 单进程运行时：仅启动 `ic-backend` 后，`/agent/*`、ComfyUI、RunningHub、FFmpeg、任务 SSE 和 `ic-backend mcp` 均可用；standalone `canvas-agent` 只作为兼容代理，不创建第二份 runtime SQLite。
 
+- Backend 资产 SSE：通过资产新增、修改、删除、文件夹变更和批量替换接口时，`GET /events` 应收到带 `asset.updated`、实体 id（适用时）和最新 payload 的事件；断线重连后仍应以 REST 快照校正最终状态。
+
 - ComfyUI 媒体持久化：通过 H3 或其他 ComfyUI 工作流生成视频、图片、音频后，结果应写入 Backend `media_files` 并可经 `/media/:storageKey` 在 Backend 重启后继续读取；H3 Motion Context 合并视频也应可播放，任务运行中、完成和失败状态应能通过 `/events` 收到。
 
 - RunningHub/FFmpeg 媒体持久化：RunningHub 返回的可下载结果和 FFmpeg 拼接视频应登记到 Backend `media_files`，任务结果仍保留原始路径或远程地址供旧调用方兼容。
