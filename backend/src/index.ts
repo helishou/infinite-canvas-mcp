@@ -36,12 +36,12 @@ const stores = createStores(db);
 const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings });
 const events = new BackendEventBus();
 const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
-const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings);
-const videoConcat = new VideoConcatBackend(runtime.tasks);
+const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events);
+const videoConcat = new VideoConcatBackend(runtime.tasks, undefined, runtime.events);
 
 const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: runtime.events });
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
-registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat);
+registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat, runtime.events);
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events, basePath: "/agent" }, runtime.comfy);
 const agent = createAgentApp({ listen: false, backendUrl: config.url, backendToken: config.token });
 app.use("/agent", agent.app);
