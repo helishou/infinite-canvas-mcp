@@ -69,7 +69,15 @@ function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, store
         const schema = toolInputSchemas[name];
         server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput) => {
             const input = schema.parse(rawInput) as Record<string, unknown>;
-            if (name === "canvas_list_projects") return textResult(db.listCanvasProjects().map((project) => ({ id: project.id, title: project.title, updatedAt: project.updatedAt, nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0, connectionCount: Array.isArray(project.connections) ? project.connections.length : 0 })));
+            if (name === "canvas_list_projects") {
+                const keyword = String(input.keyword || "").trim().toLowerCase();
+                const all = db.listCanvasProjects()
+                    .filter((project) => !keyword || String(project.title || project.name || "").toLowerCase().includes(keyword))
+                    .map((project) => ({ id: project.id, title: project.title, updatedAt: project.updatedAt, nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0, connectionCount: Array.isArray(project.connections) ? project.connections.length : 0 }));
+                const pageSize = Math.max(1, Math.min(100, Number(input.pageSize || 20)));
+                const page = Math.max(1, Number(input.page || 1));
+                return textResult({ projects: all.slice((page - 1) * pageSize, page * pageSize), total: all.length, page, pageSize });
+            }
             if (name === "generation_get_status") return textResult(listTasks(db, input));
             const project = currentProject(db); const state = project as Record<string, unknown>;
             if (name === "canvas_get_state" || name === "canvas_export_snapshot") return textResult(compactProject(state));
