@@ -217,14 +217,6 @@ export class BackendClient {
         return { url: data.url };
     }
 
-    // ── Proxy to runtime bridge (Agent stays) ────────────────────────────
-
-    /** 这些任务仍由 Agent 本地 runtime 处理（ComfyUI/RunningHub/FFmpeg） */
-    async proxyAgentTask(id: string): Promise<Record<string, unknown> | null> {
-        // Agent 本地查询 runtimeDb
-        // 由调用方提供（http.ts 中直接用 runtimeDb）
-        throw new Error("Use local runtimeDb directly");
-    }
 }
 
 /** 默认总后台地址常量（供 config 使用）。 */
