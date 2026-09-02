@@ -96,6 +96,8 @@ function compactProject(project: Record<string, unknown>) { return { ...project,
 function textResult(value: unknown) { return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] }; }
 function applyCanvasOps(project: Record<string, unknown>, ops: Array<Record<string, unknown>>) {
     const nodes = nodesOf(project); const connections = connectionsOf(project);
+    project.nodes = nodes;
+    project.connections = connections;
     for (const op of ops) {
         if (op.type === "add_node") { const node = { id: String(op.id || `${String(op.nodeType || "node")}-${crypto.randomUUID()}`), type: String(op.nodeType || "text"), title: String(op.title || ""), position: op.position || { x: Number(op.x || 0), y: Number(op.y || 0) }, width: Number(op.width || 320), height: Number(op.height || 240), metadata: op.metadata || {} }; nodes.push(node); }
         if (op.type === "update_node") { const node = nodes.find((item) => item.id === op.id); if (!node) throw new Error(`找不到节点：${String(op.id)}`); Object.assign(node, op.patch || {}); if (op.metadata) node.metadata = { ...(node.metadata as object || {}), ...(op.metadata as object) }; }
