@@ -130,14 +130,34 @@ export async function getRunningHubH3Task(endpoint: string, token: string, taskI
 
 async function fetchAsDataUrl(url: string, signal?: AbortSignal) {
     if (!url) throw new Error("本地媒体缺少可读取地址");
-    const response = await fetch(url, { signal });
+    let response: Response;
+    try {
+        response = await fetch(url, { signal });
+    } catch (error) {
+        throw new Error(`读取本地媒体失败（${url}）：${error instanceof Error ? error.message : String(error)}`);
+    }
     if (!response.ok) throw new Error(`读取本地媒体失败：HTTP ${response.status}`);
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html")) throw new Error(`媒体地址返回了 HTML 而不是文件：${url}`);
     const blob = await response.blob();
+    if (blob.type && !/^(image|video|audio)\//.test(blob.type)) {
+        throw new Error(`媒体类型无效：${blob.type}（${url}）`);
+    }
     return await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error || new Error("读取媒体失败")); reader.readAsDataURL(blob); });
 }
 
 function sourceUrl(reference: LocalReference) {
     if (reference.storageKey) return backendMediaUrl(reference.storageKey);
     const source = reference.dataUrl || reference.url || "";
-    return source.startsWith("/") ? `${getBackendUrl().replace(/\/$/, "")}${source}` : source;
+    if (!source || source.startsWith("data:")) return source;
+    try {
+        const parsed = new URL(source, window.location.origin);
+        if (parsed.pathname.startsWith("/media/")) {
+            return backendMediaUrl(decodeURIComponent(parsed.pathname.slice("/media/".length)));
+        }
+        if (source.startsWith("/")) return `${getBackendUrl().replace(/\/$/, "")}${source}`;
+    } catch {
+        // Keep the original value so the fetch error includes the source address.
+    }
+    return source;
 }
