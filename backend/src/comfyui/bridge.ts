@@ -144,7 +144,7 @@ export class ComfyUiBackend {
                 if (historyResponse.ok) {
                     const history = await historyResponse.json() as Record<string, any>;
                     const item = history[body.prompt_id];
-                    if (item?.status?.completed || item?.outputs) return { promptId: body.prompt_id, outputs: item.outputs || {}, media: await collectOutputMedia(item.outputs || {}, comfyUrl, this.deps.media), status: item.status || {} };
+                    if (item?.status?.completed || item?.outputs) return { promptId: body.prompt_id, outputs: item.outputs || {}, media: await collectOutputMedia(item.outputs || {}, comfyUrl, this.deps.media, controller.signal), status: item.status || {} };
                     if (item?.status?.status_str === "error" || item?.status?.status_str === "failed") throw new Error(JSON.stringify(item.status));
                 }
                 await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -440,13 +440,13 @@ function normalizeH3AspectRatio(value: string) {
     return aliases[value] || value;
 }
 
-async function collectOutputMedia(outputs: Record<string, any>, baseUrl: string, mediaStore: MediaStore) {
+async function collectOutputMedia(outputs: Record<string, any>, baseUrl: string, mediaStore: MediaStore, signal: AbortSignal) {
     const items = Object.values(outputs).flatMap((output) => [ ...(output?.images || []), ...(output?.gifs || []), ...(output?.videos || []) ]);
     return (await Promise.all(items.map(async (item) => {
         if (!item?.filename) return [];
         const query = new URLSearchParams({ filename: String(item.filename), subfolder: String(item.subfolder || ""), type: String(item.type || "output") });
         const sourceUrl = `${baseUrl}/view?${query.toString()}`;
-        const response = await fetch(sourceUrl);
+        const response = await fetch(sourceUrl, { signal });
         if (!response.ok) return [{ url: sourceUrl, mimeType: mimeForOutput(item), filename: String(item.filename) }];
         const stored = mediaStore.store(Buffer.from(await response.arrayBuffer()), { name: String(item.filename), mimeType: mimeForOutput(item) });
         return [{ url: mediaStore.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: String(item.filename), sourceUrl }];
