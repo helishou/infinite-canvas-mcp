@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response, type Express } from "express";
 import path from "node:path";
 
-import { type ResolvedConfig, ensureDataDirs } from "./config.js";
+import { type ResolvedConfig, ensureDataDirs, loadRootConfig, saveRootConfig } from "./config.js";
 import type {
     Asset, AssetFolder, CanvasProject,
     GenerationLog, GenerationLogStatus, RuntimeTask, RuntimeTaskStatus,
@@ -27,7 +27,7 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     const events = deps.events ?? new BackendEventBus();
     const app = express();
     app.disable("x-powered-by");
-    app.use(express.json({ limit: "50mb" }));
+    app.use(express.json({ limit: "100mb" }));
 
     // ── CORS ─────────────────────────────────────────────────────────────
     app.use((req: Request, res: Response, next: NextFunction) => {
@@ -40,7 +40,8 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         }
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-        if (req.method === "OPTIONS") return void res.json({});
+        // OPTIONS 预检请求直接返回，不进入后续 middleware（auth 等会拦截）。
+        if (req.method === "OPTIONS") { res.status(204).end(); return; }
         next();
     });
 
@@ -48,6 +49,10 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.use((req: Request, res: Response, next: NextFunction) => {
         const url = req.url!.split("?")[0];
         if (url === "/health" || url === "/config") return next();
+        // 只读媒体端点免 token：本地单用户开发 backend 的 CORS 已 `*`，且媒体 URL 内嵌的
+        // token 会在 backend 重启后失效，豁免后可避免历史产物在 token 轮换后 401 而“消失”。
+        // 仅豁免 GET 读取类端点，写入类（如 POST /runtime/media）仍受 token 保护。
+        if (url === "/media" || url.startsWith("/media/") || url.startsWith("/runtime/media-file")) return next();
         const token = req.query.token as string | undefined
             || req.headers.authorization?.replace(/^Bearer\s+/i, "");
         if (token !== config.token) {
@@ -72,6 +77,24 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     });
     app.get("/config", (_req, res) => {
         res.json({ ok: true, protocolVersion: 1, url: config.url, token: config.token, hasToken: true });
+    });
+    app.get("/data-dir", (_req, res) => {
+        const root = loadRootConfig();
+        res.json({ ok: true, dataDir: DATA_DIR, configuredDataDir: root.dataDir || null });
+    });
+    app.post("/data-dir", (req, res) => {
+        const { dataDir } = req.body as { dataDir?: string };
+        if (dataDir !== undefined) {
+            if (!path.isAbsolute(dataDir)) return void res.status(400).json({ ok: false, error: "dataDir 必须是绝对路径" });
+            const root = loadRootConfig();
+            root.dataDir = dataDir.trim() || undefined;
+            saveRootConfig(root);
+            // 重新解析 DATA_DIR（动态更新运行时的路径常量）。
+            // 注意：已有数据文件仍在旧目录，新路径在 backend 重启后生效。
+            // 如需迁移数据，需手动移动文件并更新路径。
+        }
+        const root = loadRootConfig();
+        res.json({ ok: true, dataDir: DATA_DIR, configuredDataDir: root.dataDir || null });
     });
     app.get("/runtime/status", async (_req, res) => {
         const extra: Record<string, unknown> = { sqlite: true, node: process.version };
@@ -224,7 +247,26 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.post("/runtime/media", (req, res) => {
         const name = String(req.body?.name || "media.bin");
         const dataUrl = String(req.body?.dataUrl || "");
+        const storageKey = req.body?.storageKey ? String(req.body.storageKey) : undefined;
         try {
+            // 复用后端已有的媒体：避免把本就在后端的文件再 base64 下载→重传（H3 串 clip 的
+            // previousVideo 即此情形——上一段视频后端刚生成完，前端却原路下载回来再传一次，
+            // 体积暴涨触发 413）。传 storageKey 时直接返回本地路径，不再解码 dataUrl。
+            if (storageKey) {
+                const meta = stores.media.meta(storageKey);
+                if (!meta) return void res.status(404).json({ ok: false, error: `media not found: ${storageKey}` });
+                return void res.status(201).json({
+                    ok: true,
+                    media: {
+                        id: meta.storageKey,
+                        path: meta.filePath,
+                        name: path.basename(name),
+                        mimeType: meta.mimeType,
+                        bytes: meta.bytes,
+                        url: stores.media.url(meta),
+                    },
+                });
+            }
             const media = stores.media.storeDataUrl(dataUrl, name);
             res.status(201).json({ ok: true, media: { id: media.storageKey, path: media.path, name: path.basename(name), mimeType: media.mimeType, bytes: media.bytes, url: stores.media.url(media) } });
         } catch (error) {

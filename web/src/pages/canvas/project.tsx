@@ -2093,6 +2093,7 @@ function InfiniteCanvasPage() {
     const handleDrop = useCallback(
         (event: ReactDragEvent<HTMLDivElement>) => {
             event.preventDefault();
+            if (event.dataTransfer.types.includes("application/x-smart-storyboard-slot")) return;
             const files = Array.from(event.dataTransfer.files).filter(
                 (item) => item.type.startsWith("image/") || item.type.startsWith("video/") || isAudioFile(item),
             );
@@ -3149,6 +3150,7 @@ function InfiniteCanvasPage() {
                     showImageInfo={showImageInfo}
                     onAddImage={() => createNode(CanvasNodeType.Image)}
                     onAddVideo={() => createNode(CanvasNodeType.Video)}
+                    onAddH3={() => createNode("minimax-h3:video")}
                     onAddAudio={() => createNode(CanvasNodeType.Audio)}
                     onAddText={() => createNode(CanvasNodeType.Text)}
                     onAddConfig={() => createNode(CanvasNodeType.Config)}

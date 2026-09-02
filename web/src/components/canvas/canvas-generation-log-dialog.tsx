@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Button, Empty, Modal, Tag, message } from "antd";
 import { Copy, Trash2 } from "lucide-react";
 
-import { deleteBackendGenerationLogs, fetchBackendGenerationLogs, type BackendGenerationLog as GenerationLog } from "@/services/backend-api";
+import { deleteBackendGenerationLogs, fetchBackendGenerationLogs, backendMediaUrl, type BackendGenerationLog as GenerationLog } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
 export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: boolean; projectId: string; onClose: () => void }) {
@@ -43,8 +43,14 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
 }
 
 function Output({ output }: { output: Record<string, unknown> }) {
-    const url = String(output.url || output.localUrl || output.storageKey || "");
+    const storageKey = typeof output.storageKey === "string" && output.storageKey ? output.storageKey : "";
+    // 用 storageKey 重解析为带当前 token 的绝对地址（dev 下走 Vite 代理 /media）。
+    // 日志落库时 output.url 是裸的相对 /media/...（无 token），直接当 src 会被后端 401，
+    // 表现为视频一直“加载中”。改用 backendMediaUrl 注入当前 token 即可加载，且不受 token 轮换影响。
+    const url = storageKey ? backendMediaUrl(storageKey) : String(output.url || output.localUrl || "");
     const video = String(output.mimeType || output.type || "").startsWith("video");
+    const [failed, setFailed] = useState(false);
     if (!url) return null;
-    return video ? <video src={url} controls muted playsInline className="aspect-video w-full rounded object-cover" /> : <img src={url} alt="output" className="aspect-video w-full rounded object-cover" />;
+    if (failed) return <a href={url} target="_blank" rel="noreferrer" className="block truncate text-xs text-sky-500 hover:underline">{String(output.name || url)}（加载失败，点击新窗口打开）</a>;
+    return video ? <video src={url} controls muted playsInline onError={() => setFailed(true)} className="aspect-video w-full rounded object-cover" /> : <img src={url} alt="output" onError={() => setFailed(true)} className="aspect-video w-full rounded object-cover" />;
 }

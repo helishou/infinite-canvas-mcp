@@ -1,7 +1,5 @@
 import { definePlugin } from "@infinite-canvas/plugin-sdk";
-import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
-import { defaultH3Model, defaultPrompt } from "./constants";
-import { H3ContentExact, H3Panel } from "./components/H3Workbench";
+import { h3NodeDefinition } from "./node-definition";
 import h3Css from "./styles/h3.css";
 
 export default definePlugin({
@@ -10,31 +8,7 @@ export default definePlugin({
     version: "1.2.0",
     description: "把原画布 MiniMax H3 的视频、角色参考、Motion Context 和生成参数带入新画布。",
     css: h3Css,
-    nodes: [{
-        type: "minimax-h3:video",
-        legacyTypes: ["smart-minimax", "minimax"],
-        title: "MiniMax H3",
-        icon: "✦",
-        description: "H3 视频生成与人物替换节点",
-        defaultSize: { width: 980, height: 720 },
-        defaultMetadata: {
-            content: "", prompt: defaultPrompt, status: "idle", duration: "8", aspectRatio: "16:9",
-            videoSteps: 8, denoise: 0.65, modelName: defaultH3Model, minimaxBaseModel: defaultH3Model,
-            motionContextEnabled: true, motionContextNoiseEnabled: false,
-            segments: [{ id: "segment-1", prompt: defaultPrompt, duration: 8, taskMode: "r2v", status: "idle" }],
-        },
-        minimapColor: "#f97316",
-        Content: H3ContentExact,
-        Panel: H3Panel,
-        resource: (node) => {
-            const content = node.metadata?.content;
-            return typeof content === "string" && content ? { kind: "video", url: content } : null;
-        },
-        toolbar: (ctx: CanvasNodeContext) => [
-            { id: "h3-open", title: "打开 H3 参数", label: "参数", icon: "⚙", onClick: () => ctx.openPanel() },
-            { id: "h3-clear", title: "清空 H3 输出", label: "清空", icon: "×", onClick: () => ctx.updateMetadata({ content: "", status: "idle", errorDetails: "" }) },
-        ],
-    }],
+    nodes: [h3NodeDefinition],
     mcp: {
         id: "minimax-h3",
         version: "1.2.0",

@@ -9,6 +9,10 @@ import i18n from "@/i18n";
 const cleanups = new Map<string, () => void>();
 // 缓存已评估插件的 MCP 声明(用于启用/禁用时通知 Agent 动态注册/注销工具)
 const evaluatedPlugins = new Map<string, CanvasPlugin>();
+// MiniMax H3 is currently developed as a host system node so Vite can HMR its source directly.
+// Keep the plugin package and its Agent/MCP entry available, but do not let the browser plugin
+// loader replace the built-in definition with the stale public bundle.
+const HOST_SYSTEM_PLUGIN_IDS = new Set(["minimax-h3"]);
 
 // A remote plugin may export CanvasPlugin directly or a factory that receives runtime and returns CanvasPlugin.
 // The factory uses runtime.React so the bundle does not need its own React copy.
@@ -33,6 +37,7 @@ function assertPlugin(plugin: unknown): asserts plugin is CanvasPlugin {
 }
 
 export function activatePlugin(plugin: CanvasPlugin) {
+    if (HOST_SYSTEM_PLUGIN_IDS.has(plugin.id)) return;
     registerNodeDefinitions(plugin.nodes, plugin.id);
     evaluatedPlugins.set(plugin.id, plugin);
     const runtime = getPluginRuntime();
@@ -45,6 +50,7 @@ export function activatePlugin(plugin: CanvasPlugin) {
 }
 
 export function deactivatePlugin(pluginId: string) {
+    if (HOST_SYSTEM_PLUGIN_IDS.has(pluginId)) return;
     cleanups.get(pluginId)?.();
     cleanups.delete(pluginId);
     unregisterPluginNodes(pluginId);
@@ -126,6 +132,7 @@ export async function ensurePluginsLoaded() {
     const records = usePluginStore.getState().plugins.filter((record) => record.enabled);
     await Promise.all(
         records.map(async (record) => {
+            if (HOST_SYSTEM_PLUGIN_IDS.has(record.id)) return;
             try {
                 // Local plugins use the latest output; other plugins use their cached source.
                 const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;

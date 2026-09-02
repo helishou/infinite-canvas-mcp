@@ -18,6 +18,7 @@ export function CanvasToolbar({
     showImageInfo,
     onAddImage,
     onAddVideo,
+    onAddH3,
     onAddAudio,
     onAddText,
     onAddConfig,
@@ -40,6 +41,7 @@ export function CanvasToolbar({
     showImageInfo: boolean;
     onAddImage: () => void;
     onAddVideo: () => void;
+    onAddH3: () => void;
     onAddAudio: () => void;
     onAddText: () => void;
     onAddConfig: () => void;
@@ -68,7 +70,7 @@ export function CanvasToolbar({
     const [extPanelX, setExtPanelX] = useState(0);
     // Keep extension plugin nodes synchronized with registry changes.
     useNodeRegistryVersion();
-    const extensionDefs = listNodeDefinitions().filter((def) => def.showInCreateMenu !== false && getNodePluginId(def.type) !== "builtin");
+    const extensionDefs = listNodeDefinitions().filter((def) => def.showInCreateMenu !== false && (getNodePluginId(def.type) !== "builtin" || def.type === "minimax-h3:video"));
     const dockStyle = { background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item, boxShadow: colorTheme === "dark" ? "0 18px 45px rgba(0,0,0,.32)" : "0 16px 40px rgba(28,25,23,.12)" };
     const hoverStyle = { background: theme.toolbar.itemHover, color: theme.toolbar.activeText };
     const activeStyle = { background: theme.toolbar.activeBg, color: theme.toolbar.activeText };
@@ -109,6 +111,9 @@ export function CanvasToolbar({
                 </ToolbarButton>
                 <ToolbarButton id="tool-video" label={t("canvas.toolbar.video")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddVideo}>
                     <Video className="size-4.5" />
+                </ToolbarButton>
+                <ToolbarButton id="tool-h3" label="MiniMax H3" hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddH3}>
+                    <span className="text-[11px] font-black leading-none">H3</span>
                 </ToolbarButton>
                 <ToolbarButton id="tool-audio" label={t("canvas.toolbar.audio")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddAudio}>
                     <Music2 className="size-4.5" />

@@ -1,6 +1,6 @@
 {
     "name": "canvas-plugin-minimax-h3",
-  "version": "1.1.0",
+    "version": "1.1.0",
     "private": true,
     "type": "module",
     "description": "Infinite Canvas MiniMax H3 视频节点插件",
@@ -13,5 +13,9 @@
         "@infinite-canvas/plugin-sdk": "file:../sdk",
         "@types/react": "19.1.12",
         "typescript": "^5"
+    },
+    "dependencies": {
+        "antd": "^5",
+        "file-saver": "^2.0.5"
     }
 }

@@ -182,9 +182,19 @@ export class ComfyUiBackend {
 
 async function prepareH3MotionContext(input: Record<string, unknown>, params: Record<string, unknown>) {
     const previous = String(input.previousVideo || "");
-    if (!previous || params.motionContext !== true || params.motionContextNoise !== true) return { input, cleanup: async () => undefined };
+    // 对齐旧画布 (Infinite-Canvas) 行为：只要 Motion Context 开启就先截取前一段的
+    // 尾帧（最后 ~22 帧）作为 context，而不是把整段 previousVideo 直接喂给 9108 节点。
+    // 递进增噪 (motionContextNoise) 仅控制是否在尾帧上叠加噪声，不再作为「是否截尾帧」的前置条件。
+    if (!previous || params.motionContext === false) return { input, cleanup: async () => undefined };
     const target = path.join(os.tmpdir(), `infinite-canvas-h3-context-${crypto.randomUUID()}.mp4`);
-    await runPythonWorker(["workers/motion_context.py", previous, target, "--alpha", String(params.motionContextNoiseAlpha ?? .45), "--alpha-end", String(params.motionContextNoiseAlphaEnd ?? .1), "--ramp", String(params.motionContextNoiseRampFrames ?? 3)]);
+    const noise = params.motionContextNoise === true;
+    await runPythonWorker([
+        "workers/motion_context.py", previous, target,
+        "--frames", String(Number(params.motionContextLength) || 22),
+        "--alpha", String(params.motionContextNoiseAlpha ?? (noise ? 0.45 : 0)),
+        "--alpha-end", String(params.motionContextNoiseAlphaEnd ?? (noise ? 0.1 : 0)),
+        "--ramp", String(params.motionContextNoiseRampFrames ?? (noise ? 3 : 0)),
+    ]);
     return { input: { ...input, previousVideo: target }, cleanup: async () => { try { await rm(target, { force: true }); } catch {} } };
 }
 
@@ -307,6 +317,16 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
             source["136"] = { class_type: "MiniMaxH3AudioConditioningT8", inputs: { clip: ["128", 0], video_vae: ["119", 0], audio_vae: ["120", 0], prompt: ["138", 0], width: ["115", 0], height: ["115", 1], length: ["131", 1], task_type: "Ref2VA", audio_mode: String(params.audioMode || "native"), audio_denoise_strength: Number(params.audioDenoiseStrength ?? 1), add_source_as_reference: params.addSourceAsReference === true, prompt_primary_audio_ordinal: Number(params.promptPrimaryAudioOrdinal || 0), strict_prompt_tags: params.strictPromptTags !== false, ref_image_size: String(params.refImageSize || "match"), reference_video_policy: String(params.referenceVideoPolicy || "official_2_to_15s") }, _meta: { title: "MiniMax H3 Video Edit (Ref2VA/T8)" } };
         } else if (source["136"]?.inputs && taskMode === "r2v") {
             source["136"] = { class_type: "JZL_MiniMaxH3ReferenceToVideo2", inputs: { clip: ["128", 0], vae: ["119", 0], audio_vae: ["120", 0], prompt: ["138", 0], width: ["115", 0], height: ["115", 1], length: ["131", 1], ref_image_size: String(params.refImageSize || "match"), ref_scale: 1 }, _meta: { title: "MiniMax H3 Reference to Video" } };
+        }
+        // 把用户输入的 prompt 注入 H3 文本节点（136 的 prompt 输入引用的节点，默认 138）。
+        // 之前只改了 canvas-agent 的 buildWorkflow（MCP 路径），backend 这条 UI 路径漏了，导致 UI 运行取不到提示词。
+        if (promptText && Array.isArray(source["136"]?.inputs?.prompt)) {
+            const textNodeId = source["136"].inputs.prompt[0];
+            const textNode = source[textNodeId];
+            if (textNode?.inputs) {
+                if ("value" in textNode.inputs) textNode.inputs.value = promptText;
+                else textNode.inputs.text = promptText;
+            }
         }
         if (typeof params.loraName === "string" && params.loraName.trim() && source["9071"] && source["136"]?.inputs) source["136"].inputs.clip = ["9071", 1];
     }

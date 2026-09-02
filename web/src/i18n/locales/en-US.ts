@@ -436,6 +436,12 @@ export default {
             refresh: "Refresh usage",
             readFailed: "Failed to read local storage",
             stores: { appState: "App state", images: "Image files", media: "Audio and video files", imageLogs: "Image history", videoLogs: "Video history", agentMessages: "Agent messages", promptCache: "Prompt cache" },
+            dataDir: "Data directory",
+            dataDirDescription: "Set where Backend stores its data (database, media files). Restart Backend after saving.",
+            dataDirPlaceholder: "Leave empty for default",
+            dataDirHint: "Restart Backend after saving; back up data before changing paths",
+            dataDirSaved: "Data directory saved. Restart Backend to apply.",
+            dataDirSaveFailed: "Failed to save data directory",
         },
         promptSources: {
             add: "Add source",

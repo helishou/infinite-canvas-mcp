@@ -177,6 +177,7 @@ export type GenerateTextOptions = {
     signal?: AbortSignal;
     model?: string;
     system?: string; // 附加系统提示词(拼在宿主系统提示之后)
+    references?: Array<{ url: string; name?: string }>;
     onDelta?: (text: string) => void; // 流式增量回调
 };
 

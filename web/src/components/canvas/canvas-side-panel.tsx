@@ -469,18 +469,34 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
 
 function CompositeCover({ asset }: { asset: Extract<Asset, { kind: "composite" }> }) {
     const { t } = useTranslation();
-    const [cover, setCover] = useState("");
+    const assets = useAssetStore((state) => state.assets);
+    const [covers, setCovers] = useState<string[]>([]);
     useEffect(() => {
         let cancelled = false;
-        const firstImage = asset.data.items.find((item) => item.itemType === "image" && item.storageKey);
-        if (!firstImage) return;
-        const imageItem = firstImage as Extract<(typeof asset.data.items)[number], { itemType: "image" }>;
-        if (imageItem.url) { setCover(imageItem.url); return; }
-        resolveImageUrl(imageItem.storageKey).then((url) => { if (!cancelled && url) setCover(url); });
+        const urls: string[] = [];
+        const storageKeys: string[] = [];
+        const addUrl = (url?: string) => { if (url && !urls.includes(url)) urls.push(url); };
+        const addStorageKey = (key?: string) => { if (key && !storageKeys.includes(key)) storageKeys.push(key); };
+        addUrl(asset.coverUrl);
+        for (const item of asset.data.items) {
+            if (item.itemType === "image") {
+                addUrl(item.url);
+                addStorageKey(item.storageKey);
+            } else if (item.itemType === "assetRef") {
+                const referenced = assets.find((candidate) => candidate.id === item.refId);
+                if (referenced?.kind === "image") {
+                    addUrl(referenced.data.dataUrl);
+                    addStorageKey(referenced.data.storageKey);
+                }
+            }
+        }
+        Promise.all(storageKeys.map((key) => resolveImageUrl(key))).then((resolved) => {
+            if (!cancelled) setCovers([...urls, ...resolved.filter((url): url is string => Boolean(url) && !urls.includes(url))]);
+        }).catch(() => { if (!cancelled) setCovers(urls); });
         return () => { cancelled = true; };
-    }, [asset.id, asset.data]);
+    }, [asset.id, asset.coverUrl, asset.data.items, assets]);
     const count = asset.data.items.length;
-    if (cover) return <img src={cover} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+    if (covers.length) return <img src={covers[0]} alt="" onError={() => setCovers((current) => current.slice(1))} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     return (
         <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
             <div className="text-[11px] font-medium text-stone-500 dark:text-stone-400">{t("assets.kinds.composite")}</div>

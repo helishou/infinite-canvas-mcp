@@ -4,8 +4,11 @@ import i18n from "@/i18n";
 
 import { NODE_SPECS } from "@/constant/canvas";
 import { registerNodeDefinitions } from "@/lib/canvas/node-registry";
+import { getPluginRuntime } from "@/lib/canvas/plugin-runtime";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasNodeDefinition, CanvasNodeResource } from "@/types/canvas-plugin";
+import { h3SystemDefinition } from "../../../../../plugins/canvas/minimax-h3/src/system";
+import "../../../../../plugins/canvas/minimax-h3/src/styles/h3.css";
 
 // Extensible metadata for built-in nodes, reusing NODE_SPECS for size and initial metadata.
 // Rendering remains in canvas-node's internal renderer, so no Content component is provided.
@@ -26,14 +29,18 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
     { type: CanvasNodeType.Audio, title: i18n.t("assets.kinds.audio"), icon: <Music2 className={iconClass} />, minimapColor: "#a855f7", resource: builtinResource },
     { type: CanvasNodeType.Config, title: i18n.t("canvas.configNode.title"), icon: <Settings2 className={iconClass} />, minimapColor: "#60a5fa", hasSourceHandle: false },
     { type: CanvasNodeType.Group, title: i18n.t("canvas.node.group"), icon: <Group className={iconClass} />, minimapColor: "#94a3b8" },
+    h3SystemDefinition,
 ].map((def) => {
     const spec = NODE_SPECS[def.type];
-    return { ...def, title: spec.title, defaultSize: { width: spec.width, height: spec.height }, defaultMetadata: spec.metadata };
+    return spec ? { ...def, title: spec.title, defaultSize: { width: spec.width, height: spec.height }, defaultMetadata: spec.metadata } : def;
 });
 
 let registered = false;
 export function registerBuiltinNodes() {
     if (registered) return;
     registered = true;
+    // H3 still imports the SDK's React hook bridge. Initialize the host runtime
+    // before React renders the system node, just as the plugin loader does.
+    getPluginRuntime();
     registerNodeDefinitions(BUILTIN_DEFINITIONS, "builtin");
 }

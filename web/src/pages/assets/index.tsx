@@ -4,6 +4,7 @@ import { App, Button, Card, Drawer, Dropdown, Empty, Form, Image, Input, Modal, 
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
+import { nanoid } from "nanoid";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
@@ -310,9 +311,22 @@ export default function AssetsPage() {
         if (!file) return;
         try {
             const importedAssets = await readAssetPackage(file);
+            // 重新分配 id 并维护 旧→新 映射，修复复合资产内 assetRef 的跨资产引用（否则导入后子项 refId 悬空、图片显示不出来）
+            const idMap = new Map<string, string>();
+            importedAssets.forEach((asset) => idMap.set(asset.id, nanoid()));
             importedAssets.forEach((asset) => {
-                const payload = { ...asset } as Record<string, unknown>;
-                delete payload.id;
+                let data = asset.data;
+                if (asset.kind === "composite") {
+                    data = {
+                        ...asset.data,
+                        items: asset.data.items.map((item) =>
+                            item.itemType === "assetRef" && idMap.has(item.refId)
+                                ? { ...item, refId: idMap.get(item.refId)! }
+                                : item,
+                        ),
+                    };
+                }
+                const payload = { ...asset, id: idMap.get(asset.id), data } as Record<string, unknown>;
                 delete payload.createdAt;
                 delete payload.updatedAt;
                 addAsset(payload as Parameters<typeof addAsset>[0]);
@@ -714,6 +728,7 @@ export default function AssetsPage() {
 
 function useResolvedCoverUrl(asset: Asset | null) {
     const [url, setUrl] = useState("");
+    const assets = useAssetStore((state) => state.assets);
     useEffect(() => {
         setUrl(asset?.coverUrl || "");
         if (!asset || asset.coverUrl) return;
@@ -723,8 +738,15 @@ function useResolvedCoverUrl(asset: Asset | null) {
             if (asset.data.storageKey) lookups.push(resolveImageUrl(asset.data.storageKey));
         } else if (asset.kind === "composite") {
             for (const item of asset.data.items) {
-                if (item.itemType === "image" && item.storageKey) lookups.push(resolveImageUrl(item.storageKey));
                 if (lookups.length >= 4) break;
+                if (item.itemType === "image" && item.storageKey) {
+                    lookups.push(resolveImageUrl(item.storageKey));
+                } else if (item.itemType === "assetRef") {
+                    const ref = assets.find((a) => a.id === item.refId);
+                    if (!ref || ref.kind === "composite" || ref.kind === "text") continue;
+                    const storageKey = (ref as ImageAsset | VideoAsset | AudioAsset).data.storageKey;
+                    if (storageKey) lookups.push(ref.kind === "image" ? resolveImageUrl(storageKey) : resolveMediaUrl(storageKey));
+                }
             }
         }
         if (!lookups.length) return;
@@ -734,7 +756,7 @@ function useResolvedCoverUrl(asset: Asset | null) {
             if (!cancelled && first) setUrl(first);
         });
         return () => { cancelled = true; };
-    }, [asset?.id, asset?.kind, asset?.coverUrl]);
+    }, [asset?.id, asset?.kind, asset?.coverUrl, assets]);
     return url;
 }
 

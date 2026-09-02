@@ -313,6 +313,25 @@ export const CanvasNode = React.memo(function CanvasNode({
             }}
             onMouseDownCapture={(event) => {
                 if (!referenceSelectionState) onSelectCapture?.(event, data.id);
+                if (!referenceSelectionState) {
+                    // H3 节点内容几乎全是交互控件，且其根 div 在冒泡阶段 stopPropagation 挡掉了普通的
+                    // body 拖拽路径，只能走这里。若沿用全量黑名单（button/input/textarea/select/video），
+                    // 节点上几乎任何可见区域都命中被排除，导致“拖不动”。故对 H3 仅屏蔽纯文本编辑控件，
+                    // 其余区域（视频预览、按钮、轨道空白等）均可拖动节点。
+                    const target = event.target as HTMLElement;
+                    const interactive = data.type === "minimax-h3:video"
+                        ? target.closest("input, textarea, select")
+                        : target.closest("button, input, textarea, select, video");
+                    // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
+                    // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
+                    // onMouseDown（冒泡阶段）无法执行，缩放被拖拽彻底劫持。故需显式排除缩放手柄。
+                    const onResizeHandle = target.closest("[data-resize-handle]");
+                    // 连线手柄（ConnectionHandleDot）与缩放手柄同理：纯 div 会命中拖拽分支，
+                    // capture 阶段触发 handleNodeMouseDown 的 stopPropagation 会掐断其自身
+                    // onMouseDown（onConnectStart，冒泡阶段），导致无法连线、反而变成拖拽。需显式排除。
+                    const onConnectionHandle = target.closest("[data-connection-handle]");
+                    if (!interactive && !onResizeHandle && !onConnectionHandle) onMouseDown(event, data.id);
+                }
             }}
             onContextMenu={(event) => {
                 if (referenceSelectionState) event.preventDefault();
@@ -952,7 +971,7 @@ function ResizeHandle({ corner, onMouseDown }: { corner: ResizeCorner; onMouseDo
         "bottom-right": "-bottom-[14px] -right-[14px] cursor-nwse-resize",
     }[corner];
 
-    return <div className={`absolute z-50 size-7 ${positionClass}`} onMouseDown={(event) => onMouseDown(event, corner)} />;
+    return <div data-resize-handle className={`absolute z-50 size-7 ${positionClass}`} onMouseDown={(event) => onMouseDown(event, corner)} />;
 }
 
 function ConnectionHandleDot({ side, visible, onMouseDown }: { side: "left" | "right"; visible: boolean; onMouseDown: (event: React.MouseEvent) => void }) {
@@ -960,6 +979,7 @@ function ConnectionHandleDot({ side, visible, onMouseDown }: { side: "left" | "r
 
     return (
         <div
+            data-connection-handle
             className={`absolute top-1/2 z-30 flex size-12 -translate-y-1/2 cursor-crosshair items-center justify-center transition-opacity duration-150 ${
                 side === "left" ? "-left-6" : "-right-6"
             } ${visible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"}`}

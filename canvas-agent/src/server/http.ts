@@ -114,7 +114,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     const app = express();
     const agentRoute = (routePath: string) => options.listen === false ? routePath : `/agent${routePath}`;
     app.disable("x-powered-by");
-    app.use(express.json({ limit: "30mb" }));
+    app.use(express.json({ limit: "100mb" }));
     app.use((req, res, next) => {
         if (!logger.enabled) return next();
         const startedAt = Date.now();
@@ -128,7 +128,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     if (options.listen !== false) app.use((req, res, next) => {
         const url = requestUrl(req, config);
         if (!setCors(req, res, url, config)) return void res.status(403).json({ ok: false, error: "origin not allowed" });
-        if (req.method === "OPTIONS") return void res.json({});
+        // OPTIONS 预检请求直接返回，不进入后续 middleware（auth 等会拦截）。
+        if (req.method === "OPTIONS") { res.status(204).end(); return; }
         next();
     });
     app.get("/health", (_req, res) => res.json(session.health()));

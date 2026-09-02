@@ -436,6 +436,12 @@ export default {
             refresh: "刷新统计",
             readFailed: "读取本地存储失败",
             stores: { appState: "应用状态", images: "图片文件", media: "音视频文件", imageLogs: "生图记录", videoLogs: "视频记录", agentMessages: "Agent 消息", promptCache: "提示词缓存" },
+            dataDir: "数据目录",
+            dataDirDescription: "设置 Backend 数据（数据库、媒体文件）的存储位置。修改后重启 Backend 生效。",
+            dataDirPlaceholder: "留空使用默认路径",
+            dataDirHint: "保存后需重启 Backend 服务，修改前请确认旧目录数据已备份",
+            dataDirSaved: "数据目录已保存，重启 Backend 后生效",
+            dataDirSaveFailed: "保存数据目录失败",
         },
         promptSources: {
             add: "新增来源",

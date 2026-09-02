@@ -7,6 +7,62 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
++ H3 当前 Clip 子面板：验证 Prompt 快捷标签、参考素材计数、Engine、Duration、MP、比例、Clip settings 和 Generate clip 仍保持原有布局及写回行为。
++ H3 素材库模块：验证 Assets/Output 列表、媒体卡片、删除和产物参数恢复仍正常。
++ H3 运行结果工具拆分：验证源视频自动分段、当前/后续 Clip 运行、Clip 顺序和 Output 素材收集保持一致。
++ H3 运行错误归属：快速切换 Clip 后制造生成失败，确认错误状态只回写执行时的当前/后续 Clip 集合。
++ H3 工作台工具栏拆分：验证模型选择、智能分镜入口、Clip 新增、下载、播放和参数入口行为保持一致。
++ H3 智能分镜字段拆分：验证模式、Skill、创意、参考图片槽位、删除/替换、段数及时长仍能正确写回。
++ 画布侧边栏复合资产封面：验证直接图片、`assetRef` 图片、仅 `dataUrl` 图片以及后端 `storageKey` 图片均能显示缩略图。
++ 画布侧边栏复合资产失效回退：让首选 `coverUrl` 返回图片加载失败，确认会自动尝试复合资产内的下一张图片。
++ 智能分镜图片排序：在弹窗内拖动图片到其他槽位，确认只改变 `@图片N` 顺序；拖到画布区域不应创建图片节点。
++ H3 参考素材写回一致性：在时间线、Clip 卡片和当前 Clip 面板分别添加/移除图片、视频、音频，确认 `refItems` 与三个类型分桶始终同步。
++ H3 事件订阅稳定性：连续切换 Clip、修改 Prompt 或更新进度时，单段/全部运行事件不应重复触发，监听应持续使用最新节点状态。
++ H3 同步运行事件：验证单段和全部 Clip 按钮在打开面板后仍能立即触发生成，且不会因移除 `setTimeout` 出现漏触发或重复触发。
+- H3 运行事件 hook：验证工具栏运行、当前 Clip 运行和全部 Clip 运行三种触发方式仍能正确进入同一个生成器，重复请求去重和 metadata 回写保持正常。
+
+- H3 入口定义统一：验证生产插件入口和 Vite 开发入口创建的节点类型、默认 Clip、资源解析和清空工具栏完全一致。
+
+- H3 死代码清理：确认当前 Prompt 编辑、Clip settings、时间线和智能分镜入口均来自现有组件，删除旧 PromptEditor 后不影响节点加载。
+
+- H3 运行器无 UI 挂载：确认节点加载时不再生成隐藏参数面板 DOM，内联 Clip settings 的单段运行、全部运行、任务轮询和失败重试仍正常。
+
+- H3 参数状态 hook：验证切换 Clip 后 Prompt、时长、模型、Motion Context、随机种子和自动分段设置仍能跟随当前节点 metadata 正确同步。
+
+- H3 时间线模块拆分：验证 Clip2/Clip3 播放头定位、Clip 排序、Refs 泳道拖入/移除和新增分段行为保持一致。
+
+- H3 参数面板模块拆分：验证隐藏运行器、参数面板、智能分镜入口、Clip 运行和任务状态回写仍正常，工作台主文件只负责画布 UI 编排。
+
+- H3 共享 UI 构建修复：确认 Vite 不再报告 `h3-ui.ts` 的 JSX 解析错误，H3 节点和参数控件可正常加载。
+
+- H3 命令式浏览器 API 清理：验证工作台与 Output 下载仍能正常保存文件，H3 插件源码不再出现 `document.createElement`、`querySelector`、`addEventListener` 等直接 DOM 操作。
+
+- H3 React 事件收敛：验证顶部播放按钮、时间线播放按钮、提示词按钮和参考素材交互仍能正常工作；工作台不再依赖 DOM 事件绑定器。
+
+- H3 参考素材服务拆分：验证上游图片/视频/音频、角色资产和旧版 `h3Refs` 均能正常进入素材区，拖拽参考图后仍能写入当前 Clip。
+
+- H3 Clip 工具服务拆分：验证 Output 参数恢复、源视频分段和当前 Clip 元数据更新行为保持一致。
+
+- H3 通用 UI 工具：验证工作台和参数面板按钮主题颜色、选中态及交互反馈一致。
+
+- H3 共享 UI 工具：验证工作台和高级参数按钮主题颜色、选中态及交互反馈一致。
+
+- H3 智能分镜弹窗拆分：验证模式、Skill、创意、参考图槽位、段数及时长仍能正常保存和生成。
+
+- H3 素材卡片拆分：验证 Assets、Output、当前 Refs 的图片/视频/音频显示、删除、拖拽和 Output 参数恢复仍正常。
+
+- H3 Clip 卡片拆分：验证 Clip 排序、参考素材拖入、Motion Context 切换、选中和删除仍正常。
+
+- H3 当前 Clip 面板拆分：验证 Prompt 编辑、提示词快捷标签、Refs 删除、Engine、时长、MP、比例和生成按钮仍正常。
+
+- H3 React 状态收敛：验证移除 DOM 反查和按钮 DOM 改写后，Prompt、生成按钮状态、Clip 播放与生成流程仍正常。
+
+- H3 Clip 分段预览：验证点击 Clip2/Clip3 后视频从各自 0 秒开始播放，时间线播放头仍定位在对应分段起点，播放过程中全局时间同步正确。
+
+- H3 工作台模块拆分：验证抽离后的智能分镜、图标和 Clip 数据工具仍保持节点渲染、素材操作、生成事件与参数恢复行为一致。
+
+- H3 智能分镜前端链路：验证参考图片逐图分析、Ref2VA/I2VA/T2VA/FL2VA 模式校验、常规/NS Skill、段号严格解析及完整提示词写入 Clips。
+
 - Backend 单进程运行时：仅启动 `ic-backend` 后，`/agent/*`、ComfyUI、RunningHub、FFmpeg、任务 SSE 和 `ic-backend mcp` 均可用；standalone `canvas-agent` 只作为兼容代理，不创建第二份 runtime SQLite。
 
 - Backend 资产 SSE：通过资产新增、修改、删除、文件夹变更和批量替换接口时，`GET /events` 应收到带 `asset.updated`、实体 id（适用时）和最新 payload 的事件；断线重连后仍应以 REST 快照校正最终状态。

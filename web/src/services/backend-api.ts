@@ -197,6 +197,18 @@ export function deleteBackendGenerationLogs(options: { id?: string; projectId?: 
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/generation-logs${qs ? `?${qs}` : ""}`);
 }
 
+// ── Data dir ───────────────────────────────────────────────────────────
+
+export async function fetchDataDir(): Promise<{ dataDir: string; configuredDataDir: string | null }> {
+    const data = await request<{ ok: boolean; dataDir: string; configuredDataDir: string | null }>("GET", "/data-dir");
+    return { dataDir: data.dataDir, configuredDataDir: data.configuredDataDir };
+}
+
+export async function saveDataDir(dataDir: string): Promise<{ dataDir: string; configuredDataDir: string | null }> {
+    const data = await request<{ ok: boolean; dataDir: string; configuredDataDir: string | null }>("POST", "/data-dir", { dataDir });
+    return { dataDir: data.dataDir, configuredDataDir: data.configuredDataDir };
+}
+
 // ── Tasks ────────────────────────────────────────────────────────────────
 
 export function fetchBackendTask(id: string) {

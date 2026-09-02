@@ -2,6 +2,54 @@
 
 ## Unreleased
 
++ [修复] H3 串 clip 的 previousVideo 不再把已在后端的视频 base64 下载后重新上传（根因 413）：`POST /runtime/media` 支持以 storageKey 复用已有媒体，前端对已落库媒体走复用路径，避免请求体暴涨。
++ [优化] H3 当前 Clip 面板继续拆分为 `H3PromptSection` 与 `H3ClipSettingsPanel`，Prompt 快捷标签和生成参数区域不再压缩在单个超长 JSX 组件中。
++ [修复] H3 运行器拆分后补齐自动分段的默认每段时长与最大段数，避免启用源视频自动分段时引用未定义变量。
++ [优化] H3 Assets/Output 资源库抽离为 `H3MaterialLibrary`，工作台入口不再混合素材列表、删除与产物恢复逻辑。
++ [优化] H3 运行器将自动分段结果映射、生成素材收集和 Clip 合并抽离到 `h3-runner-utils`，生成组件只保留任务流程与状态回写。
++ [优化] H3 工作台顶部模型选择、智能分镜、Clip 新增、下载和参数入口抽离为 `H3WorkbenchToolbar`，主组件进一步收敛为布局编排。
++ [优化] H3 智能分镜表单字段抽离为 `SmartStoryboardFields`，弹窗组件只负责上传生命周期、提交和关闭控制。
++ [优化] 清理工作台拆分后残留的旧拖拽、清空和图标导入，避免入口组件保留无效依赖。
++ [修复] H3 运行失败时按执行瞬间读取的当前 Clip 标记错误，避免界面快速切换 Clip 后把错误状态写到旧 Clip。
++ [修复] 画布侧边栏复合资产封面只识别带 `storageKey` 的直接图片，现支持 `assetRef` 图片、`dataUrl` 图片和复合资产自身 `coverUrl`，恢复复合资产缩略图显示。
++ [修复] 复合资产旧封面 URL 失效时不再停留在破图状态，侧边栏会按候选顺序回退到子图片和后端 `storageKey` 媒体。
++ [修复] 智能分镜参考图拖拽改用专用槽位排序协议，拖动图片只交换槽位顺序，画布全局文件拖放入口会忽略该拖拽，不再误创建图片节点。
++ [优化] H3 参考素材分桶写回统一使用 `segmentRefsPatch`/`withSegmentRefs`，时间线、Clip 卡片和当前 Clip 面板共享同一份数据转换逻辑。
++ [优化] H3 运行事件采用稳定订阅并通过 ref 读取最新生成函数，避免节点 metadata 更新时反复重绑事件监听。
++ [修复] H3 运行按钮不再通过 `setTimeout` 延迟派发事件，改为由已挂载的 React 运行器同步接收当前 Clip/全部 Clip 请求，减少无意义的异步时序依赖。
++ [优化] H3 运行事件监听抽离到 `useH3RunEvents`，生成器仅负责提交与回写，工具栏/Clip settings 的触发协议独立维护。
++ [优化] H3 插件入口与开发入口共用 `node-definition.ts`，统一节点默认参数、尺寸、资源解析和工具栏配置，避免双份定义漂移。
++ [优化] 清理 H3 重构后无引用的旧 `PromptEditor` 组件，避免保留与当前内联 Prompt 编辑器重复的死代码。
++ [优化] 移除 H3 隐藏参数面板的重复 JSX，将运行事件监听器收敛为不渲染 DOM 的 `H3Runner`；节点实际参数继续由内联 Clip settings 提供。
++ [优化] H3 参数面板的本地表单状态与节点 metadata 同步逻辑抽离到 `useH3PanelState`，降低面板组件中的状态初始化和同步副作用。
++ [优化] H3 时间线与 Refs 泳道抽离为 `H3Timeline.tsx`，Clip 排布、播放头定位、参考素材拖入和分段新增不再堆在工作台入口。
++ [优化] H3 参数面板与隐藏运行器独立为 `H3Panel.tsx`，`H3Workbench.tsx` 进一步收敛为画布工作台编排组件。
++ [修复] H3 共享 UI 文件包含 JSX 却使用 `.ts` 扩展名导致 Vite esbuild 解析失败，改为 `.tsx` 后恢复插件加载。
++ [优化] H3 任务轮询与生成日志收尾抽离到独立 hook/service，工作台不再混合异步任务生命周期；下载操作改用项目现有 `file-saver`，移除插件内直接创建 `<a>` 元素的 DOM 调用。
++ [优化] H3 当前 Clip 面板抽离为 `H3CurrentClipPanel`，Refs、Prompt 和 Clip settings 不再与工作台时间线布局混合。
++ [优化] H3 单段 Clip 时间线卡片抽离为 `H3ClipCard`，排序、拖入参考素材、Motion Context、选中和删除逻辑独立维护。
++ [优化] H3 素材与 Output 卡片抽离为 `H3MaterialCard`，媒体预览、拖拽、删除及结果恢复操作不再内嵌在工作台主组件中。
++ [优化] H3 智能分镜表单抽离为 `SmartStoryboardModal`，图片槽位、模式选择和生成动作不再与工作台布局耦合。
++ [优化] H3 按钮样式收敛到共享 `components/h3-ui.ts`，避免工作台与高级设置组件重复定义交互样式。
++ [优化] H3 通用 Toggle 与按钮样式收敛到 `components/h3-ui.ts`，避免工作台和面板重复定义交互样式。
++ [优化] H3 Clip 元数据补丁、产物参数恢复和源视频切段逻辑抽离到 `services/h3-segment-utils.ts`，进一步缩小工作台主组件职责。
++ [优化] H3 参考素材读取与拖拽载荷解析抽离到 `services/h3-refs.ts`，工作台继续收敛为 React UI 编排层。
++ [修复] H3 Motion Context 截尾帧逻辑被错误绑死在「递进增噪」(motionContextNoise) 开关上：只开 Motion Context 不开增噪时，整段 previousVideo 直接喂给 9108 `MiniMaxH3MotionContext` 节点，未先截取前一段尾帧，导致下一段开头混入前段前面的帧。现改为只要 Motion Context 开启就先调 `workers/motion_context.py` 截取前一段最后 ~22 帧（新增 `--frames` 参数，取 motionContextLength 或默认 22）作为 context，递进增噪仅控制噪声强度（不开则纯截尾帧无噪），对齐旧画布 `E:\无限画布\Infinite-Canvas\main.py` 的 `build_minimax_motion_context` 行为。改 `backend/src/comfyui/bridge.ts` 的 `prepareH3MotionContext`，重启 backend 生效。
++ [优化] H3 工作台移除 `H3TransportBinder`、提示词绑定器和参考图绑定器，播放、提示词和素材交互统一回到 React 事件处理；不再通过 `querySelector/addEventListener` 扫描工作台 DOM。
++ [优化] H3 工作台移除生成流程中的 textarea DOM 反查、按钮状态 DOM 改写和视频 poster DOM 补丁，改为使用 metadata 与 React 渲染状态。
++ [修复] H3 预览播放 Clip2/Clip3 时将整条时间线的全局秒数误传给单段视频，现区分时间线时间与 Clip 内部播放时间，切换分段后从该 Clip 的 0 秒开始并正确回写全局进度。
++ [优化] H3 工作台抽离智能分镜服务、H3 图标组件和通用数据处理函数，降低 `H3Workbench.tsx` 的职责与体积，保持现有节点和生成事件兼容。
++ [新增] H3 智能分镜前端链路复刻南风的逐图看图、Skill 注入、模式契约和严格分镜解析，生成结果保留完整官方提示词与视觉分析信息。
++ [修复] H3 节点（type=`minimax-h3:video`）在画布上几乎无法拖动：其拖动完全依赖 `canvas-node.tsx` 的 `onMouseDownCapture` 分支（H3 根 div 在冒泡阶段 `stopPropagation` 挡掉了普通 body 拖拽路径），而该分支对 H3 施加了 `closest("button, input, textarea, select, video")` 全量黑名单；H3 节点内容几乎全是视频/输入框/下拉/按钮，导致任意可见区域按下都命中被排除、拖动完全不启动。现对 H3 节点将黑名单收窄为仅 `input, textarea, select`（纯文本编辑控件），视频预览、按钮、轨道空白等区域均可拖动节点，其余节点类型保持原黑名单不变。web 端改动经 Vite HMR 即时生效。
++ [修复] 紧随上一条 H3 拖动修复引入的回归：四角 `ResizeHandle` 是纯 `div`，会命中拖动分支；而在 `onMouseDownCapture` 捕获阶段触发 `handleNodeMouseDown` 后其 `event.stopPropagation()` 会掐断事件，使 `ResizeHandle` 自身的 `onMouseDown`（冒泡阶段）无法执行，导致节点缩放被拖拽劫持、缩放能力失效。现给 `ResizeHandle` 加 `data-resize-handle` 标记，并在捕获分支显式排除命中缩放手柄的 mousedown，使缩放恢复正常（该修复同时修正了所有节点类型的同类潜在劫持）。
++ [修复] 同上回归链路的延伸：连线手柄 `ConnectionHandleDot`（canvas-node.tsx:973，节点左右两侧的连线圆点）同样是纯 `div`，也会命中 `onMouseDownCapture` 的拖拽分支；捕获阶段触发 `handleNodeMouseDown` 的 `stopPropagation` 会掐断其自身冒泡阶段的 `onConnectStart`，导致"无法连线、长按变成拖拽"。现给 `ConnectionHandleDot` 加 `data-connection-handle` 标记，并在捕获分支显式排除命中连线手柄的 mousedown，使从连线手柄拉线恢复正常。
++ [修复] 导入复合资产（kind=composite）后图片显示不出来：根因是 `use-asset-store` 的 `addAsset` 一律 `nanoid()` 重新生成 id，丢弃导入资产的原始 id；而导出的复合资产子项以 `assetRef + refId` 形式存储（指向子资产的原始 id），导入后子资产 id 变更导致 `refId` 悬空，`resolveAssetRefItem` 返回 null、图片被过滤。现改为：`addAsset` 支持外部传入 `id`（默认仍自动生成，向后兼容）；`importAssetZip` 在导入时为每个资产分配新 id 并维护「旧→新」映射，对复合资产的 `assetRef.refId` 一并改写，保证跨资产引用在导入后仍然有效。另 `useResolvedCoverUrl` 现在也会解析复合资产内的 `assetRef` 子项（取被引用资产的 image/video/audio storageKey），使资产库卡片封面能显示复合资产的缩略图。
++ [修复] 后端 `/media/:storageKey` 与 `/runtime/media-file` 只读媒体端点豁免全局 token 鉴权：媒体 URL 内嵌的 token 在 backend 重启后会轮换失效，导致历史产物刷新后请求 401、视频/图片“消失”；本地单用户开发 backend 的 CORS 已 `*`，对只读媒体免 token 即可避免该问题（写入类端点仍受保护）。
++ [修复] H3 节点 Output 区"设为当前 Clip"（点击按钮与拖拽到 clip 两种路径）此前只把结果视频 URL 灌入当前 clip，不还原生成该产物所用的 prompt 与参数。现新增 `buildRestoreParamsPatch`：按产物 URL 反查源 segment（run() 落库时已保留其完整 prompt/参数），将 prompt、taskMode、duration、megapixels、videoSteps、denoise、seed、modelName、lora、teAccel、音频与 motion context 等全部生成参数一并还原，并同步 `resultStorageKey`；旧产物亦可还原，无需重跑。预构建插件产物 `web/public/plugins/minimax-h3.js` 已重建（不含 refs/参考素材，避免覆盖当前 clip 的参考输入）。
++ [修复] H3 节点"运行 H3"按钮增加 1.2s 点击防抖，避免一次点击因事件冒泡触发多次 `run()` 导致重复调用与报错刷屏；预构建插件产物 `web/public/plugins/minimax-h3.js` 已重建。
++ [修复] 前端 `comfyui.ts` 对后端返回媒体 url 直接 `new URL()` 在本地模式（相对路径/Windows 风格路径）下抛 "Failed to construct 'URL'" 的问题，改为容错代理 `proxyComfyMedia`；并修正代理目标：`/media/:storageKey` 走总后台 `/media`（开发模式经 Vite 代理同源），`runtime-file:` 走总后台 `/runtime/media-file`，只有 ComfyUI 直链才走 `/agent/comfy/media`，避免视频 URL 落到 `/agent/media/...` 导致 404 黑屏。
++ [修复] 后端 `comfyui/bridge.ts` 的 `buildWorkflow` H3 分支此前未把用户输入的 prompt 注入工作流文本节点（节点 138），导致通过插件 UI 点"运行 H3"时始终渲染工作流写死的默认 prompt；新增按 136 节点的 prompt 引用动态写入文本节点 value（兼容 value/text），与 canvas-agent 路径对齐。
++ [修复] 把资产图片拖到 H3 节点区域（非 refs 泳道）会冒泡到画布层误生成“图片节点”。根因：H3 根元素的 `onDropCapture`（capture 阶段）只在落点为 refs 泳道时才加 ref 并 `stopImmediatePropagation`，落在节点其他区域时不拦事件，drop 冒泡到画布 `handleDrop` 后生成图片节点。现于 `onDropCapture` 末尾增加兜底：凡是落在 H3 节点区域内、携带资产引用（`application/x-infinite-canvas-ref`）或文件（`Files`）的未处理 drop，一律 `preventDefault + stopImmediatePropagation` 吞掉；refs 泳道加 ref、时间轴 clip 接收 Output 等原有逻辑不变。预构建插件产物 `web/public/plugins/minimax-h3.js` 已重建。
 + [修复] 修复生图结果图开发模式下的 CORS 跨域问题：为 Vite 增加 `/media` 代理（同源转发到总后台 17370），并让 `backendMediaUrl` 在 dev 本地模式返回同源相对路径，媒体请求不再直连 127.0.0.1:17370，彻底绕开跨域 CORS；生产/远程 backend 仍走绝对 URL（依赖总后台 CORS 白名单）。
 + [修复] 重建 canvas-agent dist 并修复 `plugin-mcp.ts` 两处类型错误（缺失 `backend` 字段、`PluginMcpBackend` 缺 `replacePluginDeclarations`），使 `npm run build` 通过、Backend 可正常导入 `@basketikun/canvas-agent/runtime/agent-runtime` 启动。
 + [修复] 生图工作台结果图片改用后端媒体绝对 URL（带当前 token）显示/下载/再上传，修复开发模式下相对路径请求到 Vite 服务导致裂图的问题。

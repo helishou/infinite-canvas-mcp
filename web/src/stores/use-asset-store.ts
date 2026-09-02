@@ -42,7 +42,7 @@ type AssetStore = {
     hydrated: boolean;
     assets: Asset[];
     folders: AssetFolder[];
-    addAsset: (asset: Omit<Asset, "id" | "createdAt" | "updatedAt">) => string;
+    addAsset: (asset: Omit<Asset, "id" | "createdAt" | "updatedAt"> & { id?: string }) => string;
     updateAsset: (id: string, patch: Partial<Omit<Asset, "id" | "createdAt">>) => void;
     removeAsset: (id: string) => void;
     removeAssets: (ids: string[]) => void;
@@ -99,7 +99,7 @@ export const useAssetStore = create<AssetStore>()((set, get) => ({
             folders: [],
             addAsset: (asset) => {
                 const now = new Date().toISOString();
-                const id = nanoid();
+                const id = asset.id || nanoid();
                 set((state) => ({ assets: [{ ...asset, id, createdAt: now, updatedAt: now } as Asset, ...state.assets] }));
                 scheduleAssetSync();
                 return id;
