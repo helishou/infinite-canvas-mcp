@@ -19,8 +19,6 @@
   },
   "files": [
     "dist",
-    "workflows",
-    "workers",
     "agent-instructions.md",
     "README.md"
   ],

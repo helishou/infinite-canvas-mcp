@@ -177,7 +177,8 @@ async function prepareH3MotionContext(input: Record<string, unknown>, params: Re
 
 function runPythonWorker(args: string[]) {
     const python = process.env.PYTHON_PATH || "python";
-    const script = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../", args[0]);
+    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+    const script = path.join(packageRoot, args[0]);
     return new Promise<void>((resolve, reject) => {
         const child = spawn(python, [script, ...args.slice(1)], { stdio: ["ignore", "ignore", "pipe"] });
         let stderr = "";
@@ -224,7 +225,8 @@ function runProcess(command: string, args: string[]) {
 
 async function buildWorkflow(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, upload?: (file: string) => Promise<string>) {
     const { readFile } = await import("node:fs/promises");
-    const packagedRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../workflows");
+    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+    const packagedRoot = path.join(packageRoot, "workflows");
     const root = path.resolve(process.env.INFINITE_CANVAS_WORKFLOWS || packagedRoot);
     const files: Record<string, string> = { "z-image": "Z-Image.json", "flux2-klein": "Flux2-Klein.json", "flashvsr-1.1": path.join("custom", "视频修复FlashVSR1.1.json"), "minimax-h3": "MiniMax_H3.json" };
     const source = JSON.parse(await readFile(path.join(root, files[preset]), "utf8")) as Record<string, any>;
