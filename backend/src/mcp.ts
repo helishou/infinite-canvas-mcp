@@ -17,7 +17,7 @@ export async function startBackendMcpServer() {
     const config = loadConfig(true);
     const db = new BackendDatabase();
     const stores = createStores(db);
-    const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings });
+    const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings, media: stores.media });
     const directBackend: PluginMcpBackend = {
         listCanvasProjects: async () => db.listCanvasProjects(),
         replaceCanvasProjects: async (projects) => db.replaceCanvasProjects(projects),

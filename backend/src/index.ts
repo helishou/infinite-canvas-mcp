@@ -33,8 +33,8 @@ ensureDataDirs();
 
 const db = new BackendDatabase();
 const stores = createStores(db);
-const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings });
 const events = new BackendEventBus();
+const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings, media: stores.media, events });
 const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
 const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events);
 const videoConcat = new VideoConcatBackend(runtime.tasks, undefined, runtime.events);

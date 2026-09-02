@@ -1,18 +1,21 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { MEDIA_DIR } from "../config.js";
 import type { RuntimeTask } from "../db.js";
-import type { SettingStore, TaskPatch, TaskStore } from "../stores/types.js";
+import type { MediaStore, SettingStore, TaskPatch, TaskStore } from "../stores/types.js";
+import type { BackendEventBus } from "../events.js";
 import { splitVideo } from "./video-segment.js";
 
 /** ComfyUI Bridge 的总后台侧依赖：任务走 task store，URL 走 setting store。 */
 export type ComfyUiDeps = {
     tasks: TaskStore;
     settings: SettingStore;
+    media: MediaStore;
+    events?: BackendEventBus;
 };
 
 export type ComfyPreset = { id: string; name: string; kind: "image" | "video"; inputs: string[]; params: string[] };
@@ -83,18 +86,18 @@ export class ComfyUiBackend {
         return task;
     }
 
-    cancel(id: string) { this.controllers.get(id)?.abort(); return this.deps.tasks.update(id, { status: "cancelled", error: "任务已取消" } as TaskPatch); }
+    cancel(id: string) { this.controllers.get(id)?.abort(); return this.updateTask(id, { status: "cancelled", error: "任务已取消" }); }
 
     private async execute(task: RuntimeTask, preset: ComfyPreset, comfyUrl: string) {
         if (this.deps.tasks.get(task.id)?.status === "cancelled") return;
         const controller = new AbortController(); this.controllers.set(task.id, controller);
         try {
-            this.deps.tasks.update(task.id, { status: "running", progress: 0.05 });
+            this.updateTask(task.id, { status: "running", progress: 0.05 });
             this.deps.tasks.addEvent(task.id, "status", { status: "running" });
             const result = preset.id === "minimax-h3" && task.params.autoSplit === true && typeof task.input.video === "string"
                 ? await this.executeH3Segments(task, preset.id, task.input, task.params, comfyUrl, controller)
                 : await this.executeWorkflow(task, preset.id, task.input, task.params, comfyUrl, controller);
-            this.deps.tasks.update(task.id, { status: "succeeded", progress: 1, result });
+            this.updateTask(task.id, { status: "succeeded", progress: 1, result });
             this.deps.tasks.addEvent(task.id, "result", result);
         } finally { this.controllers.delete(task.id); }
     }
@@ -113,12 +116,15 @@ export class ComfyUiBackend {
                 const video = media.find((item) => String((item as Record<string, unknown>).mimeType || "").startsWith("video/")) as Record<string, unknown> | undefined;
                 if (video?.url) previousVideo = await materializeComfyMedia(String(video.url), comfyUrl, path.join(path.dirname(file), `result-${index + 1}.mp4`));
                 if (previousVideo) localResults.push(previousVideo);
-                this.deps.tasks.update(task.id, { progress: Math.min(0.95, (index + 1) / split.files.length) });
+                this.updateTask(task.id, { progress: Math.min(0.95, (index + 1) / split.files.length) });
                 this.deps.tasks.addEvent(task.id, "segment_result", { index, promptId: result.promptId, media });
             }
             const segmentMedia = segments.flatMap((segment) => Array.isArray(segment.media) ? segment.media : []);
             const combined = localResults.length > 1 ? await concatLocalVideos(localResults) : undefined;
-            return { segments, media: combined ? [{ url: `runtime-file:${path.basename(combined)}`, mimeType: "video/mp4", filename: path.basename(combined) }, ...segmentMedia] : segmentMedia };
+            if (!combined) return { segments, media: segmentMedia };
+            const stored = this.deps.media.store(await readFile(combined), { name: path.basename(combined), mimeType: "video/mp4" });
+            await rm(combined, { force: true });
+            return { segments, media: [{ url: this.deps.media.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: path.basename(combined) }, ...segmentMedia] };
         } finally { await split.cleanup(); }
     }
 
@@ -138,7 +144,7 @@ export class ComfyUiBackend {
                 if (historyResponse.ok) {
                     const history = await historyResponse.json() as Record<string, any>;
                     const item = history[body.prompt_id];
-                    if (item?.status?.completed || item?.outputs) return { promptId: body.prompt_id, outputs: item.outputs || {}, media: collectOutputMedia(item.outputs || {}, comfyUrl), status: item.status || {} };
+                    if (item?.status?.completed || item?.outputs) return { promptId: body.prompt_id, outputs: item.outputs || {}, media: await collectOutputMedia(item.outputs || {}, comfyUrl, this.deps.media), status: item.status || {} };
                     if (item?.status?.status_str === "error" || item?.status?.status_str === "failed") throw new Error(JSON.stringify(item.status));
                 }
                 await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -162,8 +168,15 @@ export class ComfyUiBackend {
     private fail(id: string, error: unknown) {
         if (this.deps.tasks.get(id)?.status === "cancelled") return;
         const message = error instanceof Error ? error.message : String(error);
-        this.deps.tasks.update(id, { status: "failed", error: message });
+        this.updateTask(id, { status: "failed", error: message });
         this.deps.tasks.addEvent(id, "error", { error: message });
+    }
+
+    private updateTask(id: string, patch: TaskPatch) {
+        const task = this.deps.tasks.update(id, patch);
+        const type = task.status === "succeeded" ? "task.completed" : task.status === "failed" ? "task.failed" : task.status === "queued" || task.status === "running" || task.status === "cancelled" ? "task.updated" : "task.updated";
+        this.deps.events?.publish({ type, entityId: id, payload: task });
+        return task;
     }
 }
 
@@ -427,12 +440,25 @@ function normalizeH3AspectRatio(value: string) {
     return aliases[value] || value;
 }
 
-function collectOutputMedia(outputs: Record<string, any>, baseUrl: string) {
-    return Object.values(outputs).flatMap((output) => [ ...(output?.images || []), ...(output?.gifs || []), ...(output?.videos || []) ]).flatMap((item) => {
+async function collectOutputMedia(outputs: Record<string, any>, baseUrl: string, mediaStore: MediaStore) {
+    const items = Object.values(outputs).flatMap((output) => [ ...(output?.images || []), ...(output?.gifs || []), ...(output?.videos || []) ]);
+    return (await Promise.all(items.map(async (item) => {
         if (!item?.filename) return [];
         const query = new URLSearchParams({ filename: String(item.filename), subfolder: String(item.subfolder || ""), type: String(item.type || "output") });
-        return [{ url: `${baseUrl}/view?${query.toString()}`, mimeType: String(item.type || "image").includes("video") ? "video/mp4" : "image/png", filename: String(item.filename) }];
-    });
+        const sourceUrl = `${baseUrl}/view?${query.toString()}`;
+        const response = await fetch(sourceUrl);
+        if (!response.ok) return [{ url: sourceUrl, mimeType: mimeForOutput(item), filename: String(item.filename) }];
+        const stored = mediaStore.store(Buffer.from(await response.arrayBuffer()), { name: String(item.filename), mimeType: mimeForOutput(item) });
+        return [{ url: mediaStore.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: String(item.filename), sourceUrl }];
+    }))).flat();
+}
+
+function mimeForOutput(item: Record<string, any>) {
+    const name = String(item.filename || "").toLowerCase();
+    if (/\.(mp4|webm|mov|m4v|mkv)$/.test(name)) return "video/mp4";
+    if (/\.(mp3|wav|ogg|opus|flac|aac|m4a)$/.test(name)) return "audio/mpeg";
+    if (/\.gif$/.test(name)) return "image/gif";
+    return "image/png";
 }
 
 export { PRESETS, buildWorkflow };
