@@ -188,12 +188,7 @@ function h3ResolveTask(context: PluginMcpContext, taskId: string) {
         const config = loadConfig(true);
         h3Backend = createBackendClient(config.backendUrl || `http://127.0.0.1:17370`);
     }
-    return resolveComfyTask(h3Backend, context.runtimeDb, taskId).catch(async (error) => {
-        // backend 未启动时直接读本地（context.runtimeDb 就是 MCP 进程的 RuntimeDatabase）
-        const task = context.runtimeDb.getTask(taskId);
-        if (!task) throw error;
-        return { task, events: context.runtimeDb.listEvents(taskId) };
-    });
+    return resolveComfyTask(h3Backend, taskId);
 }
 
 export const pluginMcp: PluginMcpModule = {

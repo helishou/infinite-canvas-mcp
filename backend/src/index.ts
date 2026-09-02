@@ -33,6 +33,7 @@ const videoConcat = new VideoConcatBackend(runtime.tasks);
 const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: runtime.events });
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
 registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat);
+registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events, basePath: "/agent" }, runtime.comfy);
 const agent = createAgentApp({ listen: false, backendUrl: config.url, backendToken: config.token });
 app.use("/agent", agent.app);
 

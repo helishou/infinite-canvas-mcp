@@ -224,7 +224,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     app.post("/comfy/tasks", route(async (req, res) => res.status(202).json({ ok: true, task: await comfyUi.run(String(req.body?.preset || ""), objectBody(req.body?.input), objectBody(req.body?.params), typeof req.body?.comfyUrl === "string" ? req.body.comfyUrl : undefined) })));
     app.get("/comfy/tasks/:id", route(async (req, res) => {
         try {
-            const { task, events } = await resolveComfyTask(backend, runtimeDb, routeParam(req.params.id), Number(req.query.after || 0));
+            const { task, events } = await resolveComfyTask(backend, routeParam(req.params.id), Number(req.query.after || 0));
             res.json({ ok: true, task, events });
         } catch {
             res.status(404).json({ ok: false, error: "task not found" });
@@ -283,7 +283,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         if (name === "comfyui_run") return void res.json({ ok: true, result: await comfyUi.run(String(input.preset || ""), objectBody(input.input), objectBody(input.params)) });
         if (name === "comfyui_get_task") {
             try {
-                const { task } = await resolveComfyTask(backend, runtimeDb, String(input.taskId || ""));
+                const { task } = await resolveComfyTask(backend, String(input.taskId || ""));
                 return void res.json({ ok: true, result: task });
             } catch {
                 return void res.json({ ok: true, result: null });

@@ -7,19 +7,20 @@ import type { Stores } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
 
 /** ComfyUI Bridge 路由（总后台权威，Agent 变纯代理）。 */
-export function registerComfyRoutes(ctx: { app: import("express").Express; stores: Stores; config: ResolvedConfig; events?: BackendEventBus }, bridge: ComfyUiBackend) {
+export function registerComfyRoutes(ctx: { app: import("express").Express; stores: Stores; config: ResolvedConfig; events?: BackendEventBus; basePath?: string }, bridge: ComfyUiBackend) {
     const { app, stores, config } = ctx;
+    const routePath = (value: string) => `${ctx.basePath || ""}${value}`;
 
-    app.get("/comfy/status", async (_req, res) => {
+    app.get(routePath("/comfy/status"), async (_req, res) => {
         res.json({ ok: true, ...(await bridge.status()) });
     });
 
-    app.get("/comfy/models", async (_req, res) => {
+    app.get(routePath("/comfy/models"), async (_req, res) => {
         res.json({ ok: true, data: await bridge.models() });
     });
 
     /** 代理 ComfyUI 媒体预览（/view） */
-    app.get("/comfy/media", async (req: Request, res: Response) => {
+    app.get(routePath("/comfy/media"), async (req: Request, res: Response) => {
         const filename = String(req.query.filename || "");
         if (!filename || filename.includes("..") || filename.includes("\\")) return void res.status(400).json({ ok: false, error: "媒体文件名无效" });
         const query = new URLSearchParams({ filename, subfolder: String(req.query.subfolder || ""), type: String(req.query.type || "output") });
@@ -29,11 +30,11 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
         res.type(response.headers.get("content-type") || "application/octet-stream").send(body);
     });
 
-    app.get("/comfy/config", (_req, res) => res.json({ ok: true, url: bridge.getUrl() }));
-    app.put("/comfy/config", (req, res) => res.json({ ok: true, url: bridge.setUrl(String(req.body?.url || "")) }));
-    app.get("/comfy/presets", (_req, res) => res.json({ ok: true, data: bridge.presets() }));
+    app.get(routePath("/comfy/config"), (_req, res) => res.json({ ok: true, url: bridge.getUrl() }));
+    app.put(routePath("/comfy/config"), (req, res) => res.json({ ok: true, url: bridge.setUrl(String(req.body?.url || "")) }));
+    app.get(routePath("/comfy/presets"), (_req, res) => res.json({ ok: true, data: bridge.presets() }));
 
-    app.post("/comfy/tasks", async (req, res) => {
+    app.post(routePath("/comfy/tasks"), async (req, res) => {
         const task = await bridge.run(
             String(req.body?.preset || ""), objectBody(req.body?.input), objectBody(req.body?.params),
             typeof req.body?.comfyUrl === "string" ? req.body.comfyUrl : undefined,
@@ -45,20 +46,20 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
         });
     });
 
-    app.get("/comfy/tasks/:id", (req, res) => {
+    app.get(routePath("/comfy/tasks/:id"), (req, res) => {
         const task = stores.tasks.get(req.params.id);
         if (!task || !task.kind.startsWith("comfyui:")) return void res.status(404).json({ ok: false, error: "task not found" });
         res.json({ ok: true, task, events: stores.tasks.events(req.params.id, Number(req.query.after || 0)) });
     });
 
-    app.post("/comfy/tasks/:id/cancel", (req, res) => {
+    app.post(routePath("/comfy/tasks/:id/cancel"), (req, res) => {
         const task = bridge.cancel(req.params.id);
         ctx.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
         res.json({ ok: true, task });
     });
 
     /** ComfyUI 输出媒体落地到总后台 runtime-media（H3 分段合并结果等）。 */
-    app.post("/comfy/materialize", async (req, res) => {
+    app.post(routePath("/comfy/materialize"), async (req, res) => {
         const url = String(req.body?.url || "");
         const name = path.basename(String(req.body?.name || `materialized-${Date.now()}.mp4`));
         try {

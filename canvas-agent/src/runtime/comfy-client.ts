@@ -4,7 +4,6 @@ import path from "node:path";
 
 import { BackendClient } from "./backend-client.js";
 import { ComfyUiBridge, type ComfyModelCatalog, type ComfyPreset } from "./comfyui.js";
-import type { RuntimeDatabase } from "./database.js";
 import type { RuntimeTask, RuntimeTaskEvent } from "./types.js";
 
 /** 构造 BackendClient（读 backend.json 或环境变量）。 */
@@ -70,13 +69,9 @@ export function proxyComfyUi(backend: BackendClient, local: ComfyUiBridge): Comf
     };
 }
 
-/** 查 comfyui 任务：backend 优先，404/异常时回退 Agent 本地 runtimeDb。 */
-export async function resolveComfyTask(backend: BackendClient, runtimeDb: RuntimeDatabase, id: string, after = 0): Promise<{ task: RuntimeTask; events: RuntimeTaskEvent[] }> {
-    try {
-        const { task, events } = await backend.comfyGetTask(id, after);
-        if (task && task.kind.startsWith("comfyui:")) return { task, events };
-    } catch { /* backend unreachable or 404 */ }
-    const localTask = runtimeDb.getTask(id);
-    if (!localTask || !localTask.kind.startsWith("comfyui:")) throw new Error(`task not found: ${id}`);
-    return { task: localTask, events: runtimeDb.listEvents(localTask.id, after) };
+/** 查 ComfyUI 任务：Backend 是唯一权威，不回退到 Agent 本地数据库。 */
+export async function resolveComfyTask(backend: BackendClient, id: string, after = 0): Promise<{ task: RuntimeTask; events: RuntimeTaskEvent[] }> {
+    const { task, events } = await backend.comfyGetTask(id, after);
+    if (!task || !task.kind.startsWith("comfyui:")) throw new Error(`task not found: ${id}`);
+    return { task, events };
 }
