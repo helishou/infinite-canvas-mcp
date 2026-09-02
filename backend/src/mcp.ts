@@ -49,7 +49,7 @@ const DIRECT_CANVAS_TOOLS = [
     "canvas_list_projects", "canvas_get_state", "canvas_get_selection", "canvas_export_snapshot", "canvas_apply_ops",
     "canvas_create_node", "canvas_create_text_node", "canvas_create_text_nodes", "canvas_create_config_node",
     "canvas_create_image_prompt_flow", "canvas_create_generation_flow", "canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio",
-    "canvas_update_node", "canvas_update_node_text", "canvas_move_nodes", "canvas_resize_node", "canvas_delete_nodes", "canvas_connect_nodes", "canvas_select_nodes", "canvas_set_viewport",
+    "canvas_update_node", "canvas_update_node_text", "canvas_move_nodes", "canvas_resize_node", "canvas_delete_nodes", "canvas_connect_nodes", "canvas_select_nodes", "canvas_set_viewport", "canvas_run_generation", "generation_get_status",
 ] as ToolName[];
 
 function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, stores: ReturnType<typeof createStores>) {
@@ -58,6 +58,7 @@ function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, store
         server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput) => {
             const input = schema.parse(rawInput) as Record<string, unknown>;
             if (name === "canvas_list_projects") return textResult(db.listCanvasProjects().map((project) => ({ id: project.id, title: project.title, updatedAt: project.updatedAt, nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0, connectionCount: Array.isArray(project.connections) ? project.connections.length : 0 })));
+            if (name === "generation_get_status") return textResult(listTasks(db, input));
             const project = currentProject(db); const state = project as Record<string, unknown>;
             if (name === "canvas_get_state" || name === "canvas_export_snapshot") return textResult(compactProject(state));
             if (name === "canvas_get_selection") { const ids = new Set(Array.isArray(state.selectedNodeIds) ? state.selectedNodeIds.map(String) : []); return textResult({ nodes: nodesOf(state).filter((node) => ids.has(String(node.id))) }); }
@@ -78,6 +79,15 @@ function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, store
         });
     }
 }
+
+function listTasks(db: BackendDatabase, input: Record<string, unknown>) {
+    const taskId = typeof input.taskId === "string" ? input.taskId : "";
+    const rows = taskId
+        ? db.db.prepare("SELECT * FROM tasks WHERE id = ?").all(taskId)
+        : db.db.prepare("SELECT * FROM tasks ORDER BY updated_at DESC LIMIT ?").all(Math.max(1, Math.min(500, Number(input.limit || 100))));
+    return (rows as Array<Record<string, unknown>>).map((row) => ({ id: String(row.id), kind: String(row.kind), status: String(row.status), progress: Number(row.progress), input: parseJson(row.input_json), params: parseJson(row.params_json), result: row.result_json ? parseJson(row.result_json) : null, error: row.error ? String(row.error) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }));
+}
+function parseJson(value: unknown): Record<string, unknown> { try { const parsed = JSON.parse(String(value || "{}")); return parsed && typeof parsed === "object" ? parsed : {}; } catch { return {}; } }
 
 function currentProject(db: BackendDatabase) { const project = db.listCanvasProjects()[0]; if (!project) throw new Error("当前没有画布项目"); return project; }
 function nodesOf(project: Record<string, unknown>) { return Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : []; }
