@@ -84,13 +84,15 @@ codex plugin add infinite-canvas@infinite-canvas-local
 npx -y @basketikun/infinite-canvas-backend mcp
 ```
 
-使用时可以直接在 Codex 里说“打开 Infinite Canvas”，插件会启动本地 Agent，读取 Local URL 和 Connect token，然后在右侧打开 `https://canvas.best/` 并自动新建、连接画布；只有明确要求使用本地项目时才会启动本地前端。
+使用时可以直接在 Codex 里说“打开 Infinite Canvas”。网页只连接 Backend 的一个地址和 Token；旧版需要 `17371` 的客户端仍可启动 `canvas-agent`，它现在只是转发到 Backend，不再创建独立业务数据库。
 
-Canvas Agent 启动后，给 Codex 添加 MCP：
+使用 Backend MCP：
 
 ```bash
 codex mcp add infinite-canvas -- npx -y @basketikun/infinite-canvas-backend mcp
 ```
+
+`npx -y @basketikun/canvas-agent` 仅作为旧版 `17371` HTTP 地址的兼容代理；新安装不需要单独启动它。
 
 本仓库开发时可以改成，实际使用建议替换为本机绝对路径：
 
