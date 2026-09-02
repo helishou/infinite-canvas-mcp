@@ -137,6 +137,14 @@ export function deleteBackendPluginStorage(pluginId: string, key: string) {
     return request<{ ok: boolean }>("DELETE", `/plugins/storage?pluginId=${encodeURIComponent(pluginId)}&key=${encodeURIComponent(key)}`);
 }
 
+export function fetchBackendPromptCache<T = unknown>(sourceId: string) {
+    return request<{ ok: boolean; cache: T | null }>("GET", `/prompts/cache?sourceId=${encodeURIComponent(sourceId)}`);
+}
+
+export function saveBackendPromptCache(sourceId: string, cache: unknown) {
+    return request<{ ok: boolean }>("PUT", "/prompts/cache", { sourceId, cache });
+}
+
 // ── Media ────────────────────────────────────────────────────────────────
 
 export async function uploadBackendMedia(options: {

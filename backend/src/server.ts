@@ -349,6 +349,19 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         res.json({ ok: true });
     });
 
+    app.get("/prompts/cache", (req, res) => {
+        const sourceId = String(req.query.sourceId || "").trim();
+        if (!sourceId) return void res.status(400).json({ ok: false, error: "sourceId 必填" });
+        res.json({ ok: true, cache: db.getSetting(`prompt.cache.${sourceId}`) ?? null });
+    });
+    app.put("/prompts/cache", (req, res) => {
+        const sourceId = String(req.body?.sourceId || "").trim();
+        const cache = req.body?.cache;
+        if (!sourceId || !cache || typeof cache !== "object" || Array.isArray(cache)) return void res.status(400).json({ ok: false, error: "sourceId 和有效 cache 必填" });
+        db.setSetting(`prompt.cache.${sourceId}`, cache);
+        res.json({ ok: true });
+    });
+
     app.get("/generation-logs", (req, res) => {
         const projectId = req.query.projectId as string | undefined;
         const nodeId = req.query.nodeId as string | undefined;

@@ -8,6 +8,7 @@ description: Implemented changes that still need manual verification
 The current release needs manual verification in these areas:
 
 + Backend 存储替换：刷新页面后确认已安装插件、启用状态和插件私有配置仍能恢复；提示词页刷新后能重新拉取数据；设置页不再出现浏览器数据库统计；Backend 重启后插件数据仍存在。
++ 提示词缓存迁移：拉取提示词源后刷新页面，确认提示词中心能从 Backend 恢复缓存；修改来源地址或超过缓存周期后，确认会重新拉取并覆盖对应缓存。
 + H3 连续播放与空 Clip 预览：点击顶部或时间线播放按钮，确认视频按 Clip1、Clip2、Clip3 自动连续播放；新增空 Clip 并选中后，确认预览区域为空，不显示上一段视频。
 + H3 Refs 时间线：确认 Video 下方显示 Refs 泳道，图片/视频/音频按 Clip 时间段对齐；从 Assets 拖入不同时间段时写入对应 Clip，移除按钮只删除所属 Clip 的参考素材；拖动泳道高度后布局仍正常。
 + H3 Clip settings：确认 Task mode 可切换文生视频、图生视频、首尾帧、参考主体、视频编辑、参考素材改视频，并确认 TE speed 只显示“开/关”且能写回状态。
