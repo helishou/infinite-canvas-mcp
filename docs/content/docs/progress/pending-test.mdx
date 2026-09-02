@@ -7,6 +7,8 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
+- Backend 单进程运行时：仅启动 `ic-backend` 后，`/agent/*`、ComfyUI、RunningHub、FFmpeg、任务 SSE 和 `ic-backend mcp` 均可用；standalone `canvas-agent` 只作为兼容代理，不创建第二份 runtime SQLite。
+
 - 统一存储层：首次连接总后台时，旧版 IndexedDB 的画布、素材、媒体和生成日志完成一次性迁移；迁移后刷新、重启、导入导出和 H3 MCP 均只从 Backend SQLite/media_files 读取和写入，Backend 不可用时不应静默切换到本地或 Agent 业务副本。
 
 - MiniMax H3 插件模块化重构：启用插件后节点入口、工作台、Clip/Refs 时间线、提示词编辑、参数面板、模型发现、片段 hooks 和独立 CSS 均能正常加载；新建节点默认值、旧 metadata、拖拽素材、单段/全部 Clip 生成、Motion Context、任务状态回写以及 H3 MCP 工具行为保持不变。
