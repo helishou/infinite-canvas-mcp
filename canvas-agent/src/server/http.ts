@@ -16,6 +16,7 @@ import { checkVersions } from "../version-check.js";
 import { SkillStore, SkillStoreError } from "../skills/store.js";
 import { backendComfyUi, createBackendClient, resolveComfyTask, type ComfyUiClient } from "../runtime/comfy-client.js";
 import { loadPluginMcpDeclarationsFromBackend, savePluginMcpDeclarationsToBackend, type PluginMcpDeclaration } from "./plugin-mcp.js";
+import { startStandaloneCompat } from "./standalone-compat.js";
 
 export type AgentHttpOptions = { listen?: boolean; backendUrl?: string; backendToken?: string };
 
@@ -554,7 +555,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
 
 /** standalone 兼容入口；新架构由 Backend 持有唯一 HTTP listener。 */
 export function startHttpServer() {
-    return createAgentApp({ listen: true });
+    return startStandaloneCompat();
 }
 
 /** 将异步 Express 路由异常交给统一错误处理中间件。 */
