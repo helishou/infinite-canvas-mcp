@@ -37,7 +37,7 @@ const events = new BackendEventBus();
 const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings, media: stores.media, events });
 const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
 const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events);
-const videoConcat = new VideoConcatBackend(runtime.tasks, undefined, runtime.events);
+const videoConcat = new VideoConcatBackend(runtime.tasks, undefined, runtime.events, runtime.media);
 
 const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: runtime.events, stores: runtime.stores });
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
