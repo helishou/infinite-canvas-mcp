@@ -41,6 +41,11 @@ function startBackendEvents(url: string, token: string) {
     }
 }
 
+function syncAgentEndpoint(url: string, token: string) {
+    if (typeof window === "undefined") return;
+    void import("@/stores/use-agent-store").then(({ useAgentStore }) => useAgentStore.getState().setAgentState({ url: `${url.replace(/\/$/, "")}/agent`, token }));
+}
+
 /** 总后台连接状态 store。自动在启动时检测连通性。 */
 export const useBackendStore = create<BackendStore>((set, get) => ({
     url: getBackendUrl(),
@@ -53,6 +58,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         const cleanUrl = url.replace(/\/$/, "");
         setBackendConnection(cleanUrl, token || get().token);
         set({ url: cleanUrl, token: token || get().token, error: "" });
+        syncAgentEndpoint(cleanUrl, token || get().token);
         void get().checkConnection();
     },
 
@@ -70,6 +76,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         if (discovered.ok && discovered.token && discovered.token !== get().token) {
             setBackendConnection(getBackendUrl(), discovered.token);
             set({ token: discovered.token, checking: true });
+            syncAgentEndpoint(getBackendUrl(), discovered.token);
             await get().checkConnection();
             return;
         }
