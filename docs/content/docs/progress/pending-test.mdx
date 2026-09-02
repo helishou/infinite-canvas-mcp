@@ -11,6 +11,8 @@ The current release needs manual verification in these areas:
 
 - ComfyUI 媒体持久化：通过 H3 或其他 ComfyUI 工作流生成视频、图片、音频后，结果应写入 Backend `media_files` 并可经 `/media/:storageKey` 在 Backend 重启后继续读取；H3 Motion Context 合并视频也应可播放，任务运行中、完成和失败状态应能通过 `/events` 收到。
 
+- RunningHub/FFmpeg 媒体持久化：RunningHub 返回的可下载结果和 FFmpeg 拼接视频应登记到 Backend `media_files`，任务结果仍保留原始路径或远程地址供旧调用方兼容。
+
 - 统一存储层：首次连接总后台时，旧版 IndexedDB 的画布、素材、媒体和生成日志完成一次性迁移；迁移后刷新、重启、导入导出和 H3 MCP 均只从 Backend SQLite/media_files 读取和写入，Backend 不可用时不应静默切换到本地或 Agent 业务副本。
 
 - MiniMax H3 插件模块化重构：启用插件后节点入口、工作台、Clip/Refs 时间线、提示词编辑、参数面板、模型发现、片段 hooks 和独立 CSS 均能正常加载；新建节点默认值、旧 metadata、拖拽素材、单段/全部 Clip 生成、Motion Context、任务状态回写以及 H3 MCP 工具行为保持不变。
