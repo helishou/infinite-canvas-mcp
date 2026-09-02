@@ -1,6 +1,7 @@
 import { fetchAgentJson, syncRuntimeMedia } from "./canvas-agent";
+import { backendMediaUrl, getBackendUrl } from "@/services/backend-api";
 
-type LocalReference = { name: string; dataUrl?: string; url?: string };
+type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
 type ComfyMedia = { url: string; mimeType: string; storageKey?: string };
 type ComfyTask = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: { media?: ComfyMedia[]; segments?: Array<{ media?: ComfyMedia[] }> } | null; error?: string | null };
 
@@ -25,7 +26,7 @@ export function resolveComfyImageSize(value: string) {
 
 export async function runComfyTask(endpoint: string, token: string, comfyUrl: string, preset: string, prompt: string, references: LocalReference[], params: Record<string, unknown>, signal?: AbortSignal) {
     const synced = await Promise.all(references.map(async (reference) => {
-        const source = reference.dataUrl || reference.url || "";
+        const source = sourceUrl(reference);
         const dataUrl = source.startsWith("data:") ? source : await fetchAsDataUrl(source, signal);
         return (await syncRuntimeMedia(endpoint, token, reference.name, dataUrl)).media?.path;
     }));
@@ -58,7 +59,7 @@ export type LocalH3Input = {
 export async function runLocalH3Task(endpoint: string, token: string, comfyUrl: string, prompt: string, input: LocalH3Input, params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void) {
     const refs = [...(input.references || []), ...(input.audios || []), ...(input.video ? [input.video] : []), ...(input.previousVideo ? [input.previousVideo] : [])];
     const synced = await Promise.all(refs.map(async (reference) => {
-        const source = reference.dataUrl || reference.url || "";
+        const source = sourceUrl(reference);
         const dataUrl = source.startsWith("data:") ? source : await fetchAsDataUrl(source, signal);
         return { reference, path: (await syncRuntimeMedia(endpoint, token, reference.name, dataUrl)).media?.path };
     }));
@@ -99,7 +100,7 @@ export async function getLocalH3Task(endpoint: string, token: string, taskId: st
 export async function runRunningHubH3Task(endpoint: string, token: string, prompt: string, input: LocalH3Input, params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void) {
     const refs = [...(input.references || []), ...(input.audios || []), ...(input.video ? [input.video] : []), ...(input.previousVideo ? [input.previousVideo] : [])];
     const synced = await Promise.all(refs.map(async (reference) => {
-        const source = reference.dataUrl || reference.url || "";
+        const source = sourceUrl(reference);
         const dataUrl = source.startsWith("data:") ? source : await fetchAsDataUrl(source, signal);
         return { reference, path: (await syncRuntimeMedia(endpoint, token, reference.name, dataUrl)).media?.path };
     }));
@@ -133,4 +134,10 @@ async function fetchAsDataUrl(url: string, signal?: AbortSignal) {
     if (!response.ok) throw new Error(`读取本地媒体失败：HTTP ${response.status}`);
     const blob = await response.blob();
     return await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error || new Error("读取媒体失败")); reader.readAsDataURL(blob); });
+}
+
+function sourceUrl(reference: LocalReference) {
+    if (reference.storageKey) return backendMediaUrl(reference.storageKey);
+    const source = reference.dataUrl || reference.url || "";
+    return source.startsWith("/") ? `${getBackendUrl().replace(/\/$/, "")}${source}` : source;
 }

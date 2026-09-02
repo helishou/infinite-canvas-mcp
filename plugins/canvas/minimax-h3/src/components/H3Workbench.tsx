@@ -338,9 +338,8 @@ function requestH3Run(ctx: CanvasNodeContext, all = false) {
         errorDetails: "",
     });
     ctx.openPanel();
-    // Keep the event for already-mounted panels; the request metadata above
-    // is the durable fallback for panels that mount after this event fires.
-    setTimeout(() => ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, requestId: `h3-${Date.now()}`, all }), 0);
+    // The request metadata is the single durable trigger. Emitting here as
+    // well used to make one click start the same run several times.
 }
 
 function h3LogMedia(ref: H3Ref) {
@@ -720,6 +719,7 @@ export function H3Panel({ ctx }: CanvasNodePanelProps) {
     const [maxSegments, setMaxSegments] = useState(String(metadata.maxSegments ?? "60"));
     const [selectedSegmentId, setSelectedSegmentId] = useState(String(metadata.selectedSegmentId || ""));
     const [running, setRunning] = useState(false);
+    const runInFlightRef = useRef(false);
     const models = ctx.ai.listModels("video");
     const selectedModel = String(metadata.model || ctx.ai.defaultModel("video") || models[0]?.value || "");
 
@@ -845,6 +845,8 @@ export function H3Panel({ ctx }: CanvasNodePanelProps) {
             update({ status: "error", errorDetails: "请先连接源视频或角色参考图。" });
             return;
         }
+        if (runInFlightRef.current) return;
+        runInFlightRef.current = true;
         setRunning(true);
         const logRefs = [...images, ...(video ? [video] : []), ...audios] as H3Ref[];
         const generationLog = await createH3Log(ctx, liveSelected, livePrompt, logRefs, { engine: liveMetadata.minimaxEngine || "comfyui", workflow: "MiniMax H3", modelName: liveModelName, taskMode: liveSelected?.taskMode || "r2v", duration: liveDuration, aspectRatio: liveRatio, megapixels: liveMegapixels, videoSteps: liveSteps, denoise: liveDenoise, seed: liveSeed });
@@ -938,6 +940,7 @@ export function H3Panel({ ctx }: CanvasNodePanelProps) {
               update({ segments: current.map((segment) => errorIds.has(segment.id) ? { ...segment, status: "error", progress: 0 } : segment), status: "error", errorDetails: enhancedError, runFinishedAt: Date.now() });
               if (generationLogId) void ctx.generationLogs.update(generationLogId, { status: "failed", finishedAt: new Date().toISOString(), durationMs: Date.now() - Number(liveMetadata.runStartedAt || Date.now()), error: enhancedError, params: { ...lastSubmitted } });
         } finally {
+            runInFlightRef.current = false;
             setRunning(false);
         }
     };
@@ -945,6 +948,8 @@ export function H3Panel({ ctx }: CanvasNodePanelProps) {
     useEffect(() => ctx.on("minimax-h3:run", (payload) => {
         if (!payload || typeof payload !== "object" || String((payload as Record<string, unknown>).nodeId || "") !== ctx.node.id) return;
         const requestId = String((payload as Record<string, unknown>).requestId || "");
+        const current = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        if (!requestId && ["queued", "loading"].includes(String(current.status || ""))) return;
         if (requestId) update({ runRequestConsumedId: requestId, status: "loading", errorDetails: "", runProgress: 0 });
         void run(Boolean((payload as Record<string, unknown>).all));
     }), [ctx.node.id, run]);
