@@ -39,7 +39,7 @@ const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
 const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events);
 const videoConcat = new VideoConcatBackend(runtime.tasks, undefined, runtime.events);
 
-const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: runtime.events });
+const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: runtime.events, stores: runtime.stores });
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
 registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat, runtime.events);
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events, basePath: "/agent" }, runtime.comfy);

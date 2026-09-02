@@ -18,11 +18,12 @@ const logger = createLogger("backend");
 export type ServerDeps = {
     comfy?: ComfyUiBackend;
     events?: BackendEventBus;
+    stores?: Stores;
 };
 
 /** 启动总后台 HTTP 服务，返回 Express app（listen 由 index.ts 负责）。 */
 export function startServer(db: Parameters<typeof createStores>[0], config: ResolvedConfig, deps: ServerDeps = {}) {
-    const stores: Stores = createStores(db);
+    const stores: Stores = deps.stores ?? createStores(db);
     const events = deps.events ?? new BackendEventBus();
     const app = express();
     app.disable("x-powered-by");
