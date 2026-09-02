@@ -4,6 +4,12 @@
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./http": "./dist/server/http.js",
+    "./plugin-mcp": "./dist/server/plugin-mcp.js",
+    "./runtime/comfy-client": "./dist/runtime/comfy-client.js"
+  },
   "types": "./dist/index.d.ts",
   "bin": {
     "canvas-agent": "dist/index.js"

@@ -16,7 +16,9 @@
   },
   "dependencies": {
     "@basketikun/canvas-agent": "file:../canvas-agent",
+    "@modelcontextprotocol/sdk": "^1.12.1",
     "express": "^5.1.0",
+    "zod": "^3.25.0",
     "winston": "^3.19.0"
   },
   "devDependencies": {
