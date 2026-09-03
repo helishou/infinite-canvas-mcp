@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import localforage from "localforage";
 
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
@@ -37,8 +38,15 @@ type CanvasStore = {
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let knownProjectIds = new Set<string>();
+const localCanvasStorage = localforage.createInstance({ name: "infinite-canvas", storeName: "canvas-projects" });
+const LOCAL_PROJECTS_KEY = "projects";
+
+async function persistLocalCanvasProjects(projects: CanvasProject[]) {
+    try { await localCanvasStorage.setItem(LOCAL_PROJECTS_KEY, projects); } catch { /* 本地缓存失败不阻断 backend 同步 */ }
+}
 
 async function syncCanvasProjects(projects: CanvasProject[]) {
+    await persistLocalCanvasProjects(projects);
     if (!useBackendStore.getState().connected) return;
     try {
         const ids = new Set(projects.map((project) => project.id));
@@ -54,8 +62,19 @@ async function hydrateCanvasProjectsFromBackend() {
     try {
         const response = await fetchBackendProjects();
         const remoteProjects = Array.isArray(response.projects) ? response.projects as unknown as CanvasProject[] : [];
+        const localProjects = useCanvasStore.getState().projects;
+        const localById = new Map(localProjects.map((project) => [project.id, project]));
+        const remoteById = new Map(remoteProjects.map((project) => [project.id, project]));
+        const mergedProjects = [...new Set([...remoteById.keys(), ...localById.keys()])].map((id) => {
+            const remote = remoteById.get(id);
+            const local = localById.get(id);
+            if (!remote) return local!;
+            if (!local) return remote;
+            return Date.parse(local.updatedAt || "") > Date.parse(remote.updatedAt || "") ? local : remote;
+        });
         knownProjectIds = new Set(remoteProjects.map((project) => project.id));
-        useCanvasStore.setState({ projects: remoteProjects });
+        useCanvasStore.setState({ projects: mergedProjects });
+        if (mergedProjects.some((project) => !remoteById.has(project.id) || project.updatedAt !== remoteById.get(project.id)?.updatedAt)) scheduleCanvasSync();
         return true;
     } catch {
         return false;
@@ -63,6 +82,10 @@ async function hydrateCanvasProjectsFromBackend() {
 }
 
 export async function hydrateCanvasProjects() {
+    try {
+        const localProjects = await localCanvasStorage.getItem<CanvasProject[]>(LOCAL_PROJECTS_KEY);
+        if (Array.isArray(localProjects) && localProjects.length) useCanvasStore.setState({ projects: localProjects });
+    } catch { /* 继续尝试从 backend 恢复 */ }
     await hydrateCanvasProjectsFromBackend();
     useCanvasStore.setState({ hydrated: true });
 }
@@ -139,6 +162,7 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
 
 function scheduleCanvasSync() {
     if (saveTimer) clearTimeout(saveTimer);
+    void persistLocalCanvasProjects(useCanvasStore.getState().projects);
     saveTimer = setTimeout(() => {
         saveTimer = null;
         void syncCanvasProjects(useCanvasStore.getState().projects);

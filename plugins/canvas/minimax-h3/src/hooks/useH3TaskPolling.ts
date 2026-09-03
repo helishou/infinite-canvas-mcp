@@ -21,7 +21,7 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                         storageKey: task.result.storageKey,
                         mimeType: task.result.mimeType,
                         ...(task.result.segments?.length ? { segments: task.result.segments } : {}),
-                        materials: appendVideoMaterials(metadata.materials, [{ url: task.result.url, storageKey: task.result.storageKey, type: "video", name: "H3 输出" }]),
+                        materials: appendVideoMaterials(metadata.materials, [{ url: task.result.url, storageKey: task.result.storageKey, type: "video", name: "H3 输出", segmentId: String(metadata.selectedSegmentId || "") }]),
                         status: "success",
                         errorDetails: "",
                     });

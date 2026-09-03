@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { KeyboardEvent } from "react";
+import { Select } from "antd";
 import type { H3Ref, H3Segment } from "../types";
 import { H3Icon } from "./H3Icon";
 
@@ -11,6 +12,7 @@ type Props = {
     videoRefs: H3Ref[];
     audioRefs: H3Ref[];
     patchSelected: (patch: Partial<H3Segment>) => void;
+    onOpenStoryboard: () => void;
 };
 
 // 南风 H3 官方提示词骨架（nanfeng_prompt_nodes[_v10] web/h3_multiref.js insertPromptBlock 逐字核对）
@@ -43,12 +45,15 @@ export const H3_PROMPT_TOOLS = Object.keys(H3_SECTION_BLOCKS);
 
 type MentionItem = { ref: H3Ref; ordinal: number };
 
-export function H3PromptSection({ ctx, selected, imageRefs, videoRefs, audioRefs, patchSelected }: Props) {
+export function H3PromptSection({ ctx, selected, imageRefs, videoRefs, audioRefs, patchSelected, onOpenStoryboard }: Props) {
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
     const prompt = String(selected?.prompt || "");
+    const mode = String(selected?.mode || selected?.taskMode || "ref2va");
     const [mentionOpen, setMentionOpen] = useState(false);
     const [mentionActive, setMentionActive] = useState(0);
     const [enhancing, setEnhancing] = useState(false);
+    const models = ctx.ai.listModels("text");
+    const promptModel = String(ctx.node.metadata?.minimaxLlmModel || ctx.node.metadata?.llmModel || ctx.ai.defaultModel("text") || models[0]?.value || "");
 
     // 按 type 分组的序号（与 H3 工作台的 refsForSegment 语义一致：图片/视频/音频各自从 1 起）
     const mentionItems = useMemo<MentionItem[]>(() => [
@@ -140,9 +145,17 @@ export function H3PromptSection({ ctx, selected, imageRefs, videoRefs, audioRefs
     };
 
     return <label className="minimax-prompt-field minimax-prompt-field--mention">
-        <span><H3Icon name="prompt" /> Prompt <button type="button" disabled={enhancing} onClick={() => void enhancePrompt()} title="调用当前文本模型增强提示词">{enhancing ? "增强中…" : "增强提示词"}</button><button type="button" onClick={() => { ctx.openPanel(); if (!prompt.trim()) insertAtCursor(H3_OFFICIAL_BLOCK, { prefixNewline: false }); else if (!/^\s*subject_definitions:\s*\n/.test(prompt)) insertAtCursor(H3_OFFICIAL_BLOCK, { prefixNewline: false, select: true }); }} title="补官方 H3 提示词骨架">补骨架</button>{mentionOpen ? <button type="button" onClick={() => setMentionOpen(false)}>取消 @</button> : null}</span>
+        <span><H3Icon key="prompt-icon" name="prompt" /> Prompt <button key="enhance" type="button" disabled={enhancing} onClick={() => void enhancePrompt()} title="调用当前文本模型增强提示词">{enhancing ? "增强中…" : "增强提示词"}</button><button key="skeleton" type="button" onClick={() => { ctx.openPanel(); if (!prompt.trim()) insertAtCursor(H3_OFFICIAL_BLOCK, { prefixNewline: false }); else if (!/^\s*subject_definitions:\s*\n/.test(prompt)) insertAtCursor(H3_OFFICIAL_BLOCK, { prefixNewline: false, select: true }); }} title="补官方 H3 提示词骨架">补骨架</button>{mentionOpen ? <button key="cancel-mention" type="button" onClick={() => setMentionOpen(false)}>取消 @</button> : null}</span>
         <div className="minimax-prompt-modes">{H3_PROMPT_TOOLS.map((label) => <button type="button" key={label} onClick={() => insertAtCursor(H3_SECTION_BLOCKS[label])}>{label}</button>)}<button type="button" className="minimax-prompt-help" title="提示词结构说明">说明</button></div>
-        <small className="minimax-prompt-syntax"><code>&lt;Subject P&gt; 指认第 P 张参考图</code> <code>&lt;Picture P&gt; 指认第 P 张参考图</code> <code>&lt;Video V&gt; 指认第 V 段参考视频</code> <code>&lt;Audio A&gt; 指认第 A 段参考音频</code>{ctx.node.metadata?.promptEnhanceError ? <span style={{ color: "#fca5a5" }}>增强失败：{String(ctx.node.metadata.promptEnhanceError)}</span> : null}</small>
+        <small className="minimax-prompt-syntax"><code key="subject">&lt;Subject P&gt; 指认第 P 张参考图</code> <code key="picture">&lt;Picture P&gt; 指认第 P 张参考图</code> <code key="video">&lt;Video V&gt; 指认第 V 段参考视频</code> <code key="audio">&lt;Audio A&gt; 指认第 A 段参考音频</code>{ctx.node.metadata?.promptEnhanceError ? <span key="enhance-error" style={{ color: "#fca5a5" }}>增强失败：{String(ctx.node.metadata.promptEnhanceError)}</span> : null}</small>
+        <div className="nfh3-prompt-actions">
+            <Select className="minimax-prompt-model" size="small" value={promptModel || undefined} placeholder="提示词增强模型" options={models.map((model) => ({ value: model.value, label: model.label }))} onChange={(value) => ctx.updateMetadata({ minimaxLlmModel: value })} />
+            <button type="button" className="minimax-aux-storyboard" onClick={onOpenStoryboard}>智能分镜</button>
+        </div>
+        <div className="nfh3-prompt-options">
+            <label><span>恒定触发词</span><input value={String(selected?.constantTriggerWord || "")} onChange={(event) => patchSelected({ constantTriggerWord: event.target.value })} placeholder="可选，置于每段提示词前" /></label>
+            <span className="nfh3-prompt-ref-hint">{mode === "ref2va" ? "当前可引用：@图片1 · @视频1 · @视频音频1 · @音频1" : mode === "t2v" ? "当前模式无需引用素材" : "当前可引用：@图片1"}</span>
+        </div>
         <textarea
             ref={textareaRef}
             value={prompt}
@@ -153,7 +166,7 @@ export function H3PromptSection({ ctx, selected, imageRefs, videoRefs, audioRefs
             onMouseUp={() => { const ta = textareaRef.current; if (ta) syncMention(ta); }}
             onKeyUp={() => { const ta = textareaRef.current; if (ta) syncMention(ta); }}
         />
-        {mentionOpen && mentionItems.length ? <div className="minimax-prompt-mentions" role="listbox" onMouseDown={(event) => event.preventDefault()}>{mentionItems.map((item, index) => <MentionRow key={`${item.ref.type}-${item.ref.url}`} item={item} active={index === Math.min(mentionActive, mentionItems.length - 1)} onHover={() => setMentionActive(index)} onPick={() => insertMention(item)} />)}</div> : null}
+        {mentionOpen && mentionItems.length ? <div className="minimax-prompt-mentions" role="listbox" onMouseDown={(event) => event.preventDefault()}>{mentionItems.map((item, index) => <MentionRow key={`${item.ref.type}-${item.ref.url}-${index}`} item={item} active={index === Math.min(mentionActive, mentionItems.length - 1)} onHover={() => setMentionActive(index)} onPick={() => insertMention(item)} />)}</div> : null}
         {mentionOpen && !mentionItems.length ? <div className="minimax-prompt-mentions"><span className="minimax-prompt-mention-empty">请先在下方添加图片、视频或音频</span></div> : null}
     </label>;
 }

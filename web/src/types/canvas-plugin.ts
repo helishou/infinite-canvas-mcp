@@ -6,7 +6,7 @@ import type { CanvasConnection, CanvasNodeData, CanvasNodeMetadata } from "@/typ
 import type { CanvasResourceKind } from "@/lib/canvas/canvas-resource-references";
 
 // Resource emitted when a plugin node is consumed as an upstream input.
-export type CanvasNodeResource = { kind: CanvasResourceKind; text?: string; url?: string };
+export type CanvasNodeResource = { kind: CanvasResourceKind; text?: string; url?: string; storageKey?: string };
 
 // AI generation capabilities injected by the host, reusing its model and credential configuration.
 export type GenerateOptions = { signal?: AbortSignal; references?: string[]; model?: string };
@@ -20,6 +20,7 @@ export type LocalH3Input = { video?: { name: string; dataUrl?: string; url?: str
 export type LocalH3Result = { url: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; segments?: Array<{ media?: Array<{ url: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: LocalH3Result | null; error?: string | null };
+export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 export type PluginModelCapability = "image" | "video" | "text" | "audio";
 export type ModelOption = { value: string; label: string };
 export type CanvasGenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
@@ -45,7 +46,8 @@ export type CanvasPluginAi = {
     runLocalH3: (prompt: string, input: LocalH3Input, params: Record<string, unknown>, options?: LocalH3Options) => Promise<LocalH3Result>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
-    listLocalH3Models: () => Promise<{ models: string[]; loras: string[] }>;
+    runVideoConcat: (videos: Array<{ name: string; url?: string; storageKey?: string }>, options?: LocalH3Options) => Promise<LocalVideoConcatResult>;
+    listLocalH3Models: () => Promise<{ models: string[]; loras: string[]; textEncoders?: string[]; videoVaes?: string[]; audioVaes?: string[]; latentUpscaleModels?: string[] }>;
     runRunningHubH3: (prompt: string, input: LocalH3Input, params: Record<string, unknown>, options?: LocalH3Options) => Promise<LocalH3Result>;
     getRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
@@ -148,7 +150,7 @@ export type CanvasNodeDefinition = {
     // With interactionToggle, true forces interactive content, ignores metadata.interactive, and hides the toggle.
     forceInteractive?: (node: CanvasNodeData) => boolean;
     keepAspectRatio?: (node: CanvasNodeData) => boolean;
-    resource?: (node: CanvasNodeData) => CanvasNodeResource | null;
+    resource?: (node: CanvasNodeData) => CanvasNodeResource | CanvasNodeResource[] | null;
     // Built-ins use canvas-node's internal renderer and may omit Content.
     Content?: ComponentType<{ ctx: CanvasNodeContext }>;
     Panel?: ComponentType<{ ctx: CanvasNodeContext; onClose: () => void }>;

@@ -4,8 +4,8 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageQuestion, type AiTextMessage } from "@/services/api/image";
 import { imageToDataUrl } from "@/services/image-storage";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
-import { runLocalH3Task, getLocalH3Task, cancelLocalH3Task, runRunningHubH3Task, getRunningHubH3Task, cancelRunningHubH3Task } from "@/services/api/comfyui";
-import { fetchComfyModels } from "@/services/api/canvas-agent";
+import { runLocalH3Task, getLocalH3Task, cancelLocalH3Task, runRunningHubH3Task, getRunningHubH3Task, cancelRunningHubH3Task, runVideoConcatTask } from "@/services/api/comfyui";
+import { fetchComfyModels, fetchComfyStatus } from "@/services/api/canvas-agent";
 import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, updateBackendGenerationLog } from "@/services/backend-api";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -24,6 +24,7 @@ type CanvasTheme = (typeof canvasThemes)[keyof typeof canvasThemes];
 
 type PluginHostParams = {
     projectId: string;
+    updateProject: (id: string, patch: { nodes?: CanvasNodeData[] }) => void;
     effectiveConfig: AiConfig;
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
     openConfigDialog: (open: boolean) => void;
@@ -57,7 +58,7 @@ async function persistH3Result(result: Awaited<ReturnType<typeof runLocalH3Task>
  */
 export function usePluginHost(params: PluginHostParams) {
     const { t } = useTranslation();
-    const { projectId, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, applyAgentOps } = params;
+    const { projectId, updateProject, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, applyAgentOps } = params;
     const generationLogs = useMemo<CanvasGenerationLogs>(() => {
         const unavailable = () => { throw new Error("总后台未连接，无法访问生成日志"); };
         return {
@@ -124,6 +125,16 @@ export function usePluginHost(params: PluginHostParams) {
                     return await response.json() as { url?: string };
                 });
                 if (!comfy.url) throw new Error("尚未配置本地 ComfyUI 地址");
+                let comfyStatus;
+                try {
+                    comfyStatus = await fetchComfyStatus(agent.url, agent.token);
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    throw new Error(`无法检查 ComfyUI 状态：${message}`);
+                }
+                if (comfyStatus.connected !== true) {
+                    throw new Error(`ComfyUI 未启动，请先启动 ComfyUI${comfyStatus.url ? `（${comfyStatus.url}）` : ""}`);
+                }
                 const result = await runLocalH3Task(agent.url, agent.token, comfy.url, prompt, input, params, options?.signal, options?.onTaskId);
                 return persistH3Result(result);
             },
@@ -142,11 +153,17 @@ export function usePluginHost(params: PluginHostParams) {
                 const task = await cancelLocalH3Task(agent.url, agent.token, taskId);
                 return { id: task.id, status: task.status, progress: task.progress, error: task.error, result: null };
             },
+            runVideoConcat: async (videos, options) => {
+                const agent = useAgentStore.getState();
+                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法运行视频拼接");
+                const result = await runVideoConcatTask(agent.url, agent.token, videos, options?.signal);
+                return result;
+            },
             listLocalH3Models: async () => {
                 const agent = useAgentStore.getState();
                 if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法读取 ComfyUI 模型");
                 const result = await fetchComfyModels(agent.url, agent.token);
-                return { models: result.data?.models || [], loras: result.data?.loras || [] };
+                return { models: result.data?.models || [], loras: result.data?.loras || [], textEncoders: result.data?.textEncoders || [], videoVaes: result.data?.videoVaes || [], audioVaes: result.data?.audioVaes || [], latentUpscaleModels: result.data?.latentUpscaleModels || [], nanfeng: result.data?.nanfeng || {} };
             },
             runRunningHubH3: async (prompt, input, params, options) => {
                 const agent = useAgentStore.getState();
@@ -191,15 +208,25 @@ export function usePluginHost(params: PluginHostParams) {
                     .filter((conn) => conn.fromNodeId === nodeId)
                     .map((conn) => nodesRef.current.find((node) => node.id === conn.toNodeId))
                     .filter((node): node is CanvasNodeData => Boolean(node)),
-            updateNode: (nodeId, patch) => setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, ...patch } : node))),
-            updateMetadata: (nodeId, patch) => setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node))),
+            updateNode: (nodeId, patch) => {
+                const nextNodes = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, ...patch } : node));
+                nodesRef.current = nextNodes;
+                setNodes(nextNodes);
+                updateProject(projectId, { nodes: nextNodes });
+            },
+            updateMetadata: (nodeId, patch) => {
+                const nextNodes = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node));
+                nodesRef.current = nextNodes;
+                setNodes(nextNodes);
+                updateProject(projectId, { nodes: nextNodes });
+            },
             applyOps: (ops) => applyAgentOps(ops),
             ai: pluginAi,
             openPanel: (nodeId) => setDialogNodeId(nodeId),
             closePanel: () => setDialogNodeId(null),
             generationLogs,
         }),
-        [applyAgentOps, generationLogs, pluginAi, projectId],
+        [applyAgentOps, generationLogs, pluginAi, projectId, updateProject],
     );
 
     const renderPluginPanel = useCallback(

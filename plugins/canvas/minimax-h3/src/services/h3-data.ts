@@ -32,7 +32,7 @@ export function resultUrl(value: unknown) {
     return String(item.url || item.video_url || item.content || item.localUrl || "");
 }
 
-export function appendVideoMaterials(existing: unknown, additions: Array<{ url: string; storageKey?: string; type: string; name: string }>) {
+export function appendVideoMaterials(existing: unknown, additions: Array<{ url: string; storageKey?: string; type: string; name: string; segmentId?: string }>) {
     const current = Array.isArray(existing) ? existing.filter((item) => item && typeof item === "object") as Array<Record<string, unknown>> : [];
     return [...current, ...additions].filter((item, index, all) => Boolean(item.url) && all.findIndex((candidate) => String(candidate.url || "") === String(item.url || "")) === index);
 }

@@ -14,10 +14,9 @@ export function H3MaterialLibrary({ ctx, assets, outputs, segments, selected, se
         ctx.updateMetadata({ minimaxOutputFilter: next });
     };
     const currentUrls = new Set((selected?.results || []).map((item) => item.url).concat(selected?.result ? [String(selected.result)] : []));
-    const currentName = `Clip ${Math.max(0, segments.findIndex((item) => item.id === selected?.id)) + 1}`;
     // materials 保存的是节点级历史输出；当前筛选应显示当前 Clip 的全部历史结果，
     // 而不是只匹配当前 segment.results 中最后一次结果。
-    const visibleOutputs = outputFilter === "current" ? outputs.filter((item) => currentUrls.has(item.url) || item.segmentId === selected?.id || item.name === currentName) : outputs;
+    const visibleOutputs = outputFilter === "current" ? outputs.filter((item) => currentUrls.has(item.url) || item.segmentId === selected?.id) : outputs;
     const clearUnused = () => {
         const used = new Set(segments.flatMap((segment) => [(typeof segment.result === "string" ? segment.result : ""), ...(segment.results || []).map((item) => item.url)]).filter(Boolean));
         const materials = Array.isArray(ctx.node.metadata?.materials) ? ctx.node.metadata.materials : [];

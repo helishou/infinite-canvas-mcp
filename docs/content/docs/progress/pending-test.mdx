@@ -7,8 +7,34 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
++ 组节点双向锁定：锁定组后确认组内节点不能拖出，外部节点也不能拖入；解锁后两种拖动均恢复。
++ 组节点锁定：锁定组后拖动组内节点到组外，确认节点仍被限制在组内；在组内拖动和整体移动组仍正常，解锁后可以移出。
++ 连线断开：选中或悬停节点连线后点击中间叉号，确认对应连线立即消失，节点本身不受影响。
++ H3 Output 筛选持久化：切换到“当前”后刷新页面或重新打开节点，确认仍保持“当前”筛选；切换回“全部”后也能正确保存。
++ H3 Output 当前筛选：对同一 Clip 连续生成多个不同输出，切换“当前”筛选后确认这些历史输出全部显示；切换其他 Clip 后只显示对应 Clip 的历史输出。
++ H3 工作台拖拽辅助线：调整 Assets、预览或时间轴尺寸后，确认辅助拖拽区域与实际边界对齐，默认不显示漂浮灰线，悬停时仍可拖动。
++ H3 Prompt/Clip settings 宽度：拖动当前 Clip 面板中间的分隔条，确认 Prompt 与 Clip settings 可调整宽度，刷新或重新打开节点后宽度仍保留，窄面板下不溢出。
++ 本地 FlashVSR：在视频节点选择本地 `flashvsr-1.1`，不配置 API Key 但配置 ComfyUI 后运行，确认不再提示 API Key 错误，并能提交本地 ComfyUI。
++ 视频拼接 worker：在视频节点模型中选择“视频拼接”，连接两个及以上本地视频后生成，确认按连接顺序输出拼接视频；取消生成时确认 ffmpeg 进程停止。
++ 画布本地 ComfyUI 生图：在画布节点模型中选择 `flux2-klein`（本地 ComfyUI），连接参考图后生成，确认提交本地 ComfyUI 并回写图片节点，不再报云端 API 错误；选择 `z-image` 无参考图时也能文生图；flux2-klein 不带任何参考图时提示“至少需要一张参考图”。
 + Backend 存储替换：刷新页面后确认已安装插件、启用状态和插件私有配置仍能恢复；提示词页刷新后能重新拉取数据；设置页不再出现浏览器数据库统计；Backend 重启后插件数据仍存在。
 + 提示词缓存迁移：拉取提示词源后刷新页面，确认提示词中心能从 Backend 恢复缓存；修改来源地址或超过缓存周期后，确认会重新拉取并覆盖对应缓存。
++ 提示词中心加载态：清空或首次打开提示词中心时，确认远程来源加载期间显示明显的加载卡片；已有缓存后台刷新时不遮挡当前列表。
++ 提示词封面回退：让提示词封面返回 403/404，确认卡片显示文件图标占位，不出现破碎图片布局。
++ 提示词详情图片预览：点击详情页封面或参考图，确认能打开大图预览并可关闭返回详情页。
++ H3 列表稳定性：切换素材、参考图和提示词引用时，确认控制台不再出现重复 key 警告；刷新页面后不再出现内置 H3 插件解析 `react` 失败。
++ Backend/Agent 断连提示：暂时停止 Backend 或 Agent 后确认前端以 warning/非阻断提示反馈，服务恢复后可重新连接。
++ H3 ComfyUI 启动状态：停止本地 ComfyUI 后运行 H3，确认显示“ComfyUI 未启动，请先启动 ComfyUI”；恢复 ComfyUI 后确认可以正常提交生成。
++ 生成日志列表：确认首次只加载首批日志，滚动到底部继续加载；长提示词/错误超过 5 行默认折叠且可展开；H3 日志卡片显示输入 refs。
++ H3 React key 警告：打开 H3 节点并切换 Prompt、Engine、RunningHub 模式和 Aspect ratio，确认控制台不再出现 H3PromptSection/H3ClipSettingsPanel 的 key 警告。
++ H3 视频预览拖拽：拖动 H3 视频预览画面不会创建视频节点；从 Output 或素材卡片拖到画布外的合法行为仍可用。
++ H3 Refs 九宫格：确认时间轴 Refs 区显示当前 Clip 的 3×3 九宫格、图片/视频/音频小图标、缩略图和删除按钮；确认当前 Clip 面板下方不再显示重复 Refs 横栏，拖入素材仍写入当前 Clip。
++ H3 Refs 九宫格宽度：切换不同起点和时长的 Clip，确认九宫格水平位置和宽度与对应 Clip 卡片一致。
++ H3 全部 Clip Refs：创建多个 Clip 并分别添加参考素材，确认时间轴 Refs 区同时显示每个 Clip 的独立 3×3 九宫格，切换当前 Clip 后对应区域正确高亮。
++ H3 Prompt 区布局：在窄宽度下确认语法提示自动换行、增强失败提示单独显示，且不覆盖文本输入框。
++ H3 Prompt Flex 布局：确认不同节点高度和窄面板宽度下，标题、工具栏、语法提示、输入框均保持独立间距。
++ H3 多 Clip 输出连线：生成多个时间轴 Clip 后连接到下游节点，确认下游能按时间轴顺序收到所有 Clip 视频，而不是只有一个完整输出。
++ H3 多 Clip 输入去重：确认同一个 H3 节点的多个 Clip 不会因节点 id 相同被去重，运行下游节点时能看到全部 Clip 参考视频。
 + H3 连续播放与空 Clip 预览：点击顶部或时间线播放按钮，确认视频按 Clip1、Clip2、Clip3 自动连续播放；新增空 Clip 并选中后，确认预览区域为空，不显示上一段视频。
 + H3 Refs 时间线：确认 Video 下方显示 Refs 泳道，图片/视频/音频按 Clip 时间段对齐；从 Assets 拖入不同时间段时写入对应 Clip，移除按钮只删除所属 Clip 的参考素材；拖动泳道高度后布局仍正常。
 + H3 Clip settings：确认 Task mode 可切换文生视频、图生视频、首尾帧、参考主体、视频编辑、参考素材改视频，并确认 TE speed 只显示“开/关”且能写回状态。
@@ -23,6 +49,13 @@ The current release needs manual verification in these areas:
 + H3 ComfyUI 取消任务：生成期间点击 Reset，确认 ComfyUI 当前任务被中断、排队任务被删除，不会在后台继续生成。
 + H3 生成视频媒体复用：在重建插件产物、重编译 canvas-agent 并重启后端之后，用已在画布中的图片跑一次 r2v/i2v，确认不再出现 400「媒体必须是 base64 data URL」，且已落库的图片不会重新上传。
 + MCP 当前画布上下文：连接 Agent/MCP 后调用读取画布的工具，确认能看到当前打开画布的标题、节点和选中状态；切换画布后确认上下文随之更新。
++ 南风 H3 V10 底层迁移：检查生成 prompt graph 不包含 `NanFengH3MultiReferenceGeneratorV10` 和 `NanFeng_H3_V10.json`，四种模式分别包含正确的原生条件节点、LoadImage/LoadVideo/LoadAudio、采样、双 VAE 解码和 VHS 输出，并返回 mp4。
++ 南风 H3 V10 参考填槽：上传多张参考图确认按连续槽位（图片1..N）写入、prompt 中 @编号 与槽位一致；断档或超 9 图时确认给出明确报错。
++ 南风 H3 V10 续段：开启段间接续后运行后续 Clip，确认前一段尾帧被作为参考视频槽 1 喂入 Ref2VA，输出动作/人物连续；关闭后续段时不带前段视频。
++ 南风 H3 V10 锁音频联动：在参考生视频模式下勾选「启用锁音频」提交确认音轨锁定；勾选「音频驱动模式」但未勾锁音频时确认提交前即报错提示。
++ 南风 H3 V10 时长上限：分别在 Clip settings 设置 5s/15s/20s 提交，确认 15s 内正常、超 15s 被 clamp 或拒绝。
++ 南风 H3 V10 动态选项：读取 `/comfy/models` 返回的真实 NanFeng schema，确认模型、文本编码器、双 VAE、采样器、调度器、Sigma、二采、注意力、RTX、SLA 和 8 个 LoRA 均以对应控件展示。
++ 重建产物验证：改动 plugins/canvas/minimax-h3 与 canvas-agent 后重新执行 `node build.mjs` 与 canvas-agent 的 tsc 重建，并重启 backend，确认页面与 MCP 工具加载正常。
 + H3 时间线布局：确认 Video 下方不再显示重复 Refs 横栏，当前 Clip 的 Refs 九宫格仍可查看、添加、删除和排序素材。
 + H3 本地媒体传输：使用已有图片、视频、音频和串 Clip，确认请求复用 `storageKey` 对应的本地文件，不再调用 base64 转换；旧素材缺少 `storageKey` 时显示明确的重新上传提示。
 + 普通 ComfyUI 媒体传输：使用图片、视频和音频工作流，确认新素材通过二进制上传后以本地 `storageKey`/路径传递，且不再向 `/runtime/media` 发送 base64。
@@ -136,3 +169,6 @@ The current release needs manual verification in these areas:
 - Settings import/export and WebDAV-related configuration.
 
 The Chinese version contains the complete item-by-item acceptance checklist.
++ H3 刷新后任务恢复：生成 H3 视频期间刷新画布页面，确认带有运行任务 ID 时继续轮询并回写结果；没有运行任务 ID 的旧加载状态才显示“生成已中断”。
++ 普通视频节点刷新恢复：运行本地 FlashVSR 期间刷新页面，确认 ComfyUI 继续生成，视频节点保持加载并在任务完成后自动回写结果。
++ H3 模型搜索：打开 Clip settings，确认加速 LoRA 与 Base model 下拉框可以输入关键词过滤，并能正确选中写回。

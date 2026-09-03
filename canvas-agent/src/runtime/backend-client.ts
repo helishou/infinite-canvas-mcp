@@ -187,10 +187,10 @@ export class BackendClient {
         return data as Record<string, unknown>;
     }
 
-    async comfyModels(signal?: AbortSignal): Promise<{ models: string[]; loras: string[]; refreshedAt: string; error?: string }> {
-        const data = await this.get<{ ok: boolean; data?: { models: string[]; loras: string[]; refreshedAt: string; error?: string } }>("/comfy/models", signal);
+    async comfyModels(signal?: AbortSignal): Promise<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng?: Record<string, unknown[]>; refreshedAt: string; error?: string }> {
+        const data = await this.get<{ ok: boolean; data?: { models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels?: string[]; nanfeng?: Record<string, unknown[]>; refreshedAt: string; error?: string } }>("/comfy/models", signal);
         if (!data.data) throw new Error("backend comfy models missing data");
-        return data.data;
+        return { ...data.data, latentUpscaleModels: data.data.latentUpscaleModels || [] };
     }
 
     async comfyRun(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string) {

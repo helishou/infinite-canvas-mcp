@@ -16,7 +16,7 @@ type H3Segment = Record<string, unknown> & {
 };
 
 const H3_PARAM_KEYS = [
-    "mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed",
+    "mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "noiseSeed", "noiseSeedMode",
     "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile",
     "sampler", "scheduler", "loraSlots", "lockAudio", "audioDrive", "audioDriveFile", "constantTriggerWord",
     "textEncoderType", "textEncoderDevice", "allowCompile", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd",

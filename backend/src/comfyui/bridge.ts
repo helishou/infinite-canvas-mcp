@@ -20,7 +20,7 @@ export type ComfyUiDeps = {
 };
 
 export type ComfyPreset = { id: string; name: string; kind: "image" | "video"; inputs: string[]; params: string[] };
-export type ComfyModelCatalog = { models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; nanfeng?: Record<string, unknown[]>; refreshedAt: string; error?: string };
+export type ComfyModelCatalog = { models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng?: Record<string, unknown[]>; refreshedAt: string; error?: string };
 
 const PRESETS: ComfyPreset[] = [
     { id: "z-image", name: "Z-Image 文生图", kind: "image", inputs: ["prompt"], params: ["width", "height", "seed"] },
@@ -77,7 +77,7 @@ export class ComfyUiBackend {
                 return {};
             }
         };
-        const [models, loras, loraModelOnly, nanfengLoras, textEncoders, videoVaes, audioVaes, nanfeng] = await Promise.all([
+        const [models, loras, loraModelOnly, nanfengLoras, textEncoders, videoVaes, audioVaes, latentUpscaleModels, nanfeng] = await Promise.all([
             readChoices("UNETLoader", "unet_name"),
             readChoices("LoraLoader", "lora_name"),
             readChoices("LoraLoaderModelOnly", "lora_name"),
@@ -85,12 +85,13 @@ export class ComfyUiBackend {
             readChoices("CLIPLoader", "clip_name"),
             readChoices("VAELoader", "vae_name").then((values) => values.filter((value) => /minimax_h3_video_vae/i.test(value))),
             readChoices("VAELoader", "vae_name").then((values) => values.filter((value) => /minimax_h3_audio_vae/i.test(value))),
+            readChoices("NanFengH3LowPeakLatentUpscaler", "model_name"),
             readNanFengChoices(),
         ]);
         const h3Models = models.filter(isH3ModelPath);
         const minimaxLoras = [...loras, ...loraModelOnly, ...nanfengLoras].filter(isMinimaxLoraPath);
         const minimaxTextEncoders = textEncoders.filter((value) => /minimax/i.test(value));
-        return { models: [...new Set(h3Models)].sort((a, b) => a.localeCompare(b)), loras: [...new Set(minimaxLoras)].sort((a, b) => a.localeCompare(b)), textEncoders: [...new Set(minimaxTextEncoders)].sort((a, b) => a.localeCompare(b)), videoVaes: [...new Set(videoVaes)].sort((a, b) => a.localeCompare(b)), audioVaes: [...new Set(audioVaes)].sort((a, b) => a.localeCompare(b)), nanfeng, refreshedAt: new Date().toISOString(), ...(errors.length ? { error: errors.join("; ") } : {}) };
+        return { models: [...new Set(h3Models)].sort((a, b) => a.localeCompare(b)), loras: [...new Set(minimaxLoras)].sort((a, b) => a.localeCompare(b)), textEncoders: [...new Set(minimaxTextEncoders)].sort((a, b) => a.localeCompare(b)), videoVaes: [...new Set(videoVaes)].sort((a, b) => a.localeCompare(b)), audioVaes: [...new Set(audioVaes)].sort((a, b) => a.localeCompare(b)), latentUpscaleModels: [...new Set(latentUpscaleModels)].sort((a, b) => a.localeCompare(b)), nanfeng, refreshedAt: new Date().toISOString(), ...(errors.length ? { error: errors.join("; ") } : {}) };
     }
 
     async status() {
@@ -616,7 +617,19 @@ async function buildNanFengV10Workflow(
         sampled = node("nf_second_sample", "SamplerCustomAdvanced", { noise: noise(0), guider: secondGuider(0), sampler: secondSampler(0), sigmas: secondSigmas(0), latent_image: released(0) });
     }
     if (latentUpscaleRequested) {
-        const latentUp = node("nf_latent_upscale", "NanFengH3LowPeakLatentUpscaler", { latent: sampled(1), model_name: String(params.latentUpscaleModel || ""), target_megapixels: Number(params.latentUpscaleMegapixels || 1), align: Number(params.latentUpscaleAlign || 2), device: "cuda", precision: String(params.latentUpscalePrecision || "bf16"), aspect_ratio: ratio });
+        let latentUpscaleModel = String(params.latentUpscaleModel || "").trim();
+        if (!latentUpscaleModel) {
+            try {
+                const response = await fetch(`${comfyUrl}/object_info/NanFengH3LowPeakLatentUpscaler`, { signal });
+                if (response.ok) {
+                    const body = await response.json() as Record<string, any>;
+                    const choices = body.NanFengH3LowPeakLatentUpscaler?.input?.required?.model_name?.[0];
+                    latentUpscaleModel = Array.isArray(choices) ? String(choices.find((value: unknown) => String(value).trim()) || "") : "";
+                }
+            } catch { /* fall through to the actionable validation below */ }
+        }
+        if (!latentUpscaleModel) throw new Error("已启用 H3 潜空间放大，但没有选择放大模型；请刷新 ComfyUI 模型列表并选择模型。 ");
+        const latentUp = node("nf_latent_upscale", "NanFengH3LowPeakLatentUpscaler", { latent: sampled(1), model_name: latentUpscaleModel, target_megapixels: Number(params.latentUpscaleMegapixels || 1), align: Number(params.latentUpscaleAlign || 2), device: "cuda", precision: String(params.latentUpscalePrecision || "bf16"), aspect_ratio: ratio });
         const clear = node("nf_latent_upscale_clear", "NanFengH3ClearUpscalerCacheResident", { latent: latentUp(0), conditioning: ready(1) });
         const latentGuider = node("nf_latent_guider", "BasicGuider", { model: samplingModelRef, conditioning: clear(1) });
         const latentSampler = node("nf_latent_sampler", "KSamplerSelect", { sampler_name: String(params.sampler || "res_multistep") });
