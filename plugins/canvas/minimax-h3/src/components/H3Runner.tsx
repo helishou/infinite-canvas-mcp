@@ -1,5 +1,5 @@
 import { useMemo, useRef } from "@infinite-canvas/plugin-sdk";
-import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
+import type { CanvasNodeContext, LocalH3Options } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
 import { defaultH3Model, defaultPrompt } from "../constants";
 import { compatibleH3Settings, normalizeH3Model } from "../services/h3-compatibility";
@@ -120,16 +120,16 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             // 用于错误日志记录最后一次提交的信息
             for (const [index, segment] of storedSegments.entries()) {
                 const segmentRefs = refsForSegment(segment);
-                const requestedTaskMode = String(segment.taskMode || "r2v");
+                const requestedTaskMode = String(segment.mode || segment.taskMode || "ref2va");
                 // t2v：只使用纯提示词，忽略所有素材
                 // i2v/fl2v：只使用图片
                 // v2v：只使用视频
                 // rv2v/r2v：使用视频+图片+音频
                 const isT2v = requestedTaskMode === "t2v";
-                const isV2v = requestedTaskMode === "v2v";
+                const isV2v = false;
                 const isI2vFl2v = requestedTaskMode === "i2v" || requestedTaskMode === "fl2v";
-                const isR2vOrRv2v = !isT2v && !isV2v && !isI2vFl2v;
-                const effectiveTaskMode = isR2vOrRv2v && requestedTaskMode === "rv2v" && !segmentRefs.some((ref) => ref.type === "video") && !video ? "r2v" : requestedTaskMode;
+                const isR2vOrRv2v = requestedTaskMode === "ref2va";
+                const effectiveTaskMode = requestedTaskMode;
                 const segmentVideo = !isT2v && !isI2vFl2v ? (segmentRefs.find((ref) => ref.type === "video") || (index === 0 ? video : undefined)) : undefined;
                 const segmentImages = isT2v || isV2v ? [] : segmentRefs.filter((ref) => ref.type === "image");
                 const segmentAudios = isT2v || isV2v || isI2vFl2v ? [] : segmentRefs.filter((ref) => ref.type === "audio");
@@ -142,7 +142,75 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 const upstreamForSettings = isT2v ? [] : [...images, ...(video ? [video] : [])];
                 const segmentSettings = compatibleH3Settings({ ...segment, taskMode: effectiveTaskMode }, liveModelName, liveLoraName, upstreamForSettings);
                 const segmentSteps = Number(segment.videoSteps || liveMetadata.minimaxGlobalVideoSteps || segmentSettings.defaultSteps);
-                const h3Runner = String(liveMetadata.minimaxEngine || "").toLowerCase() === "runninghub" ? ctx.ai.runRunningHubH3 : ctx.ai.runLocalH3;
+                const h3RunnerImpl = String(liveMetadata.minimaxEngine || "").toLowerCase() === "runninghub" ? ctx.ai.runRunningHubH3 : ctx.ai.runLocalH3;
+                const h3Runner = (promptText: string, inputData: any, paramsData: any, optionsData: LocalH3Options) => {
+                    const { taskMode: _taskMode, teAccel: _teAccel, combatLoraWeight: _combat, cinematicLoraWeight: _cinematic, motionContext: _motion, motionContextEnabled: _motionEnabled, motionContextNoise: _motionNoise, motionContextNoiseAlpha: _motionAlpha, motionContextNoiseAlphaEnd: _motionAlphaEnd, motionContextNoiseRampFrames: _motionRamp, audioMode: _audioMode, audioDenoiseStrength: _audioDenoise, addSourceAsReference: _addSource, promptPrimaryAudioOrdinal: _audioOrdinal, strictPromptTags: _strictTags, referenceVideoPolicy: _refPolicy, refImageSize: _refSize, solAttnEnabled: _sol, solAttnTau: _solTau, solAttnThresholdType: _solThreshold, solAttnExactMode: _solExact, solAttnDenseSteps: _solDense, solAttnStepOff: _solOff, solAttnSinkTokens: _solSink, t8Enabled: _t8, t8ResidualThreshold: _t8Residual, t8StartPercent: _t8Start, t8EndPercent: _t8End, t8MaxConsecutiveHits: _t8Hits, t8CacheDevice: _t8Device, t8MetricStride: _t8Stride, t8Verbose: _t8Verbose, sigmaEnabled: _sigma, videoSigmaShift: _videoShift, audioSigmaShift: _audioShift, sigmaMode: _sigmaMode, lowSigmaStart: _lowSigmaStart, lowSigmaEnd: _lowSigmaEnd, sigmaRefineSteps: _sigmaRefine, sigmaCurve: _sigmaCurve, manualSigma: _manualSigma, dualSampling: _dual, dualSamplingRatio: _dualRatio, dualSampler: _dualSampler, secondPassEnabled: _secondPass, firstPassSteps: _firstPass, secondPassSteps: _secondSteps, secondPassMegapixels: _secondMp, secondPassUpscaleMethod: _secondMethod, secondPassDenoise: _secondDenoise, secondPassSigma: _secondSigma, secondPassSampler: _secondSampler, secondPassScheduler: _secondScheduler, secondPassModel: _secondModel, ...baseParams } = paramsData;
+                    return h3RunnerImpl(promptText, inputData, {
+                        ...baseParams,
+                        mode: segment.mode || effectiveTaskMode,
+                        steps: Number(segment.steps || segmentSteps),
+                        textEncoder: segment.textEncoder,
+                        textEncoderType: segment.textEncoderType || "minimax",
+                        textEncoderDevice: segment.textEncoderDevice || "default",
+                        videoVae: segment.videoVae,
+                        audioVae: segment.audioVae,
+                        precision: segment.precision || "default",
+                        sageAttention: segment.sageAttention || "auto",
+                        allowCompile: segment.allowCompile === true,
+                        sizeMultiple: Number(segment.sizeMultiple || 32),
+                        sampler: segment.sampler || "res_multistep",
+                        scheduler: segment.scheduler || "simple",
+                        refImageSize: segment.refImageSize || "match",
+                        referenceLongEdge: segment.referenceLongEdge || 1920,
+                        constantTriggerWord: segment.constantTriggerWord || "",
+                        loraSlots: segment.loraSlots || [],
+                        dedicatedAttention: segment.dedicatedAttention,
+                        reservedVramGb: segment.reservedVramGb,
+                        runtimeReserveEnabled: segment.runtimeReserveEnabled === true,
+                        uniBlockSwapEnabled: segment.uniBlockSwapEnabled === true,
+                        uniBlockSwapBlocks: segment.uniBlockSwapBlocks,
+                        latentUpscaleEnabled: segment.latentUpscaleEnabled === true,
+                        h3FirstSteps: segment.h3FirstSteps,
+                        h3SecondSteps: segment.h3SecondSteps,
+                        h3FullSigma: segment.h3FullSigma,
+                        v81ManualSigma: segment.v81ManualSigma === true,
+                        latentUpscaleModel: segment.latentUpscaleModel,
+                        latentUpscaleMegapixels: segment.latentUpscaleMegapixels,
+                        latentUpscaleAlign: segment.latentUpscaleAlign,
+                        latentUpscalePrecision: segment.latentUpscalePrecision,
+                        realtimePreviewEnabled: segment.realtimePreviewEnabled !== false,
+                        realtimePreviewLongEdge: segment.realtimePreviewLongEdge,
+                        realtimePreviewFrames: segment.realtimePreviewFrames,
+                        realtimePreviewFps: segment.realtimePreviewFps,
+                        realtimePreviewJpegQuality: segment.realtimePreviewJpegQuality,
+                        rtxEnabled: segment.rtxEnabled === true,
+                        rtxResizeMode: segment.rtxResizeMode,
+                        rtxScale: segment.rtxScale,
+                        rtxWidth: segment.rtxWidth,
+                        rtxHeight: segment.rtxHeight,
+                        rtxQuality: segment.rtxQuality,
+                        slaEnabled: segment.slaEnabled === true,
+                        slaSparsity: segment.slaSparsity,
+                        slaBlockSize: segment.slaBlockSize,
+                        slaMinSequence: segment.slaMinSequence,
+                        slaDenseLastSteps: segment.slaDenseLastSteps,
+                        slaProtectAudio: segment.slaProtectAudio,
+                        slaDenseSteps: segment.slaDenseSteps,
+                        slaBackend: segment.slaBackend,
+                        slaDisableFp16Accum: segment.slaDisableFp16Accum,
+                        slaStabilizeMotion: segment.slaStabilizeMotion,
+                        lockAudio: segment.lockAudio === true,
+                        audioDrive: segment.audioDrive === true,
+                        audioDriveFile: segment.audioDriveFile,
+                        audioDriveMarkers: segment.audioDriveMarkers,
+                        audioDriveSegmentImages: segment.audioDriveSegmentImages,
+                        audioDriveSegmentStoryboards: segment.audioDriveSegmentStoryboards,
+                        audioDriveCreative: segment.audioDriveCreative,
+                        audioDriveExclude: segment.audioDriveExclude,
+                        audioDriveStart: segment.audioDriveStart,
+                        audioDriveEnd: segment.audioDriveEnd,
+                    }, optionsData);
+                };
                 const segmentPrompt = promptEnhance ? effectivePrompt : segment.prompt !== undefined ? String(segment.prompt) : effectivePrompt;
                 const promptFlags = `${segment.noDub !== false ? "\nNo dialogue, narration, voiceover, or singing." : ""}${segment.noCaption !== false ? "\nNo subtitles, captions, on-screen text, or text overlays." : ""}`;
                 // 根据任务模式决定提交哪些 refs
@@ -180,7 +248,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             if (!lastResult) throw new Error("没有可运行的 H3 分段");
             const mergedSegments = compactSegmentStarts(mergeH3Segments(allSegments, nextSegments, activeId, runFromCurrent, autoSplit && storedSegments.length === 1));
             const generatedMaterials = generatedVideoMaterials(mergedSegments);
-            update({ content: lastResult.url, storageKey: lastResult.storageKey, mimeType: lastResult.mimeType, naturalWidth: lastResult.width, naturalHeight: lastResult.height, durationMs: lastResult.durationMs, segments: mergedSegments, materials: appendVideoMaterials(liveMetadata.materials, [...generatedMaterials, { url: lastResult.url, storageKey: lastResult.storageKey, type: "video", name: `Clip ${liveSelectedId || "输出"}` }]), runtimeTaskId: lastResult.taskId, status: "success", errorDetails: "", runFinishedAt: Date.now() });
+            update({ content: lastResult.url, storageKey: lastResult.storageKey, mimeType: lastResult.mimeType, naturalWidth: lastResult.width, naturalHeight: lastResult.height, durationMs: lastResult.durationMs, segments: mergedSegments, materials: appendVideoMaterials(liveMetadata.materials, [...generatedMaterials, { url: lastResult.url, storageKey: lastResult.storageKey, type: "video", name: `Clip ${liveSelectedId || "输出"}`, segmentId: liveSelectedId }]), runtimeTaskId: lastResult.taskId, status: "success", errorDetails: "", runFinishedAt: Date.now() });
             if (generationLogId) void ctx.generationLogs.update(generationLogId, { status: "success", runtimeTaskId: lastResult.taskId, finishedAt: new Date().toISOString(), durationMs: Date.now() - Number(liveMetadata.runStartedAt || Date.now()), outputs: [{ url: lastResult.url, storageKey: lastResult.storageKey, type: "video", mimeType: lastResult.mimeType }] });
         } catch (error) {
             // 增强错误日志：包含实际提交信息

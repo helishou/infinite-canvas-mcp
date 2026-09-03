@@ -16,10 +16,10 @@ type H3Segment = Record<string, unknown> & {
 };
 
 const H3_PARAM_KEYS = [
-    "taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "denoise", "seed",
-    "modelName", "loraName", "loraStrength", "teAccel", "audioMode", "motionContext",
-    "combatLoraWeight", "cinematicLoraWeight", "tailFrameEnabled", "motionContextEnabled",
-    "referenceVideoPolicy", "strictPromptTags", "refImageSize", "addSourceAsReference",
+    "mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed",
+    "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile",
+    "sampler", "scheduler", "loraSlots", "lockAudio", "audioDrive", "audioDriveFile", "constantTriggerWord",
+    "textEncoderType", "textEncoderDevice", "allowCompile", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd",
 ];
 
 // 工具元信息(声明,供 Agent 动态注册)
@@ -205,7 +205,14 @@ export const pluginMcp: PluginMcpModule = {
         return {
             h3_list_models: async () => {
                 const catalog = await context.comfyUi.models();
-                return { models: catalog.models || [], loras: catalog.loras || [] };
+                return {
+                    models: catalog.models || [],
+                    loras: catalog.loras || [],
+                    textEncoders: catalog.textEncoders || [],
+                    videoVaes: catalog.videoVaes || [],
+                    audioVaes: catalog.audioVaes || [],
+                    nanfeng: catalog.nanfeng || {},
+                };
             },
             h3_get_node: async (input) => {
                 const node = await context.getCanvasNode(String(input.nodeId || ""));
