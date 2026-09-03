@@ -1,6 +1,5 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -10,6 +9,7 @@ import type { RuntimeTask } from "../db.js";
 import type { MediaStore, SettingStore, TaskPatch, TaskStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
 import { splitVideo } from "./video-segment.js";
+import { buildMotionContextClip } from "./motion-context.js";
 
 /** ComfyUI Bridge 的总后台侧依赖：任务走 task store，URL 走 setting store。 */
 export type ComfyUiDeps = {
@@ -26,7 +26,7 @@ const PRESETS: ComfyPreset[] = [
     { id: "z-image", name: "Z-Image 文生图", kind: "image", inputs: ["prompt"], params: ["width", "height", "seed"] },
     { id: "flux2-klein", name: "Flux2-Klein 多图编辑", kind: "image", inputs: ["prompt", "references"], params: ["seed"] },
     { id: "flashvsr-1.1", name: "FlashVSR 1.1 视频修复", kind: "video", inputs: ["video"], params: ["scale", "longEdge"] },
-    { id: "minimax-h3", name: "MiniMax H3 视频生成/人物替换", kind: "video", inputs: ["video", "references", "audios", "segments"], params: ["taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "denoise", "seed", "modelName", "loraName", "loraStrength", "combatLoraWeight", "cinematicLoraWeight", "teAccel", "motionContext", "motionContextNoise", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags", "referenceVideoPolicy", "refImageSize"] },
+    { id: "minimax-h3", name: "南风 H3 V10 视频生成", kind: "video", inputs: ["video", "references", "audios", "segments"], params: ["mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "modelName", "textEncoder", "videoVae", "audioVae", "precision", "sageAttention", "sampler", "scheduler", "loraName", "loraStrength", "lockAudio", "audioDrive", "audioDriveFile", "constantTriggerWord"] },
 ];
 
 /** 总后台侧 ComfyUI Bridge：任务持久化统一走总后台 SQLite。 */
@@ -112,7 +112,7 @@ export class ComfyUiBackend {
     }
 
     private async executeH3Segments(task: RuntimeTask, preset: string, input: Record<string, unknown>, params: Record<string, unknown>, comfyUrl: string, controller: AbortController) {
-        const duration = Math.max(0.5, Math.min(60, Number(params.segmentDuration || params.duration || 6)));
+        const duration = Math.max(1, Math.min(15, Number(params.segmentDuration || params.duration || 6)));
         const split = await splitVideo(String(input.video), duration, Math.max(1, Math.min(240, Number(params.maxSegments || 60))));
         const segments: Array<Record<string, unknown>> = [];
         const localResults: string[] = [];
@@ -140,8 +140,10 @@ export class ComfyUiBackend {
     private async executeWorkflow(task: RuntimeTask, preset: string, input: Record<string, unknown>, params: Record<string, unknown>, comfyUrl: string, controller: AbortController) {
         const prepared = await prepareH3MotionContext(input, params);
         try {
-            const workflowParams = preset === "minimax-h3" ? await resolveH3ModelParams(comfyUrl, params, controller.signal) : params;
-            const workflow = await buildWorkflow(preset, prepared.input, workflowParams, async (file) => this.upload(file, controller.signal, comfyUrl));
+            const uploadFn = (file: string) => this.upload(file, controller.signal, comfyUrl);
+            const workflow = preset === "minimax-h3"
+                ? await buildNanFengV10Workflow(prepared.input, params, uploadFn, comfyUrl, controller.signal)
+                : await buildWorkflow(preset, prepared.input, params, uploadFn);
             const response = await fetch(`${comfyUrl}/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: workflow, client_id: task.id }), signal: controller.signal });
             if (!response.ok) { const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000); throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`); }
             const body = await response.json() as { prompt_id?: string; node_errors?: unknown };
@@ -215,39 +217,15 @@ async function prepareH3MotionContext(input: Record<string, unknown>, params: Re
     if (!previous || params.motionContext === false) return { input, cleanup: async () => undefined };
     const target = path.join(os.tmpdir(), `infinite-canvas-h3-context-${crypto.randomUUID()}.mp4`);
     const noise = params.motionContextNoise === true;
-    await runPythonWorker([
-        "workers/motion_context.py", previous, target,
-        "--frames", String(Number(params.motionContextLength) || 22),
-        "--alpha", String(params.motionContextNoiseAlpha ?? (noise ? 0.45 : 0)),
-        "--alpha-end", String(params.motionContextNoiseAlphaEnd ?? (noise ? 0.1 : 0)),
-        "--ramp", String(params.motionContextNoiseRampFrames ?? (noise ? 3 : 0)),
-    ]);
+    await buildMotionContextClip(previous, target, {
+        frames: Math.round(Number(params.motionContextLength)) || 22,
+        alpha: (params.motionContextNoiseAlpha as number) ?? (noise ? 0.45 : 0),
+        alphaEnd: (params.motionContextNoiseAlphaEnd as number) ?? (noise ? 0.1 : 0),
+        ramp: Math.round(params.motionContextNoiseRampFrames as number) ?? (noise ? 3 : 0),
+    });
     return { input: { ...input, previousVideo: target }, cleanup: async () => { try { await rm(target, { force: true }); } catch {} } };
 }
 
-function resolveBackendPython(): string {
-    const fromEnv = process.env.PYTHON_PATH;
-    if (fromEnv) return fromEnv;
-    // 项目自带的 venv（backend/venv）：隔离安装 Pillow 等依赖，避免污染系统 python。
-    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-    const venvBin = process.platform === "win32" ? path.join("venv", "Scripts", "python.exe") : path.join("venv", "bin", "python");
-    const venvPython = path.join(packageRoot, venvBin);
-    if (existsSync(venvPython)) return venvPython;
-    return "python";
-}
-
-function runPythonWorker(args: string[]) {
-    const python = resolveBackendPython();
-    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-    const script = path.join(packageRoot, args[0]);
-    return new Promise<void>((resolve, reject) => {
-        const child = spawn(python, [script, ...args.slice(1)], { stdio: ["ignore", "ignore", "pipe"] });
-        let stderr = "";
-        child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-        child.once("error", (error) => reject(new Error(`Motion Context Worker 启动失败：${error.message}`)));
-        child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`Motion Context Worker 失败（${code}）：${stderr.trim().slice(0, 1000)}`)));
-    });
-}
 
 async function materializeComfyMedia(url: string, comfyUrl: string, target: string) {
     const source = new URL(url);
@@ -289,7 +267,7 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
     const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
     const packagedRoot = path.join(packageRoot, "workflows");
     const root = path.resolve(process.env.INFINITE_CANVAS_WORKFLOWS || packagedRoot);
-    const files: Record<string, string> = { "z-image": "Z-Image.json", "flux2-klein": "Flux2-Klein.json", "flashvsr-1.1": path.join("custom", "视频修复FlashVSR1.1.json"), "minimax-h3": "MiniMax_H3.json" };
+    const files: Record<string, string> = { "z-image": "Z-Image.json", "flux2-klein": "Flux2-Klein.json", "flashvsr-1.1": path.join("custom", "视频修复FlashVSR1.1.json"), "minimax-h3": "NanFeng_H3_V10.json" };
     const source = JSON.parse(await readFile(path.join(root, files[preset]), "utf8")) as Record<string, any>;
     const promptText = String(input.prompt || "");
     const promptNode = preset === "z-image" ? source["23"] : preset === "flux2-klein" ? source["168"] : null;
@@ -312,7 +290,7 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
     }
     if (preset === "flashvsr-1.1" && source["2"]?.inputs) source["2"].inputs.value = Number(params.scale || 2);
     if (preset === "flashvsr-1.1" && source["40"]?.inputs && params.longEdge !== undefined && params.longEdge !== "auto") source["40"].inputs.longer_edge = Number(params.longEdge);
-    if (preset === "minimax-h3") {
+    if (preset === "minimax-h3-deprecated") {
         if (typeof params.modelName === "string" && params.modelName.trim() && source["127"]?.inputs) source["127"].inputs.unet_name = normalizeH3WorkflowModel(params.modelName);
         const duration = Math.max(0.5, Math.min(60, Number(params.duration || 8)));
         const width = Number(params.width || 0);
@@ -383,7 +361,7 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
             for (const [index, nodeId] of ["278", "292", "270"].entries()) if (source[nodeId]?.inputs) source[nodeId].inputs.image = uploaded[Math.min(index, uploaded.length - 1)];
         }
         if (preset === "flashvsr-1.1" && source["10"]?.inputs && typeof input.video === "string") source["10"].inputs.video = await upload(input.video);
-        if (preset === "minimax-h3") {
+        if (preset === "minimax-h3-deprecated") {
             const refs = Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : [];
             const uploadedRefs = await Promise.all(refs.map((file) => upload(file)));
             const taskMode = String(params.taskMode || (typeof input.video === "string" ? "rv2v" : "r2v"));
@@ -437,6 +415,207 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
         }
     }
     return source;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 南风 H3 V10 工作流构造
+//
+// V10 是 mega 节点：模型/文本编码器/双 VAE/采样器/8 个 LoRA 槽全部是其输入，
+// 内部用 GraphBuilder 自建采样图。参考图/视频/音频是「文件名 combo」（读 ComfyUI
+// input 目录），不走节点连线。输出 (IMAGE, AUDIO)，必须由 VHS_VideoCombine 收成 mp4。
+// 多段续段（旧 MiniMaxH3MotionContext 节点）改为：把前一段尾帧视频作为「参考视频槽 1」
+// 喂入 Ref2VA（H3 官方续段方式），用户参考视频顺延到槽 2–3。
+// ─────────────────────────────────────────────────────────────────────────
+const NANFENG_V10_CLASS = "NanFengH3MultiReferenceGeneratorV10";
+const NANFENG_VHS_CLASS = "VHS_VideoCombine";
+const NANFENG_REF2VA_MODES = new Set(["ref2va"]);
+
+async function buildNanFengV10Workflow(
+    input: Record<string, unknown>,
+    params: Record<string, unknown>,
+    upload: (file: string) => Promise<string>,
+    comfyUrl: string,
+    signal: AbortSignal,
+): Promise<Record<string, any>> {
+    let v10Defaults: Record<string, any> | null = null;
+    let vhsDefaults: Record<string, any> | null = null;
+    try {
+        v10Defaults = await fetchObjectInfoDefaults(comfyUrl, NANFENG_V10_CLASS, signal);
+    } catch { /* 走兜底模板 */ }
+    try {
+        vhsDefaults = await fetchObjectInfoDefaults(comfyUrl, NANFENG_VHS_CLASS, signal);
+    } catch { /* 走兜底模板 */ }
+
+    if (!v10Defaults) {
+        const { readFile } = await import("node:fs/promises");
+        const root = path.resolve(process.env.INFINITE_CANVAS_WORKFLOWS || path.join(path.dirname(fileURLToPath(import.meta.url)), "../..", "workflows"));
+        const template = JSON.parse(await readFile(path.join(root, "NanFeng_H3_V10.json"), "utf8")) as Record<string, any>;
+        throw new Error("南风底层图构造失败：不再使用 NanFeng_H3_V10.json 模板");
+    }
+
+    const mode = normalizeNanFengMode(params.mode ?? params.taskMode ?? (typeof input.video === "string" ? "ref2va" : "t2v"));
+
+    setIfString(v10, "模型", params.modelName);
+    setIfString(v10, "文本编码器", params.textEncoder);
+    setIfString(v10, "视频VAE", params.videoVae);
+    setIfString(v10, "音频VAE", params.audioVae);
+    setIfString(v10, "模型权重精度", params.precision);
+    setIfString(v10, "SageAttention", params.sageAttention);
+    if (typeof params.aspectRatio === "string" && params.aspectRatio) v10["画面比例"] = normalizeH3AspectRatio(params.aspectRatio);
+    if (Number.isFinite(Number(params.megapixels)) && Number(params.megapixels) > 0) v10["百万像素"] = Number(params.megapixels);
+    if (Number.isFinite(Number(params.sizeMultiple))) v10["尺寸倍数"] = Number(params.sizeMultiple);
+    v10["时长秒"] = Math.max(1, Math.min(15, Number(params.duration || 5)));
+    if (typeof input.prompt === "string" && input.prompt) v10["提示词"] = input.prompt;
+    if (params.seed !== undefined && params.seed !== null && String(params.seed).trim() !== "") v10["随机种子"] = Number(params.seed);
+    setIfString(v10, "采样器", params.sampler);
+    setIfString(v10, "调度器", params.scheduler);
+    if (Number.isFinite(Number(params.steps))) v10["采样步数"] = Number(params.steps);
+    if (Number.isFinite(Number(params.denoise))) v10["降噪强度"] = Number(params.denoise);
+    setIfString(v10, "参考图尺寸", params.refImageSize);
+    if (typeof params.constantTriggerWord === "string") v10["恒定触发词"] = params.constantTriggerWord;
+
+    v10["文生视频"] = mode === "t2v";
+    v10["图生视频"] = mode === "i2v";
+    v10["首尾帧"] = mode === "fl2v";
+
+    const refMode = NANFENG_REF2VA_MODES.has(mode);
+    v10["启用锁音频"] = refMode && params.lockAudio === true;
+    v10["开启音频驱动模式"] = refMode && params.audioDrive === true;
+    if (refMode && typeof params.audioDriveFile === "string") v10["音频驱动文件"] = params.audioDriveFile;
+
+    const images = (Array.isArray(input.references) ? input.references.map(String).filter(Boolean) : []).slice(0, 9);
+    const uploadedImages = await Promise.all(images.map((file) => upload(file)));
+    const userVideos = (Array.isArray(input.videos) ? input.videos.map(String).filter(Boolean) : []).slice(0, 3);
+    if (userVideos.length === 0 && typeof input.video === "string") userVideos.push(input.video);
+    const previousVideo = String(input.previousVideo || "");
+    const uploadedUserVideos = await Promise.all(userVideos.map((file) => upload(file)));
+    const audios = (Array.isArray(input.audios) ? input.audios.map(String).filter(Boolean) : []).slice(0, 3);
+    const uploadedAudios = await Promise.all(audios.map((file) => upload(file)));
+
+    validateNanFengMode(mode, uploadedImages.length, uploadedUserVideos.length, uploadedAudios.length, params);
+
+    for (let i = 0; i < uploadedImages.length; i += 1) v10[`图片${i + 1}`] = uploadedImages[i];
+
+    const videoSlots: string[] = [];
+    if (previousVideo && refMode) videoSlots.push(await upload(previousVideo));
+    for (const v of uploadedUserVideos) {
+        if (videoSlots.length >= 3) break;
+        videoSlots.push(v);
+    }
+    for (let i = 0; i < videoSlots.length; i += 1) v10[`视频${i + 1}`] = videoSlots[i];
+
+    for (let i = 0; i < uploadedAudios.length; i += 1) v10[`音频${i + 1}`] = uploadedAudios[i];
+
+    const vhs: Record<string, any> = { ...(vhsDefaults || { images: ["1", 0], audio: ["1", 1], filename_prefix: "NanFeng_H3", frame_rate: 24, format: "video/h264-mp4", save_output: true }) };
+    vhs.images = ["1", 0];
+    if ("audio" in vhs) vhs.audio = ["1", 1];
+
+    return {
+        "1": { class_type: NANFENG_V10_CLASS, inputs: v10, _meta: { title: "南风 H3 V10" } },
+        "2": { class_type: NANFENG_VHS_CLASS, inputs: vhs, _meta: { title: "VHS Video Combine" } },
+    };
+}
+
+async function fetchObjectInfoDefaults(comfyUrl: string, className: string, signal: AbortSignal): Promise<Record<string, any> | null> {
+    const response = await fetch(`${comfyUrl}/object_info/${encodeURIComponent(className)}`, { signal });
+    if (!response.ok) return null;
+    const body = await response.json() as Record<string, any>;
+    const required = body?.[className]?.input?.required;
+    if (!required || typeof required !== "object") return null;
+    const defaults: Record<string, any> = {};
+    for (const [key, spec] of Object.entries(required) as Array<[string, any]>) {
+        const meta = Array.isArray(spec) ? spec[spec.length - 1] : {};
+        defaults[key] = meta && typeof meta === "object" && "default" in meta ? meta.default : (Array.isArray(spec) ? spec[0] : spec);
+    }
+    return defaults;
+}
+
+function setIfString(target: Record<string, any>, key: string, value: unknown) {
+    if (typeof value === "string" && value.trim()) target[key] = value.trim();
+}
+
+// 兼容旧前端 taskMode（6 值）与 MCP 透传：统一收敛到 V10 的四模式。
+function normalizeNanFengMode(raw: unknown): string {
+    const value = String(raw || "").toLowerCase();
+    if (value === "t2v") return "t2v";
+    if (value === "i2v") return "i2v";
+    if (value === "fl2v") return "fl2v";
+    // r2v / rv2v / v2v 全部归入参考生视频(ref2va)
+    return "ref2va";
+}
+
+function validateNanFengMode(mode: string, imageCount: number, videoCount: number, audioCount: number, params: Record<string, unknown>) {    const refMode = NANFENG_REF2VA_MODES.has(mode);
+    if (mode === "t2v" && imageCount) throw new Error("文生视频模式不能上传图片参考，请切换模式或清空图片。");
+    if (mode === "i2v" && imageCount !== 1) throw new Error("图生视频模式必须且只接受 1 张图片（首帧）。");
+    if (mode === "fl2v" && imageCount !== 2) throw new Error("首尾帧模式必须且只接受 2 张图片（首帧、尾帧）。");
+    if (!refMode && videoCount) throw new Error("当前模式不接受视频参考，请切换到参考生视频(ref2va)。");
+    if (!refMode && (params.lockAudio === true || params.audioDrive === true)) throw new Error("锁音频/音频驱动只在参考生视频(ref2va)模式可用。");
+}
+
+// object_info 不可达时，以打包的 NanFeng_H3_V10.json 为基底注入参数。
+async function applyNanFengV10Params(
+    template: Record<string, any>,
+    input: Record<string, unknown>,
+    params: Record<string, unknown>,
+    upload: (file: string) => Promise<string>,
+    comfyUrl: string,
+    signal: AbortSignal,
+): Promise<Record<string, any>> {
+    const v10Node = template["1"];
+    if (!v10Node) throw new Error("NanFeng_H3_V10.json 缺少主节点 \"1\"");
+    const v10 = v10Node.inputs as Record<string, any>;
+    const mode = normalizeNanFengMode(params.mode ?? params.taskMode ?? (typeof input.video === "string" ? "ref2va" : "t2v"));
+
+    setIfString(v10, "模型", params.modelName);
+    setIfString(v10, "文本编码器", params.textEncoder);
+    setIfString(v10, "视频VAE", params.videoVae);
+    setIfString(v10, "音频VAE", params.audioVae);
+    setIfString(v10, "模型权重精度", params.precision);
+    setIfString(v10, "SageAttention", params.sageAttention);
+    if (typeof params.aspectRatio === "string" && params.aspectRatio) v10["画面比例"] = normalizeH3AspectRatio(params.aspectRatio);
+    if (Number.isFinite(Number(params.megapixels)) && Number(params.megapixels) > 0) v10["百万像素"] = Number(params.megapixels);
+    v10["时长秒"] = Math.max(1, Math.min(15, Number(params.duration || 5)));
+    if (typeof input.prompt === "string" && input.prompt) v10["提示词"] = input.prompt;
+    if (params.seed !== undefined && params.seed !== null && String(params.seed).trim() !== "") v10["随机种子"] = Number(params.seed);
+    setIfString(v10, "采样器", params.sampler);
+    setIfString(v10, "调度器", params.scheduler);
+    if (Number.isFinite(Number(params.steps))) v10["采样步数"] = Number(params.steps);
+    if (Number.isFinite(Number(params.denoise))) v10["降噪强度"] = Number(params.denoise);
+    setIfString(v10, "参考图尺寸", params.refImageSize);
+    if (typeof params.constantTriggerWord === "string") v10["恒定触发词"] = params.constantTriggerWord;
+    v10["文生视频"] = mode === "t2v";
+    v10["图生视频"] = mode === "i2v";
+    v10["首尾帧"] = mode === "fl2v";
+    const refMode = NANFENG_REF2VA_MODES.has(mode);
+    v10["启用锁音频"] = refMode && params.lockAudio === true;
+    v10["开启音频驱动模式"] = refMode && params.audioDrive === true;
+    if (refMode && typeof params.audioDriveFile === "string") v10["音频驱动文件"] = params.audioDriveFile;
+
+    const images = (Array.isArray(input.references) ? input.references.map(String).filter(Boolean) : []).slice(0, 9);
+    const uploadedImages = await Promise.all(images.map((file) => upload(file)));
+    const userVideos = (Array.isArray(input.videos) ? input.videos.map(String).filter(Boolean) : []).slice(0, 3);
+    if (userVideos.length === 0 && typeof input.video === "string") userVideos.push(input.video);
+    const previousVideo = String(input.previousVideo || "");
+    const uploadedUserVideos = await Promise.all(userVideos.map((file) => upload(file)));
+    const audios = (Array.isArray(input.audios) ? input.audios.map(String).filter(Boolean) : []).slice(0, 3);
+    const uploadedAudios = await Promise.all(audios.map((file) => upload(file)));
+    validateNanFengMode(mode, uploadedImages.length, uploadedUserVideos.length, uploadedAudios.length, params);
+    for (let i = 0; i < uploadedImages.length; i += 1) v10[`图片${i + 1}`] = uploadedImages[i];
+    const videoSlots: string[] = [];
+    if (previousVideo && refMode) videoSlots.push(await upload(previousVideo));
+    for (const v of uploadedUserVideos) { if (videoSlots.length >= 3) break; videoSlots.push(v); }
+    for (let i = 0; i < videoSlots.length; i += 1) v10[`视频${i + 1}`] = videoSlots[i];
+    for (let i = 0; i < uploadedAudios.length; i += 1) v10[`音频${i + 1}`] = uploadedAudios[i];
+
+    let vhs: Record<string, any> | null = null;
+    try { vhs = await fetchObjectInfoDefaults(comfyUrl, NANFENG_VHS_CLASS, signal); } catch { vhs = null; }
+    template["2"] = {
+        class_type: NANFENG_VHS_CLASS,
+        inputs: { ...(vhs || { images: ["1", 0], audio: ["1", 1] }), images: ["1", 0] },
+        _meta: { title: "VHS Video Combine" },
+    };
+    if ("audio" in template["2"].inputs) template["2"].inputs.audio = ["1", 1];
+    return template;
 }
 
 function normalizeUrl(value: string) {
