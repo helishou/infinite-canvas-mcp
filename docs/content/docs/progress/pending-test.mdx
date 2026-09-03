@@ -7,6 +7,7 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
++ 本地 H3 Backend 直连：关闭 Canvas Agent、保持 Backend 和 ComfyUI 运行，确认模型读取、Ref2VA 生成、任务轮询和取消均可用；关闭 Backend 时显示 Backend 未连接。
 + H3 MCP 状态同步：通过 MCP 运行单段和全部 Clip，确认 ComfyUI 进入运行后画布节点立即显示运行中，进度、成功结果和失败信息均回写到对应 Clip，刷新页面后状态仍一致。
 + 组节点双向锁定：锁定组后确认组内节点不能拖出，外部节点也不能拖入；解锁后两种拖动均恢复。
 + 组节点锁定：锁定组后拖动组内节点到组外，确认节点仍被限制在组内；在组内拖动和整体移动组仍正常，解锁后可以移出。
