@@ -1,6 +1,6 @@
 import { App, Button, Form, Input, Modal, Progress, Select, Tabs } from "antd";
 import type { TFunction } from "i18next";
-import { Cloud, Download, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
+import { Cloud, Download, FolderOpen, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -50,6 +50,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const { message } = App.useApp();
     const { i18n, t } = useTranslation();
     const configInputRef = useRef<HTMLInputElement>(null);
+    const comfyuiDirRef = useRef<HTMLInputElement>(null);
     const [activeTab, setActiveTab] = useState<ConfigTabKey>(initialTab);
     const [editingChannelId, setEditingChannelId] = useState("");
     const [testingWebdav, setTestingWebdav] = useState(false);
@@ -269,6 +270,32 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 </Form.Item>
                                 <Form.Item label={t("config.preferences.systemPrompt")} className="mb-0">
                                     <Input.TextArea rows={4} value={config.systemPrompt} placeholder={t("config.preferences.systemPromptPlaceholder")} onChange={(event) => updateConfig("systemPrompt", event.target.value)} />
+                                </Form.Item>
+                                <div className="mb-2 mt-4 text-sm font-semibold">{t("config.preferences.comfyui")}</div>
+                                <Form.Item label={t("config.preferences.comfyuiBasePath")} className="mb-0">
+                                    <div className="flex gap-2">
+                                        <Input value={config.comfyuiBasePath} onChange={(event) => updateConfig("comfyuiBasePath", event.target.value)} />
+                                        <input
+                                            {...({ webkitdirectory: "" } as any)}
+                                            type="file"
+                                            style={{ display: "none" }}
+                                            ref={comfyuiDirRef}
+                                            onChange={(e) => {
+                                                const file = e.currentTarget.files?.[0];
+                                                if (!file) return;
+                                                const parts = file.webkitRelativePath.split("/");
+                                                if (parts[0]) {
+                                                    const driveMatch = window.location.pathname.match(/^\/([a-zA-Z])/);
+                                                    const drive = driveMatch ? driveMatch[1] : null;
+                                                    updateConfig("comfyuiBasePath", drive ? `${drive}:/${parts[0]}` : `/${parts[0]}`);
+                                                }
+                                            }}
+                                        />
+                                        <Button
+                                            icon={<FolderOpen className="size-4" />}
+                                            onClick={() => comfyuiDirRef.current?.click()}
+                                        />
+                                    </div>
                                 </Form.Item>
                             </Form>
                         ),

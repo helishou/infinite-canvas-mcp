@@ -429,6 +429,7 @@ export default {
             dataDirHint: "保存后需重启 Backend 服务，修改前请确认旧目录数据已备份",
             dataDirSaved: "数据目录已保存，重启 Backend 后生效",
             dataDirSaveFailed: "保存数据目录失败",
+            browse: "浏览…",
         },
         promptSources: {
             add: "新增来源",
@@ -526,6 +527,9 @@ export default {
             audioInstructionsPlaceholder: "例如：自然、温暖、适合旁白。",
             systemPrompt: "系统提示词",
             systemPromptPlaceholder: "例如：你是一位擅长电影感写实摄影的视觉导演。",
+            comfyui: "ComfyUI 路径",
+            comfyuiBasePath: "ComfyUI 根目录",
+            comfyuiBasePathPlaceholder: "例如：D:/ComfyUI，选填",
         },
         channelEditor: {
             title: "编辑渠道",

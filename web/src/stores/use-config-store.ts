@@ -7,6 +7,7 @@ import i18n from "@/i18n";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
+export const VIDEO_CONCAT_MODEL = "__local_video_concat__";
 export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 
 export type ChannelModel = {
@@ -52,6 +53,8 @@ export type AiConfig = {
     background: string;
     count: string;
     canvasImageCount: string;
+    /** ComfyUI 安装根目录，如 D:/ComfyUI */
+    comfyuiBasePath: string;
 };
 
 export type WebdavSyncConfig = {
@@ -109,6 +112,7 @@ export const defaultConfig: AiConfig = {
     background: "",
     count: "1",
     canvasImageCount: "3",
+    comfyuiBasePath: "",
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
@@ -163,6 +167,7 @@ export function modelCapabilityOf(config: AiConfig, value: string): ModelCapabil
 }
 
 export function modelMatchesCapability(config: AiConfig, value: string, capability?: ModelCapability) {
+    if (capability === "video" && value === VIDEO_CONCAT_MODEL) return true;
     if (!capability) return true;
     return modelCapabilityOf(config, value) === capability;
 }
@@ -177,7 +182,7 @@ export function resolveModelForCapability(config: AiConfig, currentModel: string
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
     if (!capability) return config.models;
-    return config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)));
+    return [...(capability === "video" ? [VIDEO_CONCAT_MODEL] : []), ...config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)))];
 }
 
 /** The user script (if any) attached to a model; empty string means use the system default call. */
