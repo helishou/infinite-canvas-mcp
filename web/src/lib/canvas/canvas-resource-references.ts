@@ -4,6 +4,7 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageToDataUrl } from "@/services/image-storage";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
+import type { CanvasNodeResource } from "@/types/canvas-plugin";
 
 export type CanvasResourceKind = "image" | "video" | "audio" | "text";
 
@@ -100,24 +101,35 @@ export function getGroupResourceNodes(groupId: string, nodes: CanvasNodeData[]) 
 function labelResourceNodes(nodes: CanvasNodeData[], active: boolean) {
     const counts: Record<CanvasResourceKind, number> = { image: 0, video: 0, audio: 0, text: 0 };
     return nodes.flatMap((node): CanvasResourceReference[] => {
-        const kind = resourceKind(node);
-        if (!kind) return [];
-        const resource = getNodeDefinition(node.type)?.resource?.(node);
-        const index = counts[kind]++;
-        const label = labelForKind(kind, index);
-        return [
-            {
-                id: node.id,
+        return nodeResourceItems(node).map((resource, resourceIndex) => {
+            const index = counts[resource.kind]++;
+            const label = labelForKind(resource.kind, index);
+            return {
+                id: `${node.id}:${resourceIndex}`,
                 nodeId: node.id,
-                kind,
+                kind: resource.kind,
                 label,
-                title: node.title || label,
-                previewUrl: node.metadata?.content || resource?.url,
-                text: resourceText(node),
+                title: nodeResourceTitle(node, resource, resourceIndex, label),
+                previewUrl: resource.url,
+                text: resource.text,
                 active,
-            },
-        ];
+            };
+        });
     });
+}
+
+export function nodeResourceItems(node: CanvasNodeData): CanvasNodeResource[] {
+    if (node.type === CanvasNodeType.Image && node.metadata?.content) return [{ kind: "image", url: node.metadata.content, storageKey: node.metadata.storageKey }];
+    if (node.type === CanvasNodeType.Video && node.metadata?.content) return [{ kind: "video", url: node.metadata.content, storageKey: node.metadata.storageKey }];
+    if (node.type === CanvasNodeType.Audio && node.metadata?.content) return [{ kind: "audio", url: node.metadata.content, storageKey: node.metadata.storageKey }];
+    if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) return [{ kind: "text", text: node.metadata.content || node.metadata.prompt }];
+    const resource = getNodeDefinition(node.type)?.resource?.(node);
+    return Array.isArray(resource) ? resource : resource ? [resource] : [];
+}
+
+function nodeResourceTitle(node: CanvasNodeData, resource: CanvasNodeResource, index: number, fallback: string) {
+    if (resource.text && node.type === CanvasNodeType.Text) return node.title || fallback;
+    return nodeResourceItems(node).length > 1 ? `${node.title || "输出"} · Clip ${index + 1}` : node.title || fallback;
 }
 
 function labelForKind(kind: CanvasResourceKind, index: number) {
@@ -133,8 +145,7 @@ function isResourceNode(node: CanvasNodeData) {
 
 function resourceText(node: CanvasNodeData): string | undefined {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt;
-    const resource = getNodeDefinition(node.type)?.resource?.(node);
-    return resource?.kind === "text" ? resource.text : undefined;
+    return nodeResourceItems(node).find((resource) => resource.kind === "text")?.text;
 }
 
 function resourceKind(node: CanvasNodeData): CanvasResourceKind | null {
@@ -143,5 +154,5 @@ function resourceKind(node: CanvasNodeData): CanvasResourceKind | null {
     if (node.type === CanvasNodeType.Audio && node.metadata?.content) return "audio";
     if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) return "text";
     // Plugin nodes declare their input eligibility through definition.resource.
-    return getNodeDefinition(node.type)?.resource?.(node)?.kind || null;
+    return nodeResourceItems(node)[0]?.kind || null;
 }

@@ -133,7 +133,7 @@ export type CanvasAgentOp =
 // ---------------------------------------------------------------------------
 
 export type CanvasResourceKind = "image" | "video" | "audio" | "text";
-export type CanvasNodeResource = { kind: CanvasResourceKind; text?: string; url?: string };
+export type CanvasNodeResource = { kind: CanvasResourceKind; text?: string; url?: string; storageKey?: string };
 
 // ---------------------------------------------------------------------------
 // AI 生成:插件直接复用宿主的模型/密钥配置发起生成(生图/生视频/生文本/生音频)
@@ -188,6 +188,7 @@ export type LocalH3Input = { video?: { name: string; dataUrl?: string; url?: str
 export type LocalH3Result = { url: string; storageKey?: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; segments?: Array<{ media?: Array<{ url: string; storageKey?: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: LocalH3Result | null; error?: string | null };
+export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 
 // 一个可选模型:value 传回给 generateXxx({ model }),label 用于展示
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -201,7 +202,16 @@ export type CanvasPluginAi = {
     runLocalH3: (prompt: string, input: LocalH3Input, params: Record<string, unknown>, options?: LocalH3Options) => Promise<LocalH3Result>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
-    listLocalH3Models: () => Promise<{ models: string[]; loras: string[] }>;
+    runVideoConcat: (videos: Array<{ name: string; url?: string; storageKey?: string }>, options?: LocalH3Options) => Promise<LocalVideoConcatResult>;
+    listLocalH3Models: () => Promise<{
+        models: string[];
+        loras: string[];
+        textEncoders?: string[];
+        videoVaes?: string[];
+        audioVaes?: string[];
+        latentUpscaleModels?: string[];
+        nanfeng?: Record<string, unknown[]>;
+    }>;
     runRunningHubH3: (prompt: string, input: LocalH3Input, params: Record<string, unknown>, options?: LocalH3Options) => Promise<LocalH3Result>;
     getRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
@@ -319,7 +329,7 @@ export type CanvasNodeDefinition = {
     // 此时忽略 interactive 标志、始终允许操作,并隐藏移动/交互开关。缺省视为 false。
     forceInteractive?: (node: CanvasNodeData) => boolean;
     keepAspectRatio?: (node: CanvasNodeData) => boolean;
-    resource?: (node: CanvasNodeData) => CanvasNodeResource | null;
+    resource?: (node: CanvasNodeData) => CanvasNodeResource | CanvasNodeResource[] | null;
     // 渲染
     Content?: ComponentType<CanvasNodeContentProps>;
     Panel?: ComponentType<CanvasNodePanelProps>; // 节点下方面板(自定义)

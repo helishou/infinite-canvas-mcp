@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import i18n from "@/i18n";
 
-import { getBackendToken, getBackendUrl } from "@/services/backend-api";
+import { getBackendUrl } from "@/services/backend-api";
+import { fetchSettings, saveSettings } from "@/services/settings-api";
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
@@ -94,14 +95,29 @@ type AgentStore = {
 
 export const CANVAS_AGENT_PANEL_MOTION_MS = 500;
 
+let saveSettingsTimer: ReturnType<typeof setTimeout> | null = null;
+
+function debouncedSaveAgentSettings(patch: Partial<AgentStore>) {
+    if (saveSettingsTimer) clearTimeout(saveSettingsTimer);
+    saveSettingsTimer = setTimeout(() => {
+        saveSettingsTimer = null;
+        const s: Record<string, unknown> = {};
+        if (patch.width !== undefined) s.agentPanelWidth = patch.width;
+        if ((patch as Partial<AgentStore>).permissionMode !== undefined) s.agentPermissionMode = (patch as Partial<AgentStore>).permissionMode;
+        if (patch.model !== undefined) s.agentModel = patch.model;
+        if (patch.reasoningEffort !== undefined) s.agentReasoningEffort = patch.reasoningEffort;
+        if (Object.keys(s).length > 0) void saveSettings(s);
+    }, 500);
+}
+
 export const useAgentStore = create<AgentStore>((set, get) => ({
-    width: typeof window === "undefined" ? 440 : Number(localStorage.getItem("canvas-agent-panel-width")) || 440,
+    width: 440,
     panelOpen: false,
     panelMounted: true,
     panelClosing: false,
     canvasContext: null,
     url: getBackendUrl().replace(/\/$/, "") + "/agent",
-    token: getBackendToken(),
+    token: "",
     connected: false,
     enabled: false,
     silentConnect: false,
@@ -121,10 +137,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     loadingThreads: false,
     activeTab: "setup",
     confirmTools: false,
-    permissionMode: typeof window === "undefined" ? "request" : (localStorage.getItem("canvas-agent-permission-mode") as AgentPermissionMode) || "request",
+    permissionMode: "request",
     models: [],
-    model: typeof window === "undefined" ? "" : localStorage.getItem("canvas-agent-model") || "",
-    reasoningEffort: typeof window === "undefined" ? "" : (localStorage.getItem("canvas-agent-reasoning-effort") as AgentReasoningEffort) || "",
+    model: "",
+    reasoningEffort: "",
     activity: i18n.t("agent.state.ready"),
     conversation: { revision: 0, conversationId: "", threadId: "", status: "idle", mcpStatuses: {} },
     bootstrapStatus: null,
@@ -132,7 +148,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     connectError: "",
     pendingTool: null,
     pendingApprovals: [],
-    setAgentState: (patch) => set(patch),
+    setAgentState: (patch) => {
+        set(patch);
+        // Debounced 持久化到 backend settings
+        debouncedSaveAgentSettings(patch);
+    },
     openPanel: () => set({ panelOpen: true, panelMounted: true, panelClosing: false }),
     closePanel: () => {
         if (!get().panelMounted || get().panelClosing) return;
@@ -166,3 +186,20 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     addEventLog: (item) => set((state) => ({ eventLogs: [...state.eventLogs.slice(-160), item] })),
     clearEventLogs: () => set({ eventLogs: [] }),
 }));
+
+/** 从 backend settings 同步 agent 相关配置 */
+async function hydrateAgentSettings() {
+    const settings = await fetchSettings();
+    const patch: Partial<AgentStore> = {};
+    if (settings.agentPanelWidth) patch.width = settings.agentPanelWidth;
+    if (settings.agentPermissionMode) patch.permissionMode = settings.agentPermissionMode as AgentPermissionMode;
+    if (settings.agentModel) patch.model = settings.agentModel;
+    if (settings.agentReasoningEffort) patch.reasoningEffort = settings.agentReasoningEffort as AgentReasoningEffort;
+    if (Object.keys(patch).length > 0) set(patch);
+}
+
+if (typeof window !== "undefined") {
+    window.addEventListener("backend-connected", () => {
+        void hydrateAgentSettings();
+    });
+}

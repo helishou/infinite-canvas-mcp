@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response, type Express } from "express";
 import path from "node:path";
 
-import { type ResolvedConfig, DATA_DIR, ensureDataDirs, loadRootConfig, saveRootConfig } from "./config.js";
+import { type ResolvedConfig, DATA_DIR, ensureDataDirs, loadRootConfig, saveRootConfig, loadFrontendSettings, saveFrontendSettings, type FrontendSettings } from "./config.js";
 import type {
     Asset, AssetFolder, CanvasProject,
     GenerationLog, GenerationLogStatus, RuntimeTask, RuntimeTaskStatus,
@@ -96,6 +96,21 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         const root = loadRootConfig();
         res.json({ ok: true, dataDir: DATA_DIR, configuredDataDir: root.dataDir || null });
     });
+    // ── Frontend settings ───────────────────────────────────────────────
+    app.get("/settings", (_req, res) => {
+        res.json({ ok: true, settings: loadFrontendSettings() });
+    });
+    app.patch("/settings", (req, res) => {
+        const patch = req.body as Partial<FrontendSettings>;
+        if (!patch || typeof patch !== "object") {
+            return void res.status(400).json({ ok: false, error: "请求体必须是对象" });
+        }
+        const current = loadFrontendSettings();
+        saveFrontendSettings({ ...current, ...patch });
+        res.json({ ok: true, settings: loadFrontendSettings() });
+    });
+
+    // ── Runtime status ────────────────────────────────────────────────
     app.get("/runtime/status", async (_req, res) => {
         const extra: Record<string, unknown> = { sqlite: true, node: process.version };
         if (deps.comfy) extra.comfyui = await deps.comfy.status();
@@ -196,11 +211,12 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     // ── Media ────────────────────────────────────────────────────────────
     /** 上传媒体（JSON 兼容入口；新代码优先使用 /media/upload-binary） */
     app.post("/media/upload", (req, res) => {
-        const body = req.body as { name?: string; dataUrl?: string; storageKey?: string; width?: number; height?: number; durationMs?: number };
+        const body = req.body as { name?: string; dataUrl?: string; storageKey?: string; width?: number; height?: number; durationMs?: number; category?: "input" | "output" | "library" };
         if (!body.dataUrl) return void res.status(400).json({ ok: false, error: "需要提供 dataUrl（base64 data URL）" });
         try {
             const media = stores.media.storeDataUrl(String(body.dataUrl), body.name || "media.bin", {
                 storageKey: body.storageKey,
+                category: body.category,
                 width: body.width ?? null, height: body.height ?? null, durationMs: body.durationMs ?? null,
             });
             res.status(201).json({
@@ -226,11 +242,14 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         const encodedName = String(req.headers["x-media-name"] || "media.bin");
         const name = decodeURIComponent(encodedName);
         const mimeType = String(req.headers["content-type"] || "application/octet-stream").split(";", 1)[0];
+        const categoryHeader = String(req.headers["x-media-category"] || "input");
+        const category = categoryHeader === "output" || categoryHeader === "library" ? categoryHeader : "input";
         if (!body.length) return void res.status(400).json({ ok: false, error: "媒体内容为空" });
         try {
             const media = stores.media.store(body, {
                 name,
                 mimeType,
+                category,
                 width: Number(req.headers["x-media-width"]) || null,
                 height: Number(req.headers["x-media-height"]) || null,
                 durationMs: Number(req.headers["x-media-duration-ms"]) || null,
@@ -317,6 +336,49 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         else db.db.prepare("DELETE FROM plugin_declarations").run();
         events.publish({ type: "plugin.updated", payload: { declarations: result } });
         res.json({ ok: true, declarations: result });
+    });
+
+    app.get("/plugins/installed", (_req, res) => {
+        const plugins = db.getSetting("plugins.installed");
+        res.json({ ok: true, plugins: Array.isArray(plugins) ? plugins : [] });
+    });
+    app.put("/plugins/installed", (req, res) => {
+        const plugins = Array.isArray(req.body?.plugins) ? req.body.plugins.filter((item: unknown) => item && typeof item === "object" && !Array.isArray(item)) : [];
+        db.setSetting("plugins.installed", plugins);
+        res.json({ ok: true, plugins });
+    });
+    app.get("/plugins/storage", (req, res) => {
+        const pluginId = String(req.query.pluginId || "").trim();
+        const key = String(req.query.key || "").trim();
+        if (!pluginId || !key) return void res.status(400).json({ ok: false, error: "pluginId 和 key 必填" });
+        res.json({ ok: true, value: db.getSetting(`plugin.storage.${pluginId}.${key}`) ?? null });
+    });
+    app.put("/plugins/storage", (req, res) => {
+        const pluginId = String(req.body?.pluginId || "").trim();
+        const key = String(req.body?.key || "").trim();
+        if (!pluginId || !key) return void res.status(400).json({ ok: false, error: "pluginId 和 key 必填" });
+        db.setSetting(`plugin.storage.${pluginId}.${key}`, req.body?.value);
+        res.json({ ok: true });
+    });
+    app.delete("/plugins/storage", (req, res) => {
+        const pluginId = String(req.query.pluginId || "").trim();
+        const key = String(req.query.key || "").trim();
+        if (!pluginId || !key) return void res.status(400).json({ ok: false, error: "pluginId 和 key 必填" });
+        db.db.prepare("DELETE FROM runtime_settings WHERE key = ?").run(`plugin.storage.${pluginId}.${key}`);
+        res.json({ ok: true });
+    });
+
+    app.get("/prompts/cache", (req, res) => {
+        const sourceId = String(req.query.sourceId || "").trim();
+        if (!sourceId) return void res.status(400).json({ ok: false, error: "sourceId 必填" });
+        res.json({ ok: true, cache: db.getSetting(`prompt.cache.${sourceId}`) ?? null });
+    });
+    app.put("/prompts/cache", (req, res) => {
+        const sourceId = String(req.body?.sourceId || "").trim();
+        const cache = req.body?.cache;
+        if (!sourceId || !cache || typeof cache !== "object" || Array.isArray(cache)) return void res.status(400).json({ ok: false, error: "sourceId 和有效 cache 必填" });
+        db.setSetting(`prompt.cache.${sourceId}`, cache);
+        res.json({ ok: true });
     });
 
     app.get("/generation-logs", (req, res) => {

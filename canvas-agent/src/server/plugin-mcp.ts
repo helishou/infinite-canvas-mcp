@@ -52,9 +52,9 @@ export type PluginMcpBackend = {
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
     replaceCanvasProjects(projects: Record<string, unknown>[]): Promise<Record<string, unknown>[]>;
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
-    runtimeMediaStore(name: string, dataUrl: string): Promise<{ path: string }>;
+    runtimeMediaStore(name: string, dataUrl: string, storageKey?: string): Promise<{ path: string }>;
     runtimeMediaPath?(ref: string): Promise<string>;
-    comfyModels(signal?: AbortSignal): Promise<{ models: string[]; loras: string[]; refreshedAt: string; error?: string }>;
+    comfyModels(signal?: AbortSignal): Promise<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; refreshedAt: string; error?: string }>;
     comfyRun(preset: string, input: Record<string, unknown>, params: Record<string, unknown>): Promise<import("../runtime/types.js").RuntimeTask>;
     comfyGetTask(id: string, after?: number): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;
     comfyCancel(id: string): Promise<import("../runtime/types.js").RuntimeTask>;

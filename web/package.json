@@ -27,7 +27,6 @@
         "fflate": "^0.8.3",
         "file-saver": "^2.0.5",
         "i18next": "^26.3.6",
-        "localforage": "^1.10.0",
         "lucide-react": "^1.16.0",
         "motion": "^12.38.0",
         "nanoid": "^5.1.11",

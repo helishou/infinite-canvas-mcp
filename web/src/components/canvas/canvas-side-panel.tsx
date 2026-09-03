@@ -72,7 +72,6 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
             setWidth(nextWidth);
         };
         const onUp = () => {
-            localStorage.setItem("canvas-side-panel-width", String(nextWidth));
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
             setResizing(false);

@@ -4,7 +4,7 @@ import { useBackendStore } from "@/stores/use-backend-store";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
 
-export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
+export async function uploadMediaFile(input: string | Blob, prefix = "file", category: "input" | "output" | "library" = "input"): Promise<UploadedFile> {
     const blob = typeof input === "string" ? await (await fetch(input)).blob() : input;
     if (!useBackendStore.getState().connected) throw new Error("总后台未连接，无法上传媒体");
     const url = URL.createObjectURL(blob);
@@ -12,7 +12,7 @@ export async function uploadMediaFile(input: string | Blob, prefix = "file"): Pr
     const videoMeta = meta as { width?: number; height?: number; durationMs?: number };
 
     URL.revokeObjectURL(url);
-    const result = await uploadBackendMedia({ name: `${prefix}-${nanoid()}`, blob, mimeType: blob.type || "application/octet-stream", width: videoMeta.width, height: videoMeta.height, durationMs: videoMeta.durationMs });
+    const result = await uploadBackendMedia({ name: `${prefix}-${nanoid()}`, blob, mimeType: blob.type || "application/octet-stream", width: videoMeta.width, height: videoMeta.height, durationMs: videoMeta.durationMs, category });
     return { url: result.url, storageKey: result.storageKey, bytes: blob.size, mimeType: result.mimeType, ...videoMeta };
 }
 

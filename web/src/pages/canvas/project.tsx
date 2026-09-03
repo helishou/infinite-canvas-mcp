@@ -8,9 +8,12 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
-import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
+import { getComfyTask, resolveComfyImageSize, runComfyTask, runVideoConcatTask } from "@/services/api/comfyui";
 import { uploadImage } from "@/services/image-storage";
-import { uploadMediaFile } from "@/services/file-storage";
+import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
+import { backendMediaUrl } from "@/services/backend-api";
+import { useBackendStore } from "@/stores/use-backend-store";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
@@ -48,7 +51,7 @@ import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildCompositeGroupNodes, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
-import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
+import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
     audioExtension,
     buildAngleLabel,
@@ -130,6 +133,15 @@ const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
+type CanvasReferenceDrag = { nodeId: string; url: string; type: "image"; name: string; storageKey?: string };
+
+function h3DropTargetAt(clientX: number, clientY: number) {
+    return document.elementsFromPoint(clientX, clientY).map((element) => element.closest<HTMLElement>("[data-canvas-ref-drop-target]")).find(Boolean) || null;
+}
+
+function dispatchCanvasReferenceDrag(name: "canvas-reference-drag-start" | "canvas-reference-drag-over" | "canvas-reference-drop" | "canvas-reference-drag-end", detail: CanvasReferenceDrag & { targetNodeId: string; clientX?: number; clientY?: number }) {
+    window.dispatchEvent(new CustomEvent(name, { detail }));
+}
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
 
@@ -177,6 +189,8 @@ function InfiniteCanvasPage() {
         startX: number;
         startY: number;
         initialSelectedNodes: { id: string; x: number; y: number }[];
+        referenceDrag?: CanvasReferenceDrag;
+        referenceTargetNodeId?: string;
     }>({
         isDraggingNode: false,
         hasMoved: false,
@@ -371,6 +385,32 @@ function InfiniteCanvasPage() {
         };
         void restore();
     }, [hydrated, navigate, openProject, projectId, updateProject]);
+
+    useEffect(() => {
+        if (!projectLoaded) return;
+        let disposed = false;
+        const poll = async () => {
+            const agent = useAgentStore.getState();
+            if (!agent.connected || !agent.url || !agent.token) return;
+            const pending = nodesRef.current.filter((node) => node.type === CanvasNodeType.Video && node.metadata?.status === NODE_STATUS_LOADING && node.metadata.runtimeTaskId);
+            await Promise.all(pending.map(async (node) => {
+                try {
+                    const task = await getComfyTask(agent.url, agent.token, String(node.metadata?.runtimeTaskId));
+                    if (disposed) return;
+                    if (task.status === "succeeded" && task.result?.url) {
+                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, content: task.result!.url, storageKey: task.result!.storageKey, mimeType: task.result!.mimeType, status: NODE_STATUS_SUCCESS, errorDetails: undefined, runtimeTaskId: undefined } } : item));
+                    } else if (["failed", "cancelled"].includes(task.status)) {
+                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: task.error || "本地 ComfyUI 任务失败", runtimeTaskId: undefined } } : item));
+                    }
+                } catch {
+                    // Backend/Agent 暂时不可用时保留 loading，下一次页面进入或任务恢复时继续查询。
+                }
+            }));
+        };
+        void poll();
+        const timer = window.setInterval(() => void poll(), 1500);
+        return () => { disposed = true; window.clearInterval(timer); };
+    }, [projectLoaded, nodesRef, setNodes]);
 
     useEffect(() => {
         if (!projectLoaded || !["new", "recent", "choose"].includes(searchParams.get("mode") || "")) return;
@@ -687,6 +727,7 @@ function InfiniteCanvasPage() {
 
     const { pluginHost, renderPluginPanel, buildNodeToolbarItems } = usePluginHost({
         projectId,
+        updateProject,
         effectiveConfig,
         isAiConfigReady,
         openConfigDialog,
@@ -1126,6 +1167,9 @@ function InfiniteCanvasPage() {
             startX: event.clientX,
             startY: event.clientY,
             initialSelectedNodes: currentNodes.filter((node) => dragIds.has(node.id)).map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
+            referenceDrag: nextSelected.size === 1 && currentNodes.find((node) => nextSelected.has(node.id))?.type === CanvasNodeType.Image
+                ? (() => { const node = currentNodes.find((item) => nextSelected.has(item.id)); const url = String(node?.metadata?.content || "").trim(); return url && node ? { nodeId: node.id, url, type: "image" as const, name: node.title || "图片", storageKey: node.metadata?.storageKey } : undefined; })()
+                : undefined,
         };
         historyPausedRef.current = true;
         nodeDraggingRef.current = true;
@@ -1150,7 +1194,13 @@ function InfiniteCanvasPage() {
         nodeDraggingRef.current = false;
         setIsNodeDragging(false);
         setDropTargetGroupId(null);
-        if (dragRef.current.hasMoved && clientX != null && clientY != null) {
+        const referenceDrag = dragRef.current.referenceDrag;
+        const referenceTargetNodeId = dragRef.current.referenceTargetNodeId;
+        if (referenceDrag && referenceTargetNodeId && clientX != null && clientY != null) {
+            dispatchCanvasReferenceDrag("canvas-reference-drop", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
+            dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
+            setNodes((prev) => prev.map((node) => { const initial = initialPositions.find((item) => item.id === node.id); return initial ? { ...node, position: { x: initial.x, y: initial.y } } : node; }));
+        } else if (dragRef.current.hasMoved && clientX != null && clientY != null) {
             const movedIds = new Set(initialPositions.map((item) => item.id));
             setNodes((prev) => {
                 const moved = prev.map((node) => {
@@ -1158,19 +1208,21 @@ function InfiniteCanvasPage() {
                     return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
                 });
                 const targetGroup = findGroupDropTarget(movedIds, moved);
-                if (targetGroup) return snapNodesIntoGroup(movedIds, moved, targetGroup);
-                return moved.map((node) => {
+                const grouped = targetGroup ? snapNodesIntoGroup(movedIds, moved, targetGroup) : moved.map((node) => {
                     if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
                     const groupId = findContainingGroupId(node, moved);
                     if (node.metadata?.groupId === groupId) return node;
                     return { ...node, metadata: { ...node.metadata, groupId } };
                 });
+                return keepNodesInLockedGroups(movedIds, prev, grouped);
             });
         }
 
         dragRef.current.isDraggingNode = false;
         dragRef.current.hasMoved = false;
         dragRef.current.initialSelectedNodes = [];
+        dragRef.current.referenceDrag = undefined;
+        dragRef.current.referenceTargetNodeId = undefined;
         if (wasClick && clickedNodeId) {
             const clickedNode = nodesRef.current.find((node) => node.id === clickedNodeId);
             const clickedDefinition = clickedNode ? getNodeDefinition(clickedNode.type) : undefined;
@@ -1196,6 +1248,24 @@ function InfiniteCanvasPage() {
                 }
 
                 const movedIds = new Set(initialPositions.map((item) => item.id));
+                const referenceDrag = dragRef.current.referenceDrag;
+                const h3Target = referenceDrag ? h3DropTargetAt(event.clientX, event.clientY) : null;
+                if (referenceDrag && h3Target) {
+                    if (dragRef.current.referenceTargetNodeId !== h3Target.dataset.canvasRefDropTarget) {
+                        if (dragRef.current.referenceTargetNodeId) dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: dragRef.current.referenceTargetNodeId });
+                        dragRef.current.referenceTargetNodeId = h3Target.dataset.canvasRefDropTarget;
+                        dispatchCanvasReferenceDrag("canvas-reference-drag-start", { ...referenceDrag, targetNodeId: h3Target.dataset.canvasRefDropTarget || "" });
+                    }
+                    dispatchCanvasReferenceDrag("canvas-reference-drag-over", { ...referenceDrag, targetNodeId: h3Target.dataset.canvasRefDropTarget || "", clientX: event.clientX, clientY: event.clientY });
+                    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+                    setDropTargetGroupId(null);
+                    setNodes((prev) => prev.map((node) => { const initial = initialPositions.find((item) => item.id === node.id); return initial ? { ...node, position: { x: initial.x, y: initial.y } } : node; }));
+                    return;
+                }
+                if (referenceDrag && dragRef.current.referenceTargetNodeId) {
+                    dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: dragRef.current.referenceTargetNodeId, clientX: event.clientX, clientY: event.clientY });
+                    dragRef.current.referenceTargetNodeId = undefined;
+                }
                 const previewNodes = nodesRef.current.map((node) => {
                     const initial = initialPositions.find((item) => item.id === node.id);
                     return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
@@ -1363,6 +1433,30 @@ function InfiniteCanvasPage() {
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
     }, []);
+
+    // 内部引用拖拽（H3 输出视频 / 侧边栏素材）落库生成节点：复用 storageKey，不重新上传。
+    const createNodeFromCanvasRef = useCallback(
+        (ref: { url?: string; dataUrl?: string; storageKey?: string; name?: string; type?: string; kind?: string; width?: number; height?: number; durationMs?: number; bytes?: number; mimeType?: string }, position: Position) => {
+            const type = ref.type || ref.kind || "image";
+            const resolvedUrl = ref.storageKey ? backendMediaUrl(ref.storageKey) : ref.url || ref.dataUrl || "";
+            if (!resolvedUrl) return;
+            const id = `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            if (type === "video") {
+                const size = fitNodeSize(ref.width || 1280, ref.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                setNodes((prev) => [...prev, { id, type: CanvasNodeType.Video, title: ref.name || "视频", position: { x: position.x - size.width / 2, y: position.y - size.height / 2 }, width: size.width, height: size.height, metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", naturalWidth: ref.width, naturalHeight: ref.height, bytes: ref.bytes, mimeType: ref.mimeType || "video/mp4", durationMs: ref.durationMs } }]);
+            } else if (type === "audio") {
+                const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
+                setNodes((prev) => [...prev, { id, type: CanvasNodeType.Audio, title: ref.name || "音频", position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 }, width: spec.width, height: spec.height, metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", bytes: ref.bytes, mimeType: ref.mimeType || "audio/mpeg", durationMs: ref.durationMs } }]);
+            } else {
+                const size = fitNodeSize(ref.width || 512, ref.height || 512);
+                setNodes((prev) => [...prev, { id, type: CanvasNodeType.Image, title: ref.name || "图片", position: { x: position.x - size.width / 2, y: position.y - size.height / 2 }, width: size.width, height: size.height, metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", naturalWidth: ref.width, naturalHeight: ref.height, bytes: ref.bytes, mimeType: ref.mimeType || "image/png" } }]);
+            }
+            setSelectedNodeIds(new Set([id]));
+            setSelectedConnectionId(null);
+            setDialogNodeId(id);
+        },
+        [],
+    );
 
     const createTextNodeFromClipboard = useCallback(
         (text: string) => {
@@ -2094,6 +2188,21 @@ function InfiniteCanvasPage() {
         (event: ReactDragEvent<HTMLDivElement>) => {
             event.preventDefault();
             if (event.dataTransfer.types.includes("application/x-smart-storyboard-slot")) return;
+
+            // 内部引用拖拽：H3 输出视频 / 侧边栏素材 → 直接落库生成节点（复用 storageKey，不重新上传）
+            const refPayload = event.dataTransfer.getData("application/x-infinite-canvas-ref");
+            if (refPayload) {
+                try {
+                    const ref = JSON.parse(refPayload) as { url?: string; dataUrl?: string; storageKey?: string; name?: string; type?: string; kind?: string; width?: number; height?: number; durationMs?: number; bytes?: number; mimeType?: string };
+                    if (ref.url || ref.dataUrl || ref.storageKey) {
+                        createNodeFromCanvasRef(ref, screenToCanvas(event.clientX, event.clientY));
+                        return;
+                    }
+                } catch {
+                    // 解析失败则继续走外部文件逻辑
+                }
+            }
+
             const files = Array.from(event.dataTransfer.files).filter(
                 (item) => item.type.startsWith("image/") || item.type.startsWith("video/") || isAudioFile(item),
             );
@@ -2113,7 +2222,7 @@ function InfiniteCanvasPage() {
                 }
             }
         },
-        [createAudioFileNode, createImageFileNode, createVideoFileNode, screenToCanvas],
+        [createAudioFileNode, createImageFileNode, createVideoFileNode, createNodeFromCanvasRef, screenToCanvas],
     );
 
     const startTitleEditing = useCallback(() => {
@@ -2137,7 +2246,7 @@ function InfiniteCanvasPage() {
         async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => {
             const sourceNode = nodesRef.current.find((node) => node.id === nodeId);
             const generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
-            if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+            if (generationConfig.model !== VIDEO_CONCAT_MODEL && !isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
                 return;
             }
@@ -2208,6 +2317,14 @@ function InfiniteCanvasPage() {
                             ? [{ id: sourceNode.id, name: `${sourceNode.title || sourceNode.id}.png`, type: sourceNode.metadata.mimeType || "image/png", dataUrl: sourceNode.metadata.content, storageKey: sourceNode.metadata.storageKey }]
                             : [];
                     const referenceImages = [...new Map([...sourceReference, ...generationContext.referenceImages].map((image) => [image.id, image])).values()];
+                    const comfyChannel = resolveModelChannel(generationConfig, generationConfig.model);
+                    const localComfy = comfyChannel.kind === "comfyui";
+                    const localComfyPreset = localComfy
+                        ? (modelOptionName(generationConfig.model).trim().toLowerCase() === "z-image" ? "z-image" : modelOptionName(generationConfig.model).trim().toLowerCase() === "flux2-klein" ? "flux2-klein" : "")
+                        : "";
+                    if (localComfy && !localComfyPreset) throw new Error(`本地 ComfyUI 尚未支持模型：${modelOptionName(generationConfig.model)}`);
+                    if (localComfyPreset === "flux2-klein" && !referenceImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
+                    if (localComfy && !useAgentStore.getState().token.trim()) throw new Error("请先连接本地 Agent，再运行本地 ComfyUI 模型");
                     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
                     const generationMetadata = buildImageGenerationMetadata(generationType, generationConfig, count, referenceImages);
                     const parentConfig = NODE_DEFAULT_SIZE[isConfigNode ? CanvasNodeType.Config : isImageNode ? CanvasNodeType.Image : CanvasNodeType.Text];
@@ -2280,10 +2397,12 @@ function InfiniteCanvasPage() {
                     await Promise.all(
                         imageIds.map(async (imageId) => {
                             try {
-                                const image = referenceImages.length
-                                    ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
-                                    : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
-                                const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                                const image = localComfy
+                                    ? await runComfyTask(useAgentStore.getState().url, useAgentStore.getState().token, comfyChannel.baseUrl, localComfyPreset, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal)
+                                    : referenceImages.length
+                                      ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
+                                      : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
+                                const uploaded = localComfy ? await uploadImage(await fetch((image as { url: string }).url).then((response) => { if (!response.ok) throw new Error(`读取 ComfyUI 结果失败：HTTP ${response.status}`); return response.blob(); }), { signal: controller.signal }) : await uploadImage((image as { dataUrl: string }).dataUrl, { signal: controller.signal });
                                 const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                                 const item: CanvasNodeImage = { id: imageId, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
                                 setNodes((prev) =>
@@ -2344,6 +2463,9 @@ function InfiniteCanvasPage() {
                 }
 
                 if (mode === "video") {
+                    if (generationConfig.model === VIDEO_CONCAT_MODEL && generationContext.referenceVideos.length < 2) {
+                        throw new Error("视频拼接至少需要连接两个视频");
+                    }
                     const spec = nodeSizeFromRatio(generationConfig.size, NODE_DEFAULT_SIZE[CanvasNodeType.Video].width, NODE_DEFAULT_SIZE[CanvasNodeType.Video].height) || NODE_DEFAULT_SIZE[CanvasNodeType.Video];
                     const isEmptyVideoNode = sourceNode?.type === CanvasNodeType.Video && !sourceNode.metadata?.content;
                     const videoId = isEmptyVideoNode ? nodeId : nanoid();
@@ -2376,10 +2498,15 @@ function InfiniteCanvasPage() {
                     if (!isEmptyVideoNode) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: videoId }]);
                     const controller = startGenerationRequest(videoId, nodeId, nodeId, runController);
                     try {
-                        const video = await storeGeneratedVideo(
-                            await requestVideoGeneration(generationConfig, effectivePrompt, generationContext.referenceImages, { signal: controller.signal }),
-                        );
-                        const videoSize = fitNodeSize(video.width || spec.width, video.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                        const video = generationConfig.model === VIDEO_CONCAT_MODEL
+                            ? (() => {
+                                const agent = useAgentStore.getState();
+                                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法运行视频拼接");
+                                return runVideoConcatTask(agent.url, agent.token, generationContext.referenceVideos.map((item) => ({ name: item.name, url: item.url, storageKey: item.storageKey })), controller.signal).then((result) => ({ url: result.url, storageKey: result.storageKey || "", bytes: 0, mimeType: result.mimeType, width: 0, height: 0 }));
+                            })()
+                            : requestVideoGeneration(generationConfig, effectivePrompt, generationContext.referenceImages, { signal: controller.signal, videoReferences: generationContext.referenceVideos, onTaskId: (taskId) => setNodes((prev) => prev.map((item) => item.id === videoId ? { ...item, metadata: { ...item.metadata, runtimeTaskId: taskId } } : item)) }).then(storeGeneratedVideo);
+                        const resolvedVideo = await video;
+                        const videoSize = fitNodeSize(resolvedVideo.width || spec.width, resolvedVideo.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                         setNodes((prev) =>
                             prev.map((node) =>
                                 node.id === videoId
@@ -2390,7 +2517,7 @@ function InfiniteCanvasPage() {
                                           position: { x: node.position.x + node.width / 2 - videoSize.width / 2, y: node.position.y + node.height / 2 - videoSize.height / 2 },
                                           metadata: {
                                               ...node.metadata,
-                                              ...videoMetadata(video),
+                                              ...videoMetadata(resolvedVideo),
                                               prompt: effectivePrompt,
                                               model: generationConfig.model,
                                               size: generationConfig.size,
@@ -2589,7 +2716,7 @@ function InfiniteCanvasPage() {
                           count: "1",
                       }
                     : { ...buildGenerationConfig(effectiveConfig, sourceNode, node.type === CanvasNodeType.Text ? "text" : node.type === CanvasNodeType.Video ? "video" : node.type === CanvasNodeType.Audio ? "audio" : "image"), count: "1" };
-            if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+            if (generationConfig.model !== VIDEO_CONCAT_MODEL && !isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
                 return;
             }
@@ -2632,7 +2759,11 @@ function InfiniteCanvasPage() {
                     return;
                 }
                 if (node.type === CanvasNodeType.Video) {
-                    const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, prompt, retryImages, { signal: controller.signal }));
+                    const retryVideos = context?.referenceVideos || [];
+                    if (generationConfig.model === VIDEO_CONCAT_MODEL && retryVideos.length < 2) throw new Error("视频拼接至少需要连接两个视频");
+                    const video = generationConfig.model === VIDEO_CONCAT_MODEL
+                        ? await runVideoConcatTask(useAgentStore.getState().url, useAgentStore.getState().token, retryVideos.map((item) => ({ name: item.name, url: item.url, storageKey: item.storageKey })), controller.signal).then((result) => ({ url: result.url, storageKey: result.storageKey || "", bytes: 0, mimeType: result.mimeType, width: 0, height: 0 }))
+                        : await storeGeneratedVideo(await requestVideoGeneration(generationConfig, prompt, retryImages, { signal: controller.signal, videoReferences: retryVideos, onTaskId: (taskId) => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, runtimeTaskId: taskId } } : item)) }));
                     const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                     setNodes((prev) =>
                         prev.map((item) =>
@@ -2665,10 +2796,22 @@ function InfiniteCanvasPage() {
                     return;
                 }
 
-                const image = useReferenceImages
-                    ? await requestEdit(generationConfig, prompt, retryImages, { signal: controller.signal }).then((items) => items[0])
-                    : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
-                const uploadedImage = await uploadImage(image.dataUrl, { signal: controller.signal });
+                const retryComfyChannel = resolveModelChannel(generationConfig, generationConfig.model);
+                const retryLocalComfy = retryComfyChannel.kind === "comfyui";
+                const retryComfyPreset = retryLocalComfy
+                    ? (modelOptionName(generationConfig.model).trim().toLowerCase() === "z-image" ? "z-image" : modelOptionName(generationConfig.model).trim().toLowerCase() === "flux2-klein" ? "flux2-klein" : "")
+                    : "";
+                if (retryLocalComfy && !retryComfyPreset) throw new Error(`本地 ComfyUI 尚未支持模型：${modelOptionName(generationConfig.model)}`);
+                if (retryComfyPreset === "flux2-klein" && !retryImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
+                if (retryLocalComfy && !useAgentStore.getState().token.trim()) throw new Error("请先连接本地 Agent，再运行本地 ComfyUI 模型");
+                const image = retryLocalComfy
+                    ? await runComfyTask(useAgentStore.getState().url, useAgentStore.getState().token, retryComfyChannel.baseUrl, retryComfyPreset, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal)
+                    : useReferenceImages
+                      ? await requestEdit(generationConfig, prompt, retryImages, { signal: controller.signal }).then((items) => items[0])
+                      : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
+                const uploadedImage = retryLocalComfy
+                    ? await uploadImage(await fetch((image as { url: string }).url).then((response) => { if (!response.ok) throw new Error(`读取 ComfyUI 结果失败：HTTP ${response.status}`); return response.blob(); }), { signal: controller.signal })
+                    : await uploadImage((image as { dataUrl: string }).dataUrl, { signal: controller.signal });
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                 const retryImage: CanvasNodeImage = {
                     id: imageId || node.metadata?.primaryImageId || nanoid(),
@@ -3139,6 +3282,7 @@ function InfiniteCanvasPage() {
                     onReversePrompt={createImageReversePromptNodes}
                     onRetry={(node) => void handleRetryNode(node)}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
+                    onToggleGroupLock={(node) => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, groupLocked: !item.metadata?.groupLocked } } : item))}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                 />
 
@@ -3290,8 +3434,6 @@ function migrateLegacyH3Node(node: CanvasNodeData): CanvasNodeData {
     copy("modelName", "minimaxBaseModel");
     copy("combatLoraWeight", "minimaxCombatLoraWeight");
     copy("cinematicLoraWeight", "minimaxCinematicLoraWeight");
-    copy("promptEnhance", "minimaxPromptEnhance");
-    copy("promptEnhanceLanguage", "minimaxPromptEnhanceLanguage");
     copy("minimaxLlmModel", "minimaxLlmModel");
     return { ...node, type: "minimax-h3:video", metadata };
 }

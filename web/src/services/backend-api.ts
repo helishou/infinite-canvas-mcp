@@ -1,5 +1,7 @@
 /** 总后台 API client（Web 端）。 */
 
+import { getBackendTokenShared } from "@/lib/backend-token";
+
 export type BackendMediaResult = {
     storageKey: string;
     url: string;
@@ -19,19 +21,9 @@ export function getBackendUrl(): string {
     return localStorage.getItem("backend-url") || DEFAULT_URL;
 }
 
-export function getBackendToken(): string {
-    if (typeof window === "undefined") return "";
-    return localStorage.getItem("backend-token") || "";
-}
-
-export function setBackendConnection(url: string, token: string) {
-    if (typeof window === "undefined") return;
-    localStorage.setItem("backend-url", url.replace(/\/$/, ""));
-    localStorage.setItem("backend-token", token);
-}
-
-async function request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
-    const url = `${getBackendUrl().replace(/\/$/, "")}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(getBackendToken())}`;
+export async function request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+    const token = getBackendTokenShared();
+    const url = `${getBackendUrl().replace(/\/$/, "")}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
     const res = await fetch(url, {
         method,
         headers: body ? { "content-type": "application/json" } : {},
@@ -112,6 +104,39 @@ export function deleteBackendAssetFolder(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/assets/folders/${encodeURIComponent(id)}`);
 }
 
+export type InstalledPluginRecord = {
+    id: string; name: string; version: string; description?: string; url: string; source: string;
+    enabled: boolean; local?: boolean; official?: boolean; installedAt: string; mcp?: { enabled: boolean; toolCount: number };
+};
+
+export function fetchBackendInstalledPlugins() {
+    return request<{ ok: boolean; plugins?: InstalledPluginRecord[] }>("GET", "/plugins/installed");
+}
+
+export function saveBackendInstalledPlugins(plugins: InstalledPluginRecord[]) {
+    return request<{ ok: boolean; plugins?: InstalledPluginRecord[] }>("PUT", "/plugins/installed", { plugins });
+}
+
+export function getBackendPluginStorage<T = unknown>(pluginId: string, key: string) {
+    return request<{ ok: boolean; value: T | null }>("GET", `/plugins/storage?pluginId=${encodeURIComponent(pluginId)}&key=${encodeURIComponent(key)}`);
+}
+
+export function setBackendPluginStorage(pluginId: string, key: string, value: unknown) {
+    return request<{ ok: boolean }>("PUT", "/plugins/storage", { pluginId, key, value });
+}
+
+export function deleteBackendPluginStorage(pluginId: string, key: string) {
+    return request<{ ok: boolean }>("DELETE", `/plugins/storage?pluginId=${encodeURIComponent(pluginId)}&key=${encodeURIComponent(key)}`);
+}
+
+export function fetchBackendPromptCache<T = unknown>(sourceId: string) {
+    return request<{ ok: boolean; cache: T | null }>("GET", `/prompts/cache?sourceId=${encodeURIComponent(sourceId)}`);
+}
+
+export function saveBackendPromptCache(sourceId: string, cache: unknown) {
+    return request<{ ok: boolean }>("PUT", "/prompts/cache", { sourceId, cache });
+}
+
 // ── Media ────────────────────────────────────────────────────────────────
 
 export async function uploadBackendMedia(options: {
@@ -122,7 +147,10 @@ export async function uploadBackendMedia(options: {
     width?: number;
     height?: number;
     durationMs?: number;
+    category?: "input" | "output" | "library";
 }): Promise<BackendMediaResult> {
+    const { useBackendStore } = await import("@/stores/use-backend-store");
+    const token = useBackendStore.getState().token || "";
     const headers: Record<string, string> = {
         "content-type": options.mimeType || options.blob.type || "application/octet-stream",
         "x-media-name": encodeURIComponent(options.name),
@@ -130,7 +158,8 @@ export async function uploadBackendMedia(options: {
     if (options.width !== undefined) headers["x-media-width"] = String(options.width);
     if (options.height !== undefined) headers["x-media-height"] = String(options.height);
     if (options.durationMs !== undefined) headers["x-media-duration-ms"] = String(options.durationMs);
-    const url = `${getBackendUrl().replace(/\/$/, "")}/media/upload-binary?token=${encodeURIComponent(getBackendToken())}`;
+    if (options.category) headers["x-media-category"] = options.category;
+    const url = `${getBackendUrl().replace(/\/$/, "")}/media/upload-binary?token=${encodeURIComponent(token)}`;
     const res = await fetch(url, { method: "POST", headers, body: options.blob });
     const data = (await res.json().catch(() => ({}))) as { media?: BackendMediaResult; error?: string };
     if (!res.ok || !data.media) throw new Error(`Backend POST /media/upload-binary failed: HTTP ${res.status} ${data.error || ""}`);
@@ -145,13 +174,14 @@ export async function uploadBackendMediaDataUrl(options: {
     width?: number;
     height?: number;
     durationMs?: number;
+    category?: "input" | "output" | "library";
 }): Promise<BackendMediaResult> {
     const data = await request<{ ok: boolean; media: BackendMediaResult }>("POST", "/media/upload", options);
     return data.media;
 }
 
 export function backendMediaUrl(storageKey: string): string {
-    const token = encodeURIComponent(getBackendToken());
+    const token = encodeURIComponent(getBackendTokenShared());
     const key = encodeURIComponent(storageKey);
     const isDev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
     const base = getBackendUrl().replace(/\/$/, "");

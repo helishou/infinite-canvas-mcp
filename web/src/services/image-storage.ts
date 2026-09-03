@@ -18,7 +18,7 @@ const IMAGE_DECODE_TIMEOUT_MS = 10_000;
 const IMAGE_RESPONSE_ERROR = "ImageResponseError";
 const IMAGE_TIMEOUT_ERROR = "ImageTimeoutError";
 
-type ImageReadOptions = { signal?: AbortSignal };
+type ImageReadOptions = { signal?: AbortSignal; category?: "input" | "output" | "library" };
 
 export async function uploadImage(input: string | Blob, options?: ImageReadOptions): Promise<UploadedImage> {
     if (typeof input !== "string") return storeImage(input, options);
@@ -44,7 +44,7 @@ async function storeImage(blob: Blob, options?: ImageReadOptions): Promise<Uploa
         throwIfAborted(options?.signal);
         if (!useBackendStore.getState().connected) throw new Error("总后台未连接，无法上传图片");
         throwIfAborted(options?.signal);
-        const result = await uploadBackendMedia({ name: `${localKey}.png`, blob, mimeType: blob.type || "image/png", width: meta.width, height: meta.height });
+        const result = await uploadBackendMedia({ name: `${localKey}.png`, blob, mimeType: blob.type || "image/png", width: meta.width, height: meta.height, category: options?.category });
         return { url: backendMediaUrl(result.storageKey), storageKey: result.storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: result.mimeType };
     } catch (error) {
         URL.revokeObjectURL(url);

@@ -146,7 +146,7 @@ export default function ImagePage() {
             }
             const nextReferences = await Promise.all(
                 blobs.map(async (blob, index) => {
-                    const image = await uploadImage(blob);
+                    const image = await uploadImage(blob, { category: "input" });
                     return { id: nanoid(), name: `clipboard-${index + 1}.png`, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
                 }),
             );
@@ -244,13 +244,13 @@ export default function ImagePage() {
     };
 
     const addResultToReferences = async (image: GeneratedImage, index: number) => {
-        const stored = await uploadImage(image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl);
+        const stored = await uploadImage(image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl, { category: "input" });
         setReferences((value) => [...value, { id: nanoid(), name: `result-${index + 1}.png`, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
         message.success(t("imageWorkbench.addedReference"));
     };
 
     const saveResultToAssets = async (image: GeneratedImage, index: number) => {
-        const stored = await uploadImage(image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl);
+        const stored = await uploadImage(image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl, { category: "library" });
         addAsset({
             kind: "image",
             title: t("imageWorkbench.resultTitle", { count: index + 1 }),
@@ -354,7 +354,7 @@ export default function ImagePage() {
             const source = local
                 ? await fetch((result as { url: string }).url).then((response) => response.blob())
                 : (result as { dataUrl: string }).dataUrl;
-            const stored = await uploadImage(source);
+            const stored = await uploadImage(source, { category: "output" });
             const nextImage: GeneratedImage = { id: nanoid(), dataUrl: stored.url, ...(stored.storageKey ? { storageKey: stored.storageKey } : {}), durationMs: performance.now() - itemStartedAt, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
             setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
             return nextImage;

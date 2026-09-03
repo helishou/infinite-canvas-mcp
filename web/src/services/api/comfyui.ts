@@ -1,9 +1,11 @@
 import { fetchAgentJson } from "./canvas-agent";
-import { backendMediaUrl, getBackendToken, getBackendUrl, uploadBackendMedia } from "@/services/backend-api";
+import { backendMediaUrl, getBackendUrl, uploadBackendMedia } from "@/services/backend-api";
+import { getBackendTokenShared } from "@/lib/backend-token";
 
-type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
+export type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
 type ComfyMedia = { url: string; mimeType: string; storageKey?: string };
 type ComfyTask = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: { media?: ComfyMedia[]; segments?: Array<{ media?: ComfyMedia[] }> } | null; error?: string | null };
+type VideoConcatTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia } | null; error?: string | null };
 
 export function resolveComfyImageSize(value: string) {
     const size = value.trim();
@@ -42,7 +44,7 @@ function proxyComfyMedia(item: ComfyMedia, endpoint: string, token: string): Com
     if (raw.startsWith("runtime-file:")) {
         const backendUrl = getBackendUrl().replace(/\/$/, "");
         const file = encodeURIComponent(raw.slice("runtime-file:".length));
-        return { ...item, url: `${backendUrl}/runtime/media-file?file=${file}&token=${encodeURIComponent(getBackendToken())}` };
+        return { ...item, url: `${backendUrl}/runtime/media-file?file=${file}&token=${encodeURIComponent(getBackendTokenShared())}` };
     }
     try {
         const parsed = new URL(raw);
@@ -52,16 +54,17 @@ function proxyComfyMedia(item: ComfyMedia, endpoint: string, token: string): Com
         const backendUrl = getBackendUrl().replace(/\/$/, "");
         const needsSlash = !raw.startsWith("/");
         const sep = raw.includes("?") ? "&" : "?";
-        return { ...item, url: `${backendUrl}${needsSlash ? "/" : ""}${raw}${sep}token=${encodeURIComponent(getBackendToken())}` };
+        return { ...item, url: `${backendUrl}${needsSlash ? "/" : ""}${raw}${sep}token=${encodeURIComponent(getBackendTokenShared())}` };
     }
 }
 
-export async function runComfyTask(endpoint: string, token: string, comfyUrl: string, preset: string, prompt: string, references: LocalReference[], params: Record<string, unknown>, signal?: AbortSignal) {
+export async function runComfyTask(endpoint: string, token: string, comfyUrl: string, preset: string, prompt: string, references: LocalReference[], params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void) {
     const synced = await Promise.all(references.map((reference) => syncReference(endpoint, token, reference, signal, true)));
     const input: Record<string, unknown> = { prompt };
     if (preset === "flux2-klein") input.references = synced.filter(Boolean);
     if (preset === "flashvsr-1.1" && synced[0]) input.video = synced[0];
     const created = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, "/comfy/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ preset, input, params, comfyUrl }) });
+    onTaskId?.(created.task.id);
     for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${created.task.id}`);
@@ -75,6 +78,14 @@ export async function runComfyTask(endpoint: string, token: string, comfyUrl: st
     }
 }
 
+export async function getComfyTask(endpoint: string, token: string, taskId: string) {
+    const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${encodeURIComponent(taskId)}`);
+    const task = response.task;
+    const media = task.result?.media || [];
+    const output = media.find((item) => item.mimeType.startsWith("video/")) || media[0];
+    return { ...task, result: output ? { url: proxyComfyMedia(output, endpoint, token).url, storageKey: output.storageKey, mimeType: output.mimeType } : null };
+}
+
 export type LocalH3Input = {
     video?: LocalReference;
     references?: LocalReference[];
@@ -85,7 +96,9 @@ export type LocalH3Input = {
 /** Run the packaged MiniMax H3 workflow through the Agent runtime. The plugin never talks to ComfyUI directly. */
 export async function runLocalH3Task(endpoint: string, token: string, comfyUrl: string, prompt: string, input: LocalH3Input, params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void) {
     const refs = [...(input.references || []), ...(input.audios || []), ...(input.video ? [input.video] : []), ...(input.previousVideo ? [input.previousVideo] : [])];
-    const synced = await Promise.all(refs.map(async (reference) => ({ reference, path: await syncReference(endpoint, token, reference, signal) })));
+    // 旧画布/H3 输出可能只有可播放 URL，没有 storageKey。此时仍然把 URL
+    // 同步到 backend runtime media，避免移除 Assets 面板后这类素材无法参与生成。
+    const synced = await Promise.all(refs.map(async (reference) => ({ reference, path: await syncReference(endpoint, token, reference, signal, true) })));
     const pathFor = (reference?: LocalReference) => synced.find((item) => item.reference === reference)?.path;
     const created = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, "/comfy/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ preset: "minimax-h3", input: { prompt, references: (input.references || []).map(pathFor).filter(Boolean), audios: (input.audios || []).map(pathFor).filter(Boolean), video: pathFor(input.video), previousVideo: pathFor(input.previousVideo) }, params, comfyUrl }) });
     onTaskId?.(created.task.id);
@@ -108,17 +121,38 @@ export async function getLocalH3Task(endpoint: string, token: string, taskId: st
     const proxy = (item: ComfyMedia) => proxyComfyMedia(item, endpoint, token);
     if (!response.task.result) return { ...response.task, result: null };
     const media = (response.task.result.media || []).map(proxy);
-    return { ...response.task, result: { url: media.find((item) => item.mimeType.startsWith("video/"))?.url || media[0]?.url || "", mimeType: media.find((item) => item.mimeType.startsWith("video/"))?.mimeType || media[0]?.mimeType || "video/mp4", taskId: response.task.id, segments: (response.task.result.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })) } };
+    const output = media.find((item) => item.mimeType.startsWith("video/")) || media[0];
+    return { ...response.task, result: { url: output?.url || "", storageKey: output?.storageKey, mimeType: output?.mimeType || "video/mp4", taskId: response.task.id, segments: (response.task.result.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })) } };
 }
 
 export async function cancelLocalH3Task(endpoint: string, token: string, taskId: string) {
     return (await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" })).task;
 }
 
+export async function runVideoConcatTask(endpoint: string, token: string, videos: LocalReference[], signal?: AbortSignal) {
+    const inputs = videos.map((video) => video.storageKey || video.url || "").filter(Boolean);
+    if (!inputs.length) throw new Error("视频拼接至少需要两个视频输入");
+    const created = await fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, "/video-concat/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ videos: inputs }) });
+    const cancel = () => { void fetchAgentJson(endpoint, token, `/video-concat/tasks/${created.task.id}/cancel`, { method: "POST" }).catch(() => undefined); };
+    signal?.addEventListener("abort", cancel, { once: true });
+    for (;;) {
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const response = await fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, `/runtime/tasks/${created.task.id}`);
+        if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
+            if (response.task.status !== "succeeded") throw new Error(response.task.error || "视频拼接失败");
+            const media = response.task.result?.media;
+            if (!media) throw new Error("视频拼接完成但没有返回媒体");
+            signal?.removeEventListener("abort", cancel);
+            return { url: media.url.startsWith("/media/") ? backendMediaUrl(media.storageKey || decodeURIComponent(media.url.slice(7))) : media.url, storageKey: media.storageKey, mimeType: media.mimeType || "video/mp4", taskId: created.task.id };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+}
+
 /** Legacy H3 execution path for nodes migrated from the old RunningHub-backed canvas. */
 export async function runRunningHubH3Task(endpoint: string, token: string, prompt: string, input: LocalH3Input, params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void) {
     const refs = [...(input.references || []), ...(input.audios || []), ...(input.video ? [input.video] : []), ...(input.previousVideo ? [input.previousVideo] : [])];
-    const synced = await Promise.all(refs.map(async (reference) => ({ reference, path: await syncReference(endpoint, token, reference, signal) })));
+    const synced = await Promise.all(refs.map(async (reference) => ({ reference, path: await syncReference(endpoint, token, reference, signal, true) })));
     const pathFor = (reference?: LocalReference) => synced.find((item) => item.reference === reference)?.path;
     const created = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, "/runninghub/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: { prompt, references: (input.references || []).map(pathFor).filter(Boolean), audios: (input.audios || []).map(pathFor).filter(Boolean), video: pathFor(input.video), previousVideo: pathFor(input.previousVideo) }, params }) });
     onTaskId?.(created.task.id);
@@ -197,7 +231,7 @@ function extractStorageKey(url: string): string | null {
 /**
  * 把一个参考媒体落地到后端 runtime media，返回其本地路径。
  * 若媒体本就在后端（已有 storageKey，或 URL 指向后端 /media/:storageKey），
- * 直接复用而不再 base64 下载→重传，避免 H3 串 clip 时 previousVideo 撑爆请求体（413）。
+ * 直接复用；历史数据只有 URL 时再读取并落库，避免旧画布素材无法继续生成。
  */
 async function syncReference(endpoint: string, token: string, reference: LocalReference, signal?: AbortSignal, allowDataUrl = false): Promise<string | undefined> {
     const source = sourceUrl(reference);
@@ -220,5 +254,5 @@ async function syncReference(endpoint: string, token: string, reference: LocalRe
         });
         return runtime.media?.path;
     }
-    throw new Error(`参考「${reference.name}」没有本地 storageKey，H3 不再通过 base64 传输。请重新上传或重新连接该素材。`);
+    throw new Error(`参考「${reference.name}」没有可读取的本地媒体地址，请重新上传或重新连接该素材。`);
 }

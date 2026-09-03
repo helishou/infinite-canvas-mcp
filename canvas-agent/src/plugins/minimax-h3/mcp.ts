@@ -11,15 +11,16 @@ type H3Segment = Record<string, unknown> & {
     prompt?: string;
     status?: string;
     result?: unknown;
+    resultStorageKey?: string;
     refs?: { image?: H3Ref | H3Ref[]; video?: H3Ref | H3Ref[]; audio?: H3Ref | H3Ref[] };
     refItems?: H3Ref[];
 };
 
 const H3_PARAM_KEYS = [
-    "taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "denoise", "seed",
-    "modelName", "loraName", "loraStrength", "teAccel", "audioMode", "motionContext",
-    "combatLoraWeight", "cinematicLoraWeight", "tailFrameEnabled", "motionContextEnabled",
-    "referenceVideoPolicy", "strictPromptTags", "refImageSize", "addSourceAsReference",
+    "mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "noiseSeed", "noiseSeedMode",
+    "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile",
+    "sampler", "scheduler", "loraSlots", "lockAudio", "audioDrive", "audioDriveFile", "constantTriggerWord",
+    "textEncoderType", "textEncoderDevice", "allowCompile", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd",
 ];
 
 // 工具元信息(声明,供 Agent 动态注册)
@@ -125,6 +126,8 @@ async function resolveRefToPath(context: PluginMcpContext, ref: H3Ref): Promise<
     const url = ref.url || "";
     const name = ref.name || "ref";
     if (!url) throw new Error(`参考条目缺少可读取地址:${name}`);
+    const storageKey = ref.storageKey || extractMediaStorageKey(url);
+    if (storageKey) return (await context.backend.runtimeMediaStore(name, "", storageKey)).path;
     if (url.startsWith("data:")) return (await context.backend.runtimeMediaStore(name, url)).path;
     if (/^https?:\/\//i.test(url)) {
         const response = await fetch(url);
@@ -137,6 +140,17 @@ async function resolveRefToPath(context: PluginMcpContext, ref: H3Ref): Promise<
     const buffer = await readFile(url);
     const mime = /\.png$/i.test(name) ? "image/png" : /\.jpe?g$/i.test(name) ? "image/jpeg" : /\.webp$/i.test(name) ? "image/webp" : /\.mp4$/i.test(name) ? "video/mp4" : /\.mp3$/i.test(name) ? "audio/mpeg" : "application/octet-stream";
     return (await context.backend.runtimeMediaStore(name, `data:${mime};base64,${buffer.toString("base64")}`)).path;
+}
+
+function extractMediaStorageKey(url: string) {
+    try {
+        const parsed = new URL(url, "http://infinite-canvas.local");
+        if (!parsed.pathname.startsWith("/media/")) return "";
+        const key = decodeURIComponent(parsed.pathname.slice("/media/".length));
+        return key && !key.includes("/") ? key : "";
+    } catch {
+        return "";
+    }
 }
 
 function extractParams(segment: H3Segment, override: Record<string, unknown> = {}): Record<string, unknown> {
@@ -162,11 +176,16 @@ function selectSegment(segments: H3Segment[], index?: number): { segment: H3Segm
 
 async function runSegment(context: PluginMcpContext, node: AgentCanvasNode, index: number | undefined, override: Record<string, unknown>, previousVideo = "") {
     const segments = segmentsOf(node);
-    const { segment } = selectSegment(segments, index);
+    const selected = selectSegment(segments, index);
+    const { segment } = selected;
+    const previous = selected.index > 0 && segments[selected.index - 1]?.result
+        ? { name: `h3-segment-${selected.index}.mp4`, url: String(segments[selected.index - 1].result), storageKey: String(segments[selected.index - 1].resultStorageKey || "") || undefined }
+        : undefined;
     const { images, videos, audios } = collectRefs(segment);
+    const sourceVideos = videos.length ? videos : (previous ? [previous] : []);
     const [imagePaths, videoPaths, audioPaths] = await Promise.all([
         Promise.all(images.map((ref) => resolveRefToPath(context, ref))),
-        Promise.all(videos.map((ref) => resolveRefToPath(context, ref))),
+        Promise.all(sourceVideos.map((ref) => resolveRefToPath(context, ref))),
         Promise.all(audios.map((ref) => resolveRefToPath(context, ref))),
     ]);
     const input = {
@@ -197,6 +216,56 @@ async function previousVideoPath(context: PluginMcpContext, task: Record<string,
     return video?.url ? context.backend.runtimeMediaPath(String(video.url)) : "";
 }
 
+function taskVideo(task: Record<string, unknown>) {
+    const result = task.result && typeof task.result === "object" ? task.result as Record<string, unknown> : {};
+    const media = Array.isArray(result.media) ? result.media : [];
+    return media.find((item) => item && typeof item === "object" && String((item as Record<string, unknown>).mimeType || "").startsWith("video/")) as Record<string, unknown> | undefined;
+}
+
+async function updateClipTask(context: PluginMcpContext, nodeId: string, index: number, task: Record<string, unknown>, error?: string) {
+    const node = await context.getCanvasNode(nodeId);
+    if (!node) return;
+    const segments = segmentsOf(node);
+    const segment = segments[index];
+    if (!segment) return;
+    const status = error ? "error" : String(task.status || "running");
+    const video = !error && status === "succeeded" ? taskVideo(task) : undefined;
+    const resultUrl = video?.url ? String(video.url) : undefined;
+    const resultStorageKey = video?.storageKey ? String(video.storageKey) : undefined;
+    const segmentPatch: Record<string, unknown> = {
+        status: status === "succeeded" ? "success" : status === "failed" || status === "cancelled" ? "error" : "running",
+        runtimeTaskId: String(task.id || segment.runtimeTaskId || ""),
+        progress: Number(task.progress || 0),
+        ...(resultUrl ? { result: resultUrl } : {}),
+        ...(resultStorageKey ? { resultStorageKey } : {}),
+        ...(error ? { errorDetails: error } : {}),
+    };
+    const nextSegments = segments.map((item, i) => i === index ? { ...item, ...segmentPatch } : item);
+    const nodePatch: Record<string, unknown> = {
+        segments: nextSegments,
+        status: segmentPatch.status === "running" ? "loading" : segmentPatch.status,
+        runtimeTaskId: segmentPatch.runtimeTaskId,
+        runProgress: segmentPatch.progress,
+        ...(segmentPatch.status === "running" ? { runStartedAt: Date.now(), errorDetails: undefined } : {}),
+        ...(error ? { errorDetails: error, runFinishedAt: Date.now() } : {}),
+        ...(resultUrl ? { content: resultUrl, storageKey: resultStorageKey } : {}),
+    };
+    await context.updateCanvasNode(nodeId, {}, nodePatch);
+}
+
+async function monitorClipTask(context: PluginMcpContext, nodeId: string, index: number, taskId: string) {
+    try {
+        for (;;) {
+            const current = await context.backend.comfyGetTask(taskId);
+            await updateClipTask(context, nodeId, index, current.task as unknown as Record<string, unknown>);
+            if (["succeeded", "failed", "cancelled"].includes(current.task.status)) return;
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+    } catch (error) {
+        await updateClipTask(context, nodeId, index, { id: taskId, status: "failed" }, error instanceof Error ? error.message : String(error));
+    }
+}
+
 export const pluginMcp: PluginMcpModule = {
     id: "minimax-h3",
     version: "1.2.0",
@@ -205,7 +274,14 @@ export const pluginMcp: PluginMcpModule = {
         return {
             h3_list_models: async () => {
                 const catalog = await context.comfyUi.models();
-                return { models: catalog.models || [], loras: catalog.loras || [] };
+                return {
+                    models: catalog.models || [],
+                    loras: catalog.loras || [],
+                    textEncoders: catalog.textEncoders || [],
+                    videoVaes: catalog.videoVaes || [],
+                    audioVaes: catalog.audioVaes || [],
+                    nanfeng: catalog.nanfeng || {},
+                };
             },
             h3_get_node: async (input) => {
                 const node = await context.getCanvasNode(String(input.nodeId || ""));
@@ -218,7 +294,10 @@ export const pluginMcp: PluginMcpModule = {
                 if (!node) throw new Error(`找不到画布节点:${nodeId}`);
                 if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
                 const index = typeof input.segmentIndex === "number" ? input.segmentIndex : undefined;
-                const task = await runSegment(context, node, index, (input.params as Record<string, unknown>) || {});
+                const selectedIndex = selectSegment(segmentsOf(node), index).index;
+                const task = await runSegment(context, node, selectedIndex, (input.params as Record<string, unknown>) || {});
+                await updateClipTask(context, nodeId, selectedIndex, task as unknown as Record<string, unknown>);
+                void monitorClipTask(context, nodeId, selectedIndex, task.id);
                 return task;
             },
             h3_get_task: async (input) => {
@@ -258,10 +337,13 @@ export const pluginMcp: PluginMcpModule = {
                         }
                         try {
                             const started = await runSegment(context, node, i, override, previousVideo);
+                            await updateClipTask(context, node.id, i, started as unknown as Record<string, unknown>);
                             const task = await waitForTask(context, started.id);
+                            await updateClipTask(context, node.id, i, task as unknown as Record<string, unknown>);
                             previousVideo = await previousVideoPath(context, task as unknown as Record<string, unknown>);
                             tasks.push({ nodeId: node.id, segmentIndex: i, task });
                         } catch (error) {
+                            await updateClipTask(context, node.id, i, { id: "", status: "failed" }, error instanceof Error ? error.message : String(error));
                             tasks.push({ nodeId: node.id, segmentIndex: i, error: error instanceof Error ? error.message : String(error) });
                             break;
                         }

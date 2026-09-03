@@ -7,9 +7,13 @@
   "bin": {
     "ic-backend": "dist/index.js"
   },
-  "files": ["dist", "workflows", "workers"],
+  "files": [
+    "dist",
+    "workflows",
+    "workers"
+  ],
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx --watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "prepack": "npm run build"
@@ -18,8 +22,9 @@
     "@basketikun/canvas-agent": "^0.6.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "express": "^5.1.0",
-    "zod": "^3.25.0",
-    "winston": "^3.19.0"
+    "sharp": "^0.35.4",
+    "winston": "^3.19.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

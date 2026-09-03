@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { backendHealth, discoverBackendToken, getBackendToken, getBackendUrl, setBackendConnection } from "@/services/backend-api";
+import { backendHealth, discoverBackendToken, getBackendUrl } from "@/services/backend-api";
+import { setBackendToken } from "@/lib/backend-token";
 
 type BackendStore = {
     url: string;
@@ -14,6 +15,7 @@ type BackendStore = {
 
 let backendEvents: EventSource | null = null;
 const seenBackendEventIds = new Set<string>();
+let checkLock = false;
 
 function stopBackendEvents() {
     backendEvents?.close();
@@ -47,56 +49,56 @@ function syncAgentEndpoint(url: string, token: string) {
 /** 总后台连接状态 store。自动在启动时检测连通性。 */
 export const useBackendStore = create<BackendStore>((set, get) => ({
     url: getBackendUrl(),
-    token: getBackendToken(),
+    token: "",
     connected: false,
     checking: true,
     error: "",
 
     setConnection: (url, token) => {
         const cleanUrl = url.replace(/\/$/, "");
-        setBackendConnection(cleanUrl, token || get().token);
-        set({ url: cleanUrl, token: token || get().token, error: "" });
-        syncAgentEndpoint(cleanUrl, token || get().token);
+        const newToken = token || get().token;
+        setBackendToken(newToken);
+        set({ url: cleanUrl, token: newToken, error: "" });
+        syncAgentEndpoint(cleanUrl, newToken);
         void get().checkConnection();
     },
 
     checkConnection: async () => {
+        if (checkLock) return;
+        checkLock = true;
         set({ checking: true });
         const wasConnected = get().connected;
+
         const health = await backendHealth();
         if (!health.ok) {
             stopBackendEvents();
             set({ connected: false, checking: false, error: `无法连接总后台 ${getBackendUrl()}` });
+            checkLock = false;
             return;
         }
-        // 后端 /config 是 token 权威来源，连接时以后端为准刷新，避免缓存旧 token 导致 401。
-        const discovered = await discoverBackendToken();
-        if (discovered.ok && discovered.token && discovered.token !== get().token) {
-            setBackendConnection(getBackendUrl(), discovered.token);
-            set({ token: discovered.token, checking: true });
-            syncAgentEndpoint(getBackendUrl(), discovered.token);
-            await get().checkConnection();
-            return;
-        }
-        if (!wasConnected) {
-            const { migrateIndexDBToBackend } = await import("@/lib/backend-migration");
-            const migration = await migrateIndexDBToBackend();
-            if (!migration.success) {
-                const error = `Backend 数据迁移失败：${migration.error || "未知错误"}`;
-                console.warn("[backend-migration]", error);
-                set({ connected: false, checking: false, error });
-                return;
+
+        // ── 阶段2：获取 token ──────────────────────────────────────────────
+        // 如果 token 未知，先从 /config 获取后再重新检测健康状态。
+        if (!get().token) {
+            const discovered = await discoverBackendToken();
+            if (discovered.ok && discovered.token) {
+                setBackendToken(discovered.token);
+                set({ token: discovered.token });
+                syncAgentEndpoint(getBackendUrl(), discovered.token);
             }
         }
+
+        // ── 阶段3：确认连接并启动 SSE ────────────────────────────────────
         set({ connected: true, checking: false, error: "" });
         if (!wasConnected) window.dispatchEvent(new Event("backend-connected"));
         startBackendEvents(getBackendUrl(), get().token);
+        checkLock = false;
     },
 
     reset: () => { stopBackendEvents(); set({ connected: false, checking: false, error: "" }); },
 }));
 
-/** 启动时自动检测总后台连接。首次连接时先完成一次性 IndexedDB 迁移。 */
+/** 启动时自动检测总后台连接。 */
 export function initBackendConnection() {
     if (typeof window === "undefined") return;
     void useBackendStore.getState().checkConnection();

@@ -433,16 +433,17 @@ export class BackendDatabase {
         return row ? generationLogFromRow(row) : null;
     }
 
-    listGenerationLogs(options: { projectId?: string; nodeId?: string; status?: GenerationLogStatus; limit?: number } = {}): GenerationLog[] {
+    listGenerationLogs(options: { projectId?: string; nodeId?: string; status?: GenerationLogStatus; limit?: number; offset?: number } = {}): GenerationLog[] {
         const clauses: string[] = [];
         const values: Array<string | number> = [];
         if (options.projectId) { clauses.push("project_id = ?"); values.push(options.projectId); }
         if (options.nodeId) { clauses.push("node_id = ?"); values.push(options.nodeId); }
         if (options.status) { clauses.push("status = ?"); values.push(options.status); }
         const limit = Math.max(1, Math.min(500, Number(options.limit || 500)));
+        const offset = Math.max(0, Number(options.offset || 0));
         const rows = this.db.prepare(
-            `SELECT * FROM generation_logs ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT ?`
-        ).all(...values, limit) as Array<Record<string, unknown>>;
+            `SELECT * FROM generation_logs ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+        ).all(...values, limit, offset) as Array<Record<string, unknown>>;
         return rows.map(generationLogFromRow);
     }
 

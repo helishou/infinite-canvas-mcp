@@ -139,7 +139,10 @@ export function buildNodeGenerationInputs(nodeId: string, nodes: CanvasNodeData[
 
 function flattenGenerationInputs(inputs: NodeGenerationInput[]) {
     const resources = inputs.flatMap((input) => (input.type === "group" ? input.children : [input]));
-    return [...new Map(resources.map((input) => [input.nodeId, input])).values()];
+    return [...new Map(resources.map((input) => {
+        const media = input.type === "image" ? input.image?.storageKey || input.image?.dataUrl : input.type === "video" ? input.video?.storageKey || input.video?.url : input.type === "audio" ? input.audio?.storageKey || input.audio?.url : input.text;
+        return [`${input.nodeId}:${input.type}:${media || ""}`, input];
+    })).values()];
 }
 
 function readNodeGenerationResource(node: CanvasNodeData): NodeGenerationResourceInput[] {
@@ -150,10 +153,14 @@ function readNodeGenerationResource(node: CanvasNodeData): NodeGenerationResourc
     const audio = readReferenceAudio(node);
     if (audio) return [{ nodeId: node.id, type: "audio", title: node.title, audio }];
     const resource = getNodeDefinition(node.type)?.resource?.(node);
-    if (resource?.kind === "image" && resource.url) return [{ nodeId: node.id, type: "image", title: node.title, image: { id: node.id, name: `${node.title || node.id}.png`, type: node.metadata?.mimeType || "image/png", dataUrl: resource.url, storageKey: node.metadata?.storageKey } }];
-    if (resource?.kind === "video" && resource.url) return [{ nodeId: node.id, type: "video", title: node.title, video: { id: node.id, name: `${node.title || node.id}.mp4`, type: node.metadata?.mimeType || "video/mp4", url: resource.url, storageKey: node.metadata?.storageKey } }];
-    if (resource?.kind === "audio" && resource.url) return [{ nodeId: node.id, type: "audio", title: node.title, audio: { id: node.id, name: `${node.title || node.id}.mp3`, type: node.metadata?.mimeType || "audio/mpeg", url: resource.url, storageKey: node.metadata?.storageKey } }];
-    if (resource?.kind === "text" && resource.text) return [{ nodeId: node.id, type: "text", title: node.title, text: resource.text }];
+    const resources = Array.isArray(resource) ? resource : resource ? [resource] : [];
+    if (resources.length) return resources.flatMap((item): NodeGenerationResourceInput[] => {
+        if (item.kind === "image" && item.url) return [{ nodeId: node.id, type: "image" as const, title: node.title, image: { id: `${node.id}-${item.url}`, name: `${node.title || node.id}.png`, type: node.metadata?.mimeType || "image/png", dataUrl: item.url, storageKey: item.storageKey || node.metadata?.storageKey } }];
+        if (item.kind === "video" && item.url) return [{ nodeId: node.id, type: "video" as const, title: node.title, video: { id: `${node.id}-${item.url}`, name: `${node.title || node.id}.mp4`, type: node.metadata?.mimeType || "video/mp4", url: item.url, storageKey: item.storageKey || node.metadata?.storageKey } }];
+        if (item.kind === "audio" && item.url) return [{ nodeId: node.id, type: "audio" as const, title: node.title, audio: { id: `${node.id}-${item.url}`, name: `${node.title || node.id}.mp3`, type: node.metadata?.mimeType || "audio/mpeg", url: item.url, storageKey: item.storageKey || node.metadata?.storageKey } }];
+        if (item.kind === "text" && item.text) return [{ nodeId: node.id, type: "text" as const, title: node.title, text: item.text }];
+        return [];
+    });
     const text = readNodeTextInput(node);
     return text ? [{ nodeId: node.id, type: "text", title: node.title, text }] : [];
 }

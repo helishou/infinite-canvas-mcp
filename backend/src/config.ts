@@ -21,6 +21,28 @@ export const DB_FILE = path.join(DATA_DIR, "runtime.sqlite");
 export const MEDIA_DIR = path.join(DATA_DIR, "runtime-media");
 export const LOGS_DIR = path.join(DATA_DIR, "logs");
 export const WORKERS_DIR = path.join(DATA_DIR, "workers");
+export const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
+
+export type FrontendSettings = {
+    agentModel?: string;
+    agentReasoningEffort?: string;
+    agentPermissionMode?: string;
+    agentPanelWidth?: number;
+    canvasSidePanelWidth?: number;
+    canvasSidePanelOpen?: boolean;
+    locale?: string;
+    imageQuickTools?: Record<string, unknown>;
+};
+
+export function loadFrontendSettings(): FrontendSettings {
+    try {
+        return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+    } catch { return {}; }
+}
+
+export function saveFrontendSettings(settings: FrontendSettings) {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+}
 
 export type BackendConfig = {
     url: string;

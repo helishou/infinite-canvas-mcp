@@ -150,13 +150,13 @@ export default function AssetsPage() {
             const base = { title, coverUrl: "", tags: [], source: t("assets.droppedSource"), note: "", folderId: dropFolderId };
             try {
                 if (file.type.startsWith("image/")) {
-                    const image = await uploadImage(file);
+                    const image = await uploadImage(file, { category: "library" });
                     addAsset({ ...base, kind: "image", data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
                 } else if (file.type.startsWith("audio/")) {
-                    const result = await uploadMediaFile(file, "audio");
+                    const result = await uploadMediaFile(file, "audio", "library");
                     addAsset({ ...base, kind: "audio", data: { url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, durationMs: result.durationMs } });
                 } else {
-                    const result = await uploadMediaFile(file, "video");
+                    const result = await uploadMediaFile(file, "video", "library");
                     addAsset({ ...base, kind: "video", data: { url: result.url, storageKey: result.storageKey, width: result.width, height: result.height, bytes: result.bytes, mimeType: result.mimeType } });
                 }
                 added += 1;
@@ -274,7 +274,7 @@ export default function AssetsPage() {
 
     const readImageFile = async (file?: File) => {
         if (!file || !file.type.startsWith("image/")) return;
-        const image = await uploadImage(file);
+        const image = await uploadImage(file, { category: "library" });
         const draft = { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType };
         setImageDraft(draft);
         if (!form.getFieldValue("coverUrl")) form.setFieldValue("coverUrl", draft.dataUrl);
@@ -283,7 +283,7 @@ export default function AssetsPage() {
 
     const readAudioFile = async (file?: File) => {
         if (!file || !file.type.startsWith("audio/")) return;
-        const result = await uploadMediaFile(file, "audio");
+        const result = await uploadMediaFile(file, "audio", "library");
         setAudioDraft({ url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, durationMs: result.durationMs });
         if (!form.getFieldValue("title")) form.setFieldValue("title", file.name);
     };
@@ -982,13 +982,13 @@ function CompositeEditor({ items, onChange, assets }: { items: CompositeItem[]; 
 
     const handleImgUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0]; if (!file || pendingIdx === null) return;
-        const result = await uploadImage(file);
+        const result = await uploadImage(file, { category: "library" });
         updateItem(pendingIdx, { url: result.url, storageKey: result.storageKey, width: result.width, height: result.height, bytes: result.bytes, mimeType: result.mimeType });
         setPendingIdx(null); e.target.value = "";
     };
     const handleMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0]; if (!file || pendingIdx === null) return;
-        const result = await uploadMediaFile(file, mediaKind);
+        const result = await uploadMediaFile(file, mediaKind, "library");
         updateItem(pendingIdx, { url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, durationMs: result.durationMs });
         setPendingIdx(null); e.target.value = "";
     };

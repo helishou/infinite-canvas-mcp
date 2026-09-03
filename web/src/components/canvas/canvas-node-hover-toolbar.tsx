@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { App, Modal, Segmented, Tooltip } from "antd";
-import { Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, MessageSquare, Minus, Music2, Plus, RefreshCw, Settings2, Trash2, Upload, Video } from "lucide-react";
+import { Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, Lock, MessageSquare, Minus, Music2, Plus, RefreshCw, Settings2, Trash2, Unlock, Upload, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -8,10 +8,11 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useImageQuickToolsStore } from "@/stores/use-image-quick-tools-store";
 import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
 import type { CanvasNodeToolbarItem } from "@/types/canvas-plugin";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
-import { IMAGE_QUICK_TOOLS_STORAGE_KEY, buildImageToolbarTools, defaultImageQuickToolIds, readImageQuickToolsConfig, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
+import { buildImageToolbarTools, defaultImageQuickToolIds, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
 
 type CanvasNodeHoverToolbarProps = {
     node: CanvasNodeData | null;
@@ -36,6 +37,7 @@ type CanvasNodeHoverToolbarProps = {
     onReversePrompt: (node: CanvasNodeData) => void;
     onRetry: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
+    onToggleGroupLock: (node: CanvasNodeData) => void;
     onDelete: (node: CanvasNodeData) => void;
     extraTools?: CanvasNodeToolbarItem[];
 };
@@ -73,30 +75,18 @@ export function CanvasNodeHoverToolbar({
     onReversePrompt,
     onRetry,
     onToggleFreeResize,
+    onToggleGroupLock,
     onDelete,
     extraTools = [],
 }: CanvasNodeHoverToolbarProps) {
-    const [quickImageToolIds, setQuickImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
-    const [showImageToolLabels, setShowImageToolLabels] = useState(false);
-    const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
-    const [draftShowImageToolLabels, setDraftShowImageToolLabels] = useState(false);
+    const quickImageToolIds = useImageQuickToolsStore((state) => state.ids);
+    const showImageToolLabels = useImageQuickToolsStore((state) => state.showLabels);
+    const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(quickImageToolIds);
+    const [draftShowImageToolLabels, setDraftShowImageToolLabels] = useState(showImageToolLabels);
     const [imageToolSettingsOpen, setImageToolSettingsOpen] = useState(false);
     const { message } = App.useApp();
     const { t } = useTranslation();
     const copyText = useCopyText();
-
-    useEffect(() => {
-        try {
-            const stored = window.localStorage.getItem(IMAGE_QUICK_TOOLS_STORAGE_KEY);
-            if (!stored) return;
-            const parsed = JSON.parse(stored) as unknown;
-            const config = readImageQuickToolsConfig(parsed);
-            setQuickImageToolIds(config.ids);
-            setShowImageToolLabels(config.showLabels);
-        } catch {
-            window.localStorage.removeItem(IMAGE_QUICK_TOOLS_STORAGE_KEY);
-        }
-    }, []);
 
     useEffect(() => {
         setImageToolSettingsOpen(false);
@@ -115,6 +105,7 @@ export function CanvasNodeHoverToolbar({
     const hasAudio = isAudio && Boolean(node.metadata?.content);
     const isText = node.type === CanvasNodeType.Text;
     const isConfig = node.type === CanvasNodeType.Config;
+    const isGroup = node.type === CanvasNodeType.Group;
     const canRetry = node.metadata?.status === "error";
     const quickImageToolIdSet = new Set(quickImageToolIds);
     const copyImagePrompt = (target: CanvasNodeData) => {
@@ -137,6 +128,7 @@ export function CanvasNodeHoverToolbar({
     const baseToolbarTools: ToolbarTool[] = [
         { id: "info", title: t("canvas.nodeToolbar.infoTitle"), label: t("canvas.nodeToolbar.info"), icon: <Info className="size-4" />, onClick: () => onInfo(node) },
         { id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true },
+        ...(isGroup ? [{ id: "groupLock", title: node.metadata?.groupLocked ? "解锁组" : "锁定组", label: node.metadata?.groupLocked ? "解锁组" : "锁定组", icon: node.metadata?.groupLocked ? <Unlock className="size-4" /> : <Lock className="size-4" />, onClick: () => onToggleGroupLock(node), active: Boolean(node.metadata?.groupLocked) }] : []),
     ];
     const nodeToolbarTools: ToolbarTool[] = [
         ...(canRetry ? [{ id: "retry", title: t("canvas.nodeToolbar.retryTitle"), label: t("canvas.node.retry"), icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }] : []),
@@ -171,9 +163,7 @@ export function CanvasNodeHoverToolbar({
 
     const saveImageToolSettings = () => {
         const config = { ids: draftImageToolIds, showLabels: draftShowImageToolLabels };
-        setQuickImageToolIds(config.ids);
-        setShowImageToolLabels(config.showLabels);
-        window.localStorage.setItem(IMAGE_QUICK_TOOLS_STORAGE_KEY, JSON.stringify(config));
+        useImageQuickToolsStore.getState().setConfig(config);
         closeImageToolSettings();
     };
 

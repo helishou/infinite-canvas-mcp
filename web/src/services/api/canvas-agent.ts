@@ -92,7 +92,7 @@ export function fetchComfyStatus(endpoint: string, token: string) {
 }
 
 export function fetchComfyModels(endpoint: string, token: string) {
-    return fetchAgentJson<{ ok?: boolean; data?: { models?: string[]; loras?: string[]; refreshedAt?: string; error?: string } }>(endpoint, token, "/comfy/models");
+    return fetchAgentJson<{ ok?: boolean; data?: { models?: string[]; loras?: string[]; textEncoders?: string[]; videoVaes?: string[]; audioVaes?: string[]; latentUpscaleModels?: string[]; nanfeng?: Record<string, unknown[]>; refreshedAt?: string; error?: string } }>(endpoint, token, "/comfy/models");
 }
 
 export function syncRuntimeMedia(endpoint: string, token: string, name: string, dataUrl: string) {

@@ -30,5 +30,5 @@ export function mergeH3Segments(all: H3Segment[], generated: H3Segment[], active
 }
 
 export function generatedVideoMaterials(segments: H3Segment[]): H3Ref[] {
-    return segments.flatMap((segment, index) => (segment.results || []).filter((item) => item.type === "video").map((item) => ({ ...item, name: item.name || `Clip ${index + 1}` })));
+    return segments.flatMap((segment, index) => (segment.results || []).filter((item) => item.type === "video").map((item) => ({ ...item, name: item.name || `Clip ${index + 1}`, segmentId: segment.id })));
 }

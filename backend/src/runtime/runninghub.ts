@@ -86,7 +86,7 @@ async function materializeMedia(items: Array<{ url: string; [key: string]: unkno
             if (!response.ok) return item;
             const mimeType = response.headers.get("content-type")?.split(";", 1)[0] || "application/octet-stream";
             const name = path.basename(new URL(sourceUrl).pathname) || `runninghub-${Date.now()}`;
-            const media = store.store(Buffer.from(await response.arrayBuffer()), { name, mimeType });
+            const media = store.store(Buffer.from(await response.arrayBuffer()), { name, mimeType, category: "output" });
             return { ...item, url: store.url(media), storageKey: media.storageKey, mimeType: media.mimeType, sourceUrl };
         } catch {
             return item;

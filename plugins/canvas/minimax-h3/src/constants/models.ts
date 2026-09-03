@@ -1,4 +1,5 @@
 export const h3ModelOptions = [
+    { value: "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors", label: "Dasiwa REF2VA Hybrid V1" },
     { value: "h3\\10Eros_minimax_h3_TURBO-hybrid_beta4_int8_convrot_2.safetensors", label: "10Eros H3 Turbo Hybrid Beta4 INT8" },
     { value: "h3\\10Eros_minimax_h3_TURBO-hybrid_beta3_int8_convrot.safetensors", label: "10Eros H3 Turbo Hybrid Beta3 INT8" },
     { value: "h3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors", label: "Ref2VA Pruned INT8 ConvRot" },
@@ -6,7 +7,6 @@ export const h3ModelOptions = [
     { value: "h3\\minimax_h3_fl2va_pruned_int8_convrot.safetensors", label: "FL2VA Pruned INT8 ConvRot" },
     { value: "h3\\minimax_h3_fl2va_int8_convrot.safetensors", label: "FL2VA INT8 ConvRot" },
     { value: "h3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors", label: "Hybrid FL2VA / Ref2VA B25-49 INT8" },
-    { value: "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors", label: "Dasiwa REF2VA Hybrid V1" },
 ];
 export const h3LoraOptions = [
     { value: "", label: "关闭 LoRA" },

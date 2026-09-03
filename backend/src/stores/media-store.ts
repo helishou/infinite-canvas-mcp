@@ -4,11 +4,11 @@ import path from "node:path";
 
 import type { BackendDatabase, MediaFile } from "../db.js";
 import { MEDIA_DIR } from "../config.js";
-import { extensionForMime, mediaKindForMime, type MediaStore, type MediaStats, type NamedMedia } from "./types.js";
+import { extensionForMime, mediaKindForMime, type MediaCategory, type MediaStore, type MediaStats, type NamedMedia } from "./types.js";
 
 const MAX_MEDIA_BYTES = 200 * 1024 * 1024;
 
-/** 媒体 store：media_files 表 + runtime-media/ 文件系统。 */
+/** 媒体 store：media_files 表 + runtime-media/{input,output,library} 文件系统。 */
 export function createMediaStore(db: BackendDatabase): MediaStore {
     const kindFor = (mime: string, fileName = "") => mediaKindForMime(mime, fileName);
 
@@ -21,8 +21,10 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
             const name = path.basename(options.name || "media.bin");
             const storageKey = options.storageKey || `${kindFor(mimeType, name)}:${randomUUID()}`;
             const extension = path.extname(name).replace(/[^a-z0-9.]/gi, "").slice(0, 12) || extensionForMime(mimeType);
-            const filePath = path.join(MEDIA_DIR, `${randomUUID()}${extension}`);
-            fs.mkdirSync(MEDIA_DIR, { recursive: true, mode: 0o700 });
+            const category = safeCategory(options.category);
+            const categoryDir = path.join(MEDIA_DIR, category);
+            const filePath = path.join(categoryDir, `${randomUUID()}${extension}`);
+            fs.mkdirSync(categoryDir, { recursive: true, mode: 0o700 });
             fs.writeFileSync(filePath, data, { mode: 0o600 });
             const media: MediaFile = {
                 storageKey,
@@ -99,6 +101,10 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
 /** 稳定 id：同名同一 id，改名换 id。 */
 function cryptoStableId(source: string): string {
     return createHash("sha256").update(source).digest("hex").slice(0, 16);
+}
+
+function safeCategory(value: MediaCategory | undefined): MediaCategory {
+    return value === "output" || value === "library" ? value : "input";
 }
 
 function runtimeMediaUrl(name: string) {

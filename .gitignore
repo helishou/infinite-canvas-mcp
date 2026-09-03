@@ -19,3 +19,8 @@ plugins/canvas/*/dist
 plugins/canvas/*/node_modules
 web/public/plugins
 .workbuddy
+
+# python venvs (backend worker 依赖，隔离安装 Pillow)
+**/venv/
+**/.venv/
+backend/venv

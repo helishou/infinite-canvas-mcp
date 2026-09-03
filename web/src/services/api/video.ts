@@ -5,14 +5,16 @@ import i18n from "@/i18n";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
-import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { runModelPlugin } from "./model-plugin";
+import { runComfyTask, type LocalReference } from "./comfyui";
+import { useAgentStore } from "@/stores/use-agent-store";
 import type { ReferenceImage } from "@/types/image";
 
 type VideoResponse = { id: string; status?: string; error?: { message?: string }; url?: string; result_url?: string; video_url?: string; content?: { video_url?: string; url?: string } | null };
 type ApiVideoResponse = VideoResponse | { code?: number | string; data?: VideoResponse | null; msg?: string; message?: string; error?: { message?: string } };
 type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
-type RequestOptions = { signal?: AbortSignal };
+type RequestOptions = { signal?: AbortSignal; videoReferences?: LocalReference[]; onTaskId?: (taskId: string) => void };
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
@@ -34,6 +36,20 @@ function aiHeaders(config: AiConfig, contentType?: string) {
 }
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
+    const requestConfig = resolveModelRequestConfig(config, (config.model || config.videoModel).trim());
+    if (requestConfig.model === "flashvsr-1.1" && resolveModelChannel(config, (config.model || config.videoModel).trim()).kind === "comfyui") {
+        const agent = useAgentStore.getState();
+        if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法运行本地 FlashVSR");
+        const comfy = await fetch(`${agent.url}/comfy/config?token=${encodeURIComponent(agent.token)}`).then(async (response) => {
+            if (!response.ok) throw new Error(`读取 ComfyUI 配置失败（HTTP ${response.status}）`);
+            return await response.json() as { url?: string };
+        });
+        if (!comfy.url) throw new Error("尚未配置本地 ComfyUI 地址");
+        const video = options?.videoReferences?.[0];
+        if (!video) throw new Error("FlashVSR 至少需要连接一个源视频");
+        const result = await runComfyTask(agent.url, agent.token, comfy.url, "flashvsr-1.1", prompt, [video], { longEdge: config.size }, options?.signal, options?.onTaskId);
+        return { url: result.url, mimeType: result.mimeType || "video/mp4" };
+    }
     const task = await createVideoGenerationTask(config, prompt, references, options);
     for (let attempt = 0; attempt < 120; attempt += 1) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
@@ -105,10 +121,10 @@ function videoPluginResult(result: unknown): VideoGenerationResult {
 }
 
 export async function storeGeneratedVideo(result: VideoGenerationResult): Promise<UploadedFile> {
-    if (result.blob) return uploadMediaFile(result.blob, "video");
+    if (result.blob) return uploadMediaFile(result.blob, "video", "output");
     if (result.url) {
         try {
-            return await uploadMediaFile(result.url, "video");
+            return await uploadMediaFile(result.url, "video", "output");
         } catch {
             return { url: result.url, storageKey: "", bytes: 0, mimeType: result.mimeType || "video/mp4" };
         }

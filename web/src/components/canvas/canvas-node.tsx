@@ -317,11 +317,13 @@ export const CanvasNode = React.memo(function CanvasNode({
                     // H3 节点内容几乎全是交互控件，且其根 div 在冒泡阶段 stopPropagation 挡掉了普通的
                     // body 拖拽路径，只能走这里。若沿用全量黑名单（button/input/textarea/select/video），
                     // 节点上几乎任何可见区域都命中被排除，导致“拖不动”。故对 H3 仅屏蔽纯文本编辑控件，
-                    // 其余区域（视频预览、按钮、轨道空白等）均可拖动节点。
+                    // H3 只允许从自己的标题栏拖动，其他区域全部保留给控件和内容交互。
                     const target = event.target as HTMLElement;
-                    const interactive = data.type === "minimax-h3:video"
-                        ? target.closest("input, textarea, select")
+                    const isH3 = data.type === "minimax-h3:video";
+                    const interactive = isH3
+                        ? target.closest("button, input, textarea, select, video")
                         : target.closest("button, input, textarea, select, video");
+                    const isH3DragHandle = target.closest("[data-canvas-node-drag-handle]");
                     // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
                     // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
                     // onMouseDown（冒泡阶段）无法执行，缩放被拖拽彻底劫持。故需显式排除缩放手柄。
@@ -330,7 +332,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     // capture 阶段触发 handleNodeMouseDown 的 stopPropagation 会掐断其自身
                     // onMouseDown（onConnectStart，冒泡阶段），导致无法连线、反而变成拖拽。需显式排除。
                     const onConnectionHandle = target.closest("[data-connection-handle]");
-                    if (!interactive && !onResizeHandle && !onConnectionHandle) onMouseDown(event, data.id);
+                    if (!interactive && !onResizeHandle && !onConnectionHandle && (!isH3 || isH3DragHandle)) onMouseDown(event, data.id);
                 }
             }}
             onContextMenu={(event) => {
@@ -384,7 +386,9 @@ export const CanvasNode = React.memo(function CanvasNode({
                     boxShadow: isGroupDropTarget ? `0 0 0 2px ${selectionBlue}66, inset 0 0 0 999px ${selectionBlue}10` : isActive ? `0 0 0 1px ${selectionBlue}55` : isRelated ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
                 }}
                 onMouseDown={(event) => {
-                    if (!referenceSelectionState) onMouseDown(event, data.id);
+                    const target = event.target as HTMLElement;
+                    const isH3 = data.type === "minimax-h3:video";
+                    if (!referenceSelectionState && (!isH3 || target.closest("[data-canvas-node-drag-handle]"))) onMouseDown(event, data.id);
                     else if (event.button === 0 && referenceSelectionState === "available") {
                         event.stopPropagation();
                         onSelectReference?.(data.id);

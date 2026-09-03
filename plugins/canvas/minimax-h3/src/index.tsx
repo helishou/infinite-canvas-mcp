@@ -4,9 +4,9 @@ import h3Css from "./styles/h3.css";
 
 export default definePlugin({
     id: "minimax-h3",
-    name: "MiniMax H3",
+    name: "H3导演台",
     version: "1.2.0",
-    description: "把原画布 MiniMax H3 的视频、角色参考、Motion Context 和生成参数带入新画布。",
+    description: "把原画布H3导演台 的视频、角色参考、续段尾帧和生成参数带入新画布。",
     css: h3Css,
     nodes: [h3NodeDefinition],
     mcp: {

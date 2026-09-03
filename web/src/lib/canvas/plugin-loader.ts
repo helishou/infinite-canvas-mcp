@@ -2,6 +2,7 @@ import { registerNodeDefinitions, unregisterPluginNodes } from "@/lib/canvas/nod
 import { getPluginRuntime } from "@/lib/canvas/plugin-runtime";
 import { usePluginStore, type InstalledPlugin } from "@/stores/canvas/use-plugin-store";
 import { useAgentStore } from "@/stores/use-agent-store";
+import { fetchBackendInstalledPlugins, saveBackendInstalledPlugins } from "@/services/backend-api";
 import { notifyAgentPluginMcp, type AgentPluginMcpDeclaration } from "@/services/api/canvas-agent";
 import type { CanvasPlugin } from "@/types/canvas-plugin";
 import i18n from "@/i18n";
@@ -74,6 +75,7 @@ export async function installPluginFromUrl(url: string, opts?: { official?: bool
     const plugin = await evaluatePluginSource(source);
     deactivatePlugin(plugin.id); // Replace the previous version.
     usePluginStore.getState().upsert({ id: plugin.id, name: plugin.name || plugin.id, version: plugin.version || "0.0.0", description: plugin.description, url, source, enabled: true, official: opts?.official });
+    await persistInstalledPlugins();
     activatePlugin(plugin);
     void syncPluginMcpToAgent();
     return plugin;
@@ -86,6 +88,7 @@ export async function updatePlugin(record: InstalledPlugin) {
 
 export async function setPluginEnabled(record: InstalledPlugin, enabled: boolean) {
     usePluginStore.getState().setEnabled(record.id, enabled);
+    await persistInstalledPlugins();
     if (!enabled) {
         deactivatePlugin(record.id);
         void syncPluginMcpToAgent();
@@ -98,9 +101,10 @@ export async function setPluginEnabled(record: InstalledPlugin, enabled: boolean
     void syncPluginMcpToAgent();
 }
 
-export function uninstallPlugin(id: string) {
+export async function uninstallPlugin(id: string) {
     deactivatePlugin(id);
     usePluginStore.getState().remove(id);
+    await persistInstalledPlugins();
     void syncPluginMcpToAgent();
 }
 
@@ -122,27 +126,45 @@ async function syncPluginMcpToAgent() {
 }
 
 let loaded = false;
+let loading: Promise<void> | null = null;
 
 // Load installed and enabled plugins at application startup.
 export async function ensurePluginsLoaded() {
     if (loaded) return;
-    loaded = true;
-    await usePluginStore.persist.rehydrate();
-    await loadLocalPlugins(); // Discover disabled local plugins first, then activate all enabled records.
-    const records = usePluginStore.getState().plugins.filter((record) => record.enabled);
-    await Promise.all(
-        records.map(async (record) => {
-            if (HOST_SYSTEM_PLUGIN_IDS.has(record.id)) return;
+    if (loading) return loading;
+    loading = (async () => {
+        let backendLoadSucceeded = false;
+        try {
             try {
-                // Local plugins use the latest output; other plugins use their cached source.
-                const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;
-                activatePlugin(await evaluatePluginSource(source));
-            } catch (error) {
-                console.error(`[plugin] Failed to load: ${record.id}`, error);
-            }
-        }),
-    );
-    await loadDevPlugins();
+                usePluginStore.getState().setPlugins((await fetchBackendInstalledPlugins()).plugins || []);
+                backendLoadSucceeded = true;
+            } catch (error) { console.warn("[plugin] Failed to load installed plugins", error); }
+            await loadLocalPlugins(); // Discover disabled local plugins first, then activate all enabled records.
+            const records = usePluginStore.getState().plugins.filter((record) => record.enabled);
+            await Promise.all(
+                records.map(async (record) => {
+                    if (HOST_SYSTEM_PLUGIN_IDS.has(record.id)) return;
+                    try {
+                        // Local plugins use the latest output; other plugins use their cached source.
+                        const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;
+                        activatePlugin(await evaluatePluginSource(source));
+                    } catch (error) {
+                        console.warn(`[plugin] Failed to load: ${record.id}`, error);
+                    }
+                }),
+            );
+            await persistInstalledPlugins();
+            await loadDevPlugins();
+            loaded = backendLoadSucceeded;
+        } finally {
+            loading = null;
+        }
+    })();
+    return loading;
+}
+
+async function persistInstalledPlugins() {
+    try { await saveBackendInstalledPlugins(usePluginStore.getState().plugins); } catch (error) { console.warn("[plugin] Failed to persist installed plugins", error); }
 }
 
 // Discover local plugins from web/public/plugins, add them disabled, and expose them in the manager without a URL.
@@ -162,6 +184,8 @@ async function loadLocalPlugins() {
         urls.map(async (url: string) => {
             try {
                 const source = await fetchPluginSource(withCacheBust(url));
+                const localId = url.split("/").pop()?.replace(/\.js(?:\?.*)?$/, "") || "";
+                if (HOST_SYSTEM_PLUGIN_IDS.has(localId)) return;
                 const plugin = await evaluatePluginSource(source);
                 const existing = store.plugins.find((item) => item.id === plugin.id);
                 store.upsert({
@@ -175,7 +199,7 @@ async function loadLocalPlugins() {
                     local: true,
                 });
             } catch (error) {
-                console.error(`[plugin] Failed to discover local plugin: ${url}`, error);
+                console.warn(`[plugin] Failed to discover local plugin: ${url}`, error);
             }
         }),
     );
@@ -196,7 +220,7 @@ async function loadDevPlugins() {
                 activatePlugin(plugin);
                 console.info(`[plugin] Dev plugin loaded: ${plugin.id} (${url})`);
             } catch (error) {
-                console.error(`[plugin] Failed to load dev plugin: ${url}`, error);
+                console.warn(`[plugin] Failed to load dev plugin: ${url}`, error);
             }
         }),
     );
