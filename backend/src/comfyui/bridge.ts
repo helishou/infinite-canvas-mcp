@@ -296,8 +296,11 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
     const promptText = String(input.prompt || "");
     const promptNode = preset === "z-image" ? source["23"] : preset === "flux2-klein" ? source["168"] : null;
     if (promptNode?.inputs) promptNode.inputs.text = promptText;
+    const requestedSeed = Number(params.seed);
+    const randomSeed = () => Math.floor(Math.random() * 1125899906842624);
+    const seed = Number.isFinite(requestedSeed) && requestedSeed >= 0 ? requestedSeed : randomSeed();
     if (preset === "z-image" && source["144"]?.inputs) { source["144"].inputs.width = Number(params.width || 1024); source["144"].inputs.height = Number(params.height || 1024); }
-    if (preset === "z-image" && source["22"]?.inputs && params.seed !== undefined) source["22"].inputs.seed = Number(params.seed);
+    if (preset === "z-image" && source["22"]?.inputs) source["22"].inputs.seed = seed;
     if (preset === "flux2-klein") {
         const width = Number(params.width);
         const height = Number(params.height);
@@ -310,7 +313,8 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
             if (source["152"]?.inputs) { source["152"].inputs.width = width; source["152"].inputs.height = height; }
             if (source["156"]?.inputs) { source["156"].inputs.width = width; source["156"].inputs.height = height; }
         }
-        if (source["158"]?.inputs && params.seed !== undefined) source["158"].inputs.noise_seed = Number(params.seed);
+        // 未显式指定 seed 时随机化，否则画布批量多张会复用模板固定种子得到相同结果。
+        if (source["158"]?.inputs) source["158"].inputs.noise_seed = seed;
     }
     if (preset === "flashvsr-1.1" && source["2"]?.inputs) source["2"].inputs.value = Number(params.scale || 2);
     if (preset === "flashvsr-1.1" && source["40"]?.inputs && params.longEdge !== undefined && params.longEdge !== "auto") source["40"].inputs.longer_edge = Number(params.longEdge);

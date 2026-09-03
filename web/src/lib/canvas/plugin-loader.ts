@@ -138,7 +138,7 @@ export async function ensurePluginsLoaded() {
             try {
                 usePluginStore.getState().setPlugins((await fetchBackendInstalledPlugins()).plugins || []);
                 backendLoadSucceeded = true;
-            } catch (error) { console.error("[plugin] Failed to load installed plugins", error); }
+            } catch (error) { console.warn("[plugin] Failed to load installed plugins", error); }
             await loadLocalPlugins(); // Discover disabled local plugins first, then activate all enabled records.
             const records = usePluginStore.getState().plugins.filter((record) => record.enabled);
             await Promise.all(
@@ -149,7 +149,7 @@ export async function ensurePluginsLoaded() {
                         const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;
                         activatePlugin(await evaluatePluginSource(source));
                     } catch (error) {
-                        console.error(`[plugin] Failed to load: ${record.id}`, error);
+                        console.warn(`[plugin] Failed to load: ${record.id}`, error);
                     }
                 }),
             );
@@ -164,7 +164,7 @@ export async function ensurePluginsLoaded() {
 }
 
 async function persistInstalledPlugins() {
-    try { await saveBackendInstalledPlugins(usePluginStore.getState().plugins); } catch (error) { console.error("[plugin] Failed to persist installed plugins", error); }
+    try { await saveBackendInstalledPlugins(usePluginStore.getState().plugins); } catch (error) { console.warn("[plugin] Failed to persist installed plugins", error); }
 }
 
 // Discover local plugins from web/public/plugins, add them disabled, and expose them in the manager without a URL.
@@ -184,6 +184,8 @@ async function loadLocalPlugins() {
         urls.map(async (url: string) => {
             try {
                 const source = await fetchPluginSource(withCacheBust(url));
+                const localId = url.split("/").pop()?.replace(/\.js(?:\?.*)?$/, "") || "";
+                if (HOST_SYSTEM_PLUGIN_IDS.has(localId)) return;
                 const plugin = await evaluatePluginSource(source);
                 const existing = store.plugins.find((item) => item.id === plugin.id);
                 store.upsert({
@@ -197,7 +199,7 @@ async function loadLocalPlugins() {
                     local: true,
                 });
             } catch (error) {
-                console.error(`[plugin] Failed to discover local plugin: ${url}`, error);
+                console.warn(`[plugin] Failed to discover local plugin: ${url}`, error);
             }
         }),
     );
@@ -218,7 +220,7 @@ async function loadDevPlugins() {
                 activatePlugin(plugin);
                 console.info(`[plugin] Dev plugin loaded: ${plugin.id} (${url})`);
             } catch (error) {
-                console.error(`[plugin] Failed to load dev plugin: ${url}`, error);
+                console.warn(`[plugin] Failed to load dev plugin: ${url}`, error);
             }
         }),
     );

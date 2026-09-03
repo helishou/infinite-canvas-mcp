@@ -549,7 +549,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             const text = rt(wasConnected ? "connectionLostDescription" : "connectionFailedDescription");
             if (!errorLoggedRef.current || wasConnected) {
                 addEventLog(rt(wasConnected ? "connectionLost" : "connectionFailed"), text);
-                if (!headless && !silent) message.error(text);
+                if (!headless && !silent) message.warning(text);
             }
             errorLoggedRef.current = true;
             connectedRef.current = false;

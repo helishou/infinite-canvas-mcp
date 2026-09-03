@@ -429,7 +429,6 @@ export default {
             dataDirHint: "Restart Backend after saving; back up data before changing paths",
             dataDirSaved: "Data directory saved. Restart Backend to apply.",
             dataDirSaveFailed: "Failed to save data directory",
-            browse: "Browse…",
         },
         promptSources: {
             add: "Add source",
@@ -527,9 +526,6 @@ export default {
             audioInstructionsPlaceholder: "For example: natural, warm, and suitable for narration.",
             systemPrompt: "System prompt",
             systemPromptPlaceholder: "For example: You are a visual director specializing in cinematic, photorealistic imagery.",
-            comfyui: "ComfyUI Paths",
-            comfyuiBasePath: "ComfyUI root directory",
-            comfyuiBasePathPlaceholder: "For example: D:/ComfyUI, optional",
         },
         channelEditor: {
             title: "Edit provider",

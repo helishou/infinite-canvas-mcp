@@ -18,7 +18,7 @@ export function findGroupDropTarget(movedIds: Set<string>, nodes: CanvasNodeData
     if (!movingNodes.length) return null;
     return (
         [...nodes].reverse().find((group) => {
-            if (group.type !== CanvasNodeType.Group || movedIds.has(group.id)) return false;
+            if (group.type !== CanvasNodeType.Group || movedIds.has(group.id) || group.metadata?.groupLocked) return false;
             return movingNodes.some((node) => {
                 const centerX = node.position.x + node.width / 2;
                 const centerY = node.position.y + node.height / 2;
@@ -54,6 +54,27 @@ export function findContainingGroupId(node: CanvasNodeData, nodes: CanvasNodeDat
             .find((group) => group.type === CanvasNodeType.Group && group.id !== node.id && centerX >= group.position.x && centerX <= group.position.x + group.width && centerY >= group.position.y && centerY <= group.position.y + group.height)?.id ||
         undefined
     );
+}
+
+export function keepNodesInLockedGroups(movedIds: Set<string>, originalNodes: CanvasNodeData[], nextNodes: CanvasNodeData[]) {
+    const lockedParents = new Map<string, string>();
+    originalNodes.forEach((node) => {
+        const groupId = node.metadata?.groupId;
+        const group = groupId ? originalNodes.find((candidate) => candidate.id === groupId) : undefined;
+        if (groupId && group?.type === CanvasNodeType.Group && group.metadata?.groupLocked) lockedParents.set(node.id, groupId);
+    });
+    return nextNodes.map((node) => {
+        const groupId = lockedParents.get(node.id);
+        if (!movedIds.has(node.id) || !groupId) return node;
+        const group = nextNodes.find((candidate) => candidate.id === groupId);
+        if (!group) return node;
+        const pad = 24;
+        const left = group.position.x + pad;
+        const top = group.position.y + pad;
+        const right = Math.max(left, group.position.x + group.width - pad - node.width);
+        const bottom = Math.max(top, group.position.y + group.height - pad - node.height);
+        return { ...node, position: { x: Math.max(left, Math.min(right, node.position.x)), y: Math.max(top, Math.min(bottom, node.position.y)) }, metadata: { ...node.metadata, groupId } };
+    });
 }
 
 export function getConnectionTargetAnchor(node: CanvasNodeData, current: ConnectionHandle) {

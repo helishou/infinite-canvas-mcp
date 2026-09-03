@@ -181,9 +181,12 @@
 .minimax-current-panel { grid-template-columns:minmax(280px,1fr) 8px minmax(240px,var(--minimax-clip-settings-w,300px)); grid-template-rows:40px minmax(0,1fr); }
 .minimax-current-panel .minimax-prompt-field { grid-column:1; }
 .minimax-current-panel .minimax-clip-parameters { grid-column:3; }
-.minimax-current-preview { grid-column:1; grid-row:2; min-width:0; min-height:0; display:flex; align-items:center; justify-content:center; overflow:hidden; padding:12px; background:#111418; }
+.minimax-current-main { grid-column:1; grid-row:2; min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+.minimax-current-preview { flex:1 1 auto; min-width:0; min-height:0; display:flex; align-items:center; justify-content:center; overflow:hidden; padding:12px; background:#111418; }
 .minimax-current-preview video { display:block; max-width:100%; max-height:100%; border-radius:8px; object-fit:contain; background:#080a0d; }
 .minimax-current-preview > div { display:flex; flex-direction:column; align-items:center; gap:8px; color:#718496; font-size:11px; }
+.minimax-current-main > .minimax-prompt-field { flex:0 0 42%; min-height:190px; max-height:none; overflow:hidden; padding:8px 12px 10px; border:0; border-top:1px solid #303640; }
+.minimax-current-main > .minimax-prompt-field textarea { flex:1 1 auto; min-height:86px; }
 .minimax-current-resize { border-radius:4px; background:rgba(148,163,184,.16); }
 .minimax-current-head { padding:0 13px; }
 .minimax-current-title,.minimax-current-refs { font-size:12px; }

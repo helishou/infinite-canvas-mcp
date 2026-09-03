@@ -7,7 +7,7 @@ import type {
 
 /** 各 store 的筛选条件。 */
 export type AssetFilter = { kind?: string; folderId?: string };
-export type LogFilter = { projectId?: string; nodeId?: string; status?: GenerationLogStatus; limit?: number };
+export type LogFilter = { projectId?: string; nodeId?: string; status?: GenerationLogStatus; limit?: number; offset?: number };
 export type LogDeleteScope = { id?: string; projectId?: string; nodeId?: string };
 export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null };
 export type GenerationLogInput = Omit<GenerationLog, "id" | "createdAt" | "updatedAt">;

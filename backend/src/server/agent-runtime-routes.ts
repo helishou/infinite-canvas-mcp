@@ -14,6 +14,7 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, running
     app.post("/agent/runninghub/tasks/:id/cancel", (req, res) => { const task = runningHub.cancel(req.params.id); events?.publish({ type: "task.updated", entityId: task.id, payload: task }); res.json({ ok: true, task }); });
     app.get("/agent/ffmpeg/status", async (_req, res) => res.json({ ok: true, ...(await videoConcat.status()) }));
     app.post("/agent/video-concat/tasks", async (req, res) => { const task = await videoConcat.run(Array.isArray(req.body?.videos) ? req.body.videos.map(String) : [], String(req.body?.output || ""), req.body?.longEdge === "auto" || req.body?.longEdge === undefined ? "auto" : Number(req.body.longEdge)); events?.publish({ type: "task.created", entityId: task.id, payload: task }); res.status(202).json({ ok: true, task }); });
+    app.post("/agent/video-concat/tasks/:id/cancel", (req, res) => { const task = videoConcat.cancel(req.params.id); events?.publish({ type: "task.updated", entityId: task.id, payload: task }); res.json({ ok: true, task }); });
     app.get("/agent/runtime/tasks/:id", (req, res) => taskResponse(req.params.id, "", stores, req, res));
 }
 

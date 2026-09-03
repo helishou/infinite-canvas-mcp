@@ -53,8 +53,6 @@ export type AiConfig = {
     background: string;
     count: string;
     canvasImageCount: string;
-    /** ComfyUI 安装根目录，如 D:/ComfyUI */
-    comfyuiBasePath: string;
 };
 
 export type WebdavSyncConfig = {
@@ -112,7 +110,6 @@ export const defaultConfig: AiConfig = {
     background: "",
     count: "1",
     canvasImageCount: "3",
-    comfyuiBasePath: "",
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {

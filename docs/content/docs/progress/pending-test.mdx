@@ -16,7 +16,7 @@ The current release needs manual verification in these areas:
 + H3 Prompt/Clip settings 宽度：拖动当前 Clip 面板中间的分隔条，确认 Prompt 与 Clip settings 可调整宽度，刷新或重新打开节点后宽度仍保留，窄面板下不溢出。
 + 本地 FlashVSR：在视频节点选择本地 `flashvsr-1.1`，不配置 API Key 但配置 ComfyUI 后运行，确认不再提示 API Key 错误，并能提交本地 ComfyUI。
 + 视频拼接 worker：在视频节点模型中选择“视频拼接”，连接两个及以上本地视频后生成，确认按连接顺序输出拼接视频；取消生成时确认 ffmpeg 进程停止。
-+ 画布本地 ComfyUI 生图：在画布节点模型中选择 `flux2-klein`（本地 ComfyUI），连接参考图后生成，确认提交本地 ComfyUI 并回写图片节点，不再报云端 API 错误；选择 `z-image` 无参考图时也能文生图；flux2-klein 不带任何参考图时提示“至少需要一张参考图”。
++ 画布本地 ComfyUI 生图：在画布节点模型中选择 `flux2-klein`（本地 ComfyUI），连接参考图后生成，确认提交本地 ComfyUI 并回写图片节点，不再报云端 API 错误；选择 `z-image` 无参考图时也能文生图；flux2-klein 不带任何参考图时提示“至少需要一张参考图”；一次生成 3 张时确认三张结果各不相同（随机种子生效）。
 + Backend 存储替换：刷新页面后确认已安装插件、启用状态和插件私有配置仍能恢复；提示词页刷新后能重新拉取数据；设置页不再出现浏览器数据库统计；Backend 重启后插件数据仍存在。
 + 提示词缓存迁移：拉取提示词源后刷新页面，确认提示词中心能从 Backend 恢复缓存；修改来源地址或超过缓存周期后，确认会重新拉取并覆盖对应缓存。
 + 提示词中心加载态：清空或首次打开提示词中心时，确认远程来源加载期间显示明显的加载卡片；已有缓存后台刷新时不遮挡当前列表。

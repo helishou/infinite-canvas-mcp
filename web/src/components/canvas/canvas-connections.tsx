@@ -70,15 +70,21 @@ export function ConnectionPath({
             {(hovered || active) && onDelete && (
                 <g
                     transform={`translate(${midX}, ${midY})`}
-                    style={{ cursor: "pointer" }}
-                    onClick={(event) => {
+                    data-connection-delete={connection.id}
+                    style={{ cursor: "pointer", pointerEvents: "all" }}
+                    onPointerDown={(event) => {
+                        event.preventDefault();
                         event.stopPropagation();
                         onDelete();
                     }}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                    }}
                 >
-                    <circle r={9} fill={theme.node.panel} stroke={theme.node.muted} strokeWidth={1.5} />
-                    <line x1={-3.5} y1={-3.5} x2={3.5} y2={3.5} stroke="#ef4444" strokeWidth={1.8} strokeLinecap="round" />
-                    <line x1={3.5} y1={-3.5} x2={-3.5} y2={3.5} stroke="#ef4444" strokeWidth={1.8} strokeLinecap="round" />
+                    <title>断开连线</title>
+                    <rect x={-10} y={-10} width={20} height={20} rx={5} fill={theme.node.panel} fillOpacity={0.96} stroke={hovered ? "#f87171" : theme.node.muted} strokeWidth={1.2} style={{ pointerEvents: "all", filter: "drop-shadow(0 2px 5px rgba(0,0,0,.28))" }} />
+                    <line x1={-3.5} y1={-3.5} x2={3.5} y2={3.5} stroke={hovered ? "#fca5a5" : theme.node.text} strokeWidth={1.7} strokeLinecap="round" style={{ pointerEvents: "all" }} />
+                    <line x1={3.5} y1={-3.5} x2={-3.5} y2={3.5} stroke={hovered ? "#fca5a5" : theme.node.text} strokeWidth={1.7} strokeLinecap="round" style={{ pointerEvents: "all" }} />
                 </g>
             )}
         </g>

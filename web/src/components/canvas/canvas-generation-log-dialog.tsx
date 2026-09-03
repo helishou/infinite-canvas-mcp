@@ -1,52 +1,131 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Button, Empty, Modal, Tag, message } from "antd";
-import { Copy, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Trash2 } from "lucide-react";
 
 import { deleteBackendGenerationLogs, fetchBackendGenerationLogs, backendMediaUrl, type BackendGenerationLog as GenerationLog } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
+const PAGE_SIZE = 30;
+const ESTIMATED_ROW_HEIGHT = 220;
+
 export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: boolean; projectId: string; onClose: () => void }) {
-    // Select primitive fields separately. Returning a fresh object from a
-    // Zustand selector makes useSyncExternalStore see a new snapshot forever.
     const connected = useBackendStore((state) => state.connected);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
     const [loading, setLoading] = useState(false);
-    const load = async () => {
+    const [loadingMore, setLoadingMore] = useState(false);
+    const [hasMore, setHasMore] = useState(false);
+    const load = useCallback(async () => {
         if (!connected || !projectId) return;
         setLoading(true);
-        try { setLogs((await fetchBackendGenerationLogs({ projectId })).logs || []); } finally { setLoading(false); }
-    };
-    useEffect(() => { if (open) void load(); }, [open, projectId, connected]);
+        try {
+            const page = (await fetchBackendGenerationLogs({ projectId, limit: PAGE_SIZE, offset: 0 })).logs || [];
+            setLogs(page);
+            setHasMore(page.length === PAGE_SIZE);
+        } finally { setLoading(false); }
+    }, [connected, projectId]);
+    const loadMore = useCallback(async () => {
+        if (!connected || !projectId || loading || loadingMore || !hasMore) return;
+        setLoadingMore(true);
+        try {
+            const page = (await fetchBackendGenerationLogs({ projectId, limit: PAGE_SIZE, offset: logs.length })).logs || [];
+            setLogs((current) => [...current, ...page.filter((item) => !current.some((existing) => existing.id === item.id))]);
+            setHasMore(page.length === PAGE_SIZE);
+        } finally { setLoadingMore(false); }
+    }, [connected, hasMore, loading, loadingMore, logs.length, projectId]);
+    useEffect(() => { if (open) void load(); }, [load, open]);
     const remove = async (id?: string) => {
         if (!connected) return;
         await deleteBackendGenerationLogs(id ? { id } : { projectId });
         await load();
     };
-    return <Modal title={`生成日志${logs.length ? ` (${logs.length})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
+    return <Modal title={`生成日志${logs.length ? ` (${logs.length}${hasMore ? "+" : ""})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
         <div className="mb-3 flex justify-end"><Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button></div>
-        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? "加载中…" : "暂无生成日志"} /> : <div className="max-h-[65vh] space-y-3 overflow-y-auto pr-1">
-            {logs.map((log) => <LogCard key={log.id} log={log} onDelete={() => void remove(log.id)} />)}
-        </div>}
+        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? "加载中…" : "暂无生成日志"} /> : <VirtualLogList logs={logs} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={(id) => void remove(id)} />}
     </Modal>;
 }
 
+function VirtualLogList({ logs, hasMore, loadingMore, onLoadMore, onDelete }: { logs: GenerationLog[]; hasMore: boolean; loadingMore: boolean; onLoadMore: () => void; onDelete: (id: string) => void }) {
+    const [scrollTop, setScrollTop] = useState(0);
+    const [heights, setHeights] = useState<number[]>([]);
+    const rowHeights = useMemo(() => logs.map((_, index) => heights[index] || ESTIMATED_ROW_HEIGHT), [heights, logs]);
+    const positions = useMemo(() => {
+        const result = [0];
+        for (const height of rowHeights) result.push(result[result.length - 1] + height + 12);
+        return result;
+    }, [rowHeights]);
+    const firstVisible = Math.max(0, positions.findIndex((top, index) => index < logs.length && top + rowHeights[index] >= scrollTop));
+    const start = Math.max(0, firstVisible - 3);
+    const end = Math.min(logs.length, Math.max(start + 1, positions.findIndex((top) => top >= scrollTop + 720) + 3));
+    const reportHeight = useCallback((index: number, height: number) => setHeights((current) => {
+        if (current[index] === height) return current;
+        const next = [...current];
+        next[index] = height;
+        return next;
+    }), []);
+    const onScroll = (event: React.UIEvent<HTMLDivElement>) => {
+        const element = event.currentTarget;
+        setScrollTop(element.scrollTop);
+        if (hasMore && element.scrollTop + element.clientHeight >= element.scrollHeight - 600) onLoadMore();
+    };
+    return <div onScroll={onScroll} className="max-h-[65vh] overflow-y-auto pr-1">
+        <div className="relative" style={{ height: `${positions[logs.length]}px` }}>
+            {logs.slice(start, end).map((log, offset) => {
+                const index = start + offset;
+                return <VirtualLogRow key={log.id} index={index} top={positions[index]} onHeight={reportHeight}><LogCard log={log} onDelete={() => onDelete(log.id)} /></VirtualLogRow>;
+            })}
+        </div>
+        {loadingMore ? <div className="py-2 text-center text-xs text-stone-500">加载更多…</div> : null}
+    </div>;
+}
+
+function VirtualLogRow({ index, top, onHeight, children }: { index: number; top: number; onHeight: (index: number, height: number) => void; children: React.ReactNode }) {
+    const ref = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (!ref.current) return;
+        const update = () => onHeight(index, ref.current?.getBoundingClientRect().height || ESTIMATED_ROW_HEIGHT);
+        update();
+        const observer = new ResizeObserver(update);
+        observer.observe(ref.current);
+        return () => observer.disconnect();
+    }, [index, onHeight]);
+    return <div ref={ref} className="absolute inset-x-0" style={{ top } as CSSProperties}>{children}</div>;
+}
+
 function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }) {
+    const [expanded, setExpanded] = useState(false);
     const copy = async (value: string) => { await navigator.clipboard?.writeText(value); message.success("已复制"); };
     const statusColor = log.status === "success" ? "green" : log.status === "failed" ? "red" : log.status === "running" ? "processing" : "default";
+    const references = Array.isArray(log.references) ? log.references : [];
     return <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
         <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
         <div className="mt-2 flex flex-wrap gap-3 text-xs text-stone-500"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span></div>
-        {log.prompt ? <div className="mt-2 flex gap-2 text-sm"><div className="min-w-0 flex-1 whitespace-pre-wrap break-words">{log.prompt}</div><Button type="text" size="small" icon={<Copy className="size-3.5" />} onClick={() => void copy(log.prompt || "")} /></div> : null}
-        {log.error ? <div className="mt-2 flex gap-2 whitespace-pre-wrap break-words rounded bg-red-50 p-2 text-xs text-red-600 dark:bg-red-950/30 dark:text-red-300"><div className="min-w-0 flex-1">{log.error}</div><Button type="text" danger size="small" icon={<Copy className="size-3.5" />} onClick={() => void copy(log.error || "")} /></div> : null}
+        {references.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">输入 refs：</span>{references.map((reference, index) => <ReferencePreview key={`${log.id}-ref-${index}`} reference={reference} index={index} />)}</div> : null}
+        {log.prompt ? <ExpandableText label="提示词" value={log.prompt} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.prompt || "")} /> : null}
+        {log.error ? <ExpandableText label="错误" value={log.error} expanded={expanded} error onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.error || "")} /> : null}
         {log.outputs.length ? <div className="mt-3 grid grid-cols-4 gap-2">{log.outputs.map((output, index) => <Output key={`${log.id}-${index}`} output={output} />)}</div> : null}
     </div>;
 }
 
+function ReferencePreview({ reference, index }: { reference: Record<string, unknown>; index: number }) {
+    const storageKey = typeof reference.storageKey === "string" && reference.storageKey ? reference.storageKey : "";
+    const url = storageKey ? backendMediaUrl(storageKey) : String(reference.url || "");
+    const rawType = String(reference.type || "").toLowerCase();
+    const type = rawType.includes("image") ? "图片" : rawType.includes("video") ? "视频" : rawType.includes("audio") ? "音频" : "参考";
+    const label = `${type} ${index + 1}`;
+    if (!url) return <Tag>{label}</Tag>;
+    if (type === "图片") return <img src={url} alt={label} title={label} className="h-16 w-24 rounded object-cover" />;
+    if (type === "视频") return <video src={url} title={label} controls muted playsInline preload="metadata" className="h-16 w-28 rounded object-cover" />;
+    if (type === "音频") return <audio src={url} title={label} controls preload="metadata" className="h-8 w-52" />;
+    return <Tag>{label}</Tag>;
+}
+
+function ExpandableText({ label, value, expanded, error, onToggle, onCopy }: { label: string; value: string; expanded: boolean; error?: boolean; onToggle: () => void; onCopy: () => void }) {
+    const collapsible = value.split(/\r?\n/).length > 5 || value.length > 360;
+    return <div className={`mt-2 rounded ${error ? "bg-red-50 text-red-600 dark:bg-red-950/30 dark:text-red-300" : ""}`}><div className="flex gap-2 p-2 text-sm"><div className={`min-w-0 flex-1 whitespace-pre-wrap break-words ${collapsible && !expanded ? "line-clamp-5" : ""}`}><span className="mr-1 text-xs text-stone-500">{label}：</span>{value}</div><Button type="text" size="small" icon={<Copy className="size-3.5" />} onClick={onCopy} /></div>{collapsible ? <Button type="text" size="small" className="!h-7 !w-full !text-xs" icon={expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />} onClick={onToggle}>{expanded ? "收起" : "展开"}</Button> : null}</div>;
+}
+
 function Output({ output }: { output: Record<string, unknown> }) {
     const storageKey = typeof output.storageKey === "string" && output.storageKey ? output.storageKey : "";
-    // 用 storageKey 重解析为带当前 token 的绝对地址（dev 下走 Vite 代理 /media）。
-    // 日志落库时 output.url 是裸的相对 /media/...（无 token），直接当 src 会被后端 401，
-    // 表现为视频一直“加载中”。改用 backendMediaUrl 注入当前 token 即可加载，且不受 token 轮换影响。
     const url = storageKey ? backendMediaUrl(storageKey) : String(output.url || output.localUrl || "");
     const video = String(output.mimeType || output.type || "").startsWith("video");
     const [failed, setFailed] = useState(false);

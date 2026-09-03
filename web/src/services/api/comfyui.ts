@@ -1,9 +1,10 @@
 import { fetchAgentJson } from "./canvas-agent";
 import { backendMediaUrl, getBackendToken, getBackendUrl, uploadBackendMedia } from "@/services/backend-api";
 
-type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
+export type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
 type ComfyMedia = { url: string; mimeType: string; storageKey?: string };
 type ComfyTask = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: { media?: ComfyMedia[]; segments?: Array<{ media?: ComfyMedia[] }> } | null; error?: string | null };
+type VideoConcatTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia } | null; error?: string | null };
 
 export function resolveComfyImageSize(value: string) {
     const size = value.trim();
@@ -56,12 +57,13 @@ function proxyComfyMedia(item: ComfyMedia, endpoint: string, token: string): Com
     }
 }
 
-export async function runComfyTask(endpoint: string, token: string, comfyUrl: string, preset: string, prompt: string, references: LocalReference[], params: Record<string, unknown>, signal?: AbortSignal) {
+export async function runComfyTask(endpoint: string, token: string, comfyUrl: string, preset: string, prompt: string, references: LocalReference[], params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void) {
     const synced = await Promise.all(references.map((reference) => syncReference(endpoint, token, reference, signal, true)));
     const input: Record<string, unknown> = { prompt };
     if (preset === "flux2-klein") input.references = synced.filter(Boolean);
     if (preset === "flashvsr-1.1" && synced[0]) input.video = synced[0];
     const created = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, "/comfy/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ preset, input, params, comfyUrl }) });
+    onTaskId?.(created.task.id);
     for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${created.task.id}`);
@@ -73,6 +75,14 @@ export async function runComfyTask(endpoint: string, token: string, comfyUrl: st
         }
         await new Promise((resolve) => setTimeout(resolve, 1200));
     }
+}
+
+export async function getComfyTask(endpoint: string, token: string, taskId: string) {
+    const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${encodeURIComponent(taskId)}`);
+    const task = response.task;
+    const media = task.result?.media || [];
+    const output = media.find((item) => item.mimeType.startsWith("video/")) || media[0];
+    return { ...task, result: output ? { url: proxyComfyMedia(output, endpoint, token).url, storageKey: output.storageKey, mimeType: output.mimeType } : null };
 }
 
 export type LocalH3Input = {
@@ -113,6 +123,26 @@ export async function getLocalH3Task(endpoint: string, token: string, taskId: st
 
 export async function cancelLocalH3Task(endpoint: string, token: string, taskId: string) {
     return (await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" })).task;
+}
+
+export async function runVideoConcatTask(endpoint: string, token: string, videos: LocalReference[], signal?: AbortSignal) {
+    const inputs = videos.map((video) => video.storageKey || video.url || "").filter(Boolean);
+    if (!inputs.length) throw new Error("视频拼接至少需要两个视频输入");
+    const created = await fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, "/video-concat/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ videos: inputs }) });
+    const cancel = () => { void fetchAgentJson(endpoint, token, `/video-concat/tasks/${created.task.id}/cancel`, { method: "POST" }).catch(() => undefined); };
+    signal?.addEventListener("abort", cancel, { once: true });
+    for (;;) {
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const response = await fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, `/runtime/tasks/${created.task.id}`);
+        if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
+            if (response.task.status !== "succeeded") throw new Error(response.task.error || "视频拼接失败");
+            const media = response.task.result?.media;
+            if (!media) throw new Error("视频拼接完成但没有返回媒体");
+            signal?.removeEventListener("abort", cancel);
+            return { url: media.url.startsWith("/media/") ? backendMediaUrl(media.storageKey || decodeURIComponent(media.url.slice(7))) : media.url, storageKey: media.storageKey, mimeType: media.mimeType || "video/mp4", taskId: created.task.id };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
 }
 
 /** Legacy H3 execution path for nodes migrated from the old RunningHub-backed canvas. */

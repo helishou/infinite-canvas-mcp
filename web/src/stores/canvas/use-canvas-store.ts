@@ -70,6 +70,8 @@ async function hydrateCanvasProjectsFromBackend() {
             const local = localById.get(id);
             if (!remote) return local!;
             if (!local) return remote;
+            // 启动恢复期间可能先拿到空画布快照；不能让它覆盖已有节点。
+            if (local.nodes.length > 0 && remote.nodes.length === 0) return local;
             return Date.parse(local.updatedAt || "") > Date.parse(remote.updatedAt || "") ? local : remote;
         });
         knownProjectIds = new Set(remoteProjects.map((project) => project.id));
