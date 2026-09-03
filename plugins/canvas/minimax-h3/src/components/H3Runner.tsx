@@ -11,16 +11,19 @@ import { useH3TaskPolling } from "../hooks/useH3TaskPolling";
 import { useH3RunEvents } from "../hooks/useH3RunEvents";
 import { generatedVideoMaterials, mapAutoSplitSegments, mergeH3Segments } from "../services/h3-runner-utils";
 
+function normalizeH3TaskMode(value: unknown) {
+    const mode = String(value || "").trim().toLowerCase();
+    if (mode === "t2v" || mode === "i2v" || mode === "fl2v" || mode === "ref2va") return mode;
+    // 旧画布中的 r2v/rv2v/v2v 都对应 NanFeng V10 的 Ref2VA 分支。
+    return "ref2va";
+}
+
 export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
     const metadata = ctx.node.metadata || {};
     const upstream = useMemo(() => readH3Refs(ctx), [ctx.node.id, ctx.getConnections().length, ctx.getNodes().length]);
-    const textModels = ctx.ai.listModels("text");
     const combatLoraWeight = String(metadata.combatLoraWeight || metadata.minimaxCombatLoraWeight || "0");
     const cinematicLoraWeight = String(metadata.cinematicLoraWeight || metadata.minimaxCinematicLoraWeight || "0");
     const teAccel = metadata.teAccel === true || metadata.minimaxTeAccel === true;
-    const promptEnhance = metadata.promptEnhance === true || metadata.minimaxPromptEnhance === true;
-    const promptEnhanceLanguage = String(metadata.promptEnhanceLanguage || metadata.minimaxPromptEnhanceLanguage || "zh");
-    const promptEnhanceModel = String(metadata.minimaxLlmModel || metadata.llmModel || ctx.ai.defaultModel("text") || textModels[0]?.value || "");
     const motionNoise = Boolean(metadata.motionContextNoiseEnabled);
     const noiseAlpha = String(metadata.motionContextNoiseAlpha ?? "0.45");
     const noiseAlphaEnd = String(metadata.motionContextNoiseAlphaEnd ?? "0.10");
@@ -75,11 +78,18 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         const video = upstream.find((ref) => ref.type === "video");
         const images = upstream.filter((ref) => ref.type === "image");
         const audios = upstream.filter((ref) => ref.type === "audio");
-        // 读取所有 segment 的 taskMode，t2v 不需要校验素材连接
-        const hasT2vSegment = liveSegments.some((seg) => String(seg.taskMode || "r2v") === "t2v");
-        const needsMaterialValidation = !hasT2vSegment && !video && !images.length;
-        if (needsMaterialValidation) {
-            update({ status: "error", errorDetails: "请先连接源视频或角色参考图。" });
+        // 只校验实际要运行的片段：t2v 不需要素材，其他模式需要对应 clip 的 refs 里有视频或图片
+        const activeIdx = Math.max(0, liveSegments.findIndex((segment) => String(segment.id) === liveSelectedId));
+        const relevantSegments = runFromCurrent ? liveSegments.slice(activeIdx) : liveSegments.filter((segment) => String(segment.id) === liveSelectedId);
+        const missingMaterial = relevantSegments.find((seg) => {
+            const mode = normalizeH3TaskMode(seg.mode || seg.taskMode);
+            if (mode === "t2v") return false;
+            const refs = refsForSegment(seg);
+            return !refs.some((r) => r.type === "video" || r.type === "image");
+        });
+        if (missingMaterial) {
+            const clipNo = liveSegments.findIndex((seg) => seg.id === missingMaterial.id) + 1;
+            update({ status: "error", errorDetails: `Clip ${clipNo} 请先连接源视频或角色参考图。` });
             return;
         }
         if (runInFlightRef.current) return;
@@ -87,17 +97,14 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         const logRefs = [...images, ...(video ? [video] : []), ...audios] as H3Ref[];
         let generationLogId = "";
         const lastSubmitted = { taskMode: "", video: 0, images: 0, audios: 0, model: "" };
-        update({ prompt: livePrompt, duration: liveDuration, aspectRatio: liveRatio, megapixels: liveMegapixels, videoSteps: liveSteps, denoise: liveDenoise, seed: String(liveSeed).trim() ? Number(liveSeed) : undefined, modelName: liveModelName, minimaxBaseModel: liveModelName, loraName: liveLoraName, combatLoraWeight: Number(liveSelected?.combatLoraWeight ?? liveMetadata.minimaxCombatLoraWeight ?? combatLoraWeight), cinematicLoraWeight: Number(liveSelected?.cinematicLoraWeight ?? liveMetadata.minimaxCinematicLoraWeight ?? cinematicLoraWeight), teAccel: liveMetadata.minimaxGlobalTeAccel === true || teAccel, promptEnhance, promptEnhanceLanguage, motionContextEnabled: liveMotion, motionContextNoiseEnabled: liveSelected?.motionContextNoiseEnabled === true || liveMetadata.motionContextNoiseEnabled === true || motionNoise, motionContextNoiseAlpha: Number(liveSelected?.motionContextNoiseAlpha ?? liveMetadata.motionContextNoiseAlpha ?? noiseAlpha), motionContextNoiseAlphaEnd: Number(liveSelected?.motionContextNoiseAlphaEnd ?? liveMetadata.motionContextNoiseAlphaEnd ?? noiseAlphaEnd), motionContextNoiseRampFrames: Number(liveSelected?.motionContextNoiseRampFrames ?? liveMetadata.motionContextNoiseRampFrames ?? noiseRampFrames), model: selectedModel, status: "loading", errorDetails: "", runStartedAt: Date.now() });
+        update({ prompt: livePrompt, duration: liveDuration, aspectRatio: liveRatio, megapixels: liveMegapixels, videoSteps: liveSteps, denoise: liveDenoise, seed: String(liveSeed).trim() ? Number(liveSeed) : undefined, modelName: liveModelName, minimaxBaseModel: liveModelName, loraName: liveLoraName, combatLoraWeight: Number(liveSelected?.combatLoraWeight ?? liveMetadata.minimaxCombatLoraWeight ?? combatLoraWeight), cinematicLoraWeight: Number(liveSelected?.cinematicLoraWeight ?? liveMetadata.minimaxCinematicLoraWeight ?? cinematicLoraWeight), teAccel: liveMetadata.minimaxGlobalTeAccel === true || teAccel, motionContextEnabled: liveMotion, motionContextNoiseEnabled: liveSelected?.motionContextNoiseEnabled === true || liveMetadata.motionContextNoiseEnabled === true || motionNoise, motionContextNoiseAlpha: Number(liveSelected?.motionContextNoiseAlpha ?? liveMetadata.motionContextNoiseAlpha ?? noiseAlpha), motionContextNoiseAlphaEnd: Number(liveSelected?.motionContextNoiseAlphaEnd ?? liveMetadata.motionContextNoiseAlphaEnd ?? noiseAlphaEnd), motionContextNoiseRampFrames: Number(liveSelected?.motionContextNoiseRampFrames ?? liveMetadata.motionContextNoiseRampFrames ?? noiseRampFrames), model: selectedModel, status: "loading", errorDetails: "", runStartedAt: Date.now() });
         try {
             // 日志写入也属于运行链路的一部分；后台断开时必须进入统一 catch，
             // 不能让异常浮出后把节点永远留在“生成中”。
             const generationLog = await createH3Log(ctx, liveSelected, livePrompt, logRefs, { engine: liveMetadata.minimaxEngine || "comfyui", workflow: "MiniMax H3", modelName: liveModelName, taskMode: liveSelected?.taskMode || "r2v", duration: liveDuration, aspectRatio: liveRatio, megapixels: liveMegapixels, videoSteps: liveSteps, denoise: liveDenoise, seed: liveSeed });
+            console.log("MiniMax H3 生成日志已创建", generationLog);
             generationLogId = generationLog?.id || "";
-            let effectivePrompt = livePrompt;
-            if (promptEnhance) {
-                const enhanced = await ctx.ai.generateText(livePrompt, { model: String(liveMetadata.minimaxLlmModel || liveMetadata.llmModel || promptEnhanceModel), system: `你是 MiniMax H3 视频提示词整理器。用${promptEnhanceLanguage === "en" ? "英文" : "中文"}输出一条完整提示词，只补充镜头、动作、主体一致性和时序信息，不改变用户意图，不添加免责声明。` });
-                if (enhanced.text.trim()) effectivePrompt = enhanced.text.trim();
-            }
+            const effectivePrompt = livePrompt;
             const allSegments: H3Segment[] = liveSegments.length ? liveSegments : [{ id: "segment-1", prompt: livePrompt, duration: Number(liveDuration) }];
             // The visible workbench writes the selected id into metadata. The
             // local panel state can lag behind when the user clicks another
@@ -116,7 +123,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             // 无法进入 Motion Context 链路。
             const precedingSegment = allSegments[activeIndex - 1];
             let previousVideo: { name: string; url: string; storageKey?: string } | undefined = precedingSegment?.result
-                ? { name: `h3-segment-${activeIndex}.mp4`, url: String(precedingSegment.result), storageKey: precedingSegment.resultStorageKey }
+                ? { name: `h3-segment-${activeIndex}.mp4`, url: String(precedingSegment.result), ...(precedingSegment.resultStorageKey ? { storageKey: precedingSegment.resultStorageKey } : {}) }
                 : undefined;
             let lastResult: Awaited<ReturnType<typeof ctx.ai.runLocalH3>> | undefined;
             const nextSegments: H3Segment[] = [];
@@ -129,7 +136,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 const seedCurrent = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || liveMetadata);
                 update({ segments: seedCurrent.map((item) => item.id === segment.id ? { ...item, seed: runSeed, noiseSeed: runSeed } : item) });
                 const segmentRefs = refsForSegment(segment);
-                const requestedTaskMode = String(segment.mode || segment.taskMode || "ref2va");
+                const requestedTaskMode = normalizeH3TaskMode(segment.mode || segment.taskMode);
                 // t2v：只使用纯提示词，忽略所有素材
                 // i2v/fl2v：只使用图片
                 // v2v：只使用视频
@@ -139,7 +146,12 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 const isI2vFl2v = requestedTaskMode === "i2v" || requestedTaskMode === "fl2v";
                 const isR2vOrRv2v = requestedTaskMode === "ref2va";
                 const effectiveTaskMode = requestedTaskMode;
-                const segmentVideo = !isT2v && !isI2vFl2v ? (segmentRefs.find((ref) => ref.type === "video") || (index === 0 ? video : undefined)) : undefined;
+                // 单独运行 Clip2/Clip3 时，上一段结果既是 Motion Context 的来源，
+                // 也是 NanFeng Ref2VA 的实际视频参考；只传 previousVideo 不会进入
+                // V10 的 ReferenceToVideo 条件图。
+                const segmentVideo = !isT2v && !isI2vFl2v
+                    ? (segmentRefs.find((ref) => ref.type === "video") || (index === 0 ? video || previousVideo : previousVideo))
+                    : undefined;
                 const segmentImages = isT2v || isV2v ? [] : segmentRefs.filter((ref) => ref.type === "image");
                 const segmentAudios = isT2v || isV2v || isI2vFl2v ? [] : segmentRefs.filter((ref) => ref.type === "audio");
                 if (segmentImages.length > 9 || images.length > 9) throw new Error("MiniMax H3 最多支持 9 张参考图片");
@@ -220,15 +232,15 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                         audioDriveEnd: segment.audioDriveEnd,
                     }, optionsData);
                 };
-                const segmentPrompt = promptEnhance ? effectivePrompt : segment.prompt !== undefined ? String(segment.prompt) : effectivePrompt;
+                const segmentPrompt = segment.prompt !== undefined ? String(segment.prompt) : effectivePrompt;
                 const promptFlags = `${segment.noDub !== false ? "\nNo dialogue, narration, voiceover, or singing." : ""}${segment.noCaption !== false ? "\nNo subtitles, captions, on-screen text, or text overlays." : ""}`;
                 // 根据任务模式决定提交哪些 refs
                 // 透传 storageKey：后端媒体引用（图片/视频/音频）直接用 storageKey 复用，
                 // 避免只留 url 时 extractStorageKey 反推出被 URL 编码的 key（如 image%3A<uuid>）
                 // 导致后端查不到（404）或退化到 dataUrl 分支（400 畸形 data URL）。
-                const finalReferences = isT2v || isV2v ? [] : (isI2vFl2v ? segmentImages : (segmentImages.length ? segmentImages : images)).map((ref) => ({ name: `${ref.name}.png`, url: ref.url, storageKey: ref.storageKey }));
-                const finalVideo = !isT2v && !isI2vFl2v ? (segmentVideo ? { name: `${segmentVideo.name}.mp4`, url: segmentVideo.url, storageKey: segmentVideo.storageKey } : undefined) : undefined;
-                const finalAudios = isR2vOrRv2v ? (segmentAudios.length ? segmentAudios : audios).map((ref) => ({ name: `${ref.name}.mp3`, url: ref.url, storageKey: ref.storageKey })) : [];
+                const finalReferences = isT2v || isV2v ? [] : (isI2vFl2v ? segmentImages : (segmentImages.length ? segmentImages : images)).map((ref) => ({ name: `${ref.name}.png`, url: ref.url, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) }));
+                const finalVideo = !isT2v && !isI2vFl2v ? (segmentVideo ? { name: `${segmentVideo.name}.mp4`, url: segmentVideo.url, ...(segmentVideo.storageKey ? { storageKey: segmentVideo.storageKey } : {}) } : undefined) : undefined;
+                const finalAudios = isR2vOrRv2v ? (segmentAudios.length ? segmentAudios : audios).map((ref) => ({ name: `${ref.name}.mp3`, url: ref.url, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) })) : [];
                 // 记录提交信息用于错误日志
                 lastSubmitted.taskMode = effectiveTaskMode;
                 lastSubmitted.video = finalVideo ? 1 : 0;
@@ -248,7 +260,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                     update({ segments: compactSegmentStarts(current.map((item) => nextSegments.find((generated) => generated.id === item.id) || item)) });
                     break;
                 }
-                previousVideo = { name: `h3-segment-${index + 1}.mp4`, url: segmentResult.url, storageKey: segmentResult.storageKey };
+                previousVideo = { name: `h3-segment-${index + 1}.mp4`, url: segmentResult.url, ...(segmentResult.storageKey ? { storageKey: segmentResult.storageKey } : {}) };
                 nextSegments.push({ ...segmentForRun, prompt: String(segment.prompt || prompt), duration: Number(segment.duration || duration), result: segmentResult.url, resultStorageKey: segmentResult.storageKey, results: [{ url: segmentResult.url, storageKey: segmentResult.storageKey, type: "video", name: `Clip ${index + 1}` }], status: "success", progress: 1 });
                 // 每个 Clip 成功后立即写回，避免后续 Clip 失败时丢失前面已完成的产物。
                 const current = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || liveMetadata);

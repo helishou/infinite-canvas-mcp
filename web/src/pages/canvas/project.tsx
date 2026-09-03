@@ -133,6 +133,15 @@ const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
+type CanvasReferenceDrag = { nodeId: string; url: string; type: "image"; name: string; storageKey?: string };
+
+function h3DropTargetAt(clientX: number, clientY: number) {
+    return document.elementsFromPoint(clientX, clientY).map((element) => element.closest<HTMLElement>("[data-canvas-ref-drop-target]")).find(Boolean) || null;
+}
+
+function dispatchCanvasReferenceDrag(name: "canvas-reference-drag-start" | "canvas-reference-drag-over" | "canvas-reference-drop" | "canvas-reference-drag-end", detail: CanvasReferenceDrag & { targetNodeId: string; clientX?: number; clientY?: number }) {
+    window.dispatchEvent(new CustomEvent(name, { detail }));
+}
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
 
@@ -180,6 +189,8 @@ function InfiniteCanvasPage() {
         startX: number;
         startY: number;
         initialSelectedNodes: { id: string; x: number; y: number }[];
+        referenceDrag?: CanvasReferenceDrag;
+        referenceTargetNodeId?: string;
     }>({
         isDraggingNode: false,
         hasMoved: false,
@@ -1156,6 +1167,9 @@ function InfiniteCanvasPage() {
             startX: event.clientX,
             startY: event.clientY,
             initialSelectedNodes: currentNodes.filter((node) => dragIds.has(node.id)).map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
+            referenceDrag: nextSelected.size === 1 && currentNodes.find((node) => nextSelected.has(node.id))?.type === CanvasNodeType.Image
+                ? (() => { const node = currentNodes.find((item) => nextSelected.has(item.id)); const url = String(node?.metadata?.content || "").trim(); return url && node ? { nodeId: node.id, url, type: "image" as const, name: node.title || "图片", storageKey: node.metadata?.storageKey } : undefined; })()
+                : undefined,
         };
         historyPausedRef.current = true;
         nodeDraggingRef.current = true;
@@ -1180,7 +1194,13 @@ function InfiniteCanvasPage() {
         nodeDraggingRef.current = false;
         setIsNodeDragging(false);
         setDropTargetGroupId(null);
-        if (dragRef.current.hasMoved && clientX != null && clientY != null) {
+        const referenceDrag = dragRef.current.referenceDrag;
+        const referenceTargetNodeId = dragRef.current.referenceTargetNodeId;
+        if (referenceDrag && referenceTargetNodeId && clientX != null && clientY != null) {
+            dispatchCanvasReferenceDrag("canvas-reference-drop", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
+            dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
+            setNodes((prev) => prev.map((node) => { const initial = initialPositions.find((item) => item.id === node.id); return initial ? { ...node, position: { x: initial.x, y: initial.y } } : node; }));
+        } else if (dragRef.current.hasMoved && clientX != null && clientY != null) {
             const movedIds = new Set(initialPositions.map((item) => item.id));
             setNodes((prev) => {
                 const moved = prev.map((node) => {
@@ -1201,6 +1221,8 @@ function InfiniteCanvasPage() {
         dragRef.current.isDraggingNode = false;
         dragRef.current.hasMoved = false;
         dragRef.current.initialSelectedNodes = [];
+        dragRef.current.referenceDrag = undefined;
+        dragRef.current.referenceTargetNodeId = undefined;
         if (wasClick && clickedNodeId) {
             const clickedNode = nodesRef.current.find((node) => node.id === clickedNodeId);
             const clickedDefinition = clickedNode ? getNodeDefinition(clickedNode.type) : undefined;
@@ -1226,6 +1248,24 @@ function InfiniteCanvasPage() {
                 }
 
                 const movedIds = new Set(initialPositions.map((item) => item.id));
+                const referenceDrag = dragRef.current.referenceDrag;
+                const h3Target = referenceDrag ? h3DropTargetAt(event.clientX, event.clientY) : null;
+                if (referenceDrag && h3Target) {
+                    if (dragRef.current.referenceTargetNodeId !== h3Target.dataset.canvasRefDropTarget) {
+                        if (dragRef.current.referenceTargetNodeId) dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: dragRef.current.referenceTargetNodeId });
+                        dragRef.current.referenceTargetNodeId = h3Target.dataset.canvasRefDropTarget;
+                        dispatchCanvasReferenceDrag("canvas-reference-drag-start", { ...referenceDrag, targetNodeId: h3Target.dataset.canvasRefDropTarget || "" });
+                    }
+                    dispatchCanvasReferenceDrag("canvas-reference-drag-over", { ...referenceDrag, targetNodeId: h3Target.dataset.canvasRefDropTarget || "", clientX: event.clientX, clientY: event.clientY });
+                    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+                    setDropTargetGroupId(null);
+                    setNodes((prev) => prev.map((node) => { const initial = initialPositions.find((item) => item.id === node.id); return initial ? { ...node, position: { x: initial.x, y: initial.y } } : node; }));
+                    return;
+                }
+                if (referenceDrag && dragRef.current.referenceTargetNodeId) {
+                    dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: dragRef.current.referenceTargetNodeId, clientX: event.clientX, clientY: event.clientY });
+                    dragRef.current.referenceTargetNodeId = undefined;
+                }
                 const previewNodes = nodesRef.current.map((node) => {
                     const initial = initialPositions.find((item) => item.id === node.id);
                     return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
@@ -3394,8 +3434,6 @@ function migrateLegacyH3Node(node: CanvasNodeData): CanvasNodeData {
     copy("modelName", "minimaxBaseModel");
     copy("combatLoraWeight", "minimaxCombatLoraWeight");
     copy("cinematicLoraWeight", "minimaxCinematicLoraWeight");
-    copy("promptEnhance", "minimaxPromptEnhance");
-    copy("promptEnhanceLanguage", "minimaxPromptEnhanceLanguage");
     copy("minimaxLlmModel", "minimaxLlmModel");
     return { ...node, type: "minimax-h3:video", metadata };
 }
