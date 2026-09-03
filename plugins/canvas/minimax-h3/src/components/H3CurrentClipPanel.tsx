@@ -21,6 +21,9 @@ export function H3CurrentClipPanel({ ctx, metadata, selected, selectedIndex, ima
     return <section className="minimax-current-panel" style={{ "--minimax-clip-settings-w": `${settingsWidth}px` } as React.CSSProperties}>
         <div className="minimax-current-head"><div className="minimax-current-title"><span className="minimax-current-dot" /><b>Clip {selectedIndex + 1}</b><span>{fmt(Number(selected?.start || 0))} - {fmt(Number(selected?.start || 0) + Number(selected?.duration || 0))}</span></div><div className="minimax-current-refs"><span><H3Icon name="database" /> {visibleImages.length}</span><span><H3Icon name="clapperboard" /> {visibleVideos.length}</span><span><H3Icon name="output" /> {visibleAudios.length}</span></div></div>
         <div className="minimax-current-main">
+            {/* <div className="minimax-current-preview">
+                {selected?.result ? <video src={selected.result} controls muted playsInline preload="metadata" /> : <div><H3Icon name="clapperboard" /><span>当前 Clip 暂无输出</span></div>}
+            </div> */}
             <H3PromptSection ctx={ctx} selected={selected} imageRefs={visibleImages} videoRefs={visibleVideos} audioRefs={visibleAudios} patchSelected={patchSelected} onOpenStoryboard={onOpenStoryboard} />
         </div>
         <span className="minimax-current-resize" role="separator" aria-label="调整 Prompt 与 Clip settings 宽度" title="拖动调整 Prompt 与 Clip settings 宽度" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); drag.current = { x: event.clientX, width: settingsWidth }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={resizeSettings} onPointerUp={(event) => { drag.current = null; event.currentTarget.releasePointerCapture(event.pointerId); }} />

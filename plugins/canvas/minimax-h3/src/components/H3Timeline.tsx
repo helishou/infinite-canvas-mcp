@@ -36,31 +36,14 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         ctx.updateMetadata({ selectedSegmentId: target.id, segments: segments.map((item) => item.id === target.id ? withSegmentRefs(item, [...refs, ref]) : item) });
     };
     const addSegment = () => {
-        const previous = segments[segments.length - 1];
-        const inherited = previous ? (() => {
-            const { id, start, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, ...settings } = previous;
-            return settings;
-        })() : {};
-        const next = compactSegmentStarts([...segments, {
-            ...inherited,
-            id: `segment-${Date.now()}`,
-            prompt: defaultPrompt,
-            duration: Number(previous?.duration || 5),
-            status: "idle",
-            progress: 0,
-            result: "",
-            results: [],
-            runtimeTaskId: "",
-        }]);
+        const next = compactSegmentStarts([...segments, { id: `segment-${Date.now()}`, prompt: defaultPrompt, duration: 5, status: "idle" }]);
         ctx.updateMetadata({ segments: next, selectedSegmentId: next[next.length - 1].id });
     };
     const renderRefGrid = (segment: H3Segment) => {
         const refs = refsForSegment(segment);
-        const mode = String(segment.mode || segment.taskMode || "ref2va");
-        const slotCount = mode === "t2v" ? 0 : mode === "i2v" ? 1 : mode === "fl2v" ? 2 : 9;
         const left = Number(segment.start || 0) / total * 100;
         const width = Math.max(5, Number(segment.duration || 1) / total * 100);
-        return <div key={segment.id} className={`minimax-ref-grid ${slotCount === 0 ? "is-disabled" : ""} ${segment.id === selected?.id ? "active" : ""}`} style={{ left: `${left}%`, width: `${width}%`, ...(slotCount > 0 && slotCount <= 3 ? { gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))`, gridTemplateRows: "minmax(0, 1fr)" } : {}) }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>{slotCount === 0 ? <span className="minimax-ref-empty-label">无需参考素材</span> : Array.from({ length: slotCount }).map((_, index) => { const ref = refs[index]; const label = mode === "i2v" ? "首帧" : mode === "fl2v" ? index === 0 ? "首帧" : "尾帧" : `Ref ${index + 1}`; return <div key={index} className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"}`}>{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>; })}</div>;
+        return <div key={segment.id} className={`minimax-ref-grid ${segment.id === selected?.id ? "active" : ""}`} style={{ left: `${left}%`, width: `${width}%` }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>{Array.from({ length: 9 }).map((_, index) => { const ref = refs[index]; return <div key={index} className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"}`}>{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || `Ref ${index + 1}`}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>Ref {index + 1}</span></>}</div>; })}</div>;
     };
     return <div className="minimax-edit-timeline">
         <div className="minimax-timeline-controls"><button type="button" title="连续播放全部 Clip" onClick={onPlayAll}><H3Icon name="play" /></button></div>

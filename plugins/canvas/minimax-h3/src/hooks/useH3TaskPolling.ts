@@ -16,20 +16,19 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                     : await ctx.ai.getLocalH3Task(taskId);
                 if (cancelled) return;
                 if (task.status === "succeeded" && task.result?.url) {
-                    const storageKey = task.result.storageKey || (typeof metadata.storageKey === "string" ? metadata.storageKey : undefined);
                     update({
                         content: task.result.url,
-                        storageKey,
+                        storageKey: task.result.storageKey,
                         mimeType: task.result.mimeType,
                         ...(task.result.segments?.length ? { segments: task.result.segments } : {}),
-                        materials: appendVideoMaterials(metadata.materials, [{ url: task.result.url, storageKey, type: "video", name: "H3 输出", segmentId: String(metadata.selectedSegmentId || "") }]),
+                        materials: appendVideoMaterials(metadata.materials, [{ url: task.result.url, storageKey: task.result.storageKey, type: "video", name: "H3 输出", segmentId: String(metadata.selectedSegmentId || "") }]),
                         status: "success",
                         errorDetails: "",
                     });
                     void finishH3Log(ctx, taskId, "success", {
                         finishedAt: new Date().toISOString(),
                         durationMs: Date.now() - Number(metadata.runStartedAt || Date.now()),
-                        outputs: [{ url: task.result.url, storageKey, type: "video", mimeType: task.result.mimeType }],
+                        outputs: [{ url: task.result.url, storageKey: task.result.storageKey, type: "video", mimeType: task.result.mimeType }],
                     });
                 } else if (["failed", "cancelled"].includes(task.status)) {
                     const status = task.status === "cancelled" ? "cancelled" : "error";

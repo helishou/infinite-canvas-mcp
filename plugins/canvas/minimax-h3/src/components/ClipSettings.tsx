@@ -44,7 +44,6 @@ function H3Dropdown({ values, value, onChange, placeholder, allowClear = false, 
 
 export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const [catalog, setCatalog] = useState<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng: Record<string, unknown[]> }>({ models: [], loras: [], textEncoders: [], videoVaes: [], audioVaes: [], latentUpscaleModels: [], nanfeng: {} });
-    const [sigmaPresets, setSigmaPresets] = useState<Record<string, string>>({});
     useEffect(() => {
         let active = true;
         void discoverH3Models(ctx).then((value) => {
@@ -54,16 +53,6 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         });
         return () => { active = false; };
     }, [ctx.ai, segment?.id, segment?.latentUpscaleEnabled, segment?.latentUpscaleModel]);
-    useEffect(() => {
-        let active = true;
-        const legacy = metadata.h3SigmaPresets && typeof metadata.h3SigmaPresets === "object" ? metadata.h3SigmaPresets as Record<string, unknown> : {};
-        void ctx.storage.get<Record<string, string>>("h3-sigma-presets").then((stored) => {
-            const merged = Object.fromEntries(Object.entries({ ...legacy, ...(stored || {}) }).filter(([, value]) => typeof value === "string" && value.trim()));
-            if (Object.keys(merged).length && JSON.stringify(merged) !== JSON.stringify(stored || {})) void ctx.storage.set("h3-sigma-presets", merged);
-            if (active) setSigmaPresets(merged);
-        }).catch(() => { if (active) setSigmaPresets(Object.fromEntries(Object.entries(legacy).filter(([, value]) => typeof value === "string" && value.trim()))); });
-        return () => { active = false; };
-    }, [ctx.storage, segment?.id]);
     if (!segment) return null;
     const mode = (segment.mode || segment.taskMode || "ref2va") as keyof typeof modeLabels;
     const expanded = (metadata.nanFengExpandedSections as Record<string, boolean> | undefined) || {};
@@ -73,7 +62,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     };
     const isH3Model = (value: string) => /(?:^|[\\/])h3(?:[\\/]|$)/i.test(value);
     const modelOptions = mergeH3Options(h3ModelOptions.filter((option) => isH3Model(option.value)), catalog.models.filter(isH3Model), (value) => value.replace(/^.*[\\/]/, ""));
-    const isMinimaxLora = (value?: string)=>true;
+    const isMinimaxLora = (value: string) => /(?:^|[\\/])minimax(?:[\\/]|$)/i.test(value);
     const loraOptions = mergeH3Options(h3LoraOptions.filter((option) => isMinimaxLora(option.value)), catalog.loras.filter(isMinimaxLora), (value) => value.replace(/^.*[\\/]/, ""));
     const nfChoices = (key: string, fallback: Array<string | number>) => {
         const values = catalog.nanfeng[key];
@@ -114,11 +103,12 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     };
     const addLoraSlot = () => { if (loraSlots.length < 8) patch({ loraSlots: [...loraSlots, { name: "", strength: 1, enabled: false }] }); };
     const loraSummary = loraSlots.filter((slot) => slot.enabled && slot.name).length;
+    const sigmaPresets = (metadata.h3SigmaPresets && typeof metadata.h3SigmaPresets === "object" ? metadata.h3SigmaPresets : {}) as Record<string, string>;
     const sigmaPresetNames = Object.keys(sigmaPresets);
     const selectedSigmaPreset = String(metadata.h3SigmaPresetName || sigmaPresetNames[0] || "");
-    const saveSigmaPreset = (name: string) => { const trimmed = name.trim(); const value = String(segment.h3FullSigma || "").trim(); if (!trimmed || !value) return; const next = { ...sigmaPresets, [trimmed]: value }; setSigmaPresets(next); void ctx.storage.set("h3-sigma-presets", next); ctx.updateMetadata({ h3SigmaPresetName: trimmed }); };
+    const saveSigmaPreset = (name: string) => { const trimmed = name.trim(); if (!trimmed) return; ctx.updateMetadata({ h3SigmaPresets: { ...sigmaPresets, [trimmed]: String(segment.h3FullSigma || "") }, h3SigmaPresetName: trimmed }); };
     const createSigmaPreset = () => { const name = window.prompt("Sigma 预设名称", `南风${sigmaPresetNames.length + 1}步`); if (name) saveSigmaPreset(name); };
-    const deleteSigmaPreset = () => { if (!selectedSigmaPreset) return; const next = { ...sigmaPresets }; delete next[selectedSigmaPreset]; setSigmaPresets(next); void ctx.storage.set("h3-sigma-presets", next); ctx.updateMetadata({ h3SigmaPresetName: Object.keys(next)[0] || "" }); };
+    const deleteSigmaPreset = () => { if (!selectedSigmaPreset) return; const next = { ...sigmaPresets }; delete next[selectedSigmaPreset]; ctx.updateMetadata({ h3SigmaPresets: next, h3SigmaPresetName: Object.keys(next)[0] || "" }); };
     return <div className="nfh3-settings">
         {section("mode", "生成模式", modeLabels[mode] || modeLabels.ref2va, <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b><small>{modeHints[key]}</small><i>{mode === key ? "✓" : ""}</i></button>)}</div>)}
         {section("model", "模型与基础参数", String(segment.modelName || "未选择模型").replace(/^.*[\\/]/, ""), <div className="nfh3-control-grid">

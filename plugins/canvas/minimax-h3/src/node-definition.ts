@@ -5,9 +5,9 @@ import { H3ContentExact } from "./components/H3Workbench";
 export const h3NodeDefinition = {
     type: "minimax-h3:video",
     legacyTypes: ["smart-minimax", "minimax"],
-    title: "H3导演台",
+    title: "南风 H3 V10",
     icon: "✦",
-    description: "H3导演台 视频生成与人物替换节点",
+    description: "南风 H3 V10 视频生成与人物替换节点",
     defaultSize: { width: 980, height: 720 },
     defaultMetadata: {
         content: "", prompt: defaultPrompt, status: "idle" as const, duration: "8", aspectRatio: "16:9",
