@@ -15,7 +15,7 @@ type Props = {
     onOpenStoryboard: () => void;
 };
 
-// 南风 H3 官方提示词骨架（nanfeng_prompt_nodes[_v10] web/h3_multiref.js insertPromptBlock 逐字核对）
+// H3 官方提示词骨架
 const H3_OFFICIAL_BLOCK = [
     "subject_definitions:",
     "",
@@ -79,7 +79,7 @@ export function H3PromptSection({ ctx, selected, imageRefs, videoRefs, audioRefs
         }
     };
 
-    // 南风 insertPromptBlock:光标处 setRangeText,插入点前一个字符不是换行就补 \n,光标落在插入内容末尾
+  // 在光标处插入结构块，必要时补换行
     const insertAtCursor = (text: string, opts: { prefixNewline?: boolean; select?: boolean } = {}) => {
         const ta = textareaRef.current;
         if (!ta) {
@@ -100,7 +100,7 @@ export function H3PromptSection({ ctx, selected, imageRefs, videoRefs, audioRefs
         requestAnimationFrame(() => ta.focus());
     };
 
-    // 南风 mention 插入文案:图片 <Subject N>…<Picture N>,视频 <Video N>,音频 <Audio N>（与 nativeMention/多参绑定一致）
+  // 插入图片、视频和音频引用标签
     const mentionText = (item: MentionItem) => item.ref.type === "image"
         ? `<Subject ${item.ordinal}> is the visual content referenced from <Picture ${item.ordinal}>`
         : item.ref.type === "video"
@@ -127,7 +127,7 @@ export function H3PromptSection({ ctx, selected, imageRefs, videoRefs, audioRefs
         setMentionActive(0);
     };
 
-    // 检测游标前的 @ 前缀,更新 mention 下拉(南风 openMentions:键入 @ 即弹)
+  // 检测光标前的 @ 前缀并更新候选菜单
     const syncMention = (ta: HTMLTextAreaElement) => {
         const start = ta.selectionStart ?? 0;
         const match = ta.value.slice(0, start).match(/@(\S*)$/);

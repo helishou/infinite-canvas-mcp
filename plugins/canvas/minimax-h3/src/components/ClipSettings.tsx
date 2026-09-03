@@ -107,7 +107,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const sigmaPresetNames = Object.keys(sigmaPresets);
     const selectedSigmaPreset = String(metadata.h3SigmaPresetName || sigmaPresetNames[0] || "");
     const saveSigmaPreset = (name: string) => { const trimmed = name.trim(); if (!trimmed) return; ctx.updateMetadata({ h3SigmaPresets: { ...sigmaPresets, [trimmed]: String(segment.h3FullSigma || "") }, h3SigmaPresetName: trimmed }); };
-    const createSigmaPreset = () => { const name = window.prompt("Sigma 预设名称", `南风${sigmaPresetNames.length + 1}步`); if (name) saveSigmaPreset(name); };
+    const createSigmaPreset = () => { const name = window.prompt("Sigma 预设名称", `${sigmaPresetNames.length + 1}步`); if (name) saveSigmaPreset(name); };
     const deleteSigmaPreset = () => { if (!selectedSigmaPreset) return; const next = { ...sigmaPresets }; delete next[selectedSigmaPreset]; ctx.updateMetadata({ h3SigmaPresets: next, h3SigmaPresetName: Object.keys(next)[0] || "" }); };
     return <div className="nfh3-settings">
         {section("mode", "生成模式", modeLabels[mode] || modeLabels.ref2va, <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b><small>{modeHints[key]}</small><i>{mode === key ? "✓" : ""}</i></button>)}</div>)}

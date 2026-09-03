@@ -76,7 +76,7 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
         const analysisParts: string[] = [];
         for (const [index, image] of images.entries()) {
             const slot = image.slot || index + 1;
-            const result = await ctx.ai.generateText(`你现在只分析一张参考图片，固定编号是@图片${slot}。严格分类为人物图、场景图、产品或道具图三类之一，并提取身份、外观、服装、姿态、空间结构、光线、时间天气及其在连续视频中的参考职责。只返回分析正文，不要追问。`, { references: [{ url: image.url, name: image.name }], system: "你是南风 H3 逐图视觉分析器。严格按图片槽位编号分析，不改编号，不编造图片内容。" });
+            const result = await ctx.ai.generateText(`你现在只分析一张参考图片，固定编号是@图片${slot}。严格分类为人物图、场景图、产品或道具图三类之一，并提取身份、外观、服装、姿态、空间结构、光线、时间天气及其在连续视频中的参考职责。只返回分析正文，不要追问。`, { references: [{ url: image.url, name: image.name }], system: "你是 H3 逐图视觉分析器。严格按图片槽位编号分析，不改编号，不编造图片内容。" });
             analysisParts.push(`@图片${slot}（${image.name}）：\n${result.text.trim()}`);
         }
         const allowedRefs = mode === "t2va"

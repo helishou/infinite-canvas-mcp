@@ -4,9 +4,9 @@ import h3Css from "./styles/h3.css";
 
 export default definePlugin({
     id: "minimax-h3",
-    name: "南风 H3 V10",
+    name: "MiniMax H3",
     version: "1.2.0",
-    description: "把原画布南风 H3 V10 的视频、角色参考、续段尾帧和生成参数带入新画布。",
+    description: "提供 H3 视频、角色参考、续段尾帧和生成参数。",
     css: h3Css,
     nodes: [h3NodeDefinition],
     mcp: {
