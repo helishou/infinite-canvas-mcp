@@ -5,6 +5,8 @@ import { Select } from "antd";
 import type { H3Ref, H3Segment } from "../types";
 import { H3Icon } from "./H3Icon";
 import { refsForSegment } from "../services/h3-data";
+import baseReference from "../storyboard-assets/references/base-en.txt?raw";
+import refReference from "../storyboard-assets/references/ref-en.txt?raw";
 
 type Props = {
   ctx: CanvasNodeContext;
@@ -109,17 +111,20 @@ export function H3PromptSection({
           : normalizedMode === "t2va"
             ? "Do not introduce reference labels or image-alignment instructions."
             : "Treat references as Ref2VA assets; do not force them to be the first frame unless the user explicitly requests it.";
+      const officialReference = normalizedMode === "ref2va" ? refReference : baseReference;
       const system = [
-        "You are a MiniMax H3 video prompt writer.",
-        "Rewrite the user intent into one production-ready MiniMax H3 prompt.",
-        "Preserve characters, actions, dialogue, visible text, reference numbering, and hard constraints; never invent facts.",
+        "You are the official MiniMax H3 video prompt writer.",
+        "Follow the embedded official H3 prompt-writing reference exactly; it is the format authority.",
+        officialReference,
         `The selected mode is ${normalizedMode.toUpperCase()} and the selected clip duration is ${Number(selected?.duration || 5).toFixed(2)} seconds.`,
         structure,
         alignment,
-        "Write a continuous timeline beginning with [Shot 1]; later shots use strictly increasing timestamps. Include composition, subject appearance, concrete action stages, camera movement, continuity, soundscape, and non-diegetic music.",
+        "Rewrite the user intent into one production-ready prompt. Preserve characters, actions, dialogue, visible text, reference numbering, and hard constraints; never invent facts.",
+        "Make every requested visual detail explicit: composition, subject appearance, pose, gaze, action phases, camera type/amplitude/speed, lighting, materials, continuity, environment, and sound.",
+        "Use the exact official field names, section order, reference tags, timestamp conventions, dialogue tags, and language rules. Do not replace official tags with @ aliases.",
         "Keep exact user dialogue and visible text unchanged. Do not repeat dialogue in overall_soundscape or non_diegetic_music.",
         "Return only the final prompt, without Markdown fences, explanations, or prefaces.",
-      ].join(" ");
+      ].join("\n\n");
       const userPrompt = [
         prompt.trim(),
         String(ctx.node.metadata?.globalPrompt || "").trim(),
