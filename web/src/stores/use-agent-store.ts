@@ -195,7 +195,7 @@ async function hydrateAgentSettings() {
     if (settings.agentPermissionMode) patch.permissionMode = settings.agentPermissionMode as AgentPermissionMode;
     if (settings.agentModel) patch.model = settings.agentModel;
     if (settings.agentReasoningEffort) patch.reasoningEffort = settings.agentReasoningEffort as AgentReasoningEffort;
-    if (Object.keys(patch).length > 0) set(patch);
+    if (Object.keys(patch).length > 0) useAgentStore.setState(patch);
 }
 
 if (typeof window !== "undefined") {

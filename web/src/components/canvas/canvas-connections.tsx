@@ -24,6 +24,7 @@ export function ConnectionPath({
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [hovered, setHovered] = useState(false);
+    const [deleteHovered, setDeleteHovered] = useState(false);
     const startX = from.position.x + from.width;
     const startY = from.position.y + from.height / 2;
     const endX = to.position.x;
@@ -71,20 +72,12 @@ export function ConnectionPath({
                 <g
                     transform={`translate(${midX}, ${midY})`}
                     data-connection-delete={connection.id}
-                    style={{ cursor: "pointer", pointerEvents: "all" }}
-                    onPointerDown={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        onDelete();
-                    }}
-                    onClick={(event) => {
-                        event.stopPropagation();
-                    }}
+                    style={{ pointerEvents: "none" }}
                 >
                     <title>断开连线</title>
-                    <rect x={-10} y={-10} width={20} height={20} rx={5} fill={theme.node.panel} fillOpacity={0.96} stroke={hovered ? "#f87171" : theme.node.muted} strokeWidth={1.2} style={{ pointerEvents: "all", filter: "drop-shadow(0 2px 5px rgba(0,0,0,.28))" }} />
-                    <line x1={-3.5} y1={-3.5} x2={3.5} y2={3.5} stroke={hovered ? "#fca5a5" : theme.node.text} strokeWidth={1.7} strokeLinecap="round" style={{ pointerEvents: "all" }} />
-                    <line x1={3.5} y1={-3.5} x2={-3.5} y2={3.5} stroke={hovered ? "#fca5a5" : theme.node.text} strokeWidth={1.7} strokeLinecap="round" style={{ pointerEvents: "all" }} />
+                    <rect x={-10} y={-10} width={20} height={20} rx={5} fill={theme.node.panel} fillOpacity={0.96} stroke={deleteHovered ? "#f87171" : theme.node.muted} strokeWidth={1.2} style={{ pointerEvents: "all", cursor: "pointer", filter: "drop-shadow(0 2px 5px rgba(0,0,0,.28))" }} onMouseEnter={() => setDeleteHovered(true)} onMouseLeave={() => setDeleteHovered(false)} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onDelete(); }} onClick={(event) => event.stopPropagation()} />
+                    <line x1={-3.5} y1={-3.5} x2={3.5} y2={3.5} stroke={deleteHovered ? "#fca5a5" : theme.node.text} strokeWidth={1.7} strokeLinecap="round" style={{ pointerEvents: "none" }} />
+                    <line x1={3.5} y1={-3.5} x2={-3.5} y2={3.5} stroke={deleteHovered ? "#fca5a5" : theme.node.text} strokeWidth={1.7} strokeLinecap="round" style={{ pointerEvents: "none" }} />
                 </g>
             )}
         </g>

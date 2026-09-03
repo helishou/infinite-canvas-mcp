@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { backendHealth, discoverBackendToken, getBackendToken, getBackendUrl, setBackendConnection } from "@/services/backend-api";
+import { backendHealth, discoverBackendToken, getBackendUrl } from "@/services/backend-api";
+import { getBackendTokenShared, setBackendToken } from "@/lib/backend-token";
 
 type BackendStore = {
     url: string;
@@ -47,16 +48,19 @@ function syncAgentEndpoint(url: string, token: string) {
 /** 总后台连接状态 store。自动在启动时检测连通性。 */
 export const useBackendStore = create<BackendStore>((set, get) => ({
     url: getBackendUrl(),
-    token: getBackendToken(),
+    token: getBackendTokenShared(),
     connected: false,
     checking: true,
     error: "",
 
     setConnection: (url, token) => {
         const cleanUrl = url.replace(/\/$/, "");
-        setBackendConnection(cleanUrl, token || get().token);
-        set({ url: cleanUrl, token: token || get().token, error: "" });
-        syncAgentEndpoint(cleanUrl, token || get().token);
+        const nextToken = token || get().token;
+        // 同步持久化，保证 backend-api.ts 的 getBackendUrl()/getBackendTokenShared() 取到最新值。
+        try { localStorage.setItem("backend-url", cleanUrl); } catch { /* storage blocked */ }
+        setBackendToken(nextToken);
+        set({ url: cleanUrl, token: nextToken, error: "" });
+        syncAgentEndpoint(cleanUrl, nextToken);
         void get().checkConnection();
     },
 
@@ -72,7 +76,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         // 后端 /config 是 token 权威来源，连接时以后端为准刷新，避免缓存旧 token 导致 401。
         const discovered = await discoverBackendToken();
         if (discovered.ok && discovered.token && discovered.token !== get().token) {
-            setBackendConnection(getBackendUrl(), discovered.token);
+            setBackendToken(discovered.token);
             set({ token: discovered.token, checking: true });
             syncAgentEndpoint(getBackendUrl(), discovered.token);
             await get().checkConnection();

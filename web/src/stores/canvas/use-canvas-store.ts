@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import localforage from "localforage";
 
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
@@ -35,25 +34,38 @@ type CanvasStore = {
     updateProject: (id: string, patch: Partial<Pick<CanvasProject, "nodes" | "connections" | "chatSessions" | "activeChatId" | "backgroundMode" | "showImageInfo" | "globalPrompt" | "viewport">>) => void;
 };
 
+const CANVAS_PROJECTS_KEY = "infinite-canvas-projects-v1";
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let knownProjectIds = new Set<string>();
-const localCanvasStorage = localforage.createInstance({ name: "infinite-canvas", storeName: "canvas-projects" });
-const LOCAL_PROJECTS_KEY = "projects";
 
-async function persistLocalCanvasProjects(projects: CanvasProject[]) {
-    try { await localCanvasStorage.setItem(LOCAL_PROJECTS_KEY, projects); } catch { /* 本地缓存失败不阻断 backend 同步 */ }
+function loadFromLocalStorage(): CanvasProject[] {
+    try {
+        const raw = localStorage.getItem(CANVAS_PROJECTS_KEY);
+        if (!raw) return [];
+        const val = JSON.parse(raw);
+        return Array.isArray(val) ? (val as CanvasProject[]) : [];
+    } catch { return []; }
+}
+
+function saveToLocalStorage(projects: CanvasProject[]) {
+    try {
+        // 精简：只存 meta，不存大节点内容（减少 localStorage 体积）
+        const meta = projects.map(({ id, title, createdAt, updatedAt, nodes, connections, chatSessions, activeChatId, backgroundMode, showImageInfo, globalPrompt, viewport }) =>
+            ({ id, title, createdAt, updatedAt, nodes, connections, chatSessions, activeChatId, backgroundMode, showImageInfo, globalPrompt, viewport }));
+        localStorage.setItem(CANVAS_PROJECTS_KEY, JSON.stringify(meta));
+    } catch { /* localStorage 满了就放弃 */ }
 }
 
 async function syncCanvasProjects(projects: CanvasProject[]) {
-    await persistLocalCanvasProjects(projects);
+    saveToLocalStorage(projects);
     if (!useBackendStore.getState().connected) return;
     try {
         const ids = new Set(projects.map((project) => project.id));
         await Promise.all(projects.map((project) => upsertBackendProject(project as unknown as Record<string, unknown>)));
         await Promise.all([...knownProjectIds].filter((id) => !ids.has(id)).map((id) => deleteBackendProject(id)));
         knownProjectIds = ids;
-    } catch { /* Backend 是唯一写入目标，失败由下一次同步重试 */ }
+    } catch { /* Backend 失败由下一次同步重试 */ }
 }
 
 async function hydrateCanvasProjectsFromBackend() {
@@ -75,6 +87,7 @@ async function hydrateCanvasProjectsFromBackend() {
             return Date.parse(local.updatedAt || "") > Date.parse(remote.updatedAt || "") ? local : remote;
         });
         knownProjectIds = new Set(remoteProjects.map((project) => project.id));
+        saveToLocalStorage(mergedProjects);
         useCanvasStore.setState({ projects: mergedProjects });
         if (mergedProjects.some((project) => !remoteById.has(project.id) || project.updatedAt !== remoteById.get(project.id)?.updatedAt)) scheduleCanvasSync();
         return true;
@@ -84,87 +97,82 @@ async function hydrateCanvasProjectsFromBackend() {
 }
 
 export async function hydrateCanvasProjects() {
-    try {
-        const localProjects = await localCanvasStorage.getItem<CanvasProject[]>(LOCAL_PROJECTS_KEY);
-        if (Array.isArray(localProjects) && localProjects.length) useCanvasStore.setState({ projects: localProjects });
-    } catch { /* 继续尝试从 backend 恢复 */ }
     await hydrateCanvasProjectsFromBackend();
     useCanvasStore.setState({ hydrated: true });
 }
 
 export const useCanvasStore = create<CanvasStore>()((set, get) => ({
-            hydrated: false,
-            projects: [],
-            createProject: (title = i18n.t("canvas.project.untitled")) => {
-                const now = new Date().toISOString();
-                const id = nanoid();
-                const project: CanvasProject = {
-                    id,
-                    title,
-                    createdAt: now,
-                    updatedAt: now,
-                    nodes: [],
-                    connections: [],
-                    chatSessions: [],
-                    activeChatId: null,
-                    backgroundMode: "lines",
-                    showImageInfo: false,
-                    globalPrompt: "",
-                    viewport: initialViewport,
-                };
-                set((state) => ({ projects: [project, ...state.projects] }));
-                scheduleCanvasSync();
-                return id;
-            },
-            importProject: (source) => {
-                const now = new Date().toISOString();
-                const project: CanvasProject = {
-                    id: nanoid(),
-                    title: source.title || i18n.t("canvas.project.imported"),
-                    createdAt: source.createdAt || now,
-                    updatedAt: now,
-                    nodes: source.nodes || [],
-                    connections: source.connections || [],
-                    chatSessions: source.chatSessions || [],
-                    activeChatId: source.activeChatId || null,
-                    backgroundMode: source.backgroundMode || "lines",
-                    showImageInfo: source.showImageInfo || false,
-                    globalPrompt: source.globalPrompt || "",
-                    viewport: source.viewport || initialViewport,
-                };
-                set((state) => ({ projects: [project, ...state.projects] }));
-                scheduleCanvasSync();
-                void importLegacyGenerationLogs(project.id, (source as Partial<CanvasProject> & { logs?: unknown[] }).logs);
-                return project.id;
-            },
-            openProject: (id) => {
-                return get().projects.find((item) => item.id === id) || null;
-            },
-            renameProject: (id, title) => {
-                set((state) => ({
-                    projects: state.projects.map((project) => (project.id === id ? { ...project, title: title.trim() || project.title, updatedAt: new Date().toISOString() } : project)),
-                }));
-                scheduleCanvasSync();
-            },
-            deleteProjects: (ids) => {
-                set((state) => {
-                    const projects = state.projects.filter((project) => !ids.includes(project.id));
-                    return { projects };
-                });
-                scheduleCanvasSync();
-            },
-            replaceProjects: (projects) => { set({ projects }); scheduleCanvasSync(); },
-            updateProject: (id, patch) => {
-                set((state) => ({
-                    projects: state.projects.map((project) => (project.id === id ? { ...project, ...patch, updatedAt: new Date().toISOString() } : project)),
-                }));
-                scheduleCanvasSync();
-            },
+    hydrated: false,
+    projects: loadFromLocalStorage(),
+    createProject: (Title = i18n.t("canvas.project.untitled")) => {
+        const now = new Date().toISOString();
+        const id = nanoid();
+        const project: CanvasProject = {
+            id,
+            title: Title,
+            createdAt: now,
+            updatedAt: now,
+            nodes: [],
+            connections: [],
+            chatSessions: [],
+            activeChatId: null,
+            backgroundMode: "lines",
+            showImageInfo: false,
+            globalPrompt: "",
+            viewport: initialViewport,
+        };
+        set((state) => ({ projects: [project, ...state.projects] }));
+        scheduleCanvasSync();
+        return id;
+    },
+    importProject: (source) => {
+        const now = new Date().toISOString();
+        const project: CanvasProject = {
+            id: nanoid(),
+            title: source.title || i18n.t("canvas.project.imported"),
+            createdAt: source.createdAt || now,
+            updatedAt: now,
+            nodes: source.nodes || [],
+            connections: source.connections || [],
+            chatSessions: source.chatSessions || [],
+            activeChatId: source.activeChatId || null,
+            backgroundMode: source.backgroundMode || "lines",
+            showImageInfo: source.showImageInfo || false,
+            globalPrompt: source.globalPrompt || "",
+            viewport: source.viewport || initialViewport,
+        };
+        set((state) => ({ projects: [project, ...state.projects] }));
+        scheduleCanvasSync();
+        void importLegacyGenerationLogs(project.id, (source as Partial<CanvasProject> & { logs?: unknown[] }).logs);
+        return project.id;
+    },
+    openProject: (id) => {
+        return get().projects.find((item) => item.id === id) || null;
+    },
+    renameProject: (id, title) => {
+        set((state) => ({
+            projects: state.projects.map((project) => (project.id === id ? { ...project, title: title.trim() || project.title, updatedAt: new Date().toISOString() } : project)),
         }));
+        scheduleCanvasSync();
+    },
+    deleteProjects: (ids) => {
+        set((state) => {
+            const projects = state.projects.filter((project) => !ids.includes(project.id));
+            return { projects };
+        });
+        scheduleCanvasSync();
+    },
+    replaceProjects: (projects) => { set({ projects }); scheduleCanvasSync(); },
+    updateProject: (id, patch) => {
+        set((state) => ({
+            projects: state.projects.map((project) => (project.id === id ? { ...project, ...patch, updatedAt: new Date().toISOString() } : project)),
+        }));
+        scheduleCanvasSync();
+    },
+}));
 
 function scheduleCanvasSync() {
     if (saveTimer) clearTimeout(saveTimer);
-    void persistLocalCanvasProjects(useCanvasStore.getState().projects);
     saveTimer = setTimeout(() => {
         saveTimer = null;
         void syncCanvasProjects(useCanvasStore.getState().projects);

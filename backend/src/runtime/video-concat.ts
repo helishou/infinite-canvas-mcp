@@ -35,7 +35,7 @@ export class VideoConcatBackend {
             await writeFile(concatList, inputs.map((file) => `file '${file.replace(/'/g, "'\\''")}'`).join("\n"), "utf8");
             temporaryFiles.push(concatList);
             await this.runFfmpeg(task.id, concatList, output, Number(task.params.longEdge) || 0);
-            const stored = this.media ? this.media.store(await readFile(output), { name: path.basename(output), mimeType: "video/mp4" }) : null;
+            const stored = this.media ? this.media.store(await readFile(output), { name: path.basename(output), mimeType: "video/mp4", category: "output" }) : null;
             const result = { path: output, longEdge: task.params.longEdge, ...(stored ? { media: { url: this.media!.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: path.basename(output) } } : {}) };
             this.update(task.id, { status: "succeeded", progress: 1, result });
             this.tasks.addEvent(task.id, "result", result);
