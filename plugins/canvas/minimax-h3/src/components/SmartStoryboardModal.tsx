@@ -99,7 +99,7 @@ export function SmartStoryboardModal({
         }
         onReorder={reorder}
       />
-      <div style={{ marginTop: 16, color: ctx.theme.node.muted, fontSize: 12, lineHeight: 1.6 }}>
+      <div style={{ marginTop: 10, color: ctx.theme.node.muted, fontSize: 11, lineHeight: 1.5 }}>
         看图 API、语言模型和 Skill 沿用当前默认配置；未上传图片时 fallback
         使用当前节点上游图片（
         {upstream.filter((ref) => ref.type === "image").length}{" "}
