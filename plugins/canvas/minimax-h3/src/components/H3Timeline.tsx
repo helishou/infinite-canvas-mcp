@@ -46,12 +46,29 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         observer.observe(node);
         return () => observer.disconnect();
     }, [timelineMinWidth]);
-    // ruler 刻度根据滚动容器实测宽度动态生成：统一 5s 一格，从 0s 开始
-    // 一直铺到 ruler 容器右边缘（包括超过总时长部分）。
+    // ruler 刻度：0~containerSeconds 区间尽量按 5s 一格铺，但末端剩余空间
+    // < 5s 时不强行塞一个超出容器的 5s 倍数刻度，改用一个"末端刻度"卡到容器右边缘。
+    // 例：containerSeconds=22s → [0, 5, 10, 15, 20, 22]，最后那个 22 就在容器右边缘。
+    // 例：containerSeconds=42s → [0, 5, 10, 15, 20, 25, 30, 35, 40]，最后那个 40 < 42 加 42。
+    // 例：containerSeconds=20s（恰好对齐）→ [0, 5, 10, 15, 20]，不加末端。
     const tickInterval = 5;
     const containerSeconds = trackWidth / 50;
-    const tickCount = Math.floor(containerSeconds / tickInterval) + 1;
-    const majorTicks = Array.from({ length: tickCount }, (_, index) => ({ time: index * tickInterval, left: index * tickInterval * 50 }));
+    const tickPositions: number[] = [];
+    for (let t = 0; t <= containerSeconds + 0.0001; t += tickInterval) {
+        tickPositions.push(Math.round(t * 10) / 10);
+    }
+    // 末端对齐：最后一个刻度距离容器右边缘 > 2s 时再加一个末端刻度
+    const lastTick = tickPositions[tickPositions.length - 1] ?? 0;
+    if (containerSeconds - lastTick > 2 && lastTick + 5 > containerSeconds + 0.0001) {
+        // 上面的循环已经跳过了末端 5s 倍数，但 0..containerSeconds 之间本应该有刻度
+        // 实际上 tickPositions 一直会到 lastTick ≤ containerSeconds 但最后一个 5s 倍数 > containerSeconds 时不加入
+        // 比如 containerSeconds=22, lastTick=20, 20+5=25>22 — 22 距离 lastTick 2s 不加末端
+        // 比如 containerSeconds=42, lastTick=40, 40+5=45>42, 42 距离 lastTick 2s 不加末端
+    }
+    if (containerSeconds - lastTick >= 2 && lastTick + tickInterval > containerSeconds + 0.0001) {
+        tickPositions.push(Math.round(containerSeconds * 10) / 10);
+    }
+    const majorTicks = tickPositions.map((t) => ({ time: t, left: t * 50 }));
     const minorTicks: Array<{ left: number }> = [];
 
     // 节流持久化时间轴滚动位置，刷新后可恢复（避免每次 onScroll 都 updateMetadata）

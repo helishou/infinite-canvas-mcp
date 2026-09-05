@@ -49,7 +49,7 @@
 .minimax-tracks-scroll { grid-column:2; grid-row:1 / span 2; position:relative; min-width:0; height:100%; min-height:0; overflow-x:auto; overflow-y:hidden; }
 .minimax-track-body { height:100%; min-height:0; display:flex; flex-direction:column; }
 .minimax-ruler-row { flex:0 0 36px; position:relative; display:flex; align-items:center; border-bottom:1px solid #2f3338; background:#202328; }
-.minimax-ruler-play-all { position:absolute; left:0; top:0; bottom:0; width:36px; flex:0 0 36px; padding:0; border:0; border-right:1px solid #2f3338; background:#1a1d22; color:#cbd5e1; display:flex; align-items:center; justify-content:center; cursor:pointer; }
+.minimax-ruler-play-all { position:absolute; left:0; top:0; bottom:0; width:36px; z-index:2; flex:0 0 36px; padding:0; border:0; border-right:1px solid #2f3338; background:#1a1d22; color:#cbd5e1; display:flex; align-items:center; justify-content:center; cursor:pointer; }
 .minimax-ruler-play-all:hover { background:#252a31; color:#fff; }
 .minimax-ruler-ticks { position:relative; flex:1 1 0; min-width:0; height:100%; }
 /* video 行占满 tracks-scroll 的剩余高度，避免 timeline 下方出现黑色空白 */
