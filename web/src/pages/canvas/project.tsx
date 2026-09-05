@@ -9,7 +9,7 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { defaultConfig, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
-import { getComfyTask, resolveComfyImageSize, runComfyTask, runVideoConcatTask } from "@/services/api/comfyui";
+import { getComfyTask, resolveComfyEndpoint, resolveComfyImageSize, runComfyTask, runVideoConcatTask } from "@/services/api/comfyui";
 import { uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { backendMediaUrl } from "@/services/backend-api";
@@ -2349,7 +2349,7 @@ function InfiniteCanvasPage() {
                         : "";
                     if (localComfy && !localComfyPreset) throw new Error(`本地 ComfyUI 尚未支持模型：${modelOptionName(generationConfig.model)}`);
                     if (localComfyPreset === "flux2-klein" && !referenceImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
-                    if (localComfy && !useAgentStore.getState().token.trim()) throw new Error("请先连接本地 Agent，再运行本地 ComfyUI 模型");
+                    const comfyEndpoint = resolveComfyEndpoint();
                     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
                     const generationMetadata = buildImageGenerationMetadata(generationType, generationConfig, count, referenceImages);
                     const parentConfig = NODE_DEFAULT_SIZE[isConfigNode ? CanvasNodeType.Config : isImageNode ? CanvasNodeType.Image : CanvasNodeType.Text];
@@ -2423,7 +2423,7 @@ function InfiniteCanvasPage() {
                         imageIds.map(async (imageId) => {
                             try {
                                 const image = localComfy
-                                    ? await runComfyTask(useAgentStore.getState().url, useAgentStore.getState().token, comfyChannel.baseUrl, localComfyPreset, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, runtimeTaskId: taskId, primaryImageId: imageId } } : item)))
+                                    ? await runComfyTask(comfyEndpoint.endpoint, comfyEndpoint.token, comfyChannel.baseUrl, localComfyPreset, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, runtimeTaskId: taskId, primaryImageId: imageId } } : item)))
                                     : referenceImages.length
                                       ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
                                       : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
@@ -2434,7 +2434,9 @@ function InfiniteCanvasPage() {
                                     prev.map((node) => {
                                         if (node.id !== rootId) return node;
                                         const images = node.metadata?.images?.map((image) => (image.id === imageId ? item : image)) || [];
-                                        if (node.metadata?.primaryImageId) return { ...node, metadata: { ...node.metadata, images } };
+                                         // 单张生成也会在任务创建时记录 primaryImageId，但它仍然需要
+                                         // 把结果写入节点主图；只有多图批量结果才保持根节点的折叠状态。
+                                         if (node.metadata?.primaryImageId && images.length > 1) return { ...node, metadata: { ...node.metadata, images } };
                                         const center = { x: node.position.x + node.width / 2, y: node.position.y + node.height / 2 };
                                         return {
                                             ...node,
@@ -2463,7 +2465,7 @@ function InfiniteCanvasPage() {
                                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
                                 if (!firstError) firstError = errorDetails;
                                 hasFailure = true;
-                                setNodes((prev) => prev.map((node) => (node.id === rootId ? { ...node, metadata: { ...node.metadata, images: node.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_ERROR, errorDetails } : image)) } } : node)));
+                                setNodes((prev) => prev.map((node) => (node.id === rootId ? { ...node, metadata: { ...node.metadata, runtimeTaskId: undefined, images: node.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_ERROR, errorDetails } : image)) } } : node)));
                             }
                             return false;
                         }),
@@ -2829,9 +2831,9 @@ function InfiniteCanvasPage() {
                     : "";
                 if (retryLocalComfy && !retryComfyPreset) throw new Error(`本地 ComfyUI 尚未支持模型：${modelOptionName(generationConfig.model)}`);
                 if (retryComfyPreset === "flux2-klein" && !retryImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
-                if (retryLocalComfy && !useAgentStore.getState().token.trim()) throw new Error("请先连接本地 Agent，再运行本地 ComfyUI 模型");
+                const retryComfyEndpoint = resolveComfyEndpoint();
                 const image = retryLocalComfy
-                    ? await runComfyTask(useAgentStore.getState().url, useAgentStore.getState().token, retryComfyChannel.baseUrl, retryComfyPreset, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal)
+                    ? await runComfyTask(retryComfyEndpoint.endpoint, retryComfyEndpoint.token, retryComfyChannel.baseUrl, retryComfyPreset, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal)
                     : useReferenceImages
                       ? await requestEdit(generationConfig, prompt, retryImages, { signal: controller.signal }).then((items) => items[0])
                       : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);

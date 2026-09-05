@@ -1,4 +1,5 @@
 import type { H3Ref, H3Segment } from "../types";
+import { restorableParams } from "./h3-segment-utils";
 
 type GeneratedSegment = { media?: Array<{ mimeType: string; url?: string; storageKey?: string }> };
 
@@ -30,5 +31,7 @@ export function mergeH3Segments(all: H3Segment[], generated: H3Segment[], active
 }
 
 export function generatedVideoMaterials(segments: H3Segment[]): H3Ref[] {
-    return segments.flatMap((segment, index) => (segment.results || []).filter((item) => item.type === "video").map((item) => ({ ...item, name: item.name || `Clip ${index + 1}`, segmentId: segment.id })));
+    // 每条输出材料挂一份生成时刻的参数快照，Output「设为当前 Clip」在源 Clip
+    // 被删除/重建后仍能还原参数（buildRestoreParamsPatch 的最终兜底）。
+    return segments.flatMap((segment, index) => (segment.results || []).filter((item) => item.type === "video").map((item) => ({ ...item, name: item.name || `Clip ${index + 1}`, segmentId: segment.id, params: restorableParams(segment as unknown as Record<string, unknown>) })));
 }

@@ -4,7 +4,8 @@ import type { H3Ref, H3Segment } from "../types";
 import { defaultH3Model, defaultPrompt } from "../constants";
 import { compatibleH3Settings, normalizeH3Model } from "../services/h3-compatibility";
 import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
-import { appendVideoMaterials, refsForSegment } from "../services/h3-data";
+import { appendVideoMaterials, refsForSegment, resultUrl } from "../services/h3-data";
+import { restorableParams } from "../services/h3-segment-utils";
 import { readH3Refs } from "../services/h3-refs";
 import { createH3Log } from "../services/h3-logs";
 import { useH3TaskPolling } from "../hooks/useH3TaskPolling";
@@ -398,8 +399,15 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             }
             if (!lastResult) throw new Error("没有可运行的 H3 分段");
             const mergedSegments = compactSegmentStarts(mergeH3Segments(allSegments, nextSegments, activeId, runFromCurrent, autoSplit && storedSegments.length === 1));
+            // 优先用当前选中段；若已切换/删除则按 URL 反查源 Clip
+            const lastSource = mergedSegments.find((item) => item.id === liveSelectedId)
+                || mergedSegments.find((item) => {
+                    const directMatch = resultUrl(item.result) === lastResult.url;
+                    const resultsMatch = (item.results || []).some((entry) => entry.url === lastResult.url);
+                    return directMatch || resultsMatch;
+                });
             const generatedMaterials = generatedVideoMaterials(mergedSegments);
-            update({ content: lastResult.url, storageKey: lastResult.storageKey, mimeType: lastResult.mimeType, naturalWidth: lastResult.width, naturalHeight: lastResult.height, durationMs: lastResult.durationMs, segments: mergedSegments, materials: appendVideoMaterials(liveMetadata.materials, [...generatedMaterials, { url: lastResult.url, storageKey: lastResult.storageKey, type: "video", name: `Clip ${liveSelectedId || "输出"}`, segmentId: liveSelectedId }]), runtimeTaskId: "", status: "success", errorDetails: "", runtimeTargetSegmentId: undefined, runFinishedAt: Date.now() });
+            update({ content: lastResult.url, storageKey: lastResult.storageKey, mimeType: lastResult.mimeType, naturalWidth: lastResult.width, naturalHeight: lastResult.height, durationMs: lastResult.durationMs, segments: mergedSegments, materials: appendVideoMaterials(liveMetadata.materials, [...generatedMaterials, { url: lastResult.url, storageKey: lastResult.storageKey, type: "video", name: `Clip ${liveSelectedId || "输出"}`, segmentId: liveSelectedId, params: restorableParams(lastSource as unknown as Record<string, unknown> | undefined) }]), runtimeTaskId: "", status: "success", errorDetails: "", runtimeTargetSegmentId: undefined, runFinishedAt: Date.now() });
             if (generationLogId) void ctx.generationLogs.update(generationLogId, { status: "success", runtimeTaskId: lastResult.taskId, finishedAt: new Date().toISOString(), durationMs: Date.now() - Number(liveMetadata.runStartedAt || Date.now()), outputs: [{ url: lastResult.url, storageKey: lastResult.storageKey, type: "video", mimeType: lastResult.mimeType }] });
         } catch (error) {
             // 增强错误日志：包含实际提交信息

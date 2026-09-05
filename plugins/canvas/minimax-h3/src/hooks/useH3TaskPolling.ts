@@ -2,6 +2,7 @@ import { useEffect } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { appendVideoMaterials } from "../services/h3-data";
 import { finishH3Log } from "../services/h3-logs";
+import { restorableParams } from "../services/h3-segment-utils";
 import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
 
 export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string, unknown>, update: (patch: Record<string, unknown>) => void) {
@@ -84,12 +85,13 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                     // 回写目标用提交时锁定的 runtimeTargetSegmentId，而非实时选中的 Clip，
                     // 否则等待期间切换 Clip 会把结果误写到错误 clip。
                     const selId = resolveTargetId(metadata);
+                    const targetSource = segmentsFor(metadata).find((seg) => seg.id === selId);
                     update({
                         content: url,
                         storageKey,
                         mimeType: task.result.mimeType,
                         ...(task.result.segments?.length ? { segments: task.result.segments } : { segments: withSelectedResult(metadata, url, storageKey, selId) }),
-                        materials: appendVideoMaterials(metadata.materials, [{ url, storageKey, type: "video", name: "H3 输出", segmentId: selId }]),
+                        materials: appendVideoMaterials(metadata.materials, [{ url, storageKey, type: "video", name: "H3 输出", segmentId: selId, params: restorableParams(targetSource as unknown as Record<string, unknown> | undefined) }]),
                         status: "success",
                         errorDetails: "",
                         runtimeTaskId: undefined,

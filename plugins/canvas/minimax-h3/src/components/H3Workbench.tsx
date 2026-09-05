@@ -37,7 +37,7 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const imageRefs = selectedRefs.filter((item) => item.type === "image");
     const videoRefs = selectedRefs.filter((item) => item.type === "video");
     const audioRefs = selectedRefs.filter((item) => item.type === "audio");
-    const previewH = Math.max(130, Math.min(900, Number(metadata.minimaxPreviewH || 220)));
+    const previewH = Math.max(130, Math.min(2000, Number(metadata.minimaxPreviewH || 220)));
     const promptW = Math.max(220, Math.min(900, Number(metadata.minimaxPromptW || 480)));
     const previewW = Math.max(280, Math.min(1400, Number(metadata.minimaxPreviewW || 960)));
     // 行高模型：行1(预览+当前Clip) 与 行2(时间轴) 固定 px，行3(Output 素材库) 吃剩余高度；
@@ -64,14 +64,22 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     let effTimelineH = timelineH;
     let effRefLaneH = refLaneH;
     if (bodyH > 0) {
+        // 高度预算：行1+行2 超出 wb-body 可用高度时连续收敛——预览先让（到 130 下限），
+        // 时间轴再让（到 max(250, 190+Refs) 下限），Output 行 minmax(0,1fr) 自然吃剩余/压到 0。
+        // 全程单调连续（脱离挤压态时恰好等于 metadata 值），边界上不会跳变。
         const avail = bodyH - 36; // wb-body 自身 padding+gap
-        if (previewH + timelineH > avail) {
-            effPreviewH = Math.max(130, Math.min(previewH, Math.round(avail * 0.42)));
-            effTimelineH = Math.max(0, avail - effPreviewH);
-            effRefLaneH = Math.max(60, Math.min(refLaneH, effTimelineH - 190));
-            effTimelineH = Math.max(250, Math.min(effTimelineH, avail - effPreviewH));
-            if (effPreviewH + effTimelineH > avail) effPreviewH = Math.max(130, avail - effTimelineH);
+        let p = previewH;
+        let t = timelineH;
+        const over = Math.max(0, p + t - avail);
+        if (over > 0) {
+            const dp = Math.min(over, Math.max(0, p - 130));
+            p -= dp;
+            const rest = over - dp;
+            if (rest > 0) t -= Math.min(rest, Math.max(0, t - Math.max(250, 190 + refLaneH)));
         }
+        effPreviewH = Math.round(p);
+        effTimelineH = Math.round(t);
+        effRefLaneH = Math.max(60, Math.min(refLaneH, effTimelineH - 190));
     }
     const playRequest = Number(metadata.h3PlayRequest || 0);
     const [smartStoryboardOpen, setSmartStoryboardOpen] = useState(false);

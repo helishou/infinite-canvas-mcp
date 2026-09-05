@@ -19,8 +19,7 @@ import { backendMediaUrl } from "@/services/backend-api";
 import { deleteStoredImages, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
-import { useAgentStore } from "@/stores/use-agent-store";
-import { resolveComfyImageSize, runComfyTask } from "@/services/api/comfyui";
+import { resolveComfyImageSize, resolveComfyEndpoint, runComfyTask } from "@/services/api/comfyui";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
 import { deleteWorkbenchLogs, readWorkbenchLogs, saveWorkbenchLog } from "@/services/workbench-logs";
@@ -334,13 +333,13 @@ export default function ImagePage() {
             const channel = resolveModelChannel(snapshot.config, snapshot.config.model);
             const local = channel.kind === "comfyui";
             const selectedModel = modelOptionName(snapshot.config.model).trim().toLowerCase();
-            if (local && !useAgentStore.getState().token.trim()) throw new Error("请先连接本地 Agent，再运行本地 ComfyUI 模型");
             const localPreset = selectedModel === "z-image" ? "z-image" : selectedModel === "flux2-klein" ? "flux2-klein" : "";
             if (local && !localPreset) throw new Error(`本地 ComfyUI 尚未支持工作台模型：${modelOptionName(snapshot.config.model)}`);
+            const comfyEndpoint = resolveComfyEndpoint();
             const result = local
                 ? await runComfyTask(
-                      useAgentStore.getState().url,
-                      useAgentStore.getState().token,
+                      comfyEndpoint.endpoint,
+                      comfyEndpoint.token,
                       channel.baseUrl,
                       localPreset,
                       snapshot.text,

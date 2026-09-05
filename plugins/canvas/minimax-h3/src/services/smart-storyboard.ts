@@ -139,7 +139,7 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
             : mode === "i2va" || mode === "fl2va"
                 ? images
                 : orderedRefs;
-        const messages = storyboardMessages(storyboardSkill(mode, skillId), String(ctx.node.metadata?.prompt || ""), count, allowedRefs, analysisParts.join("\n\n"), mode, duration);
+        const messages = storyboardMessages(storyboardSkill(mode, skillId), String(ctx.node.metadata?.smartStoryboardIdea || ctx.node.metadata?.prompt || ""), count, allowedRefs, analysisParts.join("\n\n"), mode, duration);
         ctx.updateMetadata({ smartStoryboardStatus: "loading", errorDetails: "参考图分析完成，正在生成智能分镜…" });
         const modelRefs = await Promise.all(allowedRefs.filter((ref) => ref.type === "image").map(async (ref) => ({ ...ref, url: await imageReferenceUrl(ref) })));
         let result;
@@ -181,7 +181,10 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
         // 切勿回写节点级 prompt：created 段各自已带独立 prompt（见上），
         // 而 segmentsFor 会让「没有自己 segment.prompt 的旧段」回退到 metadata.prompt，
         // 回写会把原 selected（如 clip1）的提示词被新段1污染。保持原样即可。
-        ctx.updateMetadata({ segments, selectedSegmentId: created[0]?.id, smartStoryboardGlobal: parsed.global, smartStoryboardRaw: parsed.raw, smartStoryboardVisionAnalysis: analysisParts.join("\n\n"), smartStoryboardOutputBudget: storyboardOutputBudget(count), smartStoryboardStatus: "success", smartStoryboardError: "" });
+        // 成功后保持用户原选中段，不要强制跳到 created[0]：否则用户选中 clip4 生成三段后，
+        // UI 会瞬间选中新生成的第一段，Prompt 面板显示第一段提示词，视觉上就像
+        // 「clip4 的提示词被替换成了分镜第一段」。新段插在 clip4 之后，用户可自行点击查看。
+        ctx.updateMetadata({ segments, selectedSegmentId: selected?.id || created[0]?.id, smartStoryboardGlobal: parsed.global, smartStoryboardRaw: parsed.raw, smartStoryboardVisionAnalysis: analysisParts.join("\n\n"), smartStoryboardOutputBudget: storyboardOutputBudget(count), smartStoryboardStatus: "success", smartStoryboardError: "" });
     } catch (error) {
         // 阶段化错误信息：让用户从一行文字判断是哪一步失败、底层原因是什么。
         // 智能分镜流程长(参考图分析 -> LLM 提示词 -> 解析 -> 写入 segments)，

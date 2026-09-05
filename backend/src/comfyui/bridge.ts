@@ -539,11 +539,32 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
         if (Number.isFinite(Number(params.videoSteps)) && source["124"]?.inputs) source["124"].inputs.steps = Number(params.videoSteps);
         if (Number.isFinite(Number(params.denoise)) && source["124"]?.inputs) source["124"].inputs.denoise = Number(params.denoise);
         if (source["129"]?.inputs && params.seed !== undefined) source["129"].inputs.noise_seed = Number(params.seed);
-        if (typeof params.loraName === "string" && params.loraName.trim()) {
+        // 多 LoRA 槽位链式注入：slot0 走 LoraLoader（带 clip，供 136 的 clip 输入），
+        // slot1+ 走 LoraLoaderModelOnly 依次串在 model 链上。无槽位时回退旧 loraName 单 LoRA 路径，
+        // 否则只注入 slot0、其余槽位被静默丢弃（表现为"启用了 4 个 LoRA 实际只有第 1 个生效"）。
+        const loraSlotList = Array.isArray(params.loraSlots)
+            ? (params.loraSlots as Array<Record<string, unknown>>).filter((slot) => slot && typeof slot.name === "string" && String(slot.name).trim() && slot.enabled !== false)
+            : [];
+        let loraClipRef: [string, number] | undefined;
+        if (loraSlotList.length) {
+            let modelRef: [string, number] = ["127", 0];
+            loraSlotList.forEach((slot, index) => {
+                const id = index === 0 ? "9071" : `9075${index - 1}`;
+                if (index === 0) {
+                    source[id] = { class_type: "LoraLoader", inputs: { model: modelRef, clip: ["128", 0], lora_name: String(slot.name).trim(), strength_model: Number(slot.strength ?? 1), strength_clip: 0 }, _meta: { title: `MiniMax H3 LoRA ${index + 1}` } };
+                    loraClipRef = [id, 1];
+                } else {
+                    source[id] = { class_type: "LoraLoaderModelOnly", inputs: { model: modelRef, lora_name: String(slot.name).trim(), strength_model: Number(slot.strength ?? 1) }, _meta: { title: `MiniMax H3 LoRA ${index + 1}` } };
+                }
+                modelRef = [id, 0];
+            });
+            source["124"].inputs.model = modelRef;
+            source["126"].inputs.model = modelRef;
+        } else if (typeof params.loraName === "string" && params.loraName.trim()) {
             source["9071"] = { class_type: "LoraLoader", inputs: { model: ["127", 0], clip: ["128", 0], lora_name: params.loraName.trim(), strength_model: Number(params.loraStrength ?? 1), strength_clip: 0 }, _meta: { title: "MiniMax H3 LoRA" } };
             source["124"].inputs.model = ["9071", 0];
             source["126"].inputs.model = ["9071", 0];
-            source["136"].inputs.clip = ["9071", 1];
+            loraClipRef = ["9071", 1];
         }
         if (Number(params.combatLoraWeight || 0) > 0) {
             source["9073"] = { class_type: "LoraLoaderModelOnly", inputs: { model: source["124"].inputs.model, lora_name: "Minimax\\H3_Combat_V2.safetensors", strength_model: Number(params.combatLoraWeight) }, _meta: { title: "MiniMax H3 Combat LoRA" } };
@@ -579,7 +600,7 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
                 else textNode.inputs.text = promptText;
             }
         }
-        if (typeof params.loraName === "string" && params.loraName.trim() && source["9071"] && source["136"]?.inputs) source["136"].inputs.clip = ["9071", 1];
+        if (loraClipRef && source["136"]?.inputs) source["136"].inputs.clip = loraClipRef;
     }
     if (upload) {
         if (preset === "flux2-klein") {

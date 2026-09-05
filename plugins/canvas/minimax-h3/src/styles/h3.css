@@ -481,12 +481,8 @@
 .minimax-canvas-workbench .minimax-edit-timeline,
 .minimax-canvas-workbench .minimax-library { min-height:0; }
 
-/* 节点高度不足时收起 Output，优先保证预览、Prompt 和时间轴可用。 */
-@container (max-height: 428px) {
-    .minimax-canvas-workbench .minimax-library { display:none; }
-    .minimax-canvas-workbench .minimax-wb-body { grid-template-rows:var(--minimax-preview-h,220px) var(--minimax-timeline-h,320px) 0; }
-    .minimax-canvas-workbench .minimax-prompt-side { grid-row:1 / span 2; }
-}
+/* 节点高度不足时 Output 行由 minmax(0,1fr) 平滑压到 0（H3Workbench 高度预算负责收敛行1/行2），
+   不再用容器查询硬性 display:none —— 硬切会让拖动行高时 Output 突然消失/出现、其余行瞬间重排跳变。 */
 
 /* 工作台：Row1 Preview+Setting | Row2 Refs | Row3 Output (tall) | Row4 Clip Prompt | Status 底部。 */
 .minimax-wb-body { grid-template-columns:minmax(280px,min(var(--minimax-preview-w,960px),50%)) minmax(360px,1fr) minmax(240px,var(--minimax-prompt-w,480px)); grid-template-rows:var(--minimax-preview-h,220px) var(--minimax-timeline-h,320px) minmax(0,1fr); }

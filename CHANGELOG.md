@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- [优化] H3 行高手柄改为联动缩放：①Output 上边缘手柄——行1(preview)+行2(时间轴)作为整体按拖动前比例同涨同缩，Output 吃/补余量；②预览下边缘手柄——预览单独变，下方时间轴+Output 按拖起瞬间的实际高度比例分摊差值（时间轴受 190+refLaneH 下限、900 上限约束，超出部分由 Output 承接）。两把手柄均在拖起瞬间快照 previewH/timelineH/outputH/bodyH（本地 CSS px），拖动过程基于快照计算，不受中途重渲染影响。
+- [修复] 拖预览下边缘时 VideoRefs 区域猛的回弹（用户定位为 Output 区域隐藏触发）：①h3.css 里 wb-body ≤428px 时 Output `display:none` 的容器查询与拖动行高模型冲突——节点高度跨界瞬间 Output 硬切显隐、行结构重排跳变，已删除（Output 行 minmax(0,1fr) 本就会随空间平滑压到 0，预算系统接管后该查询多余）；②H3Workbench 高度预算收敛公式不连续——挤压态 effTimelineH=avail−effPreview 会算出比 metadata 值还大的时间轴高（受 250 下限与 42% 系数来回掰），脱离挤压态又跳回 metadata 值，改为单调连续分配（预览先让到 130 → 时间轴再让到 max(250, 190+Refs) 下限），边界处恰等于 metadata 值、无跳变。连同上一条 minT 回填修复，预览分界线全程拖动平滑。
+- [修复] 拖预览下边缘把时间轴压到最矮后继续下拉（节点自动长高阶段）时 VideoRefs 区域猛的回弹：预览分支在预览超过物理上限后把时间轴误回填为拖动起点的完整高度（快照 t0），改为保持下限 minT（190+Refs行高），与「预览吃增量、时间轴/Output 高度不变」的定案规则一致。
+- [修复] Video 行高度拉不大的限制：Video 行 = 时间轴高 − controls/刻度尺 − Refs 行高，此前 Refs/Video 分界线往下拉到 Refs 60px 下限就停，Video 行被钉死在「时间轴高 − 132px」。现该手柄越过 Refs 下限后继续下拉会自动增高时间轴面板（Video 行持续变大、Output 让位），上限改为物理约束（Output 至少留 ~80px：bodyH−116−预览，绝对顶 2000），不再有 900 硬顶；时间轴顶到节点物理上限后继续下拉会**自动增高 H3 节点本身**（updateNode 调节点高度，Output 高度保持不变，反向拖回时节点跟着缩回），Video 行不再受初始节点高度限制；同时 Refs 行高上限从写死 420 改为随时间轴高度（timelineH − 190），时间轴拉大后 Refs 也能拉更大，读取侧与拖动侧口径一致。
+- [调整] H3 行高手柄交互定为：①Output 上边缘手柄——预览高度不变，只调时间轴（行2），Output 吃/补余量；②预览下边缘手柄——Output 高度不变，预览与时间轴此消彼长（预览增多少时间轴让多少，受时间轴下限 190+refLaneH 约束）；时间轴压到下限后继续下拉会自动增高 H3 节点本身（预览吃增量、时间轴/Output 高度不变，反向拖回时节点缩回）；③Refs/Video 分界线越过 Refs 60px 下限后继续下拉会增高时间轴（Video 行变大、Output 让位）保持不变。
 - [优化] 智能分镜弹窗整体 UI 缩小：Modal 宽度 620 → 460，字段容器 fontSize 13 / gap 8，所有 label/span 字号 12，Select/Switch/Input 全部 size="small"，参考图片缩略图 172×172 → 84×84、字体 22/25 → 10/18，「从画布选择」按钮 padding 6×16 → 2×10、字号 12，整体创意 TextArea rows 5 → 3。
 - [优化] 智能分镜弹窗 UI 第二轮缩小：底部说明 fontSize 12 → 11、marginTop 16 → 10、lineHeight 1.6 → 1.5；参考图片缩略图 84×84 → 64×64、borderRadius 4 → 3；缩略图间距 gap 6 → 4、paddingBottom 4 → 2；加号图标 18 → 14；角标 / 关闭按钮全部缩小（width 14 → 12、fontSize 10 → 9）。
 - [修复] ruler 容器高度 28px 不够，22px 字号刻度文字溢出底部被 Video 行遮挡：ruler 高度提到 36px，22px 刻度文字完整显示。
@@ -20,8 +23,6 @@
 - [新增] H3 工作台每个模块都支持拖边动态调宽高：预览（下边缘调高/右边缘调宽）、Setting 右栏（左边缘调宽）、时间轴/Output（Output 上边缘：上拉 Output 增高、下拉时间轴增高）、时间轴 Refs 行（行上边缘上拉增高）。手柄位置改为 ResizeObserver 实测各模块真实边界后写入，不再用工具栏高度常量 + calc 变量链绝对定位（旧常量 58px 与工具栏实际高度不一致导致手柄漂移）；行高模型改为 行1/行2 固定 px + 行3(Output) 吃余量，并新增 `minimaxTimelineH`、启用 Refs 行高 `minimaxRefLaneH`（默认 150px），删除注入了但无消费者的 `minimaxClipPanelH`/`--minimax-clip-h` 与 `minimaxVideoTrackH`/`--minimax-video-h`。
 - [修复] 节点下方面板（参考内容/提示词编辑器）不再误触发节点拖拽：面板渲染在节点容器内部，节点根元素 capture 阶段的拖拽判定先于面板自身的 stopPropagation 执行，导致点击面板里的缩略图、标题、留白等非控件区域会拖动节点。现在面板容器带 `data-canvas-node-panel` 标记，capture 拖拽判定跳过面板区域，交互完整留给面板。
 - [修复] 图片节点主图（含单图节点）现在显示「下载」和「创建副本」工具栏：之前只有批量展开后的非主图卡片才显示「创建副本/设为主图」，主图卡片和单图节点只有「下载」。设为主图仅在非主图卡片上有意义，因此主图/单图节点仍不显示该项。
-
-- [修复] H3 节点 Clip 卡片现在能显示错误/loading/cancelled 视觉：H3Runner catch 块把 `segment.status` + `segment.errorDetails` 同步写进 segments 数组，H3ClipCard 读取后加 `is-error` / `is-loading` / `is-cancelled` className + 红底感叹号角标 + hover title 显示 errorDetails。之前 catch 块只把 status 写到 metadata 节点级、segments 数组里没 status，H3ClipCard 完全不读这个字段，导致用户感知为「Clip 卡片不更新」。
 - [修复] ComfyUI WebSocket 早断后 backend 拿不到 outputs：bridge.ts 加 `socket.onerror` / `socket.onclose` handler、补 `execution_success` 事件监听（之前只听 `executed` 单节点事件），`wsExecuted=true` 但 `/history` 被清理时扫描整个 `/history` 列表找最近成功条目兜底，WS 早断时主动 fail 而不是傻等 3 分钟。
 - [修复] H3 时间轴不再被总时长锁死：track-body / track-content / ref-content 改为 `min-width: total*50, width: 100%`，ref grid 也从百分比定位改为 px 定位，总时长 9s 时右边不再留出大段黑色空白，时间轴跟随父容器宽度拉满。
 - [修复] H3 时间轴 ruler 刻度按容器实际宽度动态生成：0-总时长 1.6s 主刻度 + 0.4s 副刻度，超过总时长部分按 5s 间隔继续标记，右侧空白处也有时间刻度参考。

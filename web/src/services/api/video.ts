@@ -7,8 +7,7 @@ import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { runModelPlugin } from "./model-plugin";
-import { runComfyTask, type LocalReference } from "./comfyui";
-import { useAgentStore } from "@/stores/use-agent-store";
+import { runComfyTask, resolveComfyEndpoint, type LocalReference } from "./comfyui";
 import type { ReferenceImage } from "@/types/image";
 
 type VideoResponse = { id: string; status?: string; error?: { message?: string }; url?: string; result_url?: string; video_url?: string; content?: { video_url?: string; url?: string } | null };
@@ -38,16 +37,15 @@ function aiHeaders(config: AiConfig, contentType?: string) {
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
     const requestConfig = resolveModelRequestConfig(config, (config.model || config.videoModel).trim());
     if (requestConfig.model === "flashvsr-1.1" && resolveModelChannel(config, (config.model || config.videoModel).trim()).kind === "comfyui") {
-        const agent = useAgentStore.getState();
-        if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法运行本地 FlashVSR");
-        const comfy = await fetch(`${agent.url}/comfy/config?token=${encodeURIComponent(agent.token)}`).then(async (response) => {
+        const comfyEndpoint = resolveComfyEndpoint();
+        const comfy = await fetch(`${comfyEndpoint.endpoint}/comfy/config?token=${encodeURIComponent(comfyEndpoint.token)}`).then(async (response) => {
             if (!response.ok) throw new Error(`读取 ComfyUI 配置失败（HTTP ${response.status}）`);
             return await response.json() as { url?: string };
         });
         if (!comfy.url) throw new Error("尚未配置本地 ComfyUI 地址");
         const video = options?.videoReferences?.[0];
         if (!video) throw new Error("FlashVSR 至少需要连接一个源视频");
-        const result = await runComfyTask(agent.url, agent.token, comfy.url, "flashvsr-1.1", prompt, [video], { longEdge: config.size }, options?.signal, options?.onTaskId);
+        const result = await runComfyTask(comfyEndpoint.endpoint, comfyEndpoint.token, comfy.url, "flashvsr-1.1", prompt, [video], { longEdge: config.size }, options?.signal, options?.onTaskId);
         return { url: result.url, mimeType: result.mimeType || "video/mp4" };
     }
     const task = await createVideoGenerationTask(config, prompt, references, options);

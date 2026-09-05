@@ -183,7 +183,7 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
             const desiredP = p0 + delta;
             if (state.bodyH && state.nodeH) ctx.updateNode({ height: Math.round(state.nodeH + Math.max(0, Math.min(desiredP - maxP0, 2000 - maxP0))) });
             const newP = Math.round(Math.max(130, Math.min(2000, desiredP)));
-            const newT = newP > maxP0 ? minT : Math.round(Math.max(minT, Math.min(2000, t0 - (newP - p0))));
+            const newT = newP > maxP0 ? t0 : Math.round(Math.max(minT, Math.min(2000, t0 - (newP - p0))));
             ctx.updateMetadata({ minimaxPreviewH: newP, minimaxTimelineH: newT });
             return;
         }

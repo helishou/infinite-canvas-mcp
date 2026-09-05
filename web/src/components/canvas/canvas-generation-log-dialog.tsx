@@ -40,55 +40,25 @@ export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: 
     };
     return <Modal title={`生成日志${logs.length ? ` (${logs.length}${hasMore ? "+" : ""})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
         <div className="mb-3 flex justify-end"><Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button></div>
-        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? "加载中…" : "暂无生成日志"} /> : <VirtualLogList logs={logs} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={(id) => void remove(id)} />}
+        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? "加载中…" : "暂无生成日志"} /> : <LogList logs={logs} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={(id) => void remove(id)} />}
     </Modal>;
 }
 
-function VirtualLogList({ logs, hasMore, loadingMore, onLoadMore, onDelete }: { logs: GenerationLog[]; hasMore: boolean; loadingMore: boolean; onLoadMore: () => void; onDelete: (id: string) => void }) {
-    const [scrollTop, setScrollTop] = useState(0);
-    const [heights, setHeights] = useState<number[]>([]);
-    const rowHeights = useMemo(() => logs.map((_, index) => heights[index] || ESTIMATED_ROW_HEIGHT), [heights, logs]);
-    const positions = useMemo(() => {
-        const result = [0];
-        for (const height of rowHeights) result.push(result[result.length - 1] + height + 12);
-        return result;
-    }, [rowHeights]);
-    const firstVisible = Math.max(0, positions.findIndex((top, index) => index < logs.length && top + rowHeights[index] >= scrollTop));
-    const start = Math.max(0, firstVisible - 3);
-    const end = Math.min(logs.length, Math.max(start + 1, positions.findIndex((top) => top >= scrollTop + 720) + 3));
-    const reportHeight = useCallback((index: number, height: number) => setHeights((current) => {
-        if (current[index] === height) return current;
-        const next = [...current];
-        next[index] = height;
-        return next;
-    }), []);
+function LogList({ logs, hasMore, loadingMore, onLoadMore, onDelete }: { logs: GenerationLog[]; hasMore: boolean; loadingMore: boolean; onLoadMore: () => void; onDelete: (id: string) => void }) {
+    // 普通文档流渲染（每页 30 条，无需虚拟化）。之前的手写虚拟列表用 absolute+top 定位，
+    // 行高靠 getBoundingClientRect 测量——antd Modal 打开动画（transform 缩放）期间测得
+    // 偏小的行高且 ResizeObserver 事后不重报，导致条目相互重叠错位；删除/刷新后按索引
+    // 缓存的高度也会错配。改回流式布局后此类错位不存在。
     const onScroll = (event: React.UIEvent<HTMLDivElement>) => {
         const element = event.currentTarget;
-        setScrollTop(element.scrollTop);
         if (hasMore && element.scrollTop + element.clientHeight >= element.scrollHeight - 600) onLoadMore();
     };
     return <div onScroll={onScroll} className="max-h-[65vh] overflow-y-auto pr-1">
-        <div className="relative" style={{ height: `${positions[logs.length]}px` }}>
-            {logs.slice(start, end).map((log, offset) => {
-                const index = start + offset;
-                return <VirtualLogRow key={log.id} index={index} top={positions[index]} onHeight={reportHeight}><LogCard log={log} onDelete={() => onDelete(log.id)} /></VirtualLogRow>;
-            })}
+        <div className="flex flex-col gap-3">
+            {logs.map((log) => <LogCard key={log.id} log={log} onDelete={() => onDelete(log.id)} />)}
         </div>
         {loadingMore ? <div className="py-2 text-center text-xs text-stone-500">加载更多…</div> : null}
     </div>;
-}
-
-function VirtualLogRow({ index, top, onHeight, children }: { index: number; top: number; onHeight: (index: number, height: number) => void; children: React.ReactNode }) {
-    const ref = useRef<HTMLDivElement>(null);
-    useEffect(() => {
-        if (!ref.current) return;
-        const update = () => onHeight(index, ref.current?.getBoundingClientRect().height || ESTIMATED_ROW_HEIGHT);
-        update();
-        const observer = new ResizeObserver(update);
-        observer.observe(ref.current);
-        return () => observer.disconnect();
-    }, [index, onHeight]);
-    return <div ref={ref} className="absolute inset-x-0" style={{ top } as CSSProperties}>{children}</div>;
 }
 
 function collectReferences(log: GenerationLog): Array<Record<string, unknown>> {

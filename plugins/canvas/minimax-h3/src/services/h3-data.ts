@@ -32,7 +32,7 @@ export function resultUrl(value: unknown) {
     return String(item.url || item.video_url || item.content || item.localUrl || "");
 }
 
-export function appendVideoMaterials(existing: unknown, additions: Array<{ url: string; storageKey?: string; type: string; name: string; segmentId?: string }>) {
+export function appendVideoMaterials(existing: unknown, additions: Array<{ url: string; storageKey?: string; type: string; name: string; segmentId?: string; params?: Record<string, unknown> }>) {
     const current = Array.isArray(existing) ? existing.filter((item) => item && typeof item === "object") as Array<Record<string, unknown>> : [];
     // 保留现有 item 上的 segmentId，避免 dedupe-by-URL 把归属信息丢掉。
     // 如果 existing 里的某条已被新 additions 覆盖，使用新 additions 的 segmentId。

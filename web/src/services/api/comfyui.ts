@@ -1,6 +1,20 @@
 import { fetchAgentJson } from "./canvas-agent";
 import { backendMediaUrl, getBackendUrl, uploadBackendMedia } from "@/services/backend-api";
 import { getBackendTokenShared } from "@/lib/backend-token";
+import { useAgentStore } from "@/stores/use-agent-store";
+
+/**
+ * 本地 ComfyUI 任务的请求端点解析。
+ * 优先走已连接的本地 Agent（Canvas Agent）；若未连接（用户只启动了总后台 backend），
+ * 则回退到总后台自身——总后台已有完整的 /comfy/tasks 路由（与 H3 节点同一条链路），
+ * 无需强制要求本地 Agent 在线。
+ */
+export function resolveComfyEndpoint(): { endpoint: string; token: string } {
+    const agent = useAgentStore.getState();
+    const agentToken = agent.token.trim();
+    if (agentToken) return { endpoint: agent.url.trim().replace(/\/$/, ""), token: agentToken };
+    return { endpoint: getBackendUrl().replace(/\/$/, ""), token: getBackendTokenShared() };
+}
 
 export type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
 type ComfyMedia = { url: string; mimeType: string; storageKey?: string };
