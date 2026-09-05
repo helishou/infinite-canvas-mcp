@@ -180,7 +180,6 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
             <div className="minimax-video-label">Video</div>
             <div className="minimax-ref-label">Refs</div>
         </div>
-        <div className="minimax-add-gutter" />
         <div ref={trackScrollRef} className="minimax-tracks-scroll" style={{ overflowX: hasHorizontalOverflow ? "auto" : "hidden" }} onScroll={(event) => persistScroll(event.currentTarget.scrollLeft)}>
             <div className="minimax-track-body" style={{ minWidth: timelineMinWidth, width: "100%" }}>
                 <div className="minimax-ruler-row" style={{ width: trackWidth }}>

@@ -34,19 +34,19 @@
 .minimax-player-image,.minimax-player-image img { width:100%; height:100%; object-fit:contain; }
 .minimax-player-stage video,.minimax-player-stage img { width:100%; height:100%; object-fit:contain; background:#0b0c0e; }
 .minimax-player-empty { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:26px; font-weight:850; }
-.minimax-edit-timeline { position:relative; min-width:0; min-height:140px; display:grid; grid-template-columns:1fr 54px; grid-template-rows:44px minmax(0,1fr); border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
+.minimax-edit-timeline { position:relative; min-width:0; min-height:140px; display:grid; grid-template-columns:36px minmax(0,1fr) 54px; grid-template-rows:44px minmax(0,1fr); border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
 
 /* 左侧标签列：与右侧 Video / Refs 行精确对齐，第一行占满剩余高度，第二行固定 96px */
-.minimax-left-labels { grid-column:1; grid-row:2; display:grid; grid-template-rows:1fr 192px; background:#202328; border-right:1px solid #2f3338; }
+.minimax-left-labels { grid-column:1; grid-row:1 / span 2; display:grid; grid-template-rows:36px 1fr 96px; background:#202328; border-right:1px solid #2f3338; }
 .minimax-left-labels .minimax-video-label { display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:22px; font-weight:900; border-bottom:1px solid #2f3338; }
 .minimax-left-labels .minimax-ref-label { display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:22px; font-weight:900; }
 .minimax-add-gutter { grid-column:3; grid-row:1; background:#202328; border-left:1px solid #2f3338; border-bottom:1px solid #2f3338; }
 /* 右侧 gutter：放置新增 Clip 按钮 */
-.minimax-track-gutter { grid-column:3; grid-row:2; display:flex; align-items:flex-start; justify-content:center; background:#15171a; border-left:1px solid #2f3338; }
+.minimax-track-gutter { grid-column:3; grid-row:1 / span 2; display:flex; align-items:flex-start; justify-content:center; background:#15171a; border-left:1px solid #2f3338; }
 .minimax-video-add { width:60px; height:56px; border:1px solid #39414c; border-radius:7px; background:#252a31; color:#d1d5db; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .15s ease,border-color .15s ease,color .15s ease,transform .15s ease; }
 .minimax-video-add:hover { border-color:#6d7d91; background:#303844; color:#fff; transform:translateY(-1px); }
 /* 单一横向滚动容器：Ruler + Video + Refs 上下合并，共用同一 scrollLeft，彻底消除错位 */
-.minimax-tracks-scroll { grid-column:2; grid-row:2; position:relative; min-width:0; height:100%; min-height:0; overflow-x:auto; overflow-y:hidden; }
+.minimax-tracks-scroll { grid-column:2; grid-row:1 / span 2; position:relative; min-width:0; height:100%; min-height:0; overflow-x:auto; overflow-y:hidden; }
 .minimax-track-body { height:100%; min-height:0; display:flex; flex-direction:column; }
 .minimax-ruler-row { flex:0 0 36px; position:relative; display:flex; align-items:center; border-bottom:1px solid #2f3338; background:#202328; }
 .minimax-ruler-play-all { position:absolute; left:0; top:0; bottom:0; width:36px; flex:0 0 36px; padding:0; border:0; border-right:1px solid #2f3338; background:#1a1d22; color:#cbd5e1; display:flex; align-items:center; justify-content:center; cursor:pointer; }
