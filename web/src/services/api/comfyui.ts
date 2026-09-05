@@ -1,4 +1,4 @@
-import { fetchAgentJson } from "./canvas-agent";
+import { fetchAgentJson, AgentApiError } from "./canvas-agent";
 import { backendMediaUrl, getBackendUrl, uploadBackendMedia } from "@/services/backend-api";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { useAgentStore } from "@/stores/use-agent-store";
@@ -72,6 +72,26 @@ function proxyComfyMedia(item: ComfyMedia, endpoint: string, token: string): Com
     }
 }
 
+/**
+ * 轮询任务状态时容忍网络层瞬时失败（backend dev 是 tsx --watch，源码变更会让 backend 重启
+ * 几秒；ComfyUI 任务本身不受影响）。此前一次 fetch 失败就把还在跑的任务判死为
+ * "Failed to fetch"。HTTP 4xx/5xx 是确定性错误（token/404 等），不重试直接抛。
+ */
+async function pollTaskWithRetry<T>(fetchOnce: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    let failures = 0;
+    for (;;) {
+        try {
+            return await fetchOnce();
+        } catch (error) {
+            if (error instanceof AgentApiError) throw error;
+            failures += 1;
+            if (failures > 15) throw error;
+            await new Promise((resolve) => setTimeout(resolve, Math.min(1200 * failures, 5000)));
+            if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        }
+    }
+}
+
 export async function runComfyTask(endpoint: string, token: string, comfyUrl: string, preset: string, prompt: string, references: LocalReference[], params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void) {
     const synced = await Promise.all(references.map((reference) => syncReference(endpoint, token, reference, signal, true)));
     const input: Record<string, unknown> = { prompt };
@@ -81,7 +101,7 @@ export async function runComfyTask(endpoint: string, token: string, comfyUrl: st
     onTaskId?.(created.task.id);
     for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${created.task.id}`);
+        const response = await pollTaskWithRetry(() => fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${created.task.id}`), signal);
         if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
             if (response.task.status !== "succeeded") throw new Error(response.task.error || "ComfyUI 任务失败");
             const media = response.task.result?.media?.[0];
@@ -118,7 +138,7 @@ export async function runLocalH3Task(endpoint: string, token: string, comfyUrl: 
     onTaskId?.(created.task.id);
     for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${created.task.id}`);
+        const response = await pollTaskWithRetry(() => fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${created.task.id}`), signal);
         if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
             // cancelled 不是失败：抛出可识别错误，调用方会按 cancelRequested 走取消分支，
             // 不再被 catch 误判成 "MiniMax H3 任务失败"。
@@ -158,7 +178,7 @@ export async function runVideoConcatTask(endpoint: string, token: string, videos
     signal?.addEventListener("abort", cancel, { once: true });
     for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const response = await fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, `/runtime/tasks/${created.task.id}`);
+        const response = await pollTaskWithRetry(() => fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, `/runtime/tasks/${created.task.id}`), signal);
         if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
             if (response.task.status !== "succeeded") throw new Error(response.task.error || "视频拼接失败");
             const media = response.task.result?.media;
@@ -179,7 +199,7 @@ export async function runRunningHubH3Task(endpoint: string, token: string, promp
     onTaskId?.(created.task.id);
     for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/runninghub/tasks/${created.task.id}`);
+        const response = await pollTaskWithRetry(() => fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/runninghub/tasks/${created.task.id}`), signal);
         if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
             if (response.task.status === "cancelled") {
                 const err = new Error(response.task.error || "H3 任务已取消");

@@ -49,6 +49,8 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
     app.get(routePath("/comfy/tasks/:id"), (req, res) => {
         const task = stores.tasks.get(req.params.id);
         if (!task || !task.kind.startsWith("comfyui:")) return void res.status(404).json({ ok: false, error: "task not found" });
+        // backend 重启后遗留的 running 任务在此懒恢复（用 events 里的 promptId 重新挂观察循环）
+        if (task.status === "running" || task.status === "queued") bridge.resume(task.id);
         res.json({ ok: true, task, events: stores.tasks.events(req.params.id, Number(req.query.after || 0)) });
     });
 

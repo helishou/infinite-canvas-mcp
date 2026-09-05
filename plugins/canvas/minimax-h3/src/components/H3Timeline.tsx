@@ -21,6 +21,7 @@ type H3TimelineProps = {
 
 export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlayAll, fmt }: H3TimelineProps) {
     const trackScrollRef = useRef<HTMLDivElement | null>(null);
+    const rulerInnerRef = useRef<HTMLDivElement | null>(null);
     const pendingScrollIdRef = useRef<string | null>(null);
     const restoredRef = useRef(false);
     const scrollPersistRafRef = useRef<number | null>(null);
@@ -87,6 +88,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         const rightPx = (Number(segment.start || 0) + Math.max(0.5, Number(segment.duration || 1))) * 100;
         const target = Math.max(0, rightPx - track.clientWidth);
         track.scrollLeft = target;
+        if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${target}px)`;
         persistScroll(target);
     }, [persistScroll]);
     // 新增 Clip 后，在 DOM 提交（内容宽度已更新）后确定性地把时间轴滚到该 Clip 最右侧
@@ -105,6 +107,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         const left = Number(ctx.node.metadata?.timelineScrollLeft || 0);
         if (left > 0 && trackScrollRef.current) {
             trackScrollRef.current.scrollLeft = left;
+            if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${left}px)`;
         }
     });
     // 卸载时清理 rAF，避免内存泄漏或已卸载组件的状态更新
@@ -199,10 +202,12 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
             <div className="minimax-ref-label">Refs</div>
         </div>
         <div className="minimax-ruler-row" style={{ width: trackWidth }}>
+            <div ref={rulerInnerRef} style={{ width: trackWidth }}>
             {majorTicks.map((tick, index) => <span className="minimax-tick" key={`M-${index}`} style={{ left: `${tick.left}px` }}><b>{fmt(tick.time)}</b></span>)}
             <span className="minimax-playhead minimax-playhead-marker" style={{ left: `${playhead * 100}px` }} />
+            </div>
         </div>
-        <div ref={trackScrollRef} className="minimax-tracks-scroll" style={{ overflowX: hasHorizontalOverflow ? "auto" : "hidden" }} onScroll={(event) => persistScroll(event.currentTarget.scrollLeft)}>
+        <div ref={trackScrollRef} className="minimax-tracks-scroll" style={{ overflowX: hasHorizontalOverflow ? "auto" : "hidden" }} onScroll={(event) => { const left = event.currentTarget.scrollLeft; persistScroll(left); if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${left}px)`; }}>
             <div className="minimax-track-body" style={{ minWidth: timelineMinWidth, width: "100%" }}>
                 <div className="minimax-video-row">
                     <div className="minimax-track-content" style={{ minWidth: timelineMinWidth, width: "100%" }}>

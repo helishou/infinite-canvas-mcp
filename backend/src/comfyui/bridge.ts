@@ -135,6 +135,60 @@ export class ComfyUiBackend {
         return task;
     }
 
+    private readonly resuming = new Set<string>();
+
+    /**
+     * backend 重启（tsx --watch 源码变更等）会杀掉内存中的执行循环，遗留 status=running 的任务
+     * 永远无人跟踪。这里懒恢复：GET 任务时发现 running/queued 且本进程没有活跃执行，
+     * 就用 task_events 里 "submitted" 事件记录的 promptId 重新挂一个 /history 观察循环，
+     * 任务真正跑完后照常回写结果，前端轮询方（已加重试）无需感知重启。
+     */
+    resume(id: string) {
+        const task = this.deps.tasks.get(id);
+        if (!task || !["queued", "running"].includes(task.status) || this.comfyExecutions.has(id) || this.resuming.has(id)) return;
+        const promptId = this.deps.tasks.events(id).find((event) => event.type === "submitted")?.payload?.promptId;
+        if (typeof promptId !== "string" || !promptId) return; // 从未提交到 ComfyUI，无法恢复
+        this.resuming.add(id);
+        this.comfyExecutions.set(id, { url: this.url, promptId });
+        const controller = new AbortController();
+        this.controllers.set(id, controller);
+        void this.watchRecovered(id, this.url, promptId, controller)
+            .catch((error) => this.fail(id, error))
+            .finally(() => { this.controllers.delete(id); this.comfyExecutions.delete(id); this.resuming.delete(id); });
+    }
+
+    /** 重启恢复专用的观察循环：只依赖 /history（无 WS 通道），ComfyUI 自身没重启就能等到结果。 */
+    private async watchRecovered(taskId: string, comfyUrl: string, promptId: string, controller: AbortController) {
+        const started = Date.now();
+        for (;;) {
+            if (controller.signal.aborted) return;
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            try {
+                const response = await fetch(`${comfyUrl}/history/${encodeURIComponent(promptId)}`, { signal: controller.signal });
+                if (response.ok) {
+                    const history = await response.json() as Record<string, any>;
+                    const item = history[promptId];
+                    const statusStr = item?.status?.status_str;
+                    if (statusStr === "error" || statusStr === "failed") throw new Error(extractComfyErrorMessage(item.status));
+                    const hasOutputs = !!(item?.outputs && typeof item.outputs === "object" && Object.keys(item.outputs).length > 0);
+                    if (statusStr === "success" || item?.status?.completed || hasOutputs) {
+                        if (!hasOutputs) throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item.status)}`);
+                        const result = { promptId, outputs: item.outputs, media: await collectOutputMedia(item.outputs, comfyUrl, this.deps.media, controller.signal), status: item.status || {} };
+                        this.updateTask(taskId, { status: "succeeded", progress: 1, result });
+                        this.deps.tasks.addEvent(taskId, "result", result);
+                        return;
+                    }
+                }
+            } catch (error) {
+                if (controller.signal.aborted) return;
+                // 瞬时网络错误（ComfyUI 抖动）继续等；确定性失败向上抛给 fail()
+                if (!(error instanceof Error) || /fetch failed|HTTP \d+|ECONN|socket/i.test(error.message)) continue;
+                throw error;
+            }
+            if (Date.now() - started > 60 * 60 * 1000) throw new Error("恢复观察超时（1 小时）未等到 ComfyUI 结果，请重新发起生成");
+        }
+    }
+
     private async execute(task: RuntimeTask, preset: ComfyPreset, comfyUrl: string) {
         if (this.deps.tasks.get(task.id)?.status === "cancelled") return;
         const controller = new AbortController(); this.controllers.set(task.id, controller);

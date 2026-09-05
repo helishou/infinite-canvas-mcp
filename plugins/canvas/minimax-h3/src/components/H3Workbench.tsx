@@ -5,7 +5,7 @@ import { segmentsFor } from "../hooks/useH3Segments";
 import { refsForSegment, resultUrl, withSegmentRefs } from "../services/h3-data";
 import { normalizeDroppedH3Ref, readH3Refs } from "../services/h3-refs";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
-import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, requestH3Run } from "./H3WorkbenchPrimitives";
+import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
 import { H3ClipSettingsPanel } from "./H3ClipSettingsPanel";
@@ -47,9 +47,9 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const refLaneRaw = Math.max(60, Math.min(900, Number(metadata.minimaxRefLaneH || 150)));
     const timelineH = Math.max(190 + refLaneRaw, Math.min(2000, Number(metadata.minimaxTimelineH || 320)));
     const refLaneH = Math.min(refLaneRaw, timelineH - 190);
-    // 高度预算：节点在画布上可被任意压缩。行1/行2 是固定 px，超出 wb-body 可用高度时
-    // 栅格会溢出裁切、行与行互相挤压（Refs 压扁、刻度被裁）。这里实测 body 高度，
-    // 超预算时按「预览先让 → Refs 跟让 → 时间轴保内部最小结构」收敛出有效行高。
+    // 行高预算：节点被画布手动压小、行1+行2+Output 装不下时连续收敛
+    //（预览先让到 130 → 时间轴再让到 max(250, 190+Refs) 下限，Output 始终保底 80）。
+    // 求解函数与拖拽侧共用（h3SolveRows）；挤压态的收敛值由 H3PaneHandles 回写 metadata，保持「存的值 = 看到的值」。
     const bodyRef = useRef<HTMLDivElement | null>(null);
     const [bodyH, setBodyH] = useState(0);
     useEffect(() => {
@@ -60,27 +60,10 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         setBodyH(el.clientHeight);
         return () => ro.disconnect();
     }, []);
-    let effPreviewH = previewH;
-    let effTimelineH = timelineH;
-    let effRefLaneH = refLaneH;
-    if (bodyH > 0) {
-        // 高度预算：行1+行2 超出 wb-body 可用高度时连续收敛——预览先让（到 130 下限），
-        // 时间轴再让（到 max(250, 190+Refs) 下限），Output 行 minmax(0,1fr) 自然吃剩余/压到 0。
-        // 全程单调连续（脱离挤压态时恰好等于 metadata 值），边界上不会跳变。
-        const avail = bodyH - 36; // wb-body 自身 padding+gap
-        let p = previewH;
-        let t = timelineH;
-        const over = Math.max(0, p + t - avail);
-        if (over > 0) {
-            const dp = Math.min(over, Math.max(0, p - 130));
-            p -= dp;
-            const rest = over - dp;
-            if (rest > 0) t -= Math.min(rest, Math.max(0, t - Math.max(250, 190 + refLaneH)));
-        }
-        effPreviewH = Math.round(p);
-        effTimelineH = Math.round(t);
-        effRefLaneH = Math.max(60, Math.min(refLaneH, effTimelineH - 190));
-    }
+    const solved = bodyH > 0 ? h3SolveRows(bodyH, previewH, timelineH, refLaneH) : { p: previewH, t: timelineH, r: refLaneH };
+    const effPreviewH = solved.p;
+    const effTimelineH = solved.t;
+    const effRefLaneH = solved.r;
     const playRequest = Number(metadata.h3PlayRequest || 0);
     const [smartStoryboardOpen, setSmartStoryboardOpen] = useState(false);
     const [smartStoryboardUploads, setSmartStoryboardUploads] = useState<H3Ref[]>([]);

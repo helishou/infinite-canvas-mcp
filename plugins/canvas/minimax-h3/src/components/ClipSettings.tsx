@@ -7,9 +7,8 @@ import type { H3Segment } from "../types";
 
 type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; segment?: H3Segment; patch: (value: Partial<H3Segment>) => void };
 type SectionKey = "mode" | "model" | "sampling" | "lora" | "sla" | "runtime" | "latentUpscale" | "preview" | "rtx" | "audio";
-const sectionKeys: SectionKey[] = ["mode", "model", "sampling", "lora", "sla", "runtime", "latentUpscale", "preview", "rtx", "audio"];
-const modeLabels = { t2v: "文生视频", i2v: "图生视频", fl2v: "首尾帧", ref2va: "多参考 Ref2VA" } as const;
-const modeHints = { t2v: "不使用图片", i2v: "1 张首帧", fl2v: "首帧＋尾帧", ref2va: "图片 / 视频 / 音频" } as const;
+const sectionKeys: SectionKey[] = ["model", "sampling", "lora", "sla", "runtime", "latentUpscale", "preview", "rtx", "audio"];
+const modeLabels = { t2v: "文生视频", i2v: "图生视频", fl2v: "首尾帧", ref2va: "多参考" } as const;
 const encoderTypes = ["minimax"];
 const encoderDevices = ["default", "cpu"];
 const precisions = ["default", "fp8_e4m3fn", "fp8_e5m2"];
@@ -103,7 +102,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     // 先触发打开，但右侧箭头区域会被父层抢走。阻止事件继续冒泡，保证整个
     // selector（包括箭头）都是同一个下拉触发热区。
     const field = { width: "100%" } as const;
-    const section = (key: SectionKey, title: string, summary: ReactNode, content: ReactNode, className = "", dataActive?: string) => <section key={`nfh3-sec-${key}`} className={`nfh3-section ${className}`} data-section={key} {...(dataActive ? { "data-active-mode": dataActive } : {})}><button type="button" className="nfh3-section-head" onClick={() => setOpen(key)}><span className={`nfh3-chevron${expanded[key] === true ? " is-open" : ""}`} aria-hidden="true" /><b>{title}</b><small>{summary}</small></button>{expanded[key] === true ? <div className="nfh3-section-body">{content}</div> : null}</section>;
+    const section = (key: SectionKey, title: string, summary: ReactNode, content: ReactNode, className = "") => <section key={`nfh3-sec-${key}`} className={`nfh3-section ${className}`} data-section={key}><button type="button" className="nfh3-section-head" onClick={() => setOpen(key)}><span className={`nfh3-chevron${expanded[key] === true ? " is-open" : ""}`} aria-hidden="true" /><b>{title}</b><small>{summary}</small></button>{expanded[key] === true ? <div className="nfh3-section-body">{content}</div> : null}</section>;
     const enabledSummary = (text: string) => <span className="nfh3-enabled-summary">{text}</span>;
     const control = (label: string, value: ReactNode, wide = false) => <label key={`nfh3-ctl-${label}`} className={`nfh3-control${wide ? " wide" : ""}`}><span>{label}</span>{value}</label>;
     const choice = (label: string, values: Array<string | number>, value: unknown, onChange: (value: string | number) => void, format?: (value: string | number) => string, wide = false, searchable = false) => control(label, <H3Dropdown values={values} value={value as string | number} onChange={onChange} format={format} searchable={searchable} listId={`nfh3-${label}-options`} />, wide);
@@ -124,7 +123,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const createSigmaPreset = () => { const name = window.prompt("Sigma 预设名称", `南风${sigmaPresetNames.length + 1}步`); if (name) saveSigmaPreset(name); };
     const deleteSigmaPreset = () => { if (!selectedSigmaPreset) return; const next = { ...sigmaPresets }; delete next[selectedSigmaPreset]; setSigmaPresets(next); void ctx.storage.set("h3-sigma-presets", next); ctx.updateMetadata({ h3SigmaPresetName: Object.keys(next)[0] || "" }); };
     return <div className="nfh3-settings">
-        {section("mode", "生成模式", modeLabels[mode] || modeLabels.ref2va, <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" data-mode={key} className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b><small>{modeHints[key]}</small><i>{mode === key ? "✓" : ""}</i></button>)}</div>, "", mode)}
+        <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" data-mode={key} className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b></button>)}</div>
         {section("model", "模型与基础参数", String(segment.modelName || "未选择模型").replace(/^.*[\\/]/, ""), <div className="nfh3-control-grid">
             {control("模型", <H3Dropdown values={modelOptions.map((item) => item.value)} value={segment.modelName || modelOptions[0]?.value} onChange={(value) => patch({ modelName: String(value) })} placeholder="选择模型" />, true)}
             {control("文本编码器", <H3Dropdown values={catalog.textEncoders.filter((value) => /minimax/i.test(value))} value={segment.textEncoder || catalog.textEncoders.find((value) => /minimax/i.test(value))} onChange={(value) => patch({ textEncoder: String(value) })} placeholder="选择文本编码器" />, true)}

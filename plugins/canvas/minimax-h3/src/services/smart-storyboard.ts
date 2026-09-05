@@ -101,7 +101,10 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
     const count = Math.max(1, Math.min(12, Number(ctx.node.metadata?.smartStoryboardCount || 3)));
     const mode = String(ctx.node.metadata?.smartStoryboardMode || "ref2va") as StoryboardMode;
     const skillId = String(ctx.node.metadata?.smartStoryboardSkill || "regular_storyboard") as StoryboardSkill;
-    ctx.updateMetadata({ smartStoryboardStatus: "loading", errorDetails: "正在分析参考图并生成智能分镜…" });
+    // 进度消息只能写 smartStoryboardError（智能分镜自己的字段），禁止碰 errorDetails——
+    // 那是生成任务的错误字段，底部状态栏会加「失败：」前缀展示；此前把进度写进去，
+    // 节点带着旧的 error 状态时就出现「失败：参考图分析完成，正在生成智能分镜…」的错乱红标。
+    ctx.updateMetadata({ smartStoryboardStatus: "loading", smartStoryboardError: "正在分析参考图并生成智能分镜…" });
     try {
         if (duration < 1 || duration > 15) throw new Error("视频时长必须为1到15秒");
         validateStoryboardMode(mode, images);
@@ -140,7 +143,7 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
                 ? images
                 : orderedRefs;
         const messages = storyboardMessages(storyboardSkill(mode, skillId), String(ctx.node.metadata?.smartStoryboardIdea || ctx.node.metadata?.prompt || ""), count, allowedRefs, analysisParts.join("\n\n"), mode, duration);
-        ctx.updateMetadata({ smartStoryboardStatus: "loading", errorDetails: "参考图分析完成，正在生成智能分镜…" });
+        ctx.updateMetadata({ smartStoryboardStatus: "loading", smartStoryboardError: "参考图分析完成，正在生成智能分镜…" });
         const modelRefs = await Promise.all(allowedRefs.filter((ref) => ref.type === "image").map(async (ref) => ({ ...ref, url: await imageReferenceUrl(ref) })));
         let result;
         try {

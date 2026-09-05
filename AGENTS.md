@@ -56,6 +56,10 @@
 - 画布内的操作按钮（如面板里的「添加」「导出」「选择」等）默认用扁平无底色样式：透明背景、仅 `hover:bg-black/5 dark:hover:bg-white/10` 轻微反馈，靠图标+文字表达，不要用 `theme.toolbar.activeBg`（`#e7e5df`/`#3a3631`）或 `theme.node.fill` 之类的灰色作为按钮填充底色。灰色 `activeBg` 只允许用于「选中态」等需要表达状态的高亮，不要当普通装饰底色。
 - 图片节点尺寸逻辑要尊重原始比例，除非功能明确要求自由变形。
 - 批量生成、多图展示、助手面板等画布交互要尽量简洁，不要占用过多画布空间。
+- H3 节点行高手柄交互规则（用户多次强调，任何行高/拖动逻辑改动都必须遵守）：
+  - 拖 Output 和 VideoRefs 的分界线时：上面的 preview 高度不变，只有 Output 和 VideoRefs（时间轴）高度变化。
+  - 拖 VideoRefs 和 preview 的分界线时：下面的 Output 高度不变，只调 VideoRefs（时间轴）和 preview。
+  - 空间不足时由节点自动长高/缩回兜底，不允许出现「拖 A 时 B/C 跟着变」的联动串扰。
 
 ## 文档规范
 
@@ -101,4 +105,5 @@
   - 改 `canvas-agent/src` 后，在 `canvas-agent` 目录执行 `node node_modules/typescript/bin/tsc -p tsconfig.json`，重新生成 `dist/`（backend 通过 `node_modules/@basketikun/canvas-agent` 软链加载的是 `dist`，不是源码）。
   - 这两类产物目录都在 `.gitignore` 中，不随提交分发，**只提交源码等于没改**。
   - `backend` 用 `tsx src/index.ts` 启动且未开启 watch，改 `backend/src` 或重建 `canvas-agent/dist` 后都要重启 backend 才生效。
+  - `web/dist` 是 vite build 的产物快照（构建时把 `public/` 拷走）：之后只重建插件只更新 `public/`，**不会更新 `web/dist`**——页面若加载 dist 里的插件就会一直跑旧代码。minimax-h3 的 `build.mjs` 已在构建后自动同步一份到 `web/dist/plugins/`；其他插件如遇同样问题，排查时先比对 `web/public/plugins/` 与 `web/dist/plugins/` 里同名文件的修改时间和大小。
 - 排查「改了代码但问题依旧」时，先做两件事再往下查：比对源码与产物的修改时间确认产物已更新；确认请求实际命中的进程与端点，不要假定同名路由是同一个实现（例如插件的媒体上传走 `/agent/runtime/media`，由 canvas-agent 处理，与 backend 的 `/runtime/media` 是两套独立实现）。
