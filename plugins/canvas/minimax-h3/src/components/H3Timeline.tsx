@@ -46,31 +46,14 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         observer.observe(node);
         return () => observer.disconnect();
     }, [timelineMinWidth]);
-    const majorInterval = 1.6;
-    const majorCount = Math.floor(total / majorInterval) + 1;
-    const majorTicks = Array.from({ length: majorCount }, (_, index) => ({ time: index * majorInterval, left: index * majorInterval * 50 }));
-    const minorInterval = 0.4;
-    const minorCount = Math.floor(total / minorInterval) + 1;
-    const minorTicks = Array.from({ length: minorCount }, (_, index) => ({ left: index * minorInterval * 50 }));
-    // ruler 容器宽度可能比总时长宽很多（比如 20s 总时长但容器 40s 宽），
-    // 0~总时长部分用 1.6s 主刻度，超过总时长部分用 5s 主刻度继续标记到 ruler 容器右边缘。
-    // 但当容器剩余宽度 < 5s 时（如 total=20s 容器 22s 宽只多 2s），用 5s 间隔会落到容器外；
-    // 此时用较小间隔（1.6s）继续铺，确保 ruler 容器内 0s 到右边缘都有连续刻度。
-    const extendedInterval = 5;
+    // ruler 刻度根据滚动容器实测宽度动态生成：统一 5s 一格，从 0s 开始
+    // 一直铺到 ruler 容器右边缘（包括超过总时长部分）。
+    const tickInterval = 5;
     const containerSeconds = trackWidth / 50;
-    const extendedStart = Math.ceil((total + 0.001) / extendedInterval) * extendedInterval;
-    const extendedTicks: Array<{ time: number; left: number }> = [];
-    if (extendedStart <= containerSeconds) {
-        // 大间隔（5s）能塞进容器
-        for (let t = extendedStart; t <= containerSeconds + 0.0001; t += extendedInterval) {
-            extendedTicks.push({ time: t, left: t * 50 });
-        }
-    } else {
-        // 容器剩余太窄，用 1.6s 继续铺到容器右边缘
-        for (let t = Math.ceil(total / 1.6) * 1.6; t <= containerSeconds + 0.0001; t += 1.6) {
-            extendedTicks.push({ time: Math.round(t * 10) / 10, left: t * 50 });
-        }
-    }
+    const tickCount = Math.floor(containerSeconds / tickInterval) + 1;
+    const majorTicks = Array.from({ length: tickCount }, (_, index) => ({ time: index * tickInterval, left: index * tickInterval * 50 }));
+    const minorTicks: Array<{ left: number }> = [];
+
     // 节流持久化时间轴滚动位置，刷新后可恢复（避免每次 onScroll 都 updateMetadata）
     const persistScroll = useCallback((left: number) => {
         if (scrollPersistRafRef.current != null) return;
@@ -193,7 +176,6 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         return <div key={segment.id} data-segment-id={segment.id} className={`minimax-ref-grid ${slotCount === 0 ? "is-disabled" : ""} ${segment.id === selected?.id ? "active" : ""}`} style={{ left: `${left}px`, width: `${width}px`, ...(slotCount > 0 && slotCount <= 3 ? { gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))`, gridTemplateRows: "minmax(0, 1fr)" } : {}) }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>{slotCount === 0 ? <span className="minimax-ref-empty-label">无需参考素材</span> : Array.from({ length: slotCount }).map((_, index) => { const ref = refs[index]; const label = mode === "i2v" ? "首帧" : mode === "fl2v" ? index === 0 ? "首帧" : "尾帧" : `Ref ${index + 1}`; return <div key={index} data-ref-index={index} draggable={ref ? true : undefined} className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"}`}>{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>; })}</div>;
     };
     return <div className="minimax-edit-timeline">
-        <div className="minimax-timeline-controls"><button type="button" title="连续播放全部 Clip" onClick={onPlayAll}><H3Icon name="play" /></button></div>
         <div className="minimax-left-labels">
             <div className="minimax-video-label">Video</div>
             <div className="minimax-ref-label">Refs</div>
@@ -202,10 +184,11 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         <div ref={trackScrollRef} className="minimax-tracks-scroll" style={{ overflowX: hasHorizontalOverflow ? "auto" : "hidden" }} onScroll={(event) => persistScroll(event.currentTarget.scrollLeft)}>
             <div className="minimax-track-body" style={{ minWidth: timelineMinWidth, width: "100%" }}>
                 <div className="minimax-ruler-row" style={{ width: trackWidth }}>
-                    {minorTicks.map((tick, index) => <span className="minimax-tick-minor" key={`m-${index}`} style={{ left: `${tick.left}px` }} />)}
-                    {majorTicks.map((tick, index) => <span className="minimax-tick" key={`M-${index}`} style={{ left: `${tick.left}px` }}><b>{fmt(tick.time)}</b></span>)}
-                    {extendedTicks.map((tick, index) => <span className="minimax-tick minimax-tick-extended" key={`E-${index}`} style={{ left: `${tick.left}px` }}><b>{fmt(tick.time)}</b></span>)}
-                    <span className="minimax-playhead minimax-playhead-marker" style={{ left: `${playhead * 50}px` }} />
+                    <button type="button" className="minimax-ruler-play-all" title="连续播放全部 Clip" onClick={onPlayAll}><H3Icon name="play" /></button>
+                    <div className="minimax-ruler-ticks" style={{ width: timelineMinWidth }}>
+                        {majorTicks.map((tick, index) => <span className="minimax-tick" key={`M-${index}`} style={{ left: `${tick.left}px` }}><b>{fmt(tick.time)}</b></span>)}
+                        <span className="minimax-playhead minimax-playhead-marker" style={{ left: `${playhead * 50}px` }} />
+                    </div>
                 </div>
                 <div className="minimax-video-row">
                     <div className="minimax-track-content" style={{ minWidth: timelineMinWidth, width: "100%" }}>
