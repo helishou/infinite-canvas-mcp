@@ -166,6 +166,17 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
         const existing = segmentsFor(metadata);
         const selected = existing.find((segment) => segment.id === String(metadata.selectedSegmentId || "")) || existing[existing.length - 1];
         const selectedIndex = selected ? Math.max(0, existing.findIndex((segment) => segment.id === selected.id)) : existing.length - 1;
+        // 调试日志：智能分镜合并 segments 前的关键状态。保留 console.log 方便用户复现
+        // 问题时直接看 selected/existing/insertAt 等真实值（之前靠猜很容易看走眼）。
+        console.log("[smart-storyboard] merge", {
+            existingLength: existing.length,
+            existingIds: existing.map((segment) => segment.id),
+            existingPrompts: existing.map((segment) => String(segment.prompt || "").slice(0, 40)),
+            metadataSelectedId: String(metadata.selectedSegmentId || ""),
+            selectedId: selected?.id,
+            selectedPrompt: String(selected?.prompt || "").slice(0, 80),
+            selectedIndex,
+        });
         // 新生成的 smart 分段是 fresh start：只继承用户在 modal 里传入的 refs（图片为主），
         // 不再自动从 selected 段拉 video/audio。selected 的 result 视频不应被当成"参考"塞进
         // 新段，否则会复用到 ComfyUI 输入、且新段 outputs 列表会"莫名其妙"出现旧视频。
@@ -178,6 +189,13 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
         const created = parsed.segments.map((prompt, index) => ({ ...inherited, id: `smart-${Date.now()}-${index}`, prompt: parsed.global ? `全局提示词：\n${parsed.global}\n\n${prompt}` : prompt, duration, taskMode, motionContextEnabled: continuityEnabled, result: "", results: [], status: "idle" }));
         const insertAt = selectedIndex < 0 ? existing.length : selectedIndex + 1;
         const segments = compactSegmentStarts([...existing.slice(0, insertAt), ...created, ...existing.slice(insertAt)]);
+        console.log("[smart-storyboard] merged", {
+            mergedLength: segments.length,
+            mergedIds: segments.map((segment) => segment.id),
+            mergedPrompts: segments.map((segment) => String(segment.prompt || "").slice(0, 40)),
+            selectedKept: segments[selectedIndex]?.id === selected?.id,
+            selectedAfterPrompt: String(segments[selectedIndex]?.prompt || "").slice(0, 80),
+        });
         // 切勿回写节点级 prompt：created 段各自已带独立 prompt（见上），
         // 而 segmentsFor 会让「没有自己 segment.prompt 的旧段」回退到 metadata.prompt，
         // 回写会把原 selected（如 clip1）的提示词被新段1污染。保持原样即可。
