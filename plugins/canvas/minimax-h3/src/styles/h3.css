@@ -320,6 +320,11 @@
 .nfh3-lora-row .ant-input-number { width:152px; border-color:#3b4a58; background:#1b2126; }
 .nfh3-lora-row .ant-input-number-input { height:46px; color:#edf7fb; font-size:20px; }
 .nfh3-lora-row .ant-switch { transform:scale(.8); transform-origin:center; }
+/* H3 插件内所有 Switch 打开时改用蓝色（dark 主题默认会被 fafafa primary 覆盖成灰白） */
+.nfh3-lora-row .ant-switch.ant-switch-checked,
+.minimax-clip-parameters .ant-switch.ant-switch-checked { background:#1677ff !important; }
+.nfh3-lora-row .ant-switch.ant-switch-checked:hover,
+.minimax-clip-parameters .ant-switch.ant-switch-checked:hover { background:#4096ff !important; }
 .nfh3-lora-add { min-height:52px; border:1px dashed #4b6473; border-radius:5px; background:transparent; color:#78dfff; font-size:20px; cursor:pointer; }
 .nfh3-lora-add:hover { border-color:#62d8ff; background:#17333f; }
 .nfh3-panel-status { margin-left:auto; color:#6bd8ff !important; }
