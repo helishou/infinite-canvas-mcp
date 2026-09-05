@@ -193,19 +193,17 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         return <div key={segment.id} data-segment-id={segment.id} className={`minimax-ref-grid ${slotCount === 0 ? "is-disabled" : ""} ${segment.id === selected?.id ? "active" : ""}`} style={{ left: `${left}px`, width: `${width}px`, ...(slotCount > 0 && slotCount <= 3 ? { gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))`, gridTemplateRows: "minmax(0, 1fr)" } : {}) }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>{slotCount === 0 ? <span className="minimax-ref-empty-label">无需参考素材</span> : Array.from({ length: slotCount }).map((_, index) => { const ref = refs[index]; const label = mode === "i2v" ? "首帧" : mode === "fl2v" ? index === 0 ? "首帧" : "尾帧" : `Ref ${index + 1}`; return <div key={index} data-ref-index={index} draggable={ref ? true : undefined} className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"}`}>{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>; })}</div>;
     };
     return <div className="minimax-edit-timeline">
+        <div className="minimax-timeline-controls"><button type="button" title="连续播放全部 Clip" onClick={onPlayAll}><H3Icon name="play" /></button></div>
         <div className="minimax-left-labels">
             <div className="minimax-video-label">Video</div>
             <div className="minimax-ref-label">Refs</div>
         </div>
+        <div className="minimax-ruler-row" style={{ width: trackWidth }}>
+            {majorTicks.map((tick, index) => <span className="minimax-tick" key={`M-${index}`} style={{ left: `${tick.left}px` }}><b>{fmt(tick.time)}</b></span>)}
+            <span className="minimax-playhead minimax-playhead-marker" style={{ left: `${playhead * 50}px` }} />
+        </div>
         <div ref={trackScrollRef} className="minimax-tracks-scroll" style={{ overflowX: hasHorizontalOverflow ? "auto" : "hidden" }} onScroll={(event) => persistScroll(event.currentTarget.scrollLeft)}>
             <div className="minimax-track-body" style={{ minWidth: timelineMinWidth, width: "100%" }}>
-                <div className="minimax-ruler-row" style={{ width: trackWidth }}>
-                    <button type="button" className="minimax-ruler-play-all" title="连续播放全部 Clip" onClick={onPlayAll}><H3Icon name="play" /></button>
-                    <div className="minimax-ruler-ticks" style={{ width: timelineMinWidth }}>
-                        {majorTicks.map((tick, index) => <span className="minimax-tick" key={`M-${index}`} style={{ left: `${tick.left}px` }}><b>{fmt(tick.time)}</b></span>)}
-                        <span className="minimax-playhead minimax-playhead-marker" style={{ left: `${playhead * 50}px` }} />
-                    </div>
-                </div>
                 <div className="minimax-video-row">
                     <div className="minimax-track-content" style={{ minWidth: timelineMinWidth, width: "100%" }}>
                         {/* 视频行底部波形装饰条：只占总时长宽度（按 px），

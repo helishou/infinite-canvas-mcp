@@ -46,30 +46,139 @@ export function H3PlayheadStyle({ playhead, total }: { playhead: number; total: 
     return <style>{`.minimax-canvas-workbench .minimax-edit-timeline::after{left:${position};background:#3b82f6}.minimax-canvas-workbench .minimax-edit-timeline::before{content:"";display:block;position:absolute;z-index:15;top:0;left:${position};width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-top:8px solid #3b82f6;transform:translateX(-50%);pointer-events:none}`}</style>;
 }
 
-export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
-    const handle = (pane: "prompt" | "preview" | "previewWidth" | "refs" | "clip", className: string) => <H3ResizeHandle key={pane} ctx={ctx} pane={pane} className={className} />;
-    return <div style={{ display: "contents" }}>{handle("prompt", "minimax-pane-resize minimax-prompt-resize")}{handle("previewWidth", "minimax-pane-resize minimax-preview-width-resize")}{handle("preview", "minimax-pane-resize minimax-preview-resize")}{handle("refs", "minimax-pane-resize minimax-ref-resize")}{handle("clip", "minimax-pane-resize minimax-clip-resize")}</div>;
-}
+type H3PaneKey = "previewH" | "previewW" | "promptW" | "timelineH" | "refLaneH";
+// 每个手柄：调哪个 metadata 键、沿哪个轴、往哪个方向拖是增大。
+// 方向遵循「边缘跟随指针」：抓住某个模块的边缘往哪拖，该模块就往哪变大。
+const H3_PANE_META: Record<H3PaneKey, { metadataKey: string; axis: "x" | "y"; sign: 1 | -1 }> = {
+    previewH: { metadataKey: "minimaxPreviewH", axis: "y", sign: 1 },    // 预览下边缘：下拉预览增高（时间轴等量让位，Output 不变）
+    previewW: { metadataKey: "minimaxPreviewW", axis: "x", sign: 1 },    // 预览右边缘：右拉预览增宽
+    promptW: { metadataKey: "minimaxPromptW", axis: "x", sign: -1 },     // Setting 左边缘：左拉 Setting 增宽
+    timelineH: { metadataKey: "minimaxTimelineH", axis: "y", sign: 1 },  // Output 上边缘：上拉 Output 增高（时间轴让位），预览不变
+    refLaneH: { metadataKey: "minimaxRefLaneH", axis: "y", sign: -1 },   // Refs 行上边缘：上拉 Refs 增高（Video 行让位）
+};
+const H3_PANE_BOUNDS: Record<H3PaneKey, [number, number]> = { previewH: [130, 900], previewW: [280, 1400], promptW: [220, 900], timelineH: [340, 900], refLaneH: [60, 900] };
+const H3_PANE_DEFAULTS: Record<H3PaneKey, number> = { previewH: 220, previewW: 960, promptW: 480, timelineH: 320, refLaneH: 150 };
 
-function H3ResizeHandle({ ctx, pane, className }: { ctx: CanvasNodeContext; pane: "prompt" | "preview" | "previewWidth" | "refs" | "clip"; className: string }) {
-    const drag = useRef<{ x: number; y: number; value: number } | null>(null);
-    const onPointerDown = (event: React.PointerEvent<HTMLSpanElement>) => {
+// 每个模块都可拖边调宽高。手柄位置不再用「工具栏高度常量 + calc 变量链」绝对定位
+// （常量与实际栅格一脱节手柄就漂移），改为 ResizeObserver 实测各模块真实边界，
+// offset* 是本地 CSS px，与工作台内绝对定位同坐标系、不受画布 zoom 缩放影响。
+export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
+    const hostRef = useRef<HTMLDivElement | null>(null);
+    const [bars, setBars] = useState<Array<{ key: H3PaneKey; dir: "ns" | "ew"; x: number; y: number; w: number; h: number }>>([]);
+    useEffect(() => {
+        const host = hostRef.current?.parentElement;
+        if (!host) return;
+        const measure = () => {
+            const stage = host.querySelector<HTMLElement>(".minimax-player-stage");
+            const prompt = host.querySelector<HTMLElement>(".minimax-prompt-side");
+            const timeline = host.querySelector<HTMLElement>(".minimax-edit-timeline");
+            const library = host.querySelector<HTMLElement>(".minimax-library");
+            const tracks = host.querySelector<HTMLElement>(".minimax-tracks-scroll");
+            const refRow = host.querySelector<HTMLElement>(".minimax-ref-row");
+            const next: Array<{ key: H3PaneKey; dir: "ns" | "ew"; x: number; y: number; w: number; h: number }> = [];
+            const colsLeft = stage ? stage.offsetLeft : 10;
+            const colsRight = timeline ? timeline.offsetLeft + timeline.offsetWidth : stage ? stage.offsetLeft + stage.offsetWidth : 0;
+            if (stage && stage.offsetHeight > 0 && colsRight > colsLeft) {
+                next.push({ key: "previewH", dir: "ns", x: colsLeft, y: stage.offsetTop + stage.offsetHeight, w: colsRight - colsLeft, h: 7 });
+                next.push({ key: "previewW", dir: "ew", x: stage.offsetLeft + stage.offsetWidth, y: stage.offsetTop, w: 7, h: stage.offsetHeight });
+            }
+            if (prompt && prompt.offsetHeight > 0) next.push({ key: "promptW", dir: "ew", x: prompt.offsetLeft, y: prompt.offsetTop, w: 7, h: prompt.offsetHeight });
+            // Output 素材库的上边缘 = 时间轴行 / Output 行分界（行1、行2 都是固定 px，行3 吃余量）
+            if (library && library.offsetHeight > 0 && library.offsetWidth > 0) next.push({ key: "timelineH", dir: "ns", x: colsLeft, y: library.offsetTop, w: library.offsetWidth, h: 7 });
+            if (timeline && refRow && refRow.offsetHeight > 0) {
+                const scroll = tracks ? tracks.offsetTop : 0;
+                next.push({ key: "refLaneH", dir: "ns", x: timeline.offsetLeft + 36, y: timeline.offsetTop + scroll + refRow.offsetTop, w: Math.max(0, timeline.offsetWidth - 36 - 54), h: 7 });
+            }
+            setBars((cur) => (cur.length === next.length && cur.every((bar, index) => bar.key === next[index].key && Math.abs(bar.x - next[index].x) < 1 && Math.abs(bar.y - next[index].y) < 1 && Math.abs(bar.w - next[index].w) < 1 && Math.abs(bar.h - next[index].h) < 1) ? cur : next));
+        };
+        measure();
+        const ro = new ResizeObserver(measure);
+        ro.observe(host);
+        for (const selector of [".minimax-player-stage", ".minimax-prompt-side", ".minimax-edit-timeline", ".minimax-library", ".minimax-tracks-scroll", ".minimax-ref-row"]) {
+            const el = host.querySelector(selector);
+            if (el) ro.observe(el);
+        }
+        window.addEventListener("resize", measure);
+        return () => { ro.disconnect(); window.removeEventListener("resize", measure); };
+    }, []);
+    // previewH / timelineH / refLaneH 是联动手柄：拖动时需要拖起瞬间的行高/outputH/bodyH 快照做比例分配。
+    const drag = useRef<{ key: H3PaneKey; x: number; y: number; value: number; previewH?: number; timelineH?: number; refLaneH?: number; outputH?: number; bodyH?: number } | null>(null);
+    const scale = () => {
+        const host = hostRef.current?.parentElement;
+        // 画布节点带 zoom transform：屏幕指针位移 / 缩放系数 = 本地 CSS px 位移
+        return host && host.offsetWidth > 0 ? host.getBoundingClientRect().width / host.offsetWidth : 1;
+    };
+    const onPointerDown = (key: H3PaneKey) => (event: React.PointerEvent<HTMLSpanElement>) => {
         event.preventDefault();
         event.stopPropagation();
         const metadata = ctx.node.metadata || {};
-        const value = pane === "prompt" ? Number(metadata.minimaxPromptW || 480) : pane === "previewWidth" ? Number(metadata.minimaxPreviewW || 960) : pane === "preview" ? Number(metadata.minimaxPreviewH || 220) : pane === "clip" ? Number(metadata.minimaxClipPanelH || 220) : Number(metadata.minimaxRefLaneH || 36);
-        drag.current = { x: event.clientX, y: event.clientY, value };
-        event.currentTarget.setPointerCapture(event.pointerId);
+        const value = Number(metadata[H3_PANE_META[key].metadataKey]) || H3_PANE_DEFAULTS[key];
+        const factor = scale();
+        const base: typeof drag.current = { key, x: event.clientX / factor, y: event.clientY / factor, value };
+        if (key === "previewH" || key === "timelineH" || key === "refLaneH") {
+            const host = hostRef.current?.parentElement;
+            const refLane0 = Math.max(60, Math.min(900, Number(metadata.minimaxRefLaneH) || 150));
+            const p0 = Math.max(130, Math.min(900, Number(metadata.minimaxPreviewH) || 220));
+            const t0 = Math.max(190 + refLane0, Math.min(900, Number(metadata.minimaxTimelineH) || 320));
+            const bodyH = host?.querySelector<HTMLElement>(".minimax-wb-body")?.clientHeight || 0;
+            const library = host?.querySelector<HTMLElement>(".minimax-library");
+            const outputH = library && library.offsetHeight > 0 ? library.offsetHeight : Math.max(100, bodyH - p0 - t0 - 32);
+            Object.assign(base, { previewH: p0, timelineH: t0, refLaneH: refLane0, outputH, bodyH });
+        }
+        drag.current = base;
+        try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* synthetic/无指针ID 的测试事件 */ }
     };
     const onPointerMove = (event: React.PointerEvent<HTMLSpanElement>) => {
-        if (!drag.current) return;
-        const bounds: Record<typeof pane, [number, number, number]> = { prompt: [220, 760, drag.current.value - (event.clientX - drag.current.x)], previewWidth: [280, 1100, drag.current.value + (event.clientX - drag.current.x)], preview: [130, 760, drag.current.value + event.clientY - drag.current.y], clip: [150, 440, drag.current.value + (drag.current.y - event.clientY)], refs: [30, 9999, drag.current.value + event.clientY - drag.current.y] };
-        const [min, max, next] = bounds[pane];
-        const clamped = Math.round(Math.max(min, Math.min(max, next)));
-        const key = pane === "prompt" ? "minimaxPromptW" : pane === "previewWidth" ? "minimaxPreviewW" : pane === "preview" ? "minimaxPreviewH" : pane === "clip" ? "minimaxClipPanelH" : "minimaxRefLaneH";
-        ctx.updateMetadata({ [key]: clamped });
+        const state = drag.current;
+        if (!state) return;
+        const meta = H3_PANE_META[state.key];
+        let [min, max] = H3_PANE_BOUNDS[state.key];
+        // 时间轴面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110 + Refs 行 refLaneH，
+        // timelineH 低于它行与行就会互相挤压裁切；两把行高手柄互相约束下限/上限。
+        const metadataNow = ctx.node.metadata || {};
+        const refLaneNow = Math.max(60, Math.min(900, Number(metadataNow.minimaxRefLaneH) || 150));
+        const timelineNow = Math.max(190 + refLaneNow, Math.min(900, Number(metadataNow.minimaxTimelineH) || 320));
+        if (state.key === "timelineH") min = 190 + refLaneNow;
+        if (state.key === "refLaneH") max = Math.min(max, timelineNow - 190);
+        const factor = scale();
+        const delta = (meta.axis === "y" ? event.clientY : event.clientX) / factor - (meta.axis === "y" ? state.y : state.x);
+        // Output 上边缘：预览高度不变，只调时间轴（行2），Output 吃/补余量。
+        if (state.key === "timelineH") {
+            const next = Math.round(Math.max(min, Math.min(max, state.value + meta.sign * delta)));
+            ctx.updateMetadata({ minimaxTimelineH: next });
+            return;
+        }
+        // Refs 行上边缘：边界跟随指针。往下拉越过 Refs 下限(60)后改为增高时间轴面板——Video 行继续变大、Output 让位；
+        // 往上拉最多把 Video 压到内部最低(190+refLane 约束)，不往上顶预览。
+        if (state.key === "refLaneH" && state.refLaneH !== undefined && state.timelineH && state.bodyH) {
+            const desired = state.refLaneH - delta;
+            let newRef = Math.max(60, Math.min(state.timelineH - 190, desired));
+            let newT = state.timelineH;
+            if (desired < 60) {
+                const maxT = Math.max(state.timelineH, Math.min(900, state.bodyH - 80 - (state.previewH || 0)));
+                newT = Math.min(Math.max(state.timelineH, Math.round(state.timelineH + (60 - desired))), maxT);
+            }
+            ctx.updateMetadata({ minimaxRefLaneH: Math.round(newRef), minimaxTimelineH: Math.round(newT) });
+            return;
+        }
+        // 预览下边缘：Output 高度不变，预览与时间轴此消彼长（预览增多少，时间轴就让多少）。
+        if (state.key === "previewH" && state.timelineH) {
+            const t0 = state.timelineH;
+            const p0 = state.value;
+            const maxP = p0 + (t0 - (190 + refLaneNow));                 // 时间轴到下限时预览最大
+            const minP = Math.max(130, p0 - (900 - t0));                 // 时间轴到上限 900 时预览最小
+            const newP = Math.round(Math.max(minP, Math.min(maxP, p0 + delta)));
+            ctx.updateMetadata({ minimaxPreviewH: newP, minimaxTimelineH: Math.round(t0 - (newP - p0)) });
+            return;
+        }
+        const next = Math.round(Math.max(min, Math.min(max, state.value + meta.sign * delta)));
+        ctx.updateMetadata({ [meta.metadataKey]: next });
     };
-    return <span className={className} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={(event) => { drag.current = null; event.currentTarget.releasePointerCapture(event.pointerId); }} />;
+    const release = (event: React.PointerEvent<HTMLSpanElement>) => {
+        drag.current = null;
+        try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* 同上 */ }
+    };
+    return <div ref={hostRef} style={{ display: "contents" }}>{bars.map((bar) => <span key={bar.key} className={`minimax-pane-handle minimax-pane-handle-${bar.dir}`} style={bar.dir === "ns" ? { left: bar.x, top: bar.y - 3, width: bar.w, height: 7 } : { left: bar.x - 3, top: bar.y, width: 7, height: bar.h }} onPointerDown={onPointerDown(bar.key)} onPointerMove={onPointerMove} onPointerUp={release} onPointerCancel={release} />)}</div>;
 }
 
 export function H3RulerScrubber({ ctx, total, previewH }: { ctx: CanvasNodeContext; total: number; previewH: number }) {
