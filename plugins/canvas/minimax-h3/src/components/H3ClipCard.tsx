@@ -6,8 +6,8 @@ import { normalizeDroppedH3Ref } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
 
 export function H3ClipCard({ ctx, segment, index, segments, selectedId, fmt }: { ctx: CanvasNodeContext; segment: H3Segment; index: number; segments: H3Segment[]; selectedId?: string; fmt: (value: number) => string }) {
-    const left = Number(segment.start || 0) * 50;
-    const width = Math.max(50, Number(segment.duration || 1) * 50);
+    const left = Number(segment.start || 0) * 100;
+    const width = Math.max(100, Number(segment.duration || 1) * 100);
     const refs = refsForSegment(segment);
     const selected = segment.id === selectedId;
     // 之前 H3ClipCard 完全不读 segment.status，导致 H3Runner catch 块写了 status: "error"

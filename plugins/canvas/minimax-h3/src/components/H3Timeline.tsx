@@ -26,8 +26,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
     const scrollPersistRafRef = useRef<number | null>(null);
     const [hasHorizontalOverflow, setHasHorizontalOverflow] = useState(false);
     // 时间轴宽度由父容器宽度决定（100% 跟随），同时保留总时长所需的最小宽度，
-    // 这样 9s 总长时不会再在右边留出大段黑色空白，1.8s 间隔仍按 50px/秒等比放大。
-    const timelineMinWidth = Math.max(500, total * 50);
+    // 这样 9s 总长时不会再在右边留出大段黑色空白，1.8s 间隔仍按 100px/秒等比放大。
+    const timelineMinWidth = Math.max(1000, total * 100);
     const playhead = Math.max(0, Math.min(total, Number(ctx.node.metadata?.playhead || 0)));
     // ruler 刻度根据滚动容器实测宽度动态生成：0~总时长用 1.6s 主刻度 + 0.4s 副刻度，
     // 超过总时长部分按 5s 间隔继续标记，避免右侧大片空白没刻度。
@@ -52,7 +52,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
     // 例：containerSeconds=42s → [0, 5, 10, 15, 20, 25, 30, 35, 40]，最后那个 40 < 42 加 42。
     // 例：containerSeconds=20s（恰好对齐）→ [0, 5, 10, 15, 20]，不加末端。
     const tickInterval = 5;
-    const containerSeconds = trackWidth / 50;
+    const containerSeconds = trackWidth / 100;
     const tickPositions: number[] = [];
     for (let t = 0; t <= containerSeconds + 0.0001; t += tickInterval) {
         tickPositions.push(Math.round(t * 10) / 10);
@@ -68,7 +68,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
     if (containerSeconds - lastTick >= 2 && lastTick + tickInterval > containerSeconds + 0.0001) {
         tickPositions.push(Math.round(containerSeconds * 10) / 10);
     }
-    const majorTicks = tickPositions.map((t) => ({ time: t, left: t * 50 }));
+    const majorTicks = tickPositions.map((t) => ({ time: t, left: t * 100 }));
     const minorTicks: Array<{ left: number }> = [];
 
     // 节流持久化时间轴滚动位置，刷新后可恢复（避免每次 onScroll 都 updateMetadata）
@@ -84,7 +84,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
     const scrollTimelineToSegment = useCallback((segment: H3Segment) => {
         const track = trackScrollRef.current;
         if (!track) return;
-        const rightPx = (Number(segment.start || 0) + Math.max(0.5, Number(segment.duration || 1))) * 50;
+        const rightPx = (Number(segment.start || 0) + Math.max(0.5, Number(segment.duration || 1))) * 100;
         const target = Math.max(0, rightPx - track.clientWidth);
         track.scrollLeft = target;
         persistScroll(target);
@@ -139,9 +139,9 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         if (!target) {
             const track = event.currentTarget as HTMLDivElement;
             const rect = track.getBoundingClientRect();
-            // 内容坐标 = 已滚动偏移 + 鼠标在可见区内偏移；每单位 50px
+            // 内容坐标 = 已滚动偏移 + 鼠标在可见区内偏移；每单位 100px
             const contentX = track.scrollLeft + (event.clientX - rect.left);
-            const time = Math.max(0, Math.min(total, contentX / 50));
+            const time = Math.max(0, Math.min(total, contentX / 100));
             target = segments.find((item) => time >= Number(item.start || 0) && time < Number(item.start || 0) + Math.max(0.5, Number(item.duration || 1))) || selected;
         }
         if (!target) return;
@@ -188,8 +188,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         const mode = String(segment.mode || segment.taskMode || "ref2va");
         const slotCount = mode === "t2v" ? 0 : mode === "i2v" ? 1 : mode === "fl2v" ? 2 : 9;
         // 用 px 定位让 ref grid 跟随实际像素宽度（容器被拉宽时 clip 不会按比例缩成一条线）
-        const left = Number(segment.start || 0) * 50;
-        const width = Math.max(50, Number(segment.duration || 1) * 50);
+        const left = Number(segment.start || 0) * 100;
+        const width = Math.max(100, Number(segment.duration || 1) * 100);
         return <div key={segment.id} data-segment-id={segment.id} className={`minimax-ref-grid ${slotCount === 0 ? "is-disabled" : ""} ${segment.id === selected?.id ? "active" : ""}`} style={{ left: `${left}px`, width: `${width}px`, ...(slotCount > 0 && slotCount <= 3 ? { gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))`, gridTemplateRows: "minmax(0, 1fr)" } : {}) }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>{slotCount === 0 ? <span className="minimax-ref-empty-label">无需参考素材</span> : Array.from({ length: slotCount }).map((_, index) => { const ref = refs[index]; const label = mode === "i2v" ? "首帧" : mode === "fl2v" ? index === 0 ? "首帧" : "尾帧" : `Ref ${index + 1}`; return <div key={index} data-ref-index={index} draggable={ref ? true : undefined} className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"}`}>{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>; })}</div>;
     };
     return <div className="minimax-edit-timeline">
@@ -200,7 +200,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         </div>
         <div className="minimax-ruler-row" style={{ width: trackWidth }}>
             {majorTicks.map((tick, index) => <span className="minimax-tick" key={`M-${index}`} style={{ left: `${tick.left}px` }}><b>{fmt(tick.time)}</b></span>)}
-            <span className="minimax-playhead minimax-playhead-marker" style={{ left: `${playhead * 50}px` }} />
+            <span className="minimax-playhead minimax-playhead-marker" style={{ left: `${playhead * 100}px` }} />
         </div>
         <div ref={trackScrollRef} className="minimax-tracks-scroll" style={{ overflowX: hasHorizontalOverflow ? "auto" : "hidden" }} onScroll={(event) => persistScroll(event.currentTarget.scrollLeft)}>
             <div className="minimax-track-body" style={{ minWidth: timelineMinWidth, width: "100%" }}>
@@ -209,13 +209,13 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
                         {/* 视频行底部波形装饰条：只占总时长宽度（按 px），
                             避免 video-row 拉满后 ::after 跟着拉满铺满整行。 */}
                         {/* <div className="minimax-video-bottom-strip" style={{ width: timelineMinWidth }}>〰   〰   〰   〰</div> */}
-                        <span className="minimax-playhead" style={{ left: `${playhead * 50}px` }} />
+                        <span className="minimax-playhead" style={{ left: `${playhead * 100}px` }} />
                         {segments.map((segment, index) => <H3ClipCard key={segment.id} ctx={ctx} segment={segment} index={index} segments={segments} selectedId={selected?.id} fmt={fmt} />)}
                     </div>
                 </div>
                 <div className="minimax-ref-row" onDragStart={startRefDrag} onDragOver={(event) => event.preventDefault()} onDrop={addRef}>
                     <div className="minimax-ref-content" style={{ minWidth: timelineMinWidth, width: "100%" }}>
-                        <span className="minimax-playhead" style={{ left: `${playhead * 50}px` }} />
+                        <span className="minimax-playhead" style={{ left: `${playhead * 100}px` }} />
                         {segments.map(renderRefGrid)}
                     </div>
                 </div>

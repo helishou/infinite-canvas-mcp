@@ -22,7 +22,7 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const upstream = readH3Refs(ctx);
     const selectedRefs = selected ? refsForSegment(selected) : [];
     const outputSegmentId = (url: string) => segments.find((segment) => resultUrl(segment.result) === url || (segment.results || []).some((item) => item.url === url))?.id;
-    const outputs = [...(Array.isArray(metadata.materials) ? metadata.materials : []), ...segments.flatMap((item, index) => [...(item.results || []), ...(resultUrl(item.result) ? [{ url: resultUrl(item.result), type: "video", name: `Clip ${index + 1}`, storageKey: item.resultStorageKey, segmentId: item.id }] : [])])].map((item, index) => { const value = item && typeof item === "object" ? item as Record<string, unknown> : { url: String(item) } as Record<string, unknown>; const url = String(value.url || value.video_url || value.content || ""); const type = String(value.type || value.kind || "video").startsWith("image") ? "image" : String(value.type || value.kind || "video").startsWith("audio") ? "audio" : "video"; const segmentId = typeof value.segmentId === "string" ? value.segmentId : outputSegmentId(url); return url ? { url, type, name: String(value.name || `Clip ${index + 1}`), storageKey: typeof value.storageKey === "string" ? value.storageKey : undefined, segmentId } as H3Ref : null; }).filter((item): item is H3Ref => Boolean(item)).filter((item, index, all) => all.findIndex((other) => other.url === item.url) === index).reverse();
+    const outputs = [...(Array.isArray(metadata.materials) ? metadata.materials : []), ...segments.flatMap((item, index) => [...(item.results || []), ...(resultUrl(item.result) ? [{ url: resultUrl(item.result), type: "video", name: `Clip ${index + 1}`, storageKey: item.resultStorageKey, segmentId: item.id }] : [])])].map((item, index) => { const value = item && typeof item === "object" ? item as Record<string, unknown> : { url: String(item) } as Record<string, unknown>; const url = String(value.url || value.video_url || value.content || ""); const type = String(value.type || value.kind || "video").startsWith("image") ? "image" : String(value.type || value.kind || "video").startsWith("audio") ? "audio" : "video"; const segmentId = typeof value.segmentId === "string" ? value.segmentId : outputSegmentId(url); return url ? { url, type, name: String(value.name || `Clip ${index + 1}`), storageKey: typeof value.storageKey === "string" ? value.storageKey : undefined, segmentId, params: value.params && typeof value.params === "object" ? value.params as Record<string, unknown> : undefined } as H3Ref : null; }).filter((item): item is H3Ref => Boolean(item)).filter((item, index, all) => all.findIndex((other) => other.url === item.url) === index).reverse();
     const total = Math.max(1, segments.reduce((sum, item) => sum + Math.max(0.5, Number(item.duration || 1)), 0));
     const playhead = Math.max(0, Math.min(total, Number(metadata.playhead || 0)));
     const fmt = (value: number) => `${Number(value || 0).toFixed(Number(value || 0) % 1 ? 1 : 0)}s`;
@@ -37,11 +37,42 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const imageRefs = selectedRefs.filter((item) => item.type === "image");
     const videoRefs = selectedRefs.filter((item) => item.type === "video");
     const audioRefs = selectedRefs.filter((item) => item.type === "audio");
-    const previewH = Math.max(130, Math.min(760, Number(metadata.minimaxPreviewH || 220)));
-    const promptW = Math.max(220, Math.min(760, Number(metadata.minimaxPromptW || 480)));
-    const videoTrackH = Math.max(48, Math.min(180, Number(metadata.minimaxVideoTrackH || 74)));
-    const refLaneH = Math.max(30, Number(metadata.minimaxRefLaneH || 36));
-    const clipPanelH = Math.max(150, Math.min(440, Number(metadata.minimaxClipPanelH || 220)));
+    const previewH = Math.max(130, Math.min(900, Number(metadata.minimaxPreviewH || 220)));
+    const promptW = Math.max(220, Math.min(900, Number(metadata.minimaxPromptW || 480)));
+    const previewW = Math.max(280, Math.min(1400, Number(metadata.minimaxPreviewW || 960)));
+    // 行高模型：行1(预览+当前Clip) 与 行2(时间轴) 固定 px，行3(Output 素材库) 吃剩余高度；
+    // Refs 行高可独立调节；时间轴面板高度下限联动 Refs 行高：
+    // 面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110 + Refs 行高 + 余量，
+    // 低于该值时 Refs 被压扁、刻度被裁、行与行重叠（历史 metadata 里的过小值会自动抬升）。
+    const refLaneRaw = Math.max(60, Math.min(900, Number(metadata.minimaxRefLaneH || 150)));
+    const timelineH = Math.max(190 + refLaneRaw, Math.min(2000, Number(metadata.minimaxTimelineH || 320)));
+    const refLaneH = Math.min(refLaneRaw, timelineH - 190);
+    // 高度预算：节点在画布上可被任意压缩。行1/行2 是固定 px，超出 wb-body 可用高度时
+    // 栅格会溢出裁切、行与行互相挤压（Refs 压扁、刻度被裁）。这里实测 body 高度，
+    // 超预算时按「预览先让 → Refs 跟让 → 时间轴保内部最小结构」收敛出有效行高。
+    const bodyRef = useRef<HTMLDivElement | null>(null);
+    const [bodyH, setBodyH] = useState(0);
+    useEffect(() => {
+        const el = bodyRef.current;
+        if (!el) return;
+        const ro = new ResizeObserver(() => setBodyH(el.clientHeight));
+        ro.observe(el);
+        setBodyH(el.clientHeight);
+        return () => ro.disconnect();
+    }, []);
+    let effPreviewH = previewH;
+    let effTimelineH = timelineH;
+    let effRefLaneH = refLaneH;
+    if (bodyH > 0) {
+        const avail = bodyH - 36; // wb-body 自身 padding+gap
+        if (previewH + timelineH > avail) {
+            effPreviewH = Math.max(130, Math.min(previewH, Math.round(avail * 0.42)));
+            effTimelineH = Math.max(0, avail - effPreviewH);
+            effRefLaneH = Math.max(60, Math.min(refLaneH, effTimelineH - 190));
+            effTimelineH = Math.max(250, Math.min(effTimelineH, avail - effPreviewH));
+            if (effPreviewH + effTimelineH > avail) effPreviewH = Math.max(130, avail - effTimelineH);
+        }
+    }
     const playRequest = Number(metadata.h3PlayRequest || 0);
     const [smartStoryboardOpen, setSmartStoryboardOpen] = useState(false);
     const [smartStoryboardUploads, setSmartStoryboardUploads] = useState<H3Ref[]>([]);
@@ -74,12 +105,12 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
             const hit = document.elementFromPoint(x, y)?.closest<HTMLElement>(".minimax-ref-grid");
             if (hit?.dataset.segmentId) target = segments.find((item) => item.id === hit.dataset.segmentId);
             if (!target) {
-                // 兜底：基于 refs 栏内容坐标（含横向滚动偏移，50px/单位）换算时间，修正旧版按可见宽度比例映射的错位
+                // 兜底：基于 refs 栏内容坐标（含横向滚动偏移，100px/单位）换算时间，修正旧版按可见宽度比例映射的错位
                 const refTrack = workbenchRef.current?.querySelector<HTMLElement>(".minimax-ref-track");
                 const rect = refTrack?.getBoundingClientRect();
                 if (rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
                     const contentX = (refTrack?.scrollLeft || 0) + (x - rect.left);
-                    const time = Math.max(0, Math.min(total, contentX / 50));
+                    const time = Math.max(0, Math.min(total, contentX / 100));
                     target = segments.find((item) => time >= Number(item.start || 0) && time < Number(item.start || 0) + Math.max(0.5, Number(item.duration || 1))) || selected;
                 }
             }
@@ -141,11 +172,11 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
         <H3Runner key="runner" ctx={ctx} />
         <H3PaneHandles key="pane-handles" ctx={ctx} />
-        <H3RulerScrubber key="ruler-scrubber" ctx={ctx} total={total} previewH={previewH} />
+        <H3RulerScrubber key="ruler-scrubber" ctx={ctx} total={total} previewH={effPreviewH} />
         <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} outputs={outputs} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} />
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
-        <style key="workbench-style">{`.minimax-canvas-workbench{--minimax-prompt-w:${promptW}px;--minimax-preview-w:${Math.max(280, Math.min(1100, Number(metadata.minimaxPreviewW || 960)))}px;--minimax-preview-h:${previewH}px;--minimax-video-h:${videoTrackH}px;--minimax-ref-h:${refLaneH}px;--minimax-clip-h:${clipPanelH}px}.minimax-canvas-workbench .minimax-wb-body{grid-template-columns:minmax(280px,min(var(--minimax-preview-w),50%)) minmax(360px,1fr) minmax(240px,var(--minimax-prompt-w))}`}</style>
-        <div key="workbench-body" className="minimax-wb-body">
+        <style key="workbench-style">{`.minimax-canvas-workbench{--minimax-prompt-w:${promptW}px;--minimax-preview-w:${previewW}px;--minimax-preview-h:${effPreviewH}px;--minimax-timeline-h:${effTimelineH}px;--minimax-ref-h:${effRefLaneH}px}`}</style>
+        <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
             <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} /></div>
             <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onPlayAll={playAll} fmt={fmt} />

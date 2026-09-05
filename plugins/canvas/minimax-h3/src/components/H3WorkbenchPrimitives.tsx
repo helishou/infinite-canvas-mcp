@@ -38,11 +38,11 @@ export function H3StatusBadge({ status, error, onRetry }: { status: string; erro
     return <div className={`minimax-status-badge ${status}`}><span>{label}</span>{status === "error" ? <button type="button" onClick={(event) => { event.stopPropagation(); onRetry(); }}>重试</button> : null}</div>;
 }
 
-// 时间轴轨道按固定 50px/秒 铺（ruler tick 用 time*50px 定位，可横向滚动），
+// 时间轴轨道按固定 100px/秒 铺（ruler tick 用 time*50px 定位，可横向滚动），
 // 指针必须用同样的像素刻度定位，按轨道总宽百分比换算会在 total<10s（timelineWidth=500 兜底）时错位。
 export function H3PlayheadStyle({ playhead, total }: { playhead: number; total: number }) {
     const safe = Math.max(0, Math.min(Number(total || 0), Number(playhead || 0)));
-    const position = `calc(52px + ${safe * 50}px)`;
+    const position = `calc(52px + ${safe * 100}px)`;
     return <style>{`.minimax-canvas-workbench .minimax-edit-timeline::after{left:${position};background:#3b82f6}.minimax-canvas-workbench .minimax-edit-timeline::before{content:"";display:block;position:absolute;z-index:15;top:0;left:${position};width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-top:8px solid #3b82f6;transform:translateX(-50%);pointer-events:none}`}</style>;
 }
 
@@ -56,7 +56,7 @@ const H3_PANE_META: Record<H3PaneKey, { metadataKey: string; axis: "x" | "y"; si
     timelineH: { metadataKey: "minimaxTimelineH", axis: "y", sign: 1 },  // Output 上边缘：上拉 Output 增高（时间轴让位），预览不变
     refLaneH: { metadataKey: "minimaxRefLaneH", axis: "y", sign: -1 },   // Refs 行上边缘：上拉 Refs 增高（Video 行让位）
 };
-const H3_PANE_BOUNDS: Record<H3PaneKey, [number, number]> = { previewH: [130, 900], previewW: [280, 1400], promptW: [220, 900], timelineH: [340, 900], refLaneH: [60, 900] };
+const H3_PANE_BOUNDS: Record<H3PaneKey, [number, number]> = { previewH: [130, 900], previewW: [280, 1400], promptW: [220, 900], timelineH: [340, 2000], refLaneH: [60, 900] };
 const H3_PANE_DEFAULTS: Record<H3PaneKey, number> = { previewH: 220, previewW: 960, promptW: 480, timelineH: 320, refLaneH: 150 };
 
 // 每个模块都可拖边调宽高。手柄位置不再用「工具栏高度常量 + calc 变量链」绝对定位
@@ -143,8 +143,11 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
         const factor = scale();
         const delta = (meta.axis === "y" ? event.clientY : event.clientX) / factor - (meta.axis === "y" ? state.y : state.x);
         // Output 上边缘：预览高度不变，只调时间轴（行2），Output 吃/补余量。
+        // 上限是物理约束而非写死值：Output 至少留 ~80px（bodyH-116-预览），节点够高时间轴就能一直涨。
         if (state.key === "timelineH") {
-            const next = Math.round(Math.max(min, Math.min(max, state.value + meta.sign * delta)));
+            const minT = 190 + refLaneNow;
+            const capT = state.bodyH ? Math.max(minT, Math.min(2000, state.bodyH - 116 - Math.max(130, state.previewH || 130))) : max;
+            const next = Math.round(Math.max(minT, Math.min(capT, state.value + meta.sign * delta)));
             ctx.updateMetadata({ minimaxTimelineH: next });
             return;
         }
@@ -155,8 +158,8 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
             let newRef = Math.max(60, Math.min(state.timelineH - 190, desired));
             let newT = state.timelineH;
             if (desired < 60) {
-                const maxT = Math.max(state.timelineH, Math.min(900, state.bodyH - 80 - (state.previewH || 0)));
-                newT = Math.min(Math.max(state.timelineH, Math.round(state.timelineH + (60 - desired))), maxT);
+                const capT = Math.max(state.timelineH, Math.min(2000, state.bodyH - 116 - (state.previewH || 130)));
+                newT = Math.min(Math.max(state.timelineH, Math.round(state.timelineH + (60 - desired))), capT);
             }
             ctx.updateMetadata({ minimaxRefLaneH: Math.round(newRef), minimaxTimelineH: Math.round(newT) });
             return;
@@ -209,7 +212,7 @@ export function H3RulerScrubber({ ctx, total, previewH }: { ctx: CanvasNodeConte
         const el = event.currentTarget as HTMLDivElement;
         const rect = el.getBoundingClientRect();
         // 画布节点带 zoom transform：屏幕距离 / 缩放系数 才等于本地 CSS px 距离。
-        // 轨道内容按 50px/秒 铺（与 H3Timeline timelineWidth 一致）且可横向滚动，
+        // 轨道内容按 100px/秒 铺（与 H3Timeline timelineWidth 一致）且可横向滚动，
         // 点击位置要加上 ruler 的 scroll 才是内容坐标，除以 50 得秒数。
         const host = scrubRef.current?.parentElement;
         const ruler = host?.querySelector<HTMLElement>(".minimax-ruler-row");
@@ -217,7 +220,7 @@ export function H3RulerScrubber({ ctx, total, previewH }: { ctx: CanvasNodeConte
         const scroll = ruler?.scrollLeft || 0;
         const px = Math.max(0, (event.clientX - rect.left) / scale + scroll);
         // 拖拽/点击 seek 的同时停掉播放循环，避免视频 onTimeUpdate 用自身 currentTime 把指针拉回去
-        ctx.updateMetadata({ playhead: Math.max(0, Math.min(total, px / 50)), h3PlaybackAll: false, h3Scrubbing: true });
+        ctx.updateMetadata({ playhead: Math.max(0, Math.min(total, px / 100)), h3PlaybackAll: false, h3Scrubbing: true });
     };
     return <div ref={scrubRef} className="minimax-ruler-scrubber" style={{ top: origin?.top ?? `calc(58px + ${previewH}px + 10px)`, left: origin?.left ?? 62, width: origin?.width ?? "calc(100% - 126px)", height: origin?.height ?? 28 }} title="点击跳转播放指针" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* synthetic/无指针ID 的测试事件无活动指针，忽略 */ } apply(event); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) apply(event); }} onPointerUp={(event) => { try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* 同上 */ } ctx.updateMetadata({ h3Scrubbing: false }); }} onPointerCancel={() => { ctx.updateMetadata({ h3Scrubbing: false }); }} />;
 }
