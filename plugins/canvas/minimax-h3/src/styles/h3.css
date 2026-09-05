@@ -399,7 +399,7 @@
 .nfh3-preset-actions button { border-color:var(--h3-border); background:var(--h3-fill); color:var(--h3-text); }
 .nfh3-chevron { border-color:var(--h3-active); }
 .nfh3-section-head small,.nfh3-mode-grid button small,.nfh3-prompt-options label,.nfh3-prompt-ref-hint { color:var(--h3-muted); }
-.nfh3-enabled-summary { color:var(--h3-active); font-weight:750; }
+.nfh3-enabled-summary { color:#1677ff; font-weight:750; }
 .nfh3-control input,.nfh3-control select,.nfh3-native-select,.nfh3-choice-grid button,.nfh3-lora-row .ant-select-selector,.nfh3-lora-row .ant-input-number { border-color:var(--h3-border); background:var(--h3-panel); color:var(--h3-text); }
 .nfh3-mode-grid button,.nfh3-choice-grid button { border-color:var(--h3-border); background:var(--h3-fill); color:var(--h3-text); }
 .nfh3-mode-grid button:hover,.nfh3-choice-grid button:hover { border-color:var(--h3-active); color:var(--h3-active); }
