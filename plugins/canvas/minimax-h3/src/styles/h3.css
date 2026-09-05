@@ -62,7 +62,11 @@
 .minimax-tick-extended b { color:#6b7787; }
 .minimax-motion-label,.minimax-motion-track,.minimax-motion-add { display:none; }
 .minimax-motion-segment { position:absolute; top:5px; bottom:5px; border-radius:4px; background:repeating-linear-gradient(135deg,#1d2935 0 4px,#253646 4px 8px); border:1px solid #334155; color:#7dd3fc; text-align:center; font-size:26px; display:flex; align-items:center; justify-content:center; }
-
+/* Clip 卡片 Motion Context 切换：左下角、与 ❌ 删除按钮对称；off 状态灰显 */
+.minimax-clip-motion { position:absolute; left:4px; top:4px; z-index:4; width:24px; height:24px; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#7dd3fc; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:13px; line-height:1; opacity:.55; transition:opacity .12s ease; }
+.minimax-clip-motion:hover { opacity:1; }
+.minimax-clip-motion.off { color:#64748b; opacity:.5; }
+.minimax-clip-motion.off:hover { opacity:.85; color:#94a3b8; }
 
 .minimax-tl-clip { position:absolute; top:10px; bottom:10px; min-width:54px; border:1px solid #334155; border-radius:5px; background:#24272b; color:#e5e7eb; overflow:hidden; cursor:pointer; }
 .minimax-tl-clip.active { border-color:#ef4444; background:#334155; box-shadow:0 0 0 1px #ef4444 inset; }
@@ -343,7 +347,9 @@
 .minimax-library-list,.minimax-edit-timeline,.minimax-current-panel { color:var(--h3-text); }
 .minimax-material-card { border-color:var(--h3-border) !important; background:var(--h3-fill) !important; box-shadow:none !important; }
 .minimax-material-card:hover { border-color:var(--h3-muted) !important; background:var(--h3-hover) !important; box-shadow:none !important; }
-.minimax-ref-type,.minimax-clip-delete,
+.minimax-ref-type,.minimax-clip-delete,.minimax-clip-motion { background:var(--h3-toolbar); color:var(--h3-text); }
+.minimax-clip-motion { color:#38bdf8; }
+.minimax-clip-motion.off { color:#94a3b8; }
 .minimax-clip-delete:hover { opacity:1; background:rgba(15,23,42,.95); color:#fff; }
 .minimax-player-stage { border-color:var(--h3-border); background:var(--h3-fill); box-shadow:none; }
 .minimax-player-stage video,.minimax-player-stage img { background:var(--h3-fill); }
