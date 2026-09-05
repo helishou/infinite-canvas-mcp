@@ -63,7 +63,7 @@
 .minimax-motion-label,.minimax-motion-track,.minimax-motion-add { display:none; }
 .minimax-motion-segment { position:absolute; top:5px; bottom:5px; border-radius:4px; background:repeating-linear-gradient(135deg,#1d2935 0 4px,#253646 4px 8px); border:1px solid #334155; color:#7dd3fc; text-align:center; font-size:26px; display:flex; align-items:center; justify-content:center; }
 /* Clip 卡片 Motion Context 切换：左下角、与 ❌ 删除按钮对称；off 状态灰显 */
-.minimax-clip-motion { position:absolute; left:4px; top:4px; z-index:4; width:24px; height:24px; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#7dd3fc; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:13px; line-height:1; opacity:.55; transition:opacity .12s ease; }
+.minimax-clip-motion { position:absolute; left:4px; top:4px; z-index:4; width:28px; height:28px; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#7dd3fc; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:18px; line-height:1; opacity:.55; transition:opacity .12s ease; }
 .minimax-clip-motion:hover { opacity:1; }
 .minimax-clip-motion.off { color:#64748b; opacity:.5; }
 .minimax-clip-motion.off:hover { opacity:.85; color:#94a3b8; }
@@ -81,7 +81,7 @@
 .minimax-clip-empty { height:100%; display:flex; align-items:center; justify-content:center; color:#64748b; }
 .minimax-clip-meta { position:absolute; left:7px; right:7px; bottom:7px; z-index:2; display:flex; flex-direction:column; align-items:center; gap:4px; text-align:center; text-shadow:0 1px 3px #000; pointer-events:none; }
 .minimax-clip-meta b { font-size:18px; color:#f8fafc; font-weight:700; }.minimax-clip-meta span { font-size:15px; color:#cbd5e1; }
-.minimax-clip-delete { position:absolute; right:4px; top:4px; z-index:4; width:24px; height:24px; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#e2e8f0; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:14px; line-height:1; opacity:.6; transition:opacity .12s ease; }
+.minimax-clip-delete { position:absolute; right:4px; top:4px; z-index:4; width:28px; height:28px; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#e2e8f0; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:18px; line-height:1; opacity:.6; transition:opacity .12s ease; }
 .minimax-current-panel { min-width:0; min-height:0; position:relative; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:72px minmax(0,1fr); overflow:hidden; border:1px solid #111827; border-radius:6px; background:#17191c; }
 .minimax-current-head { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; padding:0 10px; border-bottom:1px solid #2f3338; background:#202328; }
 .minimax-current-title,.minimax-current-refs { display:flex; align-items:center; gap:14px; color:#f8fafc; font-size:23px; }.minimax-current-title span:last-child { color:#94a3b8; }
