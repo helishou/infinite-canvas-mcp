@@ -80,7 +80,7 @@ export function SmartStoryboardModal({
       okButtonProps={{ disabled: generating }}
       okText={generating ? "生成中…" : "生成分镜"}
       cancelText="取消"
-      width={620}
+      width={460}
     >
       <SmartStoryboardFields
         ctx={ctx}
@@ -99,7 +99,7 @@ export function SmartStoryboardModal({
         }
         onReorder={reorder}
       />
-      <div style={{ marginTop: 20, color: ctx.theme.node.muted, fontSize: 24 }}>
+      <div style={{ marginTop: 16, color: ctx.theme.node.muted, fontSize: 12, lineHeight: 1.6 }}>
         看图 API、语言模型和 Skill 沿用当前默认配置；未上传图片时 fallback
         使用当前节点上游图片（
         {upstream.filter((ref) => ref.type === "image").length}{" "}
