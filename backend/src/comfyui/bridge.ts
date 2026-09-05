@@ -29,6 +29,23 @@ const PRESETS: ComfyPreset[] = [
     { id: "minimax-h3", name: "H3导演台 视频生成", kind: "video", inputs: ["video", "references", "audios", "segments"], params: ["mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sampler", "scheduler", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd", "constantTriggerWord"] },
 ];
 
+/** 从 ComfyUI 任务历史的状态对象中抽取可读的错误信息。
+ * ComfyUI 节点执行失败时，status.messages 里含 ["execution_error", { node_id, node_type, exception_message, ... }]。 */
+function extractComfyErrorMessage(status: any): string {
+    if (!status) return "ComfyUI 执行失败（无状态信息）";
+    const messages: unknown[] = Array.isArray(status.messages) ? status.messages : [];
+    for (const entry of messages) {
+        if (Array.isArray(entry) && entry.length >= 2 && entry[0] === "execution_error") {
+            const data = entry[1] as Record<string, unknown>;
+            const where = data.node_type ? `节点 ${data.node_id ?? "?"} (${data.node_type})` : `节点 ${data.node_id ?? "?"}`;
+            const msg = data.exception_message || data.exception_type || "未知错误";
+            return `ComfyUI ${where} 报错：${msg}`;
+        }
+    }
+    if (typeof status.status_str === "string") return `ComfyUI 执行失败（${status.status_str}）`;
+    try { return `ComfyUI 执行失败：${JSON.stringify(status).slice(0, 1500)}`; } catch { return "ComfyUI 执行失败"; }
+}
+
 /** 总后台侧 ComfyUI Bridge：任务持久化统一走总后台 SQLite。 */
 export class ComfyUiBackend {
     private url: string;
@@ -163,30 +180,220 @@ export class ComfyUiBackend {
         const prepared = preset === "minimax-h3"
             ? { input, cleanup: async () => undefined }
             : await prepareH3MotionContext(input, params);
+        // 提前声明 WebSocket 相关变量（置于 try 之前），避免早期异常触发 finally 时
+        // closeWs 仍处于 TDZ（const 尚未初始化）而抛出 "closeWs is not defined"，掩盖真实错误。
+        let capturedPromptId: string | null = null;
+        let ws: any = null;
+        let wsExecuted = false;
+        let wsExecutedAt = 0;
+        let wsError: Error | null = null;
+        let wsOutputs: any = null;
+        let wsExecutionSuccessOutputs: any = null;
+        let wsExecutionSuccessAt = 0;
+        let wsClosed = false;
+        let wsCloseError: Error | null = null;
+        let closeWs: () => void = () => {};
         try {
             const uploadFn = (file: string) => this.upload(file, controller.signal, comfyUrl);
             const workflow = preset === "minimax-h3"
                 ? await buildNanFengV10Workflow(prepared.input, params, uploadFn, comfyUrl, controller.signal)
                 : await buildWorkflow(preset, prepared.input, params, uploadFn);
+
+            // 在提交 /prompt 之前就建立 ComfyUI WebSocket 并监听 executed 事件。
+            // 关键修复：ComfyUI 的 executed 消息本身直接携带 outputs（文件名/路径），
+            // 无需再去查 /history——后者是有限队列（默认仅保留最近若干条），任务一多或
+            // 间隔稍长就被清理，导致"跑完了但取不回结果/历史记录找不到"的回写失败。
+            // 这里把 outputs 直接缓存下来，作为回写的主路径。
+            const Ctor = (globalThis as any).WebSocket;
+            if (typeof Ctor === "function") {
+                try {
+                    const wsBase = comfyUrl.replace(/^http/, "ws");
+                    const socket = new Ctor(`${wsBase}/ws?clientId=${encodeURIComponent(task.id)}`);
+                    socket.onmessage = (event: any) => {
+                        try {
+                            const raw = typeof event.data === "string" ? event.data : (event.data != null ? String(event.data) : "");
+                            if (!raw) return;
+                            const msg = JSON.parse(raw);
+                            if (!msg?.type) return;
+                            // 只处理与当前 prompt_id 相关的事件，避免历史/别人的事件干扰
+                            if (!capturedPromptId || msg?.data?.prompt_id !== capturedPromptId) {
+                                // 仍然记录 execution_success 的 prompt_id 匹配失败，但不接管
+                                return;
+                            }
+                            if (msg.type === "executed" || msg.type === "execution_success") {
+                                wsExecuted = true; wsExecutedAt = Date.now();
+                                // 多输出节点的工作流（如 Z-Image 的 PreviewImage + rgthree Image Comparer）
+                                // 每个节点都会发 executed；若直接覆盖，后执行节点的 outputs 会顶掉先执行的，
+                                // 若最后执行的节点用非标准键（rgthree 用 a_images/b_images）就会得到空媒体。
+                                // 这里按节点合并而非覆盖（execution_success 在当前 ComfyUI 只带 prompt_id，无 output）。
+                                if (msg.data?.output && typeof msg.data.output === "object") wsOutputs = { ...(wsOutputs || {}), ...(msg.data.output as Record<string, unknown>) };
+                                // execution_success（v1.5+）payload 才是整个 graph 的 outputs，executed 只是单节点。
+                                // 同时记录一份合并视图，优先用 execution_success 的 outputs。
+                                if (msg.type === "execution_success" && msg.data?.output && typeof msg.data.output === "object") {
+                                    wsExecutionSuccessOutputs = msg.data.output;
+                                    wsExecutionSuccessAt = Date.now();
+                                }
+                            } else if (msg.type === "execution_error") {
+                                const d = msg.data || {};
+                                wsError = new Error(`ComfyUI 节点 ${d.node_id ?? "?"} (${d.node_type ?? "?"}) 报错：${d.exception_message || d.exception_type || "未知错误"}`);
+                            }
+                        } catch {}
+                    };
+                    // 监听 WS 异常/关闭：之前没 onerror/onclose handler，连接静默断掉时 for 循环
+                    // 不知道，单纯靠 /history 兜底。但 ComfyUI 的 /history 是 LRU（默认 10000 条），
+                    // 任务一多就会被挤掉，导致"WebSocket 早断了 / 之后 /history 找不到 / 3 分钟后抛错"。
+                    // 这里记录错误，for 循环会看到 wsClosed 提前 fail。
+                    socket.onerror = () => { wsCloseError = new Error("ComfyUI WebSocket 连接出错，可能被代理/防火墙中断"); };
+                    socket.onclose = (event: any) => {
+                        wsClosed = true;
+                        if (!wsCloseError && event?.code && event.code !== 1000) {
+                            wsCloseError = new Error(`ComfyUI WebSocket 异常关闭 (code ${event.code}${event.reason ? `: ${event.reason}` : ""})`);
+                        }
+                    };
+                    ws = socket;
+                } catch {}
+            }
+            closeWs = () => { try { ws?.close(); } catch {} };
+
             const response = await fetch(`${comfyUrl}/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: workflow, client_id: task.id }), signal: controller.signal });
             if (!response.ok) { const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000); throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`); }
             const body = await response.json() as { prompt_id?: string; node_errors?: unknown };
             if (!body.prompt_id) throw new Error(body.node_errors ? JSON.stringify(body.node_errors) : "ComfyUI did not return prompt_id");
+            const promptId: string = body.prompt_id;
+            capturedPromptId = promptId;
             const execution = this.comfyExecutions.get(task.id);
             if (execution) execution.promptId = body.prompt_id;
             this.deps.tasks.addEvent(task.id, "submitted", { promptId: body.prompt_id });
+            const startedAt = Date.now();
+            const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(60 * 60 * 1000, Number(params.maxExecutionMs) || 30 * 60 * 1000));
+            let missingHistoryCount = 0;
+            let consecutiveMissingInQueue = 0;
+            // 收到 executed 信号后，先直接用消息携带的 outputs 回写（绕过 /history 被清理的坑）；
+            // 仅当 executed 没带 outputs 时才退回紧凑回查 history。
+            const fetchHistoryNow = async (attempts = 10): Promise<any | undefined> => {
+                for (let i = 0; i < attempts; i++) {
+                    if (controller.signal.aborted) return undefined;
+                    try {
+                        const res = await fetch(`${comfyUrl}/history/${encodeURIComponent(promptId)}`, { signal: controller.signal });
+                        if (res.ok) {
+                            const history = await res.json() as Record<string, any>;
+                            const item = history[promptId];
+                            if (item && item.outputs && typeof item.outputs === "object" && Object.keys(item.outputs).length > 0) return item;
+                            if (item && (item.status?.status_str === "error" || item.status?.status_str === "failed")) return item;
+                        }
+                    } catch {}
+                    await new Promise((resolve) => setTimeout(resolve, 400));
+                }
+                return undefined;
+            };
             for (;;) {
-                if (controller.signal.aborted) throw new Error("任务已取消");
+                if (controller.signal.aborted) { closeWs(); throw new Error("任务已取消"); }
+                if (Date.now() - startedAt > maxExecutionMs) { closeWs(); throw new Error(`ComfyUI 任务执行超时（已超过 ${Math.round(maxExecutionMs / 60000)} 分钟），请检查 ComfyUI 是否仍在运行`); }
+                if (wsError) { closeWs(); throw wsError; }
+                // WebSocket 已确认任务完成：优先用 execution_success 事件（v1.5+ 推送的整个 graph outputs），
+                // 没有就退回 executed 单节点 outputs；都没有再回 /history；
+                // WS 已关闭且 /history 拿不到，主动扫 /history 列表找最近的成功条目兜底。
+                if (wsExecuted) {
+                    // 优先用 execution_success（whole-graph）outputs，回退到 executed（单节点）outputs
+                    const useOutputs = (wsExecutionSuccessOutputs && typeof wsExecutionSuccessOutputs === "object" && Object.keys(wsExecutionSuccessOutputs).length > 0)
+                        ? wsExecutionSuccessOutputs
+                        : (wsOutputs && typeof wsOutputs === "object" && Object.keys(wsOutputs).length > 0 ? wsOutputs : null);
+                    if (useOutputs) {
+                        closeWs();
+                        const media = await collectOutputMedia(useOutputs, comfyUrl, this.deps.media, controller.signal);
+                        return { promptId: body.prompt_id, outputs: useOutputs, media, status: { status_str: "success", completed: true } };
+                    }
+                    const item = await fetchHistoryNow();
+                    if (item) {
+                        const statusStr = item?.status?.status_str;
+                        if (statusStr === "error" || statusStr === "failed") { closeWs(); throw new Error(extractComfyErrorMessage(item.status)); }
+                        closeWs();
+                        return { promptId: body.prompt_id, outputs: item.outputs, media: await collectOutputMedia(item.outputs, comfyUrl, this.deps.media, controller.signal), status: item.status || {} };
+                    }
+                    // WS 已关闭但 history 拿不到：主动兜底——扫整个 /history 列表找最近成功条目
+                    if (wsClosed) {
+                        try {
+                            const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
+                            if (allHistory.ok) {
+                                const all = await allHistory.json() as Record<string, any>;
+                                // 找最新的 completed + 有 outputs 的条目
+                                const candidates = Object.entries(all)
+                                    .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
+                                    .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
+                                    .sort((a, b) => b.updated - a.updated);
+                                if (candidates[0]) {
+                                    const winner = candidates[0];
+                                    closeWs();
+                                    return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
+                                }
+                            }
+                        } catch {}
+                        // 兜底都拿不到：抛明确错误，让用户知道 WS 早断了
+                        const reason = (wsCloseError as Error | null)?.message || "WebSocket 已关闭且 /history、/queue 均无该任务记录";
+                        closeWs();
+                        throw new Error(`ComfyUI ${reason}。任务可能已完成但结果无法回写。可去 ComfyUI 的 /output 目录手动拿产物。`);
+                    }
+                    // executed 没带 outputs 且 history 也取不到：再等一会，但不再走慢速 missing 计数
+                    if (Date.now() - wsExecutedAt > 60000) { closeWs(); throw new Error("ComfyUI 已在 WebSocket 中报告完成，但取不回结果（outputs 与 history 均无），回写失败"); }
+                    await new Promise((resolve) => setTimeout(resolve, 1500));
+                    continue;
+                }
+                // WS 在我们拿到 executed 之前就关闭了：提前 fail，避免傻等
+                if (wsClosed) {
+                    const reason = (wsCloseError as Error | null)?.message || "WebSocket 已关闭但未收到 executed 事件";
+                    closeWs();
+                    throw new Error(`ComfyUI ${reason}。可能 ComfyUI 中途崩溃或代理中断，请检查 /output 目录。`);
+                }
                 const historyResponse = await fetch(`${comfyUrl}/history/${encodeURIComponent(body.prompt_id)}`, { signal: controller.signal });
                 if (historyResponse.ok) {
                     const history = await historyResponse.json() as Record<string, any>;
                     const item = history[body.prompt_id];
-                    if (item?.status?.completed || item?.outputs) return { promptId: body.prompt_id, outputs: item.outputs || {}, media: await collectOutputMedia(item.outputs || {}, comfyUrl, this.deps.media, controller.signal), status: item.status || {} };
-                    if (item?.status?.status_str === "error" || item?.status?.status_str === "failed") throw new Error(JSON.stringify(item.status));
+                    // 注意：ComfyUI 节点报错时 history 条目仍会带空对象 outputs: {}，
+                    // 空对象在 JS 里为 truthy，因此必须先判错误、且成功必须要求非空输出，
+                    // 否则会被误判为「成功但无结果」，导致前端永远收不到失败回调而卡死轮询。
+                    const statusStr = item?.status?.status_str;
+                    if (statusStr === "error" || statusStr === "failed") {
+                        throw new Error(extractComfyErrorMessage(item.status));
+                    }
+                    const hasOutputs = !!(item?.outputs && typeof item.outputs === "object" && Object.keys(item.outputs).length > 0);
+                    if (statusStr === "success" || item?.status?.completed || hasOutputs) {
+                        if (!hasOutputs) {
+                            throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item.status)}`);
+                        }
+                        closeWs();
+                        return { promptId: body.prompt_id, outputs: item.outputs, media: await collectOutputMedia(item.outputs, comfyUrl, this.deps.media, controller.signal), status: item.status || {} };
+                    }
+                    if (item === undefined) {
+                        missingHistoryCount++;
+                        // history 长期没有该 prompt_id：可能是 ComfyUI 历史记录被清理，
+                        // 需要结合 /queue 判断任务是否还在执行，避免无限 running。
+                        if (missingHistoryCount > 120) {
+                            try {
+                                const queueResponse = await fetch(`${comfyUrl}/queue`, { signal: controller.signal });
+                                if (queueResponse.ok) {
+                                    const queue = await queueResponse.json() as { queue_running?: unknown[]; queue_pending?: unknown[] };
+                                    const entries = [...(queue.queue_running || []), ...(queue.queue_pending || [])];
+                                    const stillQueued = entries.some((entry) => Array.isArray(entry) && entry.length > 0 && (String(entry[0] || "") === body.prompt_id || String(entry[0] || "").includes(body.prompt_id || "")));
+                                    if (!stillQueued) {
+                                        consecutiveMissingInQueue++;
+                                        if (consecutiveMissingInQueue >= 2) throw new Error("ComfyUI 执行记录中找不到该任务，可能历史记录被清理或任务已丢失");
+                                    } else {
+                                        consecutiveMissingInQueue = 0;
+                                    }
+                                }
+                            } catch (error) {
+                                if (error instanceof Error && error.message.includes("ComfyUI 执行记录中找不到")) throw error;
+                            }
+                            missingHistoryCount = 90;
+                        }
+                    } else {
+                        missingHistoryCount = 0;
+                        consecutiveMissingInQueue = 0;
+                    }
                 }
                 await new Promise((resolve) => setTimeout(resolve, 1500));
             }
-        } finally { await prepared.cleanup(); }
+        } finally { closeWs(); await prepared.cleanup(); }
     }
 
     private async cancelComfyExecution(taskId: string) {
@@ -485,8 +692,8 @@ async function buildNanFengV10Workflow(
     if (!modelName || !textEncoder || !videoVaeName || !audioVaeName) throw new Error("南风 H3 需要模型、文本编码器、视频 VAE 和音频 VAE");
 
     const start = node("nf_start", "NanFengH3ReleaseAtStart", { unet_name: modelName, clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName, reserved_vram_gb: params.runtimeReserveEnabled === true ? Number(params.reservedVramGb ?? 0.6) : 0 });
-    // ComfyUI 的 Loader 下拉输入是 COMBO，不接受 Release 节点返回的 STRING 连线；
-    // NanFeng 的屏障只负责调度/清理，Loader 必须直接接收实际文件名。
+    // API 图的 Loader 输入是 COMBO，不能接收释放节点的 STRING 输出；
+    // 因此这里保留文件名输入，避免提交时触发 ComfyUI 的类型校验错误。
     let model = node("nf_model", "UNETLoader", { unet_name: modelName, weight_dtype: String(params.precision || "default") });
     const loraSlots = Array.isArray(params.loraSlots) ? params.loraSlots : [{ name: params.loraName, strength: params.loraStrength, enabled: true }];
     loraSlots.slice(0, 8).forEach((slot: any, index: number) => {
@@ -496,12 +703,18 @@ async function buildNanFengV10Workflow(
     if (params.slaEnabled === true) model = node("nf_sla", "H3SLAAttention", { model: model(0), enabled: true, sparsity_ratio: Number(params.slaSparsity ?? 0.9), block_size: String(params.slaBlockSize || "64"), min_seq_len: Number(params.slaMinSequence ?? 4096), dense_last_steps: Number(params.slaDenseLastSteps ?? 1), protect_audio: params.slaProtectAudio !== false, dense_steps: String(params.slaDenseSteps || "0"), dense_backend: String(params.slaBackend || "comfy_kitchen"), disable_fp16_accum: params.slaDisableFp16Accum !== false, stabilize_motion: params.slaStabilizeMotion !== false });
     else if (v10T8Enabled && params.t8Enabled === true) model = node("nf_t8", "MiniMaxH3BlockCacheT8", { model: model(0), residual_diff_threshold: Number(params.t8ResidualThreshold ?? 0.12), start_percent: Number(params.t8StartPercent ?? 0.08), end_percent: Number(params.t8EndPercent ?? 0.95), max_consecutive_hits: Number(params.t8MaxConsecutiveHits ?? 2), cache_device: String(params.t8CacheDevice || "cpu"), metric_stride: Number(params.t8MetricStride ?? 8), verbose: params.t8Verbose === true });
     else {
-        const dedicatedAttention = String(params.dedicatedAttention || "H3专用Sage加速");
-        const unifiedSage = dedicatedAttention === "自动" ? "auto" : dedicatedAttention === "关闭" ? String(params.sageAttention || "auto") : dedicatedAttention;
-        if (dedicatedAttention === "H3专用Sage加速") model = node("nf_h3_attention", "MiniMaxH3MemoryEfficientSageAttentionPatch", { model: model(0) });
-        else if (unifiedSage !== "disabled" && unifiedSage !== "关闭") model = node("nf_sage", "PathchSageAttentionKJ", { model: model(0), sage_attention: unifiedSage, allow_compile: params.allowCompile === true });
+        // SageAttention 单字段驱动（兼容旧 dedicatedAttention 字段）
+        let sage = String(params.sageAttention ?? params.dedicatedAttention ?? "H3专用Sage加速");
+        if (sage === "自动") sage = "auto";
+        else if (sage === "关闭") sage = "disabled";
+        if (sage === "H3专用Sage加速") model = node("nf_h3_attention", "MiniMaxH3MemoryEfficientSageAttentionPatch", { model: model(0) });
+        else if (sage !== "disabled") model = node("nf_sage", "PathchSageAttentionKJ", { model: model(0), sage_attention: sage, allow_compile: params.allowCompile === true });
     }
-    node("nf_condition_loaders", "NanFengH3ReleaseBeforeConditionLoaders", { clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName });
+    // 这些释放节点在 API prompt 图中没有可连接到 COMBO Loader 的合法输出类型；
+    // 保持它们的声明仅用于兼容记录，真正执行链仍从 Loader 开始。
+    node("nf_condition_loaders", "NanFengH3ReleaseBeforeConditionLoaders", {
+        clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName,
+    });
     const clip = node("nf_clip", "CLIPLoader", { clip_name: textEncoder, type: String(params.textEncoderType || "minimax"), device: String(params.textEncoderDevice || "default") });
     const videoVae = node("nf_video_vae", "VAELoader", { vae_name: videoVaeName });
     const audioVae = node("nf_audio_vae", "VAELoader", { vae_name: audioVaeName });
@@ -536,7 +749,7 @@ async function buildNanFengV10Workflow(
         const prepared = node("nf_image_condition", "MiniMaxH3ImageToVideo", imageInputs);
         conditioning = prepared(0); latent = prepared(1);
     } else {
-        const refInputs: Record<string, any> = { clip: clip(0), vae: videoVae(0), audio_vae: audioVae(0), prompt: buildNanFengPrompt(prompt, uploadedRefs.length, uploadedVideos.length, uploadedAudios.length), width, height, length: durationToFrames(duration), ref_image_size: "max" };
+        const refInputs: Record<string, any> = { clip: clip(0), vae: videoVae(0), audio_vae: audioVae(0), prompt: buildNanFengPrompt(prompt, uploadedRefs.length, uploadedVideos.length, uploadedAudios.length), width, height, length: durationToFrames(duration), ref_image_size: String(params.refImageSize || "match") };
         for (let i = 0; i < uploadedRefs.length; i += 1) { const loaded = node(`nf_image_${i}`, "LoadImage", { image: uploadedRefs[i] }); refInputs[`ref_images.ref_image_${i}`] = node(`nf_image_limit_${i}`, "NanFengH3LimitImageLongEdge", { image: loaded(0), max_long_edge: Number(params.referenceLongEdge || 1920) })(0); }
         for (let i = 0; i < uploadedVideos.length; i += 1) { const video = node(`nf_video_${i}`, "LoadVideo", { file: uploadedVideos[i] }); const parts = node(`nf_video_parts_${i}`, "GetVideoComponents", { video: video(0) }); refInputs[`ref_videos.ref_video_${i}`] = parts(0); refInputs[`ref_video_audios.ref_video_audio_${i}`] = parts(1); }
         for (let i = 0; i < uploadedAudios.length; i += 1) { const loaded = node(`nf_audio_${i}`, "LoadAudio", { audio: uploadedAudios[i] }); refInputs[`ref_audios.ref_audio_${i}`] = params.audioDrive === true ? node(`nf_audio_trim_${i}`, "TrimAudioDuration", { audio: loaded(0), start_index: Number(params.audioDriveStart ?? 0), duration })(0) : loaded(0); }
@@ -576,21 +789,19 @@ async function buildNanFengV10Workflow(
     if ((latentUpscaleRequested || manualSigmaEnabled) && fullSigmaText) sigmas = node("nf_h3_full_sigmas", "ManualSigmas", { sigmas: fullSigmaText })(0);
     if (v10LegacySigmaEnabled && params.sigmaEnabled === true && String(params.manualSigma || "").trim() && String(params.sigmaMode || "低西格玛加密") === "手动序列") sigmas = node("nf_manual_sigmas", "ManualSigmas", { sigmas: String(params.manualSigma) })(0);
     else if (v10LegacySigmaEnabled && params.sigmaEnabled === true) sigmas = node("nf_sigma_extend", "ExtendIntermediateSigmas", { sigmas, steps: Number(params.sigmaRefineSteps ?? 2), start_at_sigma: Number(params.lowSigmaStart ?? 0.8), end_at_sigma: Number(params.lowSigmaEnd ?? 0), spacing: String(params.sigmaCurve || "cosine") })(0);
-    // 保留 NanFeng 条件节点产出的 NestedTensor AV latent 原对象。ReleaseBeforeSampling
-    // 是旧式 FUNCTION 节点，某些 ComfyUI API 执行器会把它的多输出 LATENT
-    // 包装成普通单路 latent；H3 模型要求 samples.tensors[0] + [1] 两路同时存在。
-    // 释放屏障仍然用于 model/conditioning，但采样 latent 直接沿用原生条件节点输出。
+    // 采样 latent 与南风 V10 一致，必须使用 ReleaseBeforeSampling 的第三路输出。
+    // 如果当前 ComfyUI 仍会破坏 NestedTensor，应修复该节点的返回/执行行为，不能在桥接层绕过它。
     if (latentUpscaleRequested) latentSigmaSplit = node("nf_h3_sigma_split", "SplitSigmas", { sigmas, step: h3FirstSteps });
     let sampled: (output?: number) => any;
     if (latentUpscaleRequested) {
-        sampled = node("nf_sample_first", "SamplerCustomAdvanced", { noise: noise(0), guider: guider(0), sampler: sampler(0), sigmas: latentSigmaSplit(0), latent_image: latent });
+        sampled = node("nf_sample_first", "SamplerCustomAdvanced", { noise: noise(0), guider: guider(0), sampler: sampler(0), sigmas: latentSigmaSplit(0), latent_image: ready(2) });
     } else if (v10LegacySigmaEnabled && params.dualSampling === true) {
         const split = node("nf_sigma_split", "SplitSigmasDenoise", { sigmas, denoise: Number(params.dualSamplingRatio ?? 0.5) });
-        const first = node("nf_sample_first", "SamplerCustomAdvanced", { noise: noise(0), guider: guider(0), sampler: sampler(0), sigmas: split(0), latent_image: latent });
+        const first = node("nf_sample_first", "SamplerCustomAdvanced", { noise: noise(0), guider: guider(0), sampler: sampler(0), sigmas: split(0), latent_image: ready(2) });
         const secondSampler = node("nf_dual_sampler", "KSamplerSelect", { sampler_name: String(params.dualSampler || params.sampler || "res_multistep") });
         const noNoise = node("nf_dual_no_noise", "DisableNoise", {});
         sampled = node("nf_sample", "SamplerCustomAdvanced", { noise: noNoise(0), guider: guider(0), sampler: secondSampler(0), sigmas: split(1), latent_image: first(0) });
-    } else sampled = node("nf_sample", "SamplerCustomAdvanced", { noise: noise(0), guider: guider(0), sampler: sampler(0), sigmas, latent_image: latent });
+    } else sampled = node("nf_sample", "SamplerCustomAdvanced", { noise: noise(0), guider: guider(0), sampler: sampler(0), sigmas, latent_image: ready(2) });
     if (v10LegacySecondPassEnabled && params.secondPassEnabled === true) {
         // 当前运行实例未注册 NanFeng 源码 V5 分支依赖的 RebuildAVLatent；使用已注册的
         // AV latent 放大器，避免把视频单路 latent 重新接回 H3 而丢失音频流。
@@ -609,10 +820,12 @@ async function buildNanFengV10Workflow(
         let secondModel = node("nf_second_model", "UNETLoader", { unet_name: secondModelName, weight_dtype: String(params.precision || "default") });
         if (params.slaEnabled === true) secondModel = node("nf_second_sla", "H3SLAAttention", { model: secondModel(0), enabled: true, sparsity_ratio: Number(params.slaSparsity ?? 0.9), block_size: String(params.slaBlockSize || "64"), min_seq_len: Number(params.slaMinSequence ?? 4096), dense_last_steps: Number(params.slaDenseLastSteps ?? 1), protect_audio: params.slaProtectAudio !== false, dense_steps: String(params.slaDenseSteps || "0"), dense_backend: String(params.slaBackend || "comfy_kitchen"), disable_fp16_accum: params.slaDisableFp16Accum !== false, stabilize_motion: params.slaStabilizeMotion !== false });
         else {
-            const dedicatedAttention = String(params.dedicatedAttention || "H3专用Sage加速");
-            const unifiedSage = dedicatedAttention === "自动" ? "auto" : dedicatedAttention === "关闭" ? String(params.sageAttention || "auto") : dedicatedAttention;
-            if (dedicatedAttention === "H3专用Sage加速") secondModel = node("nf_second_h3_attention", "MiniMaxH3MemoryEfficientSageAttentionPatch", { model: secondModel(0) });
-            else if (unifiedSage !== "disabled" && unifiedSage !== "关闭") secondModel = node("nf_second_sage", "PathchSageAttentionKJ", { model: secondModel(0), sage_attention: unifiedSage, allow_compile: params.allowCompile === true });
+            // SageAttention 单字段驱动（兼容旧 dedicatedAttention 字段）
+            let sage = String(params.sageAttention ?? params.dedicatedAttention ?? "H3专用Sage加速");
+            if (sage === "自动") sage = "auto";
+            else if (sage === "关闭") sage = "disabled";
+            if (sage === "H3专用Sage加速") secondModel = node("nf_second_h3_attention", "MiniMaxH3MemoryEfficientSageAttentionPatch", { model: secondModel(0) });
+            else if (sage !== "disabled") secondModel = node("nf_second_sage", "PathchSageAttentionKJ", { model: secondModel(0), sage_attention: sage, allow_compile: params.allowCompile === true });
         }
         const secondGuider = node("nf_second_guider", "BasicGuider", { model: secondModel(0), conditioning: secondReady(1) });
         const secondSampler = node("nf_second_sampler", "KSamplerSelect", { sampler_name: String(params.secondPassSampler || params.sampler || "res_multistep") });
@@ -793,13 +1006,52 @@ function normalizeH3AspectRatio(value: string) {
     return aliases[value] || value;
 }
 
+/** 带重试的 fetch：ComfyUI 刚执行完时输出文件可能还在落盘，瞬时 404 应重试而非放弃。 */
+async function fetchWithRetry(url: string, signal: AbortSignal, attempts = 4, delayMs = 400): Promise<Response> {
+    let lastError: unknown;
+    for (let i = 0; i < attempts; i += 1) {
+        if (signal.aborted) throw new Error("任务已取消");
+        try {
+            const res = await fetch(url, { signal });
+            if (res.ok) return res;
+            // 404 = 文件尚未落盘：重试等待；其它状态码直接返回交给上层处理
+            if (res.status === 404 && i < attempts - 1) { await new Promise((resolve) => setTimeout(resolve, delayMs)); continue; }
+            return res;
+        } catch (error) {
+            lastError = error;
+            if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+    }
+    if (lastError) throw lastError;
+    throw new Error(`fetch ${url} 失败`);
+}
+
 async function collectOutputMedia(outputs: Record<string, any>, baseUrl: string, mediaStore: MediaStore, signal: AbortSignal) {
-    const items = Object.values(outputs).flatMap((output) => [ ...(output?.images || []), ...(output?.gifs || []), ...(output?.videos || []) ]);
+    // 对齐旧版 Python 项目的做法：递归遍历 outputs 的所有键，收集任何带 filename 的条目，
+    // 不局限于 images/gifs/videos 三个固定键——自定义节点（rgthree 的 a_images/b_images、
+    // 各类 Save 节点的自定义键）也能被捞起。仅按 filename+subfolder+type 去重。
+    const seen = new Set<string>();
+    const items: Array<Record<string, any>> = [];
+    const visit = (value: any) => {
+        if (!value) return;
+        if (Array.isArray(value)) { value.forEach(visit); return; }
+        if (typeof value !== "object") return;
+        if (typeof value.filename === "string" && value.filename) {
+            // 排除 type=input：LoadImage/LoadVideo 等节点会把加载的输入素材以 UI 预览
+            // 形式写进 history outputs（如 Motion Context 的上段视频），不排除会把输入
+            // 误当生成结果。temp 保留——z-image 等工作流的 PreviewImage 输出就是 temp。
+            if (String(value.type || "").trim().toLowerCase() === "input") return;
+            const key = `${value.filename}|${value.subfolder || ""}|${value.type || ""}`;
+            if (!seen.has(key)) { seen.add(key); items.push(value); }
+            return;
+        }
+        Object.values(value).forEach(visit);
+    };
+    visit(outputs);
     return (await Promise.all(items.map(async (item) => {
-        if (!item?.filename) return [];
         const query = new URLSearchParams({ filename: String(item.filename), subfolder: String(item.subfolder || ""), type: String(item.type || "output") });
         const sourceUrl = `${baseUrl}/view?${query.toString()}`;
-        const response = await fetch(sourceUrl, { signal });
+        const response = await fetchWithRetry(sourceUrl, signal);
         if (!response.ok) return [{ url: sourceUrl, mimeType: mimeForOutput(item), filename: String(item.filename) }];
         const stored = mediaStore.store(Buffer.from(await response.arrayBuffer()), { name: String(item.filename), mimeType: mimeForOutput(item), category: "output" });
         return [{ url: mediaStore.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: String(item.filename), sourceUrl }];

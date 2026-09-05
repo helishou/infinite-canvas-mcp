@@ -6,7 +6,8 @@ import { imageToDataUrl } from "@/services/image-storage";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { runLocalH3Task, getLocalH3Task, cancelLocalH3Task, runRunningHubH3Task, getRunningHubH3Task, cancelRunningHubH3Task, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels, fetchComfyStatus } from "@/services/api/canvas-agent";
-import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, updateBackendGenerationLog } from "@/services/backend-api";
+import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, updateBackendGenerationLog } from "@/services/backend-api";
+import { getBackendTokenShared } from "@/lib/backend-token";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
@@ -15,7 +16,7 @@ import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
-import type { CanvasGenerationLogs, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost } from "@/types/canvas-plugin";
+import type { CanvasAssetPickerImage, CanvasGenerationLogs, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
@@ -34,6 +35,7 @@ type PluginHostParams = {
     viewportRef: MutableRefObject<ViewportTransform>;
     setNodes: Dispatch<SetStateAction<CanvasNodeData[]>>;
     setDialogNodeId: Dispatch<SetStateAction<string | null>>;
+    openAssetPicker: (options?: { kind?: "image" }) => Promise<CanvasAssetPickerImage | null>;
     applyAgentOps: (ops?: CanvasAgentOp[]) => unknown;
 };
 
@@ -58,7 +60,7 @@ async function persistH3Result(result: Awaited<ReturnType<typeof runLocalH3Task>
  */
 export function usePluginHost(params: PluginHostParams) {
     const { t } = useTranslation();
-    const { projectId, updateProject, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, applyAgentOps } = params;
+    const { projectId, updateProject, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, applyAgentOps } = params;
     const generationLogs = useMemo<CanvasGenerationLogs>(() => {
         const unavailable = () => { throw new Error("总后台未连接，无法访问生成日志"); };
         return {
@@ -108,6 +110,7 @@ export function usePluginHost(params: PluginHostParams) {
                 return { url: file.url, mimeType: file.mimeType, width: file.width, height: file.height, durationMs: file.durationMs };
             },
             generateText: async (prompt, options) => {
+                console.log("pluginAi.generateText", { prompt, options });
                 const config = { ...buildGenerationConfig(effectiveConfig, undefined, "text"), ...(options?.model ? { model: options.model } : {}) };
                 ensureReady(config);
                 const content = options?.references?.length
@@ -118,16 +121,17 @@ export function usePluginHost(params: PluginHostParams) {
                 return { text };
             },
             runLocalH3: async (prompt, input, params, options) => {
-                const agent = useAgentStore.getState();
-                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法运行本地 MiniMax H3");
-                const comfy = await fetch(`${agent.url}/comfy/config?token=${encodeURIComponent(agent.token)}`).then(async (response) => {
+                const backendUrl = getBackendUrl();
+                const backendToken = getBackendTokenShared();
+                if (!(await fetch(`${backendUrl}/health`).then((response) => response.ok).catch(() => false))) throw new Error("总后台未连接，无法运行本地 MiniMax H3");
+                const comfy = await fetch(`${backendUrl}/comfy/config?token=${encodeURIComponent(backendToken)}`).then(async (response) => {
                     if (!response.ok) throw new Error(`读取 ComfyUI 配置失败（HTTP ${response.status}）`);
                     return await response.json() as { url?: string };
                 });
                 if (!comfy.url) throw new Error("尚未配置本地 ComfyUI 地址");
                 let comfyStatus;
                 try {
-                    comfyStatus = await fetchComfyStatus(agent.url, agent.token);
+                    comfyStatus = await fetchComfyStatus(backendUrl, backendToken);
                 } catch (error) {
                     const message = error instanceof Error ? error.message : String(error);
                     throw new Error(`无法检查 ComfyUI 状态：${message}`);
@@ -135,22 +139,18 @@ export function usePluginHost(params: PluginHostParams) {
                 if (comfyStatus.connected !== true) {
                     throw new Error(`ComfyUI 未启动，请先启动 ComfyUI${comfyStatus.url ? `（${comfyStatus.url}）` : ""}`);
                 }
-                const result = await runLocalH3Task(agent.url, agent.token, comfy.url, prompt, input, params, options?.signal, options?.onTaskId);
+                const result = await runLocalH3Task(backendUrl, backendToken, comfy.url, prompt, input, params, options?.signal, options?.onTaskId);
                 return persistH3Result(result);
             },
             getLocalH3Task: async (taskId) => {
-                const agent = useAgentStore.getState();
-                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法查询 H3 任务");
-                const task = await getLocalH3Task(agent.url, agent.token, taskId) as Awaited<ReturnType<typeof getLocalH3Task>>;
+                const task = await getLocalH3Task(getBackendUrl(), getBackendTokenShared(), taskId) as Awaited<ReturnType<typeof getLocalH3Task>>;
                 if (task.status === "succeeded" && task.result?.url && !task.result.storageKey) {
                     return { ...task, result: await persistH3Result(task.result) };
                 }
                 return task;
             },
             cancelLocalH3Task: async (taskId) => {
-                const agent = useAgentStore.getState();
-                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法取消 H3 任务");
-                const task = await cancelLocalH3Task(agent.url, agent.token, taskId);
+                const task = await cancelLocalH3Task(getBackendUrl(), getBackendTokenShared(), taskId);
                 return { id: task.id, status: task.status, progress: task.progress, error: task.error, result: null };
             },
             runVideoConcat: async (videos, options) => {
@@ -160,9 +160,7 @@ export function usePluginHost(params: PluginHostParams) {
                 return result;
             },
             listLocalH3Models: async () => {
-                const agent = useAgentStore.getState();
-                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法读取 ComfyUI 模型");
-                const result = await fetchComfyModels(agent.url, agent.token);
+                const result = await fetchComfyModels(getBackendUrl(), getBackendTokenShared());
                 return { models: result.data?.models || [], loras: result.data?.loras || [], textEncoders: result.data?.textEncoders || [], videoVaes: result.data?.videoVaes || [], audioVaes: result.data?.audioVaes || [], latentUpscaleModels: result.data?.latentUpscaleModels || [], nanfeng: result.data?.nanfeng || {} };
             },
             runRunningHubH3: async (prompt, input, params, options) => {
@@ -224,9 +222,10 @@ export function usePluginHost(params: PluginHostParams) {
             ai: pluginAi,
             openPanel: (nodeId) => setDialogNodeId(nodeId),
             closePanel: () => setDialogNodeId(null),
+            openAssetPicker,
             generationLogs,
         }),
-        [applyAgentOps, generationLogs, pluginAi, projectId, updateProject],
+        [applyAgentOps, generationLogs, openAssetPicker, pluginAi, projectId, updateProject],
     );
 
     const renderPluginPanel = useCallback(

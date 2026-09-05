@@ -66,6 +66,8 @@ export type CanvasNodeToolbarItem = {
     danger?: boolean;
 };
 
+export type CanvasAssetPickerImage = { kind: "image"; dataUrl: string; title: string; storageKey?: string };
+
 // Context injected while rendering each node; the primary interface between plugins and the canvas.
 export type CanvasNodeContext = {
     projectId: string;
@@ -92,6 +94,7 @@ export type CanvasNodeContext = {
     // Opens or closes the custom panel below this node; the definition must provide a Panel.
     openPanel: () => void;
     closePanel: () => void;
+    openAssetPicker: (options?: { kind?: "image" }) => Promise<CanvasAssetPickerImage | null>;
     // Plugin-private persistence isolated by namespace.
     storage: PluginStorage;
     generationLogs: CanvasGenerationLogs;

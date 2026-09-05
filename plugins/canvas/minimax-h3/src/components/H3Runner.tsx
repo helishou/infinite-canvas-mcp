@@ -58,7 +58,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         const liveMegapixels = Number(liveSelected?.megapixels || liveMetadata.megapixels || liveMetadata.minimaxGlobalMegapixels || 0.4);
         const liveSettings = liveSelected ? compatibleH3Settings(liveSelected, String(liveMetadata.minimaxBaseModel || liveMetadata.modelName || defaultH3Model), String(liveMetadata.minimaxLoraName || liveMetadata.loraName || ""), upstream) : { modelName: defaultH3Model, loraName: "", defaultSteps: 20 };
         const liveSteps = Number(liveSelected?.videoSteps || liveMetadata.videoSteps || liveMetadata.minimaxGlobalVideoSteps || liveSettings.defaultSteps);
-        const liveDenoise = Number(liveSelected?.denoise ?? liveMetadata.denoise ?? 0.65);
+        const liveDenoise = Number(liveSelected?.denoise ?? liveMetadata.denoise ?? 1);
         const liveSeed = liveSelected?.seed ?? liveMetadata.seed ?? liveMetadata.noiseSeed ?? "";
         const liveModelName = liveSettings.modelName;
         const liveLoraName = liveSettings.loraName;
@@ -94,10 +94,23 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         }
         if (runInFlightRef.current) return;
         runInFlightRef.current = true;
-        const logRefs = [...images, ...(video ? [video] : []), ...audios] as H3Ref[];
+        // 日志的 refs 必须与真正提交给 ComfyUI 的 finalReferences 保持一致：
+        // 优先用 liveSelected 自身的 segmentRefs，segmentRefs 为空时才回退到 upstream。
+        // 否则当用户只往 clip3 拖了一张图、但画布里给 H3 节点连了 2 张图时，
+        // createH3Log 会先记 2 张，line 286 的 update 才是 1 张；update 失败或延迟时
+        // 日志就一直显示成 2 张参考，与 segment 实际使用的 1 张不符。
+        const logSegmentRefs = liveSelected ? refsForSegment(liveSelected) : [];
+        const logSegImages = logSegmentRefs.filter((ref) => ref.type === "image");
+        const logSegVideos = logSegmentRefs.filter((ref) => ref.type === "video");
+        const logSegAudios = logSegmentRefs.filter((ref) => ref.type === "audio");
+        const logRefs = [
+            ...(logSegImages.length ? logSegImages : images),
+            ...(logSegVideos.length ? logSegVideos : (video ? [video] : [])),
+            ...(logSegAudios.length ? logSegAudios : audios),
+        ] as H3Ref[];
         let generationLogId = "";
         const lastSubmitted = { taskMode: "", video: 0, images: 0, audios: 0, model: "" };
-        update({ prompt: livePrompt, duration: liveDuration, aspectRatio: liveRatio, megapixels: liveMegapixels, videoSteps: liveSteps, denoise: liveDenoise, seed: String(liveSeed).trim() ? Number(liveSeed) : undefined, modelName: liveModelName, minimaxBaseModel: liveModelName, loraName: liveLoraName, combatLoraWeight: Number(liveSelected?.combatLoraWeight ?? liveMetadata.minimaxCombatLoraWeight ?? combatLoraWeight), cinematicLoraWeight: Number(liveSelected?.cinematicLoraWeight ?? liveMetadata.minimaxCinematicLoraWeight ?? cinematicLoraWeight), teAccel: liveMetadata.minimaxGlobalTeAccel === true || teAccel, motionContextEnabled: liveMotion, motionContextNoiseEnabled: liveSelected?.motionContextNoiseEnabled === true || liveMetadata.motionContextNoiseEnabled === true || motionNoise, motionContextNoiseAlpha: Number(liveSelected?.motionContextNoiseAlpha ?? liveMetadata.motionContextNoiseAlpha ?? noiseAlpha), motionContextNoiseAlphaEnd: Number(liveSelected?.motionContextNoiseAlphaEnd ?? liveMetadata.motionContextNoiseAlphaEnd ?? noiseAlphaEnd), motionContextNoiseRampFrames: Number(liveSelected?.motionContextNoiseRampFrames ?? liveMetadata.motionContextNoiseRampFrames ?? noiseRampFrames), model: selectedModel, status: "loading", errorDetails: "", runStartedAt: Date.now() });
+        update({ prompt: livePrompt, duration: liveDuration, aspectRatio: liveRatio, megapixels: liveMegapixels, videoSteps: liveSteps, denoise: liveDenoise, seed: String(liveSeed).trim() ? Number(liveSeed) : undefined, modelName: liveModelName, minimaxBaseModel: liveModelName, loraName: liveLoraName, combatLoraWeight: Number(liveSelected?.combatLoraWeight ?? liveMetadata.minimaxCombatLoraWeight ?? combatLoraWeight), cinematicLoraWeight: Number(liveSelected?.cinematicLoraWeight ?? liveMetadata.minimaxCinematicLoraWeight ?? cinematicLoraWeight), teAccel: liveMetadata.minimaxGlobalTeAccel === true || teAccel, motionContextEnabled: liveMotion, motionContextNoiseEnabled: liveSelected?.motionContextNoiseEnabled === true || liveMetadata.motionContextNoiseEnabled === true || motionNoise, motionContextNoiseAlpha: Number(liveSelected?.motionContextNoiseAlpha ?? liveMetadata.motionContextNoiseAlpha ?? noiseAlpha), motionContextNoiseAlphaEnd: Number(liveSelected?.motionContextNoiseAlphaEnd ?? liveMetadata.motionContextNoiseAlphaEnd ?? noiseAlphaEnd), motionContextNoiseRampFrames: Number(liveSelected?.motionContextNoiseRampFrames ?? liveMetadata.motionContextNoiseRampFrames ?? noiseRampFrames), model: selectedModel, status: "loading", errorDetails: "", runStartedAt: Date.now(), cancelRequested: false, runtimeTargetSegmentId: liveSelectedId });
         try {
             // 日志写入也属于运行链路的一部分；后台断开时必须进入统一 catch，
             // 不能让异常浮出后把节点永远留在“生成中”。
@@ -127,11 +140,16 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 : undefined;
             let lastResult: Awaited<ReturnType<typeof ctx.ai.runLocalH3>> | undefined;
             const nextSegments: H3Segment[] = [];
+            const submittedSegments: Array<Record<string, unknown>> = [];
             // 用于错误日志记录最后一次提交的信息
             const createRunSeed = () => Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
             for (const [index, segment] of storedSegments.entries()) {
                 const configuredSeed = Number(segment.noiseSeed ?? segment.seed);
-                const runSeed = segment.noiseSeedMode === "fixed" && Number.isFinite(configuredSeed) && configuredSeed >= 0 ? configuredSeed : createRunSeed();
+                // random 模式现在会在 UI 上生成并展示一个真实随机种子；运行时统一
+                // 使用 segment 上已有的有效种子（random 的🎲种子、fixed 的手填值、
+                // 运行后回写的本次种子都算），只有完全为空时才兜底新生成随机种子，
+                // 保证“UI 上看到的种子 = 实际运行的种子”。
+                const runSeed = Number.isFinite(configuredSeed) && configuredSeed >= 0 ? configuredSeed : createRunSeed();
                 const segmentForRun = { ...segment, seed: runSeed, noiseSeed: runSeed };
                 const seedCurrent = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || liveMetadata);
                 update({ segments: seedCurrent.map((item) => item.id === segment.id ? { ...item, seed: runSeed, noiseSeed: runSeed } : item) });
@@ -146,11 +164,13 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 const isI2vFl2v = requestedTaskMode === "i2v" || requestedTaskMode === "fl2v";
                 const isR2vOrRv2v = requestedTaskMode === "ref2va";
                 const effectiveTaskMode = requestedTaskMode;
-                // 单独运行 Clip2/Clip3 时，上一段结果既是 Motion Context 的来源，
-                // 也是 NanFeng Ref2VA 的实际视频参考；只传 previousVideo 不会进入
-                // V10 的 ReferenceToVideo 条件图。
+                // 仅多段续链（runFromCurrent=true）的中间段、且该段 Motion Context 开关为开，
+                // 才把上一段已生成的视频作为 Motion Context / Ref2VA 视频参考。
+                // 单段生成（runFromCurrent=false）或该段关闭 Motion Context 时，都不注入上一段结果，
+                // 避免“上次生成的视频被塞入当前 Clip”（即便关掉 Motion Context 仍被当视频参考喂模型）。
+                const usePreviousContext = runFromCurrent && index > 0 && segment.motionContextEnabled !== false;
                 const segmentVideo = !isT2v && !isI2vFl2v
-                    ? (segmentRefs.find((ref) => ref.type === "video") || (index === 0 ? video || previousVideo : previousVideo))
+                    ? (segmentRefs.find((ref) => ref.type === "video") || (usePreviousContext ? previousVideo : video))
                     : undefined;
                 const segmentImages = isT2v || isV2v ? [] : segmentRefs.filter((ref) => ref.type === "image");
                 const segmentAudios = isT2v || isV2v || isI2vFl2v ? [] : segmentRefs.filter((ref) => ref.type === "audio");
@@ -165,7 +185,75 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 const segmentSteps = Number(segment.videoSteps || liveMetadata.minimaxGlobalVideoSteps || segmentSettings.defaultSteps);
                 const h3RunnerImpl = String(liveMetadata.minimaxEngine || "").toLowerCase() === "runninghub" ? ctx.ai.runRunningHubH3 : ctx.ai.runLocalH3;
                 const h3Runner = (promptText: string, inputData: any, paramsData: any, optionsData: LocalH3Options) => {
+                    if (generationLogId) void ctx.generationLogs.update(generationLogId, {
+                        params: { runFromCurrent, selectedSegmentId: liveSelectedId, segments: [...submittedSegments], lastSubmitted: { prompt: promptText, input: inputData, params: paramsData } },
+                    }).catch((error) => console.warn("[minimax-h3] failed to record actual generation parameters", error));
                     const { taskMode: _taskMode, teAccel: _teAccel, combatLoraWeight: _combat, cinematicLoraWeight: _cinematic, motionContext: _motion, motionContextEnabled: _motionEnabled, motionContextNoise: _motionNoise, motionContextNoiseAlpha: _motionAlpha, motionContextNoiseAlphaEnd: _motionAlphaEnd, motionContextNoiseRampFrames: _motionRamp, audioMode: _audioMode, audioDenoiseStrength: _audioDenoise, addSourceAsReference: _addSource, promptPrimaryAudioOrdinal: _audioOrdinal, strictPromptTags: _strictTags, referenceVideoPolicy: _refPolicy, refImageSize: _refSize, solAttnEnabled: _sol, solAttnTau: _solTau, solAttnThresholdType: _solThreshold, solAttnExactMode: _solExact, solAttnDenseSteps: _solDense, solAttnStepOff: _solOff, solAttnSinkTokens: _solSink, t8Enabled: _t8, t8ResidualThreshold: _t8Residual, t8StartPercent: _t8Start, t8EndPercent: _t8End, t8MaxConsecutiveHits: _t8Hits, t8CacheDevice: _t8Device, t8MetricStride: _t8Stride, t8Verbose: _t8Verbose, sigmaEnabled: _sigma, videoSigmaShift: _videoShift, audioSigmaShift: _audioShift, sigmaMode: _sigmaMode, lowSigmaStart: _lowSigmaStart, lowSigmaEnd: _lowSigmaEnd, sigmaRefineSteps: _sigmaRefine, sigmaCurve: _sigmaCurve, manualSigma: _manualSigma, dualSampling: _dual, dualSamplingRatio: _dualRatio, dualSampler: _dualSampler, secondPassEnabled: _secondPass, firstPassSteps: _firstPass, secondPassSteps: _secondSteps, secondPassMegapixels: _secondMp, secondPassUpscaleMethod: _secondMethod, secondPassDenoise: _secondDenoise, secondPassSigma: _secondSigma, secondPassSampler: _secondSampler, secondPassScheduler: _secondScheduler, secondPassModel: _secondModel, ...baseParams } = paramsData;
+                    console.log("H3Runner submit", {
+                        ...baseParams,
+                        mode: segment.mode || effectiveTaskMode,
+                        steps: Number(segment.steps || segmentSteps),
+                        textEncoder: segment.textEncoder,
+                        textEncoderType: segment.textEncoderType || "minimax",
+                        textEncoderDevice: segment.textEncoderDevice || "default",
+                        videoVae: segment.videoVae,
+                        audioVae: segment.audioVae,
+                        precision: segment.precision || "default",
+                        sageAttention: segment.sageAttention || "auto",
+                        allowCompile: segment.allowCompile === true,
+                        sizeMultiple: Number(segment.sizeMultiple || 32),
+                        sampler: segment.sampler || "res_multistep",
+                        scheduler: segment.scheduler || "simple",
+                        refImageSize: segment.refImageSize || "match",
+                        referenceLongEdge: segment.referenceLongEdge || 1920,
+                        constantTriggerWord: segment.constantTriggerWord || "",
+                        loraSlots: segment.loraSlots || [],
+                        dedicatedAttention: segment.dedicatedAttention,
+                        reservedVramGb: segment.reservedVramGb,
+                        runtimeReserveEnabled: segment.runtimeReserveEnabled === true,
+                        uniBlockSwapEnabled: segment.uniBlockSwapEnabled === true,
+                        uniBlockSwapBlocks: segment.uniBlockSwapBlocks,
+                        latentUpscaleEnabled: segment.latentUpscaleEnabled === true,
+                        h3FirstSteps: segment.h3FirstSteps,
+                        h3SecondSteps: segment.h3SecondSteps,
+                        h3FullSigma: segment.h3FullSigma,
+                        v81ManualSigma: segment.v81ManualSigma === true,
+                        latentUpscaleModel: segment.latentUpscaleModel,
+                        latentUpscaleMegapixels: segment.latentUpscaleMegapixels,
+                        latentUpscaleAlign: segment.latentUpscaleAlign,
+                        latentUpscalePrecision: segment.latentUpscalePrecision,
+                        realtimePreviewEnabled: segment.realtimePreviewEnabled !== false,
+                        realtimePreviewLongEdge: segment.realtimePreviewLongEdge,
+                        realtimePreviewFrames: segment.realtimePreviewFrames,
+                        realtimePreviewFps: segment.realtimePreviewFps,
+                        realtimePreviewJpegQuality: segment.realtimePreviewJpegQuality,
+                        rtxEnabled: segment.rtxEnabled === true,
+                        rtxResizeMode: segment.rtxResizeMode,
+                        rtxScale: segment.rtxScale,
+                        rtxWidth: segment.rtxWidth,
+                        rtxHeight: segment.rtxHeight,
+                        rtxQuality: segment.rtxQuality,
+                        slaEnabled: segment.slaEnabled === true,
+                        slaSparsity: segment.slaSparsity,
+                        slaBlockSize: segment.slaBlockSize,
+                        slaMinSequence: segment.slaMinSequence,
+                        slaDenseLastSteps: segment.slaDenseLastSteps,
+                        slaProtectAudio: segment.slaProtectAudio,
+                        slaDenseSteps: segment.slaDenseSteps,
+                        slaBackend: segment.slaBackend,
+                        slaDisableFp16Accum: segment.slaDisableFp16Accum,
+                        slaStabilizeMotion: segment.slaStabilizeMotion,
+                        lockAudio: segment.lockAudio === true,
+                        audioDrive: segment.audioDrive === true,
+                        audioDriveFile: segment.audioDriveFile,
+                        audioDriveMarkers: segment.audioDriveMarkers,
+                        audioDriveSegmentImages: segment.audioDriveSegmentImages,
+                        audioDriveSegmentStoryboards: segment.audioDriveSegmentStoryboards,
+                        audioDriveCreative: segment.audioDriveCreative,
+                        audioDriveExclude: segment.audioDriveExclude,
+                        audioDriveStart: segment.audioDriveStart,
+                        audioDriveEnd: segment.audioDriveEnd,
+                    });
                     return h3RunnerImpl(promptText, inputData, {
                         ...baseParams,
                         mode: segment.mode || effectiveTaskMode,
@@ -247,12 +335,54 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 lastSubmitted.images = finalReferences.length;
                 lastSubmitted.audios = finalAudios.length;
                 lastSubmitted.model = segmentSettings.modelName;
-                const segmentResult = await h3Runner(`${segmentPrompt}${promptFlags}`, {
+                const submittedPrompt = `${segmentPrompt}${promptFlags}`;
+                const submittedInput = {
                     video: finalVideo,
                     references: finalReferences,
                     audios: finalAudios,
-                    previousVideo,
-                }, { duration: Number(segment.duration || duration), aspectRatio: String(segment.aspectRatio || ratio), megapixels: Number(segment.megapixels || megapixels), videoSteps: segmentSteps, denoise: Number(segment.denoise ?? denoise), seed: runSeed, modelName: segmentSettings.modelName, loraName: segmentSettings.loraName, combatLoraWeight: Number(segment.combatLoraWeight ?? 0), cinematicLoraWeight: Number(segment.cinematicLoraWeight ?? 0), teAccel: segment.teAccel ?? teAccel, taskMode: effectiveTaskMode, audioMode: String(segment.audioMode || "native"), audioDenoiseStrength: Number(segment.audioDenoiseStrength ?? 1), addSourceAsReference: segment.addSourceAsReference === true, promptPrimaryAudioOrdinal: Number(segment.promptPrimaryAudioOrdinal || 0), strictPromptTags: segment.strictPromptTags !== false, referenceVideoPolicy: String(segment.referenceVideoPolicy || "official_2_to_15s"), refImageSize: String(segment.refImageSize || "match"), motionContext: Boolean(previousVideo) && segment.motionContextEnabled !== false && motion, motionContextNoise: Boolean(previousVideo) && segment.motionContextNoiseEnabled !== false && motionNoise, motionContextNoiseAlpha: Number(segment.motionContextNoiseAlpha ?? noiseAlpha), motionContextNoiseAlphaEnd: Number(segment.motionContextNoiseAlphaEnd ?? noiseAlphaEnd), motionContextNoiseRampFrames: Number(segment.motionContextNoiseRampFrames ?? noiseRampFrames), runninghubMode: metadata.minimaxRunningHubMode, runninghubWorkflowId: metadata.minimaxRunningHubWorkflowId, runninghubAppId: metadata.minimaxRunningHubAppId, runninghubFields: metadata.minimaxRunningHubFields, runninghubParams: metadata.minimaxRunningHubParams, runninghubWorkflowJson: metadata.minimaxRunningHubWorkflowJson, useWallet: metadata.minimaxRunningHubUseWallet === true, ...(autoSplit && storedSegments.length === 1 ? { autoSplit: true, segmentDuration: Number(segmentDuration), maxSegments: Number(maxSegments) } : {}) }, { onTaskId: (taskId) => { update({ runtimeTaskId: taskId, runProgress: 0.1 }); markRequestedSegments({ runtimeTaskId: taskId, progress: 0.1 }); if (generationLogId) void ctx.generationLogs.update(generationLogId, { status: "running", runtimeTaskId: taskId }); } });
+                    // 单段生成（runFromCurrent=false）不把上一段结果作为 previousVideo 传给后端，
+                    // 否则即使关了 Motion Context，这段仍可能带着上次视频跑（被当成 video ref 喂模型）。
+                    previousVideo: usePreviousContext ? previousVideo : undefined,
+                };
+                const submittedParams = {
+                    duration: Number(segment.duration || duration),
+                    aspectRatio: String(segment.aspectRatio || ratio),
+                    megapixels: Number(segment.megapixels || megapixels),
+                    videoSteps: segmentSteps,
+                    denoise: Number(segment.denoise ?? denoise),
+                    modelName: segmentSettings.modelName,
+                    loraName: segment.loraName || liveLoraName,
+                    taskMode: effectiveTaskMode,
+                    // segmentForRun 内已包含 seed/noiseSeed（line 153 的 {...segment, seed: runSeed, noiseSeed: runSeed}），
+                    // 显式写在前面会触发 TS2783 "specified more than once"，放最后让 spread 决定最终值。
+                    ...segmentForRun,
+                };
+                submittedSegments.push({
+                    segmentId: segment.id,
+                    prompt: submittedPrompt,
+                    params: submittedParams,
+                    input: submittedInput,
+                });
+                if (generationLogId) {
+                    await ctx.generationLogs.update(generationLogId, {
+                        prompt: submittedPrompt,
+                        references: [...finalReferences, ...(finalVideo ? [finalVideo] : []), ...finalAudios].map((ref) => ({ url: ref.url, name: ref.name, type: ref.type, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) })),
+                        inputCounts: { image: finalReferences.length, video: finalVideo ? 1 : 0, audio: finalAudios.length },
+                        params: { runFromCurrent, selectedSegmentId: liveSelectedId, segments: [...submittedSegments], lastSubmitted: { prompt: submittedPrompt, input: submittedInput, params: submittedParams } },
+                    }).catch((error) => console.warn("[minimax-h3] failed to record submitted parameters", error));
+                }
+                const segmentResult = await h3Runner(submittedPrompt, submittedInput, { ...submittedParams, combatLoraWeight: Number(segment.combatLoraWeight ?? 0), cinematicLoraWeight: Number(segment.cinematicLoraWeight ?? 0), teAccel: segment.teAccel ?? teAccel, audioMode: String(segment.audioMode || "native"), audioDenoiseStrength: Number(segment.audioDenoiseStrength ?? 1), addSourceAsReference: segment.addSourceAsReference === true, promptPrimaryAudioOrdinal: Number(segment.promptPrimaryAudioOrdinal || 0), strictPromptTags: segment.strictPromptTags !== false, referenceVideoPolicy: String(segment.referenceVideoPolicy || "official_2_to_15s"), refImageSize: String(segment.refImageSize || "match"), motionContext: usePreviousContext && segment.motionContextEnabled !== false && motion, motionContextNoise: usePreviousContext && segment.motionContextNoiseEnabled !== false && motionNoise, motionContextNoiseAlpha: Number(segment.motionContextNoiseAlpha ?? noiseAlpha), motionContextNoiseAlphaEnd: Number(segment.motionContextNoiseAlphaEnd ?? noiseAlphaEnd), motionContextNoiseRampFrames: Number(segment.motionContextNoiseRampFrames ?? noiseRampFrames), runninghubMode: metadata.minimaxRunningHubMode, runninghubWorkflowId: metadata.minimaxRunningHubWorkflowId, runninghubAppId: metadata.minimaxRunningHubAppId, runninghubFields: metadata.minimaxRunningHubFields, runninghubParams: metadata.minimaxRunningHubParams, runninghubWorkflowJson: metadata.minimaxRunningHubWorkflowJson, useWallet: metadata.minimaxRunningHubUseWallet === true, ...(autoSplit && storedSegments.length === 1 ? { autoSplit: true, segmentDuration: Number(segmentDuration), maxSegments: Number(maxSegments) } : {}) }, { onTaskId: (taskId) => {
+                    console.log("[minimax-h3] onTaskId received", { nodeId: ctx.node.id, segmentId: segment.id, taskId, generationLogId });
+                    update({ runtimeTaskId: taskId, runtimeTargetSegmentId: segment.id, runProgress: 0.1 });
+                    markRequestedSegments({ runtimeTaskId: taskId, progress: 0.1 });
+                    // 把 taskId 同步写进 generation log，让 useH3TaskPolling 的 recoverTask
+                    // 在 metadata.runtimeTaskId 丢失时仍能通过 log 找回 taskId，
+                    // 否则节点会卡在 "生成中" 永远出不来。
+                    if (generationLogId) {
+                        ctx.generationLogs.update(generationLogId, { status: "running", runtimeTaskId: taskId })
+                            .catch((error) => console.warn("[minimax-h3] failed to record running taskId to log", error));
+                    }
+                } });
                 lastResult = segmentResult;
                 if (autoSplit && segmentResult.segments?.length) {
                     nextSegments.push(...mapAutoSplitSegments(segment, segmentResult.segments, prompt, Number(segmentDuration)));
@@ -269,7 +399,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             if (!lastResult) throw new Error("没有可运行的 H3 分段");
             const mergedSegments = compactSegmentStarts(mergeH3Segments(allSegments, nextSegments, activeId, runFromCurrent, autoSplit && storedSegments.length === 1));
             const generatedMaterials = generatedVideoMaterials(mergedSegments);
-            update({ content: lastResult.url, storageKey: lastResult.storageKey, mimeType: lastResult.mimeType, naturalWidth: lastResult.width, naturalHeight: lastResult.height, durationMs: lastResult.durationMs, segments: mergedSegments, materials: appendVideoMaterials(liveMetadata.materials, [...generatedMaterials, { url: lastResult.url, storageKey: lastResult.storageKey, type: "video", name: `Clip ${liveSelectedId || "输出"}`, segmentId: liveSelectedId }]), runtimeTaskId: lastResult.taskId, status: "success", errorDetails: "", runFinishedAt: Date.now() });
+            update({ content: lastResult.url, storageKey: lastResult.storageKey, mimeType: lastResult.mimeType, naturalWidth: lastResult.width, naturalHeight: lastResult.height, durationMs: lastResult.durationMs, segments: mergedSegments, materials: appendVideoMaterials(liveMetadata.materials, [...generatedMaterials, { url: lastResult.url, storageKey: lastResult.storageKey, type: "video", name: `Clip ${liveSelectedId || "输出"}`, segmentId: liveSelectedId }]), runtimeTaskId: "", status: "success", errorDetails: "", runtimeTargetSegmentId: undefined, runFinishedAt: Date.now() });
             if (generationLogId) void ctx.generationLogs.update(generationLogId, { status: "success", runtimeTaskId: lastResult.taskId, finishedAt: new Date().toISOString(), durationMs: Date.now() - Number(liveMetadata.runStartedAt || Date.now()), outputs: [{ url: lastResult.url, storageKey: lastResult.storageKey, type: "video", mimeType: lastResult.mimeType }] });
         } catch (error) {
             // 增强错误日志：包含实际提交信息
@@ -279,9 +409,21 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             const current = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || liveMetadata);
             const errorStart = Math.max(0, current.findIndex((segment) => segment.id === liveSelectedId));
             const errorIds = new Set((runFromCurrent ? current.slice(errorStart) : current.filter((segment) => segment.id === liveSelectedId)).map((segment) => segment.id));
-            const cancelled = Boolean((ctx.getNode(ctx.node.id)?.metadata || liveMetadata).cancelRequested);
-            update({ segments: current.map((segment) => errorIds.has(segment.id) ? { ...segment, status: cancelled ? "cancelled" : "error", progress: 0 } : segment), status: cancelled ? "cancelled" : "error", errorDetails: cancelled ? "任务已取消" : enhancedError, runFinishedAt: Date.now(), runtimeTaskId: "" });
-            if (generationLogId) void ctx.generationLogs.update(generationLogId, { status: "failed", finishedAt: new Date().toISOString(), durationMs: Date.now() - Number(liveMetadata.runStartedAt || Date.now()), error: enhancedError, params: { ...lastSubmitted } });
+            // 优先级：comfyui 抛出 H3RunCancelled > 节点 cancelRequested 标志 > 真正失败
+            const cancelled = error instanceof Error && error.name === "H3RunCancelled" || Boolean((ctx.getNode(ctx.node.id)?.metadata || liveMetadata).cancelRequested);
+            // catch 块同时清掉 segments 里的 runtimeTaskId / runProgress，避免出错后 segments
+            // 还残留上一个 onTaskId 写入的 taskId，触发 useH3TaskPolling 继续轮询一个不再存在的 task。
+            update({
+                segments: current.map((segment) => errorIds.has(segment.id)
+                    ? { ...segment, status: cancelled ? "cancelled" : "error", progress: 0, runtimeTaskId: "", errorDetails: cancelled ? "任务已取消" : enhancedError }
+                    : segment),
+                status: cancelled ? "cancelled" : "error",
+                errorDetails: cancelled ? "任务已取消" : enhancedError,
+                runFinishedAt: Date.now(),
+                runtimeTaskId: "",
+                runtimeTargetSegmentId: undefined,
+            });
+            if (generationLogId) void ctx.generationLogs.update(generationLogId, { status: cancelled ? "cancelled" : "failed", finishedAt: new Date().toISOString(), durationMs: Date.now() - Number(liveMetadata.runStartedAt || Date.now()), error: enhancedError, params: { ...lastSubmitted } });
         } finally {
             runInFlightRef.current = false;
         }

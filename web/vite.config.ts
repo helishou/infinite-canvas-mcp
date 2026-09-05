@@ -43,9 +43,14 @@ export default defineConfig({
     plugins: [react(), localPluginsManifest()],
     // 开发模式下把总后台媒体接口代理为同源，避免前端直连 127.0.0.1:17370 触发跨域 CORS。
     // 仅代理 /media（web 无 /media 客户端路由，不会与 SPA 冲突）；/canvas 等已存在 SPA 路由，不可代理。
+    // 另外代理 /events 与 /agent：这两个是长连接 SSE 流。若浏览器把 127.0.0.1 走了系统代理，
+    // 代理会截断 SSE（net::ERR_INCOMPLETE_CHUNKED_ENCODING）；改走 Vite 同源代理后由 Node 转发，
+    // 浏览器不再直连 17370，长连接不再被代理掐断。/events、/agent 均非 SPA 路由，不会与前端冲突。
     server: {
         proxy: {
             "/media": { target: "http://127.0.0.1:17370", changeOrigin: true },
+            "/events": { target: "http://127.0.0.1:17370", changeOrigin: true },
+            "/agent": { target: "http://127.0.0.1:17370", changeOrigin: true },
         },
     },
     resolve: {

@@ -91,11 +91,32 @@ function VirtualLogRow({ index, top, onHeight, children }: { index: number; top:
     return <div ref={ref} className="absolute inset-x-0" style={{ top } as CSSProperties}>{children}</div>;
 }
 
+function collectReferences(log: GenerationLog): Array<Record<string, unknown>> {
+    const refs = Array.isArray(log.references) ? [...log.references] : [];
+    const hasUrl = (item: Record<string, unknown>) => (typeof item.url === "string" && item.url) || (typeof item.storageKey === "string" && item.storageKey);
+    const add = (item: Record<string, unknown>) => { if (item && !refs.some((ref) => ref.url === item.url && ref.storageKey === item.storageKey)) refs.push(item); };
+    const pushRefs = (source: unknown) => {
+        if (!source || typeof source !== "object") return;
+        if (Array.isArray(source)) { source.filter((item) => item && typeof item === "object").forEach((item) => add(item as Record<string, unknown>)); return; }
+        const record = source as Record<string, unknown>;
+        for (const key of ["image", "video", "audio"]) {
+            const list = record[key];
+            if (Array.isArray(list)) list.filter((item) => item && typeof item === "object").forEach((item) => add({ ...item, type: typeof (item as Record<string, unknown>).type === "string" ? (item as Record<string, unknown>).type : key } as Record<string, unknown>));
+        }
+        if (Array.isArray(record.refItems)) record.refItems.filter((item) => item && typeof item === "object").forEach((item) => add(item as Record<string, unknown>));
+    };
+    const params = typeof log.params === "object" && log.params ? (log.params as Record<string, unknown>) : {};
+    if (params.refs) pushRefs(params.refs);
+    if (params.refItems) pushRefs(params.refItems);
+    // 如果顶层 references 已经全都有 url，保持原样；否则用 params 中补充到的完整 ref 替换
+    return refs.length && refs.every(hasUrl) ? refs : refs.filter(hasUrl).length ? refs.filter(hasUrl) : refs;
+}
+
 function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }) {
     const [expanded, setExpanded] = useState(false);
     const copy = async (value: string) => { await navigator.clipboard?.writeText(value); message.success("已复制"); };
     const statusColor = log.status === "success" ? "green" : log.status === "failed" ? "red" : log.status === "running" ? "processing" : "default";
-    const references = Array.isArray(log.references) ? log.references : [];
+    const references = collectReferences(log);
     return <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
         <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
         <div className="mt-2 flex flex-wrap gap-3 text-xs text-stone-500"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span></div>
@@ -110,13 +131,24 @@ function ReferencePreview({ reference, index }: { reference: Record<string, unkn
     const storageKey = typeof reference.storageKey === "string" && reference.storageKey ? reference.storageKey : "";
     const url = storageKey ? backendMediaUrl(storageKey) : String(reference.url || "");
     const rawType = String(reference.type || "").toLowerCase();
-    const type = rawType.includes("image") ? "图片" : rawType.includes("video") ? "视频" : rawType.includes("audio") ? "音频" : "参考";
-    const label = `${type} ${index + 1}`;
-    if (!url) return <Tag>{label}</Tag>;
-    if (type === "图片") return <img src={url} alt={label} title={label} className="h-16 w-24 rounded object-cover" />;
-    if (type === "视频") return <video src={url} title={label} controls muted playsInline preload="metadata" className="h-16 w-28 rounded object-cover" />;
-    if (type === "音频") return <audio src={url} title={label} controls preload="metadata" className="h-8 w-52" />;
-    return <Tag>{label}</Tag>;
+    const mimeType = String(reference.mimeType || "").toLowerCase();
+    const name = String(reference.name || "").toLowerCase();
+    const inferred = inferMediaType(rawType, mimeType, url, name);
+    const label = `${inferred.label} ${index + 1}`;
+    const fallbackName = typeof reference.name === "string" && reference.name.trim() ? reference.name.trim() : undefined;
+    if (!url) return <Tag title={fallbackName || label}>{fallbackName || label}</Tag>;
+    // 固定预览框尺寸，预留布局空间，避免缩略图陆续加载时反复触发重排/重绘
+    if (inferred.kind === "image") return <div style={{ width: 96, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "rgba(120,120,120,0.10)" }}><img src={url} alt={fallbackName || label} title={fallbackName || label} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} /></div>;
+    if (inferred.kind === "video") return <div style={{ width: 112, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "#000" }}><video src={url} title={fallbackName || label} controls muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} /></div>;
+    if (inferred.kind === "audio") return <audio src={url} title={fallbackName || label} controls preload="metadata" className="h-8 w-52" />;
+    return <Tag title={fallbackName || label}>{fallbackName || label}</Tag>;
+}
+
+function inferMediaType(rawType: string, mimeType: string, url: string, name = "") {
+    if (rawType.includes("image") || mimeType.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif|svg)(?:\?|#|$)/i.test(url) || /\.(png|jpe?g|webp|gif|bmp|avif|svg)(?:\?|#|$)/i.test(name)) return { kind: "image" as const, label: "图片" };
+    if (rawType.includes("video") || mimeType.startsWith("video/") || /\.(mp4|mov|mkv|webm|avi|m4v|flv)(?:\?|#|$)/i.test(url) || /\.(mp4|mov|mkv|webm|avi|m4v|flv)(?:\?|#|$)/i.test(name)) return { kind: "video" as const, label: "视频" };
+    if (rawType.includes("audio") || mimeType.startsWith("audio/") || /\.(mp3|wav|flac|aac|ogg|m4a|wma)(?:\?|#|$)/i.test(url) || /\.(mp3|wav|flac|aac|ogg|m4a|wma)(?:\?|#|$)/i.test(name)) return { kind: "audio" as const, label: "音频" };
+    return { kind: "unknown" as const, label: "参考" };
 }
 
 function ExpandableText({ label, value, expanded, error, onToggle, onCopy }: { label: string; value: string; expanded: boolean; error?: boolean; onToggle: () => void; onCopy: () => void }) {
@@ -131,5 +163,5 @@ function Output({ output }: { output: Record<string, unknown> }) {
     const [failed, setFailed] = useState(false);
     if (!url) return null;
     if (failed) return <a href={url} target="_blank" rel="noreferrer" className="block truncate text-xs text-sky-500 hover:underline">{String(output.name || url)}（加载失败，点击新窗口打开）</a>;
-    return video ? <video src={url} controls muted playsInline onError={() => setFailed(true)} className="aspect-video w-full rounded object-cover" /> : <img src={url} alt="output" onError={() => setFailed(true)} className="aspect-video w-full rounded object-cover" />;
+    return video ? <video src={url} controls muted playsInline onError={() => setFailed(true)} className="aspect-video w-full rounded object-cover" /> : <img src={url} alt="output" loading="lazy" decoding="async" onError={() => setFailed(true)} className="aspect-video w-full rounded object-cover" />;
 }

@@ -16,6 +16,20 @@ type BackendStore = {
 let backendEvents: EventSource | null = null;
 const seenBackendEventIds = new Set<string>();
 
+// 本地总后台（127.0.0.1/localhost:17370）在浏览器直连时会经过系统代理，
+// 而代理会截断长连接 SSE（net::ERR_INCOMPLETE_CHUNKED_ENCODING）。
+// 检测到本地总后台时改走同源相对路径，由 Vite 开发服务器代理转发（Node 端，不经浏览器代理），
+// 从而绕开代理对 SSE 的截断。非本地/远程总后台仍用绝对地址直连。
+function isLocalBackendUrl(url: string): boolean {
+    if (typeof window === "undefined") return false;
+    try {
+        const u = new URL(url);
+        return (u.hostname === "127.0.0.1" || u.hostname === "localhost") && u.port === "17370";
+    } catch {
+        return false;
+    }
+}
+
 function stopBackendEvents() {
     backendEvents?.close();
     backendEvents = null;
@@ -24,7 +38,10 @@ function stopBackendEvents() {
 function startBackendEvents(url: string, token: string) {
     if (typeof window === "undefined" || !token) return;
     stopBackendEvents();
-    const source = new EventSource(`${url.replace(/\/$/, "")}/events?token=${encodeURIComponent(token)}`);
+    const eventsUrl = isLocalBackendUrl(url)
+        ? `/events?token=${encodeURIComponent(token)}`
+        : `${url.replace(/\/$/, "")}/events?token=${encodeURIComponent(token)}`;
+    const source = new EventSource(eventsUrl);
     backendEvents = source;
     const handleMessage = (message: MessageEvent<string>) => {
         try {
@@ -38,6 +55,12 @@ function startBackendEvents(url: string, token: string) {
     for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "asset.updated"]) {
         source.addEventListener(eventType, handleMessage);
     }
+    source.onerror = () => {
+        if (useBackendStore.getState().connected) {
+            stopBackendEvents();
+            useBackendStore.setState({ connected: false, checking: false, error: `无法连接总后台 ${url}` });
+        }
+    };
 }
 
 function syncAgentEndpoint(url: string, token: string) {
@@ -94,10 +117,8 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
 export function initBackendConnection() {
     if (typeof window === "undefined") return;
     void useBackendStore.getState().checkConnection();
-    // 周期性重连检测
+    // 周期性检测：已连接状态也必须持续探活，才能感知后台运行中途崩溃。
     setInterval(() => {
-        if (!useBackendStore.getState().connected) {
-            void useBackendStore.getState().checkConnection();
-        }
+        void useBackendStore.getState().checkConnection();
     }, 10_000);
 }

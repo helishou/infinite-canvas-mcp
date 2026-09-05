@@ -106,6 +106,13 @@ export async function runLocalH3Task(endpoint: string, token: string, comfyUrl: 
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${created.task.id}`);
         if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
+            // cancelled 不是失败：抛出可识别错误，调用方会按 cancelRequested 走取消分支，
+            // 不再被 catch 误判成 "MiniMax H3 任务失败"。
+            if (response.task.status === "cancelled") {
+                const err = new Error(response.task.error || "H3 任务已取消");
+                err.name = "H3RunCancelled";
+                throw err;
+            }
             if (response.task.status !== "succeeded") throw new Error(response.task.error || "MiniMax H3 任务失败");
             const media = response.task.result?.media?.find((item) => String(item.mimeType || "video/mp4").startsWith("video/")) || response.task.result?.media?.[0];
             if (!media) throw new Error("MiniMax H3 完成但没有返回视频");
@@ -160,6 +167,11 @@ export async function runRunningHubH3Task(endpoint: string, token: string, promp
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/runninghub/tasks/${created.task.id}`);
         if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
+            if (response.task.status === "cancelled") {
+                const err = new Error(response.task.error || "H3 任务已取消");
+                err.name = "H3RunCancelled";
+                throw err;
+            }
             if (response.task.status !== "succeeded") throw new Error(response.task.error || "RunningHub H3 任务失败");
             const media = response.task.result?.media?.find((item) => item.mimeType.startsWith("video/")) || response.task.result?.media?.[0];
             if (!media) throw new Error("RunningHub H3 完成但没有返回媒体");

@@ -52,6 +52,21 @@ const server = app.listen(config.port, "127.0.0.1", () => {
     logger.info(`总后台已启动 http://127.0.0.1:${config.port}`, { pid: process.pid, version: readVersion() });
 });
 
+// ── 连接泄漏/僵尸连接防护 ────────────────────────────────────────────
+// 浏览器（Edge 等）频繁开关连接时，若 server 不主动释放半关闭 socket，
+// 会堆积 CLOSE_WAIT 直至 fd 耗尽拖垮进程（“老是挂掉”的根因之一）。
+// 收紧超时，让僵尸/慢连接尽快被回收。
+server.keepAliveTimeout = 30_000;
+server.headersTimeout = 35_000;
+server.requestTimeout = 120_000;
+try { (server as unknown as { timeout: number }).timeout = 120_000; } catch { /* 部分 Node 版本只读 */ }
+
+// ── 进程级异常兜底 ───────────────────────────────────────────────────
+// 单点异常（如 SSE 断连后的 EPIPE、媒体读取错误）不应直接杀掉进程；
+// 记录日志后继续运行，配合 tsx --watch 的热重载更稳健。
+process.on("uncaughtException", (error) => logger.error("uncaughtException", { message: error.message, stack: error.stack }));
+process.on("unhandledRejection", (reason) => logger.error("unhandledRejection", { reason: String(reason) }));
+
 const shutdown = (signal: string) => {
     logger.info(`${signal} received, shutting down…`);
     server.close(() => {

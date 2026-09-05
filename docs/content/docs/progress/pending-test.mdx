@@ -7,6 +7,32 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
++ H3 工作台三栏布局：确认顶部为 Video preview、Prompt、Setting 三栏；Refs 和 Output 横跨左中区域，Status 位于底部，窄节点宽度下各区域不溢出。
++ H3 顶部横向分隔：确认 Video preview 与 Prompt 之间、Prompt 与 Setting 之间均可拖拽调节宽度。
++ H3 时间轴指针：点击 Clip 2 或后续片段，确认播放指针准确落在对应片段起点。
++ H3 生成操作：确认“生成当前 Clip”和“运行当前及后续”固定在节点右下角，且不随 Setting 内容滚动。
++ H3 三栏宽度：当预览区调宽或节点变窄时，确认 Prompt 仍保持可读宽度，不被挤到右侧或压缩到不可用。
++ H3 Prompt/Setting 分隔线：确认分隔线为细竖线，拖拽时不会显示成大块灰色区域。
++ H3 Setting 操作按钮：确认两个生成按钮只占据右侧 Setting 区域底部，不横跨整个节点。
++ H3 Prompt/Setting 拖拽线：确认分割线位于两栏正中边界，拖拽热区不会覆盖 Prompt 或 Setting 内容。
++ H3 Preview/Prompt 拖拽线：确认手柄只出现在顶部 Preview 与 Prompt 的分界处，不延伸到下方时间轴或 Output。
++ H3 高度适配：内容区低于 Preview 130px + Video/Refs 138px + Output 140px + 间距 20px 时确认 Output 自动隐藏，空间恢复后重新显示。
++ H3 动态缩放：拖动节点边框改变大小，确认 Preview、Prompt、Timeline/Refs 和 Output 均随可用空间动态调整且不溢出。
++ H3 低高度操作区：确认节点高度较小时 Setting 底部的两个生成按钮仍可见、可点击。
++ H3 隐藏 Output 后操作区：确认 Setting 与按钮同步贴合剩余内容区底部，不被外层容器裁剪。
++ H3 Prompt 联动：切换 T2V、I2V、FL2V、Ref2VA 后确认工具条、说明内容和 @ 候选随模式变化。
++ H3 @ 候选显示：在 Prompt 文本框输入 @，确认候选列表出现在文本框上方且不被面板裁剪。
++ 图片节点上传：在“正在添加参考”状态下点击图片节点的上传图片，确认能正常打开文件选择器且不会继续卡在参考选择状态。
++ H3 @ 候选位置：确认候选列表紧邻 Prompt 文本框顶部，不再固定在面板底部。
++ H3 动态行高：确认节点纵向缩放后 Preview、Timeline/Refs 和 Output 会实际变高或变矮，而不是保持固定高度。
++ H3 默认比例：确认空间充足时 Preview、Video/Refs、Output 的高度约为 4:2:1。
++ H3 Timeline 填充：确认 Timeline 高度增加时 Video 和 Refs 行会填满区域，不在 Refs 下方留下空白。
+
++ H3 时间轴横向滚动：在超过可视区域的多 Clip 时间轴中横向滚动 Video、Refs 或刻度，确认三者保持同步；确认 10 秒内容宽度为 500px。
+
++ H3 日志输入 refs：分别用图片、视频、音频和不同 Clip refs 运行 H3，确认日志显示的 refs 与实际提交给 ComfyUI 的输入及数量一致。
++ H3 日志结果准确性：生成视频后替换 Clip 挂载视频，再刷新或触发任务轮询，确认日志 outputs 和节点结果仍指向本次 ComfyUI 返回的视频，不指向替换后的挂载视频。
++ 本地 H3 Backend 直连：关闭 Canvas Agent、保持 Backend 和 ComfyUI 运行，确认模型读取、Ref2VA 生成、任务轮询和取消均可用；关闭 Backend 时显示 Backend 未连接。
 + H3 MCP 状态同步：通过 MCP 运行单段和全部 Clip，确认 ComfyUI 进入运行后画布节点立即显示运行中，进度、成功结果和失败信息均回写到对应 Clip，刷新页面后状态仍一致。
 + 组节点双向锁定：锁定组后确认组内节点不能拖出，外部节点也不能拖入；解锁后两种拖动均恢复。
 + 组节点锁定：锁定组后拖动组内节点到组外，确认节点仍被限制在组内；在组内拖动和整体移动组仍正常，解锁后可以移出。
@@ -52,6 +78,7 @@ The current release needs manual verification in these areas:
 + MCP 当前画布上下文：连接 Agent/MCP 后调用读取画布的工具，确认能看到当前打开画布的标题、节点和选中状态；切换画布后确认上下文随之更新。
 + 南风 H3 V10 底层迁移：检查生成 prompt graph 不包含 `NanFengH3MultiReferenceGeneratorV10` 和 `NanFeng_H3_V10.json`，四种模式分别包含正确的原生条件节点、LoadImage/LoadVideo/LoadAudio、采样、双 VAE 解码和 VHS 输出，并返回 mp4。
 + 南风 H3 V10 参考填槽：上传多张参考图确认按连续槽位（图片1..N）写入、prompt 中 @编号 与槽位一致；断档或超 9 图时确认给出明确报错。
++ 南风 H3 V10 分拆链：确认 SamplerCustomAdvanced 使用 ReleaseBeforeSampling 的第三路 AV latent，视频与音频均能正常解码；确认 API prompt 不包含非法的 STRING 到 COMBO Loader 连线。
 + 南风 H3 V10 续段：开启段间接续后运行后续 Clip，确认前一段尾帧被作为参考视频槽 1 喂入 Ref2VA，输出动作/人物连续；关闭后续段时不带前段视频。
 + 南风 H3 V10 锁音频联动：在参考生视频模式下勾选「启用锁音频」提交确认音轨锁定；勾选「音频驱动模式」但未勾锁音频时确认提交前即报错提示。
 + 南风 H3 V10 时长上限：分别在 Clip settings 设置 5s/15s/20s 提交，确认 15s 内正常、超 15s 被 clamp 或拒绝。
@@ -173,3 +200,50 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 + H3 刷新后任务恢复：生成 H3 视频期间刷新画布页面，确认带有运行任务 ID 时继续轮询并回写结果；没有运行任务 ID 的旧加载状态才显示“生成已中断”。
 + 普通视频节点刷新恢复：运行本地 FlashVSR 期间刷新页面，确认 ComfyUI 继续生成，视频节点保持加载并在任务完成后自动回写结果。
 + H3 模型搜索：打开 Clip settings，确认加速 LoRA 与 Base model 下拉框可以输入关键词过滤，并能正确选中写回。
+### H3 Prompt @ 候选列表定位与选中态
+
+- 输入 `@` 或 `@关键词`，确认候选列表出现在光标附近，而不是固定在 Prompt 区域顶部。
+- 使用鼠标悬停或键盘上下键切换候选，确认当前项显示项目蓝色边框、左侧标识和高亮背景，未选中项明显区分。
+- 在多行文本、滚动 Prompt 文本框和节点缩放后重复验证候选位置仍跟随光标。
+### H3 与侧边栏运行时警告修复
+
+- 打开 H3 节点，确认控制台不再出现 `H3ContentExact`、`H3ClipSettingsPanel`、`ClipSettings`、`H3MaterialLibrary`、`H3PromptSection` 的 unique `key` 警告。
+- 重新连接后端或刷新画布，确认侧边栏设置恢复时不再出现 `set is not defined`。
+### 图片节点本地上传即时预览
+
+- 从画布选择本地图片创建图片节点，确认选中文件后立即出现临时预览，不必等待后台上传完成。
+- 替换已有图片节点时，确认旧节点立即显示新图片预览，并在上传完成后尺寸和存储地址正常更新。
+- 断开后台或制造上传失败，确认临时预览节点保留且显示上传错误，不会出现无响应或空白节点。
+### 刷新后恢复后台图片与 H3 生成
+
+- 启动本地 ComfyUI 图片生成后刷新页面，确认任务仍在后台运行，完成后图片能回写到原图片节点。
+- 启动 H3 生成后刷新页面，确认节点不会立即变成“生成失败”，并能继续显示后台任务结果。
+- 分别验证后台任务成功、失败和取消时，节点状态与错误信息能正确更新。
+- 画布状态现在会在每次节点、连线、提示词、视口或项目操作后立即写入浏览器本地快照；请修改画布后立刻终止后台进程，再重新打开页面确认最近修改仍然存在。
+- 后台重连时，较新的本地画布快照应优先于旧的后台版本，并在连接恢复后继续同步。
+### H3 智能分镜画布图片选择
+
+- 打开 H3 智能分镜，点击“从画布选择”，确认弹出资产选择器且只显示图片素材。
+- 选择图片后确认图片写入当前空槽位，生成分镜时使用该图片；本地上传和拖拽排序仍正常。
+
+### H3 智能分镜插入位置
+
+- 选中中间 Clip 后生成智能分镜，确认新生成的分镜紧接当前 Clip 后插入，当前 Clip 后原有片段顺延而不是被移到末尾。
+
+### H3 底部通用面板
+
+- 确认 H3 节点下方不再显示画布通用的“输入内容/模型/发送”面板，H3 仍可通过自身工作台操作。
+
+### H3 时间轴指针滚动
+
+- 横向滚动 H3 时间轴的标尺、Video 或 Refs 区域，确认蓝色时间指针与时间内容同步移动，不固定在节点原位置。
+
+## H3 Clip 参数继承
+
+- 新建 Clip 会继承当前选中 Clip 的完整生成参数，包括完整 Sigma 序列。
+- 新 Clip 会插入当前选中 Clip 后方，并保持后续 Clip 的顺序。
+- 请切换到非最后一个 Clip，设置完整 Sigma 序列后新建 Clip，确认参数和插入位置均正确。
+- 在完整 Sigma 序列文本框连续输入后立即切换到其他 Clip，再切回确认内容仍然保留。
+- 运行 H3 后打开生成日志，确认每个 Clip 的完整参数、提示词、参考素材和完整 Sigma 序列均已记录。
+- 新建 H3 节点或清空降噪设置后运行，确认实际 ComfyUI 请求的降噪强度为 1.0。
+- 在 H3 采样器输入框键入 `er_sde` 或其他采样器名称，确认能搜索、选择并保存到实际 ComfyUI 请求。

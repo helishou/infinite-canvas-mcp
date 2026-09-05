@@ -163,7 +163,7 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
     return nodes.map((node) =>
-        node.metadata?.status === "loading" && !node.metadata.runtimeTaskId
+        node.metadata?.status === "loading" && !node.metadata.runtimeTaskId && !isPersistentH3Node(node)
             ? {
                   ...node,
                   metadata: {
@@ -176,6 +176,11 @@ export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
               }
             : node,
     );
+}
+
+function isPersistentH3Node(node: CanvasNodeData) {
+    const metadata = node.metadata as (CanvasNodeMetadata & Record<string, unknown>) | undefined;
+    return Boolean(metadata && (node.type === "minimax-h3:video" || Array.isArray(metadata.segments) || (metadata.h3Refs && typeof metadata.h3Refs === "object")));
 }
 
 export function isGenerationCanceled(error: unknown) {

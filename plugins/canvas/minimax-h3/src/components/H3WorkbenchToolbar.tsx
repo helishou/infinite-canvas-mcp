@@ -6,7 +6,6 @@ import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
 import { resultUrl } from "../services/h3-data";
 import { H3Icon } from "./H3Icon";
-import { H3StatusBadge } from "./H3WorkbenchPrimitives";
 
 type Props = {
     ctx: CanvasNodeContext;
@@ -19,9 +18,6 @@ type Props = {
     total: number;
     fmt: (value: number) => string;
     onPlayAll: () => void;
-    status: string;
-    error: string;
-    onRetry: () => void;
 };
 
 export function H3WorkbenchToolbar({ ctx, metadata, segments, selected, selectedIndex, outputs, playhead, total, fmt, onPlayAll, status, error, onRetry }: Props) {
@@ -47,7 +43,6 @@ export function H3WorkbenchToolbar({ ctx, metadata, segments, selected, selected
     return <>
         <div className="minimax-wb-toolbar" data-canvas-node-drag-handle>
             <div className="minimax-brand"><H3Icon name="clapperboard" /> <span>MiniMax H3</span><em title="已加载新版 H3 插件">v1.2</em><b>{fmt(playhead)} / {fmt(total)}</b></div>
-            <div className="minimax-transport"><H3StatusBadge status={status} error={error} onRetry={onRetry} /></div>
             <div className="minimax-top-actions"><button type="button" title="下载当前片段" disabled={!selected?.result} onClick={() => { if (selected?.result) saveAs(resultUrl(selected.result), `Clip-${selectedIndex + 1}.mp4`); }}><H3Icon name="download" /></button><button type="button" title={timelineVideos.length > 1 ? "拼接并下载完整时间轴" : "下载完整时间轴"} disabled={!timelineVideos.length || timelineDownloading} onClick={() => void downloadTimeline()}><H3Icon name="output" /></button><button type="button" title="依次下载全部输出" disabled={!outputs.length} onClick={() => outputs.forEach((item, index) => setTimeout(() => saveAs(item.url, item.name || `Clip-${index + 1}.mp4`), index * 120))}><H3Icon name="folder" /></button><button type="button" title="打开参数" onClick={() => ctx.openPanel()}><H3Icon name="settings" /></button></div>
         </div>
     </>;

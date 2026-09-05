@@ -133,7 +133,7 @@ const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
-type CanvasReferenceDrag = { nodeId: string; url: string; type: "image"; name: string; storageKey?: string };
+type CanvasReferenceDrag = { nodeId: string; url: string; type: "image"; name: string; storageKey?: string; mimeType?: string };
 
 function h3DropTargetAt(clientX: number, clientY: number) {
     return document.elementsFromPoint(clientX, clientY).map((element) => element.closest<HTMLElement>("[data-canvas-ref-drop-target]")).find(Boolean) || null;
@@ -237,6 +237,8 @@ function InfiniteCanvasPage() {
     const [globalPrompt, setGlobalPrompt] = useState("");
     const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+    const [assetPickerAllowedKinds, setAssetPickerAllowedKinds] = useState<string[] | undefined>();
+    const assetPickerResolverRef = useRef<((image: { kind: "image"; dataUrl: string; title: string; storageKey?: string } | null) => void) | null>(null);
     const [projectLoaded, setProjectLoaded] = useState(false);
     const [toolbarNodeId, setToolbarNodeId] = useState<string | null>(null);
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
@@ -392,15 +394,15 @@ function InfiniteCanvasPage() {
         const poll = async () => {
             const agent = useAgentStore.getState();
             if (!agent.connected || !agent.url || !agent.token) return;
-            const pending = nodesRef.current.filter((node) => node.type === CanvasNodeType.Video && node.metadata?.status === NODE_STATUS_LOADING && node.metadata.runtimeTaskId);
+            const pending = nodesRef.current.filter((node) => (node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Image) && node.metadata?.status === NODE_STATUS_LOADING && node.metadata.runtimeTaskId);
             await Promise.all(pending.map(async (node) => {
                 try {
                     const task = await getComfyTask(agent.url, agent.token, String(node.metadata?.runtimeTaskId));
                     if (disposed) return;
                     if (task.status === "succeeded" && task.result?.url) {
-                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, content: task.result!.url, storageKey: task.result!.storageKey, mimeType: task.result!.mimeType, status: NODE_STATUS_SUCCESS, errorDetails: undefined, runtimeTaskId: undefined } } : item));
+                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, content: task.result!.url, storageKey: task.result!.storageKey, mimeType: task.result!.mimeType, status: NODE_STATUS_SUCCESS, errorDetails: undefined, runtimeTaskId: undefined, images: item.metadata?.images?.map((image) => image.id === String(item.metadata?.primaryImageId || "") ? { ...image, content: task.result!.url, storageKey: task.result!.storageKey, mimeType: task.result!.mimeType, status: NODE_STATUS_SUCCESS } : image) } } : item));
                     } else if (["failed", "cancelled"].includes(task.status)) {
-                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: task.error || "本地 ComfyUI 任务失败", runtimeTaskId: undefined } } : item));
+                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: task.error || "本地 ComfyUI 任务失败", runtimeTaskId: undefined, images: item.metadata?.images?.map((image) => image.id === String(item.metadata?.primaryImageId || "") ? { ...image, status: NODE_STATUS_ERROR, errorDetails: task.error || "本地 ComfyUI 任务失败" } : image) } } : item));
                     }
                 } catch {
                     // Backend/Agent 暂时不可用时保留 loading，下一次页面进入或任务恢复时继续查询。
@@ -737,6 +739,11 @@ function InfiniteCanvasPage() {
         viewportRef,
         setNodes,
         setDialogNodeId,
+        openAssetPicker: (options) => new Promise((resolve) => {
+            assetPickerResolverRef.current = resolve;
+            setAssetPickerAllowedKinds(options?.kind ? [options.kind] : undefined);
+            setAssetPickerOpen(true);
+        }),
         applyAgentOps,
     });
     const createNode = useCallback(
@@ -1168,7 +1175,7 @@ function InfiniteCanvasPage() {
             startY: event.clientY,
             initialSelectedNodes: currentNodes.filter((node) => dragIds.has(node.id)).map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
             referenceDrag: nextSelected.size === 1 && currentNodes.find((node) => nextSelected.has(node.id))?.type === CanvasNodeType.Image
-                ? (() => { const node = currentNodes.find((item) => nextSelected.has(item.id)); const url = String(node?.metadata?.content || "").trim(); return url && node ? { nodeId: node.id, url, type: "image" as const, name: node.title || "图片", storageKey: node.metadata?.storageKey } : undefined; })()
+                ? (() => { const node = currentNodes.find((item) => nextSelected.has(item.id)); const url = String(node?.metadata?.content || "").trim(); return url && node ? { nodeId: node.id, url, type: "image" as const, name: node.title || "图片", storageKey: node.metadata?.storageKey, mimeType: node.metadata?.mimeType } : undefined; })()
                 : undefined,
         };
         historyPausedRef.current = true;
@@ -1374,23 +1381,32 @@ function InfiniteCanvasPage() {
     }, [finishNodeDrag, handleGlobalMouseMove, handleGlobalMouseUp, handleGlobalPointerMove]);
 
     const createImageFileNode = useCallback(async (file: File, position: Position) => {
-        const image = await uploadImage(file);
-        const size = fitNodeSize(image.width, image.height);
         const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const previewUrl = URL.createObjectURL(file);
+        const initialSize = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
         const newNode: CanvasNodeData = {
             id,
             type: CanvasNodeType.Image,
             title: file.name,
-            position: { x: position.x - size.width / 2, y: position.y - size.height / 2 },
-            width: size.width,
-            height: size.height,
-            metadata: imageMetadata(image),
+            position: { x: position.x - initialSize.width / 2, y: position.y - initialSize.height / 2 },
+            width: initialSize.width,
+            height: initialSize.height,
+            metadata: { content: previewUrl, status: NODE_STATUS_LOADING, bytes: file.size, mimeType: file.type || "image/*" },
         };
 
         setNodes((prev) => [...prev, newNode]);
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
         setDialogNodeId(id);
+        try {
+            const image = await uploadImage(file);
+            const size = fitNodeSize(image.width, image.height);
+            setNodes((prev) => prev.map((node) => node.id === id ? { ...node, width: size.width, height: size.height, metadata: { ...node.metadata, ...imageMetadata(image) } } : node));
+            URL.revokeObjectURL(previewUrl);
+        } catch (error) {
+            const errorDetails = error instanceof Error ? error.message : "图片上传失败";
+            setNodes((prev) => prev.map((node) => node.id === id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node));
+        }
     }, []);
 
     const createVideoFileNode = useCallback(async (file: File, position: Position) => {
@@ -2048,6 +2064,8 @@ function InfiniteCanvasPage() {
     }, []);
 
     const handleUploadRequest = useCallback((nodeId?: string, position?: Position) => {
+        // 上传入口可能从“添加参考”状态下触发；先退出参考选择，避免上传后仍被锁在选择模式。
+        setReferencePickerNodeId(null);
         uploadTargetRef.current = { nodeId, position };
         imageInputRef.current?.click();
     }, []);
@@ -2118,6 +2136,9 @@ function InfiniteCanvasPage() {
                     setSelectedNodeIds(new Set([target.nodeId]));
                     setSelectedConnectionId(null);
                 } else {
+                    const previewUrl = URL.createObjectURL(first);
+                    setNodes((prev) => prev.map((node) => node.id === target.nodeId ? { ...node, title: first.name, metadata: { ...node.metadata, content: previewUrl, storageKey: undefined, status: NODE_STATUS_LOADING, errorDetails: undefined, bytes: first.size, mimeType: first.type || "image/*" } } : node));
+                    try {
                     const image = await uploadImage(first);
                     const s = fitNodeSize(image.width, image.height);
                     setNodes((prev) =>
@@ -2147,8 +2168,12 @@ function InfiniteCanvasPage() {
                                 : node,
                         ),
                     );
+                    URL.revokeObjectURL(previewUrl);
                     setSelectedNodeIds(new Set([target.nodeId]));
                     setSelectedConnectionId(null);
+                    } catch (error) {
+                        setNodes((prev) => prev.map((node) => node.id === target.nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails: error instanceof Error ? error.message : "图片上传失败" } } : node));
+                    }
                 }
 
                 // Create the remaining files near the target node.
@@ -2398,7 +2423,7 @@ function InfiniteCanvasPage() {
                         imageIds.map(async (imageId) => {
                             try {
                                 const image = localComfy
-                                    ? await runComfyTask(useAgentStore.getState().url, useAgentStore.getState().token, comfyChannel.baseUrl, localComfyPreset, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal)
+                                    ? await runComfyTask(useAgentStore.getState().url, useAgentStore.getState().token, comfyChannel.baseUrl, localComfyPreset, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, runtimeTaskId: taskId, primaryImageId: imageId } } : item)))
                                     : referenceImages.length
                                       ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
                                       : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
@@ -2425,6 +2450,7 @@ function InfiniteCanvasPage() {
                                                 mimeType: item.mimeType,
                                                 images,
                                                 primaryImageId: imageId,
+                                                runtimeTaskId: undefined,
                                             },
                                         };
                                     }),
@@ -2961,6 +2987,15 @@ function InfiniteCanvasPage() {
 
     const handleAssetInsert = useCallback(
         (payload: InsertAssetPayload) => {
+            const resolver = assetPickerResolverRef.current;
+            if (resolver) {
+                assetPickerResolverRef.current = null;
+                setAssetPickerOpen(false);
+                setAssetPickerAllowedKinds(undefined);
+                if (payload.kind === "image") resolver(payload);
+                else resolver(null);
+                return;
+            }
             if (payload.kind === "text") {
                 insertAssistantText(payload.content, payload.title);
             } else if (payload.kind === "video") {
@@ -3012,6 +3047,13 @@ function InfiniteCanvasPage() {
         },
         [insertAssistantImage, insertAssistantText, screenToCanvas, size.height, size.width],
     );
+
+    const closeAssetPicker = useCallback(() => {
+        assetPickerResolverRef.current?.(null);
+        assetPickerResolverRef.current = null;
+        setAssetPickerAllowedKinds(undefined);
+        setAssetPickerOpen(false);
+    }, []);
 
     // Memoize every callback and render function passed to CanvasNode.
     // CanvasNode uses React.memo, but new prop references would invalidate it on every render and rerender every node
@@ -3393,7 +3435,7 @@ function InfiniteCanvasPage() {
                     <p className="text-sm opacity-60">{t("canvas.projectPage.clearDescription")}</p>
                 </Modal>
 
-                <AssetPickerModal open={assetPickerOpen} onInsert={handleAssetInsert} onClose={() => setAssetPickerOpen(false)} />
+                <AssetPickerModal open={assetPickerOpen} allowedKinds={assetPickerAllowedKinds} onInsert={handleAssetInsert} onClose={closeAssetPicker} />
             </section>
         </main>
     );

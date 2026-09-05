@@ -21,8 +21,9 @@ export function importH3Settings(value: unknown): Partial<H3Segment> | null {
 }
 
 export function patchSelectedSegment(ctx: CanvasNodeContext, metadata: Record<string, unknown>, patch: Partial<H3Segment>) {
-    const segments = segmentsFor(metadata);
-    const selectedId = String(metadata.selectedSegmentId || segments[0]?.id || "");
+    const liveMetadata = ctx.getNode?.(ctx.node.id)?.metadata || metadata;
+    const segments = segmentsFor(liveMetadata);
+    const selectedId = String(liveMetadata.selectedSegmentId || segments[0]?.id || "");
     ctx.updateMetadata({ selectedSegmentId: selectedId, segments: segments.map((segment) => segment.id === selectedId ? { ...segment, ...patch } : segment) });
 }
 

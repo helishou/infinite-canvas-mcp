@@ -58,7 +58,7 @@ async function hydrateCanvasSidePanelSettings() {
         patch.panelMounted = settings.canvasSidePanelOpen;
         patch.panelClosing = false;
     }
-    if (Object.keys(patch).length > 0) set(patch);
+    if (Object.keys(patch).length > 0) useCanvasSidePanelStore.setState(patch);
 }
 
 if (typeof window !== "undefined") {

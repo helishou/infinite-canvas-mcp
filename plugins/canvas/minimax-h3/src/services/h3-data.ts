@@ -6,7 +6,7 @@ import { segmentsFor } from "../hooks/useH3Segments";
 export function refsForSegment(segment: H3Segment) {
     const buckets = segment.refs;
     const items = segment.refItems || [ ...(buckets?.image || []), ...(buckets?.video || []), ...(buckets?.audio || []) ];
-    const refs = items.filter((item) => item?.url).map((item) => ({ ...item, type: item.type || (item as H3Ref & { kind?: H3Ref["type"] }).kind || "image" as const }));
+    const refs = items.filter((item) => item?.url || item?.storageKey).map((item) => ({ ...item, type: item.type || (item as H3Ref & { kind?: H3Ref["type"] }).kind || "image" as const }));
     return refs.filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
 }
 
@@ -34,7 +34,14 @@ export function resultUrl(value: unknown) {
 
 export function appendVideoMaterials(existing: unknown, additions: Array<{ url: string; storageKey?: string; type: string; name: string; segmentId?: string }>) {
     const current = Array.isArray(existing) ? existing.filter((item) => item && typeof item === "object") as Array<Record<string, unknown>> : [];
-    return [...current, ...additions].filter((item, index, all) => Boolean(item.url) && all.findIndex((candidate) => String(candidate.url || "") === String(item.url || "")) === index);
+    // 保留现有 item 上的 segmentId，避免 dedupe-by-URL 把归属信息丢掉。
+    // 如果 existing 里的某条已被新 additions 覆盖，使用新 additions 的 segmentId。
+    const additionKeys = new Set(additions.map((item) => String(item.url || "")));
+    const merged = [
+        ...current.filter((item) => !additionKeys.has(String(item.url || ""))),
+        ...additions,
+    ];
+    return merged.filter((item, index, all) => Boolean(item.url) && all.findIndex((candidate) => String(candidate.url || "") === String(item.url || "")) === index);
 }
 
 export function updateSegment(ctx: CanvasNodeContext, metadata: Record<string, unknown>, index: number, patch: Partial<H3Segment>) {

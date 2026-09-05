@@ -356,7 +356,16 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 if (isCurrentConnection()) addEventLog(rt("conversationSyncFailed"), error);
             });
         };
-        const source = new EventSource(`${endpoint}/events?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`);
+        const source = (() => {
+            try {
+                const u = new URL(endpoint);
+                if ((u.hostname === "127.0.0.1" || u.hostname === "localhost") && u.port === "17370" && typeof window !== "undefined") {
+                    // 本地总后台：走同源相对路径，经 Vite 代理转发，绕开浏览器系统代理对 SSE 长连接的截断
+                    return new EventSource(`/agent/events?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`);
+                }
+            } catch { /* 解析失败则回退绝对地址 */ }
+            return new EventSource(`${endpoint}/events?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`);
+        })();
         source.addEventListener("hello", (event) => {
             if (!isCurrentConnection()) return;
             const hello = parseEventData<AgentHelloEvent>(event);

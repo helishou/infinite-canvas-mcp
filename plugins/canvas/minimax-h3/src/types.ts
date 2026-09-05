@@ -1,4 +1,4 @@
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; slot?: number; segmentId?: string };
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string };
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
@@ -15,6 +15,9 @@ export type H3Segment = {
     status?: string;
     progress?: number;
     runtimeTaskId?: string;
+    // H3Runner catch 块写 segment.status: "error" 时把 errorDetails 也写到 segment 上，
+    // H3ClipCard 用它显示 hover 提示，避免前端"卡片不更新"的视觉假象。
+    errorDetails?: string;
     taskMode?: string;
     seed?: number | string;
     noiseSeedMode?: "random" | "fixed";

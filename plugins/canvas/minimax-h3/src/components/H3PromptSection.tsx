@@ -44,7 +44,41 @@ const H3_SECTION_BLOCKS: Record<string, string> = {
   配乐: "non_diegetic_music:\nN/A",
 };
 
-export const H3_PROMPT_TOOLS = Object.keys(H3_SECTION_BLOCKS);
+const H3_VIDEO_BLOCK = [
+  "integrated_multimodal_description:",
+  "",
+  "overall_soundscape:",
+  "",
+  "non_diegetic_music:",
+  "N/A",
+].join("\n");
+
+const H3_PROMPT_MODE_CONFIG = {
+  ref2va: {
+    tools: H3_SECTION_BLOCKS,
+    title: "Ref2VA 六段结构",
+    fields: "subject_definitions → summary → retention_analysis → detailed_description → overall_soundscape → non_diegetic_music",
+    refs: "可引用图片、视频和音频；图片使用 <Subject N> / <Picture N>，视频使用 <Video N>，音频使用 <Audio N>。",
+  },
+  t2v: {
+    tools: { 模板: H3_VIDEO_BLOCK, 综合描述: "integrated_multimodal_description:\n", 声景: "overall_soundscape:\n", 配乐: "non_diegetic_music:\nN/A" },
+    title: "T2V 三段结构",
+    fields: "integrated_multimodal_description → overall_soundscape → non_diegetic_music",
+    refs: "文生视频不使用参考素材，也不插入图片、视频或音频引用标签。",
+  },
+  i2v: {
+    tools: { 模板: H3_VIDEO_BLOCK, 综合描述: "integrated_multimodal_description:\n", 声景: "overall_soundscape:\n", 配乐: "non_diegetic_music:\nN/A" },
+    title: "I2V 三段结构",
+    fields: "integrated_multimodal_description → overall_soundscape → non_diegetic_music",
+    refs: "仅允许引用 1 张首帧图片，使用 <Subject 1> / <Picture 1>。",
+  },
+  fl2v: {
+    tools: { 模板: H3_VIDEO_BLOCK, 综合描述: "integrated_multimodal_description:\n", 声景: "overall_soundscape:\n", 配乐: "non_diegetic_music:\nN/A" },
+    title: "FL2V 三段结构",
+    fields: "integrated_multimodal_description → overall_soundscape → non_diegetic_music",
+    refs: "允许引用 2 张图片：<Picture 1> 为首帧，<Picture 2> 为尾帧。",
+  },
+} as const;
 
 type MentionItem = { ref: H3Ref; ordinal: number };
 
@@ -60,8 +94,14 @@ export function H3PromptSection({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const prompt = String(selected?.prompt || "");
   const mode = String(selected?.mode || selected?.taskMode || "ref2va");
+  const promptMode = mode in H3_PROMPT_MODE_CONFIG ? mode as keyof typeof H3_PROMPT_MODE_CONFIG : "ref2va";
+  const modeConfig = H3_PROMPT_MODE_CONFIG[promptMode];
+  const toolBlocks = modeConfig.tools as Record<string, string>;
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionActive, setMentionActive] = useState(0);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionPosition, setMentionPosition] = useState({ left: 8, top: 106 });
+  const [helpOpen, setHelpOpen] = useState(false);
   const [enhancing, setEnhancing] = useState(false);
   const models = ctx.ai.listModels("text");
   const promptModel = String(
@@ -81,6 +121,15 @@ export function H3PromptSection({
     ],
     [imageRefs, videoRefs, audioRefs],
   );
+  const visibleMentionItems = useMemo(() => {
+    if (promptMode === "t2v") return [];
+    const query = mentionQuery.trim().toLowerCase();
+    if (!query) return mentionItems;
+    return mentionItems.filter(({ ref }) => {
+      const aliases = ref.type === "image" ? ["图片", "picture", "subject"] : ref.type === "video" ? ["视频", "video"] : ["音频", "audio"];
+      return aliases.some((alias) => alias.includes(query) || query.includes(alias)) || String(ref.name || "").toLowerCase().includes(query);
+    });
+  }, [mentionItems, mentionQuery, promptMode]);
 
   const setPrompt = (value: string) => patchSelected({ prompt: value });
   const enhancePrompt = async () => {
@@ -208,30 +257,48 @@ export function H3PromptSection({
     }
     setMentionOpen(false);
     setMentionActive(0);
+    setMentionPosition({ left: 8, top: 106 });
+  };
+
+  const updateMentionPosition = (ta: HTMLTextAreaElement, caretIndex?: number) => {
+    const field = ta.closest(".minimax-prompt-field") as HTMLElement | null;
+    if (!field) return;
+    const point = getCaretPoint(ta, caretIndex ?? ta.selectionStart ?? 0);
+    const fieldRect = field.getBoundingClientRect();
+    const textareaRect = ta.getBoundingClientRect();
+    const computed = window.getComputedStyle(ta);
+    const lineHeight = Number.parseFloat(computed.lineHeight) || 17;
+    const menuWidth = Math.min(360, Math.max(220, fieldRect.width - 16));
+    const rawLeft = textareaRect.left - fieldRect.left + point.left - ta.scrollLeft;
+    const left = Math.max(8, Math.min(rawLeft, Math.max(8, fieldRect.width - menuWidth - 8)));
+    const top = textareaRect.top - fieldRect.top + point.top - ta.scrollTop + lineHeight + 4;
+    setMentionPosition({ left, top });
   };
 
   // 检测游标前的 @ 前缀,更新 mention 下拉(南风 openMentions:键入 @ 即弹)
   const syncMention = (ta: HTMLTextAreaElement) => {
     const start = ta.selectionStart ?? 0;
     const match = ta.value.slice(0, start).match(/@(\S*)$/);
-    setMentionOpen(Boolean(match));
-    if (mentionActive >= mentionItems.length) setMentionActive(0);
+    setMentionQuery(match?.[1] || "");
+    setMentionOpen(Boolean(match) && promptMode !== "t2v");
+    if (match && promptMode !== "t2v") updateMentionPosition(ta, start);
+    if (mentionActive >= visibleMentionItems.length) setMentionActive(0);
   };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (!mentionOpen || !mentionItems.length) return;
-    const active = Math.min(mentionActive, mentionItems.length - 1);
+    if (!mentionOpen || !visibleMentionItems.length) return;
+    const active = Math.min(mentionActive, visibleMentionItems.length - 1);
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      setMentionActive((current) => (current + 1) % mentionItems.length);
+      setMentionActive((current) => (current + 1) % visibleMentionItems.length);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       setMentionActive(
-        (current) => (current + mentionItems.length - 1) % mentionItems.length,
+        (current) => (current + visibleMentionItems.length - 1) % visibleMentionItems.length,
       );
     } else if (event.key === "Enter") {
       event.preventDefault();
-      insertMention(mentionItems[active]);
+      insertMention(visibleMentionItems[active]);
     } else if (event.key === "Escape") {
       setMentionOpen(false);
     }
@@ -239,8 +306,8 @@ export function H3PromptSection({
 
   return (
     <label className="minimax-prompt-field minimax-prompt-field--mention">
-      <span>
-        <H3Icon key="prompt-icon" name="prompt" /> Prompt{" "}
+      <span key="prompt-header">
+        <H3Icon key="prompt-icon" name="prompt" /> <span key="prompt-label">Prompt</span>{" "}
         <button
           key="enhance"
           type="button"
@@ -260,25 +327,34 @@ export function H3PromptSection({
           </button>
         ) : null}
       </span>
-      <div className="minimax-prompt-modes">
-        {H3_PROMPT_TOOLS.map((label) => (
+      <div key="prompt-modes" className="minimax-prompt-modes">
+        <span className="minimax-prompt-mode-tools">
+        {Object.keys(toolBlocks).map((label) => (
           <button
             type="button"
             key={label}
-            onClick={() => insertAtCursor(H3_SECTION_BLOCKS[label])}
+            onClick={() => insertAtCursor(toolBlocks[label])}
           >
             {label}
           </button>
         ))}
+        </span>
         <button
           type="button"
           className="minimax-prompt-help"
           title="提示词结构说明"
+          aria-expanded={helpOpen}
+          onClick={() => setHelpOpen((open) => !open)}
         >
           说明
         </button>
       </div>
-      <small className="minimax-prompt-syntax">
+      {helpOpen ? <div key="prompt-help" className="minimax-prompt-help-panel" role="note">
+        <b>{modeConfig.title}</b>
+        <span>字段：{modeConfig.fields}</span>
+        <span>{modeConfig.refs}</span>
+      </div> : null}
+      <small key="prompt-syntax" className="minimax-prompt-syntax">
         <code key="subject">&lt;Subject P&gt; 指认第 P 张参考图</code>{" "}
         <code key="picture">&lt;Picture P&gt; 指认第 P 张参考图</code>{" "}
         <code key="video">&lt;Video V&gt; 指认第 V 段参考视频</code>{" "}
@@ -289,7 +365,7 @@ export function H3PromptSection({
           </span>
         ) : null}
       </small>
-      <div className="nfh3-prompt-actions">
+      <div key="prompt-actions" className="nfh3-prompt-actions">
         <Select
           className="minimax-prompt-model"
           size="small"
@@ -303,13 +379,15 @@ export function H3PromptSection({
         />
         <button
           type="button"
-          className="minimax-aux-storyboard"
+          className={`minimax-aux-storyboard${String(ctx.node.metadata?.smartStoryboardStatus || "") === "error" ? " is-error" : ""}`}
           onClick={onOpenStoryboard}
+          disabled={String(ctx.node.metadata?.smartStoryboardStatus || "") === "loading"}
+          title={String(ctx.node.metadata?.smartStoryboardStatus || "") === "error" ? String(ctx.node.metadata?.smartStoryboardError || "") : undefined}
         >
-          智能分镜
+          {String(ctx.node.metadata?.smartStoryboardStatus || "") === "loading" ? "智能分镜生成中…" : String(ctx.node.metadata?.smartStoryboardStatus || "") === "error" ? "分镜失败·点击重试" : "智能分镜"}
         </button>
       </div>
-      <div className="nfh3-prompt-options">
+      <div key="prompt-options" className="nfh3-prompt-options">
         <label>
           <span>恒定触发词</span>
           <input
@@ -329,6 +407,7 @@ export function H3PromptSection({
         </span>
       </div>
       <textarea
+        key="prompt-textarea"
         ref={textareaRef}
         value={prompt}
         placeholder="请输入提示词"
@@ -337,7 +416,13 @@ export function H3PromptSection({
           syncMention(event.target);
         }}
         onKeyDown={handleKeyDown}
-        onBlur={() => setMentionOpen(false)}
+        onBlur={() => {
+          setMentionOpen(false);
+          setMentionPosition({ left: 8, top: 106 });
+        }}
+        onScroll={() => {
+          if (mentionOpen) updateMentionPosition(textareaRef.current!);
+        }}
         onMouseUp={() => {
           const ta = textareaRef.current;
           if (ta) syncMention(ta);
@@ -347,18 +432,20 @@ export function H3PromptSection({
           if (ta) syncMention(ta);
         }}
       />
-      {mentionOpen && mentionItems.length ? (
+      {mentionOpen && visibleMentionItems.length ? (
         <div
+          key="prompt-mentions"
           className="minimax-prompt-mentions"
           role="listbox"
+          style={{ left: mentionPosition.left, top: mentionPosition.top }}
           onMouseDown={(event) => event.preventDefault()}
         >
-          {mentionItems.map((item, index) => (
+          {visibleMentionItems.map((item, index) => (
             <MentionRow
               key={`${item.ref.type}-${item.ref.url}-${index}`}
               item={item}
               active={
-                index === Math.min(mentionActive, mentionItems.length - 1)
+                index === Math.min(mentionActive, visibleMentionItems.length - 1)
               }
               onHover={() => setMentionActive(index)}
               onPick={() => insertMention(item)}
@@ -366,8 +453,12 @@ export function H3PromptSection({
           ))}
         </div>
       ) : null}
-      {mentionOpen && !mentionItems.length ? (
-        <div className="minimax-prompt-mentions">
+      {mentionOpen && !visibleMentionItems.length ? (
+        <div
+          key="prompt-mentions-empty"
+          className="minimax-prompt-mentions"
+          style={{ left: mentionPosition.left, top: mentionPosition.top }}
+        >
           <span className="minimax-prompt-mention-empty">
             请先在下方添加图片、视频或音频
           </span>

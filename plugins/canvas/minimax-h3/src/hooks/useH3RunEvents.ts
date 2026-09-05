@@ -29,7 +29,15 @@ export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3, update: (patc
         if (!payload || typeof payload !== "object" || String((payload as Record<string, unknown>).nodeId || "") !== ctx.node.id) return;
         const current = ctx.getNode(ctx.node.id)?.metadata || {};
         const taskId = String(current.runtimeTaskId || "");
-        if (!taskId) return;
+        const currentStatus = String(current.status || "");
+        // 没有真正的视频生成任务在跑（可能是智能分镜残留、或异常把 status 卡在 loading），
+        // 直接把节点重置回可运行，让“生成当前 Clip”按钮从“取消生成”恢复，避免死循环。
+        if (!taskId || !["queued", "loading"].includes(currentStatus)) {
+            if (["queued", "loading"].includes(currentStatus)) {
+                updateRef.current({ status: "idle", errorDetails: "", runProgress: 0, cancelRequested: false, runtimeTaskId: "" });
+            }
+            return;
+        }
         const runningHub = String(current.minimaxEngine || "").toLowerCase() === "runninghub";
         updateRef.current({ cancelRequested: true });
         void (runningHub ? ctx.ai.cancelRunningHubH3Task(taskId) : ctx.ai.cancelLocalH3Task(taskId)).then(() => updateRef.current({ status: "cancelled", errorDetails: "任务已取消", runProgress: 0, runtimeTaskId: "" })).catch((error) => updateRef.current({ status: "error", errorDetails: error instanceof Error ? error.message : String(error) }));

@@ -32,15 +32,16 @@ export function resolveCompositeItems(items: CompositeItem[], assets: Asset[]): 
 type Props = {
     open: boolean;
     defaultTab?: string;
+    allowedKinds?: string[];
     onInsert: (payload: InsertAssetPayload) => void;
     onClose: () => void;
 };
 
-export function AssetPickerModal({ open, onInsert, onClose }: Props) {
+export function AssetPickerModal({ open, allowedKinds, onInsert, onClose }: Props) {
     const { t } = useTranslation();
     return (
         <Modal title={t("canvas.assetPicker.title")} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden styles={{ body: { padding: "0 24px 24px", minHeight: 480 } }}>
-            <MyAssetsTab onInsert={onInsert} />
+            <MyAssetsTab allowedKinds={allowedKinds} onInsert={onInsert} />
         </Modal>
     );
 }
@@ -75,7 +76,7 @@ function PickerCard({ title, kind, cover, onClick }: { title: string; kind: stri
     );
 }
 
-function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => void }) {
+function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onInsert: (payload: InsertAssetPayload) => void }) {
     const { t } = useTranslation();
     const assets = useAssetStore((state) => state.assets);
     const [keyword, setKeyword] = useState("");
@@ -86,9 +87,10 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
         const query = keyword.trim().toLowerCase();
         return assets
             .filter((a) => a.kind === "text" || a.kind === "image" || a.kind === "video" || a.kind === "audio" || a.kind === "composite")
+            .filter((a) => !allowedKinds?.length || allowedKinds.includes(a.kind))
             .filter((a) => kindFilter === "all" || a.kind === kindFilter)
             .filter((a) => !query || [a.title, ...(a.tags || [])].join(" ").toLowerCase().includes(query));
-    }, [assets, keyword, kindFilter]);
+    }, [allowedKinds, assets, keyword, kindFilter]);
 
     const visible = useMemo(() => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [filtered, page]);
 
@@ -96,6 +98,10 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
         const maxPage = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
         setPage((v) => Math.min(v, maxPage));
     }, [filtered.length]);
+
+    useEffect(() => {
+        if (allowedKinds?.length && kindFilter !== "all" && !allowedKinds.includes(kindFilter)) setKindFilter("all");
+    }, [allowedKinds, kindFilter]);
 
     const handleInsert = (asset: Asset) => {
         if (asset.kind === "text") {

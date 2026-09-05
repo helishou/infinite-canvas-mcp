@@ -57,6 +57,10 @@ function saveToLocalStorage(projects: CanvasProject[]) {
     } catch { /* localStorage 满了就放弃 */ }
 }
 
+function persistCurrentCanvasSnapshot() {
+    saveToLocalStorage(useCanvasStore.getState().projects);
+}
+
 async function syncCanvasProjects(projects: CanvasProject[]) {
     saveToLocalStorage(projects);
     if (!useBackendStore.getState().connected) return;
@@ -122,6 +126,7 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
             viewport: initialViewport,
         };
         set((state) => ({ projects: [project, ...state.projects] }));
+        persistCurrentCanvasSnapshot();
         scheduleCanvasSync();
         return id;
     },
@@ -142,6 +147,7 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
             viewport: source.viewport || initialViewport,
         };
         set((state) => ({ projects: [project, ...state.projects] }));
+        persistCurrentCanvasSnapshot();
         scheduleCanvasSync();
         void importLegacyGenerationLogs(project.id, (source as Partial<CanvasProject> & { logs?: unknown[] }).logs);
         return project.id;
@@ -153,6 +159,7 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         set((state) => ({
             projects: state.projects.map((project) => (project.id === id ? { ...project, title: title.trim() || project.title, updatedAt: new Date().toISOString() } : project)),
         }));
+        persistCurrentCanvasSnapshot();
         scheduleCanvasSync();
     },
     deleteProjects: (ids) => {
@@ -160,13 +167,15 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
             const projects = state.projects.filter((project) => !ids.includes(project.id));
             return { projects };
         });
+        persistCurrentCanvasSnapshot();
         scheduleCanvasSync();
     },
-    replaceProjects: (projects) => { set({ projects }); scheduleCanvasSync(); },
+    replaceProjects: (projects) => { set({ projects }); persistCurrentCanvasSnapshot(); scheduleCanvasSync(); },
     updateProject: (id, patch) => {
         set((state) => ({
             projects: state.projects.map((project) => (project.id === id ? { ...project, ...patch, updatedAt: new Date().toISOString() } : project)),
         }));
+        persistCurrentCanvasSnapshot();
         scheduleCanvasSync();
     },
 }));
@@ -181,6 +190,7 @@ function scheduleCanvasSync() {
 
 if (typeof window !== "undefined") {
     window.addEventListener("backend-connected", () => { void hydrateCanvasProjects(); });
+    window.addEventListener("pagehide", persistCurrentCanvasSnapshot);
 }
 
 async function importLegacyGenerationLogs(projectId: string, value: unknown) {

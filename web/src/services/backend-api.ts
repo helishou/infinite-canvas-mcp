@@ -208,12 +208,13 @@ export type BackendGenerationLog = {
     params: Record<string, unknown>; createdAt: string; updatedAt: string;
 };
 
-export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; status?: string; limit?: number } = {}) {
+export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; status?: string; limit?: number; offset?: number } = {}) {
     const params = new URLSearchParams();
     if (options.projectId) params.set("projectId", options.projectId);
     if (options.nodeId) params.set("nodeId", options.nodeId);
     if (options.status) params.set("status", options.status);
     if (options.limit) params.set("limit", String(options.limit));
+    if (typeof options.offset === "number" && options.offset > 0) params.set("offset", String(options.offset));
     const qs = params.toString();
     return request<{ ok: boolean; logs?: BackendGenerationLog[] }>("GET", `/generation-logs${qs ? `?${qs}` : ""}`);
 }

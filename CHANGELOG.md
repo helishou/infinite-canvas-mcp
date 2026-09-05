@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+- [修复] H3 节点 Clip 卡片现在能显示错误/loading/cancelled 视觉：H3Runner catch 块把 `segment.status` + `segment.errorDetails` 同步写进 segments 数组，H3ClipCard 读取后加 `is-error` / `is-loading` / `is-cancelled` className + 红底感叹号角标 + hover title 显示 errorDetails。之前 catch 块只把 status 写到 metadata 节点级、segments 数组里没 status，H3ClipCard 完全不读这个字段，导致用户感知为「Clip 卡片不更新」。
+- [修复] ComfyUI WebSocket 早断后 backend 拿不到 outputs：bridge.ts 加 `socket.onerror` / `socket.onclose` handler、补 `execution_success` 事件监听（之前只听 `executed` 单节点事件），`wsExecuted=true` 但 `/history` 被清理时扫描整个 `/history` 列表找最近成功条目兜底，WS 早断时主动 fail 而不是傻等 3 分钟。
+- [修复] H3 时间轴不再被总时长锁死：track-body / track-content / ref-content 改为 `min-width: total*50, width: 100%`，ref grid 也从百分比定位改为 px 定位，总时长 9s 时右边不再留出大段黑色空白，时间轴跟随父容器宽度拉满。
+- [修复] H3 时间轴 ruler 刻度按容器实际宽度动态生成：0-总时长 1.6s 主刻度 + 0.4s 副刻度，超过总时长部分按 5s 间隔继续标记，右侧空白处也有时间刻度参考。
+- [修复] H3 视频行底部那条波形装饰条由 CSS `::after`（`left:0; right:0`）改为 JSX 内联 `<div>`，只占 `total*50px` 宽，时间轴拉满后不再误铺到 refs 行视觉位置。
+- [修复] H3RulerScrubber 找不到 `.minimax-ruler`（H3Timeline 的 ruler 行 class 改名为 `.minimax-ruler-row`），scrubber `origin` 永远为 null 退回到 fallback 位置；改为匹配 `.minimax-ruler-row` 后 scrubber 才能正确贴合 ruler 几何。
+- [修复] 智能分镜与 H3 生成按钮状态耦合：智能分镜运行时不再覆写节点 `status` 字段（只写 `smartStoryboardStatus`），H3ClipSettingsPanel 的「生成当前 Clip」按钮 `busy` 改用 `runtimeTaskId` 存在性判断；之前智能分镜会同时让"生成当前 Clip"按钮变"取消生成"且点了也取消不了（因为它没 runtimeTaskId，H3Runner cancel 路径找不到任务），下方状态徽章也会错显"生成中…"。
+- [修复] H3 节点卡在"生成中"无法回写：onTaskId 回调现在把后端 taskId 同步写进 generation log（`runtimeTaskId`），`useH3TaskPolling.recoverTask` 在 metadata 丢失 taskId 时仍能通过 log 找回；卡死的孤儿日志（无 taskId 且 `startedAt` 超过 90 秒）会被自动清空状态让用户能重新提交；H3Runner 的 catch 块同时清掉 segments 里的 `runtimeTaskId`，避免错误状态被 segments 继承继续轮询不存在的 task。
+- [修复] 新建 H3 Clip 现在从当前选中 Clip 继承完整生成参数（包括完整 Sigma 序列），并插入在当前 Clip 后方。
+- [修复] H3 Clip 参数编辑改为基于最新节点数据保存，避免连续输入完整 Sigma 序列后切换 Clip 被旧状态覆盖。
+- [优化] H3 生成日志现在记录每个已提交 Clip 的完整参数与实际输入素材，包含完整 Sigma 序列等高级设置。
+- [调整] H3 新建节点和运行时缺省降噪强度统一为 1.0，与南风 V10 默认值一致。
+- [优化] H3 采样器选择支持直接输入搜索，并补充 `er_sde` 选项。
+- [新增] H3 智能分镜参考图片支持打开画布素材选择器并按槽位写入图片。
+- [修复] 智能分镜生成结果改为插入当前 Clip 后方，不再固定追加到时间轴末尾。
+- [调整] H3 节点隐藏画布宿主自带的底部通用生成面板，避免与 H3 工作台重复显示。
+- [修复] H3 时间轴播放指针改为绑定可滚动轨道内容，横向滚动标尺、Video 或 Refs 时指针同步跟随。
+- [修复] 画布状态改为每次变更立即写入浏览器本地快照，避免后台进程被终止或页面关闭时丢失最近 400ms 内的画布数据。
+- [修复] 本地 ComfyUI 图片生成现在持久化后台任务 ID，页面刷新后可继续轮询并把完成图片回传到画布节点。
+- [修复] H3 节点刷新时从后台生成日志恢复进行中的任务，避免被误判为中断失败。
+- [修复] H3 日志 `输入 refs` 改为优先取选中 Clip 的实际 refs（与提交给 ComfyUI 的 `finalReferences` 一致），仅在 Clip refs 为空时回退到画布连线的 upstream，避免日志显示多余的全局参考。
+- [修复] H3 任务在 catch 分支会忽略 `cancelRequested`，把被取消的任务也记成 `failed`；现在按用户实际意图写入 `cancelled` 状态。
+- [修复] H3 轮询拿到后端 `cancelled` 状态时也会被抛成"MiniMax H3 任务失败"，现在改抛 `H3RunCancelled` 识别错误，H3Runner 走 cancelled 分支。
+- [修复] 智能分镜 modal 未上传图时 fallback 不再把上游 video/audio 一起带过去，submit 文案同步说明只取图片。
+- [修复] 智能分镜生成的新段不再自动继承选中段的 video/audio refs（之前会把上一段生成的视频当 ref 渗到新段，并通过 ComfyUI 输出又回流到 output 列表）。
+- [修复] `appendVideoMaterials` dedupe 时丢失 `segmentId` 字段，现在保留归属信息；output 面板按 segment 筛选时不再把别段视频算成"自己的"。
+- [优化] 智能分镜失败时把错误信息按阶段分类（参数校验 / 模式校验 / 参考图加载 / 逐图视觉分析 / 分镜提示词生成 / 分镜解析 / AI 配置），便于定位"智能分镜生成失败"的真实根因。
+- [优化] 智能分镜逐图视觉分析的参考图 fetch 显式声明 `mode: "cors"`，错误信息附带候选 URL 的 host，便于定位跨域 / CORS 失败的真实源。
+- [优化] 智能分镜在 `ctx.ai.generateText` 失败时把 `error.name` / dataURL 字节数 / `ctx.ai.defaultModel("text")` 一并写入 `errorDetails`，并 `console.error` 完整栈，方便定位是 baseUrl CORS、模型不支持 vision 还是 API 配额/超时。
+- [修复] text 走 OpenAI Responses API（`/responses`）时如果中转没实现或浏览器 CORS 拒绝（`Failed to fetch`），自动 fallback 到 Chat Completions（`/chat/completions`），覆盖更多第三方中转场景。
+
+- [优化] 图片节点上传改为先显示本地临时预览，后台上传完成后再回填正式存储地址，减少选择图片后的等待感。
+
+- [修复] 修复 H3 与画布侧边栏运行时警告：补齐动态子节点的唯一 key，并修正侧边栏设置恢复时的状态更新调用。
+
+- [优化] H3 Prompt 的 @ 候选列表跟随光标定位，并使用项目蓝色明显区分当前选中项。
+
++ [调整] H3 工作台改为左侧视频预览、中部 Prompt、右侧 Setting，下方横向展示 Refs、Output 和 Status。
++ [调整] H3 工作台支持拖拽调节 Video Preview、Prompt 和 Setting 的横向宽度。
++ [修复] H3 时间轴点击 Clip 后，播放指针按实际时间轴轨道定位到片段起点。
++ [调整] H3 生成操作按钮固定在右下角，并增强按钮视觉层级。
++ [优化] H3 三栏布局限制预览区最大占比并为 Prompt 保留最小宽度，避免 Prompt 被挤压。
++ [修复] H3 Prompt/Setting 调宽手柄高度异常，改为贴合右侧栏边界的细竖向分隔线。
++ [修复] H3 生成按钮定位基准错误，改为固定在 Setting 区域右下角。
++ [修复] H3 Prompt/Setting 分割线位置未计入节点内边距和栏间距，拖拽热区改为严格对齐实际边界。
++ [修复] H3 Preview/Prompt 宽度手柄错误延伸到时间轴和 Output，限制为顶部预览区域内。
++ [调整] H3 内容区放不下 Preview、Video/Refs 与 Output 的最小高度总和时自动隐藏 Output。
++ [优化] H3 节点缩放时 Preview、Prompt、Timeline/Refs 和 Output 按可用空间动态伸缩。
++ [修复] H3 节点高度较小时 Setting 底部生成按钮被裁剪，提升 Setting 和操作区层级确保按钮可见。
++ [新增] H3 Prompt 工具条按生成模式切换南风 V10 结构，新增就地说明面板和 @ 引用候选过滤。
++ [修复] 图片节点在参考选择状态下点击上传图片后仍停留在“正在添加参考”，上传入口现在会先退出参考选择模式。
++ [修复] H3 @ 引用候选列表被 Prompt 面板底部裁剪，改为在文本框上方显示。
++ [优化] H3 @ 候选列表改为贴近 Prompt 文本框顶部显示，减少与输入位置的距离。
++ [修复] H3 隐藏 Output 后同步收缩 Setting 跨行范围并解除参数容器裁剪，避免右下角按钮消失。
++ [修复] H3 工作区固定行高覆盖节点缩放，改为按最小高度和弹性比例动态伸缩。
++ [调整] H3 工作区默认高度比例调整为 Preview : Video/Refs : Output ≈ 4 : 2 : 1。
++ [修复] H3 时间轴内部 Video/Refs 固定高度导致下方出现空白，改为填满 Timeline 可用区域。
++ [调整] H3 Video/Refs 时间轴支持同步横向滚动，并按 50px/秒固定时间占位宽度（10 秒为 500px）。
++ [修复] H3 日志在任务完成后回写实际传入的图片、视频和音频 refs 及数量，不再只显示节点上游素材汇总。
++ [修复] H3 分拆生成链改为让采样使用 ReleaseBeforeSampling 输出的 AV latent，并避免非法 STRING 到 COMBO Loader 连线。
++ [修复] H3 任务轮询和生成日志只记录本次 ComfyUI 返回的视频，不再误用后来替换的 Clip 挂载视频。
++ [修复] 本地 H3 生成、任务查询、取消和模型读取改为直连 Backend，不再强制依赖 Canvas Agent。
 + [修复] 为 H3 素材库和参数分组补齐 React 列表 key，消除工作台渲染警告。
 + [修复] 修复 Agent 设置回填在后台连接后因调用失效的 `set` 引发前端异常。
 + [调整] H3 智能分镜按图片、视频、音频槽位分别编号，并按模式过滤和传递实际参考图片。
@@ -126,6 +188,36 @@
 + [优化] MiniMax H3 插件浏览器端按入口、工作台、类型、常量、服务、hooks 和样式模块拆分，保持现有节点与 Agent MCP 契约不变。
 + [新增] Canvas Agent 支持插件 MCP 能力:启用 MiniMax H3 插件时在 Agent 侧动态注册 h3_* 工具(h3_list_models / h3_get_node / h3_run_clip / h3_get_task / h3_cancel_task / h3_update_clip / h3_run_all_clips),复用 ComfyUiBridge 与任务库,并经官方白名单加载。
 + [新增] 插件协议新增可选 `mcp` 声明(CanvasPluginMcp),支持浏览器启用/禁用时经 `POST /api/plugins/mcp` 通知 Agent 动态注册/注销 MCP 工具,声明持久化到 SQLite,重启后仍生效。
+
++ [修复] H3 节点"随机种子"下拉切不回"随机"模式：segment 派生时曾把遗留的固定种子值误判为 fixed 模式，现以用户显式选择的 noiseSeedMode 为权威，仅当从未设置时按种子值兜底。
++ [修复] H3 随机种子实际不生效：切到"随机"即生成一个真实随机种子并展示（含🎲重摇按钮），运行时统一使用 UI 上该种子（random/fixed/运行后回写三者一致），不再 random 模式永远静默生成新随机且运行前不展示任何种子值。
++ [修复] H3 运行失败却显示"已取消"：cancelRequested 只在用户点取消时置 true、仅在重置节点时清回，残留标志把后续任何运行失败（如 ComfyUI 未启动、参数错误）都误映射为"已取消"并吞掉真实错误；现 run() 作为全新运行起点进入时重置 cancelRequested，取消标志只作用于本次运行期间用户真正取消的情况。
++ [修复] H3 任务生成成功但前端一直显示"running"且视频不回传：backend ComfyUI Bridge 的 executeWorkflow 仅轮询 /history/:prompt_id，若 ComfyUI 历史记录被清理或完成状态缺失会导致任务无限 running；现增加超时兜底、status_str === "success" 完成识别，并在 /history 长期缺失时结合 /queue 判断任务是否仍在执行或已丢失，避免无限挂起。
++ [修复] H3 生成视频仅出现在 Output 区、未替换当前 Clip：useH3TaskPolling 成功路径只写 content/materials 而漏写 segment.result，导致 Clip 卡片与时间轴预览不更新；现统一调用 withSelectedResult 把生成视频写回当前选中 Clip（result/results/storageKey），Clip 卡片与时间轴即时替换。
++ [新增] H3 Output 区素材卡支持双击放大预览：新增 lightbox 浮层（视频可播放、图片可查看），并配放大按钮与关闭（点击遮罩/×/Esc）交互。
++ [优化] H3 时间轴"+"新增 Clip 后自动选中该 Clip，并把时间轴滚动到该 Clip 最右侧与其右边缘对齐（ruler/refs 同步）。
++ [修复] H3 新增 Clip 后时间轴刻度线（播放头指示线）未指向新 Clip：addSegment 此前只设 selectedSegmentId 不更新 playhead，导致蓝色播放头线/标尺三角 marker 停在旧位置；现与点击 Clip 一致，新增时把 playhead 设为新 Clip 起点并退出“全部播放”模式，刻度线即对准新 Clip。
++ [修复] H3 Refs 区域素材拖动判定不准：①从 Refs 拖出素材时靠 children 索引定位 segment/ref，但 .minimax-ref-content 首位是 playhead 竖线导致索引偏移 1，拖出的 ref 实际来自错误 Clip；现给 ref-grid 加 data-segment-id、ref-clip 加 data-ref-index，dragStart 用 dataset 稳定定位。②拖入 Refs 时按“可见区宽度”换算时间，时间轴溢出滚动后落点严重偏后，现改用 scrollLeft+鼠标可见偏移（每单位 50px）精确换算内容坐标。
+
++ [修复] H3 智能分镜生成失败导致"生成当前 Clip"按钮点不了：智能分镜此前与视频生成共用全局 status 字段（生成/成功/失败时都写 status），分镜 loading 会把按钮误判为忙碌变成"取消生成"，且分镜无 runtimeTaskId 导致点"取消生成"时 cancel 处理器直接 return、status 永久卡在 loading 形成死循环；现智能分镜只用专属 smartStoryboardStatus/smartStoryboardError 字段、不再碰全局 status，并让无任务的 cancel 把节点重置回可运行以救活卡死节点，分镜按钮新增失败态（红字"分镜失败·点击重试"）。
++ [修复] H3 Refs 区域拖动判定仍不准（复测）：上一轮用"时间反推 clip"定位法在边界/gap/滚动不同步时会选中错误 clip，且 find 失败静默回退到 selected；现拖入落点改为直接用光标下 DOM 元素 event.target.closest(".minimax-ref-grid") 取 data-segment-id 精确判定（时间换算仅作兜底），并支持同节点内跨 clip 拖动=移动（从来源移除避免重复）；ref-clip 的 draggable 由脆弱的命令式 useEffect 改为 JSX 声明式 draggable。
+
++ [修复] H3 生成成功后视频乱写到其他 Clip：异步轮询回写（useH3TaskPolling）原本用 metadata.selectedSegmentId（轮询时实时选中的 Clip）作为回写目标，用户等待生成期间切换 Clip 就会导致结果写到错误 Clip；现提交时把目标 Clip 锁定到 metadata.runtimeTargetSegmentId（onTaskId 回调写入 segment.id、run 起始写入 liveSelectedId），轮询/恢复回写一律优先使用该锁定值（刷新恢复场景额外回退到 generationLog 记录的 selectedSegmentId），且任务结束即清除该字段，杜绝残留误导。
++ [修复] H3 时间轴滚动进度不持久化：刷新后滚动条回到最左。现滚动时（rAF 节流）把 scrollLeft 写入 metadata.timelineScrollLeft，挂载时一次性恢复该位置；新增 Clip 的 pending 滚动会覆盖恢复值且不被拉回，用户手动滚动也会被持久化。
++ [修复] H3 参数（如百万像素/MP）不生效（clip8 设 0.2MP 却输出 0.9MP）：根因为 ClipSettings 的 nfChoices 用后端 catalog.nanfeng[“百万像素”] 数组**整体替换**标准档位，一旦 ComfyUI 返回的 nanfeng 配置不含该标准值（如 0.2），下拉里就根本选不到，segment 停留旧值。现改为**合并**后端发现值 + 标准档位（去重、标准值始终保留），任何标准 MP/精度/比例档位都可选中并真实下发到 ComfyUI（run 时每段按 segment.megapixels/seed/prompt 各自取值，line 189 解构未排除这些字段，参数确实透传）。
+
++ [修复] 浏览器持续报 `net::ERR_INCOMPLETE_CHUNKED_ENCODING` 且后台明明连着：根因为总后台 `/events` 与 agent `/agent/events` 两个 SSE 长连接被浏览器系统代理（本机 Clash 127.0.0.1:7897，netstat 见大量 CLOSE_WAIT）截断，普通短连接 API 不受影响故"后台连着"。修法：检测到本地总后台（127.0.0.1/localhost:17370）时，前端把这两个 EventSource 改为同源相对路径（`/events`、`/agent/events`），由 Vite 开发服务器代理转发到 17370（Node 端、不经浏览器代理），长连接不再被代理掐断；并在 `web/vite.config.ts` 的 server.proxy 增加 `/events`、`/agent` 两条同源代理（非 SPA 路由，不与前端冲突）。远程/非本地总后台仍走绝对地址直连。
+
++ [调整] H3 时间轴 Video 行每个 Clip 卡片左上角的「素材数量图标 + 数字」（回形针 + refs.length）已移除，仅保留 Clip 序号/时间区间、Motion Context 按钮与删除按钮。
+
++ [修复] 生成日志弹窗中「输入 refs」只显示「参考 1/参考 2」文字 Tag：原 `ReferencePreview` 仅按 `reference.type` 判定，部分日志 references 字段缺少 type/url 导致 fallback 为文字标签。现新增 `collectReferences` 从 `log.params.refs` / `log.params.refItems` 兜底读取完整参考数据，并结合 URL 扩展名/MIME 类型推断显示图片/视频/音频缩略图。
+
++ [修复] 拖动时间轴时 refs 轨道与 video 轨道滚动不同步：原 `registerScrollContainer` 用单一数组管理多个滚动容器，DOM 重建/卸载后旧元素残留导致同步目标错乱。现改用 rulerRef/videoTrackRef/refsTrackRef 三个独立 ref，并通过 rAF 防抖统一同步三个容器的 scrollLeft，拖动任意轨道时三者实时对齐。
+
++ [修复] H3 参考图尺寸 match/max 选择未完全生效：backend `comfyui/bridge.ts` 的 conditioning 分支（`MiniMaxH3ReferenceToVideo`，非 t2v/i2v/fl2v 的 reference 模式）将 `ref_image_size` 硬编码为 `"max"`，无视用户选择；主采样节点 136（rv2v/r2v 分支）已用 `params.refImageSize`，两者不一致导致选择部分失效。现改为 `String(params.refImageSize || "max")`，与节点 136 一致且不破坏未选时的默认行为（仍 max）。前端 UI 仅 `mode==="ref2va"` 渲染该下拉（i2v/fl2v 走 ImageToVideo 无此字段，合理）。
+
++ [修复] 总后台（backend）稳定性：①HTTP server 增加连接超时（keepAliveTimeout=30s/headersTimeout=35s/requestTimeout=120s），主动回收浏览器频繁开关产生的半关闭 socket，避免 CLOSE_WAIT 堆积至 fd 耗尽而“老是挂掉”；②新增 `uncaughtException`/`unhandledRejection` 进程级兜底，单点异常（如 SSE 断连后 EPIPE）只记日志不杀进程；③`/events` SSE 增加断连后写错误（EPIPE）保护，避免客户端断开瞬间写已关闭 socket 抛未捕获异常。
++ [优化] 总后台启动统一为 `tsx --watch src/index.ts`（原有无 watch 实例导致改源码不热重载、且多实例争抢端口），改 backend/src 后自动重载，无需手动重启。
 
 ## v0.17.0 - 2026-09-02
 

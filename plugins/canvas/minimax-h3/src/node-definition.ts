@@ -1,6 +1,25 @@
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { defaultH3Model, defaultPrompt } from "./constants";
 import { H3ContentExact } from "./components/H3Workbench";
+import { readDefaultParams } from "./services/h3-defaults";
+
+// 「设为默认参数」可持久化的节点级参数键：这些键同时存在于节点根与初始 segment，
+// 故既合并进根也合并进初始 segment，保证新建节点根/段一致。duration/status 等
+// 易产生 string/number 类型歧义或属于运行态的键不在此列，仅由初始 segment 继承。
+const NODE_LEVEL_PARAM_KEYS = [
+    "aspectRatio", "videoSteps", "denoise", "modelName", "minimaxBaseModel",
+    "motionContextEnabled", "motionContextNoiseEnabled",
+    "smartStoryboardCount", "smartStoryboardMode", "smartStoryboardSkill",
+];
+
+// 内置基础默认（无持久化默认时的回退）。defaultMetadata 用 getter 在每次新建节点时读取
+// localStorage 中的「永久默认参数」，与基础默认合并，使新建 H3 节点自动携带用户设定。
+const BASE_DEFAULT_METADATA = {
+    content: "", prompt: defaultPrompt, status: "idle" as const, duration: "8", aspectRatio: "16:9",
+    videoSteps: 8, denoise: 1, modelName: defaultH3Model, minimaxBaseModel: defaultH3Model,
+    motionContextEnabled: true, motionContextNoiseEnabled: false, smartStoryboardCount: 3, smartStoryboardMode: "ref2va", smartStoryboardSkill: "regular_storyboard",
+    segments: [{ id: "segment-1", prompt: defaultPrompt, duration: 8, taskMode: "ref2va", status: "idle" }],
+};
 
 export const h3NodeDefinition = {
     type: "minimax-h3:video",
@@ -8,14 +27,15 @@ export const h3NodeDefinition = {
     title: "H3导演台",
     icon: "✦",
     description: "H3导演台 视频生成与人物替换节点",
-    defaultSize: { width: 980, height: 720 },
-    defaultMetadata: {
-        content: "", prompt: defaultPrompt, status: "idle" as const, duration: "8", aspectRatio: "16:9",
-        videoSteps: 8, denoise: 0.65, modelName: defaultH3Model, minimaxBaseModel: defaultH3Model,
-        motionContextEnabled: true, motionContextNoiseEnabled: false, smartStoryboardCount: 3, smartStoryboardMode: "ref2va", smartStoryboardSkill: "regular_storyboard",
-        segments: [{ id: "segment-1", prompt: defaultPrompt, duration: 8, taskMode: "ref2va", status: "idle" }],
+    defaultSize: { width: 1960, height: 1080 },
+    get defaultMetadata() {
+        const stored = readDefaultParams();
+        const nodeLevel = Object.fromEntries(NODE_LEVEL_PARAM_KEYS.filter((key) => key in stored).map((key) => [key, stored[key]]));
+        const initialSegment = { ...BASE_DEFAULT_METADATA.segments[0], ...stored };
+        return { ...BASE_DEFAULT_METADATA, ...nodeLevel, segments: [initialSegment] };
     },
     minimapColor: "#f97316",
+    hidePanel: true,
     Content: H3ContentExact,
     resource: (node: { metadata?: Record<string, unknown> }) => {
         const metadata = node.metadata || {};

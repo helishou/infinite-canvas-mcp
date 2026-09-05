@@ -173,12 +173,12 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         res.json({ ok: true, logs: (await backend.listGenerationLogs(options)).slice(0, options.limit) });
     }));
     app.post("/runtime/generation-logs", route(async (req, res) => {
-        const body = generationLogBody(req.body);
+        const body = await generationLogBody(req.body, backend);
         if (!body.projectId || !body.platform || !body.startedAt) return void res.status(400).json({ ok: false, error: "projectId、platform、startedAt 为必填项" });
         res.status(201).json({ ok: true, log: await backend.createGenerationLog(body as any) });
     }));
     app.patch("/runtime/generation-logs/:id", route(async (req, res) => {
-        const body = generationLogPatch(req.body);
+        const body = await generationLogPatch(req.body, backend);
         res.json({ ok: true, log: await backend.updateGenerationLog(routeParam(req.params.id), body as any) });
     }));
     app.delete("/runtime/generation-logs", route(async (req, res) => {
@@ -586,21 +586,21 @@ function objectBody(value: unknown): Record<string, unknown> {
 
 function stringQuery(value: unknown) { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 
-function generationLogBody(value: unknown) {
+async function generationLogBody(value: unknown, backend: ReturnType<typeof createBackendClient>) {
     const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
     return {
         projectId: String(body.projectId || "").trim(), nodeId: stringQuery(body.nodeId), segmentId: stringQuery(body.segmentId),
         status: ["queued", "running", "success", "failed", "cancelled"].includes(String(body.status)) ? String(body.status) : "queued",
         platform: String(body.platform || "Generate"), workflow: stringQuery(body.workflow), model: stringQuery(body.model), taskMode: stringQuery(body.taskMode),
-        prompt: typeof body.prompt === "string" ? body.prompt : "", references: sanitizeLogMedia(body.references),
+        prompt: typeof body.prompt === "string" ? body.prompt : "", references: await sanitizeLogMedia(body.references, backend),
         inputCounts: objectNumberMap(body.inputCounts), runtimeTaskId: stringQuery(body.runtimeTaskId), promptId: stringQuery(body.promptId),
         startedAt: String(body.startedAt || new Date().toISOString()), finishedAt: stringQuery(body.finishedAt), durationMs: Math.max(0, Number(body.durationMs || 0)),
-        outputs: sanitizeLogMedia(body.outputs), error: stringQuery(body.error), params: objectRecord(body.params),
+        outputs: await sanitizeLogMedia(body.outputs, backend), error: stringQuery(body.error), params: objectRecord(body.params),
     };
 }
 
-function generationLogPatch(value: unknown) {
-    const body = generationLogBody({ ...(value && typeof value === "object" ? value : {}), projectId: "x", platform: "x", startedAt: new Date().toISOString() });
+async function generationLogPatch(value: unknown, backend: ReturnType<typeof createBackendClient>) {
+    const body = await generationLogBody({ ...(value && typeof value === "object" ? value : {}), projectId: "x", platform: "x", startedAt: new Date().toISOString() }, backend);
     const source = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
     const result: Record<string, unknown> = {};
     for (const key of ["nodeId", "segmentId", "status", "platform", "workflow", "model", "taskMode", "prompt", "runtimeTaskId", "promptId", "startedAt", "finishedAt", "durationMs", "error"]) if (key in source) result[key] = (body as any)[key];
@@ -613,13 +613,35 @@ function generationLogPatch(value: unknown) {
 
 function objectRecord(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function objectNumberMap(value: unknown): Record<string, number> { return Object.fromEntries(Object.entries(objectRecord(value)).map(([key, item]) => [key, Number(item) || 0])); }
-function sanitizeLogMedia(value: unknown): Array<Record<string, unknown>> {
+function dataUrlMimeType(dataUrl: string) {
+    const match = String(dataUrl).match(/^data:([^;]+)/);
+    return match?.[1] || "application/octet-stream";
+}
+async function sanitizeLogMedia(value: unknown, backend: ReturnType<typeof createBackendClient>): Promise<Array<Record<string, unknown>>> {
     if (!Array.isArray(value)) return [];
-    return value.filter((item) => item && typeof item === "object").map((item) => {
+    return (await Promise.all(value.map(async (item) => {
+        if (!item || typeof item !== "object") return null;
         const copy = { ...(item as Record<string, unknown>) };
         for (const key of ["dataUrl", "base64"]) if (typeof copy[key] === "string" && String(copy[key]).startsWith("data:")) delete copy[key];
+        const url = typeof copy.url === "string" ? copy.url : "";
+        const name = String(copy.name || "ref");
+        // 将内嵌 dataURL 持久化到总后台 media store，避免日志里只保留 name 而丢失可访问地址
+        if (url.startsWith("data:") && !copy.storageKey) {
+            try {
+                const uploaded = await backend.uploadMedia({ name, dataUrl: url, mimeType: dataUrlMimeType(url) });
+                copy.url = uploaded.url;
+                copy.storageKey = uploaded.storageKey;
+                copy.mimeType = uploaded.mimeType;
+                copy.bytes = uploaded.bytes;
+                copy.width = uploaded.width ?? undefined;
+                copy.height = uploaded.height ?? undefined;
+                copy.durationMs = uploaded.durationMs ?? undefined;
+            } catch (error) {
+                logger.warn("[generation-logs] failed to persist dataURL reference", { name, error: error instanceof Error ? error.message : String(error) });
+            }
+        }
         return copy;
-    });
+    }))).filter((item): item is Record<string, unknown> => Boolean(item));
 }
 
 function permissionMode(value: unknown): AgentPermissionMode {

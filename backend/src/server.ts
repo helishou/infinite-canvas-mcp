@@ -119,13 +119,18 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.get("/events", (req, res) => {
         res.status(200).set({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
         res.flushHeaders();
+        let closed = false;
         const write = (event: import("./events.js").BackendEvent) => {
-            res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+            if (closed) return;
+            // 客户端（浏览器）断连后写已关闭的 socket 会抛 EPIPE，吞掉以免崩进程。
+            try { res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`); }
+            catch { closed = true; clearInterval(heartbeat); unsubscribe(); }
         };
-        for (const event of events.since(req.headers["last-event-id"] as string | undefined)) write(event);
+        const heartbeat = setInterval(() => { try { res.write(": heartbeat\n\n"); } catch { clearInterval(heartbeat); } }, 15_000);
         const unsubscribe = events.subscribe(write);
-        const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 15_000);
-        req.on("close", () => { clearInterval(heartbeat); unsubscribe(); });
+        const cleanup = () => { closed = true; clearInterval(heartbeat); unsubscribe(); };
+        req.on("close", cleanup);
+        res.on("error", cleanup);
     });
 
     // ── Canvas projects ──────────────────────────────────────────────────

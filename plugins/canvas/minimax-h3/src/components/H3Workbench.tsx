@@ -5,9 +5,10 @@ import { segmentsFor } from "../hooks/useH3Segments";
 import { refsForSegment, resultUrl, withSegmentRefs } from "../services/h3-data";
 import { normalizeDroppedH3Ref, readH3Refs } from "../services/h3-refs";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
-import { H3PaneHandles, H3PlayheadStyle, H3PreviewPlayer, H3RulerScrubber, requestH3Run } from "./H3WorkbenchPrimitives";
+import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
+import { H3ClipSettingsPanel } from "./H3ClipSettingsPanel";
 import { H3Timeline } from "./H3Timeline";
 import { H3MaterialLibrary } from "./H3MaterialLibrary";
 import { H3Runner } from "./H3Runner";
@@ -37,8 +38,10 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const videoRefs = selectedRefs.filter((item) => item.type === "video");
     const audioRefs = selectedRefs.filter((item) => item.type === "audio");
     const previewH = Math.max(130, Math.min(760, Number(metadata.minimaxPreviewH || 220)));
+    const promptW = Math.max(220, Math.min(760, Number(metadata.minimaxPromptW || 480)));
     const videoTrackH = Math.max(48, Math.min(180, Number(metadata.minimaxVideoTrackH || 74)));
-    const libraryW = Math.max(170, Math.min(520, Number(metadata.minimaxLibraryW || 190)));
+    const refLaneH = Math.max(30, Number(metadata.minimaxRefLaneH || 36));
+    const clipPanelH = Math.max(150, Math.min(440, Number(metadata.minimaxClipPanelH || 220)));
     const playRequest = Number(metadata.h3PlayRequest || 0);
     const [smartStoryboardOpen, setSmartStoryboardOpen] = useState(false);
     const [smartStoryboardUploads, setSmartStoryboardUploads] = useState<H3Ref[]>([]);
@@ -62,19 +65,30 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const addCanvasReference = (detail: Record<string, unknown>) => {
         const url = String(detail.url || "").trim();
         if (!url || !selected) return;
-        const ref: H3Ref = { url, type: "image", name: String(detail.name || "图片"), storageKey: typeof detail.storageKey === "string" ? detail.storageKey : undefined };
-        const mode = String(selected.mode || selected.taskMode || "ref2va");
-        if (mode === "t2v") return;
-        const refs = refsForSegment(selected);
-        const max = mode === "i2v" ? 1 : mode === "fl2v" ? 2 : 9;
-        if (refs.filter((item) => item.type === "image").length >= max || refs.some((item) => item.url === ref.url)) return;
-        const refTrack = workbenchRef.current?.querySelector<HTMLElement>(".minimax-ref-track");
+        const ref: H3Ref = { url, type: "image", name: String(detail.name || "图片"), storageKey: typeof detail.storageKey === "string" ? detail.storageKey : undefined, mimeType: typeof detail.mimeType === "string" ? detail.mimeType : undefined };
         const x = Number(detail.clientX);
         const y = Number(detail.clientY);
-        const rect = refTrack?.getBoundingClientRect();
-        const inRefTrack = rect && Number.isFinite(x) && Number.isFinite(y) && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-        const time = inRefTrack ? Math.max(0, Math.min(1, (x - rect.left) / Math.max(1, rect.width))) * total : 0;
-        const target = inRefTrack ? segments.find((item) => time >= Number(item.start || 0) && time < Number(item.start || 0) + Math.max(0.5, Number(item.duration || 1))) || selected : selected;
+        // 优先用鼠标实际命中的 ref 格子（精确），避免坐标换算误差导致落点与悬停位置不符
+        let target: H3Segment | undefined;
+        if (Number.isFinite(x) && Number.isFinite(y)) {
+            const hit = document.elementFromPoint(x, y)?.closest<HTMLElement>(".minimax-ref-grid");
+            if (hit?.dataset.segmentId) target = segments.find((item) => item.id === hit.dataset.segmentId);
+            if (!target) {
+                // 兜底：基于 refs 栏内容坐标（含横向滚动偏移，50px/单位）换算时间，修正旧版按可见宽度比例映射的错位
+                const refTrack = workbenchRef.current?.querySelector<HTMLElement>(".minimax-ref-track");
+                const rect = refTrack?.getBoundingClientRect();
+                if (rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+                    const contentX = (refTrack?.scrollLeft || 0) + (x - rect.left);
+                    const time = Math.max(0, Math.min(total, contentX / 50));
+                    target = segments.find((item) => time >= Number(item.start || 0) && time < Number(item.start || 0) + Math.max(0.5, Number(item.duration || 1))) || selected;
+                }
+            }
+        }
+        target = target || selected;
+        // t2v 段不接收参考素材（格子为「无需参考素材」）
+        const targetMode = String(target.mode || target.taskMode || "ref2va");
+        if (targetMode === "t2v") return;
+        const max = targetMode === "i2v" ? 1 : targetMode === "fl2v" ? 2 : 9;
         const targetRefs = refsForSegment(target);
         if (targetRefs.filter((item) => item.type === "image").length >= max || targetRefs.some((item) => item.url === ref.url)) return;
         ctx.updateMetadata({ selectedSegmentId: target.id, segments: segments.map((item) => item.id === target.id ? withSegmentRefs(item, [...targetRefs, ref]) : item) });
@@ -125,18 +139,19 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         "--h3-active-text": ctx.theme.toolbar.activeText,
     } as React.CSSProperties;
     return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
-        <H3Runner ctx={ctx} />
-        <H3PaneHandles ctx={ctx} />
-        <H3PlayheadStyle percent={total ? (playhead / total) * 100 : 0} />
-        <H3RulerScrubber ctx={ctx} total={total} previewH={previewH} libraryW={libraryW} />
-        <H3WorkbenchToolbar ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} outputs={outputs} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} status={String(metadata.status || selected?.status || "idle")} error={String(metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx)} />
-        <SmartStoryboardModal ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
-        <style>{`.minimax-canvas-workbench{--minimax-library-w:${libraryW}px;--minimax-preview-h:${previewH}px;--minimax-video-h:${videoTrackH}px;--minimax-ref-h:144px}.minimax-canvas-workbench .minimax-wb-body{grid-template-columns:${libraryW}px minmax(0,1fr)}.minimax-canvas-workbench .minimax-wb-main{grid-template-rows:var(--minimax-preview-h) calc(28px + var(--minimax-video-h) + var(--minimax-ref-h)) minmax(150px,1fr)}.minimax-canvas-workbench .minimax-edit-timeline{grid-template-rows:28px var(--minimax-video-h) var(--minimax-ref-h)}`}</style>
-        <div className="minimax-wb-body"><H3MaterialLibrary ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
-            <main className="minimax-wb-main"><div className="minimax-player-stage"><H3PreviewPlayer ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} /></div>
-                <H3Timeline ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onPlayAll={playAll} fmt={fmt} />
-                <H3CurrentClipPanel ctx={ctx} metadata={metadata} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
-            </main>
+        <H3Runner key="runner" ctx={ctx} />
+        <H3PaneHandles key="pane-handles" ctx={ctx} />
+        <H3RulerScrubber key="ruler-scrubber" ctx={ctx} total={total} previewH={previewH} />
+        <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} outputs={outputs} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} />
+        <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
+        <style key="workbench-style">{`.minimax-canvas-workbench{--minimax-prompt-w:${promptW}px;--minimax-preview-w:${Math.max(280, Math.min(1100, Number(metadata.minimaxPreviewW || 960)))}px;--minimax-preview-h:${previewH}px;--minimax-video-h:${videoTrackH}px;--minimax-ref-h:${refLaneH}px;--minimax-clip-h:${clipPanelH}px}.minimax-canvas-workbench .minimax-wb-body{grid-template-columns:minmax(280px,min(var(--minimax-preview-w),50%)) minmax(360px,1fr) minmax(240px,var(--minimax-prompt-w))}`}</style>
+        <div key="workbench-body" className="minimax-wb-body">
+            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} /></div>
+            <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} /></div>
+            <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onPlayAll={playAll} fmt={fmt} />
+            <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
+            <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         </div>
+        <div key="status" className="minimax-wb-status"><H3StatusBadge status={String(metadata.status || selected?.status || "idle")} error={String(metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx)} />{String(metadata.smartStoryboardStatus || "") === "loading" ? <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 24 }}>智能分镜正在分析参考图并生成提示词，请稍候…</span> : null}{String(metadata.smartStoryboardStatus || "") === "success" ? <span style={{ marginLeft: 8, color: "#22c55e", fontSize: 24 }}>智能分镜已完成</span> : null}{String(metadata.smartStoryboardStatus || "") === "error" ? <span style={{ marginLeft: 8, color: "#ef4444", fontSize: 24 }}>智能分镜生成失败</span> : null}</div>
     </div>;
 }

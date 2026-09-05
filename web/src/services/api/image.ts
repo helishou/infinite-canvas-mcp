@@ -522,6 +522,74 @@ async function requestStreamingResponse(config: AiConfig, body: Record<string, u
     return { ...result, content: state.text || result.content };
 }
 
+/**
+ * 通过 OpenAI Chat Completions 流式端点 `/chat/completions` 调文本模型。
+ * 第三方中转普遍支持这条路径（且 CORS 普遍放开），适合作为
+ * Responses API（`/responses`）不可用或被 CORS 拒绝时的兜底。
+ * 返回的 SSE chunk 形如 `data: {"choices":[{"delta":{"content":"..."}}]}`。
+ */
+async function requestChatCompletionsStreaming(config: AiConfig, body: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
+    const response = await fetch(aiApiUrl(config, "/chat/completions"), {
+        method: "POST",
+        headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
+        body: JSON.stringify({ ...body, stream: true }),
+        signal: options?.signal,
+    });
+    if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
+    if (!response.body) {
+        const payload = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        const text = payload.choices?.[0]?.message?.content || "";
+        return { content: text, toolCalls: [] };
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let text = "";
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx = buffer.indexOf("\n");
+        while (idx >= 0) {
+            const line = buffer.slice(0, idx).replace(/\r$/, "").trim();
+            buffer = buffer.slice(idx + 1);
+            if (line.startsWith("data:")) {
+                const data = line.slice(5).replace(/^ /, "");
+                if (data && data !== "[DONE]") {
+                    try {
+                        const event = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
+                        const delta = event.choices?.[0]?.delta?.content;
+                        if (typeof delta === "string" && delta) {
+                            text += delta;
+                            onDelta?.(text);
+                        }
+                    } catch {
+                        // 忽略不能解析的单行 chunk，继续消费流。
+                    }
+                }
+            }
+            idx = buffer.indexOf("\n");
+        }
+    }
+    if (buffer.trim()) {
+        const line = buffer.trim();
+        if (line.startsWith("data:")) {
+            const data = line.slice(5).replace(/^ /, "");
+            if (data && data !== "[DONE]") {
+                try {
+                    const event = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
+                    const delta = event.choices?.[0]?.delta?.content;
+                    if (typeof delta === "string" && delta) {
+                        text += delta;
+                        onDelta?.(text);
+                    }
+                } catch { /* 忽略 */ }
+            }
+        }
+    }
+    return { content: text, toolCalls: [] };
+}
+
 function toGeminiBody(config: AiConfig, messages: ResponseInputMessage[], extra?: Record<string, unknown>) {
     const systemText = [
         config.systemPrompt.trim(),
@@ -864,13 +932,41 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
             if (answer === apiText("noContent")) onDelta(answer);
             return answer;
         }
-        const answer = (await requestStreamingResponse(requestConfig, {
-            model: requestConfig.model,
-            input: toResponseInput(withSystemMessage(requestConfig, messages)),
-            ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
-        }, onDelta, options)).content || apiText("noContent");
-        if (answer === apiText("noContent")) onDelta(answer);
-        return answer;
+        // 优先用 Responses API（GPT-5+）。如果中转/服务端对 `/responses` 没实现或 CORS
+        // 没放开（典型 "Failed to fetch"），自动回退到 Chat Completions
+        // (`/chat/completions`) — 中转普遍支持且通常 CORS 已开。
+        const chatMessages = (() => {
+            const out: Array<{ role: "system" | "user" | "assistant"; content: unknown }> = [];
+            for (const m of withSystemMessage(requestConfig, messages)) {
+                if ("type" in m) {
+                    if (m.type === "function_call_output") continue;
+                    continue;
+                }
+                if (m.role === "system" || m.role === "user" || m.role === "assistant") {
+                    out.push({ role: m.role, content: m.content || "" });
+                }
+            }
+            return out;
+        })();
+        try {
+            const answer = (await requestStreamingResponse(requestConfig, {
+                model: requestConfig.model,
+                input: toResponseInput(withSystemMessage(requestConfig, messages)),
+                ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
+            }, onDelta, options)).content || apiText("noContent");
+            if (answer === apiText("noContent")) onDelta(answer);
+            return answer;
+        } catch (responsesError) {
+            const isNetworkOrCors = responsesError instanceof Error && /Failed to fetch|NetworkError|fetch failed|CORS|Load failed/i.test(responsesError.message);
+            if (!isNetworkOrCors) throw responsesError;
+            console.warn("[/chat-completions fallback]", { error: responsesError.message });
+            const answer = (await requestChatCompletionsStreaming(requestConfig, {
+                model: requestConfig.model,
+                messages: chatMessages,
+            }, onDelta, options)).content || apiText("noContent");
+            if (answer === apiText("noContent")) onDelta(answer);
+            return answer;
+        }
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("requestFailed")));
     }

@@ -2,7 +2,11 @@ import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
 
 function logMedia(ref: H3Ref) {
-    return { url: ref.url, name: ref.name, type: ref.type, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) };
+    const payload: Record<string, unknown> = { name: ref.name, type: ref.type };
+    if (ref.url) payload.url = ref.url;
+    if (ref.storageKey) payload.storageKey = ref.storageKey;
+    if (ref.mimeType) payload.mimeType = ref.mimeType;
+    return payload;
 }
 
 export async function createH3Log(ctx: CanvasNodeContext, segment: H3Segment | undefined, prompt: string, refs: H3Ref[], params: Record<string, unknown>) {
