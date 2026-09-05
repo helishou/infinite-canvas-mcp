@@ -56,7 +56,7 @@ const H3_PANE_META: Record<H3PaneKey, { metadataKey: string; axis: "x" | "y"; si
     timelineH: { metadataKey: "minimaxTimelineH", axis: "y", sign: 1 },  // Output 上边缘：上拉 Output 增高（时间轴让位），预览不变
     refLaneH: { metadataKey: "minimaxRefLaneH", axis: "y", sign: -1 },   // Refs 行上边缘：上拉 Refs 增高（Video 行让位）
 };
-const H3_PANE_BOUNDS: Record<H3PaneKey, [number, number]> = { previewH: [130, 900], previewW: [280, 1400], promptW: [220, 900], timelineH: [340, 2000], refLaneH: [60, 900] };
+const H3_PANE_BOUNDS: Record<H3PaneKey, [number, number]> = { previewH: [130, 2000], previewW: [280, 1400], promptW: [220, 900], timelineH: [340, 2000], refLaneH: [60, 900] };
 const H3_PANE_DEFAULTS: Record<H3PaneKey, number> = { previewH: 220, previewW: 960, promptW: 480, timelineH: 320, refLaneH: 150 };
 
 // 每个模块都可拖边调宽高。手柄位置不再用「工具栏高度常量 + calc 变量链」绝对定位
@@ -102,7 +102,7 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
         return () => { ro.disconnect(); window.removeEventListener("resize", measure); };
     }, []);
     // previewH / timelineH / refLaneH 是联动手柄：拖动时需要拖起瞬间的行高/outputH/bodyH 快照做比例分配。
-    const drag = useRef<{ key: H3PaneKey; x: number; y: number; value: number; previewH?: number; timelineH?: number; refLaneH?: number; outputH?: number; bodyH?: number } | null>(null);
+    const drag = useRef<{ key: H3PaneKey; x: number; y: number; value: number; previewH?: number; timelineH?: number; refLaneH?: number; outputH?: number; bodyH?: number; nodeH?: number } | null>(null);
     const scale = () => {
         const host = hostRef.current?.parentElement;
         // 画布节点带 zoom transform：屏幕指针位移 / 缩放系数 = 本地 CSS px 位移
@@ -123,7 +123,7 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
             const bodyH = host?.querySelector<HTMLElement>(".minimax-wb-body")?.clientHeight || 0;
             const library = host?.querySelector<HTMLElement>(".minimax-library");
             const outputH = library && library.offsetHeight > 0 ? library.offsetHeight : Math.max(100, bodyH - p0 - t0 - 32);
-            Object.assign(base, { previewH: p0, timelineH: t0, refLaneH: refLane0, outputH, bodyH });
+            Object.assign(base, { previewH: p0, timelineH: t0, refLaneH: refLane0, outputH, bodyH, nodeH: Number(ctx.node.height) || 0 });
         }
         drag.current = base;
         try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* synthetic/无指针ID 的测试事件 */ }
@@ -143,11 +143,16 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
         const factor = scale();
         const delta = (meta.axis === "y" ? event.clientY : event.clientX) / factor - (meta.axis === "y" ? state.y : state.x);
         // Output 上边缘：预览高度不变，只调时间轴（行2），Output 吃/补余量。
-        // 上限是物理约束而非写死值：Output 至少留 ~80px（bodyH-116-预览），节点够高时间轴就能一直涨。
+        // 时间轴顶到节点物理上限（Output 保底 ~80px）后继续下拉 → 节点自动长高，Video 行可以无限变大；
+        // 反向拖回时节点跟着缩回（节点高度 = 快照高度 + max(0, 期望时间轴 − 物理上限)，单调映射）。
         if (state.key === "timelineH") {
             const minT = 190 + refLaneNow;
-            const capT = state.bodyH ? Math.max(minT, Math.min(2000, state.bodyH - 116 - Math.max(130, state.previewH || 130))) : max;
-            const next = Math.round(Math.max(minT, Math.min(capT, state.value + meta.sign * delta)));
+            const p0 = Math.max(130, state.previewH || 130);
+            const capT0 = state.bodyH ? state.bodyH - 116 - p0 : 2000;
+            const desiredT = state.value + meta.sign * delta;
+            // 单调映射：节点高度 = 快照 + max(0, 期望时间轴 − 物理上限)，反向拖回时节点跟着缩回
+            if (state.bodyH && state.nodeH) ctx.updateNode({ height: Math.round(state.nodeH + Math.max(0, Math.min(desiredT - capT0, 2000 - capT0))) });
+            const next = Math.round(Math.max(minT, Math.min(2000, desiredT)));
             ctx.updateMetadata({ minimaxTimelineH: next });
             return;
         }
@@ -158,20 +163,28 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
             let newRef = Math.max(60, Math.min(state.timelineH - 190, desired));
             let newT = state.timelineH;
             if (desired < 60) {
-                const capT = Math.max(state.timelineH, Math.min(2000, state.bodyH - 116 - (state.previewH || 130)));
-                newT = Math.min(Math.max(state.timelineH, Math.round(state.timelineH + (60 - desired))), capT);
+                // Refs 已到最矮仍继续下拉 → 增高时间轴；时间轴顶到节点物理上限后节点自动长高（反向拖回节点缩回）。
+                const wanted = state.timelineH + (60 - desired);
+                const capT0 = state.bodyH ? state.bodyH - 116 - Math.max(130, state.previewH || 130) : wanted;
+                if (state.bodyH && state.nodeH) ctx.updateNode({ height: Math.round(state.nodeH + Math.max(0, Math.min(wanted - capT0, 2000 - capT0))) });
+                const capT = Math.min(2000, Math.max(capT0, wanted));
+                newT = Math.min(Math.max(state.timelineH, Math.round(wanted)), capT);
             }
             ctx.updateMetadata({ minimaxRefLaneH: Math.round(newRef), minimaxTimelineH: Math.round(newT) });
             return;
         }
         // 预览下边缘：Output 高度不变，预览与时间轴此消彼长（预览增多少，时间轴就让多少）。
+        // 时间轴已压到下限（190+Refs行高）后继续下拉 → 节点自动长高：预览吃增量，时间轴/Output 高度都不变；反向拖回节点缩回。
         if (state.key === "previewH" && state.timelineH) {
             const t0 = state.timelineH;
             const p0 = state.value;
-            const maxP = p0 + (t0 - (190 + refLaneNow));                 // 时间轴到下限时预览最大
-            const minP = Math.max(130, p0 - (900 - t0));                 // 时间轴到上限 900 时预览最小
-            const newP = Math.round(Math.max(minP, Math.min(maxP, p0 + delta)));
-            ctx.updateMetadata({ minimaxPreviewH: newP, minimaxTimelineH: Math.round(t0 - (newP - p0)) });
+            const minT = 190 + refLaneNow;
+            const maxP0 = p0 + (t0 - minT);                               // 节点/Output 不变时预览的物理上限
+            const desiredP = p0 + delta;
+            if (state.bodyH && state.nodeH) ctx.updateNode({ height: Math.round(state.nodeH + Math.max(0, Math.min(desiredP - maxP0, 2000 - maxP0))) });
+            const newP = Math.round(Math.max(130, Math.min(2000, desiredP)));
+            const newT = newP > maxP0 ? minT : Math.round(Math.max(minT, Math.min(2000, t0 - (newP - p0))));
+            ctx.updateMetadata({ minimaxPreviewH: newP, minimaxTimelineH: newT });
             return;
         }
         const next = Math.round(Math.max(min, Math.min(max, state.value + meta.sign * delta)));
