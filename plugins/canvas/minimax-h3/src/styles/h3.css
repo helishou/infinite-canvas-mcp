@@ -302,15 +302,19 @@
 .nfh3-mode-grid button small { color:#718496; font-size:18px; font-weight:700; }
 .nfh3-mode-grid button.active small { color:#9eeaff; }
 .nfh3-mode-grid button i,.nfh3-choice-grid button i { position:absolute; top:6px; right:7px; width:26px; height:26px; color:#66ddff; font-size:24px; font-style:normal; line-height:52px; text-align:center; }
-/* 4 种生成模式用 4 种色标识（b 标题 + active 左边 4px 边条） */
+/* 4 种生成模式用 4 种色标识（b 标题 + active 左边 4px 边条）
+   配色用 color-mix + CSS 变量在 dark/light 双主题下自适应：
+   - 前景色 = mode 色（深色，dark/light 通用）
+   - active 背景 = mode 色 16% 透明 + 主题 panel 84%
+   - active 左边竖条 = mode 色 100% */
 .nfh3-mode-grid button[data-mode="t2v"] b { color:#a855f7; }
 .nfh3-mode-grid button[data-mode="i2v"] b { color:#22c55e; }
 .nfh3-mode-grid button[data-mode="fl2v"] b { color:#f59e0b; }
 .nfh3-mode-grid button[data-mode="ref2va"] b { color:#1677ff; }
-.nfh3-mode-grid button.active[data-mode="t2v"] { border-color:#a855f7; background:#3a1f5a; box-shadow:inset 4px 0 0 #a855f3,inset 0 0 0 1px rgba(168,85,247,.18); }
-.nfh3-mode-grid button.active[data-mode="i2v"] { border-color:#22c55e; background:#0f3a23; box-shadow:inset 4px 0 0 #22c55e,inset 0 0 0 1px rgba(34,197,94,.18); }
-.nfh3-mode-grid button.active[data-mode="fl2v"] { border-color:#f59e0b; background:#3a2a0f; box-shadow:inset 4px 0 0 #f59e0b,inset 0 0 0 1px rgba(245,158,11,.18); }
-.nfh3-mode-grid button.active[data-mode="ref2va"] { border-color:#1677ff; background:#0f2742; box-shadow:inset 4px 0 0 #1677ff,inset 0 0 0 1px rgba(22,119,255,.18); }
+.nfh3-mode-grid button.active[data-mode="t2v"] { border-color:#a855f7; background:color-mix(in srgb,#a855f7 16%,var(--h3-panel) 84%); box-shadow:inset 4px 0 0 #a855f7,inset 0 0 0 1px color-mix(in srgb,#a855f7 22%,transparent); }
+.nfh3-mode-grid button.active[data-mode="i2v"] { border-color:#22c55e; background:color-mix(in srgb,#22c55e 16%,var(--h3-panel) 84%); box-shadow:inset 4px 0 0 #22c55e,inset 0 0 0 1px color-mix(in srgb,#22c55e 22%,transparent); }
+.nfh3-mode-grid button.active[data-mode="fl2v"] { border-color:#f59e0b; background:color-mix(in srgb,#f59e0b 16%,var(--h3-panel) 84%); box-shadow:inset 4px 0 0 #f59e0b,inset 0 0 0 1px color-mix(in srgb,#f59e0b 22%,transparent); }
+.nfh3-mode-grid button.active[data-mode="ref2va"] { border-color:#1677ff; background:color-mix(in srgb,#1677ff 16%,var(--h3-panel) 84%); box-shadow:inset 4px 0 0 #1677ff,inset 0 0 0 1px color-mix(in srgb,#1677ff 22%,transparent); }
 .nfh3-choice-control { min-width:0; display:flex; flex-direction:column; gap:8px; padding:10px 12px; border:1px solid #34404c; border-radius:6px; background:#252c33; color:#9eafc1; font-size:20px; font-weight:800; }
 .nfh3-choice-control.wide { grid-column:1/-1; }
 .nfh3-choice-grid { display:flex; flex-wrap:wrap; gap:6px; }
