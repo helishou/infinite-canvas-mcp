@@ -303,15 +303,16 @@
 .nfh3-mode-grid button.active small { color:#9eeaff; }
 .nfh3-mode-grid button i,.nfh3-choice-grid button i { position:absolute; top:6px; right:7px; width:26px; height:26px; color:#66ddff; font-size:24px; font-style:normal; line-height:52px; text-align:center; }
 /* 4 种 mode 按钮各用 1 种色：b 标题色 + active 左边 4px 竖条 + active 背景。
-   不动 section head，section head 颜色跟其他 section 一致。 */
-.nfh3-mode-grid button[data-mode="t2v"] b { color:#a855f7; }
-.nfh3-mode-grid button[data-mode="i2v"] b { color:#22c55e; }
-.nfh3-mode-grid button[data-mode="fl2v"] b { color:#f59e0b; }
-.nfh3-mode-grid button[data-mode="ref2va"] b { color:#1677ff; }
-.nfh3-mode-grid button.active[data-mode="t2v"] { border-color:#a855f7; background:color-mix(in srgb,#a855f7 16%,var(--h3-panel) 84%); box-shadow:inset 4px 0 0 #a855f7,inset 0 0 0 1px color-mix(in srgb,#a855f7 22%,transparent); }
-.nfh3-mode-grid button.active[data-mode="i2v"] { border-color:#22c55e; background:color-mix(in srgb,#22c55e 16%,var(--h3-panel) 84%); box-shadow:inset 4px 0 0 #22c55e,inset 0 0 0 1px color-mix(in srgb,#22c55e 22%,transparent); }
-.nfh3-mode-grid button.active[data-mode="fl2v"] { border-color:#f59e0b; background:color-mix(in srgb,#f59e0b 16%,var(--h3-panel) 84%); box-shadow:inset 4px 0 0 #f59e0b,inset 0 0 0 1px color-mix(in srgb,#f59e0b 22%,transparent); }
-.nfh3-mode-grid button.active[data-mode="ref2va"] { border-color:#1677ff; background:color-mix(in srgb,#1677ff 16%,var(--h3-panel) 84%); box-shadow:inset 4px 0 0 #1677ff,inset 0 0 0 1px color-mix(in srgb,#1677ff 22%,transparent); }
+   不动 section head，section head 颜色跟其他 section 一致。
+   用 !important 避免被后面 light 主题块（line ~414 .nfh3-mode-grid button { color: var(--h3-text) }）覆盖。 */
+.nfh3-mode-grid button[data-mode="t2v"] b { color:#a855f7 !important; }
+.nfh3-mode-grid button[data-mode="i2v"] b { color:#22c55e !important; }
+.nfh3-mode-grid button[data-mode="fl2v"] b { color:#f59e0b !important; }
+.nfh3-mode-grid button[data-mode="ref2va"] b { color:#1677ff !important; }
+.nfh3-mode-grid button.active[data-mode="t2v"] { border-color:#a855f7 !important; background:color-mix(in srgb,#a855f7 16%,var(--h3-panel) 84%) !important; box-shadow:inset 4px 0 0 #a855f7,inset 0 0 0 1px color-mix(in srgb,#a855f7 22%,transparent) !important; }
+.nfh3-mode-grid button.active[data-mode="i2v"] { border-color:#22c55e !important; background:color-mix(in srgb,#22c55e 16%,var(--h3-panel) 84%) !important; box-shadow:inset 4px 0 0 #22c55e,inset 0 0 0 1px color-mix(in srgb,#22c55e 22%,transparent) !important; }
+.nfh3-mode-grid button.active[data-mode="fl2v"] { border-color:#f59e0b !important; background:color-mix(in srgb,#f59e0b 16%,var(--h3-panel) 84%) !important; box-shadow:inset 4px 0 0 #f59e0b,inset 0 0 0 1px color-mix(in srgb,#f59e0b 22%,transparent) !important; }
+.nfh3-mode-grid button.active[data-mode="ref2va"] { border-color:#1677ff !important; background:color-mix(in srgb,#1677ff 16%,var(--h3-panel) 84%) !important; box-shadow:inset 4px 0 0 #1677ff,inset 0 0 0 1px color-mix(in srgb,#1677ff 22%,transparent) !important; }
 .nfh3-choice-control { min-width:0; display:flex; flex-direction:column; gap:8px; padding:10px 12px; border:1px solid #34404c; border-radius:6px; background:#252c33; color:#9eafc1; font-size:20px; font-weight:800; }
 .nfh3-choice-control.wide { grid-column:1/-1; }
 .nfh3-choice-grid { display:flex; flex-wrap:wrap; gap:6px; }
