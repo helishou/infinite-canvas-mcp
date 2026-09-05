@@ -18,7 +18,7 @@
 .minimax-wb-toolbar button,.minimax-timeline-controls button,.minimax-video-add { width:60px; height:56px; border:1px solid #2f3338; border-radius:5px; background:#24272b; color:#d1d5db; display:flex; align-items:center; justify-content:center; cursor:pointer; }
 .minimax-wb-toolbar button:disabled { opacity:.42; cursor:not-allowed; }
 .minimax-wb-body { flex:1; min-height:0; display:grid; grid-template-columns:190px minmax(0,1fr); gap:8px; padding:8px; }
-.minimax-library { min-width:0; min-height:0; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:60px minmax(0,1fr); border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
+.minimax-library { min-width:0; min-height:0; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:72px minmax(0,1fr); border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
 .minimax-library-head { grid-column:1; grid-row:1; height:60px; display:flex; align-items:center; gap:12px; padding:0 8px; border-bottom:1px solid #2f3338; background:#202328; color:#cbd5e1; font-size:23px; font-weight:900; }
 .minimax-output-head { border-top:1px solid #2f3338; }
 .minimax-output-actions { margin-left:auto; display:flex; align-items:center; gap:4px; }
@@ -34,7 +34,7 @@
 .minimax-player-image,.minimax-player-image img { width:100%; height:100%; object-fit:contain; }
 .minimax-player-stage video,.minimax-player-stage img { width:100%; height:100%; object-fit:contain; background:#0b0c0e; }
 .minimax-player-empty { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:26px; font-weight:850; }
-.minimax-edit-timeline { position:relative; min-width:0; min-height:220px; display:grid; grid-template-columns:52px minmax(0,1fr) 54px; grid-template-rows:44px minmax(0,1fr); border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
+.minimax-edit-timeline { position:relative; min-width:0; min-height:140px; display:grid; grid-template-columns:52px minmax(0,1fr) 54px; grid-template-rows:44px minmax(0,1fr); border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
 .minimax-timeline-controls { grid-column:1; grid-row:1; display:flex; align-items:center; justify-content:center; background:#202328; border-right:1px solid #2f3338; border-bottom:1px solid #2f3338; }
 /* 左侧标签列：与右侧 Video / Refs 行精确对齐，第一行占满剩余高度，第二行固定 96px */
 .minimax-left-labels { grid-column:1; grid-row:2; display:grid; grid-template-rows:1fr 192px; background:#202328; border-right:1px solid #2f3338; }
@@ -48,7 +48,7 @@
 /* 单一横向滚动容器：Ruler + Video + Refs 上下合并，共用同一 scrollLeft，彻底消除错位 */
 .minimax-tracks-scroll { grid-column:2; grid-row:2; position:relative; min-width:0; height:100%; min-height:0; overflow-x:auto; overflow-y:hidden; }
 .minimax-track-body { height:100%; min-height:0; display:flex; flex-direction:column; }
-.minimax-ruler-row { flex:0 0 28px; position:relative; border-bottom:1px solid #2f3338; background:#202328; }
+.minimax-ruler-row { flex:0 0 36px; position:relative; border-bottom:1px solid #2f3338; background:#202328; }
 /* video 行占满 tracks-scroll 的剩余高度，避免 timeline 下方出现黑色空白 */
 .minimax-video-row { flex:1 1 0; min-height:0; position:relative; background:linear-gradient(90deg,rgba(148,163,184,.14) 1px,transparent 1px) 0 0/12.5% 100%,#141619; }
 .minimax-video-bottom-strip { position:absolute; left:0; bottom:0; height:40px; padding:8px 20px; box-sizing:border-box; border-top:1px solid #2f3338; background:repeating-linear-gradient(135deg,#111827 0 4px,#1a2029 4px 8px); color:#475569; font-size:26px; letter-spacing:16px; pointer-events:none; white-space:nowrap; overflow:hidden; }
@@ -119,7 +119,9 @@
 .minimax-output-list > div > span[style*="display: flex"] button { width:50px; height:50px; padding:0; border:1px solid rgba(255,255,255,.16); border-radius:7px; display:flex; align-items:center; justify-content:center; background:rgba(15,23,42,.86); color:#e2e8f0; box-shadow:0 2px 8px rgba(0,0,0,.26); transition:background .15s ease,border-color .15s ease,color .15s ease,transform .15s ease; }
 .minimax-output-list > div > span[style*="display: flex"] button:hover { border-color:rgba(125,211,252,.7); background:#16445b; color:#e0f2fe; transform:translateY(-1px); }
 .minimax-output-list > div > span[style*="display: flex"] svg { width:14px; height:14px; stroke-width:2.2; }
-.minimax-output-list > div { height:78px !important; }
+.minimax-output-list > div { height:var(--h3-out-card-h, 78px) !important; }
+/* Output 固定单行横向滚动：卡片高度随面板高度（--h3-out-card-h），宽度=高度×2，超出横向滚动。 */
+.minimax-output-list { grid-template-columns:none; grid-auto-flow:column; grid-auto-columns:calc(var(--h3-out-card-h, 78px) * 2); justify-content:start; align-content:start; }
 .minimax-output-list > div > video,.minimax-output-list > div > img { width:100%; height:100%; object-fit:cover; }
 .minimax-library-list:not(.minimax-output-list) > div > span[style*="bottom"] { top:3px !important; bottom:auto !important; left:3px !important; }
 .minimax-status-badge { position:absolute; left:10px; top:48px; z-index:20; max-width:calc(100% - 20px); padding:8px 16px; border-radius:5px; background:rgba(15,23,42,.88); color:#cbd5e1; font-size:20px; font-weight:850; pointer-events:none; }
@@ -147,13 +149,11 @@
 .minimax-canvas-workbench .minimax-tl-clip { top:10px; bottom:10px; }
 .minimax-edit-timeline::before,.minimax-edit-timeline::after { display:none; content:none; }
 .minimax-edit-timeline::after { content:""; display:block; position:absolute; z-index:14; top:0; bottom:0; left:calc(52px + (100% - 106px) * var(--minimax-playhead-pct, 0%)); width:2px; margin-left:-1px; background:#f8fafc; pointer-events:none; box-shadow:0 0 0 1px rgba(0,0,0,.25); }
-.minimax-pane-resize { position:absolute; z-index:40; pointer-events:auto; background:transparent; transition:background .12s ease; }
-.minimax-pane-resize:hover { background:rgba(248,250,252,.42); }
-.minimax-prompt-resize { top:58px; left:calc(100% - var(--minimax-prompt-w,480px) - 4px); height:var(--minimax-preview-h,220px); width:8px; cursor:ew-resize; }
-.minimax-preview-width-resize { top:58px; left:calc(10px + var(--minimax-preview-w,960px) - 4px); height:var(--minimax-preview-h,220px); width:8px; cursor:ew-resize; }
-.minimax-preview-resize { left:10px; right:calc(var(--minimax-prompt-w,480px) + 18px); top:calc(58px + var(--minimax-preview-h,220px) + 2px); height:6px; cursor:ns-resize; }
-.minimax-ref-resize { left:10px; right:10px; top:calc(58px + var(--minimax-preview-h,220px) + 10px + 28px + var(--minimax-video-h,74px) + var(--minimax-ref-h,36px) + 2px); height:6px; cursor:ns-resize; }
-.minimax-clip-resize { left:10px; right:10px; top:calc(58px + var(--minimax-preview-h,220px) + 20px + 28px + var(--minimax-video-h,74px) + var(--minimax-ref-h,36px) - 2px); height:6px; cursor:ns-resize; }
+/* 模块调宽高手柄：位置由 H3PaneHandles 实测各模块边界后内联写入（left/top/width/height），
+   不再用工具栏高度常量 + calc 变量链定位（栅格一变就漂移）。 */
+.minimax-pane-handle { position:absolute; z-index:70; pointer-events:auto; background:transparent; border-radius:3px; transition:background .12s ease; }
+.minimax-pane-handle-ns { cursor:ns-resize; }
+.minimax-pane-handle-ew { cursor:ew-resize; }
 
 /* 参考素材轨道：当前 Clip 的 9 个参考槽位，按三列九宫格显示。 */
 .minimax-ref-content { position:relative; width:100%; height:100%; }
@@ -207,7 +207,7 @@
 .minimax-material-card:hover { border-color:#718096 !important; box-shadow:0 6px 16px rgba(0,0,0,.28); transform:translateY(-1px); }
 .minimax-wb-main { gap:10px; }
 .minimax-player-stage { border-color:#303640; border-radius:9px; background:#090b0e; box-shadow:inset 0 0 0 1px rgba(255,255,255,.025); }
-.minimax-edit-timeline { min-height:220px; grid-template-rows:44px minmax(0,1fr); }
+.minimax-edit-timeline { min-height:140px; grid-template-rows:44px minmax(0,1fr); }
 .minimax-ruler-row,.minimax-timeline-controls,.minimax-left-labels,.minimax-add-gutter { background:#20252c; border-color:#343c47; }
 .minimax-ref-row { background:#181b1f; border-color:#343c47; }
 .minimax-tick b { top:9px; color:#a9b8ca; font-size:22px; }
@@ -402,7 +402,7 @@
 .minimax-wb-toolbar .minimax-status-badge button:hover { background:var(--h3-hover); }
 .minimax-status-badge.loading { color:var(--h3-text); }
 .minimax-status-badge.success { color:#3f7d4f; }
-.minimax-pane-resize:hover { background:color-mix(in srgb,var(--h3-muted) 22%,transparent); }
+.minimax-canvas-workbench .minimax-pane-handle:hover,.minimax-canvas-workbench .minimax-pane-handle:active { background:var(--h3-active); box-shadow:0 0 0 1px color-mix(in srgb,var(--h3-active) 28%,transparent); }
 .minimax-current-resize:hover,.minimax-current-resize:active { background:var(--h3-active); }
 
 /* 无限画布节点质感：克制的中性层次、细边框和一致留白，避免变成独立控制台。 */
@@ -460,30 +460,27 @@
 .minimax-prompt-side .nfh3-panel-actions .minimax-run-all { border:1px solid color-mix(in srgb,var(--h3-active) 62%,var(--h3-border)); background:color-mix(in srgb,var(--h3-active-bg) 76%,var(--h3-panel)); color:var(--h3-active-text); }
 .minimax-prompt-side .nfh3-panel-actions button:hover:not(:disabled) { transform:translateY(-2px); filter:brightness(1.14); box-shadow:0 10px 24px color-mix(in srgb,var(--h3-active) 26%,transparent); }
 
-/* Prompt / Setting 分界手柄：细线贯穿右侧栏，避免被旧的预览高度撑成灰色竖块。 */
-.minimax-prompt-resize { top:58px; right:calc(var(--minimax-prompt-w,480px) + 10px); bottom:0; left:auto; width:4px; height:auto; border-radius:3px; background:transparent; transform:translateX(50%); }
-.minimax-prompt-resize:hover,.minimax-prompt-resize:active { background:var(--h3-active); box-shadow:0 0 0 1px color-mix(in srgb,var(--h3-active) 28%,transparent); }
-.minimax-preview-width-resize { top:58px; bottom:auto !important; left:calc(10px + var(--minimax-preview-w,960px) + 5px); right:auto; width:4px; height:var(--minimax-preview-h,220px); max-height:var(--minimax-preview-h,220px); border-radius:3px; transform:translateX(-50%); }
-.minimax-preview-width-resize:hover,.minimax-preview-width-resize:active { background:var(--h3-active); box-shadow:0 0 0 1px color-mix(in srgb,var(--h3-active) 28%,transparent); }
+/* 时间轴内部：Refs 行高跟随 --minimax-ref-h（手柄实测 Refs 行上边缘拖动），
+   左侧 Video/Refs 标签列同步跟随，保证标签与轨道对齐。 */
+.minimax-canvas-workbench .minimax-ref-row { flex:0 0 var(--minimax-ref-h,150px); }
+.minimax-canvas-workbench .minimax-left-labels { grid-template-rows:minmax(0,1fr) var(--minimax-ref-h,150px); }
 
-/* 节点缩放时，主体各行按比例伸缩，不把 Preview / Timeline / Output 锁死在固定像素高度。 */
-.minimax-canvas-workbench .minimax-wb-body { grid-template-rows:minmax(var(--minimax-preview-h,130px),4fr) minmax(calc(28px + var(--minimax-video-h,74px) + var(--minimax-ref-h,36px)),2fr) minmax(140px,1fr); }
+/* 行高模型：行1(预览+当前Clip)=previewH、行2(时间轴)=timelineH 固定 px，行3(Output) 吃余量；
+   行1/行2 由手柄直接拖动，Output 高度通过 Output 上边缘手柄反向控制。 */
 .minimax-canvas-workbench .minimax-player-stage,
 .minimax-canvas-workbench .minimax-current-panel,
 .minimax-canvas-workbench .minimax-edit-timeline,
 .minimax-canvas-workbench .minimax-library { min-height:0; }
-/* .minimax-canvas-workbench .minimax-edit-timeline { grid-template-rows:34px minmax(var(--minimax-video-h,74px),1fr) minmax(var(--minimax-ref-h,36px),1fr); } */
 
 /* 节点高度不足时收起 Output，优先保证预览、Prompt 和时间轴可用。 */
-/* 内容区放不下 Preview + Video/Refs + Output 的最小高度总和时才隐藏 Output。 */
 @container (max-height: 428px) {
     .minimax-canvas-workbench .minimax-library { display:none; }
-    .minimax-canvas-workbench .minimax-wb-body { grid-template-rows:var(--minimax-preview-h,220px) calc(28px + var(--minimax-video-h,74px) + var(--minimax-ref-h,36px)) 0; }
+    .minimax-canvas-workbench .minimax-wb-body { grid-template-rows:var(--minimax-preview-h,220px) var(--minimax-timeline-h,320px) 0; }
     .minimax-canvas-workbench .minimax-prompt-side { grid-row:1 / span 2; }
 }
 
 /* 工作台：Row1 Preview+Setting | Row2 Refs | Row3 Output (tall) | Row4 Clip Prompt | Status 底部。 */
-.minimax-wb-body { grid-template-columns:minmax(280px,min(var(--minimax-preview-w,960px),50%)) minmax(360px,1fr) minmax(240px,var(--minimax-prompt-w,480px)); grid-template-rows:var(--minimax-preview-h,220px) calc(28px + var(--minimax-video-h,74px) + var(--minimax-ref-h,36px)) minmax(140px,1fr); }
+.minimax-wb-body { grid-template-columns:minmax(280px,min(var(--minimax-preview-w,960px),50%)) minmax(360px,1fr) minmax(240px,var(--minimax-prompt-w,480px)); grid-template-rows:var(--minimax-preview-h,220px) var(--minimax-timeline-h,320px) minmax(0,1fr); }
 .minimax-player-stage { grid-column:1; grid-row:1; }
 .minimax-current-panel { grid-column:2; grid-row:1; }
 .minimax-prompt-side { grid-column:3; grid-row:1 / span 3; position:relative; z-index:12; min-width:0; min-height:0; display:flex; flex-direction:column; overflow:visible; border:1px solid var(--h3-border); border-radius:11px; background:color-mix(in srgb,var(--h3-panel) 88%,var(--h3-fill)); }
@@ -495,8 +492,8 @@
 .minimax-library { min-width:170px; min-height:150px; }
 .minimax-wb-main { min-width:528px; min-height:236px; }
 .minimax-player-stage { min-width:280px; min-height:130px; }
-.minimax-edit-timeline { min-width:528px; min-height:112px; }
-.minimax-current-panel { min-width:528px; min-height:220px; }
+.minimax-edit-timeline { min-width:528px; min-height:322px; }
+.minimax-current-panel { min-width:528px; min-height:130px; }
 .minimax-current-main { min-width:280px; }
 .minimax-clip-parameters { min-width:480px; }
 .minimax-wb-status { min-width:528px; }

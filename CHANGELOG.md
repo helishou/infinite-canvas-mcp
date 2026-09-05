@@ -2,8 +2,11 @@
 
 ## Unreleased
 
+- [优化] H3 行高手柄改为联动缩放：①Output 上边缘手柄——行1(preview)+行2(时间轴)作为整体按拖动前比例同涨同缩，Output 吃/补余量；②预览下边缘手柄——预览单独变，下方时间轴+Output 按拖起瞬间的实际高度比例分摊差值（时间轴受 190+refLaneH 下限、900 上限约束，超出部分由 Output 承接）。两把手柄均在拖起瞬间快照 previewH/timelineH/outputH/bodyH（本地 CSS px），拖动过程基于快照计算，不受中途重渲染影响。
 - [优化] 智能分镜弹窗整体 UI 缩小：Modal 宽度 620 → 460，字段容器 fontSize 13 / gap 8，所有 label/span 字号 12，Select/Switch/Input 全部 size="small"，参考图片缩略图 172×172 → 84×84、字体 22/25 → 10/18，「从画布选择」按钮 padding 6×16 → 2×10、字号 12，整体创意 TextArea rows 5 → 3。
 - [优化] 智能分镜弹窗 UI 第二轮缩小：底部说明 fontSize 12 → 11、marginTop 16 → 10、lineHeight 1.6 → 1.5；参考图片缩略图 84×84 → 64×64、borderRadius 4 → 3；缩略图间距 gap 6 → 4、paddingBottom 4 → 2；加号图标 18 → 14；角标 / 关闭按钮全部缩小（width 14 → 12、fontSize 10 → 9）。
+- [修复] ruler 容器高度 28px 不够，22px 字号刻度文字溢出底部被 Video 行遮挡：ruler 高度提到 36px，22px 刻度文字完整显示。
+- [修复] ruler 容器宽度 > 总时长（如 20s 总时长容器 22s 宽）时，超过总时长部分没刻度：自适应——5s 间隔能塞下时用 5s，否则用 1.6s 继续铺到容器右边缘，ruler 容器 0s 到右边缘都有连续刻度。
 - [修复] H3 节点 Clip 卡片现在能显示错误/loading/cancelled 视觉：H3Runner catch 块把 `segment.status` + `segment.errorDetails` 同步写进 segments 数组，H3ClipCard 读取后加 `is-error` / `is-loading` / `is-cancelled` className + 红底感叹号角标 + hover title 显示 errorDetails。之前 catch 块只把 status 写到 metadata 节点级、segments 数组里没 status，H3ClipCard 完全不读这个字段，导致用户感知为「Clip 卡片不更新」。
 - [修复] ComfyUI WebSocket 早断后 backend 拿不到 outputs：bridge.ts 加 `socket.onerror` / `socket.onclose` handler、补 `execution_success` 事件监听（之前只听 `executed` 单节点事件），`wsExecuted=true` 但 `/history` 被清理时扫描整个 `/history` 列表找最近成功条目兜底，WS 早断时主动 fail 而不是傻等 3 分钟。
 - [修复] 时间轴行高联动约束，根治行与行挤压重叠：时间轴面板高度（timelineH）此前可低至 140px，而面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行 + Refs 行高（60–420），不足时 Video 行被压扁、Refs 挤成一团、刻度被裁切。现 timelineH 下限联动 refLaneH（min = 190 + refLaneH，默认 320），Refs 手柄上限同步受 timelineH 约束（max = timelineH − 190），拖动时与读取时双向钳制，历史 metadata 里的过小值自动抬升；CSS fallback 252→320、min-height 112→322。另加节点级高度预算：ResizeObserver 实测 wb-body 可用高度，行1+行2 固定 px 超预算时按「预览先让→Refs 跟让→时间轴保内部最小结构」收敛（预览下限 130、Refs 下限 60、时间轴下限 250），Output 行改为 minmax(0,1fr) 彻底让位——节点在画布上被压矮时行与行不再互相挤压裁切。

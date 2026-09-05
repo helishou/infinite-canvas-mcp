@@ -52,12 +52,24 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
     const minorInterval = 0.4;
     const minorCount = Math.floor(total / minorInterval) + 1;
     const minorTicks = Array.from({ length: minorCount }, (_, index) => ({ left: index * minorInterval * 50 }));
+    // ruler 容器宽度可能比总时长宽很多（比如 20s 总时长但容器 40s 宽），
+    // 0~总时长部分用 1.6s 主刻度，超过总时长部分用 5s 主刻度继续标记到 ruler 容器右边缘。
+    // 但当容器剩余宽度 < 5s 时（如 total=20s 容器 22s 宽只多 2s），用 5s 间隔会落到容器外；
+    // 此时用较小间隔（1.6s）继续铺，确保 ruler 容器内 0s 到右边缘都有连续刻度。
     const extendedInterval = 5;
+    const containerSeconds = trackWidth / 50;
     const extendedStart = Math.ceil((total + 0.001) / extendedInterval) * extendedInterval;
-    const extendedEnd = Math.max(trackWidth / 50, extendedStart + extendedInterval);
     const extendedTicks: Array<{ time: number; left: number }> = [];
-    for (let t = extendedStart; t <= extendedEnd + 0.0001; t += extendedInterval) {
-        extendedTicks.push({ time: t, left: t * 50 });
+    if (extendedStart <= containerSeconds) {
+        // 大间隔（5s）能塞进容器
+        for (let t = extendedStart; t <= containerSeconds + 0.0001; t += extendedInterval) {
+            extendedTicks.push({ time: t, left: t * 50 });
+        }
+    } else {
+        // 容器剩余太窄，用 1.6s 继续铺到容器右边缘
+        for (let t = Math.ceil(total / 1.6) * 1.6; t <= containerSeconds + 0.0001; t += 1.6) {
+            extendedTicks.push({ time: Math.round(t * 10) / 10, left: t * 50 });
+        }
     }
     // 节流持久化时间轴滚动位置，刷新后可恢复（避免每次 onScroll 都 updateMetadata）
     const persistScroll = useCallback((left: number) => {
