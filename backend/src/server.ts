@@ -39,7 +39,7 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
             res.setHeader("Vary", "Origin");
         }
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-media-name, x-media-width, x-media-height, x-media-duration-ms");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-media-name, x-media-width, x-media-height, x-media-duration-ms, x-media-category");
         // OPTIONS 预检请求直接返回，不进入后续 middleware（auth 等会拦截）。
         if (req.method === "OPTIONS") { res.status(204).end(); return; }
         next();
