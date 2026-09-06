@@ -30,6 +30,15 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.use(express.json({ limit: "100mb" }));
 
     // ── CORS ─────────────────────────────────────────────────────────────
+    // Allow-Headers 走 reflect 模式：把预检请求里的
+    // Access-Control-Request-Headers 原样回给 Access-Control-Allow-Headers。
+    // 这样新加自定义 header（x-media-* 之类）不用每次都改这里。
+    // 注意：reflect 模式要求 Allow-Origin 是 echo（不能 *），
+    // 且 Allow-Credentials 必须是 true。
+    const CORS_ALLOWED_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
+    // reflect 之外保留一组明确白名单（防止浏览器没发 Request-Headers
+    // 时，比如简单 GET 请求没有预检，Allow-Headers 还是空）。
+    const CORS_ALLOWED_HEADERS_DEFAULT = "Content-Type, Authorization, x-media-name, x-media-width, x-media-height, x-media-duration-ms, x-media-category";
     app.use((req: Request, res: Response, next: NextFunction) => {
         const origins = config.origins ?? ["*"];
         const origin = req.headers.origin;
@@ -38,8 +47,13 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
             res.setHeader("Access-Control-Allow-Credentials", "true");
             res.setHeader("Vary", "Origin");
         }
-        res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-media-name, x-media-width, x-media-height, x-media-duration-ms, x-media-category");
+        res.setHeader("Access-Control-Allow-Methods", CORS_ALLOWED_METHODS);
+        // 预检请求：reflect 客户端请求的 header；非预检：给默认白名单
+        const requestHeaders = req.headers["access-control-request-headers"];
+        res.setHeader(
+            "Access-Control-Allow-Headers",
+            typeof requestHeaders === "string" && requestHeaders ? requestHeaders : CORS_ALLOWED_HEADERS_DEFAULT,
+        );
         // OPTIONS 预检请求直接返回，不进入后续 middleware（auth 等会拦截）。
         if (req.method === "OPTIONS") { res.status(204).end(); return; }
         next();
