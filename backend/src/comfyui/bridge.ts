@@ -226,9 +226,18 @@ export class ComfyUiBackend {
                                 if (allHistory.ok) {
                                     const all = await allHistory.json() as Record<string, any>;
                                     const candidates = Object.entries(all)
-                                        .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
+                                        .map(([pid, entry]) => {
+                                            const msgs: Array<[string, Record<string, unknown>]> = Array.isArray(entry?.status?.messages)
+                                                ? entry.status.messages as Array<[string, Record<string, unknown>]>
+                                                : [];
+                                            const ts = msgs.reduce((max: number, [, data]) => {
+                                                const t = Number((data as Record<string, unknown>)?.timestamp ?? 0);
+                                                return t > max ? t : max;
+                                            }, 0);
+                                            return { pid, entry, updated: ts };
+                                        })
                                         .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
-                                        .filter((c) => c.updated * 1000 >= started - 5000)
+                                        .filter((c) => c.updated >= started - 5000)
                                         .sort((a, b) => b.updated - a.updated);
                                     if (candidates[0]) {
                                         const winner = candidates[0];
@@ -439,9 +448,18 @@ export class ComfyUiBackend {
                                 // 找最新的 completed + 有 outputs 的条目（必须 startedAt 之后才有效，
                                 // 避免把上一次成功的历史记录当成当前任务的结果）
                                 const candidates = Object.entries(all)
-                                    .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
+                                    .map(([pid, entry]) => {
+                                        const msgs: Array<[string, Record<string, unknown>]> = Array.isArray(entry?.status?.messages)
+                                            ? entry.status.messages as Array<[string, Record<string, unknown>]>
+                                            : [];
+                                        const ts = msgs.reduce((max: number, [, data]) => {
+                                            const t = Number((data as Record<string, unknown>)?.timestamp ?? 0);
+                                            return t > max ? t : max;
+                                        }, 0);
+                                        return { pid, entry, updated: ts };
+                                    })
                                     .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
-                                    .filter((c) => c.updated * 1000 >= startedAt - 5000)
+                                    .filter((c) => c.updated >= startedAt - 5000)
                                     .sort((a, b) => b.updated - a.updated);
                                 if (candidates[0]) {
                                     const winner = candidates[0];
@@ -498,9 +516,20 @@ export class ComfyUiBackend {
                                 if (allHistory.ok) {
                                     const all = await allHistory.json() as Record<string, any>;
                                     const candidates = Object.entries(all)
-                                        .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
+                                        .map(([pid, entry]) => {
+                                            // ComfyUI /history 没有 status.updated 字段，
+                                            // 需要从 messages 里取最近一条的时间戳作为排序/过滤依据。
+                                            const msgs: Array<[string, Record<string, unknown>]> = Array.isArray(entry?.status?.messages)
+                                                ? entry.status.messages as Array<[string, Record<string, unknown>]>
+                                                : [];
+                                            const ts = msgs.reduce((max: number, [, data]) => {
+                                                const t = Number((data as Record<string, unknown>)?.timestamp ?? 0);
+                                                return t > max ? t : max;
+                                            }, 0);
+                                            return { pid, entry, updated: ts };
+                                        })
                                         .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
-                                        .filter((c) => c.updated * 1000 >= startedAt - 5000)
+                                        .filter((c) => c.updated >= startedAt - 5000)
                                         .sort((a, b) => b.updated - a.updated);
                                     if (candidates[0]) {
                                         const winner = candidates[0];
@@ -545,9 +574,18 @@ export class ComfyUiBackend {
                             if (allHistory.ok) {
                                 const all = await allHistory.json() as Record<string, any>;
                                 const candidates = Object.entries(all)
-                                    .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
+                                    .map(([pid, entry]) => {
+                                        const msgs: Array<[string, Record<string, unknown>]> = Array.isArray(entry?.status?.messages)
+                                            ? entry.status.messages as Array<[string, Record<string, unknown>]>
+                                            : [];
+                                        const ts = msgs.reduce((max: number, [, data]) => {
+                                            const t = Number((data as Record<string, unknown>)?.timestamp ?? 0);
+                                            return t > max ? t : max;
+                                        }, 0);
+                                        return { pid, entry, updated: ts };
+                                    })
                                     .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
-                                    .filter((c) => c.updated * 1000 >= startedAt - 5000)
+                                    .filter((c) => c.updated >= startedAt - 5000)
                                     .sort((a, b) => b.updated - a.updated);
                                 if (candidates[0]) {
                                     const winner = candidates[0];
