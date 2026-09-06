@@ -71,6 +71,14 @@ export function registerWorkflowRoutes(
             const result = await executor.run(detail.workflow, config, fields, clientId, undefined, name);
             res.json(result);
         } catch (error) {
+            // 输出完整堆栈到 backend stdout（用户在前端只看到 error.message，
+            // 实际 throw 位置在 stack 里）。用 console.error 而不是 logger，
+            // 避免引入 logger 依赖。
+            console.error("[workflows:run] failed", {
+                name: req.params.name,
+                error: error instanceof Error ? error.message : String(error),
+                stack: error instanceof Error ? error.stack : undefined,
+            });
             res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
         }
     });
