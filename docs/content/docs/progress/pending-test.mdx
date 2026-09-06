@@ -7,6 +7,10 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
++ H3 潜空间放大模型自动选择：新建或选中一个 H3 Clip，打开 Setting→「H3 潜空间放大二采」→开启「启用潜空间二采」，确认「放大模型」下拉框自动出现并选中第一个可用模型（而不是看着像选了但实际 segment 状态为空）；此时点生成不应再报「已启用 H3 潜空间放大，但没有选择放大模型」。若 ComfyUI 未安装 NanFengH3LowPeakLatentUpscaler 节点或该节点无模型选项，开启开关后应看到黄色提示「未在 ComfyUI 发现 H3 潜空间放大模型…」。
+
++ H3 潜空间放大提交一致性：开启放大并选好模型后点生成，后端不再误报「model_name 选项全为空字符串」；若 ComfyUI 的 NanFengH3LowPeakLatentUpscaler 节点因缺 h3_upscaler_compat 兼容层而 model_name 为空，报错应明确提示「请确认已安装 h3_upscaler_compat 兼容层」。前端「放大模型」下拉框在 segment 未真正选中时应显示「请选择放大模型」占位符，而非拿 choices[0] 伪装成已选。
+
 + 工作流列表双击重命名：在「工作流管理」页面的工作流列表里双击某条标题，应变成输入框，输入新名称回车或点击别处即保存；列表标题与（若已打开）详情页标题更新为新手名字，底层文件名不变；空名称或与原名相同不触发请求。
 + 工作流文本字段标记为提示词：在工作流节点图里展开一个文本输入字段，勾选「作为提示词」并保存；从生图工作台调用该工作流时，输入的提示词应替换该文本节点在 ComfyUI workflow 里的值（实际传到对应节点）。运行后到生成历史/日志里确认 prompt 记录的是工作台输入的提示词；同时 backend 任务 input 里也应带上 prompt 字段。切换字段类型为非文本时「作为提示词」自动取消勾选。
 + 工作流节点图自动识别下拉选项（兼容新/旧两种 COMBO 格式）：打开含下拉输入的 ComfyUI 工作流，点开对应节点浮窗。①新版格式：如 `ResolutionSelector` 的 `aspect_ratio`，输入行应显示「下拉 (8 项)」标记，勾选后自动变「下拉」且选项已被预填（1:1 / 2:3 / 3:2 / 3:4 / 4:3 / 9:16 / 16:9 / 21:9）。②旧版格式：如 `KSampler` 的 `sampler_name` / `scheduler`，同样应识别为下拉并预填。③注意并非所有输入都是下拉：`ResolutionSelector` 的 `megapixels`(FLOAT)、`multiple`(INT) 应是数字字段，不应出现下拉标记。勾选下拉输入后从运行面板选择时选项齐全；ComfyUI 未开启/不可达时该标记不出现，字段按原类型创建，仍可手动设成下拉并手填选项。

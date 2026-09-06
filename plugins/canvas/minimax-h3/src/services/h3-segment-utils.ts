@@ -34,13 +34,13 @@ export function patchSelectedSegment(ctx: CanvasNodeContext, metadata: Record<st
 export function buildRestoreParamsPatch(segments: H3Segment[], ref: H3Ref): Partial<H3Segment> {
     // 还原优先级：URL 反查源 Clip（参数始终最新）→ segmentId 反查（URL 变形/改写时兜底）
     // → 材料自带的生成时刻参数快照（源 Clip 已被删除/重建时兜底）。
-    // 注意：只恢复生成参数，不恢复 prompt —— 「设为当前 Clip」不应把源视频段的提示词
-    // 灌进当前 clip（否则选中 clip4 点 Output 里某段视频，clip4 的提示词会被源段覆盖成
-    // 智能分镜第一段之类的内容）。H3_SETTINGS_KEYS 已排除 prompt，这里保持一致。
+    // 现在「设为当前 Clip」会一并还原 prompt（源段提示词带入当前 clip），
+    // 因为提示词区已支持按 clip 隔离的撤销/重做，误覆盖可用 Ctrl+Z 回退。
+    // 注意：H3_SETTINGS_KEYS（复制/粘贴设置）仍排除 prompt，仅本函数使用含 prompt 的 RESTORABLE_PARAM_KEYS。
     const source = segments.find((segment) => resultUrl(segment.result) === ref.url || (segment.results || []).some((item) => item.url === ref.url))
         || (ref.segmentId ? segments.find((segment) => segment.id === ref.segmentId) : undefined);
-    if (source) return restorableParams(source as Record<string, unknown>, H3_SETTINGS_KEYS);
-    return restorableParams(ref.params, H3_SETTINGS_KEYS);
+    if (source) return restorableParams(source as Record<string, unknown>, RESTORABLE_PARAM_KEYS);
+    return restorableParams(ref.params, RESTORABLE_PARAM_KEYS);
 }
 
 // 后端自动分段（autoSplit）成功时返回 task.result.segments，其元素是

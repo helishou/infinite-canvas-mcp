@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "@infinite-canvas/plugin-sdk";
+import { useEffect, useMemo, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { KeyboardEvent } from "react";
 import { Select } from "antd";
@@ -155,6 +155,66 @@ export function H3PromptSection({
   }, [mentionItems, mentionQuery, promptMode]);
 
   const setPrompt = (value: string) => patchSelected({ prompt: value });
+
+  // ---- 提示词撤销/重做（按 clip 隔离，跨 clip 切换不丢历史）----
+  // 浏览器 textarea 原生撤销栈在受控组件被程序化改写 value（切 clip）时会失效，
+  // 这里自建 per-segment 历史栈，拦截 Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y。
+  const MAX_HISTORY = 200;
+  const undoRef = useRef<Map<string, { past: string[]; future: string[] }>>(new Map());
+  const lastPromptRef = useRef<string | undefined>(undefined);
+  const prevIdRef = useRef<string | undefined>(undefined);
+  const isProgrammaticRef = useRef(false);
+
+  // 统一记录每次 prompt 变更（用户键入、增强、@插入、外部 patch 如「设为当前 Clip」均覆盖）。
+  // 切 clip（segmentId 变化）不记录；undo/redo 自身通过 isProgrammaticRef 防重入。
+  useEffect(() => {
+    const id = selected?.id;
+    const newPrompt = String(selected?.prompt || "");
+    if (
+      id &&
+      prevIdRef.current === id &&
+      lastPromptRef.current !== undefined &&
+      lastPromptRef.current !== newPrompt &&
+      !isProgrammaticRef.current
+    ) {
+      const hist = undoRef.current.get(id) || { past: [], future: [] };
+      hist.past.push(lastPromptRef.current);
+      if (hist.past.length > MAX_HISTORY) hist.past.shift();
+      hist.future = [];
+      undoRef.current.set(id, hist);
+    }
+    prevIdRef.current = id;
+    lastPromptRef.current = newPrompt;
+    isProgrammaticRef.current = false;
+  }, [selected?.id, selected?.prompt]);
+
+  const undo = () => {
+    const id = selected?.id;
+    if (!id) return;
+    const hist = undoRef.current.get(id);
+    if (!hist || hist.past.length === 0) return;
+    const current = String(selected?.prompt || "");
+    const target = hist.past.pop() as string;
+    if (hist.future.length > MAX_HISTORY) hist.future.shift();
+    hist.future.push(current);
+    undoRef.current.set(id, hist);
+    isProgrammaticRef.current = true;
+    setPrompt(target);
+  };
+
+  const redo = () => {
+    const id = selected?.id;
+    if (!id) return;
+    const hist = undoRef.current.get(id);
+    if (!hist || hist.future.length === 0) return;
+    const current = String(selected?.prompt || "");
+    const target = hist.future.pop() as string;
+    if (hist.past.length > MAX_HISTORY) hist.past.shift();
+    hist.past.push(current);
+    undoRef.current.set(id, hist);
+    isProgrammaticRef.current = true;
+    setPrompt(target);
+  };
   const enhancePrompt = async () => {
     if (!prompt.trim() || enhancing) return;
     setEnhancing(true);
@@ -316,6 +376,18 @@ export function H3PromptSection({
   };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // 自定义撤销/重做：拦截浏览器原生 Ctrl+Z（原生在受控切换 clip 后会失效）
+    if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z")) {
+      event.preventDefault();
+      if (event.shiftKey) redo();
+      else undo();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === "y" || event.key === "Y")) {
+      event.preventDefault();
+      redo();
+      return;
+    }
     if (!mentionOpen || !visibleMentionItems.length) return;
     const active = Math.min(mentionActive, visibleMentionItems.length - 1);
     if (event.key === "ArrowDown") {

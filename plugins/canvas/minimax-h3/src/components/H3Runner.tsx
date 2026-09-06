@@ -195,9 +195,13 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 }
                 // 仅对接受额外图片参考的模式注入尾帧图（ref2va/r2v/rv2v 最多 9 张）；
                 // i2v/fl2v 图片数被模式固定（1/2 张），注入会违反约束，降级为仅提示词文本。
-                const tailFrameRef: H3Ref | null = (tailFrameDataUrl && isR2vOrRv2v) ? { url: tailFrameDataUrl, type: "image", name: `尾帧·Clip${activeIndex + index}` } : null;
+                // 尾帧来自「上一段」(prevLiveSeg，全局下标 = activeIndex + index - 1)，ref 名称与提示词标签都应指向该段，
+                // 不能用 activeIndex + index（那是本段全局下标，会被误标成本段的上一个视频）。
+                const prevClipLabel = `Clip ${activeIndex + index - 1}`;
+                const tailFrameRef: H3Ref | null = (tailFrameDataUrl && isR2vOrRv2v) ? { url: tailFrameDataUrl, type: "image", name: `尾帧·${prevClipLabel}` } : null;
                 if (tailFrameDataUrl && !tailFrameRef) console.warn(`[minimax-h3] 尾帧接续：下一段为 ${effectiveTaskMode} 模式（图片数被固定），仅注入提示词文本，不附加尾帧参考图`);
-                const effectiveSegmentImages = tailFrameRef ? [...segmentImages, tailFrameRef] : segmentImages;
+                // 尾帧接续开启时：尾帧作为 Picture 1（首位），原有参考图顺延（Picture 1 -> 2, 2 -> 3, ...）
+                const effectiveSegmentImages = tailFrameRef ? [tailFrameRef, ...segmentImages] : segmentImages;
                 if (effectiveSegmentImages.length > 9 || images.length > 9) throw new Error("MiniMax H3 最多支持 9 张参考图片");
                 if (segmentRefs.filter((ref) => ref.type === "video").length > 3 || upstream.filter((ref) => ref.type === "video").length > 3) throw new Error("MiniMax H3 最多支持 3 段参考视频");
                 if (segmentAudios.length > 3 || audios.length > 3) throw new Error("MiniMax H3 最多支持 3 段参考音频");
@@ -351,7 +355,8 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 // 尾帧接续：只要有截到的尾帧（无论模式是否允许注入参考图），都把「切镜保持人物/动作连续」的
                 // 描述拼进本次提交的提示词与日志；不回写 segment.prompt（编辑区保持用户原文）。
                 // 参考图本身只在接受多图参考的模式（ref2va/r2v/rv2v）注入，i2v/fl2v 图片数被模式固定则只拼提示词。
-                const submittedSegmentPrompt = tailFrameDataUrl ? buildTailFrameContinuation(segmentPrompt, nextPictureNumber(segmentPrompt, effectiveSegmentImages.length), `Clip ${activeIndex + index}`) : segmentPrompt;
+                // 尾帧接续开启时：尾帧始终作为 Picture 1（首位），提示词 Picture 编号顺延一位
+                const submittedSegmentPrompt = tailFrameDataUrl ? buildTailFrameContinuation(segmentPrompt, 1, prevClipLabel) : segmentPrompt;
                 const promptFlags = `${segment.noDub !== false ? "\nNo dialogue, narration, voiceover, or singing." : ""}${segment.noCaption !== false ? "\nNo subtitles, captions, on-screen text, or text overlays." : ""}`;
                 // 根据任务模式决定提交哪些 refs
                 // 透传 storageKey：后端媒体引用（图片/视频/音频）直接用 storageKey 复用，
@@ -442,7 +447,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         } catch (error) {
             // 增强错误日志：包含实际提交信息
             const errorMessage = error instanceof Error ? error.message : String(error);
-            const debugInfo = `[h3-run] taskMode=${lastSubmitted.taskMode}, video=${lastSubmitted.video}, images=${lastSubmitted.images}, audios=${lastSubmitted.audios}, model=${lastSubmitted.model}`;
+            const debugInfo = `[h3-run] taskMode=${lastSubmitted.taskMode}, video=${lastSubmitted.video}, images=${lastSubmitted.images}, audios=${lastSubmitted.audios}, model=${lastSubmitted.model}, latentUpscale=${lastSubmitted.latentUpscaleEnabled}, latentUpscaleModel=${lastSubmitted.latentUpscaleModel}`;
             const enhancedError = errorMessage.includes(debugInfo) ? errorMessage : `${errorMessage}\n${debugInfo}`;
             const current = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || liveMetadata);
             const errorStart = Math.max(0, current.findIndex((segment) => segment.id === liveSelectedId));
