@@ -22,10 +22,17 @@ const rtxQualities = ["ULTRA", "HIGH", "MEDIUM"];
 
 function H3Dropdown({ values, value, onChange, placeholder, allowClear = false, format, searchable = false, listId = "nfh3-options" }: { values: Array<string | number>; value?: string | number; onChange: (value: string | number) => void; placeholder?: string; allowClear?: boolean; format?: (value: string | number) => string; searchable?: boolean; listId?: string }) {
     const selected = value === undefined || value === null ? "" : String(value);
-    if (searchable) return <>
-        <input className="nfh3-native-select" type="search" value={selected} list={listId} placeholder={placeholder} autoComplete="off" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => onChange(event.target.value)} />
-        <datalist id={listId}>{values.map((item) => <option key={String(item)} value={String(item)}>{format ? format(item) : String(item)}</option>)}</datalist>
-    </>;
+    if (searchable) {
+        const commit = (v: string) => {
+            if (allowClear && v === "") { onChange(undefined as unknown as string); return; }
+            const match = values.find((item) => String(item) === v);
+            onChange(match ?? v);
+        };
+        return <>
+            <input className="nfh3-native-select" type="search" defaultValue={selected} list={listId} placeholder={placeholder} autoComplete="off" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onFocus={(event) => { event.currentTarget.value = ""; }} onKeyDown={(event) => { if (event.key === "Enter") commit(event.currentTarget.value); }} onBlur={(event) => { if (event.target.value === "") event.currentTarget.value = selected; commit(event.target.value); }} />
+            <datalist id={listId}>{values.map((item) => <option key={String(item)} value={String(item)}>{format ? format(item) : String(item)}</option>)}</datalist>
+        </>;
+    }
     return <select className="nfh3-native-select" value={selected} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => {
         if (allowClear && event.target.value === "") { onChange(undefined as unknown as string); return; }
         const option = values.find((item) => String(item) === event.target.value);
@@ -152,7 +159,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
             {control("时长秒", <InputNumber style={field} min={1} max={15} step={1} value={segment.duration != null ? Number(segment.duration) : undefined} placeholder="5" onChange={(value) => patch({ duration: value ?? undefined })} />)}
         </div>)}
         {section("sampling", "采样设置", `${segment.steps || 20} 步 · ${segment.sampler || "res_multistep"}`, <div className="nfh3-control-grid">
-            {choice("采样器", samplerChoices, segment.sampler || "res_multistep", (value) => patch({ sampler: value ? String(value) : undefined }), undefined, true, true, "选择采样器", true)}
+            {choice("采样器", samplerChoices, segment.sampler || "res_multistep", (value) => patch({ sampler: value ? String(value) : undefined }), undefined, true, false, "选择采样器", true)}
             {choice("调度器", schedulerChoices, segment.scheduler || "simple", (value) => patch({ scheduler: value ? String(value) : undefined }), undefined, true, false, "选择调度器", true)}
             {control("采样步数", <InputNumber style={field} min={1} max={100} value={segment.steps != null ? Number(segment.steps) : undefined} placeholder="20" onChange={(value) => patch({ steps: value ?? undefined })} />)}
             {control("降噪强度", <InputNumber style={field} min={0} max={1} step={0.01} value={segment.denoise != null ? Number(segment.denoise) : undefined} placeholder="1" onChange={(value) => patch({ denoise: value ?? undefined })} />)}
