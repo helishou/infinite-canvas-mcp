@@ -44,6 +44,13 @@ export function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {
 }
 
 export function runWorkflow(name: string, fields: WorkflowRunFields): Promise<WorkflowRunResult> {
-    return request<WorkflowRunResult>("POST", `/api/workflows/${encodeURIComponent(name)}/run`, { fields });
+    // 给一个空 config，避免后端 executor.run 第一行
+    // processImageFields(config.fields, …) 抛 "Cannot read properties of
+    // undefined (reading 'fields')"。用户后续在 workflows 页面配置
+    // 完字段后，前端会再传带 fields 的真 config。
+    return request<WorkflowRunResult>("POST", `/api/workflows/${encodeURIComponent(name)}/run`, {
+        fields,
+        config: { title: name, backend: "", operation: "", description: "", fields: [] },
+    });
 }
 

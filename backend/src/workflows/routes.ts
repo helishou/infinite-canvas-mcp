@@ -65,7 +65,19 @@ export function registerWorkflowRoutes(
     router.post("/api/workflows/:name/run", async (req: Request, res: Response) => {
         try {
             const name = decodeURIComponent(req.params.name as string);
-            const { fields, config } = req.body as { fields: Record<string, unknown>; config: WorkflowConfig };
+            const body = (req.body || {}) as { fields?: Record<string, unknown>; config?: WorkflowConfig };
+            // config 是 WorkflowExecutor.run 第一个会用到的字段（processImageFields 读
+            // config.fields），前端如果漏传会让 executor 立刻崩
+            // "Cannot read properties of undefined (reading 'fields')"。
+            // 给个空 config 兜底，等前端在 workflows 页面配完字段再传真 config。
+            const config: WorkflowConfig = body.config ?? {
+                title: name.split('/').pop()?.replace(/\.json$/, "") || name,
+                backend: "",
+                operation: "",
+                description: "",
+                fields: [],
+            };
+            const fields = body.fields ?? {};
             const detail = await store.get(name);
             const clientId = randomUUID();
             const result = await executor.run(detail.workflow, config, fields, clientId, undefined, name);
