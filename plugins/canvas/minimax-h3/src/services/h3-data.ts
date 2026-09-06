@@ -59,7 +59,11 @@ export function nextPictureNumber(prompt?: string, imageRefCount = 0): number {
         const n = parseInt(match[1], 10);
         if (!Number.isNaN(n) && n > max) max = n;
     }
-    return Math.max(max + 1, imageRefCount + 1);
+    // 取 max+1 与 imageRefCount 的较大值：
+    // - prompt 有 Picture 1..max → 下一个是 max+1
+    // - imageRefCount 是已有图片数（含尾帧），尾帧序号不能小于已有图片数
+    // 原逻辑 Math.max(max + 1, imageRefCount + 1) 会跳号（如 max=1, imageRefCount=2 → 3）
+    return Math.max(max + 1, imageRefCount);
 }
 
 // <Picture N> 的定义行（放在 subject_definitions；H3 规范要求标签先在此定义再被引用）。
