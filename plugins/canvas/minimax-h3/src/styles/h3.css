@@ -87,6 +87,9 @@
 /* 截取尾帧按钮：顶部居中（位于 motion 与 delete 两个角按钮之间），样式与 motion 一致 */
 .minimax-clip-tailframe { position:absolute; left:50%; top:5%; transform:translateX(-50%); z-index:4; width:10%; aspect-ratio:1/1; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#a7f3d0; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:65%; line-height:1; opacity:.55; transition:opacity .12s ease; }
 .minimax-clip-tailframe:hover { opacity:1; color:#6ee7b7; }
+/* 尾帧接续开关「开启」状态：用强调色（翡翠绿）实心填充 + 发光，和关闭态明显区分 */
+.minimax-clip-tailframe.on { color:#052e1a; background:#34d399; opacity:1; box-shadow:0 0 0 1px #6ee7b7, 0 0 8px rgba(52,211,153,.55); }
+.minimax-clip-tailframe.on:hover { background:#6ee7b7; }
 /* 截取尾帧的瞬时反馈 toast（自包含，不依赖 antd App 上下文） */
 .minimax-clip-flash { position:absolute; left:50%; bottom:5px; transform:translateX(-50%); z-index:6; max-width:92%; padding:2px 6px; border-radius:4px; font-size:14px; line-height:1.25; text-align:center; background:rgba(15,23,42,.92); color:#e2e8f0; pointer-events:none; white-space:normal; }
 .minimax-clip-flash.ok { color:#86efac; }

@@ -131,6 +131,9 @@ export type H3Segment = {
     trimOut?: number;
     motionContextEnabled?: boolean;
     tailFrameEnabled?: boolean;
+    // 尾帧接续：本段运行结束后，下一段运行自动抓取本段尾帧作为首帧参考并拼接到提示词
+    // （仅运行时拼接，不写回 prompt 编辑区）。该开关标在本段上，表示「把我的尾帧传给下一段」。
+    tailFrameContinuation?: boolean;
     motionContextNoiseEnabled?: boolean;
     motionContextNoiseAlpha?: number;
     motionContextNoiseAlphaEnd?: number;

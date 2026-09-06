@@ -15,17 +15,20 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected, patchSelec
     const listRef = useRef<HTMLDivElement | null>(null);
     const [cardH, setCardH] = useState(78);
     useEffect(() => {
-        const el = listRef.current;
-        if (!el) return;
+        // 测量父容器（.minimax-library）的可用高度，而非 listRef 自身：
+        // listRef 是 grid 容器，其高度由 --h3-out-card-h 决定，若测量自身会形成
+        // cardH → CSS → 容器高度 → ResizeObserver → cardH 的死循环，导致卡片尺寸持续跳变。
+        const parent = listRef.current?.parentElement;
+        if (!parent) return;
         const measure = () => {
-            const style = window.getComputedStyle(el);
-            const availH = el.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+            const style = window.getComputedStyle(parent);
+            const availH = parent.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom) - 28;
             if (availH <= 40) return;
             const next = Math.round(Math.max(78, Math.min(380, availH)));
             setCardH((prev) => (Math.abs(prev - next) > 1 ? next : prev));
         };
         const ro = new ResizeObserver(measure);
-        ro.observe(el);
+        ro.observe(parent);
         measure();
         return () => ro.disconnect();
     }, []);

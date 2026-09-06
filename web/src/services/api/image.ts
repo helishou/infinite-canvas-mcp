@@ -966,8 +966,7 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
                 signal: options?.signal,
                 onDelta,
             });
-            const text = String(answer ?? "").trim() || apiText("noContent");
-            if (text === apiText("noContent")) onDelta(text);
+            const text = String(answer ?? "").trim() || "";
             return text;
         } catch (error) {
             throw new Error(readAxiosError(error, apiText("requestFailed")));
@@ -975,8 +974,8 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
     }
     try {
         if (requestConfig.apiFormat === "gemini") {
-            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, normalizedMessages), onDelta, options)).content || apiText("noContent");
-            if (answer === apiText("noContent")) onDelta(answer);
+            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, normalizedMessages), onDelta, options)).content || "";
+            if (answer === "") onDelta(answer);
             return answer;
         }
         if (requestConfig.apiFormat === "openai-chat") {
@@ -993,8 +992,8 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
             const answer = (await requestChatCompletionsStreaming(requestConfig, {
                 model: requestConfig.model,
                 messages: chatMessages,
-            }, onDelta, options)).content || apiText("noContent");
-            if (answer === apiText("noContent")) onDelta(answer);
+            }, onDelta, options)).content || "";
+            if (answer === "") onDelta(answer);
             return answer;
         }
         // 优先用 Responses API（GPT-5+）。如果中转/服务端对 `/responses` 没实现或 CORS
@@ -1015,8 +1014,8 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
                 model: requestConfig.model,
                 input: toResponseInput(withSystemMessage(requestConfig, normalizedMessages)),
                 ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
-            }, onDelta, options)).content || apiText("noContent");
-            if (answer === apiText("noContent")) onDelta(answer);
+            }, onDelta, options)).content || "";
+            if (answer === "") onDelta(answer);
             return answer;
         } catch (responsesError) {
             const typed = responsesError as Error & { status?: number };
@@ -1031,8 +1030,8 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
                 const answer = (await requestChatCompletionsStreaming(requestConfig, {
                     model: requestConfig.model,
                     messages: chatMessages,
-                }, onDelta, options)).content || apiText("noContent");
-                if (answer === apiText("noContent")) onDelta(answer);
+                }, onDelta, options)).content || "";
+                if (answer === "") onDelta(answer);
                 return answer;
             } catch (chatError) {
                 // 两个端点都失败：把模型名与试过的路径带上，方便直接定位（典型：Ollama 里没装该模型）

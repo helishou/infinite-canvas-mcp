@@ -207,7 +207,14 @@ export function H3PromptSection({
         system,
         references: references.map((ref) => ({ url: ref.url, name: ref.name })),
       });
-      if (result.text.trim()) setPrompt(result.text.trim());
+      // 模型未返回内容时（如 Ollama 空响应），requestImageQuestion 现在返回空串，
+      // 这里不能把 prompt 覆写成占位符/空串——保留用户原文，并给出明确失败提示。
+      const enhanced = result.text.trim();
+      if (enhanced) {
+        setPrompt(enhanced);
+      } else {
+        ctx.updateMetadata({ promptEnhanceError: "模型未返回内容，增强被跳过（请检查文本模型配置或重试）" });
+      }
     } catch (error) {
       ctx.updateMetadata({
         promptEnhanceError:

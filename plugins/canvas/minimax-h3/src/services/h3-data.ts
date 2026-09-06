@@ -64,15 +64,62 @@ export function nextPictureNumber(prompt?: string, imageRefCount = 0): number {
 
 // <Picture N> 的定义行（放在 subject_definitions；H3 规范要求标签先在此定义再被引用）。
 export function appendSubjectDefinition(prompt: string, pictureNumber: number, fromClipLabel: string): string {
-    const line = `<Picture ${pictureNumber}> is the opening frame of this segment, reused from the ending frame of ${fromClipLabel} to anchor character and scene continuity.`;
+    const line = `<Picture ${pictureNumber}> is the opening frame of this segment, hard-cut from the ending frame of ${fromClipLabel} to anchor character and scene continuity.`;
     return appendToSection(prompt, "subject_definitions", line);
 }
 
-// retention_analysis 里的引用行：用官方格式 `<Picture N> ([Shot 1] first frame): fully_preserved - ...`，
-// 说明该帧是上一段尾帧、作为本段首帧参考以保持人物/场景连续。
-export function appendRetentionAnalysis(prompt: string, pictureNumber: number, fromClipLabel: string): string {
-    const line = `<Picture ${pictureNumber}> ([Shot 1] first frame): fully_preserved - the ending frame of ${fromClipLabel}, reused as the opening frame of this segment to preserve character identity and scene continuity.`;
-    return appendToSection(prompt, "retention_analysis", line);
+// 尾帧接续：把上一段尾帧作为本段「切镜」首帧参考，但保持人物与动作连续性。
+// 注意用 partially_preserved（而非 fully_preserved）——这是一次 scene cut，
+// 不是无缝 match-cut 续接；帧被复用为开场帧，但人物身份/姿态/进行中的动作要跨切保持。
+export function buildTailFrameContinuation(prompt: string, pictureNumber: number, fromClipLabel: string): string {
+    let p = prompt;
+    if (/^subject_definitions\s*[:：]/m.test(p)) {
+        p = appendSubjectDefinition(p, pictureNumber, fromClipLabel);
+    }
+    const line = `<Picture ${pictureNumber}> ([Shot 1] first frame): partially_preserved - the ending frame of ${fromClipLabel} is hard-cut into this segment as the opening frame; preserve the character's identity, pose, and ongoing action across the cut, but treat it as a new shot/scene (not a seamless match-cut continuation).`;
+    return appendToSection(p, "retention_analysis", line);
+}
+
+// 截取视频尾帧为 PNG data URL（略回退 1/30s 防踩在 duration 边界取到黑屏/空帧）。
+// 返回 null 表示截取失败。仅在浏览器环境调用。
+export function captureVideoTailFrameDataUrl(src: string): Promise<string | null> {
+    return new Promise((resolve) => {
+        const video = document.createElement("video");
+        video.src = src;
+        video.muted = true;
+        video.preload = "auto";
+        let settled = false;
+        const cleanup = () => { try { video.removeAttribute("src"); video.load(); } catch { /* ignore */ } };
+        const fail = (reason: string) => { if (!settled) { settled = true; cleanup(); resolve(null); console.warn("[minimax-h3] tail-frame capture failed:", reason); } };
+        video.addEventListener("error", () => fail("video load error"));
+        video.addEventListener("loadedmetadata", () => {
+            const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+            video.currentTime = Math.max(0, duration - 1 / 30);
+        });
+        video.addEventListener("seeked", () => {
+            if (settled) return;
+            try {
+                const vw = video.videoWidth || 1280;
+                const vh = video.videoHeight || 720;
+                const maxLong = 768;
+                const scale = Math.min(1, maxLong / Math.max(vw, vh));
+                const cw = Math.max(1, Math.round(vw * scale));
+                const ch = Math.max(1, Math.round(vh * scale));
+                const canvas = document.createElement("canvas");
+                canvas.width = cw;
+                canvas.height = ch;
+                const cx = canvas.getContext("2d");
+                if (!cx) return fail("no 2d context");
+                cx.drawImage(video, 0, 0, cw, ch);
+                settled = true;
+                cleanup();
+                resolve(canvas.toDataURL("image/png"));
+            } catch (error) {
+                fail(error instanceof Error ? error.message : String(error));
+            }
+        });
+        video.load();
+    });
 }
 
 export function resultUrl(value: unknown) {

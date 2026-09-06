@@ -4,7 +4,7 @@ import type { H3Ref, H3Segment } from "../types";
 import { defaultH3Model, defaultPrompt } from "../constants";
 import { compatibleH3Settings, normalizeH3Model } from "../services/h3-compatibility";
 import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
-import { appendVideoMaterials, refsForSegment, resultUrl } from "../services/h3-data";
+import { appendVideoMaterials, refsForSegment, resultUrl, nextPictureNumber, buildTailFrameContinuation, captureVideoTailFrameDataUrl } from "../services/h3-data";
 import { restorableParams } from "../services/h3-segment-utils";
 import { readH3Refs } from "../services/h3-refs";
 import { createH3Log } from "../services/h3-logs";
@@ -175,7 +175,30 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                     : undefined;
                 const segmentImages = isT2v || isV2v ? [] : segmentRefs.filter((ref) => ref.type === "image");
                 const segmentAudios = isT2v || isV2v || isI2vFl2v ? [] : segmentRefs.filter((ref) => ref.type === "audio");
-                if (segmentImages.length > 9 || images.length > 9) throw new Error("MiniMax H3 最多支持 9 张参考图片");
+                // 尾帧接续（运行时自动）：上一段开启 tailFrameContinuation 且有生成视频时，
+                // 抓取上一段尾帧，作为本段首帧参考图（接受多图参考的模式）并拼到提示词
+                // retention_analysis；不修改 segment.prompt 编辑区。
+                // 上一段结果从「实时节点 metadata」取（而非本次运行起始快照），这样连续单次
+                // 运行（手动点某 Clip）也能拿到前一段已生成的尾帧，无需手动去切。
+                // prevLiveSeg 是整条时间轴上本段的前一段（本段全局下标 = activeIndex + index）。
+                // 注意：不能用「循环内 index > 0」作守卫——单独运行某段时 storedSegments 仅 1 项、
+                // index 恒为 0，续链运行的第一段也是 index=0，两种场景都会被错误排除，导致永远抓不到尾帧。
+                // 正确守卫是「时间轴上确有前一段（prevLiveSeg 存在）」：JS 对负下标返回 undefined，
+                // 故首段（activeIndex=0 且 index=0 → -1）自然为 undefined，无需额外判断。
+                const prevLiveSeg = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || liveMetadata)[activeIndex + index - 1];
+                const prevContinuation = Boolean(prevLiveSeg?.tailFrameContinuation) && Boolean(prevLiveSeg?.result);
+                let tailFrameDataUrl: string | null = null;
+                if (prevContinuation) {
+                    const prevUrl = resultUrl(prevLiveSeg!.result);
+                    tailFrameDataUrl = prevUrl ? await captureVideoTailFrameDataUrl(prevUrl) : null;
+                    if (!tailFrameDataUrl) console.warn("[minimax-h3] 尾帧接续：截取上一段尾帧失败，本次跳过尾帧注入");
+                }
+                // 仅对接受额外图片参考的模式注入尾帧图（ref2va/r2v/rv2v 最多 9 张）；
+                // i2v/fl2v 图片数被模式固定（1/2 张），注入会违反约束，降级为仅提示词文本。
+                const tailFrameRef: H3Ref | null = (tailFrameDataUrl && isR2vOrRv2v) ? { url: tailFrameDataUrl, type: "image", name: `尾帧·Clip${activeIndex + index}` } : null;
+                if (tailFrameDataUrl && !tailFrameRef) console.warn(`[minimax-h3] 尾帧接续：下一段为 ${effectiveTaskMode} 模式（图片数被固定），仅注入提示词文本，不附加尾帧参考图`);
+                const effectiveSegmentImages = tailFrameRef ? [...segmentImages, tailFrameRef] : segmentImages;
+                if (effectiveSegmentImages.length > 9 || images.length > 9) throw new Error("MiniMax H3 最多支持 9 张参考图片");
                 if (segmentRefs.filter((ref) => ref.type === "video").length > 3 || upstream.filter((ref) => ref.type === "video").length > 3) throw new Error("MiniMax H3 最多支持 3 段参考视频");
                 if (segmentAudios.length > 3 || audios.length > 3) throw new Error("MiniMax H3 最多支持 3 段参考音频");
                 if (requestedTaskMode === "i2v" && segmentImages.length !== 1) throw new Error("I2V 必须且只能使用 1 张图片作为首帧");
@@ -322,21 +345,28 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                     }, optionsData);
                 };
                 const segmentPrompt = segment.prompt !== undefined ? String(segment.prompt) : effectivePrompt;
+                // 尾帧接续：把上一段尾帧作为本段「切镜」首帧参考，但保持人物/动作连续性。
+                // 用 partially_preserved 描述（新镜头，不是无缝 match-cut 续接）。
+                // 仅注入到本次提交的提示词与日志；不回写 segment.prompt（编辑区保持用户原文）。
+                // 尾帧接续：只要有截到的尾帧（无论模式是否允许注入参考图），都把「切镜保持人物/动作连续」的
+                // 描述拼进本次提交的提示词与日志；不回写 segment.prompt（编辑区保持用户原文）。
+                // 参考图本身只在接受多图参考的模式（ref2va/r2v/rv2v）注入，i2v/fl2v 图片数被模式固定则只拼提示词。
+                const submittedSegmentPrompt = tailFrameDataUrl ? buildTailFrameContinuation(segmentPrompt, nextPictureNumber(segmentPrompt, effectiveSegmentImages.length), `Clip ${activeIndex + index}`) : segmentPrompt;
                 const promptFlags = `${segment.noDub !== false ? "\nNo dialogue, narration, voiceover, or singing." : ""}${segment.noCaption !== false ? "\nNo subtitles, captions, on-screen text, or text overlays." : ""}`;
                 // 根据任务模式决定提交哪些 refs
                 // 透传 storageKey：后端媒体引用（图片/视频/音频）直接用 storageKey 复用，
                 // 避免只留 url 时 extractStorageKey 反推出被 URL 编码的 key（如 image%3A<uuid>）
                 // 导致后端查不到（404）或退化到 dataUrl 分支（400 畸形 data URL）。
-                const finalReferences = isT2v || isV2v ? [] : (isI2vFl2v ? segmentImages : (segmentImages.length ? segmentImages : images)).map((ref) => ({ name: `${ref.name}.png`, url: ref.url, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) }));
-                const finalVideo = !isT2v && !isI2vFl2v ? (segmentVideo ? { name: `${segmentVideo.name}.mp4`, url: segmentVideo.url, ...(segmentVideo.storageKey ? { storageKey: segmentVideo.storageKey } : {}) } : undefined) : undefined;
-                const finalAudios = isR2vOrRv2v ? (segmentAudios.length ? segmentAudios : audios).map((ref) => ({ name: `${ref.name}.mp3`, url: ref.url, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) })) : [];
+                const finalReferences = isT2v || isV2v ? [] : (isI2vFl2v ? segmentImages : (effectiveSegmentImages.length ? effectiveSegmentImages : images)).map((ref) => ({ name: `${ref.name}.png`, url: ref.url, type: ref.type, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) }));
+                const finalVideo = !isT2v && !isI2vFl2v ? (segmentVideo ? { name: `${segmentVideo.name}.mp4`, url: segmentVideo.url, type: "video", ...(segmentVideo.storageKey ? { storageKey: segmentVideo.storageKey } : {}) } : undefined) : undefined;
+                const finalAudios = isR2vOrRv2v ? (segmentAudios.length ? segmentAudios : audios).map((ref) => ({ name: `${ref.name}.mp3`, url: ref.url, type: ref.type, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) })) : [];
                 // 记录提交信息用于错误日志
                 lastSubmitted.taskMode = effectiveTaskMode;
                 lastSubmitted.video = finalVideo ? 1 : 0;
                 lastSubmitted.images = finalReferences.length;
                 lastSubmitted.audios = finalAudios.length;
                 lastSubmitted.model = segmentSettings.modelName;
-                const submittedPrompt = `${segmentPrompt}${promptFlags}`;
+                const submittedPrompt = `${submittedSegmentPrompt}${promptFlags}`;
                 const submittedInput = {
                     video: finalVideo,
                     references: finalReferences,
