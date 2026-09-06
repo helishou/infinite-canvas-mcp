@@ -52,6 +52,39 @@ export type PluginDeclaration = {
     updatedAt: string;
 };
 
+// ── Workflow Import ──────────────────────────────────────────────────────
+
+export type WorkflowFieldType = 'text' | 'number' | 'slider' | 'boolean' | 'dropdown' | 'image';
+
+export type WorkflowField = {
+    id: string;
+    node: string;
+    input: string;
+    name: string;
+    type: WorkflowFieldType;
+    default?: unknown;
+    min?: number;
+    max?: number;
+    step?: number;
+    options?: string[];
+    randomEnabled?: boolean;
+};
+
+export type WorkflowConfig = {
+    title: string;
+    backend: string;
+    operation: string;
+    description: string;
+    fields: WorkflowField[];
+    mediaInputs?: Record<string, unknown>;
+    miniCards?: Record<string, unknown>;
+};
+
+export type WorkflowConfigRow = {
+    name: string; title: string; backend: string; description: string; operation: string;
+    fieldsJson: string; mediaInputsJson: string; miniCardsJson: string; updatedAt: string;
+};
+
 // ── Database ──────────────────────────────────────────────────────────────────
 
 export class BackendDatabase {
@@ -170,6 +203,17 @@ export class BackendDatabase {
                 tools_json TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS workflow_configs (
+                name TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT '',
+                backend TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                operation TEXT NOT NULL DEFAULT '',
+                fields_json TEXT NOT NULL DEFAULT '[]',
+                media_inputs_json TEXT NOT NULL DEFAULT '{}',
+                mini_cards_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            );
         `);
         const version = this.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version?: number } | undefined;
         if (!version?.version) {
@@ -252,7 +296,56 @@ export class BackendDatabase {
         return this.listPluginDeclarations();
     }
 
-    // ── assets ────────────────────────────────────────────────────────────
+    // ── workflow_configs ─────────────────────────────────────────────────
+
+    getWorkflowConfig(name: string): WorkflowConfigRow | null {
+        const row = this.db.prepare("SELECT * FROM workflow_configs WHERE name = ?").get(name) as Record<string, unknown> | undefined;
+        if (!row) return null;
+        try {
+            return {
+                name: String(row.name),
+                title: String(row.title || ''),
+                backend: String(row.backend || ''),
+                description: String(row.description || ''),
+                operation: String(row.operation || ''),
+                fieldsJson: String(row.fields_json || '[]'),
+                mediaInputsJson: String(row.media_inputs_json || '{}'),
+                miniCardsJson: String(row.mini_cards_json || '{}'),
+                updatedAt: String(row.updated_at),
+            };
+        } catch { return null; }
+    }
+
+    upsertWorkflowConfig(name: string, config: {
+        title?: string; backend?: string; description?: string; operation?: string;
+        fieldsJson?: string; mediaInputsJson?: string; miniCardsJson?: string;
+    }): void {
+        const now = new Date().toISOString();
+        const existing = this.getWorkflowConfig(name);
+        this.db.prepare(`
+            INSERT INTO workflow_configs (name, title, backend, description, operation, fields_json, media_inputs_json, mini_cards_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                title = excluded.title, backend = excluded.backend, description = excluded.description,
+                operation = excluded.operation, fields_json = excluded.fields_json,
+                media_inputs_json = excluded.media_inputs_json, mini_cards_json = excluded.mini_cards_json,
+                updated_at = excluded.updated_at
+        `).run(
+            name,
+            config.title ?? existing?.title ?? '',
+            config.backend ?? existing?.backend ?? '',
+            config.description ?? existing?.description ?? '',
+            config.operation ?? existing?.operation ?? '',
+            config.fieldsJson ?? existing?.fieldsJson ?? '[]',
+            config.mediaInputsJson ?? existing?.mediaInputsJson ?? '{}',
+            config.miniCardsJson ?? existing?.miniCardsJson ?? '{}',
+            now,
+        );
+    }
+
+    deleteWorkflowConfig(name: string): number {
+        return Number(this.db.prepare("DELETE FROM workflow_configs WHERE name = ?").run(name).changes);
+    }
 
     listAssets(options: { kind?: string; folderId?: string } = {}): Asset[] {
         const clauses: string[] = [];

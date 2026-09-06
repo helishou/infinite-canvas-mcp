@@ -15,6 +15,9 @@ import { RunningHubBackend } from "./runtime/runninghub.js";
 import { VideoConcatBackend } from "./runtime/video-concat.js";
 import { registerAgentRuntimeRoutes } from "./server/agent-runtime-routes.js";
 import { createAgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";
+import { WorkflowStore } from "./workflows/store.js";
+import { WorkflowExecutor } from "./workflows/executor.js";
+import { registerWorkflowRoutes } from "./workflows/routes.js";
 import { startBackendMcpServer } from "./mcp.js";
 
 const logger = createLogger("main");
@@ -41,6 +44,11 @@ const videoConcat = new VideoConcatBackend(runtime.tasks, undefined, runtime.eve
 
 const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: runtime.events, stores: runtime.stores });
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
+
+// Workflow import routes
+const workflowStore = new WorkflowStore(db);
+const workflowExecutor = new WorkflowExecutor(runtime.comfy, runtime.stores.tasks, runtime.stores.media, runtime.events, db);
+registerWorkflowRoutes(app, workflowStore, workflowExecutor);
 registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat, runtime.events);
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events, basePath: "/agent" }, runtime.comfy);
 const agent = createAgentRuntime({ backendUrl: config.url, backendToken: config.token });

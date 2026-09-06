@@ -163,6 +163,10 @@ export class WorkflowExecutor {
                 platform: "workflow",
                 workflow: name || "unknown",
                 prompt: config.title,
+                references: [],
+                inputCounts: {},
+                startedAt: new Date().toISOString(),
+                durationMs: 0,
                 outputs: finalResult.media.map((m) => ({
                     url: m.url,
                     storageKey: m.storageKey,
@@ -182,6 +186,11 @@ export class WorkflowExecutor {
                 platform: "workflow",
                 workflow: name || "unknown",
                 prompt: config.title,
+                references: [],
+                inputCounts: {},
+                startedAt: new Date().toISOString(),
+                durationMs: 0,
+                outputs: [],
                 error: message,
                 params: { fields: fieldValues, configTitle: config.title },
             });

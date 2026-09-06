@@ -466,7 +466,7 @@ export class ComfyUiBackend {
         }
     }
 
-    private async upload(file: string, signal: AbortSignal, comfyUrl = this.url) {
+    public async upload(file: string, signal: AbortSignal, comfyUrl = this.url) {
         const { readFile } = await import("node:fs/promises");
         const data = await readFile(file);
         const form = new FormData();
@@ -1101,7 +1101,9 @@ async function fetchWithRetry(url: string, signal: AbortSignal, attempts = 4, de
     throw new Error(`fetch ${url} 失败`);
 }
 
-async function collectOutputMedia(outputs: Record<string, any>, baseUrl: string, mediaStore: MediaStore, signal: AbortSignal) {
+export type CollectedMedia = { url: string; storageKey?: string; mimeType: string; filename: string; sourceUrl?: string };
+
+export async function collectOutputMedia(outputs: Record<string, any>, baseUrl: string, mediaStore: MediaStore, signal: AbortSignal): Promise<CollectedMedia[]> {
     // 对齐旧版 Python 项目的做法：递归遍历 outputs 的所有键，收集任何带 filename 的条目，
     // 不局限于 images/gifs/videos 三个固定键——自定义节点（rgthree 的 a_images/b_images、
     // 各类 Save 节点的自定义键）也能被捞起。仅按 filename+subfolder+type 去重。

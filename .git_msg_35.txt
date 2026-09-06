@@ -1,0 +1,8 @@
+fix(config): 移除协议下拉重复 value 的 ComfyUI 占位项
+
+- 10b2ce19 在 apiFormatOptions 加了 { label: "本地 ComfyUI",
+  value: "openai", disabled: true } 占位项
+- AntD Select options 用重复 value 渲染会冲突，OpenAI 真实
+  项变得不可点（"openai 选不了了"）
+- 修复：移除占位项；改用 Select 下面一行 hint 文字提示
+  ComfyUI 渠道不走协议、下方「渠道类型」已选

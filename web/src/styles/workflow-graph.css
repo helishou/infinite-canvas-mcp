@@ -1,0 +1,23 @@
+.graph-svg-wrap {
+    cursor: grab;
+    user-select: none;
+}
+
+.graph-svg-wrap.is-panning {
+    cursor: grabbing;
+}
+
+.gnode rect {
+    transition: stroke 0.15s, stroke-width 0.15s;
+}
+
+.gnode:hover rect {
+    stroke: #3b82f6;
+    stroke-width: 2;
+}
+
+.gnode.is-active rect {
+    stroke: #2563eb;
+    stroke-width: 2;
+    filter: drop-shadow(0 0 4px rgba(37, 99, 235, 0.3));
+}

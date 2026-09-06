@@ -48,6 +48,7 @@ export default defineConfig({
     // 浏览器不再直连 17370，长连接不再被代理掐断。/events、/agent 均非 SPA 路由，不会与前端冲突。
     server: {
         proxy: {
+            "/api": { target: "http://127.0.0.1:17370", changeOrigin: true },
             "/media": { target: "http://127.0.0.1:17370", changeOrigin: true },
             "/events": { target: "http://127.0.0.1:17370", changeOrigin: true },
             "/agent": { target: "http://127.0.0.1:17370", changeOrigin: true },
