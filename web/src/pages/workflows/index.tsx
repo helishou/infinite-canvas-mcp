@@ -331,6 +331,7 @@ export default function WorkflowsPage() {
 type RunPanelProps = {
     config: WorkflowConfig;
     onRun: (fields: Record<string, string>) => void;
+    onFieldChange?: (fieldId: string, value: string) => void;
     running: boolean;
     result: TaskResult | null;
 };
@@ -343,9 +344,25 @@ type ImageFieldUploadProps = {
 
 function ImageFieldUpload({ fieldId, value, onChange }: ImageFieldUploadProps) {
     const inputRef = useRef<HTMLInputElement>(null);
-    const [previewUrl, setPreviewUrl] = useState<string>(value || "");
+    const storageKey = `wf_image_${fieldId}`;
+    const [previewUrl, setPreviewUrl] = useState<string>>(() => {
+        // 优先使用当前值，否则从 localStorage 恢复
+        if (value) return value;
+        try { return localStorage.getItem(storageKey) || ""; } catch { return ""; }
+    });
 
-    useEffect(() => { setPreviewUrl(value || ""); }, [value]);
+    useEffect(() => {
+        if (value) setPreviewUrl(value);
+    }, [value]);
+
+    useEffect(() => {
+        // 持久化到 localStorage
+        if (previewUrl && previewUrl.startsWith("data:")) {
+            try { localStorage.setItem(storageKey, previewUrl); } catch { /* ignore */ }
+        } else if (previewUrl === "") {
+            try { localStorage.removeItem(storageKey); } catch { /* ignore */ }
+        }
+    }, [previewUrl, storageKey]);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -366,9 +383,9 @@ function ImageFieldUpload({ fieldId, value, onChange }: ImageFieldUploadProps) {
             <div className="flex items-center gap-2">
                 <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
                 <Button size="small" icon={<Upload className="size-3" />} onClick={() => inputRef.current?.click()}>
-                    {value ? "更换图片" : "选择图片"}
+                    {previewUrl ? "更换图片" : "选择图片"}
                 </Button>
-                {value && (
+                {previewUrl && (
                     <>
                         <Tag color="blue" className="text-xs truncate max-w-32">已选择图片</Tag>
                         <Button size="small" danger type="text" onClick={() => { setPreviewUrl(""); onChange(""); }}>
