@@ -9,11 +9,37 @@ export type WorkflowItem = {
     hasConfig?: boolean;
 };
 
+// 跟 backend/src/db.ts 的 WorkflowField / WorkflowConfig 对齐。
+// 配置面板加完后这个类型可以删，本地前端 types 由 workflows 页面那侧维护。
+export type WorkflowFieldType = "text" | "number" | "slider" | "boolean" | "dropdown" | "image";
+export type WorkflowField = {
+    id: string;
+    node: string;
+    input: string;
+    name: string;
+    type: WorkflowFieldType;
+    default?: unknown;
+    min?: number;
+    max?: number;
+    step?: number;
+    options?: string[];
+    randomEnabled?: boolean;
+};
+export type WorkflowConfig = {
+    title: string;
+    backend: string;
+    operation: string;
+    description: string;
+    fields: WorkflowField[];
+    mediaInputs?: Record<string, unknown>;
+    miniCards?: Record<string, unknown>;
+};
+
 export type WorkflowDetail = {
     name: string;
     description?: string;
     workflow: Record<string, unknown>;
-    config?: Record<string, unknown>;
+    config?: WorkflowConfig;
 };
 
 // 跟 backend/src/workflows/executor.ts 的 RunResult 对齐；
@@ -27,12 +53,13 @@ export type WorkflowRunResult = {
     error?: string;
 };
 
-// 极简 fields：生图工作台暂时只传 prompt 字段。
-// 复杂字段（lora / sampler / …）等 workflows 页面配置面板加完 UI 再补。
+// fields 字典：key = WorkflowField.id，value：
+//   - image 字段：dataURL 字符串
+//   - text/number/... 字段：原始值
+// 顶层 prompt 字段约定 key = "prompt"（与生图工作台传入对齐）
 export type WorkflowRunFields = {
     prompt?: string;
-    references?: string[];
-    [key: string]: unknown;
+    [fieldId: string]: unknown;
 };
 
 export function fetchWorkflows(): Promise<{ workflows: WorkflowItem[] }> {
@@ -43,14 +70,21 @@ export function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {
     return request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(name)}`);
 }
 
-export function runWorkflow(name: string, fields: WorkflowRunFields): Promise<WorkflowRunResult> {
-    // 给一个空 config，避免后端 executor.run 第一行
-    // processImageFields(config.fields, …) 抛 "Cannot read properties of
-    // undefined (reading 'fields')"。用户后续在 workflows 页面配置
-    // 完字段后，前端会再传带 fields 的真 config。
+export function runWorkflow(name: string, fields: WorkflowRunFields, config?: WorkflowConfig): Promise<WorkflowRunResult> {
+    // config 是 WorkflowExecutor.run 第一个会用到的字段（processImageFields 读
+    // config.fields），前端如果漏传会让 executor 立刻崩
+    // "Cannot read properties of undefined (reading 'fields')"。
+    // 用户后续在 workflows 页面配完字段后，前端传真 config 让
+    // processImageFields 能把 image 类型的 dataURL 上传到 ComfyUI。
     return request<WorkflowRunResult>("POST", `/api/workflows/${encodeURIComponent(name)}/run`, {
         fields,
-        config: { title: name, backend: "", operation: "", description: "", fields: [] },
+        config: config ?? {
+            title: name.split("/").pop()?.replace(/\.json$/, "") || name,
+            backend: "",
+            operation: "",
+            description: "",
+            fields: [],
+        },
     });
 }
 

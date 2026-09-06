@@ -20,7 +20,7 @@ import { deleteStoredImages, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import { resolveComfyImageSize, resolveComfyEndpoint, runComfyTask } from "@/services/api/comfyui";
-import { runWorkflow } from "@/services/api/workflows";
+import { fetchWorkflowDetail, runWorkflow } from "@/services/api/workflows";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
 import { deleteWorkbenchLogs, readWorkbenchLogs, saveWorkbenchLog } from "@/services/workbench-logs";
@@ -353,11 +353,22 @@ export default function ImagePage() {
                 );
             } else if (local) {
                 // 用户上传的 ComfyUI workflow（含 / 的名字是后端 store 允许的 custom/ 前缀）
-                // 第一版只透传 prompt；复杂 fields（lora / sampler / 图片 inputs）等
-                // workflows 页面配置面板加完 UI 再扩 WorkflowRunFields。
-                const run = await runWorkflow(selectedModelName, {
-                    prompt: snapshot.text,
-                });
+                // 1) 拉 workflow 详情：拿 config.fields 里 type=image 的 input 节点
+                // 2) 把生图工作台选的 references 按 image field 顺序塞到 fields
+                // 3) runWorkflow 传真 config + fields，后端 processImageFields
+                //    会把 dataURL 上传到 ComfyUI 转文件名注入 workflow
+                const detail = await fetchWorkflowDetail(selectedModelName);
+                const imageFields = (detail.config?.fields || []).filter((field) => field.type === "image");
+                const workflowFields: Record<string, unknown> = { prompt: snapshot.text };
+                for (let index = 0; index < imageFields.length; index += 1) {
+                    const field = imageFields[index];
+                    const ref = snapshot.references[index];
+                    if (!ref) continue;
+                    // dataUrl 优先，storageKey 也带上让后端可选走 media 引用
+                    const dataUrl = ref.dataUrl || ref.url;
+                    if (typeof dataUrl === "string" && dataUrl) workflowFields[field.id] = dataUrl;
+                }
+                const run = await runWorkflow(selectedModelName, workflowFields, detail.config);
                 if (run.error) throw new Error(run.error);
                 const first = run.media?.[0];
                 if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");
