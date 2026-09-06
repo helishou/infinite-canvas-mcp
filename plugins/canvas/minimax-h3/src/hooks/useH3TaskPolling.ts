@@ -2,7 +2,7 @@ import { useEffect } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { appendVideoMaterials } from "../services/h3-data";
 import { finishH3Log } from "../services/h3-logs";
-import { restorableParams } from "../services/h3-segment-utils";
+import { restorableParams, mergeBackendResultSegments } from "../services/h3-segment-utils";
 import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
 
 export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string, unknown>, update: (patch: Record<string, unknown>) => void) {
@@ -86,11 +86,14 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                     // 否则等待期间切换 Clip 会把结果误写到错误 clip。
                     const selId = resolveTargetId(metadata);
                     const targetSource = segmentsFor(metadata).find((seg) => seg.id === selId);
+                    // 后端自动分段成功会返回 task.result.segments（缺 loraSlots 等前端字段）。
+                    // 直接整段替换会清空所有 Clip 的 LoRA/参数，改为按 index 合并，保留前端参数。
+                    const mergedSegments = mergeBackendResultSegments(segmentsFor(metadata), task.result.segments, url, storageKey);
                     update({
                         content: url,
                         storageKey,
                         mimeType: task.result.mimeType,
-                        ...(task.result.segments?.length ? { segments: task.result.segments } : { segments: withSelectedResult(metadata, url, storageKey, selId) }),
+                        segments: mergedSegments ?? withSelectedResult(metadata, url, storageKey, selId),
                         materials: appendVideoMaterials(metadata.materials, [{ url, storageKey, type: "video", name: "H3 输出", segmentId: selId, params: restorableParams(targetSource as unknown as Record<string, unknown> | undefined) }]),
                         status: "success",
                         errorDetails: "",

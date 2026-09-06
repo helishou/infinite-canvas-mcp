@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
-import { refsForSegment, withSegmentRefs } from "../services/h3-data";
+import { refsForSegment, withSegmentRefs, nextPictureNumber, appendSubjectDefinition, appendRetentionAnalysis } from "../services/h3-data";
 import { normalizeDroppedH3Ref } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
 
@@ -69,11 +69,19 @@ export function H3ClipCard({ ctx, segment, index, segments, selectedId, fmt }: {
                 if (nextRefs.some((item) => item.url === dataUrl)) { settled = true; showFlash("ok", "尾帧已在该段参考中"); cleanup(); return; }
                 const imageCount = nextRefs.filter((item) => item.type === "image").length;
                 if (imageCount >= maxImages) { settled = true; showFlash("err", `下一段参考图已满（${maxImages}）`); cleanup(); return; }
-                const frameRef: H3Ref = { url: dataUrl, type: "image", name: `尾帧·Clip${index + 1}` };
-                const updated = segments.map((item) => item.id === next.id ? withSegmentRefs(next, [...nextRefs, frameRef]) : item);
+                const pictureNumber = nextPictureNumber(next.prompt, imageCount);
+                const fromClipLabel = `Clip ${index + 1}`;
+                const frameRef: H3Ref = { url: dataUrl, type: "image", name: `尾帧·Clip${index + 1} (P${pictureNumber})` };
+                const updatedRefs = [...nextRefs, frameRef];
+                let nextPrompt = next.prompt || "";
+                // subject_definitions 里先定义 <Picture N>（仅当该 section 已存在，避免凭空造大段结构）；
+                // retention_analysis 里加引用行（H3 规范要求标签先定义再引用）。
+                if (/^subject_definitions\s*[:：]/m.test(nextPrompt)) nextPrompt = appendSubjectDefinition(nextPrompt, pictureNumber, fromClipLabel);
+                nextPrompt = appendRetentionAnalysis(nextPrompt, pictureNumber, fromClipLabel);
+                const updated = segments.map((item) => item.id === next.id ? { ...withSegmentRefs(next, updatedRefs), prompt: nextPrompt } : item);
                 ctx.updateMetadata({ segments: updated, selectedSegmentId: next.id });
                 settled = true;
-                showFlash("ok", "已截取尾帧插入下一段参考区");
+                showFlash("ok", `已截取尾帧插入下一段参考区，retention_analysis 标记 <Picture ${pictureNumber}>`);
                 cleanup();
             } catch (error) {
                 settled = true;
