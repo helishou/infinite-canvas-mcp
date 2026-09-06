@@ -18,7 +18,16 @@ const BASE_DEFAULT_METADATA = {
     content: "", prompt: defaultPrompt, status: "idle" as const, duration: "8", aspectRatio: "16:9",
     videoSteps: 8, denoise: 1, modelName: defaultH3Model, minimaxBaseModel: defaultH3Model,
     motionContextEnabled: true, motionContextNoiseEnabled: false, smartStoryboardCount: 3, smartStoryboardMode: "ref2va", smartStoryboardSkill: "regular_storyboard",
-    segments: [{ id: "segment-1", prompt: defaultPrompt, duration: 8, taskMode: "ref2va", status: "idle" }],
+    textEncoder: "qwen3vl_32b_minimax_h3_fp8.safetensors",
+    videoVae: "minimax_h3_video_vae_fp16.safetensors",
+    audioVae: "minimax_h3_audio_vae_fp32.safetensors",
+    sageAttention: "H3专用Sage加速",
+    segments: [{ id: "segment-1", prompt: defaultPrompt, duration: 8, taskMode: "ref2va", status: "idle",
+        textEncoder: "qwen3vl_32b_minimax_h3_fp8.safetensors",
+        videoVae: "minimax_h3_video_vae_fp16.safetensors",
+        audioVae: "minimax_h3_audio_vae_fp32.safetensors",
+        sageAttention: "H3专用Sage加速",
+    }],
 };
 
 export const h3NodeDefinition = {
