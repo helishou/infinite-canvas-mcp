@@ -84,6 +84,13 @@
 .minimax-clip-meta b { font-size:18px; color:#f8fafc; font-weight:700; }.minimax-clip-meta span { font-size:15px; color:#cbd5e1; }
 /* ❌ 删除按钮：与 motion 按钮对称右上方；大小 = 卡片高度 1/10、离边 1/20 */
 .minimax-clip-delete { position:absolute; right:5%; top:5%; z-index:4; width:10%; aspect-ratio:1/1; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#e2e8f0; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:65%; line-height:1; opacity:.6; transition:opacity .12s ease; }
+/* 截取尾帧按钮：顶部居中（位于 motion 与 delete 两个角按钮之间），样式与 motion 一致 */
+.minimax-clip-tailframe { position:absolute; left:50%; top:5%; transform:translateX(-50%); z-index:4; width:10%; aspect-ratio:1/1; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#a7f3d0; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:65%; line-height:1; opacity:.55; transition:opacity .12s ease; }
+.minimax-clip-tailframe:hover { opacity:1; color:#6ee7b7; }
+/* 截取尾帧的瞬时反馈 toast（自包含，不依赖 antd App 上下文） */
+.minimax-clip-flash { position:absolute; left:50%; bottom:5px; transform:translateX(-50%); z-index:6; max-width:92%; padding:2px 6px; border-radius:4px; font-size:14px; line-height:1.25; text-align:center; background:rgba(15,23,42,.92); color:#e2e8f0; pointer-events:none; white-space:normal; }
+.minimax-clip-flash.ok { color:#86efac; }
+.minimax-clip-flash.err { color:#fca5a5; }
 .minimax-current-panel { min-width:0; min-height:0; position:relative; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:72px minmax(0,1fr); overflow:hidden; border:1px solid #111827; border-radius:6px; background:#17191c; }
 .minimax-current-head { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; padding:0 10px; border-bottom:1px solid #2f3338; background:#202328; }
 .minimax-current-title,.minimax-current-refs { display:flex; align-items:center; gap:14px; color:#f8fafc; font-size:23px; }.minimax-current-title span:last-child { color:#94a3b8; }

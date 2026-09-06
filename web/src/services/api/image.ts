@@ -913,8 +913,48 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
 }
 
+/**
+ * 把相对路径的图片（如 /media/image:xxx?token=yyy）在浏览器侧拉取并转成 base64 data URL。
+ * 原因：OpenAI/Ollama 等模型服务收的是绝对 URL 或 data URL；相对路径服务端取不到，
+ * 会报 invalid image input / 400。浏览器同源 fetch 能拿到真实图片字节（图片本就显示在页面上）。
+ */
+async function toDataUrl(url: string): Promise<string> {
+    if (/^(https?:|data:|blob:)/i.test(url)) return url;
+    const absolute = url.startsWith("/")
+        ? `${window.location.origin}${url}`
+        : new URL(url, window.location.origin).href;
+    const res = await fetch(absolute);
+    if (!res.ok) throw new Error(`读取参考图失败（HTTP ${res.status}），请确认图片已保存且可访问`);
+    const blob = await res.blob();
+    if (blob.size === 0) throw new Error("参考图内容为空（HTTP 200 但 0 字节），请重新上传或保存该图片");
+    return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error("参考图转 base64 失败"));
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function normalizeMessageImages(message: AiTextMessage): Promise<AiTextMessage> {
+    if (typeof message.content === "string") return message;
+    const content = await Promise.all(
+        message.content.map(async (part) => {
+            if (part.type === "image_url") {
+                return { ...part, image_url: { url: await toDataUrl(part.image_url.url) } };
+            }
+            return part;
+        }),
+    );
+    return { ...message, content };
+}
+
+async function normalizeImageUrls(messages: AiTextMessage[]): Promise<AiTextMessage[]> {
+    return Promise.all(messages.map(normalizeMessageImages));
+}
+
 export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel);
+    const normalizedMessages = await normalizeImageUrls(messages);
     const script = resolveModelScript(config, config.model || config.textModel);
     if (script) {
         try {
@@ -922,7 +962,7 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
                 capability: "text",
                 script,
                 config: requestConfig,
-                messages: withSystemMessage(requestConfig, messages),
+                messages: withSystemMessage(requestConfig, normalizedMessages),
                 signal: options?.signal,
                 onDelta,
             });
@@ -935,14 +975,14 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
     }
     try {
         if (requestConfig.apiFormat === "gemini") {
-            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, messages), onDelta, options)).content || apiText("noContent");
+            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, normalizedMessages), onDelta, options)).content || apiText("noContent");
             if (answer === apiText("noContent")) onDelta(answer);
             return answer;
         }
         if (requestConfig.apiFormat === "openai-chat") {
             const chatMessages = (() => {
                 const out: Array<{ role: "system" | "user" | "assistant"; content: unknown }> = [];
-                for (const m of withSystemMessage(requestConfig, messages)) {
+                for (const m of withSystemMessage(requestConfig, normalizedMessages)) {
                     const record = m as Record<string, unknown>;
                     const role = record.role;
                     if (role !== "system" && role !== "user" && role !== "assistant") continue;
@@ -962,7 +1002,7 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
         // (`/chat/completions`) — 中转普遍支持且通常 CORS 已开。
         const chatMessages = (() => {
             const out: Array<{ role: "system" | "user" | "assistant"; content: unknown }> = [];
-            for (const m of withSystemMessage(requestConfig, messages)) {
+            for (const m of withSystemMessage(requestConfig, normalizedMessages)) {
                 const record = m as Record<string, unknown>;
                 const role = record.role;
                 if (role !== "system" && role !== "user" && role !== "assistant") continue;
@@ -973,7 +1013,7 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
         try {
             const answer = (await requestStreamingResponse(requestConfig, {
                 model: requestConfig.model,
-                input: toResponseInput(withSystemMessage(requestConfig, messages)),
+                input: toResponseInput(withSystemMessage(requestConfig, normalizedMessages)),
                 ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
             }, onDelta, options)).content || apiText("noContent");
             if (answer === apiText("noContent")) onDelta(answer);

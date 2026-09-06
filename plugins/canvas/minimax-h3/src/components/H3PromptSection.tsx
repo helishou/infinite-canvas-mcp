@@ -8,6 +8,29 @@ import { refsForSegment } from "../services/h3-data";
 import baseReference from "../storyboard-assets/references/base-en.txt?raw";
 import refReference from "../storyboard-assets/references/ref-en.txt?raw";
 
+const MIRROR_STYLE_PROPS = ["boxSizing", "width", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "fontStyle", "fontVariant", "fontWeight", "fontStretch", "fontSize", "lineHeight", "fontFamily", "textAlign", "textIndent", "letterSpacing", "wordSpacing", "tabSize", "textTransform"] as const;
+
+function getCaretPoint(textarea: HTMLTextAreaElement, index: number) {
+    const computed = window.getComputedStyle(textarea);
+    const mirror = document.createElement("div");
+    const style = mirror.style;
+    style.position = "absolute";
+    style.top = "0";
+    style.left = "-9999px";
+    style.visibility = "hidden";
+    style.whiteSpace = "pre-wrap";
+    style.overflowWrap = "break-word";
+    for (const prop of MIRROR_STYLE_PROPS) style[prop] = computed[prop];
+    mirror.textContent = textarea.value.slice(0, index);
+    const marker = document.createElement("span");
+    marker.textContent = textarea.value.slice(index) || ".";
+    mirror.appendChild(marker);
+    document.body.appendChild(mirror);
+    const point = { left: marker.offsetLeft, top: marker.offsetTop };
+    document.body.removeChild(mirror);
+    return point;
+}
+
 type Props = {
   ctx: CanvasNodeContext;
   selected?: H3Segment;
