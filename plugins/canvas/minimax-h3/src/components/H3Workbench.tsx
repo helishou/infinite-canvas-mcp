@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
+import { useEffect, useRef, useState, useCallback } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
@@ -69,7 +69,7 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const [smartStoryboardUploads, setSmartStoryboardUploads] = useState<H3Ref[]>([]);
     const [canvasReferenceDragOver, setCanvasReferenceDragOver] = useState(false);
     const workbenchRef = useRef<HTMLDivElement | null>(null);
-    const patchSelected = (patch: Partial<H3Segment>) => selected && patchSelectedSegment(ctx, { ...metadata, selectedSegmentId: selected.id }, patch);
+    const patchSelected = useCallback((patch: Partial<H3Segment>) => selected && patchSelectedSegment(ctx, { ...metadata, selectedSegmentId: selected.id }, patch), [ctx, metadata, selected]);
     const removeTimelineRef = (segmentId: string, ref: H3Ref) => ctx.updateMetadata({ segments: segments.map((item) => item.id === segmentId ? { ...item, refItems: refsForSegment(item).filter((entry) => entry.url !== ref.url), refs: { image: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "image"), video: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "video"), audio: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "audio") } } : item) });
     const addDroppedReference = (event: React.DragEvent<HTMLElement>) => {
         if ((event.target as HTMLElement).closest(".minimax-ref-track")) return;
