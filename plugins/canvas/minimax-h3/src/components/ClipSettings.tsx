@@ -152,8 +152,8 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
             {control("时长秒", <InputNumber style={field} min={1} max={15} step={1} value={segment.duration != null ? Number(segment.duration) : undefined} placeholder="5" onChange={(value) => patch({ duration: value ?? undefined })} />)}
         </div>)}
         {section("sampling", "采样设置", `${segment.steps || 20} 步 · ${segment.sampler || "res_multistep"}`, <div className="nfh3-control-grid">
-            {choice("采样器", samplerChoices, segment.sampler, (value) => patch({ sampler: value ? String(value) : undefined }), undefined, true, true, "选择采样器", true)}
-            {choice("调度器", schedulerChoices, segment.scheduler, (value) => patch({ scheduler: value ? String(value) : undefined }), undefined, true, false, "选择调度器", true)}
+            {choice("采样器", samplerChoices, segment.sampler || "res_multistep", (value) => patch({ sampler: value ? String(value) : undefined }), undefined, true, true, "选择采样器", true)}
+            {choice("调度器", schedulerChoices, segment.scheduler || "simple", (value) => patch({ scheduler: value ? String(value) : undefined }), undefined, true, false, "选择调度器", true)}
             {control("采样步数", <InputNumber style={field} min={1} max={100} value={segment.steps != null ? Number(segment.steps) : undefined} placeholder="20" onChange={(value) => patch({ steps: value ?? undefined })} />)}
             {control("降噪强度", <InputNumber style={field} min={0} max={1} step={0.01} value={segment.denoise != null ? Number(segment.denoise) : undefined} placeholder="1" onChange={(value) => patch({ denoise: value ?? undefined })} />)}
             {choice("SageAttention", sageChoices, segment.sageAttention || "H3专用Sage加速", (value) => patch({ sageAttention: String(value) }), (value) => String(value).replace(/^sageattn_/, "sage "))}
