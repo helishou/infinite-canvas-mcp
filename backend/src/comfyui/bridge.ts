@@ -197,6 +197,7 @@ export class ComfyUiBackend {
     /** 重启恢复专用的观察循环：只依赖 /history（无 WS 通道），ComfyUI 自身没重启就能等到结果。 */
     private async watchRecovered(taskId: string, comfyUrl: string, promptId: string, controller: AbortController) {
         const started = Date.now();
+        let missingCount = 0;
         for (;;) {
             if (controller.signal.aborted) return;
             await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -214,6 +215,33 @@ export class ComfyUiBackend {
                         this.updateTask(taskId, { status: "succeeded", progress: 1, result });
                         this.deps.tasks.addEvent(taskId, "result", result);
                         return;
+                    }
+                    // /history/{prompt_id} 无记录（可能被 LRU 清理）：计数器递增，
+                    // 到 20 次时主动扫 /history 列表找最近成功条目兜底。
+                    if (!item) {
+                        missingCount++;
+                        if (missingCount === 20) {
+                            try {
+                                const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
+                                if (allHistory.ok) {
+                                    const all = await allHistory.json() as Record<string, any>;
+                                    const candidates = Object.entries(all)
+                                        .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
+                                        .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
+                                        .sort((a, b) => b.updated - a.updated);
+                                    if (candidates[0]) {
+                                        const winner = candidates[0];
+                                        console.warn(`[comfyui] 恢复观察：/history 无记录，扫描列表找到最近成功条目 prompt_id=${winner.pid}（目标 ${promptId}）`);
+                                        const result = { promptId, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
+                                        this.updateTask(taskId, { status: "succeeded", progress: 1, result });
+                                        this.deps.tasks.addEvent(taskId, "result", result);
+                                        return;
+                                    }
+                                }
+                            } catch {}
+                        }
+                    } else {
+                        missingCount = 0;
                     }
                 }
             } catch (error) {
@@ -429,19 +457,19 @@ export class ComfyUiBackend {
                     await new Promise((resolve) => setTimeout(resolve, 1500));
                     continue;
                 }
-                // WS 在我们拿到 executed 之前就关闭了：提前 fail，避免傻等
-                if (wsClosed) {
+                // WS 在我们拿到 executed 之前就关闭了：不再直接 fail，
+                // 而是退回 /history 轮询——ComfyUI 可能已完成但 WS 因代理超时/负载高等原因提前断开，
+                // 任务本身仍在执行或已完成，结果在 /history 或 /output 里。
+                // 仅在 /history 也长期无果时才最终 fail，避免"ComfyUI 实际跑完了但前端收不到结果"。
+                if (wsClosed && !wsExecuted) {
                     const reason = (wsCloseError as Error | null)?.message || "WebSocket 已关闭但未收到 executed 事件";
-                    closeWs();
-                    throw new Error(`ComfyUI ${reason}。可能 ComfyUI 中途崩溃或代理中断，请检查 /output 目录。`);
+                    console.warn(`[comfyui] WS 提前断开，退回 /history 轮询：${reason}`);
+                    // 不再 throw，继续走下面的 /history 轮询
                 }
                 const historyResponse = await fetch(`${comfyUrl}/history/${encodeURIComponent(body.prompt_id)}`, { signal: controller.signal });
                 if (historyResponse.ok) {
                     const history = await historyResponse.json() as Record<string, any>;
                     const item = history[body.prompt_id];
-                    // 注意：ComfyUI 节点报错时 history 条目仍会带空对象 outputs: {}，
-                    // 空对象在 JS 里为 truthy，因此必须先判错误、且成功必须要求非空输出，
-                    // 否则会被误判为「成功但无结果」，导致前端永远收不到失败回调而卡死轮询。
                     const statusStr = item?.status?.status_str;
                     if (statusStr === "error" || statusStr === "failed") {
                         throw new Error(extractComfyErrorMessage(item.status));
@@ -454,10 +482,29 @@ export class ComfyUiBackend {
                         closeWs();
                         return { promptId: body.prompt_id, outputs: item.outputs, media: await collectOutputMedia(item.outputs, comfyUrl, this.deps.media, controller.signal), status: item.status || {} };
                     }
-                    if (item === undefined) {
+                    if (item === undefined || (typeof item === "object" && Object.keys(item).length === 0)) {
                         missingHistoryCount++;
-                        // history 长期没有该 prompt_id：可能是 ComfyUI 历史记录被清理，
-                        // 需要结合 /queue 判断任务是否还在执行，避免无限 running。
+                        // /history/{prompt_id} 无记录或空对象：可能是 ComfyUI 历史记录被清理，
+                        // 主动扫 /history 列表找最近成功条目兜底（不要求 WS 已关闭，
+                        // 因为 WS 可能开着但丢消息、或 /history 被 LRU 清理而 WS 仍连接）。
+                        if (missingHistoryCount === 20) {
+                            try {
+                                const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
+                                if (allHistory.ok) {
+                                    const all = await allHistory.json() as Record<string, any>;
+                                    const candidates = Object.entries(all)
+                                        .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
+                                        .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
+                                        .sort((a, b) => b.updated - a.updated);
+                                    if (candidates[0]) {
+                                        const winner = candidates[0];
+                                        console.warn(`[comfyui] /history 无记录，扫描列表找到最近成功条目 prompt_id=${winner.pid}（目标 ${body.prompt_id}）`);
+                                        closeWs();
+                                        return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
+                                    }
+                                }
+                            } catch {}
+                        }
                         if (missingHistoryCount > 120) {
                             try {
                                 const queueResponse = await fetch(`${comfyUrl}/queue`, { signal: controller.signal });
@@ -480,6 +527,28 @@ export class ComfyUiBackend {
                     } else {
                         missingHistoryCount = 0;
                         consecutiveMissingInQueue = 0;
+                    }
+                } else {
+                    // /history/{prompt_id} 返回非 200（如 404）：与 item===undefined 同样对待，
+                    // 避免"history 被清理但响应码不是 404"时计数器不递增导致无限空转。
+                    missingHistoryCount++;
+                    if (missingHistoryCount === 20) {
+                        try {
+                            const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
+                            if (allHistory.ok) {
+                                const all = await allHistory.json() as Record<string, any>;
+                                const candidates = Object.entries(all)
+                                    .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
+                                    .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
+                                    .sort((a, b) => b.updated - a.updated);
+                                if (candidates[0]) {
+                                    const winner = candidates[0];
+                                    console.warn(`[comfyui] /history 返回 ${historyResponse.status}，扫描列表找到最近成功条目 prompt_id=${winner.pid}`);
+                                    closeWs();
+                                    return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
+                                }
+                            }
+                        } catch {}
                     }
                 }
                 await new Promise((resolve) => setTimeout(resolve, 1500));
