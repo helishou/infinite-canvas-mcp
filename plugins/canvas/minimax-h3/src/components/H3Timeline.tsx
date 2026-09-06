@@ -25,6 +25,19 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
     const pendingScrollIdRef = useRef<string | null>(null);
     const restoredRef = useRef(false);
     const scrollPersistRafRef = useRef<number | null>(null);
+    // 时间轴/参考区：鼠标滚轮转为横向滚动（与 Output 区域一致）
+    useEffect(() => {
+        const el = trackScrollRef.current;
+        if (!el) return;
+        const onWheel = (e: WheelEvent) => {
+            if (e.deltaY !== 0) {
+                e.preventDefault();
+                el.scrollLeft += e.deltaY;
+            }
+        };
+        el.addEventListener("wheel", onWheel, { passive: false });
+        return () => el.removeEventListener("wheel", onWheel);
+    }, []);
     const [hasHorizontalOverflow, setHasHorizontalOverflow] = useState(false);
     // 时间轴宽度由父容器宽度决定（100% 跟随），同时保留总时长所需的最小宽度，
     // 这样 9s 总长时不会再在右边留出大段黑色空白，1.8s 间隔仍按 100px/秒等比放大。
