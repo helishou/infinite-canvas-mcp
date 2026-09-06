@@ -3,6 +3,7 @@ import path from "node:path";
 import { DATA_DIR } from "../config.js";
 import type { BackendDatabase } from "../db.js";
 import type { WorkflowConfig, WorkflowField } from "../db.js";
+import type { ComfyUiBackend } from "../comfyui/bridge.js";
 
 const CUSTOM_SUBDIR = "custom";
 const NAME_RE = /^[a-zA-Z0-9_\u4e00-\u9fff.\-]+\.json$/;
@@ -58,11 +59,32 @@ export class WorkflowStore {
         const dir = workflowDir();
         try { await fs.access(dir); } catch { return []; }
         const items: WorkflowListItem[] = [];
+        const seen = new Set<string>();
+
+        // 扫描根目录（内置工作流）
+        try {
+            const rootFiles = await fs.readdir(dir);
+            for (const fn of rootFiles) {
+                if (!fn.endsWith(".json") || fn.endsWith(".config.json")) continue;
+                const name = fn;
+                const config = this.getConfig(name);
+                items.push({
+                    name,
+                    title: config?.title || fn.replace(".json", ""),
+                    builtin: true,
+                    fieldCount: config?.fields?.length ?? 0,
+                });
+                seen.add(fn);
+            }
+        } catch { /* ignore */ }
+
+        // 扫描 custom 子目录（用户上传）
         const customDir = path.join(dir, CUSTOM_SUBDIR);
         try {
             const files = await fs.readdir(customDir);
             for (const fn of files) {
                 if (!fn.endsWith(".json") || fn.endsWith(".config.json")) continue;
+                if (seen.has(fn)) continue;
                 const name = `${CUSTOM_SUBDIR}/${fn}`;
                 const config = this.getConfig(name);
                 items.push({
@@ -155,6 +177,31 @@ export class WorkflowStore {
         return { ok: true };
     }
 
+    /** 仅重命名显示标题（title），不动文件名与 config 其他字段 */
+    async renameTitle(name: string, title: string): Promise<{ name: string; title: string }> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        const existing = this.getConfig(name);
+        const config: WorkflowConfig = existing ?? {
+            title: name.split('/').pop()!.replace(/\.json$/, ""),
+            backend: "",
+            operation: "",
+            description: "",
+            fields: [],
+        };
+        config.title = title;
+        this.db.upsertWorkflowConfig(name, {
+            title: config.title,
+            backend: config.backend,
+            operation: config.operation,
+            description: config.description,
+            fieldsJson: JSON.stringify(config.fields),
+            mediaInputsJson: JSON.stringify(config.mediaInputs ?? {}),
+            miniCardsJson: JSON.stringify(config.miniCards ?? {}),
+        });
+        return { name, title: config.title };
+    }
+
     /** 扫描工作流中所有媒体输入引用 */
     scanMediaInputs(workflow: Record<string, unknown>): string[] {
         const required: string[] = [];
@@ -181,5 +228,39 @@ export class WorkflowStore {
 
     getWorkflowPath(name: string): string {
         return workflowFilePath(name);
+    }
+
+    /**
+     * 查询 ComfyUI 获取当前 workflow 中各节点 COMBO 输入的选项列表。
+     * 返回 { node_id: { input_name: [choice, ...] } }；ComfyUI 不可达时返回空对象。
+     */
+    async getComboOptions(name: string, bridge: ComfyUiBackend, signal?: AbortSignal): Promise<Record<string, Record<string, string[]>>> {
+        let workflow: Record<string, unknown>;
+        try {
+            workflow = JSON.parse(await fs.readFile(workflowFilePath(name), "utf8"));
+        } catch { return {}; }
+
+        const classTypes = new Map<string, string>();
+        for (const [nodeId, rawNode] of Object.entries(workflow)) {
+            const node = typeof rawNode === "object" && rawNode !== null ? (rawNode as Record<string, unknown>) : {};
+            const classType = typeof node.class_type === "string" ? node.class_type : "";
+            if (classType) classTypes.set(nodeId, classType);
+        }
+
+        const options: Record<string, Record<string, string[]>> = {};
+        const uniqueClassTypes = [...new Set(classTypes.values())];
+        const classOptionsMap = new Map<string, Record<string, string[]>>();
+        await Promise.all(
+            uniqueClassTypes.map(async (classType) => {
+                const opts = await bridge.getNodeComboOptions(classType, signal);
+                if (Object.keys(opts).length > 0) classOptionsMap.set(classType, opts);
+            }),
+        );
+
+        for (const [nodeId, classType] of classTypes) {
+            const nodeOptions = classOptionsMap.get(classType);
+            if (nodeOptions && Object.keys(nodeOptions).length > 0) options[nodeId] = nodeOptions;
+        }
+        return options;
     }
 }

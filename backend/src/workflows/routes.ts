@@ -3,12 +3,14 @@ import { randomUUID } from "node:crypto";
 import type { WorkflowStore } from "./store.js";
 import type { WorkflowExecutor } from "./executor.js";
 import type { WorkflowConfig } from "../db.js";
+import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import { loadInstances, saveInstances, validateInstance } from "../comfyui/instances.js";
 
 export function registerWorkflowRoutes(
     router: Router,
     store: WorkflowStore,
     executor: WorkflowExecutor,
+    comfy?: ComfyUiBackend,
 ) {
     // GET /api/workflows - 列出所有工作流
     router.get("/api/workflows", async (_req: Request, res: Response) => {
@@ -55,6 +57,35 @@ export function registerWorkflowRoutes(
         try {
             const name = decodeURIComponent(req.params.name as string);
             const result = await store.delete(name);
+            res.json(result);
+        } catch (error) {
+            res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
+    // GET /api/workflows/:name/combo-options - 获取各节点 COMBO 输入选项
+    router.get("/api/workflows/:name/combo-options", async (req: Request, res: Response) => {
+        try {
+            const name = decodeURIComponent(req.params.name as string);
+            if (!comfy) return res.status(503).json({ options: {}, error: "ComfyUI backend not available" });
+            const controller = new AbortController();
+            req.on("close", () => controller.abort());
+            const options = await store.getComboOptions(name, comfy, controller.signal);
+            res.json({ options });
+        } catch (error) {
+            res.status(500).json({ options: {}, error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
+    // PUT /api/workflows/:name/title - 重命名显示标题
+    router.put("/api/workflows/:name/title", async (req: Request, res: Response) => {
+        try {
+            const name = decodeURIComponent(req.params.name as string);
+            const { title } = req.body as { title?: string };
+            if (!title || !title.trim()) {
+                return res.status(400).json({ error: "名称不能为空" });
+            }
+            const result = await store.renameTitle(name, title.trim());
             res.json(result);
         } catch (error) {
             res.status(400).json({ error: error instanceof Error ? error.message : String(error) });

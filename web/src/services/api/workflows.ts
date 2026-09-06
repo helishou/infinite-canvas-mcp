@@ -24,6 +24,7 @@ export type WorkflowField = {
     step?: number;
     options?: string[];
     randomEnabled?: boolean;
+    isPrompt?: boolean;
 };
 export type WorkflowConfig = {
     title: string;
@@ -68,6 +69,16 @@ export function fetchWorkflows(): Promise<{ workflows: WorkflowItem[] }> {
 
 export function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {
     return request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(name)}`);
+}
+
+// 仅重命名显示标题（title），不动底层文件名
+export function renameWorkflowTitle(name: string, title: string): Promise<{ name: string; title: string }> {
+    return request<{ name: string; title: string }>("PUT", `/api/workflows/${encodeURIComponent(name)}/title`, { title });
+}
+
+/** 拉取 ComfyUI 各节点 COMBO 输入的选项列表 */
+export function fetchWorkflowComboOptions(name: string): Promise<{ options: Record<string, Record<string, string[]>> }> {
+    return request<{ options: Record<string, Record<string, string[]>> }>("GET", `/api/workflows/${encodeURIComponent(name)}/combo-options`);
 }
 
 export function runWorkflow(name: string, fields: WorkflowRunFields, config?: WorkflowConfig): Promise<WorkflowRunResult> {

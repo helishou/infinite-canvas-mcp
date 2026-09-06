@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { WorkflowField } from "@/types/workflow";
+import { fetchWorkflowComboOptions } from "@/services/api/workflows";
 
 type WorkflowJson = Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
 
@@ -136,23 +137,34 @@ function friendlyInputName(key: string): string {
 }
 
 type Props = {
+    name: string;
     workflow: WorkflowJson;
     fields: WorkflowField[];
     onFieldsChange: (fields: WorkflowField[]) => void;
 };
 
-export function WorkflowGraphPanel({ workflow, fields, onFieldsChange }: Props) {
+export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange }: Props) {
     const svgRef = useRef<SVGSVGElement>(null);
     const wrapRef = useRef<HTMLDivElement>(null);
     const [view, setView] = useState({ k: 1, x: 0, y: 0 });
     const [layout, setLayout] = useState<GraphLayout | null>(null);
     const [popupNodeId, setPopupNodeId] = useState<string | null>(null);
+    const [comboOptions, setComboOptions] = useState<Record<string, Record<string, string[]>>>({});
     const panRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
 
     useEffect(() => {
         if (!workflow || Object.keys(workflow).length === 0) { setLayout(null); return; }
         try { setLayout(computeGraphLayout(workflow, fields)); setView({ k: 1, x: 0, y: 0 }); } catch { setLayout(null); }
     }, [workflow, fields]);
+
+    useEffect(() => {
+        if (!name) return;
+        let cancelled = false;
+        fetchWorkflowComboOptions(name)
+            .then((res) => { if (!cancelled) setComboOptions(res.options || {}); })
+            .catch(() => { if (!cancelled) setComboOptions({}); });
+        return () => { cancelled = true; };
+    }, [name]);
 
     const fitToView = useCallback(() => {
         if (!layout || !wrapRef.current) return;
@@ -196,7 +208,9 @@ export function WorkflowGraphPanel({ workflow, fields, onFieldsChange }: Props) 
         if (existing) {
             onFieldsChange(fields.filter(f => f !== existing));
         } else {
-            const type = guessType(rawValue, inputKey);
+            const inputOptions = comboOptions[nodeId]?.[inputKey];
+            const hasComboOptions = Array.isArray(inputOptions) && inputOptions.length > 0;
+            const type = hasComboOptions ? "dropdown" : guessType(rawValue, inputKey);
             const newField: WorkflowField = {
                 id: `f_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                 node: nodeId,
@@ -213,7 +227,7 @@ export function WorkflowGraphPanel({ workflow, fields, onFieldsChange }: Props) 
                 }
                 if (type === "number") newField.randomEnabled = false;
             }
-            if (type === "dropdown") newField.options = [];
+            if (type === "dropdown") newField.options = hasComboOptions ? inputOptions : [];
             onFieldsChange([...fields, newField]);
         }
     };
@@ -280,6 +294,7 @@ export function WorkflowGraphPanel({ workflow, fields, onFieldsChange }: Props) 
                     nodeId={popupNodeId}
                     node={popupNode}
                     fields={fields.filter(f => f.node === popupNodeId)}
+                    comboOptions={comboOptions[popupNodeId] || {}}
                     onToggleField={(inputKey) => toggleField(popupNodeId, inputKey, popupNode.inputs?.[inputKey])}
                     onUpdateField={updateField}
                     onRemoveField={removeField}
@@ -292,11 +307,12 @@ export function WorkflowGraphPanel({ workflow, fields, onFieldsChange }: Props) 
 
 // ─── 浮窗组件 ───
 function NodeFieldPopup({
-    nodeId, node, fields, onToggleField, onUpdateField, onRemoveField, onClose,
+    nodeId, node, fields, comboOptions, onToggleField, onUpdateField, onRemoveField, onClose,
 }: {
     nodeId: string;
     node: { class_type?: string; inputs?: Record<string, unknown> };
     fields: WorkflowField[];
+    comboOptions: Record<string, string[]>;
     onToggleField: (inputKey: string) => void;
     onUpdateField: (fieldId: string, updates: Partial<WorkflowField>) => void;
     onRemoveField: (fieldId: string) => void;
@@ -337,6 +353,7 @@ function NodeFieldPopup({
                                     rawValue={rawValue}
                                     field={field}
                                     active={active}
+                                    comboOptions={comboOptions[key]}
                                     onToggle={() => onToggleField(key)}
                                     onUpdate={(u) => field && onUpdateField(field.id, u)}
                                     onRemove={() => field && onRemoveField(field.id)}
@@ -351,12 +368,13 @@ function NodeFieldPopup({
 }
 
 function InputRow({
-    inputKey, rawValue, field, active, onToggle, onUpdate, onRemove,
+    inputKey, rawValue, field, active, comboOptions, onToggle, onUpdate, onRemove,
 }: {
     inputKey: string;
     rawValue: unknown;
     field?: WorkflowField;
     active: boolean;
+    comboOptions?: string[];
     onToggle: () => void;
     onUpdate: (u: Partial<WorkflowField>) => void;
     onRemove: () => void;
@@ -364,6 +382,10 @@ function InputRow({
     const friendlyName = friendlyInputName(inputKey);
 
     const valueBadge = (() => {
+        if (Array.isArray(comboOptions) && comboOptions.length > 0) {
+            const current = typeof rawValue === "string" ? rawValue : "";
+            return <span className="text-[11px] text-stone-500">下拉 ({comboOptions.length} 项){current ? `: ${current.length > 20 ? current.slice(0, 20) + "…" : current}` : ""}</span>;
+        }
         if (typeof rawValue === "string") {
             const s = rawValue.length > 50 ? rawValue.slice(0, 50) + "…" : rawValue;
             return <span className="text-[11px] font-mono text-stone-600">"{s}"</span>;
@@ -431,6 +453,7 @@ function InputRow({
                                     updates.max = undefined;
                                     updates.step = undefined;
                                 }
+                                if (type !== "text") updates.isPrompt = false;
                                 onUpdate(updates);
                             }}
                             className="w-full rounded border border-stone-200 px-2 py-1 text-xs dark:border-stone-700 dark:bg-stone-900"
@@ -490,6 +513,17 @@ function InputRow({
                                     onChange={(e) => onUpdate({ default: e.target.value })}
                                     className="w-full rounded border border-stone-200 px-2 py-1 text-xs dark:border-stone-700 dark:bg-stone-900"
                                 />
+                            )}
+                            {field.type === "text" && (
+                                <label className="mt-2 flex items-center gap-2 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={!!field.isPrompt}
+                                        onChange={(e) => onUpdate({ isPrompt: e.target.checked })}
+                                        className="size-3"
+                                    />
+                                    <span className="text-[11px]">作为提示词</span>
+                                </label>
                             )}
                         </div>
                     )}

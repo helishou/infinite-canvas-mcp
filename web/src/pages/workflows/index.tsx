@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { Button, Empty, Input, Spin, Tag, message, Select, Switch } from "antd";
 import { Upload as UploadIcon, Upload, Play, Trash2, Settings2, Workflow, Code, Server, History } from "lucide-react";
 import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs } from "@/services/backend-api";
+import { renameWorkflowTitle } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
 import { InstancesModal } from "./instances-modal";
 import "../../styles/workflow-graph.css";
@@ -39,6 +40,8 @@ export default function WorkflowsPage() {
     const [instancesOpen, setInstancesOpen] = useState(false);
     const [historyLogs, setHistoryLogs] = useState<Array<{ id: string; workflow: string; prompt: string; status: string; createdAt: string; outputs: Array<{ url: string; mimeType: string }>; error?: string }>>([]);
     const [loadingHistory, setLoadingHistory] = useState(false);
+    const [editingName, setEditingName] = useState<string | null>(null);
+    const [editValue, setEditValue] = useState("");
 
     const fetchWorkflows = useCallback(async () => {
         try {
@@ -75,6 +78,22 @@ export default function WorkflowsPage() {
             if (selected?.name === name) setSelected(null);
         } catch (err) {
             message.error(err instanceof Error ? err.message : "删除失败");
+        }
+    };
+
+    const handleRename = async (name: string) => {
+        const trimmed = editValue.trim();
+        setEditingName(null);
+        if (!trimmed) return;
+        const item = workflows.find((w) => w.name === name);
+        if (item && item.title === trimmed) return;
+        try {
+            await renameWorkflowTitle(name, trimmed);
+            setWorkflows((prev) => prev.map((w) => (w.name === name ? { ...w, title: trimmed } : w)));
+            if (selected?.name === name) setSelected({ ...selected, config: { ...selected.config, title: trimmed } });
+            message.success("已重命名");
+        } catch (err) {
+            message.error(err instanceof Error ? err.message : "重命名失败");
         }
     };
 
@@ -223,6 +242,7 @@ export default function WorkflowsPage() {
                                     {activeTab === "structure" && (
                                         <div className="h-[500px]">
                                             <WorkflowGraphPanel
+                                                name={selected.name}
                                                 workflow={selected.workflow}
                                                 fields={selected.config.fields}
                                                 onFieldsChange={handleFieldsChange}
@@ -307,11 +327,34 @@ export default function WorkflowsPage() {
                                     <div
                                         key={wf.name}
                                         className={`cursor-pointer px-4 py-3 transition hover:bg-stone-50 dark:hover:bg-stone-800 ${selected?.name === wf.name ? "bg-stone-100 dark:bg-stone-800" : ""}`}
-                                        onClick={() => handleLoadDetail(wf.name)}
+                                        onClick={() => { if (editingName !== wf.name) handleLoadDetail(wf.name); }}
                                     >
                                         <div className="flex items-center justify-between">
-                                            <div>
-                                                <p className="text-sm font-medium">{wf.title}</p>
+                                            <div className="min-w-0 flex-1">
+                                                {editingName === wf.name ? (
+                                                    <Input
+                                                        autoFocus
+                                                        size="small"
+                                                        value={editValue}
+                                                        onChange={(e) => setEditValue(e.target.value)}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        onPressEnter={() => handleRename(wf.name)}
+                                                        onBlur={() => handleRename(wf.name)}
+                                                        className="w-full"
+                                                    />
+                                                ) : (
+                                                    <p
+                                                        className="truncate text-sm font-medium"
+                                                        title="双击重命名"
+                                                        onDoubleClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setEditingName(wf.name);
+                                                            setEditValue(wf.title);
+                                                        }}
+                                                    >
+                                                        {wf.title}
+                                                    </p>
+                                                )}
                                                 <p className="text-xs text-stone-500">{wf.name}</p>
                                             </div>
                                             <Tag color="blue">{wf.fieldCount} 字段</Tag>

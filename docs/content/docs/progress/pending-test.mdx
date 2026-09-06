@@ -7,6 +7,10 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
++ 工作流列表双击重命名：在「工作流管理」页面的工作流列表里双击某条标题，应变成输入框，输入新名称回车或点击别处即保存；列表标题与（若已打开）详情页标题更新为新手名字，底层文件名不变；空名称或与原名相同不触发请求。
++ 工作流文本字段标记为提示词：在工作流节点图里展开一个文本输入字段，勾选「作为提示词」并保存；从生图工作台调用该工作流时，输入的提示词应替换该文本节点在 ComfyUI workflow 里的值（实际传到对应节点）。运行后到生成历史/日志里确认 prompt 记录的是工作台输入的提示词；同时 backend 任务 input 里也应带上 prompt 字段。切换字段类型为非文本时「作为提示词」自动取消勾选。
++ 工作流节点图自动识别下拉选项：打开一个含 COMBO 输入（如 ResolutionSelector 的 Aspect ratio / Megapixels / Multiple）的 ComfyUI 工作流，点开对应节点浮窗；该输入行应显示「下拉 (N 项)」标记；勾选它后字段类型自动变成「下拉」且选项列表已被 ComfyUI object_info 预填充（可在编辑区看到选项，可改可加）；从运行面板选择时选项齐全。ComfyUI 未开启/不可达时该标记不出现，字段按原类型（文本等）创建，仍可手动设成下拉并手填选项。
+
 + 生成模式按钮行：H3 设置面板顶部常驻一行四个模式按钮（文生视频 / 图生视频 / 首尾帧 / 多参考 Ref2VA），无标题栏、无需展开，点按即切换且选中态配色正常；面板拖窄时按钮文字省略号截断不溢出。
 + LoRA 多槽位：还原/导入参数后，非 minimax 目录的自定义 LoRA 名称能正常回显在下拉框；backend 重启后跑一条启用多槽位的生成，确认 ComfyUI 工作流模型链按槽位串联多个 LoraLoader/LoaderModelOnly 节点（9071、90750、90751…），136 的 clip 接在 9071 上。
 

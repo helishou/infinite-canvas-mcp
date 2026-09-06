@@ -48,7 +48,7 @@ registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.event
 // Workflow import routes
 const workflowStore = new WorkflowStore(db);
 const workflowExecutor = new WorkflowExecutor(runtime.comfy, runtime.stores.tasks, runtime.stores.media, runtime.events, db);
-registerWorkflowRoutes(app, workflowStore, workflowExecutor);
+registerWorkflowRoutes(app, workflowStore, workflowExecutor, runtime.comfy);
 registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat, runtime.events);
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events, basePath: "/agent" }, runtime.comfy);
 const agent = createAgentRuntime({ backendUrl: config.url, backendToken: config.token });

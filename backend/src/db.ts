@@ -68,6 +68,7 @@ export type WorkflowField = {
     step?: number;
     options?: string[];
     randomEnabled?: boolean;
+    isPrompt?: boolean;
 };
 
 export type WorkflowConfig = {

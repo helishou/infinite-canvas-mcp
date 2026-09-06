@@ -23,9 +23,6 @@ export type ComfyPreset = { id: string; name: string; kind: "image" | "video"; i
 export type ComfyModelCatalog = { models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng?: Record<string, unknown[]>; refreshedAt: string; error?: string };
 
 const PRESETS: ComfyPreset[] = [
-    { id: "z-image", name: "Z-Image 文生图", kind: "image", inputs: ["prompt"], params: ["width", "height", "seed"] },
-    { id: "flux2-klein", name: "Flux2-Klein 多图编辑", kind: "image", inputs: ["prompt", "references"], params: ["seed"] },
-    { id: "flashvsr-1.1", name: "FlashVSR 1.1 视频修复", kind: "video", inputs: ["video"], params: ["scale", "longEdge"] },
     { id: "minimax-h3", name: "H3导演台 视频生成", kind: "video", inputs: ["video", "references", "audios", "segments"], params: ["mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sampler", "scheduler", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd", "constantTriggerWord"] },
 ];
 
@@ -116,6 +113,39 @@ export class ComfyUiBackend {
             const response = await fetch(`${this.url}/system_stats`);
             return { connected: response.ok, url: this.url, system: response.ok ? await response.json() : null, error: response.ok ? null : `HTTP ${response.status}` };
         } catch (error) { return { connected: false, url: this.url, system: null, error: error instanceof Error ? error.message : String(error) }; }
+    }
+
+    /**
+     * 读取指定 ComfyUI 节点所有 COMBO 类型输入的选项列表。
+     * 返回 { input_name: [choice, ...] }，仅包含 COMBO；不可达时返回空对象。
+     */
+    async getNodeComboOptions(classType: string, signal?: AbortSignal): Promise<Record<string, string[]>> {
+        const cleanClass = classType.split("//")[0].trim();
+        if (!cleanClass) return {};
+        try {
+            const response = await fetch(`${this.url}/object_info/${encodeURIComponent(cleanClass)}`, { signal });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const body = (await response.json()) as Record<string, any>;
+            const required = body[cleanClass]?.input?.required || {};
+            const optional = body[cleanClass]?.input?.optional || {};
+            const result: Record<string, string[]> = {};
+            for (const [inputs, source] of [[required, "required"], [optional, "optional"]] as const) {
+                for (const [key, value] of Object.entries(inputs)) {
+                    if (!Array.isArray(value) || value.length === 0) continue;
+                    const first = value[0];
+                    if (Array.isArray(first)) {
+                        result[key] = first.map(String).filter((v) => v !== undefined && v !== null);
+                    } else if (first && typeof first === "object" && Array.isArray(first[0])) {
+                        // 部分返回格式为 [[choices], {extra}]
+                        result[key] = first[0].map(String).filter((v) => v !== undefined && v !== null);
+                    }
+                }
+            }
+            return result;
+        } catch (error) {
+            console.warn(`[comfyui] getNodeComboOptions ${cleanClass} failed:`, error instanceof Error ? error.message : String(error));
+            return {};
+        }
     }
 
     async run(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string) {

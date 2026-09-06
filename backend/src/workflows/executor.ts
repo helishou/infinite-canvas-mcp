@@ -23,8 +23,10 @@ type RunResult = {
 function buildParams(fields: WorkflowField[], values: FieldValues): RunParams {
     const params: RunParams = {};
     for (const field of fields) {
-        if (!field.node || !field.input) continue;
+        if (!field.input) continue;
         if (!(field.id in values)) continue;
+        // 跳过多节点字段（在 run() 中单独处理）
+        if (field.node.includes(",")) continue;
         let value = values[field.id];
         if (field.type === "number" || field.type === "slider") {
             const num = typeof value === "number" ? value : Number(value);
@@ -45,6 +47,19 @@ function buildParams(fields: WorkflowField[], values: FieldValues): RunParams {
         (params[field.node] as Record<string, unknown>)[field.input] = value;
     }
     return params;
+}
+
+/**
+ * 收集标记为「提示词」的文本字段值，用于任务与生成日志的 prompt 字段。
+ */
+function buildPrompt(fields: WorkflowField[], values: FieldValues): string | undefined {
+    const prompts: string[] = [];
+    for (const field of fields) {
+        if (field.type !== "text" || !field.isPrompt) continue;
+        const value = values[field.id];
+        if (typeof value === "string" && value.trim()) prompts.push(value.trim());
+    }
+    return prompts.length > 0 ? prompts.join("\n") : undefined;
 }
 
 /**
@@ -189,9 +204,34 @@ export class WorkflowExecutor {
         });
         // 先处理 image 字段：上传 dataURL → 获取文件名
         const processedValues = await processImageFields(config.fields, fieldValues, url, controller.signal);
+        const promptText = buildPrompt(config.fields, processedValues) || config.title;
+        // 处理 seed=-1 随机化
+        for (const field of config.fields || []) {
+            if ((field.id === "seed" || field.id === "noise_seed") && processedValues[field.id] === -1) {
+                processedValues[field.id] = Math.floor(Math.random() * 1125899906842624);
+            }
+        }
+
+        // 处理多节点字段（node 含逗号，如 Flux2-Klein 的 width/height 需同时注入到 152 和 156）
+        const multiNodeParams: RunParams = {};
+        for (const field of config.fields || []) {
+            if (!field.node.includes(",")) continue;
+            const value = processedValues[field.id];
+            if (value === undefined) continue;
+            for (const nodeId of field.node.split(",")) {
+                if (!multiNodeParams[nodeId]) multiNodeParams[nodeId] = {};
+                (multiNodeParams[nodeId] as Record<string, unknown>)[field.input] = value;
+            }
+        }
+
         const params = buildParams(config.fields, processedValues);
+        // 合并多节点参数
+        for (const [nodeId, inputs] of Object.entries(multiNodeParams)) {
+            if (!params[nodeId]) params[nodeId] = {};
+            Object.assign(params[nodeId] as Record<string, unknown>, inputs);
+        }
         const prepared = injectParams(workflowJson, params);
-        const task = this.tasks.create("workflow", { workflow: "custom", fields: fieldValues }, params);
+        const task = this.tasks.create("workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, params);
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
 
         try {
@@ -204,7 +244,7 @@ export class WorkflowExecutor {
                 status: "success",
                 platform: "workflow",
                 workflow: name || "unknown",
-                prompt: config.title,
+                prompt: promptText,
                 references: [],
                 inputCounts: {},
                 startedAt: new Date().toISOString(),
@@ -227,7 +267,7 @@ export class WorkflowExecutor {
                 status: "failed",
                 platform: "workflow",
                 workflow: name || "unknown",
-                prompt: config.title,
+                prompt: promptText,
                 references: [],
                 inputCounts: {},
                 startedAt: new Date().toISOString(),
