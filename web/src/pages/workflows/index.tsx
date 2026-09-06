@@ -126,21 +126,23 @@ export default function WorkflowsPage() {
         setLoadingHistory(true);
         try {
             const data = await fetchBackendGenerationLogs({ projectId: "workflow", limit: 50 });
-            setHistoryLogs((data.logs || []).map((log) => ({
-                id: log.id,
-                workflow: log.workflow || "unknown",
-                prompt: log.prompt || "",
-                status: log.status,
-                createdAt: log.createdAt,
-                outputs: (log.outputs || []).map((o: any) => ({ url: o.url, mimeType: o.mimeType })),
-                error: log.error,
-            })));
+            setHistoryLogs((data.logs || [])
+                .filter((log) => !selected?.name || log.workflow === selected.name)
+                .map((log) => ({
+                    id: log.id,
+                    workflow: log.workflow || "unknown",
+                    prompt: log.prompt || "",
+                    status: log.status,
+                    createdAt: log.createdAt,
+                    outputs: (log.outputs || []).map((o: any) => ({ url: o.url, mimeType: o.mimeType })),
+                    error: log.error,
+                })));
         } catch (err) {
             message.error(err instanceof Error ? err.message : "加载历史失败");
         } finally {
             setLoadingHistory(false);
         }
-    }, []);
+    }, [selected?.name]);
 
     useEffect(() => { if (activeTab === "history") loadHistory(); }, [activeTab, loadHistory]);
 
@@ -345,7 +347,7 @@ type ImageFieldUploadProps = {
 function ImageFieldUpload({ fieldId, value, onChange }: ImageFieldUploadProps) {
     const inputRef = useRef<HTMLInputElement>(null);
     const storageKey = `wf_image_${fieldId}`;
-    const [previewUrl, setPreviewUrl] = useState<string>>(() => {
+    const [previewUrl, setPreviewUrl] = useState<string>(() => {
         // 优先使用当前值，否则从 localStorage 恢复
         if (value) return value;
         try { return localStorage.getItem(storageKey) || ""; } catch { return ""; }
