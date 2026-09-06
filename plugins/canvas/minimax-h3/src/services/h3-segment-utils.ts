@@ -34,13 +34,20 @@ export function patchSelectedSegment(ctx: CanvasNodeContext, metadata: Record<st
 export function buildRestoreParamsPatch(segments: H3Segment[], ref: H3Ref): Partial<H3Segment> {
     // 还原优先级：URL 反查源 Clip（参数始终最新）→ segmentId 反查（URL 变形/改写时兜底）
     // → 材料自带的生成时刻参数快照（源 Clip 已被删除/重建时兜底）。
-    // 现在「设为当前 Clip」会一并还原 prompt（源段提示词带入当前 clip），
+    // 「设为当前 Clip」会一并还原 prompt（源段提示词带入当前 clip），
     // 因为提示词区已支持按 clip 隔离的撤销/重做，误覆盖可用 Ctrl+Z 回退。
     // 注意：H3_SETTINGS_KEYS（复制/粘贴设置）仍排除 prompt，仅本函数使用含 prompt 的 RESTORABLE_PARAM_KEYS。
     const source = segments.find((segment) => resultUrl(segment.result) === ref.url || (segment.results || []).some((item) => item.url === ref.url))
         || (ref.segmentId ? segments.find((segment) => segment.id === ref.segmentId) : undefined);
-    if (source) return restorableParams(source as Record<string, unknown>, RESTORABLE_PARAM_KEYS);
-    return restorableParams(ref.params, RESTORABLE_PARAM_KEYS);
+    const base = source ? restorableParams(source as Record<string, unknown>, RESTORABLE_PARAM_KEYS) : restorableParams(ref.params, RESTORABLE_PARAM_KEYS);
+    // 仅当源段确实带非空提示词时才还原 prompt：避免把当前 clip 的好提示词覆盖成空字符串
+    // （源段 prompt 在实时 segments 里可能已丢失，但生成时刻快照 ref.params 里仍保留，故优先用快照兜底）。
+    const basePrompt = String((base as Record<string, unknown>).prompt || "").trim();
+    const snapshotPrompt = ref.params && typeof ref.params.prompt === "string" ? ref.params.prompt.trim() : "";
+    const finalPrompt = basePrompt || snapshotPrompt;
+    if (finalPrompt) return { ...base, prompt: finalPrompt } as Partial<H3Segment>;
+    const { prompt: _drop, ...rest } = base as Record<string, unknown>;
+    return rest as Partial<H3Segment>;
 }
 
 // 后端自动分段（autoSplit）成功时返回 task.result.segments，其元素是

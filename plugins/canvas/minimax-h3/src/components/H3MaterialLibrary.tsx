@@ -14,6 +14,19 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected, patchSelec
     // Output 固定单行横向滚动：卡片高度实测面板可用高度自适应（78–380px），宽度=高度×2 保持 2:1。
     const listRef = useRef<HTMLDivElement | null>(null);
     const [cardH, setCardH] = useState(78);
+    // Output 区域滚轮横向滚动：在滚动条区域滚动时把纵向转为横向
+    useEffect(() => {
+        const el = listRef.current;
+        if (!el) return;
+        const onWheel = (e: WheelEvent) => {
+            if (e.deltaY !== 0) {
+                e.preventDefault();
+                el.scrollLeft += e.deltaY;
+            }
+        };
+        el.addEventListener("wheel", onWheel, { passive: false });
+        return () => el.removeEventListener("wheel", onWheel);
+    }, []);
     useEffect(() => {
         // 测量父容器（.minimax-library）的可用高度，而非 listRef 自身：
         // listRef 是 grid 容器，其高度由 --h3-out-card-h 决定，若测量自身会形成
