@@ -228,10 +228,11 @@ export class ComfyUiBackend {
                                     const candidates = Object.entries(all)
                                         .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
                                         .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
+                                        .filter((c) => c.updated * 1000 >= started - 5000)
                                         .sort((a, b) => b.updated - a.updated);
                                     if (candidates[0]) {
                                         const winner = candidates[0];
-                                        console.warn(`[comfyui] 恢复观察：/history 无记录，扫描列表找到最近成功条目 prompt_id=${winner.pid}（目标 ${promptId}）`);
+                                        console.warn(`[comfyui] 恢复观察：/history 无记录，扫描列表找到条目 prompt_id=${winner.pid}（目标 ${promptId}）`);
                                         const result = { promptId, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
                                         this.updateTask(taskId, { status: "succeeded", progress: 1, result });
                                         this.deps.tasks.addEvent(taskId, "result", result);
@@ -435,10 +436,12 @@ export class ComfyUiBackend {
                             const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
                             if (allHistory.ok) {
                                 const all = await allHistory.json() as Record<string, any>;
-                                // 找最新的 completed + 有 outputs 的条目
+                                // 找最新的 completed + 有 outputs 的条目（必须 startedAt 之后才有效，
+                                // 避免把上一次成功的历史记录当成当前任务的结果）
                                 const candidates = Object.entries(all)
                                     .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
                                     .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
+                                    .filter((c) => c.updated * 1000 >= startedAt - 5000)
                                     .sort((a, b) => b.updated - a.updated);
                                 if (candidates[0]) {
                                     const winner = candidates[0];
@@ -487,6 +490,8 @@ export class ComfyUiBackend {
                         // /history/{prompt_id} 无记录或空对象：可能是 ComfyUI 历史记录被清理，
                         // 主动扫 /history 列表找最近成功条目兜底（不要求 WS 已关闭，
                         // 因为 WS 可能开着但丢消息、或 /history 被 LRU 清理而 WS 仍连接）。
+                        // 【关键】必须用 startedAt 过滤掉旧条目，否则会把上一次成功的历史记录
+                        // 当成当前任务的结果，导致回写旧视频 + 本次实际生成的视频丢失。
                         if (missingHistoryCount === 20) {
                             try {
                                 const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
@@ -495,13 +500,15 @@ export class ComfyUiBackend {
                                     const candidates = Object.entries(all)
                                         .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
                                         .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
+                                        .filter((c) => c.updated * 1000 >= startedAt - 5000)
                                         .sort((a, b) => b.updated - a.updated);
                                     if (candidates[0]) {
                                         const winner = candidates[0];
-                                        console.warn(`[comfyui] /history 无记录，扫描列表找到最近成功条目 prompt_id=${winner.pid}（目标 ${body.prompt_id}）`);
+                                        console.warn(`[comfyui] /history 无记录，扫描列表找到条目 prompt_id=${winner.pid}（目标 ${body.prompt_id}）`);
                                         closeWs();
                                         return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
                                     }
+                                    console.warn(`[comfyui] /history 列表中没有 startedAt 之后的成功条目（目标 ${body.prompt_id}），继续等待`);
                                 }
                             } catch {}
                         }
@@ -540,10 +547,11 @@ export class ComfyUiBackend {
                                 const candidates = Object.entries(all)
                                     .map(([pid, entry]) => ({ pid, entry, updated: Number(entry?.status?.updated ?? 0) }))
                                     .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
+                                    .filter((c) => c.updated * 1000 >= startedAt - 5000)
                                     .sort((a, b) => b.updated - a.updated);
                                 if (candidates[0]) {
                                     const winner = candidates[0];
-                                    console.warn(`[comfyui] /history 返回 ${historyResponse.status}，扫描列表找到最近成功条目 prompt_id=${winner.pid}`);
+                                    console.warn(`[comfyui] /history 返回 ${historyResponse.status}，扫描列表找到条目 prompt_id=${winner.pid}`);
                                     closeWs();
                                     return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
                                 }
@@ -1015,18 +1023,43 @@ async function buildNanFengV10Workflow(
         sampled = node("nf_second_sample", "SamplerCustomAdvanced", { noise: noise(0), guider: secondGuider(0), sampler: secondSampler(0), sigmas: secondSigmas(0), latent_image: released(0) });
     }
     if (latentUpscaleRequested) {
-        let latentUpscaleModel = String(params.latentUpscaleModel || "").trim();
-        if (!latentUpscaleModel) {
-            try {
-                const response = await fetch(`${comfyUrl}/object_info/NanFengH3LowPeakLatentUpscaler`, { signal });
-                if (response.ok) {
-                    const body = await response.json() as Record<string, any>;
-                    const choices = body.NanFengH3LowPeakLatentUpscaler?.input?.required?.model_name?.[0];
-                    latentUpscaleModel = Array.isArray(choices) ? String(choices.find((value: unknown) => String(value).trim()) || "") : "";
+        const requestedModel = String(params.latentUpscaleModel || "").trim();
+        let latentUpscaleModel = requestedModel;
+        let upscaleMissingReason = "前端未传入放大模型";
+        let nodeOptionsEmpty = false;
+        let nodeChoices: string[] = [];
+        // 无论前端是否传入模型，都向 ComfyUI 查询该节点实际的 model_name 选项，
+        // 用于校验「所选模型是否真的存在于该 ComfyUI 实例」。之前只在未传模型时才查，
+        // 导致「传了模型但节点选项为空（shim 未生效）」的情况把错误丢给 ComfyUI 报模糊的
+        // value not in list。这里显式校验，直接指向 shim 未在该实例生效。
+        try {
+            const response = await fetch(`${comfyUrl}/object_info/NanFengH3LowPeakLatentUpscaler`, { signal });
+            if (!response.ok) {
+                upscaleMissingReason = `ComfyUI 未暴露 NanFengH3LowPeakLatentUpscaler 节点（HTTP ${response.status}），请确认该节点已安装`;
+            } else {
+                const body = await response.json() as Record<string, any>;
+                const rawChoices = body.NanFengH3LowPeakLatentUpscaler?.input?.required?.model_name?.[0];
+                // 与 listLocalH3Models 的 readChoices 保持一致：过滤空字符串。
+                // 节点在缺少上游 schema（未装 h3_upscaler_compat 兼容层）时会返回 ["","",...]。
+                nodeChoices = Array.isArray(rawChoices) ? rawChoices.map(String).filter((value) => value.trim()) : [];
+                nodeOptionsEmpty = nodeChoices.length === 0;
+                if (!latentUpscaleModel) {
+                    if (nodeOptionsEmpty) {
+                        upscaleMissingReason = "ComfyUI 未返回任何放大模型（该节点的 model_name 选项为空）；请确认已安装 h3_upscaler_compat 兼容层，使 NanFengH3LowPeakLatentUpscaler 能找到上游 H3LatentUpscalerNodeMegapixels 类并列出模型文件";
+                    } else {
+                        latentUpscaleModel = nodeChoices[0];
+                    }
+                } else if (nodeOptionsEmpty || !nodeChoices.includes(latentUpscaleModel)) {
+                    // 前端已传入模型名，但节点实际选项里没有：说明该 ComfyUI 实例未生效 shim（选项为空）或模型名不匹配。
+                    // 显式抛出，避免把错误丢给 ComfyUI 报模糊的 value not in list（容易被误解为「二采没生效」）。
+                    throw new Error(`已启用 H3 潜空间放大，但所选模型「${latentUpscaleModel}」不在 ComfyUI 节点 NanFengH3LowPeakLatentUpscaler 的 model_name 选项里（该节点当前${nodeOptionsEmpty ? "选项为空" : `仅有：${nodeChoices.join("、")}`}）。这通常意味着 h3_upscaler_compat 兼容层未在该 ComfyUI 实例生效——请确认「无限画布连接的那个 ComfyUI」已安装 h3_upscaler_compat（文件夹名不可改）并重启 ComfyUI。`);
                 }
-            } catch { /* fall through to the actionable validation below */ }
+            }
+        } catch (error) {
+            if (error instanceof Error && error.message.startsWith("已启用 H3 潜空间放大，但所选模型")) throw error;
+            upscaleMissingReason = `读取 NanFengH3LowPeakLatentUpscaler 节点失败：${error instanceof Error ? error.message : String(error)}`;
         }
-        if (!latentUpscaleModel) throw new Error("已启用 H3 潜空间放大，但没有选择放大模型；请刷新 ComfyUI 模型列表并选择模型。 ");
+        if (!latentUpscaleModel) throw new Error(`已启用 H3 潜空间放大，但无法确定放大模型（${upscaleMissingReason}）；请在 Clip 设置中选择模型，或确认 ComfyUI 中已安装该节点并刷新模型列表。`);
         const latentUp = node("nf_latent_upscale", "NanFengH3LowPeakLatentUpscaler", { latent: sampled(1), model_name: latentUpscaleModel, target_megapixels: Number(params.latentUpscaleMegapixels || 1), align: Number(params.latentUpscaleAlign || 2), device: "cuda", precision: String(params.latentUpscalePrecision || "bf16"), aspect_ratio: ratio });
         const clear = node("nf_latent_upscale_clear", "NanFengH3ClearUpscalerCacheResident", { latent: latentUp(0), conditioning: ready(1) });
         const latentGuider = node("nf_latent_guider", "BasicGuider", { model: samplingModelRef, conditioning: clear(1) });
