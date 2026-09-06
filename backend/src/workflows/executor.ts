@@ -145,6 +145,19 @@ export class WorkflowExecutor {
     ): Promise<RunResult> {
         const controller = new AbortController();
         const url = comfyUrl ?? this.bridge.getUrl();
+        // 调试：把 fields / config 摘要写到 backend stdout，
+        // 下次 processImageFields / buildParams / injectParams 抛错时
+        // 能直接看到收到什么数据。生产环境可去掉。
+        const imageFields = (config.fields || []).filter((f) => f.type === "image");
+        console.log("[workflows:run] start", {
+            name,
+            comfyUrl: url,
+            totalFields: (config.fields || []).length,
+            imageFieldCount: imageFields.length,
+            imageFieldIds: imageFields.map((f) => f.id),
+            fieldValueKeys: Object.keys(fieldValues),
+            fieldValueTypes: Object.fromEntries(Object.entries(fieldValues).map(([k, v]) => [k, typeof v === "string" && v.startsWith("data:") ? `dataUrl(${v.length} chars)` : typeof v])),
+        });
         // 先处理 image 字段：上传 dataURL → 获取文件名
         const processedValues = await processImageFields(config.fields, fieldValues, url, controller.signal);
         const params = buildParams(config.fields, processedValues);
