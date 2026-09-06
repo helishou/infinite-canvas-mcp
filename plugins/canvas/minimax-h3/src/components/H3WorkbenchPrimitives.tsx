@@ -334,6 +334,24 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         return () => media.removeEventListener("ended", handler);
     }, [url]);
     useEffect(() => { const media = mediaRef.current; if (!media || !playRequest) return; if (media.paused) void media.play().catch(() => undefined); else media.pause(); }, [playRequest]);
+    // 拖动刻度线 seek：playhead 变化时同步更新视频当前帧（无需等 onLoadedMetadata）
+    useEffect(() => {
+        const media = mediaRef.current;
+        if (!media || !Number.isFinite(playhead)) return;
+        // 播放中不强制 seek（避免跟 onTimeUpdate 冲突），仅暂停态/未初始化时同步
+        if (!media.paused && Math.abs(media.currentTime - playhead) < 0.3) return;
+        if (media.readyState >= 1 && Math.abs(media.currentTime - playhead) > 0.1) {
+            media.currentTime = Math.max(0, Math.min(Number(media.duration || Infinity), playhead));
+        }
+    }, [playhead]);
+    // 点击连续播放全部 Clip：先把当前帧跳到 playhead 再播放
+    useEffect(() => {
+        const media = mediaRef.current;
+        if (!media || !playRequest) return;
+        if (media.readyState >= 1 && Math.abs(media.currentTime - playhead) > 0.05) {
+            media.currentTime = Math.max(0, Math.min(Number(media.duration || Infinity), playhead));
+        }
+    }, [playRequest, playhead]);
     // 预加载下一个 clip 的视频（只暖缓存，不手动切 DOM；切换统一走 advancePlayback → React 更新 src）
     useEffect(() => {
         if (!nextUrl) { preloadRef.current = null; return; }
