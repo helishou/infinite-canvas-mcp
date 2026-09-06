@@ -1,6 +1,6 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Select, Switch, Tag, Tooltip, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -21,6 +21,7 @@ import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import { resolveComfyImageSize, resolveComfyEndpoint } from "@/services/api/comfyui";
 import { fetchWorkflowDetail, runWorkflow } from "@/services/api/workflows";
+import type { WorkflowDetail, WorkflowField } from "@/services/api/workflows";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
 import { deleteWorkbenchLogs, readWorkbenchLogs, saveWorkbenchLog } from "@/services/workbench-logs";
@@ -114,6 +115,8 @@ export default function ImagePage() {
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
     const [autoRunToken, setAutoRunToken] = useState(0);
+    const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
+    const [customFieldValues, setCustomFieldValues] = useState<Record<string, unknown>>({});
     const imageCommand = useWorkbenchAgentStore((state) => state.imageCommand);
     const clearImageCommand = useWorkbenchAgentStore((state) => state.clearImageCommand);
     const updateAgentTask = useWorkbenchAgentStore((state) => state.updateTask);
@@ -142,6 +145,45 @@ export default function ImagePage() {
         window.addEventListener("backend-event", refresh);
         return () => window.removeEventListener("backend-event", refresh);
     }, []);
+
+    // 当选中 ComfyUI 工作流模型时，拉取详情并初始化非 image / 非提示词的自定义字段值
+    useEffect(() => {
+        const channel = resolveModelChannel(config, model);
+        if (channel.kind !== "comfyui") {
+            setWorkflowDetail(null);
+            setCustomFieldValues({});
+            return;
+        }
+        const name = modelOptionName(model).trim();
+        if (!name) {
+            setWorkflowDetail(null);
+            setCustomFieldValues({});
+            return;
+        }
+        let cancelled = false;
+        fetchWorkflowDetail(name)
+            .then((detail) => {
+                if (cancelled) return;
+                setWorkflowDetail(detail);
+                const initial: Record<string, unknown> = {};
+                for (const field of detail.config?.fields || []) {
+                    if (field.type === "image" || field.isPrompt) continue;
+                    if (field.id === "width" || field.id === "height") {
+                        const size = resolveComfyImageSize(config.size);
+                        initial[field.id] = field.id === "width" ? size.width : size.height;
+                    } else {
+                        initial[field.id] = field.default ?? (field.type === "boolean" ? false : field.type === "number" || field.type === "slider" ? 0 : "");
+                    }
+                }
+                setCustomFieldValues(initial);
+            })
+            .catch(() => {
+                if (cancelled) return;
+                setWorkflowDetail(null);
+                setCustomFieldValues({});
+            });
+        return () => { cancelled = true; };
+    }, [model]);
 
     const addReferences = async (files?: FileList | null) => {
         const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
@@ -389,6 +431,10 @@ export default function ImagePage() {
                     const dataUrl = ref.dataUrl || ref.url;
                     if (typeof dataUrl === "string" && dataUrl) workflowFields[field.id] = dataUrl;
                 }
+                // 合并用户在工作台自定义字段面板填写的值（非 image、非提示词）
+                for (const [id, value] of Object.entries(customFieldValues)) {
+                    workflowFields[id] = value;
+                }
                 const run = await runWorkflow(workflowName, workflowFields, detail.config);
                 if (run.error) throw new Error(run.error);
                 const first = run.media?.[0];
@@ -415,6 +461,10 @@ export default function ImagePage() {
                     // dataUrl 优先，storageKey 也带上让后端可选走 media 引用
                     const dataUrl = ref.dataUrl || ref.url;
                     if (typeof dataUrl === "string" && dataUrl) workflowFields[field.id] = dataUrl;
+                }
+                // 合并用户在工作台自定义字段面板填写的值（非 image、非提示词）
+                for (const [id, value] of Object.entries(customFieldValues)) {
+                    workflowFields[id] = value;
                 }
                 const run = await runWorkflow(selectedModelName, workflowFields, detail.config);
                 if (run.error) throw new Error(run.error);
@@ -585,7 +635,7 @@ export default function ImagePage() {
                             </div>
 
                             <div className="hidden gap-4 sm:grid sm:grid-cols-2">
-                                <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                                <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} workflowDetail={workflowDetail} customFieldValues={customFieldValues} setCustomFieldValues={setCustomFieldValues} />
                             </div>
                         </div>
 
@@ -648,7 +698,7 @@ export default function ImagePage() {
             </Drawer>
             <Drawer title={t("workbench.settings")} placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
-                    <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                    <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} workflowDetail={workflowDetail} customFieldValues={customFieldValues} setCustomFieldValues={setCustomFieldValues} />
                 </div>
             </Drawer>
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
@@ -660,9 +710,26 @@ export default function ImagePage() {
     );
 }
 
-function GenerationSettings({ config, model, updateConfig, openConfigDialog }: { config: AiConfig; model: string; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void }) {
+function GenerationSettings({
+    config,
+    model,
+    updateConfig,
+    openConfigDialog,
+    workflowDetail,
+    customFieldValues,
+    setCustomFieldValues,
+}: {
+    config: AiConfig;
+    model: string;
+    updateConfig: UpdateAiConfig;
+    openConfigDialog: (shouldPromptContinue?: boolean) => void;
+    workflowDetail: WorkflowDetail | null;
+    customFieldValues: Record<string, unknown>;
+    setCustomFieldValues: React.Dispatch<React.SetStateAction<Record<string, unknown>>>;
+}) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
+    const displayFields = (workflowDetail?.config?.fields || []).filter((field) => field.type !== "image" && !field.isPrompt);
 
     return (
         <>
@@ -670,11 +737,93 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">{t("workbench.model")}</span>
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
+            {displayFields.length > 0 && (
+                <div className="col-span-2">
+                    <WorkflowCustomFields fields={displayFields} values={customFieldValues} onChange={(id, value) => setCustomFieldValues((prev) => ({ ...prev, [id]: value }))} />
+                </div>
+            )}
             <div className="col-span-2">
                 <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />
             </div>
         </>
     );
+}
+
+function WorkflowCustomFields({
+    fields,
+    values,
+    onChange,
+}: {
+    fields: WorkflowField[];
+    values: Record<string, unknown>;
+    onChange: (id: string, value: unknown) => void;
+}) {
+    return (
+        <div className="space-y-3">
+            {fields.map((field) => (
+                <CustomFieldInput key={field.id} field={field} value={values[field.id]} onChange={(value) => onChange(field.id, value)} />
+            ))}
+        </div>
+    );
+}
+
+function CustomFieldInput({
+    field,
+    value,
+    onChange,
+}: {
+    field: WorkflowField;
+    value: unknown;
+    onChange: (value: unknown) => void;
+}) {
+    const commonLabel = <span className="mb-1.5 block text-sm font-semibold">{field.name}</span>;
+    switch (field.type) {
+        case "boolean":
+            return (
+                <label className="flex cursor-pointer items-center justify-between gap-3">
+                    <span className="text-sm font-semibold">{field.name}</span>
+                    <Switch checked={value === true} onChange={(checked) => onChange(checked)} />
+                </label>
+            );
+        case "dropdown": {
+            const options = field.options || [];
+            const current = options.includes(String(value ?? "")) ? String(value ?? "") : options[0] ?? "";
+            return (
+                <label className="block">
+                    {commonLabel}
+                    <Select
+                        value={current}
+                        onChange={(next) => onChange(next)}
+                        options={options.map((option) => ({ value: option, label: option }))}
+                        className="w-full"
+                    />
+                </label>
+            );
+        }
+        case "number":
+        case "slider":
+            return (
+                <label className="block">
+                    {commonLabel}
+                    <Input
+                        type="number"
+                        value={value === undefined || value === null ? "" : String(value)}
+                        min={field.min}
+                        max={field.max}
+                        step={field.step}
+                        onChange={(event) => onChange(event.target.value === "" ? (field.default ?? 0) : Number(event.target.value))}
+                    />
+                </label>
+            );
+        case "text":
+        default:
+            return (
+                <label className="block">
+                    {commonLabel}
+                    <Input value={value === undefined || value === null ? "" : String(value)} onChange={(event) => onChange(event.target.value)} />
+                </label>
+            );
+    }
 }
 
 function ResultImageCard({

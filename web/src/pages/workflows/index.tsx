@@ -86,7 +86,8 @@ export default function WorkflowsPage() {
         setEditingName(null);
         if (!trimmed) return;
         const item = workflows.find((w) => w.name === name);
-        if (item && item.title === trimmed) return;
+        if (!item || item.builtin) return;
+        if (item.title === trimmed) return;
         try {
             await renameWorkflowTitle(name, trimmed);
             setWorkflows((prev) => prev.map((w) => (w.name === name ? { ...w, title: trimmed } : w)));
@@ -206,8 +207,30 @@ export default function WorkflowsPage() {
                         <div className="space-y-4">
                             <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-stone-900">
                                 <div>
-                                    <h2 className="text-lg font-semibold">{selected.config.title || selected.name}</h2>
-                                    <p className="text-sm text-stone-500">{selected.name} · {Object.keys(selected.workflow).length} 个节点 · {selected.config.fields.length} 字段</p>
+                                    {editingName === selected.name ? (
+                                        <Input
+                                            autoFocus
+                                            size="small"
+                                            value={editValue}
+                                            onChange={(e) => setEditValue(e.target.value)}
+                                            onPressEnter={() => handleRename(selected.name)}
+                                            onBlur={() => handleRename(selected.name)}
+                                            className="mb-1 w-full"
+                                        />
+                                    ) : (
+                                        <h2
+                                            className={`text-lg font-semibold ${selected.builtin ? "" : "cursor-pointer hover:text-blue-600"}`}
+                                            title={selected.builtin ? "" : "双击重命名"}
+                                            onDoubleClick={() => {
+                                                if (selected.builtin) return;
+                                                setEditingName(selected.name);
+                                                setEditValue(selected.config.title || selected.name);
+                                            }}
+                                        >
+                                            {selected.config.title || selected.name}
+                                        </h2>
+                                    )}
+                                    <p className="text-sm text-stone-500">{selected.name.replace(/^custom\//, "")} · {Object.keys(selected.workflow).length} 个节点 · {selected.config.fields.length} 字段</p>
                                 </div>
                                 <div className="flex gap-2">
                                     <Button danger icon={<Trash2 className="size-4" />} onClick={() => handleDelete(selected.name)} disabled={selected.builtin}>
@@ -345,9 +368,10 @@ export default function WorkflowsPage() {
                                                 ) : (
                                                     <p
                                                         className="truncate text-sm font-medium"
-                                                        title="双击重命名"
+                                                        title={wf.builtin ? "" : "双击重命名"}
                                                         onDoubleClick={(e) => {
                                                             e.stopPropagation();
+                                                            if (wf.builtin) return;
                                                             setEditingName(wf.name);
                                                             setEditValue(wf.title);
                                                         }}
@@ -355,7 +379,7 @@ export default function WorkflowsPage() {
                                                         {wf.title}
                                                     </p>
                                                 )}
-                                                <p className="text-xs text-stone-500">{wf.name}</p>
+                                                <p className="text-xs text-stone-500">{wf.name.replace(/^custom\//, "")}</p>
                                             </div>
                                             <Tag color="blue">{wf.fieldCount} 字段</Tag>
                                         </div>

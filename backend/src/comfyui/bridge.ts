@@ -129,16 +129,23 @@ export class ComfyUiBackend {
             const required = body[cleanClass]?.input?.required || {};
             const optional = body[cleanClass]?.input?.optional || {};
             const result: Record<string, string[]> = {};
-            for (const [inputs, source] of [[required, "required"], [optional, "optional"]] as const) {
+            for (const [inputs] of [[required], [optional]] as const) {
                 for (const [key, value] of Object.entries(inputs)) {
                     if (!Array.isArray(value) || value.length === 0) continue;
                     const first = value[0];
+                    let choices: unknown[] | null = null;
                     if (Array.isArray(first)) {
-                        result[key] = first.map(String).filter((v) => v !== undefined && v !== null);
-                    } else if (first && typeof first === "object" && Array.isArray(first[0])) {
-                        // 部分返回格式为 [[choices], {extra}]
-                        result[key] = first[0].map(String).filter((v) => v !== undefined && v !== null);
+                        // 旧格式：第一元素直接是选项数组，如 ["1:1", "2:3", ...]
+                        choices = first;
+                    } else if (typeof first === "string" && first.toUpperCase() === "COMBO") {
+                        // 新格式：type 为字符串 "COMBO"，选项在第二个元素的 options 里
+                        // 如 ["COMBO", { "options": [...], "default": "...", "multiselect": false }]
+                        const cfg = value[1] as Record<string, unknown> | undefined;
+                        const opts = cfg?.options;
+                        if (Array.isArray(opts)) choices = opts;
                     }
+                    if (!choices || choices.length === 0) continue;
+                    result[key] = choices.map(String).filter((v) => v !== undefined && v !== null);
                 }
             }
             return result;

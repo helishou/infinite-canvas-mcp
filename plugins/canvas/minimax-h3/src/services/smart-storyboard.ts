@@ -41,6 +41,7 @@ export function storyboardMessages(skill: string, idea: string, count: number, i
 }
 
 export function parseStoryboard(text: string, count: number) {
+    console.log("parseStoryboard", { count, text: text.slice(0, 200) });
     const raw = text.replace(/```(?:text)?|```/g, "").trim();
     const matches = [...raw.matchAll(/^\s*段\s*(\d+)\s*[:：-]?\s*/gm)];
     if (matches.some((match, index) => Number(match[1]) !== index + 1)) throw new Error("模型返回的段号存在跳号、重复或顺序错误");
