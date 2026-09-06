@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { defaultBaseUrlForApiFormat, guessCapability, normalizeChannelModels, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
+import { WorkflowSelectModal } from "./workflow-select-modal";
 
 type ScriptTarget = { name: string; capability: ModelCapability; value: string };
 
@@ -14,9 +15,11 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const [draft, setDraft] = useState<ModelChannel | null>(channel);
     const [selectOpen, setSelectOpen] = useState(false);
     const [scriptTarget, setScriptTarget] = useState<ScriptTarget | null>(null);
-    const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
+    const apiFormatOptions: Array<{ label: string; value: ApiCallFormat; disabled?: boolean }> = [
         { label: "OpenAI", value: "openai" },
         { label: "Gemini", value: "gemini" },
+        // 占位项：提示用户在「渠道类型」里选 ComfyUI（kind=comfyui）
+        { label: "本地 ComfyUI（在「渠道类型」选）", value: "openai", disabled: true },
     ];
     const capabilityOptions: Array<{ label: string; value: ModelCapability }> = ["image", "video", "text", "audio"].map((value) => ({ label: t(`config.channelEditor.capabilities.${value}`), value: value as ModelCapability }));
 
@@ -90,11 +93,11 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
 
             <div className="mt-6 mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
-                    <div className="text-sm font-semibold">{t("config.channelEditor.models")}</div>
+                    <div className="text-sm font-semibold">{isComfy ? t("config.channelEditor.workflows") : t("config.channelEditor.models")}</div>
                     <div className="mt-0.5 text-xs text-stone-500">{t("config.channelEditor.modelDescription", { count: draft.models.length })}</div>
                 </div>
                 <Button type="primary" icon={<ListPlus className="size-4" />} onClick={() => setSelectOpen(true)}>
-                    {t("config.channelEditor.selectModels")}
+                    {isComfy ? t("config.channelEditor.selectWorkflows") : t("config.channelEditor.selectModels")}
                 </Button>
             </div>
 
@@ -119,7 +122,16 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                 )}
             </div>
 
-            <ModelSelectModal open={selectOpen} channel={draft} selectedNames={draft.models.map((model) => model.name)} onConfirm={applySelection} onClose={() => setSelectOpen(false)} />
+            {isComfy ? (
+                <WorkflowSelectModal
+                    open={selectOpen}
+                    selectedNames={draft.models.map((model) => model.name)}
+                    onConfirm={applySelection}
+                    onClose={() => setSelectOpen(false)}
+                />
+            ) : (
+                <ModelSelectModal open={selectOpen} channel={draft} selectedNames={draft.models.map((model) => model.name)} onConfirm={applySelection} onClose={() => setSelectOpen(false)} />
+            )}
 
             <ModelScriptEditor
                 open={Boolean(scriptTarget)}
