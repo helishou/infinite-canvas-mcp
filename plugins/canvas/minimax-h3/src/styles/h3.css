@@ -27,6 +27,8 @@
 .minimax-output-actions button.active { background:#334155; color:#7dd3fc; opacity:1; }
 .minimax-output-actions svg { width:26px; height:26px; }
 .minimax-library-list { grid-column:1; grid-row:2; min-height:0; overflow:auto; padding:14px; display:grid; grid-template-columns:repeat(auto-fill,minmax(156px,1fr)); align-content:start; gap:14px; scrollbar-width:thin; }
+/* Output 固定单行横向滚动：卡片高度随面板高度（--h3-out-card-h），宽度=高度×2，超出横向滚动。禁止竖向滚动。 */
+.minimax-output-list { grid-template-columns:none; grid-auto-flow:column; grid-auto-columns:calc(var(--h3-out-card-h, 78px) * 2); justify-content:start; align-content:start; overflow-x:auto; overflow-y:hidden; }
 .minimax-library-empty { min-height:152px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:#64748b; font-size:23px; font-weight:850; }
 .minimax-wb-main { min-width:0; min-height:0; display:grid; grid-template-rows:minmax(180px,.95fr) minmax(112px,.48fr) minmax(230px,1.2fr); gap:8px; }
 .minimax-player-stage { min-width:0; min-height:0; position:relative; border:1px solid #111827; border-radius:6px; background:#0b0c0e; overflow:hidden; display:flex; align-items:center; justify-content:center; }
@@ -137,8 +139,7 @@
 .minimax-output-list > div > span[style*="display: flex"] button:hover { border-color:rgba(125,211,252,.7); background:#16445b; color:#e0f2fe; transform:translateY(-1px); }
 .minimax-output-list > div > span[style*="display: flex"] svg { width:14px; height:14px; stroke-width:2.2; }
 .minimax-output-list > div { height:var(--h3-out-card-h, 78px) !important; }
-/* Output 固定单行横向滚动：卡片高度随面板高度（--h3-out-card-h），宽度=高度×2，超出横向滚动。 */
-.minimax-output-list { grid-template-columns:none; grid-auto-flow:column; grid-auto-columns:calc(var(--h3-out-card-h, 78px) * 2); justify-content:start; align-content:start; }
+/* Output 固定单行横向滚动：卡片高度随面板高度（--h3-out-card-h），宽度=高度×2，超出横向滚动。禁止竖向滚动。 */
 .minimax-output-list > div > video,.minimax-output-list > div > img { width:100%; height:100%; object-fit:cover; }
 .minimax-library-list:not(.minimax-output-list) > div > span[style*="bottom"] { top:3px !important; bottom:auto !important; left:3px !important; }
 .minimax-status-badge { position:absolute; left:10px; top:48px; z-index:20; max-width:calc(100% - 20px); padding:8px 16px; border-radius:5px; background:rgba(15,23,42,.88); color:#cbd5e1; font-size:20px; font-weight:850; pointer-events:none; }

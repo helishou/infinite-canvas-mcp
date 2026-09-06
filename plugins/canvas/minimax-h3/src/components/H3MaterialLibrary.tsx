@@ -22,7 +22,10 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected, patchSelec
         if (!parent) return;
         const measure = () => {
             const style = window.getComputedStyle(parent);
-            const availH = parent.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom) - 28;
+            // 从 grid-template-rows 解析第一行（header）高度，避免魔法数
+            const gridRows = style.gridTemplateRows.split(" ");
+            const headerRowH = parseFloat(gridRows[0]) || 60;
+            const availH = parent.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom) - headerRowH;
             if (availH <= 40) return;
             const next = Math.round(Math.max(78, Math.min(380, availH)));
             setCardH((prev) => (Math.abs(prev - next) > 1 ? next : prev));
