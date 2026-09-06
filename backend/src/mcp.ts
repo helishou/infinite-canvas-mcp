@@ -8,6 +8,8 @@ import { BackendDatabase } from "./db.js";
 import { ComfyUiBackend } from "./comfyui/bridge.js";
 import { createStores } from "./stores/index.js";
 import { PluginMcpRegistry, buildPluginMcpContext, type PluginMcpDeclaration, type PluginMcpBackend } from "@basketikun/canvas-agent/plugin-mcp";
+import type { CanvasProject } from "./db.js";
+import type { PluginDeclaration } from "./db.js";
 import type { ComfyUiClient } from "@basketikun/canvas-agent/runtime/comfy-client";
 import { toolDescriptions, toolInputSchemas, toolNames, type ToolName } from "@basketikun/canvas-agent/schemas";
 import { buildCanvasToolRequest } from "@basketikun/canvas-agent/operations";
@@ -20,7 +22,8 @@ export async function startBackendMcpServer() {
     const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings, media: stores.media });
     const directBackend: PluginMcpBackend = {
         listCanvasProjects: async () => db.listCanvasProjects(),
-        replaceCanvasProjects: async (projects) => db.replaceCanvasProjects(projects),
+        replaceCanvasProjects: async (projects) => db.replaceCanvasProjects(projects as CanvasProject[]),
+        replacePluginDeclarations: async (declarations) => db.replacePluginDeclarations(declarations as PluginDeclaration[]),
         runtimeMediaStore: async (name, dataUrl) => ({ path: stores.media.storeDataUrl(dataUrl, name).path }),
         runtimeMediaPath: async (ref) => {
             const url = new URL(ref || "", config.url);
@@ -75,7 +78,7 @@ const DIRECT_TOOL_NAMES = new Set<ToolName>([...DIRECT_CANVAS_TOOLS, "assets_lis
 function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, stores: ReturnType<typeof createStores>) {
     for (const name of DIRECT_CANVAS_TOOLS) {
         const schema = toolInputSchemas[name];
-        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput) => {
+        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput: Record<string, unknown>) => {
             const input = schema.parse(rawInput) as Record<string, unknown>;
             if (name === "canvas_list_projects") {
                 const keyword = String(input.keyword || "").trim().toLowerCase();
@@ -98,7 +101,7 @@ function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, store
     }
     for (const name of ["assets_list", "assets_add"] as ToolName[]) {
         const schema = toolInputSchemas[name];
-        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput) => {
+        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput: Record<string, unknown>) => {
             const input = schema.parse(rawInput) as Record<string, unknown>;
             if (name === "assets_list") return textResult(stores.assets.list({ kind: input.kind && input.kind !== "all" ? String(input.kind) : undefined }));
             const now = new Date().toISOString();
@@ -148,7 +151,7 @@ function registerDirectComfyTools(server: McpServer, comfy: ComfyUiBackend, stor
 function registerBrowserCompatibilityTools(server: McpServer, config: ReturnType<typeof loadConfig>) {
     for (const name of toolNames.filter((item) => !DIRECT_TOOL_NAMES.has(item) && !item.startsWith("h3_"))) {
         const schema = toolInputSchemas[name];
-        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (input) => {
+        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (input: Record<string, unknown>) => {
             const response = await fetch(`${config.url.replace(/\/$/, "")}/agent/api/tools`, {
                 method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${config.token}` },
                 body: JSON.stringify({ name, input: schema.parse(input) }),

@@ -23,6 +23,9 @@ export type ComfyPreset = { id: string; name: string; kind: "image" | "video"; i
 export type ComfyModelCatalog = { models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng?: Record<string, unknown[]>; refreshedAt: string; error?: string };
 
 const PRESETS: ComfyPreset[] = [
+    { id: "z-image", name: "Z-Image 文生图", kind: "image", inputs: ["prompt"], params: ["width", "height", "seed"] },
+    { id: "flux2-klein", name: "Flux2-Klein 图生图", kind: "image", inputs: ["prompt", "references"], params: ["width", "height", "seed"] },
+    { id: "flashvsr-1.1", name: "FlashVSR 视频修复", kind: "video", inputs: ["video"], params: ["scale", "longEdge"] },
     { id: "minimax-h3", name: "H3导演台 视频生成", kind: "video", inputs: ["video", "references", "audios", "segments"], params: ["mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sampler", "scheduler", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd", "constantTriggerWord"] },
 ];
 
@@ -41,6 +44,59 @@ function extractComfyErrorMessage(status: any): string {
     }
     if (typeof status.status_str === "string") return `ComfyUI 执行失败（${status.status_str}）`;
     try { return `ComfyUI 执行失败：${JSON.stringify(status).slice(0, 1500)}`; } catch { return "ComfyUI 执行失败"; }
+}
+
+/** ComfyUI status.messages 里的 timestamp 在不同版本/平台下有时是秒、有时是毫秒。
+ * 统一转成毫秒，避免秒级时间戳被当成 1970 年导致兜底扫描永远过滤失败。 */
+function normalizeComfyTimestamp(ts: unknown): number {
+    const t = Number(ts || 0);
+    if (!t || !Number.isFinite(t)) return 0;
+    // 阈值 1e12 (ms) ≈ 2001-09-09；秒级时间戳要到 2286 年才超过 1e10。
+    // 所以 <1e12 视为秒，>=1e12 视为毫秒。
+    return t < 1e12 ? t * 1000 : t;
+}
+
+/** 当 /history/{prompt_id} 缺失时，扫描整个 /history 列表找最可能的兜底条目。
+ * 先按 strict 窗口过滤，找不到再逐步放宽，最后回退到最新一条有 outputs 的记录。
+ * targetPromptId 仅用于日志。 */
+function findLatestHistoryEntry(
+    all: Record<string, any>,
+    startedAt: number,
+    targetPromptId?: string,
+): { pid: string; entry: Record<string, any>; updated: number } | undefined {
+    const entries = Object.entries(all)
+        .map(([pid, entry]) => {
+            const msgs: Array<[string, Record<string, unknown>]> = Array.isArray(entry?.status?.messages)
+                ? entry.status.messages as Array<[string, Record<string, unknown>]>
+                : [];
+            const ts = msgs.reduce((max: number, [, data]) => {
+                const t = normalizeComfyTimestamp((data as Record<string, unknown>)?.timestamp);
+                return t > max ? t : max;
+            }, 0);
+            return { pid, entry, updated: ts };
+        })
+        .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0);
+
+    // 策略1: 严格窗口 (startedAt 前后 5 秒，避免把上一次成功记录当成当前任务)
+    const strict = entries.filter((c) => c.updated >= startedAt - 5000).sort((a, b) => b.updated - a.updated);
+    if (strict[0]) {
+        console.warn(`[comfyui] /history/${targetPromptId || "?"} 缺失，严格窗口扫描命中 prompt_id=${strict[0].pid}`);
+        return strict[0];
+    }
+    // 策略2: 宽松窗口 (2 分钟，应对时钟 skew、排队延迟或 ComfyUI 启动耗时)
+    const loose = entries.filter((c) => c.updated >= startedAt - 120000).sort((a, b) => b.updated - a.updated);
+    if (loose[0]) {
+        console.warn(`[comfyui] /history/${targetPromptId || "?"} 缺失，宽松窗口扫描命中 prompt_id=${loose[0].pid}`);
+        return loose[0];
+    }
+    // 策略3: 最后兜底：取 /history 里最新一条有 outputs 的记录
+    const latest = entries.sort((a, b) => b.updated - a.updated)[0];
+    if (latest) {
+        console.warn(`[comfyui] /history/${targetPromptId || "?"} 缺失，fallback 取最新有 outputs 的记录 prompt_id=${latest.pid}`);
+        return latest;
+    }
+    console.warn(`[comfyui] /history/${targetPromptId || "?"} 缺失，且 /history 列表中没有任何带 outputs 的记录`);
+    return undefined;
 }
 
 /** 总后台侧 ComfyUI Bridge：任务持久化统一走总后台 SQLite。 */
@@ -217,31 +273,16 @@ export class ComfyUiBackend {
                         return;
                     }
                     // /history/{prompt_id} 无记录（可能被 LRU 清理）：计数器递增，
-                    // 到 20 次时主动扫 /history 列表找最近成功条目兜底。
+                    // 每 20 次（约 40 秒）主动扫 /history 列表找最近成功条目兜底。
                     if (!item) {
                         missingCount++;
-                        if (missingCount === 20) {
+                        if (missingCount === 20 || (missingCount > 20 && missingCount % 20 === 0)) {
                             try {
                                 const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
                                 if (allHistory.ok) {
                                     const all = await allHistory.json() as Record<string, any>;
-                                    const candidates = Object.entries(all)
-                                        .map(([pid, entry]) => {
-                                            const msgs: Array<[string, Record<string, unknown>]> = Array.isArray(entry?.status?.messages)
-                                                ? entry.status.messages as Array<[string, Record<string, unknown>]>
-                                                : [];
-                                            const ts = msgs.reduce((max: number, [, data]) => {
-                                                const t = Number((data as Record<string, unknown>)?.timestamp ?? 0);
-                                                return t > max ? t : max;
-                                            }, 0);
-                                            return { pid, entry, updated: ts };
-                                        })
-                                        .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
-                                        .filter((c) => c.updated >= started - 5000)
-                                        .sort((a, b) => b.updated - a.updated);
-                                    if (candidates[0]) {
-                                        const winner = candidates[0];
-                                        console.warn(`[comfyui] 恢复观察：/history 无记录，扫描列表找到条目 prompt_id=${winner.pid}（目标 ${promptId}）`);
+                                    const winner = findLatestHistoryEntry(all, started, promptId);
+                                    if (winner) {
                                         const result = { promptId, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
                                         this.updateTask(taskId, { status: "succeeded", progress: 1, result });
                                         this.deps.tasks.addEvent(taskId, "result", result);
@@ -445,24 +486,8 @@ export class ComfyUiBackend {
                             const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
                             if (allHistory.ok) {
                                 const all = await allHistory.json() as Record<string, any>;
-                                // 找最新的 completed + 有 outputs 的条目（必须 startedAt 之后才有效，
-                                // 避免把上一次成功的历史记录当成当前任务的结果）
-                                const candidates = Object.entries(all)
-                                    .map(([pid, entry]) => {
-                                        const msgs: Array<[string, Record<string, unknown>]> = Array.isArray(entry?.status?.messages)
-                                            ? entry.status.messages as Array<[string, Record<string, unknown>]>
-                                            : [];
-                                        const ts = msgs.reduce((max: number, [, data]) => {
-                                            const t = Number((data as Record<string, unknown>)?.timestamp ?? 0);
-                                            return t > max ? t : max;
-                                        }, 0);
-                                        return { pid, entry, updated: ts };
-                                    })
-                                    .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
-                                    .filter((c) => c.updated >= startedAt - 5000)
-                                    .sort((a, b) => b.updated - a.updated);
-                                if (candidates[0]) {
-                                    const winner = candidates[0];
+                                const winner = findLatestHistoryEntry(all, startedAt, body.prompt_id);
+                                if (winner) {
                                     closeWs();
                                     return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
                                 }
@@ -510,34 +535,19 @@ export class ComfyUiBackend {
                         // 因为 WS 可能开着但丢消息、或 /history 被 LRU 清理而 WS 仍连接）。
                         // 【关键】必须用 startedAt 过滤掉旧条目，否则会把上一次成功的历史记录
                         // 当成当前任务的结果，导致回写旧视频 + 本次实际生成的视频丢失。
-                        if (missingHistoryCount === 20) {
+                        // 每 20 轮（约 30 秒）扫描一次 /history 列表兜底，而不是只扫一次：
+                        // 有些 ComfyUI 实例会延迟写入 /history，或历史记录被 LRU 清理后
+                        //  WS 又先于 executed 事件断开，需要持续尝试兜底。
+                        if (missingHistoryCount === 20 || (missingHistoryCount > 20 && missingHistoryCount % 20 === 0)) {
                             try {
                                 const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
                                 if (allHistory.ok) {
                                     const all = await allHistory.json() as Record<string, any>;
-                                    const candidates = Object.entries(all)
-                                        .map(([pid, entry]) => {
-                                            // ComfyUI /history 没有 status.updated 字段，
-                                            // 需要从 messages 里取最近一条的时间戳作为排序/过滤依据。
-                                            const msgs: Array<[string, Record<string, unknown>]> = Array.isArray(entry?.status?.messages)
-                                                ? entry.status.messages as Array<[string, Record<string, unknown>]>
-                                                : [];
-                                            const ts = msgs.reduce((max: number, [, data]) => {
-                                                const t = Number((data as Record<string, unknown>)?.timestamp ?? 0);
-                                                return t > max ? t : max;
-                                            }, 0);
-                                            return { pid, entry, updated: ts };
-                                        })
-                                        .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
-                                        .filter((c) => c.updated >= startedAt - 5000)
-                                        .sort((a, b) => b.updated - a.updated);
-                                    if (candidates[0]) {
-                                        const winner = candidates[0];
-                                        console.warn(`[comfyui] /history 无记录，扫描列表找到条目 prompt_id=${winner.pid}（目标 ${body.prompt_id}）`);
+                                    const winner = findLatestHistoryEntry(all, startedAt, body.prompt_id);
+                                    if (winner) {
                                         closeWs();
                                         return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
                                     }
-                                    console.warn(`[comfyui] /history 列表中没有 startedAt 之后的成功条目（目标 ${body.prompt_id}），继续等待`);
                                 }
                             } catch {}
                         }
@@ -568,28 +578,13 @@ export class ComfyUiBackend {
                     // /history/{prompt_id} 返回非 200（如 404）：与 item===undefined 同样对待，
                     // 避免"history 被清理但响应码不是 404"时计数器不递增导致无限空转。
                     missingHistoryCount++;
-                    if (missingHistoryCount === 20) {
+                    if (missingHistoryCount === 20 || (missingHistoryCount > 20 && missingHistoryCount % 20 === 0)) {
                         try {
                             const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
                             if (allHistory.ok) {
                                 const all = await allHistory.json() as Record<string, any>;
-                                const candidates = Object.entries(all)
-                                    .map(([pid, entry]) => {
-                                        const msgs: Array<[string, Record<string, unknown>]> = Array.isArray(entry?.status?.messages)
-                                            ? entry.status.messages as Array<[string, Record<string, unknown>]>
-                                            : [];
-                                        const ts = msgs.reduce((max: number, [, data]) => {
-                                            const t = Number((data as Record<string, unknown>)?.timestamp ?? 0);
-                                            return t > max ? t : max;
-                                        }, 0);
-                                        return { pid, entry, updated: ts };
-                                    })
-                                    .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0)
-                                    .filter((c) => c.updated >= startedAt - 5000)
-                                    .sort((a, b) => b.updated - a.updated);
-                                if (candidates[0]) {
-                                    const winner = candidates[0];
-                                    console.warn(`[comfyui] /history 返回 ${historyResponse.status}，扫描列表找到条目 prompt_id=${winner.pid}`);
+                                const winner = findLatestHistoryEntry(all, startedAt, body.prompt_id);
+                                if (winner) {
                                     closeWs();
                                     return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
                                 }
