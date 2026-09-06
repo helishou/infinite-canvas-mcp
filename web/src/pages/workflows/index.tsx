@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from "react";
-import { Button, Empty, Input, Spin, Tag, message } from "antd";
-import { Upload as UploadIcon, Play, Trash2, Workflow, Code, Server, History } from "lucide-react";
+import { useEffect, useState, useCallback, useRef } from "react";
+import { Button, Empty, Input, Spin, Tag, message, Select, Switch } from "antd";
+import { Upload as UploadIcon, Upload, Play, Trash2, Settings2, Workflow, Code, Server, History } from "lucide-react";
 import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs } from "@/services/backend-api";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
 import { InstancesModal } from "./instances-modal";
