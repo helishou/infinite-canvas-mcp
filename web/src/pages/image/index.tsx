@@ -20,6 +20,7 @@ import { deleteStoredImages, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import { resolveComfyImageSize, resolveComfyEndpoint, runComfyTask } from "@/services/api/comfyui";
+import { runWorkflow } from "@/services/api/workflows";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
 import { deleteWorkbenchLogs, readWorkbenchLogs, saveWorkbenchLog } from "@/services/workbench-logs";
@@ -332,25 +333,41 @@ export default function ImagePage() {
         try {
             const channel = resolveModelChannel(snapshot.config, snapshot.config.model);
             const local = channel.kind === "comfyui";
-            const selectedModel = modelOptionName(snapshot.config.model).trim().toLowerCase();
-            const localPreset = selectedModel === "z-image" ? "z-image" : selectedModel === "flux2-klein" ? "flux2-klein" : "";
-            if (local && !localPreset) throw new Error(`本地 ComfyUI 尚未支持工作台模型：${modelOptionName(snapshot.config.model)}`);
+            const selectedModelName = modelOptionName(snapshot.config.model).trim();
+            const selectedModelKey = selectedModelName.toLowerCase();
+            // ComfyUI 渠道下分流：
+            //   - 内置 preset（z-image / flux2-klein）走 runComfyTask → /comfy/tasks
+            //   - 其他（用户上传的 workflow，含 "custom/xxx" 等）走 runWorkflow → /api/workflows/:name/run
+            const isBuiltinPreset = selectedModelKey === "z-image" || selectedModelKey === "flux2-klein";
             const comfyEndpoint = resolveComfyEndpoint();
-            const result = local
-                ? await runComfyTask(
-                      comfyEndpoint.endpoint,
-                      comfyEndpoint.token,
-                      channel.baseUrl,
-                      localPreset,
-                      snapshot.text,
-                      snapshot.references,
-                      resolveComfyImageSize(snapshot.config.size),
-                  )
-                : snapshot.references.length
-                  ? await requestEdit(snapshot.config, snapshot.text, snapshot.references).then((items) => items[0])
-                  : await requestGeneration(snapshot.config, snapshot.text).then((items) => items[0]);
+            let result: { url: string } | { dataUrl: string } | undefined;
+            if (local && isBuiltinPreset) {
+                result = await runComfyTask(
+                    comfyEndpoint.endpoint,
+                    comfyEndpoint.token,
+                    channel.baseUrl,
+                    selectedModelKey,
+                    snapshot.text,
+                    snapshot.references,
+                    resolveComfyImageSize(snapshot.config.size),
+                );
+            } else if (local) {
+                // 用户上传的 ComfyUI workflow（含 / 的名字是后端 store 允许的 custom/ 前缀）
+                const run = await runWorkflow(selectedModelName, {
+                    prompt: snapshot.text,
+                    references: snapshot.references.map((item) => item.dataUrl || item.url || "").filter(Boolean),
+                });
+                if (run.error) throw new Error(run.error);
+                const first = run.media?.[0];
+                if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");
+                result = { url: first.url };
+            } else if (snapshot.references.length) {
+                result = await requestEdit(snapshot.config, snapshot.text, snapshot.references).then((items) => items[0]);
+            } else {
+                result = await requestGeneration(snapshot.config, snapshot.text).then((items) => items[0]);
+            }
             if (!result) throw new Error(t("imageWorkbench.missingResult"));
-            const source = local
+            const source = "url" in result
                 ? await fetch((result as { url: string }).url).then((response) => response.blob())
                 : (result as { dataUrl: string }).dataUrl;
             const stored = await uploadImage(source, { category: "output" });
