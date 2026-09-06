@@ -81,7 +81,25 @@ export default function ImagePage() {
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
     const [prompt, setPrompt] = useState("");
-    const [references, setReferences] = useState<ReferenceImage[]>([]);
+    const [references, setReferences] = useState<ReferenceImage[]>(() => {
+        try {
+            const saved = localStorage.getItem("image_workbench_references");
+            if (saved) {
+                const parsed = JSON.parse(saved) as ReferenceImage[];
+                return parsed.map((ref) => ({
+                    ...ref,
+                    dataUrl: ref.storageKey ? backendMediaUrl(ref.storageKey) : ref.dataUrl,
+                }));
+            }
+        } catch { /* ignore */ }
+        return [];
+    });
+
+    useEffect(() => {
+        try {
+            localStorage.setItem("image_workbench_references", JSON.stringify(references));
+        } catch { /* ignore */ }
+    }, [references]);
     const [results, setResults] = useState<GenerationResult[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
     const [running, setRunning] = useState(false);

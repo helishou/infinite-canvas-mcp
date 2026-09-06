@@ -119,8 +119,37 @@ async function processImageFields(
     for (const field of fields) {
         if (field.type !== "image") continue;
         const value = fieldValues[field.id];
-        if (value && typeof value === "string" && value.startsWith("data:image")) {
+        if (!value || typeof value !== "string") continue;
+        if (value.startsWith("data:image")) {
             result[field.id] = await uploadDataUrlToComfy(value, field.id, comfyUrl, signal);
+        } else if (/^https?:\/\//.test(value) || value.startsWith("/media/")) {
+            // 生图工作站的参考图是 URL 或 /media/ 路径，需要 fetch 后上传到 ComfyUI
+            let url = value;
+            if (value.startsWith("/media/")) {
+                // /media/ 路径由本 backend 服务（默认 17370），不从 ComfyUI 取
+                const backendBase = `http://127.0.0.1:${process.env.PORT || 17370}`;
+                url = `${backendBase}${value}`;
+            }
+            const resp = await fetch(url, { signal });
+            if (!resp.ok) throw new Error(`为字段 ${field.id} 拉取图片失败: HTTP ${resp.status}`);
+            const blob = await resp.blob();
+            const ext = blob.type.split("/")[1]?.split(";")[0] || "png";
+            const filename = `workflow_${field.id}_${Date.now()}.${ext}`;
+            const form = new FormData();
+            form.set("image", blob, filename);
+            form.set("overwrite", "true");
+            const uploadResp = await fetch(`${comfyUrl.replace(/\/$/, "")}/upload/image`, {
+                method: "POST",
+                body: form,
+                signal,
+            });
+            if (!uploadResp.ok) {
+                const text = await uploadResp.text().catch(() => "");
+                throw new Error(`ComfyUI 上传失败: HTTP ${uploadResp.status} ${text.slice(0, 200)}`);
+            }
+            const body = (await uploadResp.json()) as { name?: string };
+            if (!body.name) throw new Error("ComfyUI 未返回文件名");
+            result[field.id] = body.name;
         }
     }
     return result;
