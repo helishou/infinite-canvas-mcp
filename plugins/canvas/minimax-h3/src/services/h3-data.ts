@@ -75,8 +75,15 @@ export function appendSubjectDefinition(prompt: string, pictureNumber: number, f
 // 尾帧接续：把上一段尾帧作为本段「切镜」首帧参考，但保持人物与动作连续性。
 // 注意用 partially_preserved（而非 fully_preserved）——这是一次 scene cut，
 // 不是无缝 match-cut 续接；帧被复用为开场帧，但人物身份/姿态/进行中的动作要跨切保持。
+// 同时把 prompt 里已有的 <Picture N> 编号全部 +1，为尾帧（Picture 1）腾出首位。
 export function buildTailFrameContinuation(prompt: string, pictureNumber: number, fromClipLabel: string): string {
     let p = prompt;
+    // 先顺延：把所有 <Picture N> 替换为 <Picture N+1>，从大到小编号避免重复覆盖（如先改1→2，再改2→3会覆盖新生成的2）
+    let maxN = 0;
+    for (const m of p.matchAll(/<Picture\s+(\d+)>/gi)) { maxN = Math.max(maxN, parseInt(m[1], 10)); }
+    for (let n = maxN; n >= 1; n--) {
+        p = p.replace(new RegExp(`<Picture\\s+${n}>`, "gi"), `<Picture ${n + 1}>`);
+    }
     if (/^subject_definitions\s*[:：]/m.test(p)) {
         p = appendSubjectDefinition(p, pictureNumber, fromClipLabel);
     }
