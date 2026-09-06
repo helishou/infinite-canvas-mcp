@@ -15,11 +15,9 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const [draft, setDraft] = useState<ModelChannel | null>(channel);
     const [selectOpen, setSelectOpen] = useState(false);
     const [scriptTarget, setScriptTarget] = useState<ScriptTarget | null>(null);
-    const apiFormatOptions: Array<{ label: string; value: ApiCallFormat; disabled?: boolean }> = [
+    const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
         { label: "OpenAI", value: "openai" },
         { label: "Gemini", value: "gemini" },
-        // 占位项：提示用户在「渠道类型」里选 ComfyUI（kind=comfyui）
-        { label: "本地 ComfyUI（在「渠道类型」选）", value: "openai", disabled: true },
     ];
     const capabilityOptions: Array<{ label: string; value: ModelCapability }> = ["image", "video", "text", "audio"].map((value) => ({ label: t(`config.channelEditor.capabilities.${value}`), value: value as ModelCapability }));
 
@@ -76,6 +74,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                 <label className="block">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.protocol")}</span>
                     <Select disabled={isComfy} className="w-full" value={draft.apiFormat} options={apiFormatOptions} onChange={changeApiFormat} />
+                    {isComfy ? <div className="mt-1 text-xs text-stone-500">ComfyUI 渠道不走协议，下方「渠道类型」已选 ComfyUI。</div> : null}
                 </label>
                 <label className="block">
                     <span className="mb-1 block text-sm font-medium">渠道类型</span>
