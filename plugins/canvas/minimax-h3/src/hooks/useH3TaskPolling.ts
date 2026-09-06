@@ -33,7 +33,17 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
         const recoverTask = async () => {
             if (taskId) return taskId;
             const logs = await ctx.generationLogs.list({ projectId: ctx.projectId, nodeId: ctx.node.id, limit: 50 });
-            const log = logs.filter((item) => ["queued", "running", "success", "failed", "cancelled"].includes(item.status)).sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))[0];
+            const runStartedAt = Number(metadata.runStartedAt || 0);
+            const log = logs
+                .filter((item) => ["queued", "running", "success", "failed", "cancelled"].includes(item.status))
+                .filter((item) => {
+                    // 只考虑当前运行开始之后创建的日志，避免把上一次成功运行的日志
+                    // 误认为当前运行的结果（导致节点直接显示"已完成"而不再提交新任务）。
+                    if (runStartedAt <= 0) return true;
+                    const logTime = new Date(item.createdAt || 0).getTime();
+                    return logTime >= runStartedAt - 2000;
+                })
+                .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))[0];
             if (!log || cancelled) return "";
             if (log.status === "success" && log.outputs?.[0]?.url) {
                 const output = log.outputs[0];
