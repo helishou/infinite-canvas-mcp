@@ -171,6 +171,11 @@ export default function ImagePage() {
                     if (field.id === "width" || field.id === "height") {
                         const size = resolveComfyImageSize(config.size);
                         initial[field.id] = field.id === "width" ? size.width : size.height;
+                    } else if (field.type === "dropdown") {
+                        // 下拉框初值必须命中 options，否则 (例如节点原始值为数字 16)
+                        // ComfyUI 会报 value_not_in_list。缺失/非法时回退到第一项。
+                        const opts = field.options || [];
+                        initial[field.id] = opts.includes(String(field.default ?? "")) ? field.default : (opts[0] ?? "");
                     } else {
                         initial[field.id] = field.default ?? (field.type === "boolean" ? false : field.type === "number" || field.type === "slider" ? 0 : "");
                     }

@@ -7,7 +7,7 @@
 - [新增] 工作流节点图自动识别 ComfyUI 节点的 COMBO/下拉输入：通过 `/object_info` 拉取原始选项列表，勾选该输入时自动创建下拉字段并预填充选项；新增后端 `GET /api/workflows/:name/combo-options`。
 - [修复] COMBO 选项检测兼容 ComfyUI 新版 object_info 格式（`"COMBO"` 字符串类型 + `options` 数组，如 `ResolutionSelector.aspect_ratio`），旧版「选项数组直接作为第一元素」格式（如 `KSampler.sampler_name`）仍兼容；之前新格式的下拉框会被漏判成普通文本。
 - [修复] 生图工作台调用自定义 ComfyUI 工作流时，用户输入的提示词现在会替换勾选「作为提示词」的文本节点值注入 workflow，而不只是记录到日志。
-- [新增] 生图工作台的「自定义模型」（ComfyUI workflow）下方自动展示该工作流已勾选的自定义输入字段（文本/数字/下拉/布尔/滑动条），供运行前直接调整；已自动排除参考图字段与标记为「提示词」的文本字段，避免与顶部提示词、参考图区域重复。
+- [修复] 自定义工作流下拉框（COMBO）传值导致 ComfyUI 报 `value_not_in_list` 的 500：①前端初始化下拉字段初值时对齐到合法选项，不再沿用节点原始输入里可能非法的数字（如 `aspect_ratio: 16`）；②后端 `buildParams` 的 dropdown 分支去掉数字强制转换（之前会把 `"16"` 变成数字 `16`），改为非合法选项时回退首个选项，确保传给 ComfyUI 的一定是字符串且命中 options。
 - [调整] H3 设置面板「生成模式」不再做成可折叠分区：去掉标题栏和展开交互，改为设置面板顶部常驻一行四个模式按钮（文生视频 / 图生视频 / 首尾帧 / 多参考 Ref2VA），点按即切换，各模式配色与选中态样式保留；按钮文字在面板较窄时省略号截断兜底。
 - [修复] H3/Comfy 生成在 backend 重启时被误判为「Failed to fetch」而整个作废：backend dev 模式是 `tsx --watch`，源码变更会自动重启 backend（几秒），浏览器轮询循环一次 fetch 失败就放弃，但 ComfyUI 任务其实已提交且在继续跑。双端修复：①前端所有任务轮询循环（本地 H3/Comfy/RunningHub/视频拼接）对网络层瞬时失败自动重试（最多 15 次、间隔递增；HTTP 4xx/5xx 仍立即抛出）；②backend 新增懒恢复——GET `/comfy/tasks/:id` 发现遗留 running/queued 任务时，用 task_events 里 submitted 事件记录的 promptId 重新挂 /history 观察循环，任务真正跑完后照常回写结果与媒体。已实测：一次被误判失败的视频经恢复链路成功取回（NanFeng_H3_00061-audio.mp4，任务回写 succeeded）。
 - [修复] 播放指针跳转条（ruler-scrubber）横穿设置面板伸出节点外：其宽度误取刻度尺的完整轨道内容宽度（可滚动总宽，可达数千 px），且 left 少加了时间轴面板自身偏移——一条 36px 高的隐形条从时间轴一直压到设置面板上抢指针事件。现宽度钳制为时间轴可见宽度（clientWidth − 左标签 36 − 右槽 54）、left 补上时间轴偏移，并监听时间轴尺寸变化（拖 Settings 宽度手柄时跟随重算）。

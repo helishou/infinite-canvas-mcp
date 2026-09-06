@@ -102,6 +102,7 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
     const count = Math.max(1, Math.min(12, Number(ctx.node.metadata?.smartStoryboardCount || 3)));
     const mode = String(ctx.node.metadata?.smartStoryboardMode || "ref2va") as StoryboardMode;
     const skillId = String(ctx.node.metadata?.smartStoryboardSkill || "regular_storyboard") as StoryboardSkill;
+    const llmModel = String(ctx.node.metadata?.minimaxLlmModel || ctx.node.metadata?.llmModel || ctx.ai.defaultModel("text") || "");
     // 进度消息只能写 smartStoryboardError（智能分镜自己的字段），禁止碰 errorDetails——
     // 那是生成任务的错误字段，底部状态栏会加「失败：」前缀展示；此前把进度写进去，
     // 节点带着旧的 error 状态时就出现「失败：参考图分析完成，正在生成智能分镜…」的错乱红标。
@@ -118,7 +119,7 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
             const imageMeta = { index, slot, name: image.name, isDataUrl: imageUrl.startsWith("data:"), dataUrlBytes: imageUrl.length };
             console.log("generateSmartStoryboard analyze", imageMeta);
             try {
-                result = await ctx.ai.generateText(`你现在只分析一张参考图片，固定编号是@图片${slot}。严格分类为人物图、场景图、产品或道具图三类之一，并提取身份、外观、服装、姿态、空间结构、光线、时间天气及其在连续视频中的参考职责。只返回分析正文，不要追问。`, { references: [{ url: imageUrl, name: image.name }], system: "你是 H3 逐图视觉分析器。严格按图片槽位编号分析，不改编号，不编造图片内容。" });
+                result = await ctx.ai.generateText(`你现在只分析一张参考图片，固定编号是@图片${slot}。严格分类为人物图、场景图、产品或道具图三类之一，并提取身份、外观、服装、姿态、空间结构、光线、时间天气及其在连续视频中的参考职责。只返回分析正文，不要追问。`, { references: [{ url: imageUrl, name: image.name }], system: "你是 H3 逐图视觉分析器。严格按图片槽位编号分析，不改编号，不编造图片内容。", model: llmModel });
             } catch (error) {
                 // 视觉分析失败通常有 3 种根因，原生 message 经常太简短
                 // （比如浏览器 CORS 直接抛 "Failed to fetch"，看不出是 baseUrl 还是
@@ -151,6 +152,7 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
             result = await ctx.ai.generateText(messages[1].content, {
                 system: messages[0].content,
                 references: modelRefs.map((ref) => ({ url: ref.url, name: ref.name })),
+                model: llmModel,
             });
         } catch (error) {
             const raw = error instanceof Error ? error.message : String(error);

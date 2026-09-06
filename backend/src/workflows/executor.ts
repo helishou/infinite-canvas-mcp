@@ -35,12 +35,16 @@ function buildParams(fields: WorkflowField[], values: FieldValues): RunParams {
             }
         } else if (field.type === "boolean") {
             value = Boolean(value);
-        } else if (field.type === "dropdown" && typeof value === "string") {
-            const s = value.trim();
-            if (s && (s.includes(".") || s.toLowerCase().includes("e"))) {
-                const f = parseFloat(s); if (!Number.isNaN(f)) value = f;
-            } else if (s && /^-?\d+$/.test(s)) {
-                const i = parseInt(s, 10); if (!Number.isNaN(i)) value = i;
+        } else if (field.type === "dropdown") {
+            // 下拉框（ComfyUI COMBO）的选项都是字符串且必须命中 options 列表。
+            // 不能做数字强制转换，否则 "16" 会被变成数字 16，导致 ComfyUI 校验
+            // 「value_not_in_list」失败。值不合法时回退到第一个选项。
+            const str = typeof value === "string" ? value : String(value);
+            const opts = field.options;
+            if (Array.isArray(opts) && opts.length > 0 && !opts.includes(str)) {
+                value = opts[0];
+            } else {
+                value = str;
             }
         }
         if (!params[field.node]) params[field.node] = {};
