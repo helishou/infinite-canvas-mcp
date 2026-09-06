@@ -5,7 +5,7 @@ import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
 
-export type ApiCallFormat = "openai" | "gemini";
+export type ApiCallFormat = "openai" | "openai-chat" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
 export const VIDEO_CONCAT_MODEL = "__local_video_concat__";
 export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
@@ -389,7 +389,9 @@ export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
 }
 
 function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
-    return apiFormat === "gemini" ? apiFormat : "openai";
+    if (apiFormat === "gemini") return "gemini";
+    if (apiFormat === "openai-chat") return "openai-chat";
+    return "openai";
 }
 
 function uniqueModelOptions(models: string[]) {

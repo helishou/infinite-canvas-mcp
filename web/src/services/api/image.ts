@@ -495,10 +495,14 @@ async function requestStreamingResponse(config: AiConfig, body: Record<string, u
     const response = await fetch(aiApiUrl(config, "/responses"), {
         method: "POST",
         headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
-        body: JSON.stringify({ ...body, stream: true }),
+        body: JSON.stringify({ ...body, stream: true, keep_alive: 300 }),
         signal: options?.signal,
     });
-    if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
+    if (!response.ok) {
+        const error = new Error(await readFetchError(response, apiText("requestFailed"))) as Error & { status?: number };
+        error.status = response.status;
+        throw error;
+    }
     if (!response.body) {
         const payload = (await response.json()) as ResponseApiPayload;
         validateResponsePayload(payload);
@@ -532,7 +536,10 @@ async function requestChatCompletionsStreaming(config: AiConfig, body: Record<st
     const response = await fetch(aiApiUrl(config, "/chat/completions"), {
         method: "POST",
         headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
-        body: JSON.stringify({ ...body, stream: true }),
+        // keep_alive: Ollama 扩展参数。本地 Ollama 默认在空闲后卸载模型，
+        // 下次请求要花 20~30s 重新加载（冷启动）。设为 300 秒让模型在首次
+        // 加载后常驻显存，后续请求秒回。OpenAI 官方会忽略此字段，不影响。
+        body: JSON.stringify({ ...body, stream: true, keep_alive: 300 }),
         signal: options?.signal,
     });
     if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
@@ -932,19 +939,34 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
             if (answer === apiText("noContent")) onDelta(answer);
             return answer;
         }
+        if (requestConfig.apiFormat === "openai-chat") {
+            const chatMessages = (() => {
+                const out: Array<{ role: "system" | "user" | "assistant"; content: unknown }> = [];
+                for (const m of withSystemMessage(requestConfig, messages)) {
+                    const record = m as Record<string, unknown>;
+                    const role = record.role;
+                    if (role !== "system" && role !== "user" && role !== "assistant") continue;
+                    out.push({ role: role as "system" | "user" | "assistant", content: record.content ?? "" });
+                }
+                return out;
+            })();
+            const answer = (await requestChatCompletionsStreaming(requestConfig, {
+                model: requestConfig.model,
+                messages: chatMessages,
+            }, onDelta, options)).content || apiText("noContent");
+            if (answer === apiText("noContent")) onDelta(answer);
+            return answer;
+        }
         // 优先用 Responses API（GPT-5+）。如果中转/服务端对 `/responses` 没实现或 CORS
         // 没放开（典型 "Failed to fetch"），自动回退到 Chat Completions
         // (`/chat/completions`) — 中转普遍支持且通常 CORS 已开。
         const chatMessages = (() => {
             const out: Array<{ role: "system" | "user" | "assistant"; content: unknown }> = [];
             for (const m of withSystemMessage(requestConfig, messages)) {
-                if ("type" in m) {
-                    if (m.type === "function_call_output") continue;
-                    continue;
-                }
-                if (m.role === "system" || m.role === "user" || m.role === "assistant") {
-                    out.push({ role: m.role, content: m.content || "" });
-                }
+                const record = m as Record<string, unknown>;
+                const role = record.role;
+                if (role !== "system" && role !== "user" && role !== "assistant") continue;
+                out.push({ role: role as "system" | "user" | "assistant", content: record.content ?? "" });
             }
             return out;
         })();
@@ -957,15 +979,31 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
             if (answer === apiText("noContent")) onDelta(answer);
             return answer;
         } catch (responsesError) {
-            const isNetworkOrCors = responsesError instanceof Error && /Failed to fetch|NetworkError|fetch failed|CORS|Load failed/i.test(responsesError.message);
-            if (!isNetworkOrCors) throw responsesError;
-            console.warn("[/chat-completions fallback]", { error: responsesError.message });
-            const answer = (await requestChatCompletionsStreaming(requestConfig, {
-                model: requestConfig.model,
-                messages: chatMessages,
-            }, onDelta, options)).content || apiText("noContent");
-            if (answer === apiText("noContent")) onDelta(answer);
-            return answer;
+            const typed = responsesError as Error & { status?: number };
+            const isNetworkOrCors = typed instanceof Error && /Failed to fetch|NetworkError|fetch failed|CORS|Load failed/i.test(typed.message);
+            // `/responses` 是较新的 Responses API，很多 OpenAI 兼容服务（Ollama、部分中转）未实现，
+            // 会返回 4xx/5xx 而非网络错误。这类情况自动回退到普遍支持的 /chat/completions。
+            // 401/403 视为鉴权问题，不再回退（两个端点鉴权一致，回退无意义）。
+            const isResponsesUnavailable = typeof typed.status === "number" && typed.status >= 400 && typed.status !== 401 && typed.status !== 403;
+            if (!isNetworkOrCors && !isResponsesUnavailable) throw typed;
+            console.warn("[/chat-completions fallback]", { status: typed.status, error: typed.message });
+            try {
+                const answer = (await requestChatCompletionsStreaming(requestConfig, {
+                    model: requestConfig.model,
+                    messages: chatMessages,
+                }, onDelta, options)).content || apiText("noContent");
+                if (answer === apiText("noContent")) onDelta(answer);
+                return answer;
+            } catch (chatError) {
+                // 两个端点都失败：把模型名与试过的路径带上，方便直接定位（典型：Ollama 里没装该模型）
+                const chatTyped = chatError as Error & { status?: number };
+                const reason = [typed.status, chatTyped.status].filter((s): s is number => typeof s === "number");
+                throw new Error(
+                    `调用文本模型「${requestConfig.model}」失败：已依次尝试 /v1/responses（${typed.status ?? "?"}, 该服务不支持）与 /v1/chat/completions（${chatTyped.status ?? "?"}）。`
+                    + (chatTyped.message ? ` 末次错误：${chatTyped.message}` : "")
+                    + (reason.includes(404) ? " 常见原因：渠道里填的模型名在 Ollama 中不存在，请用 ollama list 核对精确模型名（含 :latest 标签）。" : ""),
+                );
+            }
         }
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("requestFailed")));

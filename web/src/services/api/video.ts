@@ -181,7 +181,7 @@ function assertVideoConfig(config: AiConfig, model: string) {
     if (!model) throw new Error(apiText("videoModelRequired"));
     if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
     if (!config.apiKey.trim()) throw new Error(apiText("apiKeyRequired"));
-    if (config.apiFormat === "gemini") throw new Error(apiText("geminiVideoUnsupported"));
+    if (config.apiFormat === "gemini" || config.apiFormat === "openai-chat") throw new Error(apiText("geminiVideoUnsupported"));
 }
 
 function normalizeVideoSeconds(value: string) {
