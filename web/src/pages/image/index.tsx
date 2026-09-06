@@ -353,9 +353,10 @@ export default function ImagePage() {
                 );
             } else if (local) {
                 // 用户上传的 ComfyUI workflow（含 / 的名字是后端 store 允许的 custom/ 前缀）
+                // 第一版只透传 prompt；复杂 fields（lora / sampler / 图片 inputs）等
+                // workflows 页面配置面板加完 UI 再扩 WorkflowRunFields。
                 const run = await runWorkflow(selectedModelName, {
                     prompt: snapshot.text,
-                    references: snapshot.references.map((item) => item.dataUrl || item.url || "").filter(Boolean),
                 });
                 if (run.error) throw new Error(run.error);
                 const first = run.media?.[0];

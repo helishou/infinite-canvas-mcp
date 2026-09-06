@@ -30,7 +30,12 @@ export async function request<T = unknown>(method: string, path: string, body?: 
         body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
-    if (!res.ok) throw new Error(`Backend ${method} ${path} failed: HTTP ${res.status} ${data.error || ""}`);
+    if (!res.ok) {
+        // 把后端返回的 error 字符串完整透传（之前 30 字符截断导致 500 错看不到）
+        const errText = (data && typeof data === "object" && "error" in data && typeof data.error === "string") ? data.error : "";
+        const extra = errText || (res.headers.get("content-type")?.includes("application/json") ? "" : (await res.text().catch(() => "")));
+        throw new Error(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim());
+    }
     return data;
 }
 
