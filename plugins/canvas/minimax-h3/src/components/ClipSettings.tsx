@@ -27,6 +27,7 @@ function H3Dropdown({ values, value, onChange, placeholder, allowClear = false, 
         <datalist id={listId}>{values.map((item) => <option key={String(item)} value={String(item)}>{format ? format(item) : String(item)}</option>)}</datalist>
     </>;
     return <select className="nfh3-native-select" value={selected} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => {
+        if (allowClear && event.target.value === "") { onChange(undefined as unknown as string); return; }
         const option = values.find((item) => String(item) === event.target.value);
         onChange(option ?? event.target.value);
     }}>
@@ -116,7 +117,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const section = (key: SectionKey, title: string, summary: ReactNode, content: ReactNode, className = "") => <section key={`nfh3-sec-${key}`} className={`nfh3-section ${className}`} data-section={key}><button type="button" className="nfh3-section-head" onClick={() => setOpen(key)}><span className={`nfh3-chevron${expanded[key] === true ? " is-open" : ""}`} aria-hidden="true" /><b>{title}</b><small>{summary}</small></button>{expanded[key] === true ? <div className="nfh3-section-body">{content}</div> : null}</section>;
     const enabledSummary = (text: string) => <span className="nfh3-enabled-summary">{text}</span>;
     const control = (label: string, value: ReactNode, wide = false) => <label key={`nfh3-ctl-${label}`} className={`nfh3-control${wide ? " wide" : ""}`}><span>{label}</span>{value}</label>;
-    const choice = (label: string, values: Array<string | number>, value: unknown, onChange: (value: string | number) => void, format?: (value: string | number) => string, wide = false, searchable = false, placeholder?: string) => control(label, <H3Dropdown values={values} value={value as string | number} onChange={onChange} format={format} searchable={searchable} placeholder={placeholder} listId={`nfh3-${label}-options`} />, wide);
+    const choice = (label: string, values: Array<string | number>, value: unknown, onChange: (value: string | number) => void, format?: (value: string | number) => string, wide = false, searchable = false, placeholder?: string, allowClear = false) => control(label, <H3Dropdown values={values} value={value as string | number} onChange={onChange} format={format} searchable={searchable} placeholder={placeholder} allowClear={allowClear} listId={`nfh3-${label}-options`} />, wide);
     const loraSlots = (segment.loraSlots?.length ? segment.loraSlots : [{ name: segment.loraName || "", strength: Number(segment.loraStrength ?? 1), enabled: !!segment.loraName }]).slice(0, 8);
     while (loraSlots.length < 3) loraSlots.push({ name: "", strength: 1, enabled: false });
     const patchLoraSlot = (index: number, value: Partial<{ name: string; strength: number; enabled: boolean }>) => {
@@ -151,8 +152,8 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
             {control("时长秒", <InputNumber style={field} min={1} max={15} step={1} value={segment.duration != null ? Number(segment.duration) : undefined} placeholder="5" onChange={(value) => patch({ duration: value ?? undefined })} />)}
         </div>)}
         {section("sampling", "采样设置", `${segment.steps || 20} 步 · ${segment.sampler || "res_multistep"}`, <div className="nfh3-control-grid">
-            {choice("采样器", samplerChoices, segment.sampler || "res_multistep", (value) => patch({ sampler: String(value) }), undefined, true, true)}
-            {choice("调度器", schedulerChoices, segment.scheduler || "simple", (value) => patch({ scheduler: String(value) }), undefined, true)}
+            {choice("采样器", samplerChoices, segment.sampler, (value) => patch({ sampler: value ? String(value) : undefined }), undefined, true, true, "选择采样器", true)}
+            {choice("调度器", schedulerChoices, segment.scheduler, (value) => patch({ scheduler: value ? String(value) : undefined }), undefined, true, false, "选择调度器", true)}
             {control("采样步数", <InputNumber style={field} min={1} max={100} value={segment.steps != null ? Number(segment.steps) : undefined} placeholder="20" onChange={(value) => patch({ steps: value ?? undefined })} />)}
             {control("降噪强度", <InputNumber style={field} min={0} max={1} step={0.01} value={segment.denoise != null ? Number(segment.denoise) : undefined} placeholder="1" onChange={(value) => patch({ denoise: value ?? undefined })} />)}
             {choice("SageAttention", sageChoices, segment.sageAttention || "H3专用Sage加速", (value) => patch({ sageAttention: String(value) }), (value) => String(value).replace(/^sageattn_/, "sage "))}
