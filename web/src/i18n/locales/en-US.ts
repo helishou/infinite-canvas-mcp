@@ -32,7 +32,7 @@ export default {
     },
     settingsPanels: {
         common: { auto: "Auto", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high" },
-        image: { title: "Image settings", quality: "Quality", size: "Size", align16: "Align to multiples of 16", align16Hint: "Round dimensions up to the next multiple of 16 after input", aspectRatio: "Aspect ratio", transparent: "Transparent background", transparentHint: "Generate an image without a background when supported by the model", count: "Image count", images: "{{count}} images" },
+        image: { title: "Image settings", quality: "Quality", size: "Size", align16: "Align to multiples of 16", align16Hint: "Round dimensions up to the next multiple of 16 after input", aspectRatio: "Aspect ratio", transparent: "Transparent background", transparentHint: "Generate an image without a background when supported by the model", count: "Image count", images: "{{count}} images", workflowFields: "Workflow parameters" },
         video: { title: "Video settings", quality: "Quality", size: "Size", seconds: "Seconds", resolution: "Resolution", ratio: "Aspect ratio", duration: "Duration", smart: "Smart", output: "Output", generateAudio: "Generate audio", watermark: "Add watermark", adaptive: "Adaptive", sizes: { landscape: "Landscape", portrait: "Portrait", square: "Square", widescreen: "Widescreen", tall: "Tall", auto: "Auto" }, ratios: { landscape: "Landscape", portrait: "Portrait", square: "Square", standardLandscape: "Standard landscape", standardPortrait: "Standard portrait", cinematic: "Cinematic", adaptive: "Adaptive" } },
         audio: { title: "Audio settings", voice: "Voice", format: "Format", speed: "Speed", instructions: "Voice instructions", instructionsPlaceholder: "For example: natural, warm, and suitable for narration." },
         text: { title: "Text settings", reasoning: "Reasoning effort", count: "Generation count" },
@@ -142,6 +142,7 @@ export default {
         copyText: "Copy text",
         downloadImage: "Download image",
         downloadVideo: "Download video",
+        downloadFailed: "Download failed. Please try again.",
         composite: {
             itemType: {
                 text: "Text",
@@ -417,9 +418,22 @@ export default {
         modalDescription: "Providers, default models, sync, and local storage",
         tabs: {
             channels: "Providers",
+            localProxy: "Local proxy",
             preferences: "Preferences",
             promptSources: "Prompt sources",
             localStorage: "Local storage",
+        },
+        proxy: {
+            title: "Local proxy",
+            description: "Forward remote model, image, video, text, and audio requests through a proxy running on this machine to avoid browser CORS errors.",
+            startHint: "Run this in a terminal first, then keep it running while you use the canvas:",
+            address: "Proxy address",
+            addressDescription: "It must match the address printed by the startup command.",
+            channelHint: "Keep the provider's real endpoint in its channel settings; turn this off to resume direct requests.",
+            test: "Test connection",
+            available: "Local proxy is reachable ({{proxy}})",
+            missingUrl: "Enter the local proxy address first.",
+            unreachable: "Local proxy is unreachable. Confirm the command is running and the address is correct.",
         },
         localStorage: {
             backendStorageDescription: "Canvas projects, assets, generation records, media files, and plugin data are stored by the local Backend instead of browser databases.",
@@ -492,6 +506,10 @@ export default {
         export: "Export settings",
         imported: "Settings and preferences imported",
         importedDirectConfig: "Local direct connection settings imported",
+        importedChannelCreated: "Added provider “{{name}}” without changing existing providers",
+        importedChannelUpdated: "Updated connection settings for provider “{{name}}”",
+        importedChannelBaseUrlRequired: "The import link has no Base URL. No providers were changed.",
+        importedChannelBaseUrlInvalid: "The import link has an invalid Base URL. No providers were changed.",
         importFailed: "Failed to read the settings file",
         saved: "Settings saved",
         savedContinue: "Settings saved. Continue with your previous request.",

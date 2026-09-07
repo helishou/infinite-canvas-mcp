@@ -28,10 +28,24 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const fmt = (value: number) => `${Number(value || 0).toFixed(Number(value || 0) % 1 ? 1 : 0)}s`;
     const selectedVideo = selectedRefs.find((item) => item.type === "video");
     const selectedImage = selectedRefs.find((item) => item.type === "image");
+    const [livePreview, setLivePreview] = useState<{ url: string; mime: string } | null>(null);
+    useEffect(() => {
+        if (String(metadata.status || "") !== "loading") { setLivePreview(null); return; }
+        const taskId = String(metadata.runtimeTaskId || "");
+        const onPreview = (event: Event) => {
+            const detail = (event as CustomEvent<{ taskId?: string; url?: string; mime?: string }>).detail;
+            if (!detail?.url || !taskId || detail.taskId !== taskId) return;
+            setLivePreview({ url: detail.url, mime: detail.mime || (detail.url.startsWith("data:video/") ? "video/mp4" : "image/jpeg") });
+        };
+        window.addEventListener("minimax-h3-preview", onPreview);
+        return () => window.removeEventListener("minimax-h3-preview", onPreview);
+    }, [metadata.runtimeTaskId, metadata.status]);
     const selectedOwnPreview = resultUrl(selected?.result) || selectedVideo?.url || selectedImage?.url || "";
-    const preview = selectedOwnPreview || (selectedIndex === 0 ? String(metadata.content || upstream.find((item) => item.type === "video")?.url || "") : "");
+    // 预览事件已经按 taskId 过滤；收到后必须独占主预览，不能再让原 Clip 视频留在同一层。
+    const showLivePreview = Boolean(livePreview && String(metadata.status || "") === "loading");
+    const preview = showLivePreview ? livePreview!.url : (selectedOwnPreview || (selectedIndex === 0 ? String(metadata.content || upstream.find((item) => item.type === "video")?.url || "") : ""));
     const selectedResultRef = (selected?.results || []).find((item) => resultUrl(item.url) === preview || item.url === preview);
-    const previewKind: H3Ref["type"] = selectedResultRef?.type || (resultUrl(selected?.result) ? "video" : selectedVideo ? "video" : selectedImage ? "image" : "video");
+    const previewKind: H3Ref["type"] = showLivePreview ? (livePreview!.mime.startsWith("image/") ? "image" : "video") : (selectedResultRef?.type || (resultUrl(selected?.result) ? "video" : selectedVideo ? "video" : selectedImage ? "image" : "video"));
     const previewStorageKey = selectedResultRef?.storageKey || (resultUrl(selected?.result) ? selected?.resultStorageKey : (upstream.find((item) => item.url === preview)?.storageKey)) || undefined;
     const previewName = selectedResultRef?.name || (resultUrl(selected?.result) ? `Clip ${selectedIndex + 1}` : "H3 输出");
     const imageRefs = selectedRefs.filter((item) => item.type === "image");
@@ -168,7 +182,7 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
         <style key="workbench-style">{`.minimax-canvas-workbench{--minimax-prompt-w:${promptW}px;--minimax-preview-w:${previewW}px;--minimax-preview-h:${effPreviewH}px;--minimax-timeline-h:${effTimelineH}px;--minimax-ref-h:${effRefLaneH}px}`}</style>
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
-            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} /></div>
+            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} /></div>
             <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />

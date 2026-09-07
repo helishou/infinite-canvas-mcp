@@ -9,7 +9,6 @@ import { fetchComfyModels, fetchComfyStatus } from "@/services/api/canvas-agent"
 import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, updateBackendGenerationLog } from "@/services/backend-api";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { useBackendStore } from "@/stores/use-backend-store";
 import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
@@ -40,7 +39,8 @@ type PluginHostParams = {
 };
 
 async function persistH3Result<T extends { url: string; mimeType: string; storageKey?: string; segments?: Array<{ media?: Array<{ url: string; mimeType: string; storageKey?: string }> }> }>(result: T): Promise<T & { storageKey?: string }> {
-    const stored = await storeGeneratedVideo({ url: result.url, mimeType: result.mimeType });
+    // Comfy 后端已经落库的 H3 输出直接复用；再次经浏览器下载并上传会重复写一份大视频，也拖慢后续播放缓存。
+    const stored = result.storageKey ? { url: result.url, storageKey: result.storageKey } : await storeGeneratedVideo({ url: result.url, mimeType: result.mimeType });
     const segments = result.segments
         ? await Promise.all(result.segments.map(async (segment) => ({
             ...segment,
@@ -62,12 +62,11 @@ export function usePluginHost(params: PluginHostParams) {
     const { t } = useTranslation();
     const { projectId, updateProject, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, applyAgentOps } = params;
     const generationLogs = useMemo<CanvasGenerationLogs>(() => {
-        const unavailable = () => { throw new Error("总后台未连接，无法访问生成日志"); };
         return {
-            list: async (options: Parameters<CanvasGenerationLogs["list"]>[0] = {}) => { if (!useBackendStore.getState().connected) return []; const result = await fetchBackendGenerationLogs({ ...options, projectId: options.projectId || projectId }); return result.logs || []; },
-            create: async (input: any) => { if (!useBackendStore.getState().connected) return unavailable(); const result = await createBackendGenerationLog({ ...input, projectId: input.projectId || projectId }); if (!result.log) throw new Error("总后台未返回生成日志"); return result.log; },
-            update: async (id: string, patch: any) => { if (!useBackendStore.getState().connected) return unavailable(); const result = await updateBackendGenerationLog(id, patch); if (!result.log) throw new Error("总后台未返回生成日志"); return result.log; },
-            remove: async (options: any) => { if (!useBackendStore.getState().connected) return unavailable(); const result = await deleteBackendGenerationLogs(options); return Number(result.deleted || 0); },
+            list: async (options: Parameters<CanvasGenerationLogs["list"]>[0] = {}) => { const result = await fetchBackendGenerationLogs({ ...options, projectId: options.projectId || projectId }); return result.logs || []; },
+            create: async (input: any) => { const result = await createBackendGenerationLog({ ...input, projectId: input.projectId || projectId }); if (!result.log) throw new Error("总后台未返回生成日志"); return result.log; },
+            update: async (id: string, patch: any) => { const result = await updateBackendGenerationLog(id, patch); if (!result.log) throw new Error("总后台未返回生成日志"); return result.log; },
+            remove: async (options: any) => { const result = await deleteBackendGenerationLogs(options); return Number(result.deleted || 0); },
         };
     }, [projectId]);
 
@@ -124,10 +123,21 @@ export function usePluginHost(params: PluginHostParams) {
                 const backendUrl = getBackendUrl();
                 const backendToken = getBackendTokenShared();
                 if (!(await fetch(`${backendUrl}/health`).then((response) => response.ok).catch(() => false))) throw new Error("总后台未连接，无法运行本地 MiniMax H3");
-                const comfy = await fetch(`${backendUrl}/comfy/config?token=${encodeURIComponent(backendToken)}`).then(async (response) => {
+                let comfy = await fetch(`${backendUrl}/comfy/config?token=${encodeURIComponent(backendToken)}`).then(async (response) => {
                     if (!response.ok) throw new Error(`读取 ComfyUI 配置失败（HTTP ${response.status}）`);
                     return await response.json() as { url?: string };
                 });
+                const comfyuiBasePath = String(effectiveConfig.comfyuiBasePath || "").trim();
+                if (comfyuiBasePath) {
+                    comfy = await fetch(`${backendUrl}/comfy/config?token=${encodeURIComponent(backendToken)}`, {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ localH3RootDir: comfyuiBasePath }),
+                    }).then(async (response) => {
+                        if (!response.ok) throw new Error(`配置 H3 本地直读失败（HTTP ${response.status}）`);
+                        return await response.json() as { url?: string };
+                    });
+                }
                 if (!comfy.url) throw new Error("尚未配置本地 ComfyUI 地址");
                 let comfyStatus;
                 try {

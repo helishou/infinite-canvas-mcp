@@ -233,7 +233,7 @@ export default function WorkflowsPage() {
                                     <p className="text-sm text-stone-500">{selected.name.replace(/^custom\//, "")} · {Object.keys(selected.workflow).length} 个节点 · {selected.config.fields.length} 字段</p>
                                 </div>
                                 <div className="flex gap-2">
-                                    <Button danger icon={<Trash2 className="size-4" />} onClick={() => handleDelete(selected.name)} disabled={selected.builtin}>
+                                    <Button danger icon={<Trash2 className="size-4" />} onClick={() => handleDelete(selected.name)}>
                                         删除
                                     </Button>
                                 </div>
@@ -269,6 +269,13 @@ export default function WorkflowsPage() {
                                                 workflow={selected.workflow}
                                                 fields={selected.config.fields}
                                                 onFieldsChange={handleFieldsChange}
+                                                canDeleteNode
+                                                onWorkflowChange={(workflow) => {
+                                                    if (!selected) return;
+                                                    const next = { ...selected, workflow };
+                                                    setSelected(next);
+                                                    void request("PUT", `/api/workflows/${encodeURIComponent(selected.name)}/workflow`, workflow).catch((error) => message.error(error instanceof Error ? error.message : "保存节点图失败"));
+                                                }}
                                             />
                                         </div>
                                     )}
@@ -496,7 +503,7 @@ function RunPanel({ config, onRun, running, result }: RunPanelProps) {
                         <div key={field.id}>
                             <label className="mb-1 flex items-center gap-2 text-xs text-stone-500">
                                 {field.name || field.id}
-                                <Tag color="default" className="text-xs">{field.node}.{field.input}</Tag>
+                                <Tag color="default" className="text-xs">{field.node.includes(",") ? `多节点 · ${field.input}` : `${field.node}.${field.input}`}</Tag>
                             </label>
                             {field.type === "text" ? (
                                 <Input.TextArea value={fields[field.id] || ""} onChange={(e) => setFields((p) => ({ ...p, [field.id]: e.target.value }))} rows={2} placeholder={field.name} />

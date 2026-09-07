@@ -90,6 +90,35 @@ function injectParams(
     return result;
 }
 
+function removeEmptyImageNodes(workflow: Record<string, unknown>, fields: WorkflowField[], values: FieldValues) {
+    const removed = new Set(fields.filter((field) => field.type === "image" && values[field.id] == null).map((field) => field.node));
+    if (!removed.size) return workflow;
+    const result = { ...workflow };
+    const removableTypes = new Set(["LoadImage", "ImageScaleToTotalPixels", "VAEEncode", "GetImageSize"]);
+    // Flux2 的尺寸链不能依赖已裁掉的图片分支；无图时使用工作流原本的默认尺寸。
+    for (const node of Object.values(result)) {
+        const item = node as { class_type?: string; inputs?: Record<string, unknown> };
+        if (item.class_type !== "Flux2Scheduler" && item.class_type !== "EmptyFlux2LatentImage") continue;
+        for (const key of ["width", "height"]) item.inputs![key] = 1024;
+    }
+    let changed = true;
+    while (changed) {
+        changed = false;
+        for (const [nodeId, node] of Object.entries(result)) {
+            if (removed.has(nodeId)) continue;
+            const inputs = (node as Record<string, unknown>).inputs as Record<string, unknown> | undefined;
+            if (!inputs) continue;
+            const dependsOnRemovedNode = Object.values(inputs).some((value) => Array.isArray(value) && typeof value[0] === "string" && removed.has(value[0]));
+            if (dependsOnRemovedNode && removableTypes.has((node as { class_type?: string }).class_type || "")) {
+                removed.add(nodeId);
+                changed = true;
+            }
+        }
+    }
+    for (const nodeId of removed) delete result[nodeId];
+    return result;
+}
+
 /**
  * 将 dataURL 上传到 ComfyUI，获取文件名
  */
@@ -138,7 +167,12 @@ async function processImageFields(
     for (const field of fields) {
         if (field.type !== "image") continue;
         const value = fieldValues[field.id];
-        if (!value || typeof value !== "string") continue;
+        // 空图片槽位必须显式删除工作流中的原始文件名，否则 ComfyUI 会继续校验
+        // workflow JSON 里预置的 LoadImage 文件；这样一个工作流可以支持 0-N 张图。
+        if (!value || typeof value !== "string") {
+            result[field.id] = null;
+            continue;
+        }
         if (value.startsWith("data:image")) {
             result[field.id] = await uploadDataUrlToComfy(value, field.id, comfyUrl, signal);
         } else if (/^https?:\/\//.test(value) || value.startsWith("/media/")) {
@@ -171,6 +205,13 @@ async function processImageFields(
             result[field.id] = body.name;
         }
     }
+    for (const node of Object.values(result)) {
+        const inputs = (node as Record<string, unknown>).inputs as Record<string, unknown> | undefined;
+        if (!inputs) continue;
+        for (const [name, value] of Object.entries(inputs)) {
+            if (Array.isArray(value) && typeof value[0] === "string" && removed.has(value[0])) delete inputs[name];
+        }
+    }
     return result;
 }
 
@@ -190,6 +231,7 @@ export class WorkflowExecutor {
         clientId: string,
         comfyUrl?: string,
         name?: string,
+        clientTaskId?: string,
     ): Promise<RunResult> {
         const controller = new AbortController();
         const url = comfyUrl ?? this.bridge.getUrl();
@@ -234,8 +276,10 @@ export class WorkflowExecutor {
             if (!params[nodeId]) params[nodeId] = {};
             Object.assign(params[nodeId] as Record<string, unknown>, inputs);
         }
-        const prepared = injectParams(workflowJson, params);
-        const task = this.tasks.create("workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, params);
+        const prepared = removeEmptyImageNodes(injectParams(workflowJson, params), config.fields, processedValues);
+        const task = clientTaskId
+            ? this.tasks.create(clientTaskId, "workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, params)
+            : this.tasks.create("workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, params);
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
 
         try {

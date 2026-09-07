@@ -106,6 +106,8 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                                 onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
                                 onMissingConfig={() => openConfigDialog(true)}
                                 onOpenChange={onImageSettingsOpenChange}
+                                comfyParams={node.metadata?.comfyParams}
+                                onComfyParamsChange={(value) => onConfigChange(node.id, { comfyParams: value })}
                             />
                         </>
                     ) : mode === "video" ? (
@@ -183,7 +185,7 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
         audioFormat: node.metadata?.audioFormat || globalConfig.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node.metadata?.audioSpeed || globalConfig.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node.metadata?.audioInstructions || globalConfig.audioInstructions || defaultConfig.audioInstructions,
-        count: String(node.metadata?.count || (mode === "image" ? globalConfig.canvasImageCount || globalConfig.count : globalConfig.count) || defaultConfig.count),
+        count: String(node.metadata?.count || (mode === "image" ? globalConfig.count || globalConfig.canvasImageCount : globalConfig.count) || defaultConfig.count),
     };
 }
 

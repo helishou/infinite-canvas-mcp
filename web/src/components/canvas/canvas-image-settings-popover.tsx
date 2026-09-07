@@ -7,7 +7,8 @@ import { useTranslation } from "react-i18next";
 import { ImageSettingsPanel, imageQualityLabel, imageSizeLabel } from "@/components/image-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import type { AiConfig } from "@/stores/use-config-store";
+import { modelOptionName, resolveModelChannel, type AiConfig } from "@/stores/use-config-store";
+import { fetchWorkflowDetail, isWorkflowImageField, type WorkflowDetail } from "@/services/api/workflows";
 
 type CanvasImageSettingsPopoverProps = {
     config: AiConfig;
@@ -18,15 +19,20 @@ type CanvasImageSettingsPopoverProps = {
     getPopupContainer?: (triggerNode: HTMLElement) => HTMLElement;
     placement?: "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
     autoAdjustOverflow?: boolean;
+    // 选中本地 ComfyUI 工作流时，把工作流的非 image / 非 prompt 自定义字段渲染到面板顶部；
+    // comfyParams 存在 node.metadata，运行时由 runLocalComfyImage 合并进 workflow fields。
+    comfyParams?: Record<string, unknown>;
+    onComfyParamsChange?: (value: Record<string, unknown>) => void;
 };
 
-export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft" }: CanvasImageSettingsPopoverProps) {
+export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange }: CanvasImageSettingsPopoverProps) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
+    const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
     const quality = config.quality || "auto";
     const count = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const activeSize = config.size || "auto";
@@ -58,7 +64,64 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
         };
     }, [onOpenChange, open]);
 
-    const panel = open && buttonRect ? <ImageSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} /> : null;
+    // 选中本地 ComfyUI 工作流（且不是内置 z-image / flux2-klein）时拉详情，把非 image / 非 prompt
+    // 的字段渲染到面板顶部；model 切回云端 / 内置 preset 时清空。
+    const comfyChannel = resolveModelChannel(config, config.model);
+    const selectedModelName = modelOptionName(config.model).trim();
+    const isLocalCustomWorkflow = comfyChannel.kind === "comfyui";
+
+    useEffect(() => {
+        if (!isLocalCustomWorkflow) {
+            setWorkflowDetail(null);
+            return;
+        }
+        let cancelled = false;
+        fetchWorkflowDetail(selectedModelName)
+            .then((detail) => {
+                if (cancelled) return;
+                setWorkflowDetail(detail);
+            })
+            .catch(() => {
+                if (cancelled) return;
+                setWorkflowDetail(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isLocalCustomWorkflow, selectedModelName]);
+
+    const customFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, workflowDetail?.workflow) && !field.isPrompt);
+
+    useEffect(() => {
+        if (!workflowDetail || !onComfyParamsChange) return;
+        const next = { ...(comfyParams || {}) };
+        let changed = false;
+        for (const field of customFields) {
+            if (next[field.id] !== undefined && next[field.id] !== null) continue;
+            const options = field.options || [];
+            const value = field.type === "dropdown"
+                ? (options.includes(String(field.default ?? "")) ? field.default : options[0] ?? "")
+                : field.default ?? (field.type === "boolean" ? false : field.type === "number" || field.type === "slider" ? 0 : "");
+            next[field.id] = value;
+            changed = true;
+        }
+        if (changed) onComfyParamsChange(next);
+    }, [comfyParams, customFields, onComfyParamsChange, workflowDetail]);
+
+    const panel = open && buttonRect ? (
+        <ImageSettingsPortal
+            buttonRect={buttonRect}
+            panelRef={panelRef}
+            placement={placement}
+            theme={theme}
+            config={config}
+            onConfigChange={onConfigChange}
+            customFields={customFields}
+            customFieldValues={comfyParams}
+            onCustomFieldChange={onComfyParamsChange ? (id, value) => onComfyParamsChange({ ...(comfyParams || {}), [id]: value }) : undefined}
+            hideStandardImageOptions={isLocalCustomWorkflow}
+        />
+    ) : null;
 
     return (
         <>
@@ -81,6 +144,10 @@ function ImageSettingsPortal({
     theme,
     config,
     onConfigChange,
+    customFields,
+    customFieldValues,
+    onCustomFieldChange,
+    hideStandardImageOptions,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -88,6 +155,10 @@ function ImageSettingsPortal({
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
     onConfigChange: (key: keyof AiConfig, value: string) => void;
+    customFields?: Parameters<typeof ImageSettingsPanel>[0]["customFields"];
+    customFieldValues?: Parameters<typeof ImageSettingsPanel>[0]["customFieldValues"];
+    onCustomFieldChange?: Parameters<typeof ImageSettingsPanel>[0]["onCustomFieldChange"];
+    hideStandardImageOptions: boolean;
 }) {
     const width = 356;
     const gap = 8;
@@ -119,7 +190,16 @@ function ImageSettingsPortal({
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
         >
-            <ImageSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" />
+            <ImageSettingsPanel
+                config={config}
+                onConfigChange={(key, value) => onConfigChange(key, value)}
+                theme={theme}
+                className="space-y-4"
+                customFields={customFields}
+                customFieldValues={customFieldValues}
+                onCustomFieldChange={onCustomFieldChange}
+                hideStandardImageOptions={hideStandardImageOptions}
+            />
         </div>,
         document.body,
     );

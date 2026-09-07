@@ -43,6 +43,11 @@ export type WorkflowDetail = {
     config?: WorkflowConfig;
 };
 
+export function isWorkflowImageField(field: WorkflowField, workflow?: Record<string, unknown>) {
+    if (field.type === "image") return true;
+    return field.node.split(",").some((nodeId) => (workflow?.[nodeId] as { class_type?: unknown } | undefined)?.class_type === "LoadImage");
+}
+
 // 跟 backend/src/workflows/executor.ts 的 RunResult 对齐；
 // fields 走 builder prompt 模式（workflow 顶层 prompt 节点），config 里的 fields 定义 UI 渲染。
 export type WorkflowRunResult = {
@@ -81,7 +86,7 @@ export function fetchWorkflowComboOptions(name: string): Promise<{ options: Reco
     return request<{ options: Record<string, Record<string, string[]>> }>("GET", `/api/workflows/${encodeURIComponent(name)}/combo-options`);
 }
 
-export function runWorkflow(name: string, fields: WorkflowRunFields, config?: WorkflowConfig): Promise<WorkflowRunResult> {
+export function runWorkflow(name: string, fields: WorkflowRunFields, config?: WorkflowConfig, clientTaskId?: string): Promise<WorkflowRunResult> {
     // config 是 WorkflowExecutor.run 第一个会用到的字段（processImageFields 读
     // config.fields），前端如果漏传会让 executor 立刻崩
     // "Cannot read properties of undefined (reading 'fields')"。
@@ -89,6 +94,7 @@ export function runWorkflow(name: string, fields: WorkflowRunFields, config?: Wo
     // processImageFields 能把 image 类型的 dataURL 上传到 ComfyUI。
     return request<WorkflowRunResult>("POST", `/api/workflows/${encodeURIComponent(name)}/run`, {
         fields,
+        clientTaskId,
         config: config ?? {
             title: name.split("/").pop()?.replace(/\.json$/, "") || name,
             backend: "",
@@ -98,4 +104,3 @@ export function runWorkflow(name: string, fields: WorkflowRunFields, config?: Wo
         },
     });
 }
-

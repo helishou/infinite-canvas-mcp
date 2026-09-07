@@ -88,6 +88,28 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
 
         url: (m) => `/media/${encodeURIComponent(m.storageKey)}`,
 
+        relocateRoot(targetDir) {
+            const source = path.resolve(MEDIA_DIR), target = path.resolve(targetDir);
+            if (source === target) return { migrated: 0 };
+            if (fs.existsSync(target)) throw new Error(`目标媒体目录已存在：${target}`);
+            const records = db.listMediaFiles();
+            try {
+                fs.cpSync(source, target, { recursive: true, errorOnExist: true, force: false });
+                for (const media of records) {
+                    const relative = path.relative(source, media.filePath);
+                    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+                    const copied = path.join(target, relative);
+                    if (!fs.existsSync(copied) || fs.statSync(copied).size !== media.bytes) throw new Error(`媒体迁移校验失败：${media.filePath}`);
+                }
+                const migrated = db.rebaseMediaFiles(source, target);
+                fs.rmSync(source, { recursive: true, force: true });
+                return { migrated };
+            } catch (error) {
+                fs.rmSync(target, { recursive: true, force: true });
+                throw error;
+            }
+        },
+
         delete(storageKey: string): number {
             const media = db.getMediaFile(storageKey);
             if (!media) return 0;

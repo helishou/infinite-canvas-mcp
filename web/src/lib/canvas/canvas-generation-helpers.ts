@@ -157,25 +157,30 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node?.metadata?.audioInstructions || config.audioInstructions || defaultConfig.audioInstructions,
-        count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
+        count: String(node?.metadata?.count || (mode === "image" ? config.count || config.canvasImageCount : config.count) || defaultConfig.count),
     };
 }
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
-    return nodes.map((node) =>
-        node.metadata?.status === "loading" && !node.metadata.runtimeTaskId && !isPersistentH3Node(node)
-            ? {
-                  ...node,
-                  metadata: {
-                      ...node.metadata,
-                      status: "error" as const,
-                      errorDetails: i18n.t("canvas.generation.interrupted"),
-                      images: node.metadata.images?.map((image) => (image.status === "loading" ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : image)),
-                      texts: node.metadata.texts?.map((text) => (text.status === "loading" ? { ...text, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : text)),
-                  },
-              }
-            : node,
-    );
+    // 之前会把「loading 但前端没拿到 runtimeTaskId」的节点直接判成 error 并提示
+    // 「页面刷新后生成已中断」。但生成是后端跑的，刷新瞬间 / 网络抖动 / 用户提前切走
+    // 都可能让前端没拿到 ID，**后端任务大概率还在跑**——此时把节点标为 error 会让用户
+    // 误以为失败、并误点「重试」触发第二次任务，占用 ComfyUI 队列还可能写出覆盖。现改为
+    // 清回 idle，让用户按需手动重新触发；带 runtimeTaskId 的节点交给 project.tsx 的
+    // 轮询恢复逻辑继续等后端结果。
+    return nodes.map((node) => {
+        if (node.metadata?.status !== "loading" || node.metadata.runtimeTaskId || isPersistentH3Node(node)) return node;
+        const { runtimeTaskId: _runtimeTaskId, errorDetails: _errorDetails, ...rest } = node.metadata;
+        return {
+            ...node,
+            metadata: {
+                ...rest,
+                status: "idle" as const,
+                images: node.metadata.images?.map((image) => (image.status === "loading" ? { ...image, status: "idle" as const, errorDetails: undefined } : image)),
+                texts: node.metadata.texts?.map((text) => (text.status === "loading" ? { ...text, status: "idle" as const, errorDetails: undefined } : text)),
+            },
+        };
+    });
 }
 
 function isPersistentH3Node(node: CanvasNodeData) {

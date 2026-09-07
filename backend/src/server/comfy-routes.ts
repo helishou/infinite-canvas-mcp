@@ -30,14 +30,19 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
         res.type(response.headers.get("content-type") || "application/octet-stream").send(body);
     });
 
-    app.get(routePath("/comfy/config"), (_req, res) => res.json({ ok: true, url: bridge.getUrl() }));
-    app.put(routePath("/comfy/config"), (req, res) => res.json({ ok: true, url: bridge.setUrl(String(req.body?.url || "")) }));
+    app.get(routePath("/comfy/config"), (_req, res) => res.json({ ok: true, url: bridge.getUrl(), localH3Direct: bridge.localH3DirectConfig() }));
+    app.put(routePath("/comfy/config"), (req, res) => {
+        const url = typeof req.body?.url === "string" ? bridge.setUrl(req.body.url) : bridge.getUrl();
+        const localH3Direct = Object.prototype.hasOwnProperty.call(req.body || {}, "localH3RootDir") ? bridge.setLocalH3ComfyRoot(String(req.body.localH3RootDir || "")) : bridge.localH3DirectConfig();
+        res.json({ ok: true, url, localH3Direct });
+    });
     app.get(routePath("/comfy/presets"), (_req, res) => res.json({ ok: true, data: bridge.presets() }));
 
     app.post(routePath("/comfy/tasks"), async (req, res) => {
         const task = await bridge.run(
             String(req.body?.preset || ""), objectBody(req.body?.input), objectBody(req.body?.params),
             typeof req.body?.comfyUrl === "string" ? req.body.comfyUrl : undefined,
+            typeof req.body?.clientTaskId === "string" && req.body.clientTaskId ? req.body.clientTaskId : undefined,
         );
         ctx.events?.publish({ type: "task.created", entityId: task.id, payload: task });
         res.status(202).json({
@@ -49,10 +54,10 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
     app.get(routePath("/comfy/tasks/:id"), (req, res) => {
         const taskId = String(req.params.id);
         const task = stores.tasks.get(taskId);
-        if (!task || !task.kind.startsWith("comfyui:")) return void res.status(404).json({ ok: false, error: "task not found" });
+        if (!task || (!task.kind.startsWith("comfyui:") && task.kind !== "workflow")) return void res.status(404).json({ ok: false, error: "task not found" });
         // backend 重启后遗留的 running 任务在此懒恢复（用 events 里的 promptId 重新挂观察循环）
-        if (task.status === "running" || task.status === "queued") bridge.resume(task.id);
-        res.json({ ok: true, task, events: stores.tasks.events(taskId, Number(req.query.after || 0)) });
+        if ((task.status === "running" || task.status === "queued") && task.kind.startsWith("comfyui:")) bridge.resume(task.id);
+        res.json({ ok: true, task, preview: bridge.getLivePreview(taskId) || null, events: stores.tasks.events(taskId, Number(req.query.after || 0)) });
     });
 
     app.post(routePath("/comfy/tasks/:id/cancel"), (req, res) => {

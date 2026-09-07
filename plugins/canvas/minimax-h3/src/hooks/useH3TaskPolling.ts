@@ -8,7 +8,10 @@ import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
 export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string, unknown>, update: (patch: Record<string, unknown>) => void) {
     useEffect(() => {
         const taskId = String(metadata.runtimeTaskId || "");
-        if (!["loading", "queued"].includes(String(metadata.status))) return;
+        const runtimeRunId = String(metadata.runtimeRunId || "");
+        // 仅按本轮 runtimeRunId 精确恢复；绝不再按时间选择历史 generation log，
+        // 否则新任务尚未拿到 taskId 的窗口会把上一轮成功结果误写回来。
+        if (String(metadata.status) !== "loading" || !runtimeRunId) return;
         const targetSegmentId = String(metadata.runtimeTargetSegmentId || "");
         let cancelled = false;
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -35,16 +38,9 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
         const recoverTask = async () => {
             if (taskId) return taskId;
             const logs = await ctx.generationLogs.list({ projectId: ctx.projectId, nodeId: ctx.node.id, limit: 50 });
-            const runStartedAt = Number(metadata.runStartedAt || 0);
             const log = logs
                 .filter((item) => ["queued", "running", "success", "failed", "cancelled"].includes(item.status))
-                .filter((item) => {
-                    // 只考虑当前运行开始之后创建的日志，避免把上一次成功运行的日志
-                    // 误认为当前运行的结果（导致节点直接显示"已完成"而不再提交新任务）。
-                    if (runStartedAt <= 0) return true;
-                    const logTime = new Date(item.createdAt || 0).getTime();
-                    return logTime >= runStartedAt - 2000;
-                })
+                .filter((item) => String((item.params as Record<string, unknown> | undefined)?.runtimeRunId || "") === runtimeRunId)
                 .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))[0];
             if (!log || cancelled) return "";
             if (log.status === "success" && log.outputs?.[0]?.url) {
@@ -56,11 +52,11 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                 const logParams = log.params && typeof log.params === "object" ? (log.params as Record<string, unknown>) : {};
                 const logSelId = String(logParams.selectedSegmentId || "");
                 const selId = logSelId || resolveTargetId(metadata);
-                update({ content: url, storageKey, mimeType: typeof output.mimeType === "string" ? output.mimeType : "video/mp4", segments: withSelectedResult(metadata, url, storageKey, selId), status: "success", errorDetails: "", runtimeTaskId: undefined, runtimeTargetSegmentId: undefined });
+                update({ content: url, storageKey, mimeType: typeof output.mimeType === "string" ? output.mimeType : "video/mp4", segments: withSelectedResult(metadata, url, storageKey, selId), status: "success", errorDetails: "", runtimeTaskId: undefined, runtimeRunId: "", runtimeTargetSegmentId: undefined });
                 return "";
             }
             if (["failed", "cancelled"].includes(log.status)) {
-                update({ status: log.status === "cancelled" ? "cancelled" : "error", errorDetails: log.error || "H3 任务失败", runtimeTaskId: undefined });
+                update({ status: log.status === "cancelled" ? "cancelled" : "error", errorDetails: log.error || "H3 任务失败", runtimeTaskId: undefined, runtimeRunId: "" });
                 return "";
             }
             if (log.runtimeTaskId) {
@@ -73,7 +69,7 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
             const staleMs = Date.now() - new Date(String(log.startedAt || log.createdAt || 0)).getTime();
             if (staleMs > 90_000) {
                 console.warn("[minimax-h3] orphan log detected, clearing stale state", { logId: log.id, status: log.status, staleSeconds: Math.round(staleMs / 1000) });
-                update({ status: "idle", errorDetails: "上次的生成任务已失联（无后端 task id），已自动重置状态", runtimeTaskId: "", runtimeTargetSegmentId: undefined, runProgress: 0, cancelRequested: false });
+                update({ status: "idle", errorDetails: "上次的生成任务已失联（无后端 task id），已自动重置状态", runtimeTaskId: "", runtimeRunId: "", runtimeTargetSegmentId: undefined, runProgress: 0, cancelRequested: false });
                 return "";
             }
             return "";
@@ -89,6 +85,9 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                     ? await ctx.ai.getRunningHubH3Task(recoveredTaskId)
                     : await ctx.ai.getLocalH3Task(recoveredTaskId);
                 if (cancelled) return;
+                if (task.preview?.dataUrl && typeof window !== "undefined") {
+                    window.dispatchEvent(new CustomEvent("minimax-h3-preview", { detail: { taskId: recoveredTaskId, url: task.preview.dataUrl, mime: task.preview.mime, promptId: task.preview.promptId, step: task.preview.step, total: task.preview.total } }));
+                }
                 // 轮询回调可能在新任务已经接管节点后才返回。只有节点、目标 Clip 和
                 // Clip 自己记录的 task ID 都仍然匹配时，才允许落盘这份异步结果。
                 const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || {};
@@ -122,6 +121,7 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                         status: "success",
                         errorDetails: "",
                         runtimeTaskId: undefined,
+                        runtimeRunId: "",
                         runtimeTargetSegmentId: undefined,
                     });
                     void finishH3Log(ctx, recoveredTaskId, "success", {
@@ -132,7 +132,7 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                     void recordH3ActualSubmission(ctx, task.result.actualSubmission, undefined, recoveredTaskId);
                 } else if (["failed", "cancelled"].includes(task.status)) {
                     const status = task.status === "cancelled" ? "cancelled" : "error";
-                    update({ status, errorDetails: task.error || "H3 任务失败" });
+                    update({ status, errorDetails: task.error || "H3 任务失败", runtimeRunId: "" });
                     void finishH3Log(ctx, recoveredTaskId, task.status === "cancelled" ? "cancelled" : "failed", {
                         finishedAt: new Date().toISOString(),
                         durationMs: Date.now() - Number(metadata.runStartedAt || Date.now()),
@@ -150,5 +150,5 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
             cancelled = true;
             if (timer) clearTimeout(timer);
         };
-    }, [ctx.node.id, metadata.runtimeTaskId, metadata.status, update]);
+    }, [ctx.node.id, metadata.runtimeTaskId, metadata.runtimeRunId, metadata.status, update]);
 }

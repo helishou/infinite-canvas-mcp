@@ -1,6 +1,6 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Select, Switch, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Select, Tag, Tooltip, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -20,8 +20,9 @@ import { deleteStoredImages, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import { resolveComfyImageSize, resolveComfyEndpoint } from "@/services/api/comfyui";
-import { fetchWorkflowDetail, runWorkflow } from "@/services/api/workflows";
-import type { WorkflowDetail, WorkflowField } from "@/services/api/workflows";
+import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow } from "@/services/api/workflows";
+import type { WorkflowDetail } from "@/services/api/workflows";
+import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
 import { deleteWorkbenchLogs, readWorkbenchLogs, saveWorkbenchLog } from "@/services/workbench-logs";
@@ -734,7 +735,9 @@ function GenerationSettings({
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
-    const displayFields = (workflowDetail?.config?.fields || []).filter((field) => field.type !== "image" && !field.isPrompt);
+    const displayFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, workflowDetail?.workflow) && !field.isPrompt);
+    const channel = resolveModelChannel(config, model);
+    const hideStandardImageOptions = channel.kind === "comfyui";
 
     return (
         <>
@@ -748,87 +751,10 @@ function GenerationSettings({
                 </div>
             )}
             <div className="col-span-2">
-                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />
+                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} hideStandardImageOptions={hideStandardImageOptions} />
             </div>
         </>
     );
-}
-
-function WorkflowCustomFields({
-    fields,
-    values,
-    onChange,
-}: {
-    fields: WorkflowField[];
-    values: Record<string, unknown>;
-    onChange: (id: string, value: unknown) => void;
-}) {
-    return (
-        <div className="space-y-3">
-            {fields.map((field) => (
-                <CustomFieldInput key={field.id} field={field} value={values[field.id]} onChange={(value) => onChange(field.id, value)} />
-            ))}
-        </div>
-    );
-}
-
-function CustomFieldInput({
-    field,
-    value,
-    onChange,
-}: {
-    field: WorkflowField;
-    value: unknown;
-    onChange: (value: unknown) => void;
-}) {
-    const commonLabel = <span className="mb-1.5 block text-sm font-semibold">{field.name}</span>;
-    switch (field.type) {
-        case "boolean":
-            return (
-                <label className="flex cursor-pointer items-center justify-between gap-3">
-                    <span className="text-sm font-semibold">{field.name}</span>
-                    <Switch checked={value === true} onChange={(checked) => onChange(checked)} />
-                </label>
-            );
-        case "dropdown": {
-            const options = field.options || [];
-            const current = options.includes(String(value ?? "")) ? String(value ?? "") : options[0] ?? "";
-            return (
-                <label className="block">
-                    {commonLabel}
-                    <Select
-                        value={current}
-                        onChange={(next) => onChange(next)}
-                        options={options.map((option) => ({ value: option, label: option }))}
-                        className="w-full"
-                    />
-                </label>
-            );
-        }
-        case "number":
-        case "slider":
-            return (
-                <label className="block">
-                    {commonLabel}
-                    <Input
-                        type="number"
-                        value={value === undefined || value === null ? "" : String(value)}
-                        min={field.min}
-                        max={field.max}
-                        step={field.step}
-                        onChange={(event) => onChange(event.target.value === "" ? (field.default ?? 0) : Number(event.target.value))}
-                    />
-                </label>
-            );
-        case "text":
-        default:
-            return (
-                <label className="block">
-                    {commonLabel}
-                    <Input value={value === undefined || value === null ? "" : String(value)} onChange={(event) => onChange(event.target.value)} />
-                </label>
-            );
-    }
 }
 
 function ResultImageCard({

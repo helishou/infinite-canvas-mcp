@@ -1,7 +1,7 @@
 import axios from "axios";
 
 import i18n from "@/i18n";
-import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
@@ -924,7 +924,7 @@ async function toDataUrl(url: string): Promise<string> {
     const absolute = url.startsWith("/")
         ? `${window.location.origin}${url}`
         : new URL(url, window.location.origin).href;
-    const res = await fetch(absolute);
+    const res = await fetch(withLocalProxy(absolute));
     if (!res.ok) throw new Error(`读取参考图失败（HTTP ${res.status}），请确认图片已保存且可访问`);
     const blob = await res.blob();
     if (blob.size === 0) throw new Error("参考图内容为空（HTTP 200 但 0 字节），请重新上传或保存该图片");

@@ -32,7 +32,7 @@ export default {
     },
     settingsPanels: {
         common: { auto: "自动", low: "低", medium: "中", high: "高", xhigh: "极高" },
-        image: { title: "图像设置", quality: "质量", size: "尺寸", align16: "16 倍数对齐", align16Hint: "输入完成后自动向上补成 16 的倍数", aspectRatio: "宽高比", transparent: "透明背景", transparentHint: "开启后生成无背景的透明图像（仅部分模型可用）", count: "生成张数", images: "{{count}} 张" },
+        image: { title: "图像设置", quality: "质量", size: "尺寸", align16: "16 倍数对齐", align16Hint: "输入完成后自动向上补成 16 的倍数", aspectRatio: "宽高比", transparent: "透明背景", transparentHint: "开启后生成无背景的透明图像（仅部分模型可用）", count: "生成张数", images: "{{count}} 张", workflowFields: "工作流参数" },
         video: { title: "视频设置", quality: "清晰度", size: "尺寸", seconds: "秒数", resolution: "分辨率", ratio: "比例", duration: "时长", smart: "智能", output: "输出", generateAudio: "生成声音", watermark: "添加水印", adaptive: "自适应", sizes: { landscape: "横屏", portrait: "竖屏", square: "方形", widescreen: "宽屏", tall: "长图", auto: "自动" }, ratios: { landscape: "横屏", portrait: "竖屏", square: "方形", standardLandscape: "标准横屏", standardPortrait: "标准竖屏", cinematic: "宽银幕", adaptive: "自适应" } },
         audio: { title: "音频设置", voice: "声音", format: "格式", speed: "语速", instructions: "声音指令", instructionsPlaceholder: "例如：自然、温暖、适合旁白。" },
         text: { title: "文本设置", reasoning: "推理强度", count: "生成次数" },
@@ -142,6 +142,7 @@ export default {
         copyText: "复制文本",
         downloadImage: "下载图片",
         downloadVideo: "下载视频",
+        downloadFailed: "下载失败，请稍后重试",
         composite: {
             itemType: {
                 text: "文本",
@@ -417,9 +418,22 @@ export default {
         modalDescription: "渠道聚合、默认模型、同步与本地存储",
         tabs: {
             channels: "渠道",
+            localProxy: "本地代理",
             preferences: "偏好设置",
             promptSources: "提示词来源",
             localStorage: "本地存储",
+        },
+        proxy: {
+            title: "本地代理",
+            description: "把模型、生图、视频、文本和音频的远程请求转发到本机代理，解决浏览器跨域限制。",
+            startHint: "先在终端运行下面的命令，并在使用画布期间保持运行：",
+            address: "代理地址",
+            addressDescription: "需要和启动命令打印的地址一致。",
+            channelHint: "渠道里仍填写接口的真实地址；关闭开关即可恢复直连。",
+            test: "测试连接",
+            available: "本地代理连接正常（{{proxy}}）",
+            missingUrl: "请先填写本地代理地址。",
+            unreachable: "本地代理不可用，请确认命令已启动且地址正确。",
         },
         localStorage: {
             backendStorageDescription: "画布、素材、生成记录、媒体文件和插件数据均由本地 Backend 统一保存，不再使用浏览器数据库。",
@@ -492,6 +506,10 @@ export default {
         export: "导出配置",
         imported: "配置与用户偏好已导入",
         importedDirectConfig: "已导入本地直连配置",
+        importedChannelCreated: "已新增渠道“{{name}}”，原有渠道未改动",
+        importedChannelUpdated: "已更新渠道“{{name}}”的连接配置",
+        importedChannelBaseUrlRequired: "导入链接缺少 Base URL，未修改任何渠道",
+        importedChannelBaseUrlInvalid: "导入链接中的 Base URL 无效，未修改任何渠道",
         importFailed: "配置文件读取失败",
         saved: "配置已保存",
         savedContinue: "配置已保存，请继续刚才的请求",

@@ -1,10 +1,10 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
-import os from "node:os";
 import { fileURLToPath } from "node:url";
 
-import { MEDIA_DIR } from "../config.js";
+import { loadRootConfig, MEDIA_DIR, saveRootConfig, setMediaDir } from "../config.js";
 import type { RuntimeTask } from "../db.js";
 import type { MediaStore, SettingStore, TaskPatch, TaskStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
@@ -57,6 +57,8 @@ export type H3ActualSubmission = {
     sigma?: string;
 };
 
+export type H3LivePreview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
+
 /** 只接受目标 promptId 的历史记录；绝不按时间猜测其他任务的输出。 */
 export function exactHistoryEntry(history: Record<string, any>, promptId: string): Record<string, any> | undefined {
     return history[promptId];
@@ -107,6 +109,8 @@ export class ComfyUiBackend {
     private readonly deps: ComfyUiDeps;
     private readonly controllers = new Map<string, AbortController>();
     private readonly comfyExecutions = new Map<string, { url: string; promptId?: string }>();
+    private readonly livePreviews = new Map<string, H3LivePreview>();
+    private readonly pendingPreviews = new Map<string, Omit<H3LivePreview, "promptId">>();
 
     constructor(deps: ComfyUiDeps, baseUrl?: string) {
         this.deps = deps;
@@ -115,7 +119,35 @@ export class ComfyUiBackend {
     }
 
     getUrl() { return this.url; }
+    getLivePreview(taskId: string) { return this.livePreviews.get(taskId); }
     setUrl(url: string) { this.url = normalizeUrl(url); this.deps.settings.set("comfyui.url", this.url); return this.url; }
+    localH3DirectConfig() {
+        const rootDir = String(this.deps.settings.get("comfyui.localRootDir") || "");
+        const inputDir = rootDir ? path.join(rootDir, "input") : "";
+        const linkPath = inputDir ? path.join(inputDir, "infinite-canvas") : "";
+        let ready = false;
+        try { ready = !!linkPath && fs.statSync(linkPath).isDirectory() && !fs.lstatSync(linkPath).isSymbolicLink() && samePath(linkPath, MEDIA_DIR); } catch {}
+        return { rootDir, inputDir, linkPath, ready };
+    }
+    setLocalH3ComfyRoot(rootDir: string) {
+        const root = path.resolve(rootDir.trim());
+        const inputDir = path.join(root, "input");
+        if (!fs.existsSync(inputDir) || !fs.statSync(inputDir).isDirectory()) throw new Error(`ComfyUI 根目录无效，找不到 input 目录：${inputDir}`);
+        const linkPath = path.join(inputDir, "infinite-canvas");
+        const targetIsLink = fs.existsSync(linkPath) && fs.lstatSync(linkPath).isSymbolicLink();
+        if (!samePath(MEDIA_DIR, linkPath) || targetIsLink) {
+            if (fs.existsSync(linkPath)) {
+                if (fs.lstatSync(linkPath).isSymbolicLink() && samePath(linkPath, MEDIA_DIR)) fs.rmdirSync(linkPath);
+                else if (fs.statSync(linkPath).isDirectory() && fs.readdirSync(linkPath).length === 0) fs.rmdirSync(linkPath);
+                else throw new Error(`ComfyUI input 目录已存在非本项目媒体目录：${linkPath}`);
+            }
+            this.deps.media.relocateRoot(linkPath);
+            saveRootConfig({ ...loadRootConfig(), mediaDir: linkPath });
+            setMediaDir(linkPath);
+        }
+        this.deps.settings.set("comfyui.localRootDir", root);
+        return this.localH3DirectConfig();
+    }
     presets() { return PRESETS; }
 
     /**
@@ -213,11 +245,15 @@ export class ComfyUiBackend {
         }
     }
 
-    async run(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string) {
+    async run(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string, clientTaskId?: string) {
         const definition = PRESETS.find((item) => item.id === preset);
         if (!definition) throw new Error(`Unknown ComfyUI preset: ${preset}`);
         const taskUrl = baseUrl ? normalizeUrl(baseUrl) : this.url;
-        const task = this.deps.tasks.create(`comfyui:${preset}`, input, params);
+        // 客户端预生成 taskId：让前端在「请求还没回到后端」时就能把 ID 写进节点元数据，
+        // 避免用户刷新瞬间 race 造成 `runtimeTaskId` 丢失、节点被误判为「中断」。
+        const task = clientTaskId
+            ? this.deps.tasks.create(clientTaskId, `comfyui:${preset}`, input, params)
+            : this.deps.tasks.create(`comfyui:${preset}`, input, params);
         void this.execute(task, definition, taskUrl).catch((error) => this.fail(task.id, error));
         return task;
     }
@@ -346,7 +382,9 @@ export class ComfyUiBackend {
         let wsCloseError: Error | null = null;
         let closeWs: () => void = () => {};
         try {
-            const uploadFn = (file: string) => this.upload(file, controller.signal, comfyUrl);
+            const uploadFn = preset === "minimax-h3"
+                ? (file: string) => this.localH3Input(file, controller.signal, comfyUrl)
+                : (file: string) => this.upload(file, controller.signal, comfyUrl);
             const workflow = preset === "minimax-h3"
                 ? await buildNativeNanFengV10Workflow(prepared.input, params, uploadFn, comfyUrl, controller.signal)
                 : await buildWorkflow(preset, prepared.input, params, uploadFn);
@@ -369,6 +407,23 @@ export class ComfyUiBackend {
                             if (!raw) return;
                             const msg = JSON.parse(raw);
                             if (!msg?.type) return;
+                            if (msg.type === "kj_preview_override") {
+                                const data = (msg.data || msg) as Record<string, unknown>;
+                                const encoded = typeof data?.image === "string" ? data.image : "";
+                                // KJ 没有在自定义预览事件里重复 prompt_id；该 WS 使用本 task 专属 clientId，
+                                // 且要求 /prompt 已返回当前 promptId，故事件归属仍是一对一的。
+                                if (encoded) {
+                                    const preview = {
+                                    dataUrl: `data:${typeof data?.mime === "string" ? data.mime : "image/jpeg"};base64,${encoded}`,
+                                    ...(Number.isFinite(Number(data?.step)) ? { step: Number(data?.step) } : {}),
+                                    ...(Number.isFinite(Number(data?.total)) ? { total: Number(data?.total) } : {}),
+                                    ...(typeof data?.mime === "string" ? { mime: data.mime } : {}),
+                                    };
+                                    if (capturedPromptId) this.livePreviews.set(task.id, { promptId: capturedPromptId, ...preview });
+                                    else this.pendingPreviews.set(task.id, preview);
+                                }
+                                return;
+                            }
                             // 只处理与当前 prompt_id 相关的事件，避免历史/别人的事件干扰
                             if (!capturedPromptId || msg?.data?.prompt_id !== capturedPromptId) {
                                 // 仍然记录 execution_success 的 prompt_id 匹配失败，但不接管
@@ -415,6 +470,11 @@ export class ComfyUiBackend {
             if (!body.prompt_id) throw new Error(body.node_errors ? JSON.stringify(body.node_errors) : "ComfyUI did not return prompt_id");
             const promptId: string = body.prompt_id;
             capturedPromptId = promptId;
+            const pendingPreview = this.pendingPreviews.get(task.id);
+            if (pendingPreview) {
+                this.livePreviews.set(task.id, { promptId, ...pendingPreview });
+                this.pendingPreviews.delete(task.id);
+            }
             const execution = this.comfyExecutions.get(task.id);
             if (execution) execution.promptId = body.prompt_id;
             this.deps.tasks.addEvent(task.id, "submitted", actualSubmission ? { promptId: body.prompt_id, actualSubmission: { ...actualSubmission, promptId: body.prompt_id } } : { promptId: body.prompt_id });
@@ -529,7 +589,10 @@ export class ComfyUiBackend {
                 }
                 await new Promise((resolve) => setTimeout(resolve, 1500));
             }
-        } finally { closeWs(); await prepared.cleanup(); }
+        } finally {
+            closeWs();
+            await prepared.cleanup();
+        }
     }
 
     private async cancelComfyExecution(taskId: string) {
@@ -561,6 +624,17 @@ export class ComfyUiBackend {
         return body.name;
     }
 
+    /** H3 本地直读：运行媒体根目录就是 ComfyUI input/infinite-canvas。 */
+    private async localH3Input(file: string, signal: AbortSignal, comfyUrl: string) {
+        const direct = this.localH3DirectConfig();
+        if (!direct.ready) throw new Error("H3 本地直读未就绪；请在应用「偏好设置」填写 ComfyUI 根目录后重试，以迁移运行媒体到 input/infinite-canvas。");
+        const name = localComfyInputName(file);
+        const query = new URLSearchParams({ filename: path.basename(name), subfolder: path.posix.dirname(name), type: "input" });
+        const response = await fetch(`${comfyUrl}/view?${query}`, { method: "HEAD", signal });
+        if (!response.ok) throw new Error(`H3 本地直读未就绪：ComfyUI input/infinite-canvas 未暴露 ${name}（HTTP ${response.status}）。请检查 ComfyUI input 目录。`);
+        return name;
+    }
+
     private fail(id: string, error: unknown) {
         if (this.deps.tasks.get(id)?.status === "cancelled") return;
         const message = error instanceof Error ? error.message : String(error);
@@ -570,10 +644,23 @@ export class ComfyUiBackend {
 
     private updateTask(id: string, patch: TaskPatch) {
         const task = this.deps.tasks.update(id, patch);
+        if (["succeeded", "failed", "cancelled"].includes(task.status)) this.livePreviews.delete(id);
+        if (["succeeded", "failed", "cancelled"].includes(task.status)) this.pendingPreviews.delete(id);
         const type = task.status === "succeeded" ? "task.completed" : task.status === "failed" ? "task.failed" : task.status === "queued" || task.status === "running" || task.status === "cancelled" ? "task.updated" : "task.updated";
         this.deps.events?.publish({ type, entityId: id, payload: task });
         return task;
     }
+}
+
+/** 只允许 backend 自有运行媒体进入 ComfyUI 本地直读目录。 */
+export function localComfyInputName(file: string) {
+    const relative = path.relative(path.resolve(MEDIA_DIR), path.resolve(file));
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`H3 本地直读只接受运行媒体文件：${file}`);
+    return `infinite-canvas/${relative.split(path.sep).join("/")}`;
+}
+
+function samePath(left: string, right: string) {
+    try { return path.resolve(fs.realpathSync(left)).toLowerCase() === path.resolve(fs.realpathSync(right)).toLowerCase(); } catch { return false; }
 }
 
 async function prepareH3MotionContext(input: Record<string, unknown>, params: Record<string, unknown>) {
@@ -582,7 +669,7 @@ async function prepareH3MotionContext(input: Record<string, unknown>, params: Re
     // 尾帧（最后 ~22 帧）作为 context，而不是把整段 previousVideo 直接喂给 9108 节点。
     // 递进增噪 (motionContextNoise) 仅控制是否在尾帧上叠加噪声，不再作为「是否截尾帧」的前置条件。
     if (!previous || params.motionContext === false) return { input, cleanup: async () => undefined };
-    const target = path.join(os.tmpdir(), `infinite-canvas-h3-context-${crypto.randomUUID()}.mp4`);
+    const target = path.join(MEDIA_DIR, `h3-context-${crypto.randomUUID()}.mp4`);
     const noise = params.motionContextNoise === true;
     await buildMotionContextClip(previous, target, {
         frames: Math.round(Number(params.motionContextLength)) || 22,

@@ -134,10 +134,12 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     });
     app.get("/health", (_req, res) => res.json(session.health()));
     app.get("/config", (_req, res) => res.json({ ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, url: config.url, hasToken: true }));
-    if (options.listen !== false) app.use((req, res, next) => {
-        if (validToken(req, requestUrl(req, config), config.token)) return next();
-        res.status(401).json({ ok: false, error: "invalid token" });
-    });
+    if (options.listen !== false && process.env.CANVAS_AGENT_SKIP_AUTH !== "1") {
+        app.use((req, res, next) => {
+            if (validToken(req, requestUrl(req, config), config.token)) return next();
+            res.status(401).json({ ok: false, error: "invalid token" });
+        });
+    }
     app.get("/events", (req, res) => {
         session.openEvents(requestUrl(req, config), res, ensureSiteWorkspace(config).activeThreadId || "");
     });

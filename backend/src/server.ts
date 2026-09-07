@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Request, type Response, type Express } from "express";
+import fs from "node:fs";
 import path from "node:path";
 
 import { type ResolvedConfig, DATA_DIR, ensureDataDirs, loadRootConfig, saveRootConfig, loadFrontendSettings, saveFrontendSettings, type FrontendSettings } from "./config.js";
@@ -279,17 +280,38 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         }
     });
 
-    /** 代理读取媒体文件 */
+    /** 代理读取媒体文件。视频必须支持 Range，浏览器才能按需缓冲和 seek，避免整段读入内存后播放卡顿。 */
     app.get("/media/:storageKey", async (req, res) => {
         const storageKey = decodeURIComponent(req.params.storageKey);
         const media = stores.media.meta(storageKey);
         if (!media) return void res.status(404).json({ ok: false, error: "media not found" });
         try {
-            const data = await stores.media.read(storageKey);
             res.setHeader("Cache-Control", "private, max-age=3600");
             res.setHeader("Content-Type", media.mimeType);
-            res.setHeader("Content-Length", String(data.length));
-            res.send(data);
+            res.setHeader("Accept-Ranges", "bytes");
+            const bytes = fs.statSync(media.filePath).size;
+            const range = req.headers.range;
+            if (!range) {
+                res.setHeader("Content-Length", String(bytes));
+                fs.createReadStream(media.filePath).pipe(res);
+                return;
+            }
+            const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+            if (!match) {
+                res.setHeader("Content-Range", `bytes */${bytes}`);
+                return void res.status(416).end();
+            }
+            const suffixLength = match[1] ? 0 : Number(match[2]);
+            const start = match[1] ? Number(match[1]) : Math.max(0, bytes - suffixLength);
+            const end = match[1] ? (match[2] ? Math.min(Number(match[2]), bytes - 1) : bytes - 1) : bytes - 1;
+            if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= bytes || end < start) {
+                res.setHeader("Content-Range", `bytes */${bytes}`);
+                return void res.status(416).end();
+            }
+            res.status(206);
+            res.setHeader("Content-Range", `bytes ${start}-${end}/${bytes}`);
+            res.setHeader("Content-Length", String(end - start + 1));
+            fs.createReadStream(media.filePath, { start, end }).pipe(res);
         } catch {
             res.status(404).json({ ok: false, error: "媒体文件丢失" });
         }

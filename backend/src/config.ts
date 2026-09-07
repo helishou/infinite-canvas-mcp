@@ -6,19 +6,28 @@ import path from "node:path";
 export const DEFAULT_PORT = 17370;
 /** Root config 文件路径（固定在用户目录，与 DATA_DIR 解耦）。 */
 export const ROOT_CONFIG_FILE = path.join(os.homedir(), ".infinite-canvas-root.json");
+export type RootConfig = { dataDir?: string; mediaDir?: string };
+
+function readRootConfig(): RootConfig {
+    try { return JSON.parse(fs.readFileSync(ROOT_CONFIG_FILE, "utf8")) as RootConfig; } catch { return {}; }
+}
 /** 数据目录优先级：环境变量 > root config > 默认 `~/.infinite-canvas`。 */
 function resolveDataDir(): string {
     if (process.env.INFINITE_CANVAS_DATA_DIR) return path.resolve(process.env.INFINITE_CANVAS_DATA_DIR);
-    try {
-        const root = JSON.parse(fs.readFileSync(ROOT_CONFIG_FILE, "utf8")) as { dataDir?: string };
-        if (root?.dataDir) return path.resolve(root.dataDir);
-    } catch { /* not set yet */ }
+    const root = readRootConfig();
+    if (root.dataDir) return path.resolve(root.dataDir);
     return path.join(os.homedir(), ".infinite-canvas");
+}
+function resolveMediaDir(): string {
+    if (process.env.INFINITE_CANVAS_MEDIA_DIR) return path.resolve(process.env.INFINITE_CANVAS_MEDIA_DIR);
+    const root = readRootConfig();
+    return root.mediaDir ? path.resolve(root.mediaDir) : path.join(DATA_DIR, "runtime-media");
 }
 export const DATA_DIR = resolveDataDir();
 export const CONFIG_FILE = path.join(DATA_DIR, "backend.json");
 export const DB_FILE = path.join(DATA_DIR, "runtime.sqlite");
-export const MEDIA_DIR = path.join(DATA_DIR, "runtime-media");
+export let MEDIA_DIR = resolveMediaDir();
+export function setMediaDir(dir: string) { MEDIA_DIR = path.resolve(dir); }
 export const LOGS_DIR = path.join(DATA_DIR, "logs");
 export const WORKERS_DIR = path.join(DATA_DIR, "workers");
 export const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
@@ -76,16 +85,10 @@ export function saveConfig(config: ResolvedConfig) {
 }
 
 /** 读取 root config（dataDir 等全局选项）。 */
-export function loadRootConfig(): { dataDir?: string } {
-    try {
-        return JSON.parse(fs.readFileSync(ROOT_CONFIG_FILE, "utf8"));
-    } catch {
-        return {};
-    }
-}
+export function loadRootConfig(): RootConfig { return readRootConfig(); }
 
 /** 写入 root config。 */
-export function saveRootConfig(cfg: { dataDir?: string }) {
+export function saveRootConfig(cfg: RootConfig) {
     const dir = path.dirname(ROOT_CONFIG_FILE);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(ROOT_CONFIG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 });

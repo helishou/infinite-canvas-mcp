@@ -12,24 +12,27 @@ export function requestH3Run(ctx: CanvasNodeContext, all = false) {
     const selectedId = String(metadata.selectedSegmentId || segments[0]?.id || "");
     const selected = segments.find((segment) => segment.id === selectedId) || segments[0];
     const prompt = String(selected?.prompt || metadata.prompt || "");
+    const runtimeRunId = `h3-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     ctx.updateMetadata({
         selectedSegmentId: selectedId,
         prompt,
         segments: segments.map((segment) => all || segment.id === selectedId ? { ...segment, prompt: segment.id === selectedId ? prompt : segment.prompt, status: "queued", progress: 0, runtimeTaskId: "" } : segment),
         status: "queued",
-        runRequestId: `h3-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        runRequestId: runtimeRunId,
+        runtimeRunId,
         runRequestAll: all,
         runRequestConsumedId: "",
         cancelRequested: false,
         runtimeTaskId: "",
         runProgress: 0,
+        runStartedAt: 0,
     });
 }
 
 export function resetH3Run(ctx: CanvasNodeContext) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const segments = segmentsFor(node.metadata || {}).map((segment) => ({ ...segment, result: "", results: [], status: "idle", progress: 0, runtimeTaskId: "" }));
-    ctx.updateMetadata({ content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, materials: [], segments, status: "idle", errorDetails: "", runtimeTaskId: "", runProgress: 0, runRequestId: "", runRequestConsumedId: "", cancelRequested: false, runFinishedAt: undefined });
+    ctx.updateMetadata({ content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, materials: [], segments, status: "idle", errorDetails: "", runtimeTaskId: "", runtimeRunId: "", runProgress: 0, runRequestId: "", runRequestConsumedId: "", cancelRequested: false, runFinishedAt: undefined });
 }
 
 export function H3StatusBadge({ status, error, onRetry }: { status: string; error: string; onRetry: () => void }) {
@@ -324,6 +327,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
     const preloadRef = useRef<HTMLVideoElement | null>(null);
     const onEndedRef = useRef(onEnded);
+    const lastCommittedPlayheadRef = useRef(-Infinity);
     useEffect(() => { onEndedRef.current = onEnded; }, [onEnded]);
     // 监听 video/audio 原生 ended 事件（视频完整播完后触发，驱动 advancePlayback 换段）
     useEffect(() => {
@@ -338,11 +342,13 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     useEffect(() => {
         const media = mediaRef.current;
         if (!media || !Number.isFinite(playhead)) return;
-        // 播放中不强制 seek（避免跟 onTimeUpdate 冲突），仅暂停态/未初始化时同步
-        if (!media.paused && Math.abs(media.currentTime - playhead) < 0.3) return;
+        // 播放器自己上报的 playhead 回到 React 后，绝不可再被当作外部 seek。
+        // 否则状态提交落后于解码时钟时会周期性回退当前帧。
+        if (Math.abs(playhead - lastCommittedPlayheadRef.current) < 0.05) return;
         if (media.readyState >= 1 && Math.abs(media.currentTime - playhead) > 0.1) {
             media.currentTime = Math.max(0, Math.min(Number(media.duration || Infinity), playhead));
         }
+        lastCommittedPlayheadRef.current = playhead;
     }, [playhead]);
     // 点击连续播放全部 Clip：先把当前帧跳到 playhead 再播放
     useEffect(() => {
@@ -372,5 +378,5 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     if (!url) return <div className="minimax-player-content"><div className="minimax-player-empty">连接视频和角色参考图</div></div>;
     if (kind === "image") return <div className="minimax-player-content minimax-player-image" draggable onDragStart={handleDragStart}><img src={url} alt="H3 reference" draggable={false} /></div>;
     if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio ref={(node) => { mediaRef.current = node; }} src={url} controls preload="metadata" draggable={false} /></div></div>;
-    return <div className="minimax-player-content"><video ref={(node) => { mediaRef.current = node; }} src={resultUrl(url)} controls muted playsInline draggable={false} onLoadedMetadata={(event) => { event.currentTarget.currentTime = Math.max(0, Math.min(Number(event.currentTarget.duration || Infinity), playhead)); }} onTimeUpdate={(event) => { const media = event.currentTarget; const nodeNow = (ctx.getNode ? ctx.getNode(ctx.node.id) : ctx.node) || ctx.node; if (Number(nodeNow?.metadata?.h3Scrubbing)) return; const dur = Number(media.duration || 0); const effectiveDur = Number.isFinite(Number(clipDuration)) && Number(clipDuration) > 0 ? Math.min(Number(clipDuration), dur || Number(clipDuration)) : dur; const local = Math.max(0, Math.min(Number(media.currentTime || 0), effectiveDur)); const time = timelineOffset + local; if (Math.abs(time - Number(ctx.node.metadata?.playhead || 0)) > 0.2) ctx.updateMetadata({ playhead: time }); }} /></div>;
+    return <div className="minimax-player-content"><video ref={(node) => { mediaRef.current = node; }} src={resultUrl(url)} controls muted playsInline draggable={false} onLoadedMetadata={(event) => { lastCommittedPlayheadRef.current = playhead; event.currentTarget.currentTime = Math.max(0, Math.min(Number(event.currentTarget.duration || Infinity), playhead)); }} onPause={(event) => { const media = event.currentTarget; const dur = Number(media.duration || 0); const effectiveDur = Number.isFinite(Number(clipDuration)) && Number(clipDuration) > 0 ? Math.min(Number(clipDuration), dur || Number(clipDuration)) : dur; const time = timelineOffset + Math.max(0, Math.min(Number(media.currentTime || 0), effectiveDur)); lastCommittedPlayheadRef.current = time; ctx.updateMetadata({ playhead: time }); }} /></div>;
 }

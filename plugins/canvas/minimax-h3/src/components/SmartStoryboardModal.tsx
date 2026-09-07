@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Modal } from "antd";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref } from "../types";
@@ -25,6 +26,13 @@ export function SmartStoryboardModal({
   onClose: () => void;
 }) {
   const generating = String(metadata.smartStoryboardStatus || "") === "loading";
+  // modal 打开时如果带着上次的 error 状态，自动清掉 —— 刷新/重启后 metadata 原样加载，
+  // 旧的 error 会一直挂着按钮变红、status 区显示红字，用户无法清除。
+  useEffect(() => {
+    if (open && String(metadata.smartStoryboardStatus || "") === "error") {
+      ctx.updateMetadata({ smartStoryboardStatus: "", smartStoryboardError: "" });
+    }
+  }, [open]);
   const uploadAt = async (file: File, index: number) => {
     const next = { ...(await readStoryboardUpload(file)), slot: index + 1 };
     setUploads((current) => {

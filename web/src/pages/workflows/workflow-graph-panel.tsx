@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import type { WorkflowField } from "@/types/workflow";
 import { fetchWorkflowComboOptions } from "@/services/api/workflows";
+import { Modal } from "antd";
 
 type WorkflowJson = Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
 
@@ -141,9 +142,11 @@ type Props = {
     workflow: WorkflowJson;
     fields: WorkflowField[];
     onFieldsChange: (fields: WorkflowField[]) => void;
+    onWorkflowChange: (workflow: WorkflowJson) => void;
+    canDeleteNode?: boolean;
 };
 
-export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange }: Props) {
+export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onWorkflowChange, canDeleteNode = true }: Props) {
     const svgRef = useRef<SVGSVGElement>(null);
     const wrapRef = useRef<HTMLDivElement>(null);
     const [view, setView] = useState({ k: 1, x: 0, y: 0 });
@@ -165,6 +168,17 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange }: P
             .catch(() => { if (!cancelled) setComboOptions({}); });
         return () => { cancelled = true; };
     }, [name]);
+
+    // 孤儿字段：节点名含逗号（复合多节点写法，节点浮窗无法管理）或节点已不在 workflow 中。
+    // 这类字段运行面板会渲染、却无法在节点浮窗里勾选/删除，需在此单独提供清理入口。
+    const orphanedFields = useMemo(() => {
+        const nodeIds = new Set(Object.keys(workflow));
+        return fields.filter((f) => {
+            const ids = f.node.split(",");
+            if (ids.length > 1) return true;
+            return !nodeIds.has(f.node);
+        });
+    }, [fields, workflow]);
 
     const fitToView = useCallback(() => {
         if (!layout || !wrapRef.current) return;
@@ -240,6 +254,28 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange }: P
         onFieldsChange(fields.filter(f => f.id !== fieldId));
     };
 
+    const removeNode = (nodeId: string) => {
+        Modal.confirm({
+            title: "删除工作流节点？",
+            content: `确认删除节点 ${nodeId}（${workflow[nodeId]?.class_type || "未知类型"}）吗？相关字段和连接也会被移除。`,
+            okText: "删除",
+            cancelText: "取消",
+            okButtonProps: { danger: true },
+            onOk: () => {
+                const next = { ...workflow };
+                delete next[nodeId];
+                for (const node of Object.values(next)) {
+                    for (const [key, value] of Object.entries(node.inputs || {})) {
+                        if (Array.isArray(value) && value[0] === nodeId) delete node.inputs![key];
+                    }
+                }
+                onWorkflowChange(next);
+                onFieldsChange(fields.filter((field) => field.node !== nodeId));
+                setPopupNodeId(null);
+            },
+        });
+    };
+
     if (!layout || layout.nodes.length === 0) {
         return <div className="flex h-64 items-center justify-center text-sm text-stone-400">无可视化节点</div>;
     }
@@ -298,8 +334,28 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange }: P
                     onToggleField={(inputKey) => toggleField(popupNodeId, inputKey, popupNode.inputs?.[inputKey])}
                     onUpdateField={updateField}
                     onRemoveField={removeField}
+                    onDeleteNode={canDeleteNode ? () => removeNode(popupNodeId) : undefined}
                     onClose={() => setPopupNodeId(null)}
                 />
+            )}
+
+            {orphanedFields.length > 0 && (
+                <div className="absolute bottom-2 left-2 right-2 z-30 rounded border border-amber-300 bg-amber-50 p-2 text-xs dark:border-amber-700 dark:bg-amber-900/30">
+                    <div className="mb-1 font-medium text-amber-700 dark:text-amber-300">
+                        未关联节点的字段（运行面板会显示，但节点图里无法勾选，可在此删除）
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                        {orphanedFields.map((f) => (
+                            <button
+                                key={f.id}
+                                onClick={() => onFieldsChange(fields.filter((x) => x.id !== f.id))}
+                                className="rounded bg-white/70 px-2 py-1 text-xs text-stone-700 shadow-sm hover:bg-white dark:bg-stone-700/70 dark:text-stone-200 dark:hover:bg-stone-700"
+                            >
+                                {f.name || f.id} ✕
+                            </button>
+                        ))}
+                    </div>
+                </div>
             )}
         </div>
     );
@@ -307,7 +363,7 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange }: P
 
 // ─── 浮窗组件 ───
 function NodeFieldPopup({
-    nodeId, node, fields, comboOptions, onToggleField, onUpdateField, onRemoveField, onClose,
+    nodeId, node, fields, comboOptions, onToggleField, onUpdateField, onRemoveField, onDeleteNode, onClose,
 }: {
     nodeId: string;
     node: { class_type?: string; inputs?: Record<string, unknown> };
@@ -316,6 +372,7 @@ function NodeFieldPopup({
     onToggleField: (inputKey: string) => void;
     onUpdateField: (fieldId: string, updates: Partial<WorkflowField>) => void;
     onRemoveField: (fieldId: string) => void;
+    onDeleteNode?: () => void;
     onClose: () => void;
 }) {
     // 只显示非连接型输入（连接型是 [nodeId, slot] 数组）
@@ -338,6 +395,7 @@ function NodeFieldPopup({
                     </div>
                     <button onClick={onClose} className="text-stone-400 hover:text-stone-600 text-xl leading-none">×</button>
                 </div>
+                {onDeleteNode && <button onClick={onDeleteNode} className="mb-3 w-full rounded border border-red-200 px-3 py-2 text-left text-xs text-red-600 hover:bg-red-50">删除此节点</button>}
 
                 {inputs.length === 0 ? (
                     <div className="py-4 text-center text-xs text-stone-400">无可配置输入</div>

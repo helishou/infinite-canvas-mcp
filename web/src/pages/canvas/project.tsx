@@ -10,6 +10,7 @@ import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audi
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { defaultConfig, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
 import { getComfyTask, resolveComfyEndpoint, resolveComfyImageSize, runComfyTask, runVideoConcatTask } from "@/services/api/comfyui";
+import { fetchWorkflowDetail, runWorkflow } from "@/services/api/workflows";
 import { uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { backendMediaUrl } from "@/services/backend-api";
@@ -36,6 +37,7 @@ import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
+import { ImageCompareModal } from "@/components/canvas/image-compare-modal";
 import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
@@ -51,7 +53,7 @@ import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildCompositeGroupNodes, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
-import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
+import { findContainingGroupId, findGroupDropTarget, findOpenNodePosition, findRightSidePosition, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
     audioExtension,
     buildAngleLabel,
@@ -141,6 +143,65 @@ function h3DropTargetAt(clientX: number, clientY: number) {
 
 function dispatchCanvasReferenceDrag(name: "canvas-reference-drag-start" | "canvas-reference-drag-over" | "canvas-reference-drop" | "canvas-reference-drag-end", detail: CanvasReferenceDrag & { targetNodeId: string; clientX?: number; clientY?: number }) {
     window.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
+// 画布图片节点运行本地 ComfyUI：内置 preset（z-image / flux2-klein）继续走老 /comfy/tasks
+// 通道；其他（包括用户上传的 custom/xxx.json）走统一的 /api/workflows/:name/run，与生图工作台
+// 保持一致，避免「本地 ComfyUI 尚未支持模型：xxx」把用户上传的工作流误判成不支持。
+type ComfyImageReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
+async function runLocalComfyImage(
+    comfyBaseUrl: string,
+    comfyEndpoint: { endpoint: string; token: string },
+    selectedModelName: string,
+    prompt: string,
+    references: ComfyImageReference[],
+    size: { width: number; height: number },
+    signal: AbortSignal,
+    onTaskId?: (taskId: string) => void,
+    // 来自右侧图像设置面板中工作流自定义字段（与右上面板节点 metadata.comfyParams 同源）
+    customFieldValues?: Record<string, unknown>,
+    // 客户端预生成的 taskId；提前告知后端用同一行创建，跨刷新也能恢复
+    clientTaskId?: string,
+): Promise<{ url: string }> {
+    const lower = selectedModelName.split(/[\\/]/).pop()?.replace(/\.json$/i, "").toLowerCase() || "";
+    if (lower === "z-image" || lower === "flux2-klein") {
+        const image = await runComfyTask(comfyEndpoint.endpoint, comfyEndpoint.token, comfyBaseUrl, lower, prompt, references, size, signal, onTaskId, clientTaskId);
+        return { url: image.url };
+    }
+    const detail = await fetchWorkflowDetail(selectedModelName);
+    const fields = detail.config?.fields || [];
+    const workflowFields: Record<string, unknown> = { prompt };
+    for (const field of fields) {
+        if (field.type === "text" && field.isPrompt) workflowFields[field.id] = prompt;
+    }
+    if (size.width > 0 && size.height > 0) {
+        for (const field of fields) {
+            if (field.id === "width") workflowFields[field.id] = size.width;
+            if (field.id === "height") workflowFields[field.id] = size.height;
+        }
+    }
+    const imageFields = fields.filter((field) => field.type === "image");
+    for (let index = 0; index < imageFields.length; index += 1) {
+        const field = imageFields[index];
+        const ref = references[index];
+        if (!ref) {
+            workflowFields[field.id] = null;
+            continue;
+        }
+        const dataUrl = ref.dataUrl || ref.url;
+        workflowFields[field.id] = typeof dataUrl === "string" && dataUrl ? dataUrl : null;
+    }
+    // 合并用户在右侧「工作流参数」面板填写的非 image / 非 prompt 字段值
+    for (const [id, value] of Object.entries(customFieldValues || {})) {
+        if ((id === "width" || id === "height") && Number(value) <= 0) continue;
+        workflowFields[id] = value;
+    }
+    const run = await runWorkflow(selectedModelName, workflowFields, detail.config, clientTaskId);
+    if (run.error) throw new Error(run.error);
+    const first = run.media?.[0];
+    if (!first) throw new Error("工作流完成但没有返回媒体");
+    if (run.taskId) onTaskId?.(run.taskId);
+    return { url: first.url };
 }
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
@@ -404,8 +465,15 @@ function InfiniteCanvasPage() {
                     } else if (["failed", "cancelled"].includes(task.status)) {
                         setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: task.error || "本地 ComfyUI 任务失败", runtimeTaskId: undefined, images: item.metadata?.images?.map((image) => image.id === String(item.metadata?.primaryImageId || "") ? { ...image, status: NODE_STATUS_ERROR, errorDetails: task.error || "本地 ComfyUI 任务失败" } : image) } } : item));
                     }
-                } catch {
-                    // Backend/Agent 暂时不可用时保留 loading，下一次页面进入或任务恢复时继续查询。
+                } catch (error) {
+                    // 404：节点上有 clientTaskId 但后端没有这条任务 → 该次生成从未真正跑过
+                    // （用户点完生成就刷新、或请求在到达后端前丢了）。清回 idle，避免永远转圈。
+                    if (error && typeof error === "object" && "status" in error && (error as { status?: number }).status === 404) {
+                        if (disposed) return;
+                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_IDLE, errorDetails: undefined, runtimeTaskId: undefined, images: item.metadata?.images?.map((image) => image.id === String(item.metadata?.primaryImageId || "") ? { ...image, status: NODE_STATUS_IDLE, errorDetails: undefined } : image) } } : item));
+                        return;
+                    }
+                    // 其他网络/Agent 瞬时错误：保留 loading，下一次轮询继续查。
                 }
             }));
         };
@@ -564,7 +632,7 @@ function InfiniteCanvasPage() {
 
     const createConnectedNode = useCallback(
         (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio, pending: PendingConnectionCreate) => {
-            const metadata = type === CanvasNodeType.Config ? { model: effectiveConfig.imageModel || effectiveConfig.model, size: effectiveConfig.size, count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count) } : undefined;
+            const metadata = type === CanvasNodeType.Config ? { model: effectiveConfig.imageModel || effectiveConfig.model, size: effectiveConfig.size, count: getGenerationCount(effectiveConfig.count || effectiveConfig.canvasImageCount) } : undefined;
             const newNode = createCanvasNode(type, pending.position, metadata);
             const connection = normalizeConnection(pending.connection.nodeId, newNode.id, [...nodesRef.current, newNode], pending.connection.handleType);
             if (!connection) {
@@ -651,6 +719,17 @@ function InfiniteCanvasPage() {
     const contextMenuNode = contextMenu?.type === "node" ? nodeById.get(contextMenu.nodeId) || null : null;
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
     const previewContent = previewImageId ? previewNode?.metadata?.images?.find((image) => image.id === previewImageId)?.content : previewNode?.metadata?.content;
+    // 追溯上游原图：找到当前预览图片节点的上游图片节点，用于对比
+    const previewBeforeContent = useMemo(() => {
+        if (!previewNode || !previewContent) return null;
+        const upstreamNodes = connectedNodesByNodeId.get(previewNode.id) || [];
+        for (const upstream of upstreamNodes) {
+            if (upstream.type === CanvasNodeType.Image && upstream.metadata?.content) {
+                return upstream.metadata.content;
+            }
+        }
+        return null;
+    }, [previewNode, previewContent, connectedNodesByNodeId]);
     const hasMultipleSelectedNodes = selectedNodeIds.size > 1;
     const activeNodeId = hasMultipleSelectedNodes ? null : hoveredNodeId || (selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null);
     const groupChildCountById = useMemo(() => {
@@ -754,7 +833,7 @@ function InfiniteCanvasPage() {
                     ? {
                           model: effectiveConfig.imageModel || effectiveConfig.model,
                           size: effectiveConfig.size,
-                          count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count),
+                          count: getGenerationCount(effectiveConfig.count || effectiveConfig.canvasImageCount),
                       }
                     : undefined;
             const newNode = createCanvasNode(type, targetPosition, configMetadata);
@@ -2347,7 +2426,6 @@ function InfiniteCanvasPage() {
                     const localComfyPreset = localComfy
                         ? (modelOptionName(generationConfig.model).trim().toLowerCase() === "z-image" ? "z-image" : modelOptionName(generationConfig.model).trim().toLowerCase() === "flux2-klein" ? "flux2-klein" : "")
                         : "";
-                    if (localComfy && !localComfyPreset) throw new Error(`本地 ComfyUI 尚未支持模型：${modelOptionName(generationConfig.model)}`);
                     if (localComfyPreset === "flux2-klein" && !referenceImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
                     const comfyEndpoint = resolveComfyEndpoint();
                     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
@@ -2355,22 +2433,24 @@ function InfiniteCanvasPage() {
                     const parentConfig = NODE_DEFAULT_SIZE[isConfigNode ? CanvasNodeType.Config : isImageNode ? CanvasNodeType.Image : CanvasNodeType.Text];
                     const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                     const parentPosition = sourceNode?.position || { x: 0, y: 0 };
+                    const outputSize = isImageNode && sourceNode ? { width: sourceNode.width, height: sourceNode.height } : imageConfig;
                     const rootId = isEmptyImageNode ? nodeId : nanoid();
                     const imageIds = Array.from({ length: count }, () => nanoid());
                     pendingChildIds = [rootId];
+                    // 客户端预生成 taskId：避免 onTaskId 回调写盘之前用户刷新导致 `runtimeTaskId` 丢失。
+                    // 后端会用这个 ID 创建同一行任务；项目恢复轮询直接能对到后端。
+                    const clientTaskId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
                     const rootNode: CanvasNodeData = {
                         id: rootId,
                         type: CanvasNodeType.Image,
                         title: effectivePrompt.slice(0, 32) || "Generated Image",
-                        position: {
-                            x: isEmptyImageNode ? parentPosition.x : parentPosition.x + parentConfig.width + 96,
-                            y: parentPosition.y + parentConfig.height / 2 - imageConfig.height / 2,
-                        },
-                        width: isEmptyImageNode ? sourceNode?.width || imageConfig.width : imageConfig.width,
-                        height: isEmptyImageNode ? sourceNode?.height || imageConfig.height : imageConfig.height,
+                        position: isEmptyImageNode ? parentPosition : sourceNode ? (isImageNode ? findRightSidePosition(nodesRef.current, sourceNode, outputSize) : findOpenNodePosition(nodesRef.current, sourceNode, outputSize)) : { x: parentPosition.x + parentConfig.width + 96, y: parentPosition.y + parentConfig.height / 2 - outputSize.height / 2 },
+                        width: isEmptyImageNode ? sourceNode?.width || imageConfig.width : outputSize.width,
+                        height: isEmptyImageNode ? sourceNode?.height || imageConfig.height : outputSize.height,
                         metadata: {
                             prompt: effectivePrompt,
                             status: NODE_STATUS_LOADING,
+                            runtimeTaskId: clientTaskId,
                             images: imageIds.map((id) => ({ id, status: NODE_STATUS_LOADING, content: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" })),
                             ...generationMetadata,
                         },
@@ -2423,12 +2503,12 @@ function InfiniteCanvasPage() {
                         imageIds.map(async (imageId) => {
                             try {
                                 const image = localComfy
-                                    ? await runComfyTask(comfyEndpoint.endpoint, comfyEndpoint.token, comfyChannel.baseUrl, localComfyPreset, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, runtimeTaskId: taskId, primaryImageId: imageId } } : item)))
+                                    ? await runLocalComfyImage(comfyChannel.baseUrl, comfyEndpoint, modelOptionName(generationConfig.model).trim(), effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (_taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, primaryImageId: imageId } } : item)), sourceNode?.metadata?.comfyParams, clientTaskId)
                                     : referenceImages.length
                                       ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
                                       : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
                                 const uploaded = localComfy ? await uploadImage(await fetch((image as { url: string }).url).then((response) => { if (!response.ok) throw new Error(`读取 ComfyUI 结果失败：HTTP ${response.status}`); return response.blob(); }), { signal: controller.signal }) : await uploadImage((image as { dataUrl: string }).dataUrl, { signal: controller.signal });
-                                const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
+                                const imageSize = isImageNode && sourceNode ? { width: sourceNode.width, height: sourceNode.height } : fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                                 const item: CanvasNodeImage = { id: imageId, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
                                 setNodes((prev) =>
                                     prev.map((node) => {
@@ -2437,10 +2517,14 @@ function InfiniteCanvasPage() {
                                          // 单张生成也会在任务创建时记录 primaryImageId，但它仍然需要
                                          // 把结果写入节点主图；只有多图批量结果才保持根节点的折叠状态。
                                          if (node.metadata?.primaryImageId && images.length > 1) return { ...node, metadata: { ...node.metadata, images } };
-                                        const center = { x: node.position.x + node.width / 2, y: node.position.y + node.height / 2 };
+                                        // 分离的输出节点（rootId）保留当前位置：创建时已用 findRightSidePosition 算好在右侧，
+                                        // 用户生成途中拖动过也直接沿用，不再重算覆盖（修复「拖了又跑回去」）。
+                                        const position = node.id === nodeId
+                                            ? { x: node.position.x + node.width / 2 - imageSize.width / 2, y: node.position.y + node.height / 2 - imageSize.height / 2 }
+                                            : node.position;
                                         return {
                                             ...node,
-                                            position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 },
+                                            position,
                                             ...imageSize,
                                             metadata: {
                                                 ...node.metadata,
@@ -2765,9 +2849,11 @@ function InfiniteCanvasPage() {
                 return;
             }
             const retryImages = retryReferenceImages || [];
+            // 客户端预生成 taskId：先写进节点 metadata，再发请求。中间任何时机刷新都能续上。
+            const retryClientTaskId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
             setRunningNodeId(node.id);
-            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, images: item.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_LOADING, errorDetails: undefined } : image)) } } : item)));
+            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, runtimeTaskId: retryClientTaskId, errorDetails: undefined, images: item.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_LOADING, errorDetails: undefined } : image)) } } : item)));
             const controller = startGenerationRequest(node.id, sourceNode.id, node.id);
 
             try {
@@ -2829,11 +2915,10 @@ function InfiniteCanvasPage() {
                 const retryComfyPreset = retryLocalComfy
                     ? (modelOptionName(generationConfig.model).trim().toLowerCase() === "z-image" ? "z-image" : modelOptionName(generationConfig.model).trim().toLowerCase() === "flux2-klein" ? "flux2-klein" : "")
                     : "";
-                if (retryLocalComfy && !retryComfyPreset) throw new Error(`本地 ComfyUI 尚未支持模型：${modelOptionName(generationConfig.model)}`);
                 if (retryComfyPreset === "flux2-klein" && !retryImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
                 const retryComfyEndpoint = resolveComfyEndpoint();
                 const image = retryLocalComfy
-                    ? await runComfyTask(retryComfyEndpoint.endpoint, retryComfyEndpoint.token, retryComfyChannel.baseUrl, retryComfyPreset, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal)
+                    ? await runLocalComfyImage(retryComfyChannel.baseUrl, retryComfyEndpoint, modelOptionName(generationConfig.model).trim(), prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal, undefined, sourceNode.metadata?.comfyParams, retryClientTaskId)
                     : useReferenceImages
                       ? await requestEdit(generationConfig, prompt, retryImages, { signal: controller.signal }).then((items) => items[0])
                       : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
@@ -2930,7 +3015,7 @@ function InfiniteCanvasPage() {
                     prompt: "",
                     model: effectiveConfig.imageModel || effectiveConfig.model,
                     size: effectiveConfig.size,
-                    count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count),
+                    count: getGenerationCount(effectiveConfig.count || effectiveConfig.canvasImageCount),
                 },
             );
             const connection = { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: configNode.id };
@@ -3408,17 +3493,13 @@ function InfiniteCanvasPage() {
 
                 {angleNode?.metadata?.content ? <CanvasNodeAngleDialog dataUrl={angleNode.metadata.content} open={Boolean(angleNode)} onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode!, params)} /> : null}
 
-                <Modal
-                    title={t("canvas.projectPage.imageDetails")}
+                <ImageCompareModal
                     open={Boolean(previewContent)}
-                    centered
-                    onCancel={() => setPreviewNodeId(null)}
-                    footer={null}
-                    width="auto"
-                    styles={{ body: { padding: 0, display: "flex", justifyContent: "center", alignItems: "center", maxHeight: "80vh" } }}
-                >
-                    {previewContent ? <img src={previewContent} alt={previewNode?.title || t("assets.kinds.image")} style={{ maxWidth: "100%", maxHeight: "80vh", objectFit: "contain" }} /> : null}
-                </Modal>
+                    beforeUrl={previewBeforeContent}
+                    afterUrl={previewContent || ""}
+                    title={previewNode?.title || t("assets.kinds.image")}
+                    onClose={() => setPreviewNodeId(null)}
+                />
 
                 <Modal
                     title={t("canvas.projectPage.clearTitle")}

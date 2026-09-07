@@ -52,6 +52,16 @@ export function registerWorkflowRoutes(
         }
     });
 
+    router.put("/api/workflows/:name/workflow", async (req: Request, res: Response) => {
+        try {
+            const name = decodeURIComponent(req.params.name as string);
+            const result = await store.saveWorkflow(name, req.body as Record<string, unknown>);
+            res.json(result);
+        } catch (error) {
+            res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
     // DELETE /api/workflows/:name - 删除工作流
     router.delete("/api/workflows/:name", async (req: Request, res: Response) => {
         try {
@@ -111,7 +121,10 @@ export function registerWorkflowRoutes(
             const fields = body.fields ?? {};
             const detail = await store.get(name);
             const clientId = randomUUID();
-            const result = await executor.run(detail.workflow, config, fields, clientId, undefined, name);
+            const result = await executor.run(
+                detail.workflow, config, fields, clientId, undefined, name,
+                typeof body.clientTaskId === "string" && body.clientTaskId ? body.clientTaskId : undefined,
+            );
             res.json(result);
         } catch (error) {
             // 输出完整堆栈到 backend stdout（用户在前端只看到 error.message，

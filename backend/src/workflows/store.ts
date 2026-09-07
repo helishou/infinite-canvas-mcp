@@ -152,6 +152,14 @@ export class WorkflowStore {
         return { config };
     }
 
+    async saveWorkflow(name: string, workflow: Record<string, unknown>): Promise<{ workflow: Record<string, unknown> }> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        if (!workflow || typeof workflow !== "object" || Object.keys(workflow).length === 0) throw new Error("工作流不能为空");
+        await fs.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+        return { workflow };
+    }
+
     getConfig(name: string): WorkflowConfig | null {
         const row = this.db.getWorkflowConfig(name);
         if (!row) return null;
@@ -169,7 +177,6 @@ export class WorkflowStore {
     }
 
     async delete(name: string): Promise<{ ok: true }> {
-        if (isBuiltin(name)) throw new Error("内置工作流不可删除");
         const filePath = workflowFilePath(name);
         try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
         await fs.unlink(filePath);

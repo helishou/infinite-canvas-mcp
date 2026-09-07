@@ -7,8 +7,8 @@ import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
-import { resolveImageUrl, uploadImage } from "@/services/image-storage";
-import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
+import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { cn } from "@/lib/utils";
 import { useAssetStore, type Asset, type AssetKind, type ImageAsset, type VideoAsset, type AudioAsset, type CompositeItem } from "@/stores/use-asset-store";
 import { exportAssets, readAssetPackage } from "./asset-transfer";
@@ -293,10 +293,14 @@ export default function AssetsPage() {
         copyText(asset.data.content, t("assets.textCopied"));
     };
 
-    const downloadImage = (asset: Asset) => {
-        if (asset.kind === "image") { saveAs(asset.data.dataUrl, `${asset.title || "asset"}.${asset.data.mimeType.split("/")[1] || "png"}`); return; }
-        if (asset.kind === "video") { saveAs(asset.data.url, `${asset.title || "asset"}.${asset.data.mimeType.split("/")[1] || "mp4"}`); return; }
-        if (asset.kind === "audio") { saveAs(asset.data.url, `${asset.title || "audio"}.${asset.data.mimeType.split("/")[1] || "mp3"}`); return; }
+    const downloadImage = async (asset: Asset) => {
+        if (asset.kind === "text" || asset.kind === "composite") return;
+        try {
+            const blob = await readAssetMediaBlob(asset);
+            if (!blob) throw new Error("媒体不可读取");
+            const extension = asset.data.mimeType.split("/")[1]?.split("+")[0] || (asset.kind === "image" ? "png" : asset.kind === "video" ? "mp4" : "mp3");
+            saveAs(blob, `${asset.title || asset.kind}.${extension}`);
+        } catch { message.error(t("common.downloadFailed")); }
     };
 
     const exportAllAssets = async () => {
@@ -924,6 +928,17 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
             ) : null}
         </Drawer>
     );
+}
+
+async function readAssetMediaBlob(asset: Extract<Asset, { kind: "image" | "video" | "audio" }>) {
+    if (asset.data.storageKey) {
+        const stored = asset.kind === "image" ? await getImageBlob(asset.data.storageKey) : await getMediaBlob(asset.data.storageKey);
+        if (stored) return stored;
+    }
+    const url = asset.kind === "image" ? asset.data.dataUrl || asset.coverUrl : asset.data.url;
+    if (!url) return null;
+    const response = await fetch(url);
+    return response.ok ? response.blob() : null;
 }
 
 function assetSummary(asset: Asset) {

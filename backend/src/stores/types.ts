@@ -60,12 +60,19 @@ export type MediaStore = {
     readNamed(name: string): Buffer;
     /** 代理 URL（相对总后台根路径）。 */
     url(m: MediaFile): string;
+    /** 将整个运行媒体根目录迁至新位置，并同步媒体索引路径。 */
+    relocateRoot(targetDir: string): { migrated: number };
     delete(storageKey: string): number;
 };
 
 /** 任务 store：tasks + task_events。 */
 export type TaskStore = {
-    create(kind: string, input: Record<string, unknown>, params: Record<string, unknown>): RuntimeTask;
+    /**
+     * 创建任务。两种重载：
+     *   create(kind, input, params) — 由后端生成 UUID
+     *   create(id, kind, input, params) — 客户端预生成 taskId（用于「前端能跨刷新找回任务」）
+     */
+    create(kindOrId: string, inputOrKind: string | Record<string, unknown>, paramsOrInput: Record<string, unknown>, maybeParams?: Record<string, unknown>): RuntimeTask;
     get(id: string): RuntimeTask | null;
     update(id: string, patch: TaskPatch): RuntimeTask;
     cancel(id: string): RuntimeTask;

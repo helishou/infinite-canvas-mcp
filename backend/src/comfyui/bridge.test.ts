@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import path from "node:path";
 
-import { attachH3ActualSubmission, buildNativeNanFengV10Workflow, exactHistoryEntry, summarizeH3Workflow } from "./bridge.js";
+import { attachH3ActualSubmission, buildNativeNanFengV10Workflow, exactHistoryEntry, localComfyInputName, summarizeH3Workflow } from "./bridge.js";
+import { MEDIA_DIR } from "../config.js";
 
 const promptA = "5ef69623-4030-4f1b-a00b-09e7355303e4";
 const promptB = "3d11bbd6-3b53-49c5-8514-d3fce9981704";
@@ -13,6 +15,11 @@ test("history recovery never substitutes another prompt's output", () => {
     };
     assert.equal(exactHistoryEntry(history, promptA), undefined);
     assert.equal(exactHistoryEntry(history, promptB), history[promptB]);
+});
+
+test("H3 local input only exposes files from runtime-media", () => {
+    assert.match(localComfyInputName(path.join(MEDIA_DIR, "input", "ref.png")), /^infinite-canvas\/input\/ref\.png$/);
+    assert.throws(() => localComfyInputName(path.join(path.dirname(MEDIA_DIR), "ref.png")), /运行媒体/);
 });
 
 test("H3 audit summary reads the submitted API graph instead of raw UI fields", async () => {

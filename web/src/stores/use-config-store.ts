@@ -53,6 +53,9 @@ export type AiConfig = {
     background: string;
     count: string;
     canvasImageCount: string;
+    comfyuiBasePath: string;
+    proxyEnabled: boolean;
+    proxyUrl: string;
 };
 
 export type WebdavSyncConfig = {
@@ -62,12 +65,15 @@ export type WebdavSyncConfig = {
     directory: string;
     lastSyncedAt: string;
 };
-export type ConfigTabKey = "channels" | "preferences" | "prompt-sources" | "webdav" | "local-storage";
+export type ConfigTabKey = "channels" | "local-proxy" | "preferences" | "prompt-sources" | "webdav" | "local-storage";
+export type ChannelCredentialsImportResult = { status: "created" | "updated" | "missing-base-url" | "invalid-base-url"; channelName?: string };
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
+export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
@@ -110,6 +116,9 @@ export const defaultConfig: AiConfig = {
     background: "",
     count: "1",
     canvasImageCount: "3",
+    comfyuiBasePath: "",
+    proxyEnabled: false,
+    proxyUrl: DEFAULT_LOCAL_PROXY_URL,
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
@@ -127,6 +136,7 @@ type ConfigStore = {
     configTab: ConfigTabKey;
     shouldPromptContinue: boolean;
     updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
+    importChannelCredentials: (input: { baseUrl?: string | null; apiKey?: string | null }) => ChannelCredentialsImportResult;
     updateWebdavConfig: <K extends keyof WebdavSyncConfig>(key: K, value: WebdavSyncConfig[K]) => void;
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
     openConfigDialog: (shouldPromptContinue?: boolean, tab?: ConfigTabKey) => void;
@@ -208,6 +218,12 @@ export const useConfigStore = create<ConfigStore>()(
                         [key]: value,
                     },
                 })),
+            importChannelCredentials: (input) => {
+                const config = get().config;
+                const result = upsertChannelCredentials(config, input);
+                if (result.config !== config) set({ config: result.config });
+                return { status: result.status, channelName: result.channelName };
+            },
             updateWebdavConfig: (key, value) =>
                 set((state) => ({
                     webdav: {
@@ -254,6 +270,8 @@ export const useConfigStore = create<ConfigStore>()(
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
                         canvasImageCount: config.canvasImageCount || "3",
+                        proxyEnabled: Boolean(config.proxyEnabled),
+                        proxyUrl: normalizeLocalProxyUrl(config.proxyUrl || DEFAULT_LOCAL_PROXY_URL) || DEFAULT_LOCAL_PROXY_URL,
                     },
                 };
             },
@@ -292,6 +310,28 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
         models: normalizeChannelModels(channel?.models),
         kind: channel?.kind || "api",
     };
+}
+
+export function upsertChannelCredentials(config: AiConfig, input: { baseUrl?: string | null; apiKey?: string | null }): ChannelCredentialsImportResult & { config: AiConfig } {
+    const rawBaseUrl = input.baseUrl?.trim() || "";
+    if (!rawBaseUrl) return { status: "missing-base-url", config };
+    let baseUrl: string;
+    try {
+        const url = new URL(rawBaseUrl);
+        if (url.protocol !== "http:" && url.protocol !== "https:") return { status: "invalid-base-url", config };
+        url.hash = "";
+        baseUrl = url.toString().replace(/\/+$/, "");
+    } catch { return { status: "invalid-base-url", config }; }
+    const key = baseUrl.replace(/\/v1$/i, "").toLowerCase();
+    const apiKey = input.apiKey?.trim() || "";
+    const index = config.channels.findIndex((channel) => channel.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/i, "").toLowerCase() === key);
+    if (index >= 0) {
+        const existing = config.channels[index];
+        const channels = config.channels.map((channel, itemIndex) => itemIndex === index ? { ...existing, baseUrl, ...(apiKey ? { apiKey } : {}) } : channel);
+        return { status: "updated", channelName: existing.name, config: { ...config, channels } };
+    }
+    const channel = createModelChannel({ name: new URL(baseUrl).hostname.replace(/^(?:www|api)\./i, "") || i18n.t("config.channels.newName"), baseUrl, apiKey, apiFormat: "openai", models: [] });
+    return { status: "created", channelName: channel.name, config: { ...config, channels: [...config.channels, channel] } };
 }
 
 export function encodeChannelModel(channelId: string, model: string) {
@@ -402,5 +442,31 @@ export function buildApiUrl(baseUrl: string, path: string) {
     const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
     const apiBaseUrl = lowerBaseUrl.endsWith("/v1") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
-    return `${apiBaseUrl}${path}`;
+    return withLocalProxy(`${apiBaseUrl}${path}`);
+}
+
+export function normalizeLocalProxyUrl(value: string) {
+    const trimmed = value.trim().replace(/\/+$/, "");
+    if (!trimmed) return "";
+    return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+}
+
+/** Routes external provider traffic through the optional loopback proxy, never through itself or the local backend. */
+export function withLocalProxy(url: string) {
+    const { proxyEnabled, proxyUrl } = useConfigStore.getState().config;
+    if (!proxyEnabled || !/^https?:\/\//i.test(url)) return url;
+    const base = normalizeLocalProxyUrl(proxyUrl);
+    if (!base) return url;
+    try {
+        const target = new URL(url);
+        const proxy = new URL(base);
+        if (target.origin === proxy.origin || isLoopbackHost(target.hostname)) return url;
+    } catch {
+        return url;
+    }
+    return `${base}/${url}`;
+}
+
+function isLoopbackHost(hostname: string) {
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 }

@@ -1,7 +1,8 @@
 import { mkdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import os from "node:os";
 import path from "node:path";
+
+import { MEDIA_DIR } from "../config.js";
 
 type Probe = { format?: { duration?: string }; streams?: Array<{ codec_type?: string; duration?: string }> };
 
@@ -30,7 +31,7 @@ export async function splitVideo(source: string, seconds: number, maxSegments: n
 }
 
 async function fsTempDirectory() {
-    const directory = path.join(os.tmpdir(), `infinite-canvas-h3-segments-${crypto.randomUUID()}`);
+    const directory = path.join(MEDIA_DIR, `h3-segments-${crypto.randomUUID()}`);
     await mkdir(directory, { recursive: true });
     return directory;
 }

@@ -217,8 +217,44 @@ export class BackendDatabase {
             );
         `);
         const version = this.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version?: number } | undefined;
-        if (!version?.version) {
+        const currentVersion = version?.version || 0;
+        if (currentVersion < 1) {
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 2) {
+            this.removeFlux2KleinCompositeFields();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (2, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 3) {
+            // 旧 v2 已把这两个字段补了 name/default，这里统一清理掉（幂等）。
+            this.removeFlux2KleinCompositeFields();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (3, ?)").run(new Date().toISOString());
+        }
+    }
+
+    /**
+     * 删除 Flux2-Klein 内置工作流中 `node: "152,156"` 的 width/height 复合字段。
+     * 这两类字段的 node 是「同时注入节点152+156」的复合写法，不是真实节点名，
+     * 因此工作流管理面板无法显示/删除它，却又会出现在运行面板；且其 default 被
+     * 注入 0 时会覆盖节点 157（GetImageSize）的尺寸连接，破坏生图。尺寸本就由
+     * 节点 157 自动驱动，故直接移除。
+     */
+    private removeFlux2KleinCompositeFields() {
+        const row = this.db.prepare("SELECT fields_json FROM workflow_configs WHERE name = ?").get("Flux2-Klein.json") as { fields_json?: string } | undefined;
+        if (!row) return;
+        let fields: WorkflowField[] = [];
+        try {
+            fields = row.fields_json ? (JSON.parse(row.fields_json) as WorkflowField[]) : [];
+        } catch {
+            return;
+        }
+        const removeIds = new Set(["152,156.width", "152,156.height"]);
+        const next = fields.filter((f) => !removeIds.has(f.id));
+        if (next.length !== fields.length) {
+            this.upsertWorkflowConfig("Flux2-Klein.json", {
+                title: "Flux2-Klein",
+                fieldsJson: JSON.stringify(next),
+            });
         }
     }
 
@@ -462,6 +498,17 @@ export class BackendDatabase {
         return rows.map(mediaFromRow);
     }
 
+    rebaseMediaFiles(fromDir: string, toDir: string): number {
+        let changed = 0;
+        const update = this.db.prepare("UPDATE media_files SET file_path = ? WHERE storage_key = ?");
+        for (const media of this.listMediaFiles()) {
+            const relative = path.relative(fromDir, media.filePath);
+            if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+            changed += Number(update.run(path.join(toDir, relative), media.storageKey).changes);
+        }
+        return changed;
+    }
+
     deleteMediaFile(storageKey: string): number {
         return Number(this.db.prepare("DELETE FROM media_files WHERE storage_key = ?").run(storageKey).changes);
     }
@@ -553,12 +600,38 @@ export class BackendDatabase {
 
     // ── tasks ─────────────────────────────────────────────────────────────
 
-    createTask(kind: string, input: Record<string, unknown>, params: Record<string, unknown>): RuntimeTask {
-        const id = crypto.randomUUID();
+    createTask(idOrKind: string, inputOrKindOrInput?: string | Record<string, unknown>, paramsOrInput?: Record<string, unknown>, paramsOrParams?: Record<string, unknown>): RuntimeTask {
+        // 兼容两种调用：
+        //   createTask(kind, input, params)
+        //   createTask(id, kind, input, params) — 客户端预生成 taskId 用于「前端能跨刷新
+        //   跨进程找回任务」，避免 onTaskId 回调还没写盘时用户刷新导致任务 ID 丢失。
+        let id: string;
+        let kind: string;
+        let input: Record<string, unknown>;
+        let params: Record<string, unknown>;
+        if (paramsOrParams !== undefined) {
+            id = idOrKind;
+            kind = inputOrKindOrInput as string;
+            input = (paramsOrInput as Record<string, unknown>) || {};
+            params = paramsOrParams;
+            if (!/^[A-Za-z0-9._:\-]{1,128}$/.test(id)) throw new Error(`Invalid clientTaskId: ${id}`);
+        } else {
+            kind = idOrKind;
+            input = (inputOrKindOrInput as Record<string, unknown>) || {};
+            params = paramsOrInput || {};
+            id = crypto.randomUUID();
+        }
         const now = new Date().toISOString();
-        this.db.prepare(
-            "INSERT INTO tasks (id, kind, status, progress, input_json, params_json, created_at, updated_at) VALUES (?, ?, 'queued', 0, ?, ?, ?, ?)"
-        ).run(id, kind, JSON.stringify(input), JSON.stringify(params), now, now);
+        try {
+            this.db.prepare(
+                "INSERT INTO tasks (id, kind, status, progress, input_json, params_json, created_at, updated_at) VALUES (?, ?, 'queued', 0, ?, ?, ?, ?)"
+            ).run(id, kind, JSON.stringify(input), JSON.stringify(params), now, now);
+        } catch (error) {
+            // 客户端传来的 id 已存在（重试 / 多标签）→ 直接复用该任务，让新请求接上同一行记录。
+            const existing = this.getTask(id);
+            if (existing) return existing;
+            throw error;
+        }
         return this.getTask(id)!;
     }
 

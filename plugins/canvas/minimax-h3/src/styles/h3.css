@@ -292,10 +292,10 @@
 .nfh3-native-select { min-width:0; width:100%; height:24px; padding:0 12px 0 5px; border:1px solid #3b4a58; border-radius:4px; outline:0; background:#1b2126; color:#f3f7fb; font-size:11px; font-weight:700; cursor:pointer; }
 .nfh3-native-select:focus { border-color:#41c7f2; box-shadow:0 0 0 2px rgba(65,199,242,.1); }
 .nfh3-control select option { background:#20262d; color:#f3f7fb; }
-.nfh3-control .ant-select { min-width:0; }
+.nfh3-control .ant-select { min-width:0; background:transparent !important; box-shadow:none !important; }
 .nfh3-control .ant-select-selector,.nfh3-control .ant-select-arrow { cursor:pointer; }
-.nfh3-control .ant-select-selector { min-height:24px !important; height:24px !important; padding:0 3px !important; border:0 !important; background:transparent !important; box-shadow:none !important; }
-.nfh3-control .ant-select-selection-item { color:#f3f7fb !important; font-size:11px; line-height:44px !important; }
+.nfh3-control .ant-select-selector { min-height:48px !important; height:48px !important; padding:0 6px !important; border:0 !important; background:transparent !important; box-shadow:none !important; }
+.nfh3-control .ant-select-selection-item { color:#f3f7fb !important; font-size:14px; line-height:48px !important; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .nfh3-control .ant-input-number { min-width:0; border:0; background:transparent; box-shadow:none; }
 .nfh3-control .ant-input-number-input { height:48px; padding:0 3px; color:#f3f7fb; font-size:22px; }
 .nfh3-textarea { width:100%; min-height:164px; resize:vertical; padding:14px; border:1px solid #3b4a58; border-radius:6px; outline:0; background:#11161a; color:#eaf2f8; font:11px/1.45 "Segoe UI","Microsoft YaHei",sans-serif; }

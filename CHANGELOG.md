@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- [调整] 本地工作流统一隐藏质量、尺寸和宽高比设置，并允许删除包括 `z-image`、`flux2-klein` 在内的内置工作流及其节点。
+- [修复] 生图工作台与画布保持一致：本地自定义工作流自动使用参数默认值，并隐藏质量、尺寸和宽高比设置。
+- [修复] Flux2-Klein 工作流运行面板出现用户未勾选的 `152,156.width` / `152,156.height` 字段：其 `node` 是「同时注入节点152+156」的复合写法而非真实节点，工作流管理面板无法显示/删除（孤儿字段），却会出现在运行面板；且带 default 时 executor 会注入 0 覆盖节点 157（GetImageSize）的尺寸连接、破坏生图。改为数据库 migration（v2/v3 幂等）直接移除这两个冗余复合字段；尺寸本就由节点 157 自动驱动。前端工作流管理面板新增「未关联节点的字段」清理区，列出所有复合/无对应节点的孤儿字段并可一键删除，杜绝此类问题复发。
+- [修复] 本地内置工作流按文件名去除路径和 `.json` 后缀再识别，`Flux2-Klein.json` 不再误走自定义工作流裁剪逻辑导致输出节点被删除。
+- [修复] 自动识别绑定到 ComfyUI `LoadImage` 节点的工作流字段并从工作流参数面板隐藏，避免图片槽位被错误显示成数字或普通参数。
+- [修复] 支持 0–3 张参考图的自定义工作流，未传入的 LoadImage 槽位会从本次 ComfyUI prompt 中移除，不再校验工作流内置的旧文件名。
+- [修复] 本地自定义工作流的画布参数面板现在会自动填入字段默认值，并隐藏不适用的质量、尺寸和宽高比设置。
+- [新增] H3 原生 V10 的 KJ 实时预览现在按 taskId 透传到节点预览区，预览帧仅保存在任务内存中，正式视频完成后自动替换且不写入媒体库。
+- [新增] 配置页新增可选「本地代理」：通过独立的 `canvas-proxy` 本机转发服务解决外部模型渠道的浏览器跨域问题，外部 API 与远程媒体走代理，本地 Backend / ComfyUI 请求保持直连；配置链接导入也改为按渠道 Base URL 增量更新或新增，不再覆盖现有渠道。
+- [优化] 我的素材下载优先读取 Backend 已保存的媒体 Blob，避免临时外链过期或跨域导致下载失败。
+- [修复] 画布图片节点「生成1张」参数被忽略仍出3张：图片生图张数解析优先级原为 `canvasImageCount || count`，而 `canvasImageCount` 默认3且排在用户显式 `count` 之前，导致图片默认永远出3张、用户在节点/全局设的「生成1张」被盖掉。现翻转为 `count || canvasImageCount`（节点级 `metadata.count` 仍最高优先），新建图片/配置节点的默认张数也同步改为读取 `count` 优先。
+- [修复] 画布图片生成输出节点落点问题：① 原 `findOpenNodePosition` 是「右→左→下→上→对角」环形螺旋，只要原图节点右边被其他节点占用就跳到左侧，现新增 `findRightSidePosition` 专用于图片输出节点，始终从原图右边界起沿垂直方向向下/向上逐行找空位，绝不跳到左侧；② 生成完成那次 `setNodes` 原会无条件重算 position 覆盖用户拖动，现分离的输出节点改为保留当前位置（创建时已算好/用户已拖动），不再「拖了又跑回去」。
+- [修复] 画布图片节点 `runtimeTaskId` 不再在「onTaskId 回调还没写盘」窗口里丢失。改为「客户端预生成 taskId」：点击生成时立即 `crypto.randomUUID()`，**先**写进 `rootNode.metadata.runtimeTaskId` **再**发请求；后端 `createTask` / `bridge.run` / `workflows/executor.run` / `comfy-routes` / `workflows-routes` 全部加可选 `clientTaskId` 入参，存在则用客户端 ID（与后端 UUID 同一行 schema 兼容，已有任务也走 `INSERT OR REUSE`）。这样 ① 用户在任何时机刷新都能在节点上找到 taskId；② 项目恢复轮询 `project.tsx:445` 直接对得上后端任务；③ 节点 404 时（请求在到达后端前丢了 / 后端 DB 被清）自动把节点清回 `idle`，不再无限转圈。
+- [修复] 画布改图结果节点现继承原图节点的显示宽高，并从源节点右侧开始搜索无碰撞空位；右侧被占用时自动换到其他相邻空白区域，生成完成后按最终尺寸再次校正位置，不再被已有节点遮挡。
+- [修复] 页面刷新会误判「在跑」的图片/视频/文本/音频节点为「页面刷新后生成已中断」。生成是后端跑的，刷新瞬间 / 网络抖动 / 切走标签页都可能让前端没拿到 `runtimeTaskId`——此时后端任务大概率还在跑，但 `resetInterruptedGeneration` 直接把节点标 `error` 并提示「请重新生成」，用户误点「重试」会再起一条 ComfyUI 任务，占队列还可能写出覆盖。现改为：拿不到 `runtimeTaskId` 的 `loading` 节点仅清回 `idle`（含子图/子文条目），不再冒充失败；带 `runtimeTaskId` 的仍由 `project.tsx` 的轮询恢复逻辑继续等后端结果。
+- [新增] 画布图片节点选中本地 ComfyUI 工作流时，右侧「图像设置」弹层顶部会拉取 workflow 详情并渲染「工作流参数」区，显示该工作流非图片 / 非提示词的字段（文本 / 数字 / 滑动条 / 布尔 / 下拉），用户填的值会写进 `node.metadata.comfyParams`；运行时 `runLocalComfyImage` 合并这些值注入 `workflowFields`，与生图工作台同构。把 `WorkflowCustomFields` 抽成 `components/workflow-custom-fields.tsx` 共享给两边，避免重复。
+- [修复] 画布图片节点本地 ComfyUI 模型选择硬编码为只接 `z-image` / `flux2-klein` 两枚 preset，用户上传的工作流（含 `custom/xxx.json`）会直接报「本地 ComfyUI 尚未支持模型：xxx」无法生图。现与生图工作台统一走 `/api/workflows/:name/run` 通道，自动拉取 workflow 的 `config.fields` 注入提示词、参考图、宽高与自定义字段，结果回写到节点。`z-image` / `flux2-klein` 仍保留原 `/comfy/tasks` 通道，避免回归。
+- [优化] 本机 H3 首次启用时将 backend 运行媒体根目录迁入真实的 ComfyUI `input/infinite-canvas`，校验并同步媒体索引路径；后续 H3 直接读取原始本机文件，不再上传、暂存或重复复制。
+- [修复] 南风原生 `NanFengH3MultiReferenceGeneratorV10` 的图片、视频、音频选项改为递归枚举 ComfyUI input 相对路径，允许 H3 直接提交 `infinite-canvas/...` 媒体。
+- [修复] H3 重复生成改用每轮唯一 `runtimeRunId` 关联 generation log；新任务在尚未取得 taskId 时不会再按时间误选上一轮成功日志而秒完成。
+- [调整] H3「采样设置」现集中显示一采手动 Sigma、完整 Sigma 序列与 Sigma 预设；启用手动 Sigma 后自动锁定常规采样步数，潜空间二采精度补齐 fp32 选项。
 - [调整] H3 默认提交路径切换为原生 `NanFengH3MultiReferenceGeneratorV10` 主节点：前端选择的模型、参考槽、LoRA、采样、Sigma、二采、显存与预览参数直接透传给南风，保留原分拆 API 图作为备用实现。
 - [修复] H3 ComfyUI 结果回收现严格绑定提交时返回的 promptId：WebSocket 事件和 `/history/{promptId}` 之外不再从全量 history 按时间猜测其他任务输出；目标记录缺失时保留 promptId 并报可诊断失败，绝不把别的任务媒体写进当前 Clip。生成日志同时新增「实际提交配置」，显示最终 seed、帧数、分辨率、LoRA 链、注意力、Sigma 来源与 ComfyUI promptId，便于直接核对 API 图。
 - [修复] H3 异步任务结果串写到错误 Clip：前端与 Agent 现在均按「稳定 Clip ID + runtimeTaskId」一对一绑定任务；旧轮询、重跑前任务、Clip 重排或删除后的延迟回调不会再覆盖当前 Clip，批量运行也不再给多个 Clip 复用同一任务 ID。

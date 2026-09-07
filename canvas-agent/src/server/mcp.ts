@@ -11,6 +11,8 @@ type CanvasAgentToolResponse = { ok?: boolean; result?: unknown; error?: string 
 /** 启动通过标准输入输出通信的 MCP 服务。 */
 export async function startMcpServer() {
     const config = loadConfig(true);
+    // 确保 backend token 被传递给后端
+    if (config.token) process.env.INFINITE_CANVAS_BACKEND_TOKEN = config.token;
     const backend = createBackendClient(config.backendUrl || `http://127.0.0.1:17370`);
     const server = new McpServer({ name: "canvas-agent", version: VERSION }, { instructions: AGENT_PROMPT });
     toolNames.forEach((name) => registerCanvasTool(server, backend, name));
