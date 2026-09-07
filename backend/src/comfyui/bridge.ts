@@ -914,9 +914,7 @@ async function buildNanFengV10Workflow(
     if (!modelName || !textEncoder || !videoVaeName || !audioVaeName) throw new Error("南风 H3 需要模型、文本编码器、视频 VAE 和音频 VAE");
 
     const start = node("nf_start", "NanFengH3ReleaseAtStart", { unet_name: modelName, clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName, reserved_vram_gb: params.runtimeReserveEnabled === true ? Number(params.reservedVramGb ?? 0.6) : 0 });
-    // API 图的 Loader 输入是 COMBO，不能接收释放节点的 STRING 输出；
-    // 因此这里保留文件名输入，避免提交时触发 ComfyUI 的类型校验错误。
-    let model = node("nf_model", "UNETLoader", { unet_name: modelName, weight_dtype: String(params.precision || "default") });
+    let model = node("nf_model", "UNETLoader", { unet_name: start(0), weight_dtype: String(params.precision || "default") });
     const loraSlots = Array.isArray(params.loraSlots) ? params.loraSlots : [{ name: params.loraName, strength: params.loraStrength, enabled: true }];
     loraSlots.slice(0, 8).forEach((slot: any, index: number) => {
         if (slot?.enabled === false || typeof slot?.name !== "string" || !slot.name.trim()) return;
@@ -932,14 +930,13 @@ async function buildNanFengV10Workflow(
         if (sage === "H3专用Sage加速") model = node("nf_h3_attention", "MiniMaxH3MemoryEfficientSageAttentionPatch", { model: model(0) });
         else if (sage !== "disabled") model = node("nf_sage", "PathchSageAttentionKJ", { model: model(0), sage_attention: sage, allow_compile: params.allowCompile === true });
     }
-    // 这些释放节点在 API prompt 图中没有可连接到 COMBO Loader 的合法输出类型；
-    // 保持它们的声明仅用于兼容记录，真正执行链仍从 Loader 开始。
+    // 模型加载链路：NanFengH3ReleaseAtStart → 各标准 Loader → 下游
     node("nf_condition_loaders", "NanFengH3ReleaseBeforeConditionLoaders", {
-        clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName,
+        clip_name: start(1), video_vae_name: start(2), audio_vae_name: start(3),
     });
-    const clip = node("nf_clip", "CLIPLoader", { clip_name: textEncoder, type: String(params.textEncoderType || "minimax"), device: String(params.textEncoderDevice || "default") });
-    const videoVae = node("nf_video_vae", "VAELoader", { vae_name: videoVaeName });
-    const audioVae = node("nf_audio_vae", "VAELoader", { vae_name: audioVaeName });
+    const clip = node("nf_clip", "CLIPLoader", { clip_name: start(1), type: String(params.textEncoderType || "minimax"), device: String(params.textEncoderDevice || "default") });
+    const videoVae = node("nf_video_vae", "VAELoader", { vae_name: start(2) });
+    const audioVae = node("nf_audio_vae", "VAELoader", { vae_name: start(3) });
     const promptBody = String(input.prompt || "").trim();
     const trigger = String(params.constantTriggerWord || "").trim();
     const prompt = trigger && promptBody ? `${trigger}\n${promptBody}` : trigger || promptBody;

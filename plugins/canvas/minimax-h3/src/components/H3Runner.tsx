@@ -347,7 +347,27 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                         audioDriveExclude: segment.audioDriveExclude,
                         audioDriveStart: segment.audioDriveStart,
                         audioDriveEnd: segment.audioDriveEnd,
-                    }, optionsData);
+                    }, {
+                        ...optionsData,
+                        onTaskId: (taskId) => {
+                            console.log("[minimax-h3] onTaskId received", { nodeId: ctx.node.id, segmentId: segment.id, taskId, generationLogId });
+                            // 任务归属必须是 Clip ID + task ID 的一对一关系。不能给整批待运行
+                            // Clip 都写同一个 ID，否则旧轮询/完成回调会把结果串写到其他 Clip。
+                            const current = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || liveMetadata);
+                            update({
+                                runtimeTaskId: taskId,
+                                runtimeTargetSegmentId: segment.id,
+                                runProgress: 0.1,
+                                segments: current.map((item) => item.id === segment.id
+                                    ? { ...item, runtimeTaskId: taskId, progress: 0.1 }
+                                    : item),
+                            });
+                            if (generationLogId) {
+                                ctx.generationLogs.update(generationLogId, { status: "running", runtimeTaskId: taskId })
+                                    .catch((error) => console.warn("[minimax-h3] failed to record running taskId to log", error));
+                            }
+                        },
+                    });
                 };
                 const segmentPrompt = segment.prompt !== undefined ? String(segment.prompt) : effectivePrompt;
                 // 尾帧接续：把上一段尾帧作为本段「切镜」首帧参考，但保持人物/动作连续性。
@@ -408,18 +428,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                         params: { runFromCurrent, selectedSegmentId: liveSelectedId, segments: [...submittedSegments], lastSubmitted: { prompt: submittedPrompt, input: submittedInput, params: submittedParams } },
                     }).catch((error) => console.warn("[minimax-h3] failed to record submitted parameters", error));
                 }
-                const segmentResult = await h3Runner(submittedPrompt, submittedInput, { ...submittedParams, combatLoraWeight: Number(segment.combatLoraWeight ?? 0), cinematicLoraWeight: Number(segment.cinematicLoraWeight ?? 0), teAccel: segment.teAccel ?? teAccel, audioMode: String(segment.audioMode || "native"), audioDenoiseStrength: Number(segment.audioDenoiseStrength ?? 1), addSourceAsReference: segment.addSourceAsReference === true, promptPrimaryAudioOrdinal: Number(segment.promptPrimaryAudioOrdinal || 0), strictPromptTags: segment.strictPromptTags !== false, referenceVideoPolicy: String(segment.referenceVideoPolicy || "official_2_to_15s"), refImageSize: String(segment.refImageSize || "match"), motionContext: usePreviousContext && segment.motionContextEnabled !== false && motion, motionContextNoise: usePreviousContext && segment.motionContextNoiseEnabled !== false && motionNoise, motionContextNoiseAlpha: Number(segment.motionContextNoiseAlpha ?? noiseAlpha), motionContextNoiseAlphaEnd: Number(segment.motionContextNoiseAlphaEnd ?? noiseAlphaEnd), motionContextNoiseRampFrames: Number(segment.motionContextNoiseRampFrames ?? noiseRampFrames), runninghubMode: metadata.minimaxRunningHubMode, runninghubWorkflowId: metadata.minimaxRunningHubWorkflowId, runninghubAppId: metadata.minimaxRunningHubAppId, runninghubFields: runningHubFields, runninghubParams: runningHubParams, runninghubWorkflowJson: metadata.minimaxRunningHubWorkflowJson, useWallet: metadata.minimaxRunningHubUseWallet === true, ...(autoSplit && storedSegments.length === 1 ? { autoSplit: true, segmentDuration: Number(segmentDuration), maxSegments: Number(maxSegments) } : {}) }, { onTaskId: (taskId) => {
-                    console.log("[minimax-h3] onTaskId received", { nodeId: ctx.node.id, segmentId: segment.id, taskId, generationLogId });
-                    update({ runtimeTaskId: taskId, runtimeTargetSegmentId: segment.id, runProgress: 0.1 });
-                    markRequestedSegments({ runtimeTaskId: taskId, progress: 0.1 });
-                    // 把 taskId 同步写进 generation log，让 useH3TaskPolling 的 recoverTask
-                    // 在 metadata.runtimeTaskId 丢失时仍能通过 log 找回 taskId，
-                    // 否则节点会卡在 "生成中" 永远出不来。
-                    if (generationLogId) {
-                        ctx.generationLogs.update(generationLogId, { status: "running", runtimeTaskId: taskId })
-                            .catch((error) => console.warn("[minimax-h3] failed to record running taskId to log", error));
-                    }
-                } });
+                const segmentResult = await h3Runner(submittedPrompt, submittedInput, { ...submittedParams, combatLoraWeight: Number(segment.combatLoraWeight ?? 0), cinematicLoraWeight: Number(segment.cinematicLoraWeight ?? 0), teAccel: segment.teAccel ?? teAccel, audioMode: String(segment.audioMode || "native"), audioDenoiseStrength: Number(segment.audioDenoiseStrength ?? 1), addSourceAsReference: segment.addSourceAsReference === true, promptPrimaryAudioOrdinal: Number(segment.promptPrimaryAudioOrdinal || 0), strictPromptTags: segment.strictPromptTags !== false, referenceVideoPolicy: String(segment.referenceVideoPolicy || "official_2_to_15s"), refImageSize: String(segment.refImageSize || "match"), motionContext: usePreviousContext && segment.motionContextEnabled !== false && motion, motionContextNoise: usePreviousContext && segment.motionContextNoiseEnabled !== false && motionNoise, motionContextNoiseAlpha: Number(segment.motionContextNoiseAlpha ?? noiseAlpha), motionContextNoiseAlphaEnd: Number(segment.motionContextNoiseAlphaEnd ?? noiseAlphaEnd), motionContextNoiseRampFrames: Number(segment.motionContextNoiseRampFrames ?? noiseRampFrames), runninghubMode: metadata.minimaxRunningHubMode, runninghubWorkflowId: metadata.minimaxRunningHubWorkflowId, runninghubAppId: metadata.minimaxRunningHubAppId, runninghubFields: runningHubFields, runninghubParams: runningHubParams, runninghubWorkflowJson: metadata.minimaxRunningHubWorkflowJson, useWallet: metadata.minimaxRunningHubUseWallet === true, ...(autoSplit && storedSegments.length === 1 ? { autoSplit: true, segmentDuration: Number(segmentDuration), maxSegments: Number(maxSegments) } : {}) }, {});
                 lastResult = segmentResult;
                 if (autoSplit && segmentResult.segments?.length) {
                     nextSegments.push(...mapAutoSplitSegments(segment, segmentResult.segments, prompt, Number(segmentDuration)));

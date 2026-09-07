@@ -222,19 +222,24 @@ function taskVideo(task: Record<string, unknown>) {
     return media.find((item) => item && typeof item === "object" && String((item as Record<string, unknown>).mimeType || "").startsWith("video/")) as Record<string, unknown> | undefined;
 }
 
-async function updateClipTask(context: PluginMcpContext, nodeId: string, index: number, task: Record<string, unknown>, error?: string) {
+async function updateClipTask(context: PluginMcpContext, nodeId: string, clipId: string, task: Record<string, unknown>, error?: string, bindTask = false) {
     const node = await context.getCanvasNode(nodeId);
     if (!node) return;
     const segments = segmentsOf(node);
+    const index = segments.findIndex((item) => String(item.id || "") === clipId);
     const segment = segments[index];
     if (!segment) return;
+    const taskId = String(task.id || "");
+    // 后台轮询是异步的：Clip 被重跑、重排或删除后，旧任务的回调必须失效。
+    // 首次提交仅用于建立 Clip ID -> task ID 绑定；之后每次更新都双重校验。
+    if (!bindTask && (!taskId || String(segment.runtimeTaskId || "") !== taskId)) return;
     const status = error ? "error" : String(task.status || "running");
     const video = !error && status === "succeeded" ? taskVideo(task) : undefined;
     const resultUrl = video?.url ? String(video.url) : undefined;
     const resultStorageKey = video?.storageKey ? String(video.storageKey) : undefined;
     const segmentPatch: Record<string, unknown> = {
         status: status === "succeeded" ? "success" : status === "failed" || status === "cancelled" ? "error" : "running",
-        runtimeTaskId: String(task.id || segment.runtimeTaskId || ""),
+        runtimeTaskId: taskId || String(segment.runtimeTaskId || ""),
         progress: Number(task.progress || 0),
         ...(resultUrl ? { result: resultUrl } : {}),
         ...(resultStorageKey ? { resultStorageKey } : {}),
@@ -253,16 +258,16 @@ async function updateClipTask(context: PluginMcpContext, nodeId: string, index: 
     await context.updateCanvasNode(nodeId, {}, nodePatch);
 }
 
-async function monitorClipTask(context: PluginMcpContext, nodeId: string, index: number, taskId: string) {
+async function monitorClipTask(context: PluginMcpContext, nodeId: string, clipId: string, taskId: string) {
     try {
         for (;;) {
             const current = await context.backend.comfyGetTask(taskId);
-            await updateClipTask(context, nodeId, index, current.task as unknown as Record<string, unknown>);
+            await updateClipTask(context, nodeId, clipId, current.task as unknown as Record<string, unknown>);
             if (["succeeded", "failed", "cancelled"].includes(current.task.status)) return;
             await new Promise((resolve) => setTimeout(resolve, 1500));
         }
     } catch (error) {
-        await updateClipTask(context, nodeId, index, { id: taskId, status: "failed" }, error instanceof Error ? error.message : String(error));
+        await updateClipTask(context, nodeId, clipId, { id: taskId, status: "failed" }, error instanceof Error ? error.message : String(error));
     }
 }
 
@@ -296,8 +301,10 @@ export const pluginMcp: PluginMcpModule = {
                 const index = typeof input.segmentIndex === "number" ? input.segmentIndex : undefined;
                 const selectedIndex = selectSegment(segmentsOf(node), index).index;
                 const task = await runSegment(context, node, selectedIndex, (input.params as Record<string, unknown>) || {});
-                await updateClipTask(context, nodeId, selectedIndex, task as unknown as Record<string, unknown>);
-                void monitorClipTask(context, nodeId, selectedIndex, task.id);
+                const clipId = String(segmentsOf(node)[selectedIndex]?.id || "");
+                if (!clipId) throw new Error("H3 Clip 缺少身份标识");
+                await updateClipTask(context, nodeId, clipId, task as unknown as Record<string, unknown>, undefined, true);
+                void monitorClipTask(context, nodeId, clipId, task.id);
                 return task;
             },
             h3_get_task: async (input) => {
@@ -334,16 +341,20 @@ export const pluginMcp: PluginMcpModule = {
                             const previous = String(segments[i].result || "");
                             if (previous && context.backend.runtimeMediaPath) previousVideo = await context.backend.runtimeMediaPath(previous);
                             continue;
-                        }
-                        try {
-                            const started = await runSegment(context, node, i, override, previousVideo);
-                            await updateClipTask(context, node.id, i, started as unknown as Record<string, unknown>);
-                            const task = await waitForTask(context, started.id);
-                            await updateClipTask(context, node.id, i, task as unknown as Record<string, unknown>);
-                            previousVideo = await previousVideoPath(context, task as unknown as Record<string, unknown>);
+                    }
+                    const clipId = String(segments[i].id || "");
+                    let startedTaskId = "";
+                    try {
+                        if (!clipId) throw new Error(`H3 Clip ${i + 1} 缺少身份标识`);
+                        const started = await runSegment(context, node, i, override, previousVideo);
+                        startedTaskId = String(started.id || "");
+                        await updateClipTask(context, node.id, clipId, started as unknown as Record<string, unknown>, undefined, true);
+                        const task = await waitForTask(context, started.id);
+                        await updateClipTask(context, node.id, clipId, task as unknown as Record<string, unknown>);
+                        previousVideo = await previousVideoPath(context, task as unknown as Record<string, unknown>);
                             tasks.push({ nodeId: node.id, segmentIndex: i, task });
-                        } catch (error) {
-                            await updateClipTask(context, node.id, i, { id: "", status: "failed" }, error instanceof Error ? error.message : String(error));
+                    } catch (error) {
+                        await updateClipTask(context, node.id, clipId, { id: startedTaskId, status: "failed" }, error instanceof Error ? error.message : String(error), !startedTaskId);
                             tasks.push({ nodeId: node.id, segmentIndex: i, error: error instanceof Error ? error.message : String(error) });
                             break;
                         }

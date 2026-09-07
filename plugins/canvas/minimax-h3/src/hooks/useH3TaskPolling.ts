@@ -9,6 +9,7 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
     useEffect(() => {
         const taskId = String(metadata.runtimeTaskId || "");
         if (!["loading", "queued"].includes(String(metadata.status))) return;
+        const targetSegmentId = String(metadata.runtimeTargetSegmentId || "");
         let cancelled = false;
         let timer: ReturnType<typeof setTimeout> | undefined;
         // 把生成成功的视频写回「当前 Clip」：同时更新 segment.result，
@@ -28,6 +29,7 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                 results: [...(seg.results || []).filter((item) => item.url !== url), { url, storageKey, type: "video", name: `Clip ${index + 1}` }],
                 status: "success",
                 progress: 1,
+                runtimeTaskId: "",
             } : seg));
         };
         const recoverTask = async () => {
@@ -87,6 +89,16 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                     ? await ctx.ai.getRunningHubH3Task(recoveredTaskId)
                     : await ctx.ai.getLocalH3Task(recoveredTaskId);
                 if (cancelled) return;
+                // 轮询回调可能在新任务已经接管节点后才返回。只有节点、目标 Clip 和
+                // Clip 自己记录的 task ID 都仍然匹配时，才允许落盘这份异步结果。
+                const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || {};
+                const liveTargetId = String(liveMetadata.runtimeTargetSegmentId || "");
+                const liveTarget = segmentsFor(liveMetadata).find((segment) => segment.id === liveTargetId);
+                if (
+                    String(liveMetadata.runtimeTaskId || "") !== recoveredTaskId ||
+                    liveTargetId !== targetSegmentId ||
+                    String(liveTarget?.runtimeTaskId || "") !== recoveredTaskId
+                ) return;
                 if (task.status === "succeeded" && task.result?.url) {
                     // 任务结果必须使用本次 ComfyUI 返回的 storageKey；
                     // metadata.storageKey 可能属于用户后来替换的 Clip 挂载视频。
@@ -94,17 +106,19 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                     const url = task.result.url;
                     // 回写目标用提交时锁定的 runtimeTargetSegmentId，而非实时选中的 Clip，
                     // 否则等待期间切换 Clip 会把结果误写到错误 clip。
-                    const selId = resolveTargetId(metadata);
-                    const targetSource = segmentsFor(metadata).find((seg) => seg.id === selId);
+                    const selId = liveTargetId;
+                    const targetSource = liveTarget;
                     // 后端自动分段成功会返回 task.result.segments（缺 loraSlots 等前端字段）。
                     // 直接整段替换会清空所有 Clip 的 LoRA/参数，改为按 index 合并，保留前端参数。
-                    const mergedSegments = mergeBackendResultSegments(segmentsFor(metadata), task.result.segments, url, storageKey);
+                    const mergedSegments = mergeBackendResultSegments(segmentsFor(liveMetadata), task.result.segments, url, storageKey);
+                    const completedSegments = (mergedSegments ?? withSelectedResult(liveMetadata, url, storageKey, selId))
+                        .map((segment) => segment.id === selId ? { ...segment, runtimeTaskId: "" } : segment);
                     update({
                         content: url,
                         storageKey,
                         mimeType: task.result.mimeType,
-                        segments: mergedSegments ?? withSelectedResult(metadata, url, storageKey, selId),
-                        materials: appendVideoMaterials(metadata.materials, [{ url, storageKey, type: "video", name: "H3 输出", segmentId: selId, params: restorableParams(targetSource as unknown as Record<string, unknown> | undefined) }]),
+                        segments: completedSegments,
+                        materials: appendVideoMaterials(liveMetadata.materials, [{ url, storageKey, type: "video", name: "H3 输出", segmentId: selId, params: restorableParams(targetSource as unknown as Record<string, unknown> | undefined) }]),
                         status: "success",
                         errorDetails: "",
                         runtimeTaskId: undefined,

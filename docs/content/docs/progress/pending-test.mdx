@@ -7,6 +7,8 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
++ H3 任务与 Clip 归属：同时让不同 Clip 运行、运行中切换 Clip、重跑同一 Clip、或在任务未结束时调整 Clip 顺序；每个完成结果只能写回其提交时绑定的 Clip，旧任务回调不得覆盖新任务或其他 Clip。分别确认前端工作台与 Agent 的 `h3_run_clip` / `h3_run_all_clips` 路径。
+
 + H3 潜空间放大模型自动选择：新建或选中一个 H3 Clip，打开 Setting→「H3 潜空间放大二采」→开启「启用潜空间二采」，确认「放大模型」下拉框自动出现并选中第一个可用模型（而不是看着像选了但实际 segment 状态为空）；此时点生成不应再报「已启用 H3 潜空间放大，但没有选择放大模型」。若 ComfyUI 未安装 NanFengH3LowPeakLatentUpscaler 节点或该节点无模型选项，开启开关后应看到黄色提示「未在 ComfyUI 发现 H3 潜空间放大模型…」。
 
 + H3 潜空间放大提交一致性：开启放大并选好模型后点生成，后端不再误报「model_name 选项全为空字符串」；若 ComfyUI 的 NanFengH3LowPeakLatentUpscaler 节点因缺 h3_upscaler_compat 兼容层而 model_name 为空，报错应明确提示「请确认已安装 h3_upscaler_compat 兼容层」。前端「放大模型」下拉框在 segment 未真正选中时应显示「请选择放大模型」占位符，而非拿 choices[0] 伪装成已选。
