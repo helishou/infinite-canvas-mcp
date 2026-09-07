@@ -7,6 +7,10 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
++ H3 原生 V10 提交：分别以文生、图生、首尾帧和 Ref2VA 提交，确认 ComfyUI prompt 图只有 `NanFengH3MultiReferenceGeneratorV10` 与输出节点；模型、素材槽位、LoRA、手动 Sigma、二采、实时预览和显存预留均与当前 Clip 设置一致，输出正常回写。
+
++ H3 ComfyUI 结果隔离与提交审计：连续提交两条 H3 任务后，分别打开生成日志，确认每条均展示自身的 ComfyUI promptId、最终 Seed、帧数、分辨率、LoRA 链、注意力模式和 Sigma 来源；人为让其中一条的 `/history/{promptId}` 缺失或 WS 断开，确认该 Clip 显示带 promptId 的可诊断失败、不会填入另一条任务的视频，且可按 promptId 从 ComfyUI output 目录手动恢复。
+
 + H3 任务与 Clip 归属：同时让不同 Clip 运行、运行中切换 Clip、重跑同一 Clip、或在任务未结束时调整 Clip 顺序；每个完成结果只能写回其提交时绑定的 Clip，旧任务回调不得覆盖新任务或其他 Clip。分别确认前端工作台与 Agent 的 `h3_run_clip` / `h3_run_all_clips` 路径。
 
 + H3 潜空间放大模型自动选择：新建或选中一个 H3 Clip，打开 Setting→「H3 潜空间放大二采」→开启「启用潜空间二采」，确认「放大模型」下拉框自动出现并选中第一个可用模型（而不是看着像选了但实际 segment 状态为空）；此时点生成不应再报「已启用 H3 潜空间放大，但没有选择放大模型」。若 ComfyUI 未安装 NanFengH3LowPeakLatentUpscaler 节点或该节点无模型选项，开启开关后应看到黄色提示「未在 ComfyUI 发现 H3 潜空间放大模型…」。

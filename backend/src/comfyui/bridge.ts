@@ -46,57 +46,59 @@ function extractComfyErrorMessage(status: any): string {
     try { return `ComfyUI 执行失败：${JSON.stringify(status).slice(0, 1500)}`; } catch { return "ComfyUI 执行失败"; }
 }
 
-/** ComfyUI status.messages 里的 timestamp 在不同版本/平台下有时是秒、有时是毫秒。
- * 统一转成毫秒，避免秒级时间戳被当成 1970 年导致兜底扫描永远过滤失败。 */
-function normalizeComfyTimestamp(ts: unknown): number {
-    const t = Number(ts || 0);
-    if (!t || !Number.isFinite(t)) return 0;
-    // 阈值 1e12 (ms) ≈ 2001-09-09；秒级时间戳要到 2286 年才超过 1e10。
-    // 所以 <1e12 视为秒，>=1e12 视为毫秒。
-    return t < 1e12 ? t * 1000 : t;
+export type H3ActualSubmission = {
+    promptId: string;
+    seed?: number;
+    frames?: number;
+    width?: number;
+    height?: number;
+    loras?: Array<{ name: string; strength: number }>;
+    attention?: string;
+    sigma?: string;
+};
+
+/** 只接受目标 promptId 的历史记录；绝不按时间猜测其他任务的输出。 */
+export function exactHistoryEntry(history: Record<string, any>, promptId: string): Record<string, any> | undefined {
+    return history[promptId];
 }
 
-/** 当 /history/{prompt_id} 缺失时，扫描整个 /history 列表找最可能的兜底条目。
- * 先按 strict 窗口过滤，找不到再逐步放宽，最后回退到最新一条有 outputs 的记录。
- * targetPromptId 仅用于日志。 */
-function findLatestHistoryEntry(
-    all: Record<string, any>,
-    startedAt: number,
-    targetPromptId?: string,
-): { pid: string; entry: Record<string, any>; updated: number } | undefined {
-    const entries = Object.entries(all)
-        .map(([pid, entry]) => {
-            const msgs: Array<[string, Record<string, unknown>]> = Array.isArray(entry?.status?.messages)
-                ? entry.status.messages as Array<[string, Record<string, unknown>]>
-                : [];
-            const ts = msgs.reduce((max: number, [, data]) => {
-                const t = normalizeComfyTimestamp((data as Record<string, unknown>)?.timestamp);
-                return t > max ? t : max;
-            }, 0);
-            return { pid, entry, updated: ts };
-        })
-        .filter((c) => c.entry?.outputs && typeof c.entry.outputs === "object" && Object.keys(c.entry.outputs).length > 0);
+export function attachH3ActualSubmission(result: Record<string, any>, actualSubmission: H3ActualSubmission | undefined, promptId: string) {
+    return actualSubmission ? { ...result, actualSubmission: { ...actualSubmission, promptId } } : result;
+}
 
-    // 策略1: 严格窗口 (startedAt 前后 5 秒，避免把上一次成功记录当成当前任务)
-    const strict = entries.filter((c) => c.updated >= startedAt - 5000).sort((a, b) => b.updated - a.updated);
-    if (strict[0]) {
-        console.warn(`[comfyui] /history/${targetPromptId || "?"} 缺失，严格窗口扫描命中 prompt_id=${strict[0].pid}`);
-        return strict[0];
+/** 从最终 API prompt 图提取审计值，避免日志只反映 UI 的原始字段。 */
+export function summarizeH3Workflow(workflow: Record<string, any>, promptId: string): H3ActualSubmission {
+    const nodes = Object.values(workflow) as Array<{ class_type?: string; inputs?: Record<string, any> }>;
+    const native = nodes.find((node) => node.class_type === "NanFengH3MultiReferenceGeneratorV10")?.inputs;
+    if (native) {
+        const requestedRatio = String(native["画面比例"] || "16:9");
+        const ratio = normalizeH3AspectRatio(requestedRatio);
+        const megapixels = Number(native["百万像素"] || 0.4), multiple = Number(native["尺寸倍数"] || 32);
+        const width = Math.max(32, Math.round(Math.sqrt(megapixels * 1024 * 1024 * ratioWidth(ratio) / ratioHeight(ratio)) / multiple) * multiple);
+        const loras = Array.from({ length: 8 }, (_, index) => ({ name: String(native[`LoRA${index + 1}`] || ""), strength: Number(native[`LoRA${index + 1}强度`] ?? 1), enabled: native[`LoRA${index + 1}启用`] === true })).filter((item) => item.enabled && item.name && item.name !== "未选择").map(({ name, strength }) => ({ name, strength }));
+        const manual = native["V81一采使用手动Sigma"] === true ? native["H3完整Sigma序列"] : native["西格玛模式"] === "手动序列" ? native["手动西格玛"] : "";
+        return { promptId, seed: Number(native["随机种子"]), frames: durationToFrames(Number(native["时长秒"] || 5)), ...(requestedRatio === "原图比例" ? {} : { width, height: Math.max(32, Math.round(width * ratioHeight(ratio) / ratioWidth(ratio) / multiple) * multiple) }), ...(loras.length ? { loras } : {}), attention: native["启用H3 SLA"] === true ? "H3 SLA" : String(native.SageAttention || "disabled"), sigma: manual ? `手动：${String(manual)}` : `调度器：${String(native["调度器"] || "")} / ${Number(native["采样步数"] || 0)} 步` };
     }
-    // 策略2: 宽松窗口 (2 分钟，应对时钟 skew、排队延迟或 ComfyUI 启动耗时)
-    const loose = entries.filter((c) => c.updated >= startedAt - 120000).sort((a, b) => b.updated - a.updated);
-    if (loose[0]) {
-        console.warn(`[comfyui] /history/${targetPromptId || "?"} 缺失，宽松窗口扫描命中 prompt_id=${loose[0].pid}`);
-        return loose[0];
-    }
-    // 策略3: 最后兜底：取 /history 里最新一条有 outputs 的记录
-    const latest = entries.sort((a, b) => b.updated - a.updated)[0];
-    if (latest) {
-        console.warn(`[comfyui] /history/${targetPromptId || "?"} 缺失，fallback 取最新有 outputs 的记录 prompt_id=${latest.pid}`);
-        return latest;
-    }
-    console.warn(`[comfyui] /history/${targetPromptId || "?"} 缺失，且 /history 列表中没有任何带 outputs 的记录`);
-    return undefined;
+    const inputsOf = (type: string) => nodes.find((node) => node.class_type === type)?.inputs || {};
+    const condition = nodes.find((node) => node.class_type === "MiniMaxH3ReferenceToVideo" || node.class_type === "MiniMaxH3ImageToVideo")?.inputs || {};
+    const loras = nodes.filter((node) => node.class_type === "LoraLoaderModelOnly").flatMap((node) => {
+        const name = String(node.inputs?.lora_name || "").trim();
+        return name ? [{ name, strength: Number(node.inputs?.strength_model ?? 0.75) }] : [];
+    });
+    const sage = nodes.find((node) => node.class_type === "PathchSageAttentionKJ")?.inputs?.sage_attention;
+    const attention = nodes.some((node) => node.class_type === "MiniMaxH3MemoryEfficientSageAttentionPatch") ? "H3专用Sage加速" : sage ? String(sage) : "disabled";
+    const manual = nodes.find((node) => node.class_type === "ManualSigmas")?.inputs?.sigmas;
+    const scheduler = inputsOf("BasicScheduler");
+    return {
+        promptId,
+        seed: Number(inputsOf("RandomNoise").noise_seed),
+        frames: Number(condition.length),
+        width: Number(condition.width),
+        height: Number(condition.height),
+        ...(loras.length ? { loras } : {}),
+        attention,
+        sigma: manual ? `手动：${String(manual)}` : `调度器：${String(scheduler.scheduler || "")} / ${Number(scheduler.steps || 0)} 步`,
+    };
 }
 
 /** 总后台侧 ComfyUI Bridge：任务持久化统一走总后台 SQLite。 */
@@ -253,7 +255,7 @@ export class ComfyUiBackend {
     /** 重启恢复专用的观察循环：只依赖 /history（无 WS 通道），ComfyUI 自身没重启就能等到结果。 */
     private async watchRecovered(taskId: string, comfyUrl: string, promptId: string, controller: AbortController) {
         const started = Date.now();
-        let missingCount = 0;
+        const submitted = this.deps.tasks.events(taskId).find((event) => event.type === "submitted")?.payload as { actualSubmission?: H3ActualSubmission } | undefined;
         for (;;) {
             if (controller.signal.aborted) return;
             await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -261,38 +263,16 @@ export class ComfyUiBackend {
                 const response = await fetch(`${comfyUrl}/history/${encodeURIComponent(promptId)}`, { signal: controller.signal });
                 if (response.ok) {
                     const history = await response.json() as Record<string, any>;
-                    const item = history[promptId];
+                    const item = exactHistoryEntry(history, promptId);
                     const statusStr = item?.status?.status_str;
-                    if (statusStr === "error" || statusStr === "failed") throw new Error(extractComfyErrorMessage(item.status));
+                    if (statusStr === "error" || statusStr === "failed") throw new Error(extractComfyErrorMessage(item?.status));
                     const hasOutputs = !!(item?.outputs && typeof item.outputs === "object" && Object.keys(item.outputs).length > 0);
                     if (statusStr === "success" || item?.status?.completed || hasOutputs) {
-                        if (!hasOutputs) throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item.status)}`);
-                        const result = { promptId, outputs: item.outputs, media: await collectOutputMedia(item.outputs, comfyUrl, this.deps.media, controller.signal), status: item.status || {} };
+                        if (!hasOutputs) throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item?.status)}`);
+                        const result = attachH3ActualSubmission({ promptId, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, submitted?.actualSubmission, promptId);
                         this.updateTask(taskId, { status: "succeeded", progress: 1, result });
                         this.deps.tasks.addEvent(taskId, "result", result);
                         return;
-                    }
-                    // /history/{prompt_id} 无记录（可能被 LRU 清理）：计数器递增，
-                    // 每 20 次（约 40 秒）主动扫 /history 列表找最近成功条目兜底。
-                    if (!item) {
-                        missingCount++;
-                        if (missingCount === 20 || (missingCount > 20 && missingCount % 20 === 0)) {
-                            try {
-                                const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
-                                if (allHistory.ok) {
-                                    const all = await allHistory.json() as Record<string, any>;
-                                    const winner = findLatestHistoryEntry(all, started, promptId);
-                                    if (winner) {
-                                        const result = { promptId, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
-                                        this.updateTask(taskId, { status: "succeeded", progress: 1, result });
-                                        this.deps.tasks.addEvent(taskId, "result", result);
-                                        return;
-                                    }
-                                }
-                            } catch {}
-                        }
-                    } else {
-                        missingCount = 0;
                     }
                 }
             } catch (error) {
@@ -301,7 +281,7 @@ export class ComfyUiBackend {
                 if (!(error instanceof Error) || /fetch failed|HTTP \d+|ECONN|socket/i.test(error.message)) continue;
                 throw error;
             }
-            if (Date.now() - started > 60 * 60 * 1000) throw new Error("恢复观察超时（1 小时）未等到 ComfyUI 结果，请重新发起生成");
+            if (Date.now() - started > 60 * 60 * 1000) throw new Error(`恢复观察超时（1 小时）：目标 promptId ${promptId} 的 history 与 WebSocket 输出均不可用；未写入任何媒体，可从 ComfyUI 输出目录按 promptId 手动恢复。`);
         }
     }
 
@@ -338,11 +318,13 @@ export class ComfyUiBackend {
                 this.deps.tasks.addEvent(task.id, "segment_result", { index, promptId: result.promptId, media });
             }
             const segmentMedia = segments.flatMap((segment) => Array.isArray(segment.media) ? segment.media : []);
+            const actualSubmission = segments.length ? segments[segments.length - 1].actualSubmission : undefined;
             const combined = localResults.length > 1 ? await concatLocalVideos(localResults) : undefined;
-            if (!combined) return { segments, media: segmentMedia };
+            if (!combined) return actualSubmission ? { segments, media: segmentMedia, actualSubmission } : { segments, media: segmentMedia };
             const stored = this.deps.media.store(await readFile(combined), { name: path.basename(combined), mimeType: "video/mp4", category: "output" });
             await rm(combined, { force: true });
-            return { segments, media: [{ url: this.deps.media.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: path.basename(combined) }, ...segmentMedia] };
+            const result = { segments, media: [{ url: this.deps.media.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: path.basename(combined) }, ...segmentMedia] };
+            return actualSubmission ? { ...result, actualSubmission } : result;
         } finally { await split.cleanup(); }
     }
 
@@ -366,8 +348,10 @@ export class ComfyUiBackend {
         try {
             const uploadFn = (file: string) => this.upload(file, controller.signal, comfyUrl);
             const workflow = preset === "minimax-h3"
-                ? await buildNanFengV10Workflow(prepared.input, params, uploadFn, comfyUrl, controller.signal)
+                ? await buildNativeNanFengV10Workflow(prepared.input, params, uploadFn, comfyUrl, controller.signal)
                 : await buildWorkflow(preset, prepared.input, params, uploadFn);
+            const actualSubmission = preset === "minimax-h3" ? summarizeH3Workflow(workflow, "") : undefined;
+            const withActualSubmission = (result: Record<string, any>, promptId: string) => attachH3ActualSubmission(result, actualSubmission, promptId);
 
             // 在提交 /prompt 之前就建立 ComfyUI WebSocket 并监听 executed 事件。
             // 关键修复：ComfyUI 的 executed 消息本身直接携带 outputs（文件名/路径），
@@ -433,7 +417,7 @@ export class ComfyUiBackend {
             capturedPromptId = promptId;
             const execution = this.comfyExecutions.get(task.id);
             if (execution) execution.promptId = body.prompt_id;
-            this.deps.tasks.addEvent(task.id, "submitted", { promptId: body.prompt_id });
+            this.deps.tasks.addEvent(task.id, "submitted", actualSubmission ? { promptId: body.prompt_id, actualSubmission: { ...actualSubmission, promptId: body.prompt_id } } : { promptId: body.prompt_id });
             const startedAt = Date.now();
             const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(60 * 60 * 1000, Number(params.maxExecutionMs) || 30 * 60 * 1000));
             let missingHistoryCount = 0;
@@ -447,7 +431,7 @@ export class ComfyUiBackend {
                         const res = await fetch(`${comfyUrl}/history/${encodeURIComponent(promptId)}`, { signal: controller.signal });
                         if (res.ok) {
                             const history = await res.json() as Record<string, any>;
-                            const item = history[promptId];
+                            const item = exactHistoryEntry(history, promptId);
                             if (item && item.outputs && typeof item.outputs === "object" && Object.keys(item.outputs).length > 0) return item;
                             if (item && (item.status?.status_str === "error" || item.status?.status_str === "failed")) return item;
                         }
@@ -462,7 +446,6 @@ export class ComfyUiBackend {
                 if (wsError) { closeWs(); throw wsError; }
                 // WebSocket 已确认任务完成：优先用 execution_success 事件（v1.5+ 推送的整个 graph outputs），
                 // 没有就退回 executed 单节点 outputs；都没有再回 /history；
-                // WS 已关闭且 /history 拿不到，主动扫 /history 列表找最近的成功条目兜底。
                 if (wsExecuted) {
                     // 优先用 execution_success（whole-graph）outputs，回退到 executed（单节点）outputs
                     const useOutputs = (wsExecutionSuccessOutputs && typeof wsExecutionSuccessOutputs === "object" && Object.keys(wsExecutionSuccessOutputs).length > 0)
@@ -471,35 +454,22 @@ export class ComfyUiBackend {
                     if (useOutputs) {
                         closeWs();
                         const media = await collectOutputMedia(useOutputs, comfyUrl, this.deps.media, controller.signal);
-                        return { promptId: body.prompt_id, outputs: useOutputs, media, status: { status_str: "success", completed: true } };
+                        return withActualSubmission({ promptId: body.prompt_id, outputs: useOutputs, media, status: { status_str: "success", completed: true } }, body.prompt_id);
                     }
                     const item = await fetchHistoryNow();
                     if (item) {
                         const statusStr = item?.status?.status_str;
                         if (statusStr === "error" || statusStr === "failed") { closeWs(); throw new Error(extractComfyErrorMessage(item.status)); }
                         closeWs();
-                        return { promptId: body.prompt_id, outputs: item.outputs, media: await collectOutputMedia(item.outputs, comfyUrl, this.deps.media, controller.signal), status: item.status || {} };
+                        return withActualSubmission({ promptId: body.prompt_id, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, body.prompt_id);
                     }
-                    // WS 已关闭但 history 拿不到：主动兜底——扫整个 /history 列表找最近成功条目
                     if (wsClosed) {
-                        try {
-                            const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
-                            if (allHistory.ok) {
-                                const all = await allHistory.json() as Record<string, any>;
-                                const winner = findLatestHistoryEntry(all, startedAt, body.prompt_id);
-                                if (winner) {
-                                    closeWs();
-                                    return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
-                                }
-                            }
-                        } catch {}
-                        // 兜底都拿不到：抛明确错误，让用户知道 WS 早断了
-                        const reason = (wsCloseError as Error | null)?.message || "WebSocket 已关闭且 /history、/queue 均无该任务记录";
+                        const reason = (wsCloseError as Error | null)?.message || "WebSocket 已关闭";
                         closeWs();
-                        throw new Error(`ComfyUI ${reason}。任务可能已完成但结果无法回写。可去 ComfyUI 的 /output 目录手动拿产物。`);
+                        throw new Error(`ComfyUI ${reason}；目标 promptId ${body.prompt_id} 的 history 与 WebSocket 输出均不可用。未写入任何媒体，可从 ComfyUI 输出目录按 promptId 手动恢复。`);
                     }
                     // executed 没带 outputs 且 history 也取不到：再等一会，但不再走慢速 missing 计数
-                    if (Date.now() - wsExecutedAt > 60000) { closeWs(); throw new Error("ComfyUI 已在 WebSocket 中报告完成，但取不回结果（outputs 与 history 均无），回写失败"); }
+                    if (Date.now() - wsExecutedAt > 60000) { closeWs(); throw new Error(`ComfyUI 已在 WebSocket 中报告目标 promptId ${body.prompt_id} 完成，但 history 与 WebSocket 输出均不可用；未写入任何媒体。`); }
                     await new Promise((resolve) => setTimeout(resolve, 1500));
                     continue;
                 }
@@ -515,42 +485,21 @@ export class ComfyUiBackend {
                 const historyResponse = await fetch(`${comfyUrl}/history/${encodeURIComponent(body.prompt_id)}`, { signal: controller.signal });
                 if (historyResponse.ok) {
                     const history = await historyResponse.json() as Record<string, any>;
-                    const item = history[body.prompt_id];
+                    const item = exactHistoryEntry(history, body.prompt_id);
                     const statusStr = item?.status?.status_str;
                     if (statusStr === "error" || statusStr === "failed") {
-                        throw new Error(extractComfyErrorMessage(item.status));
+                        throw new Error(extractComfyErrorMessage(item?.status));
                     }
                     const hasOutputs = !!(item?.outputs && typeof item.outputs === "object" && Object.keys(item.outputs).length > 0);
                     if (statusStr === "success" || item?.status?.completed || hasOutputs) {
                         if (!hasOutputs) {
-                            throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item.status)}`);
+                            throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item?.status)}`);
                         }
                         closeWs();
-                        return { promptId: body.prompt_id, outputs: item.outputs, media: await collectOutputMedia(item.outputs, comfyUrl, this.deps.media, controller.signal), status: item.status || {} };
+                        return withActualSubmission({ promptId: body.prompt_id, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, body.prompt_id);
                     }
                     if (item === undefined || (typeof item === "object" && Object.keys(item).length === 0)) {
                         missingHistoryCount++;
-                        // /history/{prompt_id} 无记录或空对象：可能是 ComfyUI 历史记录被清理，
-                        // 主动扫 /history 列表找最近成功条目兜底（不要求 WS 已关闭，
-                        // 因为 WS 可能开着但丢消息、或 /history 被 LRU 清理而 WS 仍连接）。
-                        // 【关键】必须用 startedAt 过滤掉旧条目，否则会把上一次成功的历史记录
-                        // 当成当前任务的结果，导致回写旧视频 + 本次实际生成的视频丢失。
-                        // 每 20 轮（约 30 秒）扫描一次 /history 列表兜底，而不是只扫一次：
-                        // 有些 ComfyUI 实例会延迟写入 /history，或历史记录被 LRU 清理后
-                        //  WS 又先于 executed 事件断开，需要持续尝试兜底。
-                        if (missingHistoryCount === 20 || (missingHistoryCount > 20 && missingHistoryCount % 20 === 0)) {
-                            try {
-                                const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
-                                if (allHistory.ok) {
-                                    const all = await allHistory.json() as Record<string, any>;
-                                    const winner = findLatestHistoryEntry(all, startedAt, body.prompt_id);
-                                    if (winner) {
-                                        closeWs();
-                                        return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
-                                    }
-                                }
-                            } catch {}
-                        }
                         if (missingHistoryCount > 120) {
                             try {
                                 const queueResponse = await fetch(`${comfyUrl}/queue`, { signal: controller.signal });
@@ -560,7 +509,7 @@ export class ComfyUiBackend {
                                     const stillQueued = entries.some((entry) => Array.isArray(entry) && entry.length > 0 && (String(entry[0] || "") === body.prompt_id || String(entry[0] || "").includes(body.prompt_id || "")));
                                     if (!stillQueued) {
                                         consecutiveMissingInQueue++;
-                                        if (consecutiveMissingInQueue >= 2) throw new Error("ComfyUI 执行记录中找不到该任务，可能历史记录被清理或任务已丢失");
+                                        if (consecutiveMissingInQueue >= 2) throw new Error(`目标 promptId ${body.prompt_id} 的 history 与 WebSocket 输出均不可用；未写入任何媒体，可从 ComfyUI 输出目录按 promptId 手动恢复。`);
                                     } else {
                                         consecutiveMissingInQueue = 0;
                                     }
@@ -575,22 +524,8 @@ export class ComfyUiBackend {
                         consecutiveMissingInQueue = 0;
                     }
                 } else {
-                    // /history/{prompt_id} 返回非 200（如 404）：与 item===undefined 同样对待，
-                    // 避免"history 被清理但响应码不是 404"时计数器不递增导致无限空转。
+                    // /history/{prompt_id} 返回非 200（如 404）：与 item===undefined 同样对待。
                     missingHistoryCount++;
-                    if (missingHistoryCount === 20 || (missingHistoryCount > 20 && missingHistoryCount % 20 === 0)) {
-                        try {
-                            const allHistory = await fetch(`${comfyUrl}/history`, { signal: controller.signal });
-                            if (allHistory.ok) {
-                                const all = await allHistory.json() as Record<string, any>;
-                                const winner = findLatestHistoryEntry(all, startedAt, body.prompt_id);
-                                if (winner) {
-                                    closeWs();
-                                    return { promptId: body.prompt_id, outputs: winner.entry.outputs, media: await collectOutputMedia(winner.entry.outputs, comfyUrl, this.deps.media, controller.signal), status: winner.entry.status || {} };
-                                }
-                            }
-                        } catch {}
-                    }
                 }
                 await new Promise((resolve) => setTimeout(resolve, 1500));
             }
@@ -877,14 +812,48 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
 // ─────────────────────────────────────────────────────────────────────────
 // H3导演台 工作流构造
 //
-// 直接复刻 NanFeng V10 generate() 的 GraphBuilder 结构为 ComfyUI API prompt 图。
-// 参考媒体先上传到 input，再由 LoadImage/LoadVideo/LoadAudio 节点引用；输出由
-// VHS_VideoCombine 收成 mp4。执行图不包含 NanFeng mega 节点或工作流 JSON 模板。
+// 默认将前端参数提交给 NanFeng V10 主节点；旧的分拆 API 图保留在下方备用。
 // ─────────────────────────────────────────────────────────────────────────
 const NANFENG_VHS_CLASS = "VHS_VideoCombine";
 const NANFENG_REF2VA_MODES = new Set(["ref2va"]);
 
-async function buildNanFengV10Workflow(
+/** 正常路径：交给南风 V10 主节点内部 GraphBuilder 展开，保留其原生释放/加载依赖。 */
+export async function buildNativeNanFengV10Workflow(input: Record<string, unknown>, params: Record<string, unknown>, upload: (file: string) => Promise<string>, _comfyUrl: string, signal: AbortSignal): Promise<Record<string, any>> {
+    if (signal.aborted) throw new Error("任务已取消");
+    const mode = normalizeNanFengMode(params.mode ?? params.taskMode ?? (typeof input.video === "string" ? "ref2va" : "t2v"));
+    const refs = Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : [];
+    const videos = (Array.isArray(input.videos) ? input.videos.map(String).filter(Boolean) : typeof input.video === "string" ? [input.video] : []).slice(0, 3);
+    const audios = Array.isArray(input.audios) ? input.audios.map(String).filter(Boolean).slice(0, 3) : [];
+    const audioDriveFile = String(params.audioDriveFile || "").trim();
+    const referenceAudios = params.audioDrive === true && audioDriveFile ? [audioDriveFile] : audios;
+    const uploadedRefs = await Promise.all(refs.map(upload));
+    const uploadedVideos = await Promise.all(videos.map(upload));
+    const uploadedAudios = await Promise.all(referenceAudios.map(upload));
+    validateNanFengMode(mode, uploadedRefs.length, uploadedVideos.length, uploadedAudios.length, params);
+    const slots = Array.isArray(params.loraSlots) ? params.loraSlots : [{ name: params.loraName, strength: params.loraStrength, enabled: Boolean(params.loraName) }];
+    const value = (key: string, fallback: unknown) => params[key] ?? fallback;
+    const selectedAttention = String(value("sageAttention", value("dedicatedAttention", "H3专用Sage加速")));
+    const sageAttention = selectedAttention === "关闭" ? "disabled" : selectedAttention === "自动" || selectedAttention === "H3专用Sage加速" ? "auto" : selectedAttention;
+    const inputs: Record<string, unknown> = {
+        "模型": String(value("modelName", "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors")), "文本编码器": String(value("textEncoder", "qwen3vl_32b_minimax_h3_fp8.safetensors")), "文本编码器类型": String(value("textEncoderType", "minimax")), "文本编码器设备": String(value("textEncoderDevice", "default")), "视频VAE": String(value("videoVae", "minimax_h3_video_vae_fp16.safetensors")), "音频VAE": String(value("audioVae", "minimax_h3_audio_vae_fp32.safetensors")), "模型权重精度": String(value("precision", "default")),
+        "SageAttention": sageAttention, "H3专用注意力": selectedAttention, "允许编译": value("allowCompile", false), "画面比例": normalizeH3AspectRatio(String(value("aspectRatio", "16:9 (Widescreen)"))), "百万像素": Number(value("megapixels", 0.4)), "尺寸倍数": Number(value("sizeMultiple", 32)), "时长秒": Number(value("duration", 5)), "提示词": String(input.prompt || ""), "恒定触发词": String(value("constantTriggerWord", "")), "随机种子": Number.isFinite(Number(params.seed)) && Number(params.seed) >= 0 ? Number(params.seed) : Math.floor(Math.random() * 1125899906842624), "采样器": String(value("sampler", "res_multistep")), "调度器": String(value("scheduler", "simple")), "采样步数": Number(value("steps", 20)), "降噪强度": Number(value("denoise", 1)), "参考图尺寸": String(value("refImageSize", "match")),
+        "文生视频": mode === "t2v", "图生视频": mode === "i2v", "首尾帧": mode === "fl2v", "启用LoRA": slots.some((slot: any) => slot?.enabled !== false && String(slot?.name || "").trim()), "启用锁音频": value("lockAudio", false), "开启音频驱动模式": value("audioDrive", false), "音频驱动文件": params.audioDrive === true ? uploadedAudios[0] || "" : "", "运行时预留显存GB": Number(value("reservedVramGb", 0.6)), "启用运行时预留显存": value("runtimeReserveEnabled", false), "启用UniBlockSwap": value("uniBlockSwapEnabled", false), "UniBlockSwap常驻块数": Number(value("uniBlockSwapBlocks", 1)), "启用H3潜空间放大二采": value("latentUpscaleEnabled", false), "H3潜空间放大模型": String(value("latentUpscaleModel", "minimax_h3_latent_upscaler_3d_fp16.safetensors")), "H3潜空间目标百万像素": Number(value("latentUpscaleMegapixels", 1)), "H3潜空间对齐": Number(value("latentUpscaleAlign", 2)), "H3潜空间精度": String(value("latentUpscalePrecision", "bf16")), "H3一采步数": Number(value("h3FirstSteps", 6)), "H3二采步数": Number(value("h3SecondSteps", 4)), "H3完整Sigma序列": String(value("h3FullSigma", "")), "V81一采使用手动Sigma": value("v81ManualSigma", false), "启用实时预览": value("realtimePreviewEnabled", true), "实时预览最长边": Number(value("realtimePreviewLongEdge", 512)), "实时预览帧数": Number(value("realtimePreviewFrames", 12)), "实时预览帧率": Number(value("realtimePreviewFps", 8)), "实时预览JPEG质量": Number(value("realtimePreviewJpegQuality", 75)), "参考图最长边": Number(value("referenceLongEdge", 1920)), "启用H3 SLA": value("slaEnabled", false), "SLA稀疏率": Number(value("slaSparsity", 0.9)), "SLA块大小": String(value("slaBlockSize", "64")), "SLA最短序列": Number(value("slaMinSequence", 4096)), "SLA末尾稠密步数": Number(value("slaDenseLastSteps", 1)), "SLA保护音频": value("slaProtectAudio", true), "SLA指定稠密步": String(value("slaDenseSteps", "0")), "SLA稠密后端": String(value("slaBackend", "comfy_kitchen")), "SLA关闭FP16累加": value("slaDisableFp16Accum", true), "SLA稳定运动": value("slaStabilizeMotion", true),
+        // V10 要求完整继承链的每一个字段，即使对应功能未启用也必须显式提交默认值。
+        "启用SolAttn": value("solEnabled", false), "SolAttn_tau": Number(value("solTau", 1.2)), "SolAttn阈值类型": String(value("solThresholdType", "diag")), "SolAttn精确模式": String(value("solExactMode", "exact_kv")), "SolAttn完整末步": Number(value("solFullFinalSteps", 1)), "SolAttn末段比例": Number(value("solTailRatio", 0)), "SolAttn前缀Token": Number(value("solPrefixTokens", 0)),
+        "启用T8缓存": value("t8Enabled", false), "T8残差阈值": Number(value("t8ResidualThreshold", 0.12)), "T8开始比例": Number(value("t8StartPercent", 0.08)), "T8结束比例": Number(value("t8EndPercent", 0.95)), "T8连续命中": Number(value("t8MaxConsecutiveHits", 2)), "T8缓存设备": String(value("t8CacheDevice", "cpu")), "T8指标步幅": Number(value("t8MetricStride", 8)), "T8详细日志": value("t8Verbose", false), "固定随机种子": value("fixedSeed", false),
+        "启动准备": String(value("startupPreparation", "关闭（原始输出）")), "单人小脸修复": value("singleFaceRepair", false), "多人小脸修复": value("multiFaceRepair", false), "人物1身份参考": String(value("person1Reference", "图片1")), "人物2身份参考": String(value("person2Reference", "图片2")), "人物1图中位置": String(value("person1Position", "自动（最大脸）")), "人物2图中位置": String(value("person2Position", "自动（最大脸）")),
+        "全局修复": value("globalRepairEnabled", false), "全局修复倍率": Number(value("globalRepairScale", 1.5)), "Sigma策略": String(value("sigmaStrategy", "原生轨迹（不加步）")), "分块处理（节约显存）": String(value("chunkProcessing", "关闭")), "分块卸载层数": Number(value("chunkOffloadLayers", 50)), "全局修复LoRA模式": String(value("globalRepairLoraMode", "专用4步LoRA")), "全局修复LoRA": String(value("globalRepairLora", "自动选择4步LoRA")), "全局修复LoRA强度": Number(value("globalRepairLoraStrength", 0.75)), "全局修复步数": Number(value("globalRepairSteps", 4)), "全局修复降噪": Number(value("globalRepairDenoise", 0.28)), "全局修复Sigma策略": String(value("globalRepairSigmaStrategy", "最终区间增加1步")), "全局修复范围": String(value("globalRepairRange", "全画面双区")), "低显存注意力分头数": Number(value("lowVramAttentionHeads", 10)),
+        "H3二采LoRA模式": String(value("h3SecondLoraMode", "继承一采LoRA")), "H3二采LoRA": String(value("h3SecondLora", "")), "H3二采LoRA强度": Number(value("h3SecondLoraStrength", 0.6)),
+    };
+    for (let i = 0; i < 9; i += 1) inputs[`图片${i + 1}`] = uploadedRefs[i] || "未选择";
+    for (let i = 0; i < 3; i += 1) { inputs[`视频${i + 1}`] = uploadedVideos[i] || "未选择"; inputs[`音频${i + 1}`] = uploadedAudios[i] || "未选择"; }
+    for (let i = 0; i < 8; i += 1) { const slot: any = slots[i] || {}; inputs[`LoRA${i + 1}`] = String(slot.name || "未选择"); inputs[`LoRA${i + 1}强度`] = Number(slot.strength ?? 1); inputs[`LoRA${i + 1}启用`] = slot.enabled !== false && Boolean(String(slot.name || "").trim()); }
+    for (const [target, source, fallback] of [["启用西格玛调节", "sigmaEnabled", false], ["视频西格玛偏移", "videoSigmaShift", 12], ["音频西格玛偏移", "audioSigmaShift", 3], ["西格玛模式", "sigmaMode", "低西格玛加密"], ["低西格玛开始", "lowSigmaStart", 0.8], ["低西格玛结束", "lowSigmaEnd", 0], ["每区间细分", "sigmaRefineSteps", 2], ["加密曲线", "sigmaCurve", "cosine"], ["手动西格玛", "manualSigma", ""], ["启用双采样", "dualSampling", false], ["双采后段比例", "dualSamplingRatio", 0.5], ["双采后段采样器", "dualSampler", "res_multistep"], ["启用高清二采", "secondPassEnabled", false], ["一采步数", "firstPassSteps", 20], ["二采百万像素", "secondPassMegapixels", 1], ["二采放大方法", "secondPassUpscaleMethod", "lanczos"], ["二采步数", "secondPassSteps", 6], ["二采降噪", "secondPassDenoise", 0.2], ["二采采样器", "secondPassSampler", "res_multistep"], ["二采调度器", "secondPassScheduler", "simple"], ["二采模型", "secondPassModel", "跟随一采模型（质量优先）"], ["二采起始Sigma", "secondPassSigma", 0.2], ["H3二采Sigma", "h3SecondSigma", "0.35, 0.22, 0.12, 0.05, 0"], ["启用RTX视频超分", "rtxEnabled", false], ["RTX缩放方式", "rtxResizeMode", "倍数缩放"], ["RTX缩放倍数", "rtxScale", 2], ["RTX目标宽度", "rtxWidth", 1920], ["RTX目标高度", "rtxHeight", 1080], ["RTX质量", "rtxQuality", "ULTRA"], ["音频驱动打点", "audioDriveMarkers", "[]"], ["音频驱动分段图片", "audioDriveSegmentImages", "{}"], ["音频驱动分段分镜", "audioDriveSegmentStoryboards", "{}"], ["音频驱动创意", "audioDriveCreative", ""], ["音频驱动排除范围", "audioDriveExclude", "{}"], ["音频驱动当前起点", "audioDriveStart", 0], ["音频驱动当前终点", "audioDriveEnd", 0]] as Array<[string, string, unknown]>) inputs[target] = value(source, fallback);
+    return { nf_v10: { class_type: "NanFengH3MultiReferenceGeneratorV10", inputs }, nf_output: { class_type: NANFENG_VHS_CLASS, inputs: { images: ["nf_v10", 0], audio: ["nf_v10", 1], filename_prefix: "NanFeng_H3", frame_rate: 24, format: "video/h264-mp4", loop_count: 0, pingpong: false, save_output: true } } };
+}
+
+/** 备用：此前的分拆 API 图，保留用于定位原生 V10 节点异常。 */
+export async function buildExpandedNanFengV10Workflow(
     input: Record<string, unknown>,
     params: Record<string, unknown>,
     upload: (file: string) => Promise<string>,
@@ -914,7 +883,6 @@ async function buildNanFengV10Workflow(
     if (!modelName || !textEncoder || !videoVaeName || !audioVaeName) throw new Error("南风 H3 需要模型、文本编码器、视频 VAE 和音频 VAE");
 
     const start = node("nf_start", "NanFengH3ReleaseAtStart", { unet_name: modelName, clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName, reserved_vram_gb: params.runtimeReserveEnabled === true ? Number(params.reservedVramGb ?? 0.6) : 0 });
-    // 模型加载链路：NanFengH3ReleaseAtStart → 各标准 Loader → 下游
     let model = node("nf_model", "UNETLoader", { unet_name: modelName, weight_dtype: String(params.precision || "default") });
     const loraSlots = Array.isArray(params.loraSlots) ? params.loraSlots : [{ name: params.loraName, strength: params.loraStrength, enabled: true }];
     loraSlots.slice(0, 8).forEach((slot: any, index: number) => {
@@ -931,7 +899,6 @@ async function buildNanFengV10Workflow(
         if (sage === "H3专用Sage加速") model = node("nf_h3_attention", "MiniMaxH3MemoryEfficientSageAttentionPatch", { model: model(0) });
         else if (sage !== "disabled") model = node("nf_sage", "PathchSageAttentionKJ", { model: model(0), sage_attention: sage, allow_compile: params.allowCompile === true });
     }
-    // 模型加载链路：NanFengH3ReleaseAtStart → 各标准 Loader → 下游
     node("nf_condition_loaders", "NanFengH3ReleaseBeforeConditionLoaders", {
         clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName,
     });

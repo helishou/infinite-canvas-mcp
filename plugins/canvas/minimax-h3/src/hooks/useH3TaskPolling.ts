@@ -1,7 +1,7 @@
 import { useEffect } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { appendVideoMaterials } from "../services/h3-data";
-import { finishH3Log } from "../services/h3-logs";
+import { finishH3Log, recordH3ActualSubmission } from "../services/h3-logs";
 import { restorableParams, mergeBackendResultSegments } from "../services/h3-segment-utils";
 import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
 
@@ -129,6 +129,7 @@ export function useH3TaskPolling(ctx: CanvasNodeContext, metadata: Record<string
                         durationMs: Date.now() - Number(metadata.runStartedAt || Date.now()),
                         outputs: [{ url, storageKey, type: "video", mimeType: task.result.mimeType }],
                     });
+                    void recordH3ActualSubmission(ctx, task.result.actualSubmission, undefined, recoveredTaskId);
                 } else if (["failed", "cancelled"].includes(task.status)) {
                     const status = task.status === "cancelled" ? "cancelled" : "error";
                     update({ status, errorDetails: task.error || "H3 任务失败" });

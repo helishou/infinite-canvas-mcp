@@ -185,7 +185,8 @@ export type GenerateTextResult = {
     text: string;
 };
 export type LocalH3Input = { video?: { name: string; dataUrl?: string; url?: string }; references?: Array<{ name: string; dataUrl?: string; url?: string }>; audios?: Array<{ name: string; dataUrl?: string; url?: string }>; previousVideo?: { name: string; dataUrl?: string; url?: string } };
-export type LocalH3Result = { url: string; storageKey?: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; segments?: Array<{ media?: Array<{ url: string; storageKey?: string; mimeType: string }> }> };
+export type LocalH3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string };
+export type LocalH3Result = { url: string; storageKey?: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; actualSubmission?: LocalH3ActualSubmission; segments?: Array<{ media?: Array<{ url: string; storageKey?: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: LocalH3Result | null; error?: string | null };
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };

@@ -378,7 +378,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 // 参考图本身只在接受多图参考的模式（ref2va/r2v/rv2v）注入，i2v/fl2v 图片数被模式固定则只拼提示词。
                 // 尾帧接续开启时：尾帧始终作为 Picture 1（首位），提示词 Picture 编号顺延一位
                 const submittedSegmentPrompt = tailFrameDataUrl ? buildTailFrameContinuation(segmentPrompt, 1, prevClipLabel) : segmentPrompt;
-                const promptFlags = `${segment.noDub !== false ? "\nNo dialogue, narration, voiceover, or singing." : ""}${segment.noCaption !== false ? "\nNo subtitles, captions, on-screen text, or text overlays." : ""}`;
+                // const promptFlags = `${segment.noDub !== false ? "\nNo dialogue, narration, voiceover, or singing." : ""}${segment.noCaption !== false ? "\nNo subtitles, captions, on-screen text, or text overlays." : ""}`;
                 // 根据任务模式决定提交哪些 refs
                 // 透传 storageKey：后端媒体引用（图片/视频/音频）直接用 storageKey 复用，
                 // 避免只留 url 时 extractStorageKey 反推出被 URL 编码的 key（如 image%3A<uuid>）
@@ -392,7 +392,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 lastSubmitted.images = finalReferences.length;
                 lastSubmitted.audios = finalAudios.length;
                 lastSubmitted.model = segmentSettings.modelName;
-                const submittedPrompt = `${submittedSegmentPrompt}${promptFlags}`;
+                const submittedPrompt = `${submittedSegmentPrompt}`;
                 const submittedInput = {
                     video: finalVideo,
                     references: finalReferences,

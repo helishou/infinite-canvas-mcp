@@ -18,7 +18,9 @@ export function resolveComfyEndpoint(): { endpoint: string; token: string } {
 
 export type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
 type ComfyMedia = { url: string; mimeType: string; storageKey?: string };
-type ComfyTask = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: { media?: ComfyMedia[]; segments?: Array<{ media?: ComfyMedia[] }> } | null; error?: string | null };
+export type H3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string };
+export type LocalH3TaskResult = { url: string; storageKey?: string; mimeType: string; taskId: string; width?: number; height?: number; durationMs?: number; actualSubmission?: H3ActualSubmission; segments?: Array<{ media?: ComfyMedia[] }> };
+type ComfyTask = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: { media?: ComfyMedia[]; actualSubmission?: H3ActualSubmission; segments?: Array<{ media?: ComfyMedia[] }> } | null; error?: string | null };
 type VideoConcatTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia } | null; error?: string | null };
 
 export function resolveComfyImageSize(value: string) {
@@ -128,7 +130,7 @@ export type LocalH3Input = {
 };
 
 /** Run the packaged MiniMax H3 workflow through the Agent runtime. The plugin never talks to ComfyUI directly. */
-export async function runLocalH3Task(endpoint: string, token: string, comfyUrl: string, prompt: string, input: LocalH3Input, params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void) {
+export async function runLocalH3Task(endpoint: string, token: string, comfyUrl: string, prompt: string, input: LocalH3Input, params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void): Promise<LocalH3TaskResult> {
     const refs = [...(input.references || []), ...(input.audios || []), ...(input.video ? [input.video] : []), ...(input.previousVideo ? [input.previousVideo] : [])];
     // 旧画布/H3 输出可能只有可播放 URL，没有 storageKey。此时仍然把 URL
     // 同步到 backend runtime media，避免移除 Assets 面板后这类素材无法参与生成。
@@ -151,19 +153,19 @@ export async function runLocalH3Task(endpoint: string, token: string, comfyUrl: 
             const media = response.task.result?.media?.find((item) => String(item.mimeType || "video/mp4").startsWith("video/")) || response.task.result?.media?.[0];
             if (!media) throw new Error("MiniMax H3 完成但没有返回视频");
             const proxy = (item: ComfyMedia) => proxyComfyMedia(item, endpoint, token);
-            return { ...proxy(media), segments: (response.task.result?.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })), taskId: created.task.id };
+            return { ...proxy(media), actualSubmission: response.task.result?.actualSubmission, segments: (response.task.result?.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })), taskId: created.task.id };
         }
         await new Promise((resolve) => setTimeout(resolve, 1200));
     }
 }
 
-export async function getLocalH3Task(endpoint: string, token: string, taskId: string) {
+export async function getLocalH3Task(endpoint: string, token: string, taskId: string): Promise<Omit<ComfyTask, "result"> & { result: LocalH3TaskResult | null }> {
     const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${encodeURIComponent(taskId)}`);
     const proxy = (item: ComfyMedia) => proxyComfyMedia(item, endpoint, token);
     if (!response.task.result) return { ...response.task, result: null };
     const media = (response.task.result.media || []).map(proxy);
     const output = media.find((item) => item.mimeType.startsWith("video/")) || media[0];
-    return { ...response.task, result: { url: output?.url || "", storageKey: output?.storageKey, mimeType: output?.mimeType || "video/mp4", taskId: response.task.id, segments: (response.task.result.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })) } };
+    return { ...response.task, result: { url: output?.url || "", storageKey: output?.storageKey, mimeType: output?.mimeType || "video/mp4", taskId: response.task.id, actualSubmission: response.task.result.actualSubmission, segments: (response.task.result.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })) } };
 }
 
 export async function cancelLocalH3Task(endpoint: string, token: string, taskId: string) {
@@ -220,7 +222,7 @@ export async function getRunningHubH3Task(endpoint: string, token: string, taskI
     if (!task.result) return { ...task, result: null };
     const media = task.result.media || [];
     const output = media.find((item) => String(item.mimeType || "video/mp4").startsWith("video/")) || media[0];
-    return { ...task, result: output ? { url: output.url, mimeType: output.mimeType || "video/mp4", taskId: task.id } : null };
+    return { ...task, result: output ? { url: output.url, storageKey: output.storageKey, mimeType: output.mimeType || "video/mp4", taskId: task.id } : null };
 }
 
 export async function cancelRunningHubH3Task(endpoint: string, token: string, taskId: string) {

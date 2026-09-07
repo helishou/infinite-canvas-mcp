@@ -39,8 +39,8 @@ type PluginHostParams = {
     applyAgentOps: (ops?: CanvasAgentOp[]) => unknown;
 };
 
-async function persistH3Result(result: Awaited<ReturnType<typeof runLocalH3Task>>) {
-    const stored = await storeGeneratedVideo({ url: result.url, mimeType: result.mimeType, width: result.width, height: result.height, durationMs: result.durationMs });
+async function persistH3Result<T extends { url: string; mimeType: string; storageKey?: string; segments?: Array<{ media?: Array<{ url: string; mimeType: string; storageKey?: string }> }> }>(result: T): Promise<T & { storageKey?: string }> {
+    const stored = await storeGeneratedVideo({ url: result.url, mimeType: result.mimeType });
     const segments = result.segments
         ? await Promise.all(result.segments.map(async (segment) => ({
             ...segment,

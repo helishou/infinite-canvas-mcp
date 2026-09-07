@@ -47,3 +47,14 @@ export async function finishH3Log(ctx: CanvasNodeContext, taskId: string, status
         console.warn("[minimax-h3] failed to update generation log", error);
     }
 }
+
+export async function recordH3ActualSubmission(ctx: CanvasNodeContext, actualSubmission: unknown, logId?: string, taskId?: string) {
+    if (!actualSubmission || typeof actualSubmission !== "object") return;
+    try {
+        const logs = await ctx.generationLogs.list({ projectId: ctx.projectId, nodeId: ctx.node.id, limit: 500 });
+        const log = logId ? logs.find((item) => item.id === logId) : logs.find((item) => item.runtimeTaskId === taskId);
+        if (log) await ctx.generationLogs.update(log.id, { params: { ...(log.params || {}), actualSubmission } });
+    } catch (error) {
+        console.warn("[minimax-h3] failed to record actual ComfyUI submission", error);
+    }
+}
