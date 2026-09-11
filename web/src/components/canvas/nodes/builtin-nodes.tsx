@@ -1,4 +1,4 @@
-import { FileText, Group, Image as ImageIcon, Music2, Settings2, Video } from "lucide-react";
+import { FileText, Group, Image as ImageIcon, Music2, Settings2, User, Video } from "lucide-react";
 
 import i18n from "@/i18n";
 
@@ -12,11 +12,18 @@ import "../../../../../plugins/canvas/minimax-h3/src/styles/h3.css";
 
 // Extensible metadata for built-in nodes, reusing NODE_SPECS for size and initial metadata.
 // Rendering remains in canvas-node's internal renderer, so no Content component is provided.
-function builtinResource(node: CanvasNodeData): CanvasNodeResource | null {
+function builtinResource(node: CanvasNodeData): CanvasNodeResource | null | CanvasNodeResource[] {
     if (node.type === CanvasNodeType.Image && node.metadata?.content) return { kind: "image", url: node.metadata.content };
     if (node.type === CanvasNodeType.Video && node.metadata?.content) return { kind: "video", url: node.metadata.content };
     if (node.type === CanvasNodeType.Audio && node.metadata?.content) return { kind: "audio", url: node.metadata.content };
     if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) return { kind: "text", text: node.metadata.content || node.metadata.prompt };
+    if (node.type === CanvasNodeType.Character) {
+        // 角色节点被拖到下游 ref 槽时，展开为每张参考图一个 image 资源
+        const images = node.metadata?.characterImages || [];
+        return images
+            .filter((image) => image.url)
+            .map((image) => ({ kind: "image", url: image.url, storageKey: image.storageKey, text: image.outfit || image.name }));
+    }
     return null;
 }
 
@@ -29,6 +36,7 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
     { type: CanvasNodeType.Audio, title: i18n.t("assets.kinds.audio"), icon: <Music2 className={iconClass} />, minimapColor: "#a855f7", resource: builtinResource },
     { type: CanvasNodeType.Config, title: i18n.t("canvas.configNode.title"), icon: <Settings2 className={iconClass} />, minimapColor: "#60a5fa", hasSourceHandle: false },
     { type: CanvasNodeType.Group, title: i18n.t("canvas.node.group"), icon: <Group className={iconClass} />, minimapColor: "#94a3b8" },
+    { type: CanvasNodeType.Character, title: i18n.t("assets.kinds.character"), icon: <User className={iconClass} />, minimapColor: "#f43f5e", resource: builtinResource },
     h3SystemDefinition,
 ].map((def) => {
     const spec = NODE_SPECS[def.type];

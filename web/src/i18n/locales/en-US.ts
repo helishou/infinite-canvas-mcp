@@ -104,7 +104,7 @@ export default {
         dropHere: "Drop to import",
         dropHint: "Supported images, audio or video will be added to the asset library",
         packageName: "my-assets.zip",
-        kinds: { text: "Text", image: "Image", video: "Video", audio: "Audio", composite: "Composite" },
+        kinds: { text: "Text", image: "Image", video: "Video", audio: "Audio", character: "Character" },
         fields: {
             title: "Title",
             titleRequired: "Enter a title",
@@ -122,14 +122,16 @@ export default {
             textPlaceholder: "Save prompts, copy, reference descriptions, and other text assets",
             imageContent: "Image content",
             audioContent: "Audio file",
-            compositeContent: "Composite content",
+            characterDescription: "Description",
+            characterDescriptionPlaceholder: "Brief description of this character (background, traits, etc.)",
+            characterImages: "Reference images",
         },
         selectImageFile: "Select image file",
         noImageSelected: "No image selected",
         selectAudioFile: "Select audio file",
         noAudioSelected: "No audio selected",
         selectAudio: "Please select an audio file",
-        compositeRequireOne: "Composite must contain at least one item",
+        characterRequireOneImage: "A character asset needs at least one reference image",
         preview: "Preview",
         noCover: "No cover",
         untitled: "Untitled asset",
@@ -143,22 +145,11 @@ export default {
         downloadImage: "Download image",
         downloadVideo: "Download video",
         downloadFailed: "Download failed. Please try again.",
-        composite: {
-            itemType: {
-                text: "Text",
-                image: "Image",
-                video: "Video",
-                audio: "Audio",
-                assetRef: "Asset reference",
-            },
-            textPlaceholder: "Enter text content…",
-            mediaUrlPlaceholder: "Enter media URL…",
-            selectAsset: "Select existing asset",
-            addText: "Text",
-            addImage: "Image",
-            addVideo: "Video",
-            addAudio: "Audio",
-            addAssetRef: "Asset reference",
+        character: {
+            outfitPlaceholder: "Outfit / look name",
+            namePlaceholder: "Image name",
+            outfitDescriptionPlaceholder: "Describe this outfit…",
+            addImage: "Add reference image",
         },
     },
     backend: {
@@ -295,9 +286,9 @@ export default {
         globalPrompt: "Global prompt",
         globalPromptHint: "Set the global prompt for this canvas",
         globalPromptPlaceholder: "Text automatically appended to image and video prompts on this canvas…",
-        nodeTypes: { image: "Image", text: "Text", config: "Generation config", video: "Video", audio: "Audio", group: "Group" },
+        nodeTypes: { image: "Image", text: "Text", config: "Generation config", video: "Video", audio: "Audio", group: "Group", character: "Character" },
         toolbar: {
-            select: "Select", pan: "Move", text: "Text", image: "Image", video: "Video", audio: "Audio", config: "Generation config", group: "Group", extensions: "Extension nodes", upload: "Upload assets", appearance: "Canvas appearance", clear: "Clear canvas",
+            select: "Select", pan: "Move", text: "Text", image: "Image", video: "Video", audio: "Audio", config: "Generation config", character: "Character", group: "Group", extensions: "Extension nodes", upload: "Upload assets", appearance: "Canvas appearance", clear: "Clear canvas", arrange: "Arrange",
             themeMode: "Theme", light: "Light", dark: "Dark", gridStyle: "Grid style", dots: "Dots", lines: "Lines", blank: "Blank", imageInfo: "Image info",
         },
         project: {
@@ -312,6 +303,10 @@ export default {
         node: {
             node: "Node",
             untitled: "Untitled node", renameHint: "Double-click to rename the node", group: "Group", nodeCount: "{{count}} nodes", generating: "Generating", failed: "Generation failed", retry: "Retry", missingPlugin: "Plugin missing", missingPluginDescription: "The plugin for node type “{{type}}” is not installed or enabled", generateImage: "Generate image from text", generate: "Generate", editText: "Double-click to edit text", emptyImage: "Empty image node", emptyVideo: "Empty video node", emptyAudio: "Empty audio node", audio: "Audio", batchExpanded: "Image group expanded", batchCollapsed: "Image group collapsed", textBatchExpanded: "Text alternatives expanded", textBatchCollapsed: "Text alternatives collapsed", createCopy: "Create copy", setPrimary: "Set as primary", setPrimaryText: "Set as primary",
+        },
+        character: {
+            empty: "Empty character node",
+            imageCount: "{{count}}",
         },
         videoFrames: { first: "Capture first frame", last: "Capture last frame", current: "Capture current frame", firstTitle: "{{name}} first frame", lastTitle: "{{name}} last frame", currentTitle: "{{name}} current frame", captured: "Image node created", failed: "Could not capture this frame. Try again." },
         sidePanel: {

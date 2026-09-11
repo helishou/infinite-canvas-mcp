@@ -18,6 +18,7 @@ export type WorkflowField = {
     input: string;
     name: string;
     type: WorkflowFieldType;
+    required?: boolean;
     default?: unknown;
     min?: number;
     max?: number;

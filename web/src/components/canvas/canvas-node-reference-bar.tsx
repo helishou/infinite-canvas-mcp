@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { FileText, Image as ImageIcon, Music2, Plus, Puzzle, Video, X } from "lucide-react";
 import { Popover } from "antd";
 import { useTranslation } from "react-i18next";
@@ -8,6 +9,8 @@ import { getGroupResourceNodes, nodeResourceItems } from "@/lib/canvas/canvas-re
 import type { CanvasNodeResource } from "@/types/canvas-plugin";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
+import { resolveImageUrl } from "@/services/image-storage";
+import { useBackendStore } from "@/stores/use-backend-store";
 
 export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, onDisconnect, onStartSelection }: { nodeId: string; nodes: CanvasNodeData[]; connectedNodes: CanvasNodeData[]; onDisconnect?: (fromNodeId: string, toNodeId: string) => void; onStartSelection?: (nodeId: string) => void }) {
     const { t } = useTranslation();
@@ -29,7 +32,24 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, onDiscon
 function ReferenceItem({ node, resource, onRemove }: { node: CanvasNodeData; resource: CanvasNodeResource; onRemove: () => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const content = resource.url || node.metadata?.content;
+    const rawContent = resource.url || node.metadata?.content;
+    const storageKey = resource.storageKey || node.metadata?.storageKey;
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+    const [content, setContent] = useState(rawContent);
+    useEffect(() => {
+        let cancelled = false;
+        if (!rawContent && !storageKey) {
+            setContent("");
+            return;
+        }
+        resolveImageUrl(storageKey, rawContent || "").then((resolved) => {
+            if (!cancelled) setContent(resolved);
+        }).catch(() => {
+            if (!cancelled) setContent(rawContent || "");
+        });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, rawContent, storageKey]);
     const Icon = resource.kind === "image" ? ImageIcon : resource.kind === "video" ? Video : resource.kind === "audio" ? Music2 : resource.kind === "text" ? FileText : Puzzle;
     return (
         <Popover placement="topLeft" mouseEnterDelay={0.15} content={<ReferencePreview node={node} resource={resource} content={content} />}>

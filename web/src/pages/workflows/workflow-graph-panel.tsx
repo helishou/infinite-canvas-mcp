@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import type { WorkflowField } from "@/types/workflow";
 import { fetchWorkflowComboOptions } from "@/services/api/workflows";
-import { Modal } from "antd";
 
 type WorkflowJson = Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
 
@@ -143,10 +142,9 @@ type Props = {
     fields: WorkflowField[];
     onFieldsChange: (fields: WorkflowField[]) => void;
     onWorkflowChange: (workflow: WorkflowJson) => void;
-    canDeleteNode?: boolean;
 };
 
-export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onWorkflowChange, canDeleteNode = true }: Props) {
+export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onWorkflowChange }: Props) {
     const svgRef = useRef<SVGSVGElement>(null);
     const wrapRef = useRef<HTMLDivElement>(null);
     const [view, setView] = useState({ k: 1, x: 0, y: 0 });
@@ -254,28 +252,6 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onW
         onFieldsChange(fields.filter(f => f.id !== fieldId));
     };
 
-    const removeNode = (nodeId: string) => {
-        Modal.confirm({
-            title: "删除工作流节点？",
-            content: `确认删除节点 ${nodeId}（${workflow[nodeId]?.class_type || "未知类型"}）吗？相关字段和连接也会被移除。`,
-            okText: "删除",
-            cancelText: "取消",
-            okButtonProps: { danger: true },
-            onOk: () => {
-                const next = { ...workflow };
-                delete next[nodeId];
-                for (const node of Object.values(next)) {
-                    for (const [key, value] of Object.entries(node.inputs || {})) {
-                        if (Array.isArray(value) && value[0] === nodeId) delete node.inputs![key];
-                    }
-                }
-                onWorkflowChange(next);
-                onFieldsChange(fields.filter((field) => field.node !== nodeId));
-                setPopupNodeId(null);
-            },
-        });
-    };
-
     if (!layout || layout.nodes.length === 0) {
         return <div className="flex h-64 items-center justify-center text-sm text-stone-400">无可视化节点</div>;
     }
@@ -334,7 +310,6 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onW
                     onToggleField={(inputKey) => toggleField(popupNodeId, inputKey, popupNode.inputs?.[inputKey])}
                     onUpdateField={updateField}
                     onRemoveField={removeField}
-                    onDeleteNode={canDeleteNode ? () => removeNode(popupNodeId) : undefined}
                     onClose={() => setPopupNodeId(null)}
                 />
             )}
@@ -363,7 +338,7 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onW
 
 // ─── 浮窗组件 ───
 function NodeFieldPopup({
-    nodeId, node, fields, comboOptions, onToggleField, onUpdateField, onRemoveField, onDeleteNode, onClose,
+    nodeId, node, fields, comboOptions, onToggleField, onUpdateField, onRemoveField, onClose,
 }: {
     nodeId: string;
     node: { class_type?: string; inputs?: Record<string, unknown> };
@@ -372,7 +347,6 @@ function NodeFieldPopup({
     onToggleField: (inputKey: string) => void;
     onUpdateField: (fieldId: string, updates: Partial<WorkflowField>) => void;
     onRemoveField: (fieldId: string) => void;
-    onDeleteNode?: () => void;
     onClose: () => void;
 }) {
     // 只显示非连接型输入（连接型是 [nodeId, slot] 数组）
@@ -395,7 +369,6 @@ function NodeFieldPopup({
                     </div>
                     <button onClick={onClose} className="text-stone-400 hover:text-stone-600 text-xl leading-none">×</button>
                 </div>
-                {onDeleteNode && <button onClick={onDeleteNode} className="mb-3 w-full rounded border border-red-200 px-3 py-2 text-left text-xs text-red-600 hover:bg-red-50">删除此节点</button>}
 
                 {inputs.length === 0 ? (
                     <div className="py-4 text-center text-xs text-stone-400">无可配置输入</div>

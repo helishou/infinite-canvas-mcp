@@ -2,7 +2,7 @@ import { defaultConfig, resolveModelForCapability, type AiConfig } from "@/store
 import i18n from "@/i18n";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
-import { imageMetadata, referenceUrl } from "@/lib/canvas/canvas-node-factory";
+import { referenceUrl } from "@/lib/canvas/canvas-node-factory";
 import type { NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
@@ -96,11 +96,42 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
                 return { ...node, metadata: { ...metadata, ...(outputContent !== undefined ? { content: outputContent } : {}), ...(Array.isArray(segments) ? { segments } : {}), ...(h3Refs ? { h3Refs } : {}), ...(Array.isArray(h3CharacterAssets) ? { h3CharacterAssets } : {}), ...(Array.isArray(materials) ? { materials } : {}) } };
             }
             if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && metadata?.storageKey) return { ...node, metadata: { ...metadata, content: await resolveMediaUrl(metadata.storageKey, content) } };
-            if (node.type !== CanvasNodeType.Image || !metadata || !content) return node;
-            const images = await Promise.all((metadata.images || []).map(async (image) => (image.content ? { ...image, content: await resolveImageUrl(image.storageKey, image.content) } : image)));
-            if (metadata.storageKey) return { ...node, metadata: { ...metadata, content: await resolveImageUrl(metadata.storageKey, content), images } };
-            if (!content.startsWith("data:image/")) return node;
-            return { ...node, metadata: { ...metadata, ...imageMetadata(await uploadImage(content)) } };
+            if (node.type !== CanvasNodeType.Image || !metadata) return node;
+
+            const hydrateImage = async <T extends { content?: string; storageKey?: string; mimeType?: string; bytes?: number; naturalWidth?: number | null; naturalHeight?: number | null }>(image: T): Promise<T> => {
+                const raw = image.content || "";
+                if (!raw && !image.storageKey) return image;
+                const resolved = await resolveImageUrl(image.storageKey, raw);
+                if (!resolved) return image;
+                if (resolved === raw && !raw.startsWith("data:image/")) return image;
+                if (image.storageKey) return { ...image, content: resolved };
+
+                // 历史 MCP 节点保存过 ComfyUI /view 临时地址。首次打开时把它落到总后台媒体库，
+                // 后续节点只使用稳定的 storageKey，不再依赖 ComfyUI 临时文件。
+                if (resolved !== raw || raw.startsWith("data:image/")) {
+                    try {
+                        const stored = await uploadImage(resolved, { category: "library" });
+                        return { ...image, content: stored.url, storageKey: stored.storageKey, mimeType: stored.mimeType, bytes: stored.bytes, naturalWidth: stored.width, naturalHeight: stored.height };
+                    } catch {
+                        return { ...image, content: resolved };
+                    }
+                }
+                return { ...image, content: resolved };
+            };
+
+            const hydratedRoot = content ? await hydrateImage({ content, storageKey: metadata.storageKey, mimeType: metadata.mimeType, bytes: metadata.bytes, naturalWidth: metadata.naturalWidth, naturalHeight: metadata.naturalHeight }) : null;
+            const images = await Promise.all((metadata.images || []).map((image) => hydrateImage(image)));
+            const rootChanged = Boolean(hydratedRoot && (hydratedRoot.content !== content || hydratedRoot.storageKey !== metadata.storageKey || hydratedRoot.mimeType !== metadata.mimeType || hydratedRoot.bytes !== metadata.bytes || hydratedRoot.naturalWidth !== metadata.naturalWidth || hydratedRoot.naturalHeight !== metadata.naturalHeight));
+            const hasImageChanges = images.some((image, index) => image !== metadata.images?.[index]);
+            if (!rootChanged && !hasImageChanges) return node;
+            return {
+                ...node,
+                metadata: {
+                    ...metadata,
+                    ...(rootChanged && hydratedRoot ? { ...hydratedRoot } : {}),
+                    ...(metadata.images ? { images } : {}),
+                },
+            };
         }),
     );
 }

@@ -9,11 +9,10 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { defaultConfig, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
-import { getComfyTask, resolveComfyEndpoint, resolveComfyImageSize, runComfyTask, runVideoConcatTask } from "@/services/api/comfyui";
-import { fetchWorkflowDetail, runWorkflow } from "@/services/api/workflows";
+import { getComfyTask, resolveComfyImageSize, runVideoConcatTask } from "@/services/api/comfyui";
 import { uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { backendMediaUrl } from "@/services/backend-api";
+import { backendMediaUrl, fetchBackendTask, startCanvasImageGeneration, type BackendMediaResult } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -22,6 +21,7 @@ import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
 import { App, Button, Modal } from "antd";
@@ -52,7 +52,7 @@ import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
-import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildCompositeGroupNodes, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
+import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, findOpenNodePosition, findRightSidePosition, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
     audioExtension,
@@ -136,22 +136,20 @@ const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
 type CanvasReferenceDrag = { nodeId: string; url: string; type: "image"; name: string; storageKey?: string; mimeType?: string };
+// 角色节点拖到 ref 槽：dispatchCanvasReferenceDrag 会按 images 数组逐张发 drop 事件。
+type CharacterReferenceDrag = { nodeId: string; images: Array<{ url: string; name: string; storageKey?: string; mimeType?: string }> };
+type AnyReferenceDrag = CanvasReferenceDrag | CharacterReferenceDrag;
 
 function h3DropTargetAt(clientX: number, clientY: number) {
     return document.elementsFromPoint(clientX, clientY).map((element) => element.closest<HTMLElement>("[data-canvas-ref-drop-target]")).find(Boolean) || null;
 }
 
-function dispatchCanvasReferenceDrag(name: "canvas-reference-drag-start" | "canvas-reference-drag-over" | "canvas-reference-drop" | "canvas-reference-drag-end", detail: CanvasReferenceDrag & { targetNodeId: string; clientX?: number; clientY?: number }) {
+function dispatchCanvasReferenceDrag(name: "canvas-reference-drag-start" | "canvas-reference-drag-over" | "canvas-reference-drop" | "canvas-reference-drag-end", detail: (CanvasReferenceDrag | CharacterReferenceDrag) & { targetNodeId: string; clientX?: number; clientY?: number }) {
     window.dispatchEvent(new CustomEvent(name, { detail }));
 }
 
-// 画布图片节点运行本地 ComfyUI：内置 preset（z-image / flux2-klein）继续走老 /comfy/tasks
-// 通道；其他（包括用户上传的 custom/xxx.json）走统一的 /api/workflows/:name/run，与生图工作台
-// 保持一致，避免「本地 ComfyUI 尚未支持模型：xxx」把用户上传的工作流误判成不支持。
 type ComfyImageReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
 async function runLocalComfyImage(
-    comfyBaseUrl: string,
-    comfyEndpoint: { endpoint: string; token: string },
     selectedModelName: string,
     prompt: string,
     references: ComfyImageReference[],
@@ -162,46 +160,38 @@ async function runLocalComfyImage(
     customFieldValues?: Record<string, unknown>,
     // 客户端预生成的 taskId；提前告知后端用同一行创建，跨刷新也能恢复
     clientTaskId?: string,
-): Promise<{ url: string }> {
-    const lower = selectedModelName.split(/[\\/]/).pop()?.replace(/\.json$/i, "").toLowerCase() || "";
-    if (lower === "z-image" || lower === "flux2-klein") {
-        const image = await runComfyTask(comfyEndpoint.endpoint, comfyEndpoint.token, comfyBaseUrl, lower, prompt, references, size, signal, onTaskId, clientTaskId);
-        return { url: image.url };
-    }
-    const detail = await fetchWorkflowDetail(selectedModelName);
-    const fields = detail.config?.fields || [];
-    const workflowFields: Record<string, unknown> = { prompt };
-    for (const field of fields) {
-        if (field.type === "text" && field.isPrompt) workflowFields[field.id] = prompt;
-    }
-    if (size.width > 0 && size.height > 0) {
-        for (const field of fields) {
-            if (field.id === "width") workflowFields[field.id] = size.width;
-            if (field.id === "height") workflowFields[field.id] = size.height;
+    provider?: { baseUrl?: string; apiKey?: string },
+    // 画布生成日志关联：projectId + 触发的源节点 id
+    logContext?: { projectId: string; nodeId?: string },
+): Promise<BackendMediaResult> {
+    const started = await startCanvasImageGeneration({
+        model: selectedModelName,
+        prompt,
+        references,
+        width: size.width,
+        height: size.height,
+        size: `${size.width}x${size.height}`,
+        params: customFieldValues,
+        clientTaskId,
+        provider,
+        projectId: logContext?.projectId,
+        nodeId: logContext?.nodeId,
+    }, signal);
+    onTaskId?.(started.taskId);
+    for (;;) {
+        const response = await fetchBackendTask(started.taskId, signal);
+        const task = response.task;
+        if (task.status === "succeeded") {
+            const media = task.result?.media?.[0] || task.result?.images?.[0];
+            if (!media?.url) throw new Error("画布图片任务完成但没有返回媒体");
+            return { ...media, url: media.storageKey ? backendMediaUrl(media.storageKey) : media.url };
         }
+        if (task.status === "failed" || task.status === "cancelled") throw new Error(task.error || `画布图片任务${task.status}`);
+        await new Promise<void>((resolve, reject) => {
+            const timer = window.setTimeout(resolve, 800);
+            signal.addEventListener("abort", () => { window.clearTimeout(timer); reject(signal.reason || new DOMException("Aborted", "AbortError")); }, { once: true });
+        });
     }
-    const imageFields = fields.filter((field) => field.type === "image");
-    for (let index = 0; index < imageFields.length; index += 1) {
-        const field = imageFields[index];
-        const ref = references[index];
-        if (!ref) {
-            workflowFields[field.id] = null;
-            continue;
-        }
-        const dataUrl = ref.dataUrl || ref.url;
-        workflowFields[field.id] = typeof dataUrl === "string" && dataUrl ? dataUrl : null;
-    }
-    // 合并用户在右侧「工作流参数」面板填写的非 image / 非 prompt 字段值
-    for (const [id, value] of Object.entries(customFieldValues || {})) {
-        if ((id === "width" || id === "height") && Number(value) <= 0) continue;
-        workflowFields[id] = value;
-    }
-    const run = await runWorkflow(selectedModelName, workflowFields, detail.config, clientTaskId);
-    if (run.error) throw new Error(run.error);
-    const first = run.media?.[0];
-    if (!first) throw new Error("工作流完成但没有返回媒体");
-    if (run.taskId) onTaskId?.(run.taskId);
-    return { url: first.url };
 }
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
@@ -237,6 +227,8 @@ function InfiniteCanvasPage() {
     const clipboardRef = useRef<CanvasClipboard | null>(null);
     const historyRef = useRef<{ past: CanvasHistoryEntry[]; future: CanvasHistoryEntry[] }>({ past: [], future: [] });
     const lastHistoryRef = useRef<CanvasHistoryEntry | null>(null);
+    const suppressNextProjectPersistRef = useRef(false);
+    const restoreGenerationRef = useRef(0);
     const historyCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const viewportSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const applyingHistoryRef = useRef(false);
@@ -250,7 +242,7 @@ function InfiniteCanvasPage() {
         startX: number;
         startY: number;
         initialSelectedNodes: { id: string; x: number; y: number }[];
-        referenceDrag?: CanvasReferenceDrag;
+        referenceDrag?: AnyReferenceDrag;
         referenceTargetNodeId?: string;
     }>({
         isDraggingNode: false,
@@ -273,6 +265,7 @@ function InfiniteCanvasPage() {
     const renameProject = useCanvasStore((state) => state.renameProject);
     const deleteProjects = useCanvasStore((state) => state.deleteProjects);
     const currentProject = useCanvasStore((state) => state.projects.find((project) => project.id === projectId));
+    const backendRevision = useCanvasStore((state) => state.backendRevisions[projectId] || 0);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [nodes, setNodes] = useState<CanvasNodeData[]>([]);
     const [connections, setConnections] = useState<CanvasConnection[]>([]);
@@ -412,6 +405,8 @@ function InfiniteCanvasPage() {
 
     useEffect(() => {
         if (!hydrated) return;
+        const restoreGeneration = ++restoreGenerationRef.current;
+        if (backendRevision > 0) suppressNextProjectPersistRef.current = true;
         setProjectLoaded(false);
         const project = openProject(projectId);
         if (!project) {
@@ -422,7 +417,9 @@ function InfiniteCanvasPage() {
         const restore = async () => {
             const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes.map(migrateLegacyH3Node)));
             const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
-            if (JSON.stringify(restoredNodes) !== JSON.stringify(project.nodes)) updateProject(projectId, { nodes: restoredNodes });
+            if (restoreGeneration !== restoreGenerationRef.current) return;
+            // 多个 MCP 更新可能同时触发恢复；只有最后一次恢复完成后，才允许它进入本地持久化链路。
+            suppressNextProjectPersistRef.current = true;
             setNodes(restoredNodes);
             setConnections(project.connections);
             setChatSessions(restoredSessions);
@@ -447,7 +444,7 @@ function InfiniteCanvasPage() {
             setProjectLoaded(true);
         };
         void restore();
-    }, [hydrated, navigate, openProject, projectId, updateProject]);
+    }, [backendRevision, hydrated, navigate, openProject, projectId, updateProject]);
 
     useEffect(() => {
         if (!projectLoaded) return;
@@ -523,6 +520,10 @@ function InfiniteCanvasPage() {
 
     useEffect(() => {
         if (!projectLoaded || historyPausedRef.current) return;
+        if (suppressNextProjectPersistRef.current) {
+            suppressNextProjectPersistRef.current = false;
+            return;
+        }
         updateProject(projectId, { nodes, connections, chatSessions, activeChatId, backgroundMode, showImageInfo });
     }, [activeChatId, backgroundMode, chatSessions, connections, nodes, projectId, projectLoaded, showImageInfo, updateProject]);
 
@@ -719,17 +720,17 @@ function InfiniteCanvasPage() {
     const contextMenuNode = contextMenu?.type === "node" ? nodeById.get(contextMenu.nodeId) || null : null;
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
     const previewContent = previewImageId ? previewNode?.metadata?.images?.find((image) => image.id === previewImageId)?.content : previewNode?.metadata?.content;
-    // 追溯上游原图：找到当前预览图片节点的上游图片节点，用于对比
     const previewBeforeContent = useMemo(() => {
         if (!previewNode || !previewContent) return null;
-        const upstreamNodes = connectedNodesByNodeId.get(previewNode.id) || [];
-        for (const upstream of upstreamNodes) {
-            if (upstream.type === CanvasNodeType.Image && upstream.metadata?.content) {
-                return upstream.metadata.content;
+        for (const connection of connections) {
+            if (connection.toNodeId !== previewNode.id) continue;
+            const source = nodeById.get(connection.fromNodeId);
+            if (source?.type === CanvasNodeType.Image && source.metadata?.content) {
+                return source.metadata.content;
             }
         }
         return null;
-    }, [previewNode, previewContent, connectedNodesByNodeId]);
+    }, [previewNode, previewContent, connections, nodeById]);
     const hasMultipleSelectedNodes = selectedNodeIds.size > 1;
     const activeNodeId = hasMultipleSelectedNodes ? null : hoveredNodeId || (selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null);
     const groupChildCountById = useMemo(() => {
@@ -851,7 +852,7 @@ function InfiniteCanvasPage() {
                   ? Boolean(definition.autoOpenPanel)
                   : definition?.useBuiltinPanel
                     ? true
-                    : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group;
+                    : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group && type !== CanvasNodeType.Character;
             if (wantsPanel) setDialogNodeId(newNode.id);
         },
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
@@ -888,6 +889,28 @@ function InfiniteCanvasPage() {
         },
         [chatSessions, cleanupCanvasFiles, projectId],
     );
+
+    // 把选中的多个节点按连接关系做拓扑分层排布：源点（输入）在左、汇点（输出）在右，
+    // 同一层纵向堆叠。MCP 批量生成常叠在同一点，一键按数据流展开。
+    const arrangeSelectedNodes = useCallback(() => {
+        const selectedIds = selectedNodeIdsRef.current;
+        if (selectedIds.size < 2) return;
+        const selected = nodesRef.current.filter((node) => selectedIds.has(node.id));
+        if (selected.length < 2) return;
+        const minX = Math.min(...selected.map((node) => node.position.x));
+        const minY = Math.min(...selected.map((node) => node.position.y));
+        // 只取两端都在选择集内的边，按子图做分层（输入在左、输出在右，无连接时退回网格）。
+        const positions = computeFlowLayout({
+            nodes: nodesRef.current,
+            connections: connectionsRef.current,
+            ids: selected.map((node) => node.id),
+            scopeEdges: true,
+            anchorX: minX,
+            anchorY: minY,
+        });
+        const ops = [...positions.entries()].map(([id, pos]) => ({ type: "update_node" as const, id, patch: { position: pos } }));
+        applyAgentOps(ops);
+    }, [applyAgentOps]);
 
     const deleteConnection = useCallback((connectionId: string) => {
         setConnections((prev) => prev.filter((conn) => conn.id !== connectionId));
@@ -1253,9 +1276,21 @@ function InfiniteCanvasPage() {
             startX: event.clientX,
             startY: event.clientY,
             initialSelectedNodes: currentNodes.filter((node) => dragIds.has(node.id)).map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
-            referenceDrag: nextSelected.size === 1 && currentNodes.find((node) => nextSelected.has(node.id))?.type === CanvasNodeType.Image
-                ? (() => { const node = currentNodes.find((item) => nextSelected.has(item.id)); const url = String(node?.metadata?.content || "").trim(); return url && node ? { nodeId: node.id, url, type: "image" as const, name: node.title || "图片", storageKey: node.metadata?.storageKey, mimeType: node.metadata?.mimeType } : undefined; })()
-                : undefined,
+            referenceDrag: (() => {
+                if (nextSelected.size !== 1) return undefined;
+                const node = currentNodes.find((item) => nextSelected.has(item.id));
+                if (!node) return undefined;
+                if (node.type === CanvasNodeType.Image) {
+                    const url = String(node.metadata?.content || "").trim();
+                    return url ? { nodeId: node.id, url, type: "image" as const, name: node.title || "图片", storageKey: node.metadata?.storageKey, mimeType: node.metadata?.mimeType } : undefined;
+                }
+                if (node.type === CanvasNodeType.Character) {
+                    // 角色节点拖到 ref 槽：把 images 全部带过去，下游按张数展开为 image refs
+                    const images = (node.metadata?.characterImages || []).filter((image) => image.url).map((image) => ({ url: image.url, name: image.outfit || image.name || node.title || "角色参考图", storageKey: image.storageKey, mimeType: image.mimeType }));
+                    return images.length ? { nodeId: node.id, images } : undefined;
+                }
+                return undefined;
+            })(),
         };
         historyPausedRef.current = true;
         nodeDraggingRef.current = true;
@@ -1283,8 +1318,16 @@ function InfiniteCanvasPage() {
         const referenceDrag = dragRef.current.referenceDrag;
         const referenceTargetNodeId = dragRef.current.referenceTargetNodeId;
         if (referenceDrag && referenceTargetNodeId && clientX != null && clientY != null) {
-            dispatchCanvasReferenceDrag("canvas-reference-drop", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
-            dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
+            // 角色节点：images 数组逐张发送 drop，让 H3 按张数添加
+            if ("images" in referenceDrag) {
+                for (const image of referenceDrag.images) {
+                    dispatchCanvasReferenceDrag("canvas-reference-drop", { nodeId: referenceDrag.nodeId, url: image.url, type: "image", name: image.name, storageKey: image.storageKey, mimeType: image.mimeType, targetNodeId: referenceTargetNodeId, clientX, clientY });
+                }
+                dispatchCanvasReferenceDrag("canvas-reference-drag-end", { nodeId: referenceDrag.nodeId, url: referenceDrag.images[0]?.url || "", type: "image", name: referenceDrag.images[0]?.name || "", targetNodeId: referenceTargetNodeId, clientX, clientY });
+            } else {
+                dispatchCanvasReferenceDrag("canvas-reference-drop", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
+                dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
+            }
             setNodes((prev) => prev.map((node) => { const initial = initialPositions.find((item) => item.id === node.id); return initial ? { ...node, position: { x: initial.x, y: initial.y } } : node; }));
         } else if (dragRef.current.hasMoved && clientX != null && clientY != null) {
             const movedIds = new Set(initialPositions.map((item) => item.id));
@@ -1531,8 +1574,34 @@ function InfiniteCanvasPage() {
 
     // 内部引用拖拽（H3 输出视频 / 侧边栏素材）落库生成节点：复用 storageKey，不重新上传。
     const createNodeFromCanvasRef = useCallback(
-        (ref: { url?: string; dataUrl?: string; storageKey?: string; name?: string; type?: string; kind?: string; width?: number; height?: number; durationMs?: number; bytes?: number; mimeType?: string }, position: Position) => {
+        (ref: { url?: string; dataUrl?: string; storageKey?: string; name?: string; type?: string; kind?: string; width?: number; height?: number; durationMs?: number; bytes?: number; mimeType?: string; characterAssetId?: string; characterName?: string; characterDescription?: string; characterImages?: Array<{ url: string; storageKey?: string; name: string; outfit: string; outfitDescription: string; width: number; height: number; bytes: number; mimeType: string }> }, position: Position) => {
             const type = ref.type || ref.kind || "image";
+            // 角色资产拖入：生成 Character 节点（不展开为多张 Image）
+            if (type === "character") {
+                const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Character];
+                const characterImages = ref.characterImages || [];
+                const title = ref.characterName || ref.name || "角色";
+                const id = `character-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+                setNodes((prev) => [...prev, {
+                    id,
+                    type: CanvasNodeType.Character,
+                    title,
+                    position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
+                    width: spec.width,
+                    height: spec.height,
+                    metadata: {
+                        status: "success",
+                        characterAssetId: ref.characterAssetId,
+                        characterName: ref.characterName,
+                        characterDescription: ref.characterDescription,
+                        characterImages,
+                        characterPrimaryIndex: 0,
+                    },
+                }]);
+                setSelectedNodeIds(new Set([id]));
+                setSelectedConnectionId(null);
+                return;
+            }
             const resolvedUrl = ref.storageKey ? backendMediaUrl(ref.storageKey) : ref.url || ref.dataUrl || "";
             if (!resolvedUrl) return;
             const id = `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -2423,11 +2492,12 @@ function InfiniteCanvasPage() {
                     const referenceImages = [...new Map([...sourceReference, ...generationContext.referenceImages].map((image) => [image.id, image])).values()];
                     const comfyChannel = resolveModelChannel(generationConfig, generationConfig.model);
                     const localComfy = comfyChannel.kind === "comfyui";
+                    const selectedImageModel = modelOptionName(generationConfig.model).trim();
+                    const useCanvasDispatcher = localComfy || /^gpt-image(?:-|$)/i.test(selectedImageModel);
                     const localComfyPreset = localComfy
                         ? (modelOptionName(generationConfig.model).trim().toLowerCase() === "z-image" ? "z-image" : modelOptionName(generationConfig.model).trim().toLowerCase() === "flux2-klein" ? "flux2-klein" : "")
                         : "";
                     if (localComfyPreset === "flux2-klein" && !referenceImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
-                    const comfyEndpoint = resolveComfyEndpoint();
                     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
                     const generationMetadata = buildImageGenerationMetadata(generationType, generationConfig, count, referenceImages);
                     const parentConfig = NODE_DEFAULT_SIZE[isConfigNode ? CanvasNodeType.Config : isImageNode ? CanvasNodeType.Image : CanvasNodeType.Text];
@@ -2502,12 +2572,12 @@ function InfiniteCanvasPage() {
                     await Promise.all(
                         imageIds.map(async (imageId) => {
                             try {
-                                const image = localComfy
-                                    ? await runLocalComfyImage(comfyChannel.baseUrl, comfyEndpoint, modelOptionName(generationConfig.model).trim(), effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (_taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, primaryImageId: imageId } } : item)), sourceNode?.metadata?.comfyParams, clientTaskId)
+                                const image = useCanvasDispatcher
+                                    ? await runLocalComfyImage(selectedImageModel, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (_taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, primaryImageId: imageId } } : item)), sourceNode?.metadata?.comfyParams, clientTaskId ? (imageId === imageIds[0] ? clientTaskId : `${clientTaskId}-${imageId}`) : undefined, /^gpt-image(?:-|$)/i.test(selectedImageModel) ? { baseUrl: comfyChannel.baseUrl, apiKey: comfyChannel.apiKey } : undefined, { projectId, nodeId: rootId })
                                     : referenceImages.length
                                       ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
                                       : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
-                                const uploaded = localComfy ? await uploadImage(await fetch((image as { url: string }).url).then((response) => { if (!response.ok) throw new Error(`读取 ComfyUI 结果失败：HTTP ${response.status}`); return response.blob(); }), { signal: controller.signal }) : await uploadImage((image as { dataUrl: string }).dataUrl, { signal: controller.signal });
+                                const uploaded = useCanvasDispatcher ? image : await uploadImage((image as { dataUrl: string }).dataUrl, { signal: controller.signal });
                                 const imageSize = isImageNode && sourceNode ? { width: sourceNode.width, height: sourceNode.height } : fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                                 const item: CanvasNodeImage = { id: imageId, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
                                 setNodes((prev) =>
@@ -2912,18 +2982,19 @@ function InfiniteCanvasPage() {
 
                 const retryComfyChannel = resolveModelChannel(generationConfig, generationConfig.model);
                 const retryLocalComfy = retryComfyChannel.kind === "comfyui";
+                const retrySelectedImageModel = modelOptionName(generationConfig.model).trim();
+                const retryUseCanvasDispatcher = retryLocalComfy || /^gpt-image(?:-|$)/i.test(retrySelectedImageModel);
                 const retryComfyPreset = retryLocalComfy
                     ? (modelOptionName(generationConfig.model).trim().toLowerCase() === "z-image" ? "z-image" : modelOptionName(generationConfig.model).trim().toLowerCase() === "flux2-klein" ? "flux2-klein" : "")
                     : "";
                 if (retryComfyPreset === "flux2-klein" && !retryImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
-                const retryComfyEndpoint = resolveComfyEndpoint();
-                const image = retryLocalComfy
-                    ? await runLocalComfyImage(retryComfyChannel.baseUrl, retryComfyEndpoint, modelOptionName(generationConfig.model).trim(), prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal, undefined, sourceNode.metadata?.comfyParams, retryClientTaskId)
+                const image = retryUseCanvasDispatcher
+                    ? await runLocalComfyImage(retrySelectedImageModel, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal, undefined, sourceNode.metadata?.comfyParams, retryClientTaskId, /^gpt-image(?:-|$)/i.test(retrySelectedImageModel) ? { baseUrl: retryComfyChannel.baseUrl, apiKey: retryComfyChannel.apiKey } : undefined)
                     : useReferenceImages
                       ? await requestEdit(generationConfig, prompt, retryImages, { signal: controller.signal }).then((items) => items[0])
                       : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
-                const uploadedImage = retryLocalComfy
-                    ? await uploadImage(await fetch((image as { url: string }).url).then((response) => { if (!response.ok) throw new Error(`读取 ComfyUI 结果失败：HTTP ${response.status}`); return response.blob(); }), { signal: controller.signal })
+                const uploadedImage = retryUseCanvasDispatcher
+                    ? image
                     : await uploadImage((image as { dataUrl: string }).dataUrl, { signal: controller.signal });
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                 const retryImage: CanvasNodeImage = {
@@ -3120,13 +3191,38 @@ function InfiniteCanvasPage() {
                     },
                 ]);
                 setSelectedNodeIds(new Set([id]));
-            } else if (payload.kind === "composite") {
+            } else if (payload.kind === "character") {
+                // 角色资产：从资产库选择 / 工具栏 + 角色 / 拖入 → 统一创建 1 个 Character 节点，
+                // 不再展开为 Group + N 张 Image（旧的"快速散开"路径移除）。
+                const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Character];
                 const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
-                const draft = buildCompositeGroupNodes(payload.title, payload.items, { x: 0, y: 0 });
-                const group = draft[0];
-                const shifted = draft.map((node) => ({ ...node, position: { x: node.position.x + center.x - group.width / 2, y: node.position.y + center.y - group.height / 2 } }));
-                setNodes((prev) => [...prev, ...shifted]);
-                setSelectedNodeIds(new Set([group.id]));
+                const id = `character-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+                const firstImage = payload.images.find((image) => image.url);
+                setNodes((prev) => [
+                    ...prev,
+                    {
+                        id,
+                        type: CanvasNodeType.Character,
+                        title: payload.title || "角色",
+                        position: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 },
+                        width: spec.width,
+                        height: spec.height,
+                        metadata: {
+                            status: NODE_STATUS_SUCCESS,
+                            characterName: payload.title,
+                            characterDescription: "",
+                            characterImages: payload.images,
+                            characterPrimaryIndex: 0,
+                            content: firstImage?.url,
+                            storageKey: firstImage?.storageKey,
+                            naturalWidth: firstImage?.width,
+                            naturalHeight: firstImage?.height,
+                            bytes: firstImage?.bytes,
+                            mimeType: firstImage?.mimeType,
+                        },
+                    },
+                ]);
+                setSelectedNodeIds(new Set([id]));
             } else {
                 insertAssistantImage({ id: `asset-${Date.now()}`, prompt: payload.title, dataUrl: payload.dataUrl, storageKey: payload.storageKey });
             }
@@ -3428,12 +3524,17 @@ function InfiniteCanvasPage() {
                     onAddAudio={() => createNode(CanvasNodeType.Audio)}
                     onAddText={() => createNode(CanvasNodeType.Text)}
                     onAddConfig={() => createNode(CanvasNodeType.Config)}
+                    onAddCharacter={() => {
+                        setAssetPickerAllowedKinds(["character"]);
+                        setAssetPickerOpen(true);
+                    }}
                     onAddGroup={() => createNode(CanvasNodeType.Group)}
                     onAddExtensionNode={(type) => createNode(type)}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                     onUpload={() => handleUploadRequest()}
                     onDelete={() => deleteNodes(new Set(selectedNodeIds))}
+                    onArrange={arrangeSelectedNodes}
                     onClear={() => setClearConfirmOpen(true)}
                     onCanvasToolChange={setCanvasTool}
                     onBackgroundModeChange={setBackgroundMode}

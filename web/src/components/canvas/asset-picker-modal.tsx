@@ -4,30 +4,14 @@ import { Search } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
-import { useAssetStore, type Asset, type ImageAsset, type CompositeItem } from "@/stores/use-asset-store";
+import { useAssetStore, type Asset, type CharacterImage, type ImageAsset } from "@/stores/use-asset-store";
 
 export type InsertAssetPayload =
     | { kind: "text"; content: string; title: string }
     | { kind: "image"; dataUrl: string; title: string; storageKey?: string }
     | { kind: "video"; url: string; title: string; storageKey?: string; width?: number; height?: number }
     | { kind: "audio"; url: string; title: string; storageKey?: string; bytes: number; mimeType: string; durationMs?: number }
-    | { kind: "composite"; title: string; items: CompositeItem[] };
-
-/** 把 assetRef 项解析成具体类型项（值拷贝）；引用已删除时返回 null，由调用方过滤。 */
-export function resolveAssetRefItem(item: CompositeItem, assets: Asset[]): CompositeItem | null {
-    if (item.itemType !== "assetRef") return item;
-    const ref = assets.find((a) => a.id === item.refId);
-    if (!ref) return null;
-    if (ref.kind === "text") return { itemType: "text", content: (ref as Extract<Asset, { kind: "text" }>).data.content };
-    if (ref.kind === "image") return { itemType: "image", url: (ref as ImageAsset).data.dataUrl, storageKey: (ref as ImageAsset).data.storageKey, width: (ref as ImageAsset).data.width, height: (ref as ImageAsset).data.height, bytes: (ref as ImageAsset).data.bytes, mimeType: (ref as ImageAsset).data.mimeType };
-    if (ref.kind === "video") return { itemType: "video", url: (ref as Extract<Asset, { kind: "video" }>).data.url, storageKey: (ref as Extract<Asset, { kind: "video" }>).data.storageKey, width: (ref as Extract<Asset, { kind: "video" }>).data.width, height: (ref as Extract<Asset, { kind: "video" }>).data.height, bytes: (ref as Extract<Asset, { kind: "video" }>).data.bytes, mimeType: (ref as Extract<Asset, { kind: "video" }>).data.mimeType };
-    return ref.kind === "audio" ? { itemType: "audio", url: (ref as Extract<Asset, { kind: "audio" }>).data.url, storageKey: (ref as Extract<Asset, { kind: "audio" }>).data.storageKey, bytes: (ref as Extract<Asset, { kind: "audio" }>).data.bytes, mimeType: (ref as Extract<Asset, { kind: "audio" }>).data.mimeType, durationMs: (ref as Extract<Asset, { kind: "audio" }>).data.durationMs } : null;
-}
-
-/** 解析 composite 全部 items（assetRef → 具体类型，已删除引用跳过）。 */
-export function resolveCompositeItems(items: CompositeItem[], assets: Asset[]): CompositeItem[] {
-    return items.map((item) => resolveAssetRefItem(item, assets)).filter((item): item is CompositeItem => Boolean(item));
-}
+    | { kind: "character"; title: string; images: CharacterImage[] };
 
 type Props = {
     open: boolean;
@@ -48,7 +32,7 @@ export function AssetPickerModal({ open, allowedKinds, onInsert, onClose }: Prop
 
 const PAGE_SIZE = 8;
 
-const kindOptions = ["all", "text", "image", "video", "audio", "composite"];
+const kindOptions = ["all", "text", "image", "video", "audio", "character"];
 
 function PickerCard({ title, kind, cover, onClick }: { title: string; kind: string; cover: string; onClick: () => void }) {
     const { t } = useTranslation();
@@ -62,7 +46,7 @@ function PickerCard({ title, kind, cover, onClick }: { title: string; kind: stri
                             <img src={cover} alt={title} className="aspect-[4/3] w-full object-cover" />
                         ) : (
                             <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-3 text-center text-xs leading-5 text-stone-500 dark:bg-stone-800 dark:text-stone-400">
-                                {kind === "composite" || kind === "audio" ? t(`assets.kinds.${kind}`) : title}
+                                {kind === "character" || kind === "audio" ? t(`assets.kinds.${kind}`) : title}
                             </div>
                         )}
             <div className="p-2.5">
@@ -86,7 +70,7 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
         return assets
-            .filter((a) => a.kind === "text" || a.kind === "image" || a.kind === "video" || a.kind === "audio" || a.kind === "composite")
+            .filter((a) => a.kind === "text" || a.kind === "image" || a.kind === "video" || a.kind === "audio" || a.kind === "character")
             .filter((a) => !allowedKinds?.length || allowedKinds.includes(a.kind))
             .filter((a) => kindFilter === "all" || a.kind === kindFilter)
             .filter((a) => !query || [a.title, ...(a.tags || [])].join(" ").toLowerCase().includes(query));
@@ -110,8 +94,8 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
             onInsert({ kind: "video", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, width: asset.data.width, height: asset.data.height });
         } else if (asset.kind === "audio") {
             onInsert({ kind: "audio", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, bytes: asset.data.bytes, mimeType: asset.data.mimeType, durationMs: asset.data.durationMs });
-        } else if (asset.kind === "composite") {
-            onInsert({ kind: "composite", title: asset.title, items: resolveCompositeItems(asset.data.items, assets) });
+        } else if (asset.kind === "character") {
+            onInsert({ kind: "character", title: asset.title, images: asset.data.images });
         } else {
             onInsert({ kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title });
         }

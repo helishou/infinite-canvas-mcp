@@ -20,11 +20,12 @@ export function normalizeH3Model(value: unknown) {
 
 export function compatibleH3Settings(segment: H3Segment, fallbackModel: string, fallbackLora: string, suppliedRefs: H3Ref[] = []) {
     const taskMode = String(segment.taskMode || "r2v");
-    const segmentRefs = Array.isArray(segment.refItems) ? segment.refItems : [
+    const bucketRefs = [
         ...(segment.refs?.image || []),
         ...(segment.refs?.video || []),
         ...(segment.refs?.audio || []),
     ];
+    const segmentRefs = segment.refItems?.length ? segment.refItems : bucketRefs;
     const refs = [...segmentRefs, ...suppliedRefs].filter((ref, index, all) => all.findIndex((item) => sameRef(item, ref)) === index);
     const hasImage = refs.some((ref) => ref.type === "image");
     const hasVideo = refs.some((ref) => ref.type === "video");

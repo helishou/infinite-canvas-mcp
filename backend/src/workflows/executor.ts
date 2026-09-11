@@ -20,7 +20,7 @@ type RunResult = {
  * 将用户字段值转换为 {node_id: {input_name: value}} 格式
  * 对应 Python run_workflow() L15690-15711
  */
-function buildParams(fields: WorkflowField[], values: FieldValues): RunParams {
+function buildParams(fields: WorkflowField[], values: FieldValues, workflow: Record<string, unknown>): RunParams {
     const params: RunParams = {};
     for (const field of fields) {
         if (!field.input) continue;
@@ -28,7 +28,9 @@ function buildParams(fields: WorkflowField[], values: FieldValues): RunParams {
         // 跳过多节点字段（在 run() 中单独处理）
         if (field.node.includes(",")) continue;
         let value = values[field.id];
-        if (field.type === "number" || field.type === "slider") {
+        if (isImageField(field, workflow)) {
+            // LoadImage 字段即使配置类型被错误保存为 number/text，也必须按图片文件名处理。
+        } else if (field.type === "number" || field.type === "slider") {
             const num = typeof value === "number" ? value : Number(value);
             if (!Number.isNaN(num)) {
                 value = field.step && field.step < 1 ? num : Math.round(num);
@@ -51,6 +53,11 @@ function buildParams(fields: WorkflowField[], values: FieldValues): RunParams {
         (params[field.node] as Record<string, unknown>)[field.input] = value;
     }
     return params;
+}
+
+function isImageField(field: WorkflowField, workflow: Record<string, unknown>) {
+    if (field.type === "image") return true;
+    return field.node.split(",").some((id) => (workflow[id] as { class_type?: string } | null | undefined)?.class_type === "LoadImage");
 }
 
 /**
@@ -77,7 +84,8 @@ function injectParams(
     const result: Record<string, unknown> = JSON.parse(JSON.stringify(workflow));
     for (const [nodeId, nodeInputs] of Object.entries(params)) {
         if (!(nodeId in result)) continue;
-        const node = result[nodeId] as Record<string, unknown>;
+        const node = result[nodeId] as Record<string, unknown> | null;
+        if (!node || typeof node !== "object") continue;
         if (!node.inputs) node.inputs = {};
         for (const [inputName, value] of Object.entries(nodeInputs as Record<string, unknown>)) {
             if (value === null) {
@@ -90,33 +98,225 @@ function injectParams(
     return result;
 }
 
-function removeEmptyImageNodes(workflow: Record<string, unknown>, fields: WorkflowField[], values: FieldValues) {
-    const removed = new Set(fields.filter((field) => field.type === "image" && values[field.id] == null).map((field) => field.node));
-    if (!removed.size) return workflow;
-    const result = { ...workflow };
-    const removableTypes = new Set(["LoadImage", "ImageScaleToTotalPixels", "VAEEncode", "GetImageSize"]);
-    // Flux2 的尺寸链不能依赖已裁掉的图片分支；无图时使用工作流原本的默认尺寸。
-    for (const node of Object.values(result)) {
-        const item = node as { class_type?: string; inputs?: Record<string, unknown> };
-        if (item.class_type !== "Flux2Scheduler" && item.class_type !== "EmptyFlux2LatentImage") continue;
-        for (const key of ["width", "height"]) item.inputs![key] = 1024;
+type WfNode = { class_type?: string; inputs?: Record<string, unknown> } | null;
+
+/**
+ * 从「注入参数后的最终 graph」判定哪些 LoadImage 节点真正“被提供”。
+ * 这是 ComfyUI 实际会看到的真相来源：只要某 LoadImage 节点的 inputs.image
+ * 是非空字符串（上传后得到的文件名，或工作流预置文件名），即视为已提供。
+ *
+ * 之所以不直接用 processedValues 判断，是因为 processImageFields 上传失败/返回异常时
+ * processedValues 可能为 null，进而 injectParams 会把该 LoadImage 的 inputs.image 删掉，
+ * 此时 graph 才是唯一可靠的“是否提供”判据。
+ */
+function getPresentLoadImages(workflow: Record<string, unknown>): Set<string> {
+    const present = new Set<string>();
+    for (const [id, node] of Object.entries(workflow)) {
+        if (!node || typeof node !== "object") continue;
+        const item = node as WfNode;
+        if (item!.class_type !== "LoadImage") continue;
+        const img = item!.inputs?.image;
+        if (typeof img === "string" && img.trim().length > 0) present.add(id);
     }
+    return present;
+}
+
+/**
+ * 判断 workflow 中某个节点 id 是否真实存在（非空对象、有 class_type）。
+ * 用于容忍原始 workflow JSON 里可能存在的 null 节点。
+ */
+function isNodePresent(workflow: Record<string, unknown>, id: string): boolean {
+    const n = workflow[id] as WfNode;
+    return !!n && typeof n === "object" && typeof (n as { class_type?: string }).class_type === "string";
+}
+
+/**
+ * 字段级裁剪（替代原先的“全图递归删除”）。
+ *
+ * 关键修正：原实现用 `some` 判定——只要某个节点的「任一」连线输入指向已删除节点
+ * 就把它整节点删掉，结果会把 ComfySwitchNode、尺寸链、甚至输出路径一起误删，
+ * 导致 ComfyUI 返回 HTTP 400 / Prompt has no outputs。
+ *
+ * 正确规则（对齐参考项目 rhPruneWorkflowForMissingFields 的“只删字段所在节点及直接连接”思路，
+ * 并修正 Flux2-Klein 这类多分支共用输出/尺寸链的工作流）：
+ * 1. 只移除空图片字段对应的 LoadImage 节点本身。
+ * 2. 级联裁剪：
+ *    - 普通节点：只要「任一」连线输入指向已删除节点就移除（它已无法产出有效输出）。
+ *    - ComfySwitchNode：仅当「选中分支」指向已删除节点才移除；未选中分支悬空不影响执行。
+ *    - SaveImage / PreviewImage 永远保留（但其悬空输入会在提交前被校验捕获）。
+ * 3. 清理存活节点上指向已删除节点的悬空连线（删除该 input 而不是删节点）。
+ */
+function removeEmptyImageNodes(workflow: Record<string, unknown>, fields: WorkflowField[], values: FieldValues) {
+    // 用 graph 真相判断“哪些 LoadImage 未被提供”：只要节点的 inputs.image 为空即视为缺失。
+    // 不再依赖 values[field.id]（processedValues 在上传异常时可能为 null）。
+    const present = getPresentLoadImages(workflow);
+    const removed = new Set<string>();
+    // 1) 收集空图片字段对应的 LoadImage 节点（field.node 可能是逗号分隔的多个 id）
+    for (const field of fields) {
+        if (!isImageField(field, workflow)) continue;
+        let fieldMissing = false;
+        for (const id of field.node.split(",").map((value) => value.trim())) {
+            if (isNodePresent(workflow, id) && (workflow[id] as WfNode)!.class_type === "LoadImage" && !present.has(id)) {
+                removed.add(id);
+                fieldMissing = true;
+            }
+        }
+        if (fieldMissing && field.required === true) {
+            throw new Error(`工作流缺少必选图片：${field.name || field.id}`);
+        }
+    }
+    if (!removed.size) return workflow;
+
+    const result: Record<string, unknown> = JSON.parse(JSON.stringify(workflow));
+    for (const id of removed) delete result[id];
+
+    // 2) 级联裁剪
     let changed = true;
     while (changed) {
         changed = false;
         for (const [nodeId, node] of Object.entries(result)) {
-            if (removed.has(nodeId)) continue;
-            const inputs = (node as Record<string, unknown>).inputs as Record<string, unknown> | undefined;
+            if (removed.has(nodeId) || !node || typeof node !== "object") continue;
+            const item = node as WfNode;
+            const cls = item!.class_type;
+            if (cls === "SaveImage" || cls === "PreviewImage") continue;
+            const inputs = item!.inputs;
             if (!inputs) continue;
-            const dependsOnRemovedNode = Object.values(inputs).some((value) => Array.isArray(value) && typeof value[0] === "string" && removed.has(value[0]));
-            if (dependsOnRemovedNode && removableTypes.has((node as { class_type?: string }).class_type || "")) {
+            const linkEntries = Object.entries(inputs).filter(
+                ([, v]) => Array.isArray(v) && typeof (v as unknown[])[0] === "string",
+            );
+            if (!linkEntries.length) continue;
+            let shouldRemove = false;
+            if (cls === "ComfySwitchNode") {
+                const sel = selectedSwitchBranch(result, item!);
+                if (sel === null) {
+                    // 开关来源缺失，无法判定选中分支 -> 视为无效，移除并级联
+                    shouldRemove = true;
+                } else {
+                    const selLink = inputs[sel] as unknown[];
+                    if (Array.isArray(selLink) && removed.has(String(selLink[0]))) shouldRemove = true;
+                }
+            } else {
+                shouldRemove = linkEntries.some(([, v]) => removed.has(String((v as unknown[])[0])));
+            }
+            if (shouldRemove) {
                 removed.add(nodeId);
+                delete result[nodeId];
                 changed = true;
             }
         }
     }
-    for (const nodeId of removed) delete result[nodeId];
+
+    // 3) 清理存活节点上指向已删除节点的悬空连线（含 ComfySwitchNode 的未选中分支）
+    for (const node of Object.values(result)) {
+        if (!node || typeof node !== "object") continue;
+        const inputs = (node as WfNode)!.inputs;
+        if (!inputs) continue;
+        for (const [name, value] of Object.entries(inputs)) {
+            if (Array.isArray(value) && typeof value[0] === "string" && removed.has(value[0])) {
+                delete inputs[name];
+            }
+        }
+    }
     return result;
+}
+
+/**
+ * 解析 ComfySwitchNode 当前选中的分支名（on_true / on_false）。
+ * 通过 switch 输入追溯 PrimitiveBoolean 节点的 value 判定；来源缺失/不可判定时返回 null。
+ */
+function selectedSwitchBranch(graph: Record<string, unknown>, node: WfNode): "on_true" | "on_false" | null {
+    const sw = node!.inputs?.switch;
+    if (Array.isArray(sw) && isNodePresent(graph, String(sw[0]))) {
+        const swNode = graph[String(sw[0])] as WfNode;
+        if (swNode && swNode.class_type === "PrimitiveBoolean") {
+            return swNode.inputs?.value === true ? "on_true" : "on_false";
+        }
+    }
+    return null;
+}
+
+/**
+ * 智能路由（Flux2-Klein 类「尺寸/主参考来自单一图片」工作流的容错）。
+ *
+ * 某些工作流的输出尺寸由 `GetImageSize` 取自某一张参考图（本例为 LoadImage 278 -> ImageScaleToTotalPixels 291），
+ * 且默认开关下主参考 latent 也来自同一张图。若用户只提供了其它参考图（270/292）而未提供该「尺寸源」图，
+ * 直接裁剪会让尺寸链 / 主参考链断裂。这里在裁剪前把 `GetImageSize` 上游 scaler 的 image 输入改接到
+ * 用户实际提供的某张图上，使「任意单图」都能拼出有效工作流。
+ *
+ * 仅当检测到 GetImageSize -> ImageScaleToTotalPixels 结构、且尺寸源 LoadImage 确实缺失但存在其它已提供
+ * 的 LoadImage 时才生效；否则原样返回（对其它工作流零影响）。
+ */
+function routeSizeImage(workflow: Record<string, unknown>, presentLoadImages: Set<string>): void {
+    const getImgEntry = Object.entries(workflow).find(
+        ([, n]) => n && typeof n === "object" && (n as WfNode)!.class_type === "GetImageSize",
+    );
+    if (!getImgEntry) return;
+    const gnode = getImgEntry[1] as WfNode;
+    const imgLink = gnode!.inputs?.image;
+    if (!Array.isArray(imgLink) || typeof imgLink[0] !== "string") return;
+    const scaNode = workflow[String(imgLink[0])] as WfNode;
+    if (!scaNode || scaNode.class_type !== "ImageScaleToTotalPixels") return;
+    const srcLoad = scaNode.inputs?.image;
+    if (!Array.isArray(srcLoad) || typeof srcLoad[0] !== "string") return;
+    const srcId = String(srcLoad[0]);
+    if (presentLoadImages.has(srcId)) return; // 尺寸源已提供，无需改接
+    const alt = [...presentLoadImages].find((id) => id !== srcId);
+    if (!alt) return;
+    (scaNode.inputs as Record<string, unknown>).image = [alt, 0];
+}
+
+/**
+ * 提交给 ComfyUI 前的静态图校验。
+ *
+ * 注意：被检查的对象必须是**裁剪 + 清理后**的最终 workflow（prepared），不是裁剪前的 full。
+ * 原因：`removeEmptyImageNodes` 第 3 步会清掉存活节点上指向已删节点的悬空 input，
+ * 拿裁剪前的 full 校验会把「已经被清掉的」悬空引用再次当错报上来。
+ *
+ * 校验内容：
+ *   1) 兜底：prepared 至少要有一个 SaveImage / PreviewImage 输出节点，否则
+ *      ComfyUI 会返回 400 "Prompt has no outputs"，提前抛更清晰。
+ *   2) 兜底悬空：prepared 里若还存在「input 引用了不在 prepared 中的节点」（说明第 3
+ *      步漏掉），按 ComfySwitchNode 选中分支例外放过；其它情况列出。
+ *
+ * @param prepared 裁剪 + 清理后的最终 workflow（即将提交给 ComfyUI）
+ */
+function validatePromptGraph(prepared: Record<string, unknown>): void {
+    // 1) 兜底：没有任何 SaveImage / PreviewImage 输出节点
+    const hasOutput = Object.values(prepared).some(
+        (n) =>
+            !!n &&
+            typeof n === "object" &&
+            ((n as WfNode)!.class_type === "SaveImage" || (n as WfNode)!.class_type === "PreviewImage"),
+    );
+    if (!hasOutput) {
+        throw new Error(
+            "工作流裁剪后没有任何 SaveImage / PreviewImage 输出节点，无法提交 ComfyUI。" +
+                "（说明：当前传入的参考图不足以覆盖工作流开关/分支依赖——Flux2-Klein 默认开关下「图 B(278)」为必选槽位，请提供该图片，或调整工作流开关后再试）",
+        );
+    }
+    // 2) 兜底悬空：prepared 中还存在的 input 是否指向 prepared 中不存在的节点 id
+    const dangling: string[] = [];
+    for (const [id, node] of Object.entries(prepared)) {
+        if (!node || typeof node !== "object" || !(node as WfNode)!.inputs) continue;
+        const item = node as WfNode;
+        const cls = item!.class_type;
+        const sel = cls === "ComfySwitchNode" ? selectedSwitchBranch(prepared, item!) : null;
+        for (const [name, value] of Object.entries(item!.inputs!)) {
+            if (!Array.isArray(value) || typeof (value as unknown[])[0] !== "string") continue;
+            const target = String((value as unknown[])[0]);
+            if (!isNodePresent(prepared, target)) {
+                // ComfySwitchNode 未选中分支悬空是允许的
+                if (cls === "ComfySwitchNode" && (name === "on_true" || name === "on_false") && name !== sel) continue;
+                dangling.push(`节点 ${id} (${cls}) 的输入 ${name} 指向不存在的节点 ${target}`);
+            }
+        }
+    }
+    if (dangling.length) {
+        throw new Error(
+            `工作流裁剪后存在未满足的依赖，无法提交 ComfyUI：\n- ${dangling.join("\n- ")}\n` +
+                `（说明：当前传入的参考图不足以覆盖工作流开关/分支依赖，请检查已提供的图片槽位与开关配置是否匹配）`,
+        );
+    }
 }
 
 /**
@@ -159,13 +359,14 @@ async function uploadDataUrlToComfy(
  */
 async function processImageFields(
     fields: WorkflowField[],
+    workflow: Record<string, unknown>,
     fieldValues: FieldValues,
     comfyUrl: string,
     signal: AbortSignal,
 ): Promise<FieldValues> {
     const result: FieldValues = { ...fieldValues };
     for (const field of fields) {
-        if (field.type !== "image") continue;
+        if (!isImageField(field, workflow)) continue;
         const value = fieldValues[field.id];
         // 空图片槽位必须显式删除工作流中的原始文件名，否则 ComfyUI 会继续校验
         // workflow JSON 里预置的 LoadImage 文件；这样一个工作流可以支持 0-N 张图。
@@ -205,13 +406,6 @@ async function processImageFields(
             result[field.id] = body.name;
         }
     }
-    for (const node of Object.values(result)) {
-        const inputs = (node as Record<string, unknown>).inputs as Record<string, unknown> | undefined;
-        if (!inputs) continue;
-        for (const [name, value] of Object.entries(inputs)) {
-            if (Array.isArray(value) && typeof value[0] === "string" && removed.has(value[0])) delete inputs[name];
-        }
-    }
     return result;
 }
 
@@ -232,24 +426,14 @@ export class WorkflowExecutor {
         comfyUrl?: string,
         name?: string,
         clientTaskId?: string,
+        // 画布生成日志关联：项目 id + 触发节点 id（为空时仍允许走，但没有日志）
+        projectId?: string,
+        nodeId?: string,
     ): Promise<RunResult> {
         const controller = new AbortController();
         const url = comfyUrl ?? this.bridge.getUrl();
-        // 调试：把 fields / config 摘要写到 backend stdout，
-        // 下次 processImageFields / buildParams / injectParams 抛错时
-        // 能直接看到收到什么数据。生产环境可去掉。
-        const imageFields = (config.fields || []).filter((f) => f.type === "image");
-        console.log("[workflows:run] start", {
-            name,
-            comfyUrl: url,
-            totalFields: (config.fields || []).length,
-            imageFieldCount: imageFields.length,
-            imageFieldIds: imageFields.map((f) => f.id),
-            fieldValueKeys: Object.keys(fieldValues),
-            fieldValueTypes: Object.fromEntries(Object.entries(fieldValues).map(([k, v]) => [k, typeof v === "string" && v.startsWith("data:") ? `dataUrl(${v.length} chars)` : typeof v])),
-        });
         // 先处理 image 字段：上传 dataURL → 获取文件名
-        const processedValues = await processImageFields(config.fields, fieldValues, url, controller.signal);
+        const processedValues = await processImageFields(config.fields, workflowJson, fieldValues, url, controller.signal);
         const promptText = buildPrompt(config.fields, processedValues) || config.title;
         // 处理 seed=-1 随机化
         for (const field of config.fields || []) {
@@ -270,13 +454,46 @@ export class WorkflowExecutor {
             }
         }
 
-        const params = buildParams(config.fields, processedValues);
+        const params = buildParams(config.fields, processedValues, workflowJson);
         // 合并多节点参数
         for (const [nodeId, inputs] of Object.entries(multiNodeParams)) {
             if (!params[nodeId]) params[nodeId] = {};
             Object.assign(params[nodeId] as Record<string, unknown>, inputs);
         }
-        const prepared = removeEmptyImageNodes(injectParams(workflowJson, params), config.fields, processedValues);
+        const full = injectParams(workflowJson, params);
+        // 智能路由：若尺寸源 LoadImage 缺失但用户提供了其它参考图，把尺寸链(GETImageSize 上游 scaler)
+        // 改接到用户提供的图上，使 Flux2-Klein 这类工作流在任意单图下都能拼出有效图。
+        // 用 graph 真相（LoadImage.inputs.image 是否非空）判定“已提供”，不再依赖 processedValues。
+        const presentLoadImages = getPresentLoadImages(full);
+        routeSizeImage(full, presentLoadImages);
+        // 调试：打印注入后各 LoadImage 的 inputs.image，确认“已提供”判定是否准确
+        console.log("[workflows:run] image presence", {
+            name,
+            present: [...presentLoadImages],
+            loadImageInputs: Object.fromEntries(
+                Object.entries(full)
+                    .filter(([, n]) => (n as WfNode)?.class_type === "LoadImage")
+                    .map(([id, n]) => [id, (n as WfNode)!.inputs?.image]),
+            ),
+        });
+        const prepared = removeEmptyImageNodes(full, config.fields, processedValues);
+        // 提交前静态校验：必须用「裁剪+清理后」的最终图 prepared，不能用裁剪前的 full；
+        // 否则 removeEmptyImageNodes 第 3 步已经清掉的悬空 input 会被误判为「指向已被裁剪的节点」。
+        try {
+            validatePromptGraph(prepared);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error("[workflows:run] graph validation failed", {
+                name,
+                remainingNodes: Object.keys(prepared).length,
+            });
+            throw new Error(`工作流裁剪校验未通过：${msg}`);
+        }
+        console.log("[workflows:run] pruned graph", {
+            name,
+            remainingNodeCount: Object.keys(prepared).length,
+            saveImagePresent: Object.values(prepared).some((n) => (n as WfNode)?.class_type === "SaveImage"),
+        });
         const task = clientTaskId
             ? this.tasks.create(clientTaskId, "workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, params)
             : this.tasks.create("workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, params);
@@ -288,7 +505,8 @@ export class WorkflowExecutor {
             this.tasks.update(task.id, { status: "succeeded", progress: 1, result: finalResult });
             this.events?.publish({ type: "task.completed", entityId: task.id, payload: finalResult });
             this.db?.createGenerationLog({
-                projectId: "workflow",
+                projectId: projectId || "workflow",
+                nodeId,
                 status: "success",
                 platform: "workflow",
                 workflow: name || "unknown",
@@ -311,7 +529,8 @@ export class WorkflowExecutor {
             this.tasks.update(task.id, { status: "failed", error: message });
             this.events?.publish({ type: "task.failed", entityId: task.id, payload: { error: message } });
             this.db?.createGenerationLog({
-                projectId: "workflow",
+                projectId: projectId || "workflow",
+                nodeId,
                 status: "failed",
                 platform: "workflow",
                 workflow: name || "unknown",

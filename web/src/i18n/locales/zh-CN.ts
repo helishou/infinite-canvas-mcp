@@ -104,7 +104,7 @@ export default {
         dropHere: "松开以导入",
         dropHint: "支持的图片、音频或视频会加入资产库",
         packageName: "我的资产.zip",
-        kinds: { text: "文本", image: "图片", video: "视频", audio: "音频", composite: "复合" },
+        kinds: { text: "文本", image: "图片", video: "视频", audio: "音频", character: "角色" },
         fields: {
             title: "标题",
             titleRequired: "请输入标题",
@@ -122,14 +122,16 @@ export default {
             textPlaceholder: "保存提示词、说明文案、参考描述等文本资产",
             imageContent: "图片内容",
             audioContent: "音频文件",
-            compositeContent: "复合内容",
+            characterDescription: "角色描述",
+            characterDescriptionPlaceholder: "一句话描述这个角色（背景、特征等）",
+            characterImages: "参考图",
         },
         selectImageFile: "选择图片文件",
         noImageSelected: "未选择图片",
         selectAudioFile: "选择音频文件",
         noAudioSelected: "未选择音频",
         selectAudio: "请先选择音频文件",
-        compositeRequireOne: "复合内容至少需要添加一项",
+        characterRequireOneImage: "角色资产至少需要一张参考图",
         preview: "预览",
         noCover: "暂无封面",
         untitled: "未命名资产",
@@ -143,22 +145,11 @@ export default {
         downloadImage: "下载图片",
         downloadVideo: "下载视频",
         downloadFailed: "下载失败，请稍后重试",
-        composite: {
-            itemType: {
-                text: "文本",
-                image: "图片",
-                video: "视频",
-                audio: "音频",
-                assetRef: "引用资产",
-            },
-            textPlaceholder: "输入文本内容…",
-            mediaUrlPlaceholder: "输入媒体 URL…",
-            selectAsset: "选择已有资产",
-            addText: "文本",
-            addImage: "图片",
-            addVideo: "视频",
-            addAudio: "音频",
-            addAssetRef: "引用资产",
+        character: {
+            outfitPlaceholder: "服装/造型名称",
+            namePlaceholder: "图片名称",
+            outfitDescriptionPlaceholder: "描述这套造型…",
+            addImage: "添加参考图",
         },
     },
     backend: {
@@ -295,9 +286,9 @@ export default {
         globalPrompt: "全局提示词",
         globalPromptHint: "设置当前画布的全局提示词",
         globalPromptPlaceholder: "输入会自动附加到本画布生图和生视频提示词的内容…",
-        nodeTypes: { image: "图片", text: "文本", config: "生成配置", video: "视频", audio: "音频", group: "组" },
+        nodeTypes: { image: "图片", text: "文本", config: "生成配置", video: "视频", audio: "音频", group: "组", character: "角色" },
         toolbar: {
-            select: "选择", pan: "移动", text: "文本", image: "图片", video: "视频", audio: "音频", config: "生成配置", group: "组", extensions: "扩展节点", upload: "上传资产", appearance: "画布外观", clear: "清空画布",
+            select: "选择", pan: "移动", text: "文本", image: "图片", video: "视频", audio: "音频", config: "生成配置", character: "角色", group: "组", extensions: "扩展节点", upload: "上传资产", appearance: "画布外观", clear: "清空画布", arrange: "整理布局",
             themeMode: "主题模式", light: "浅色", dark: "深色", gridStyle: "网格样式", dots: "点", lines: "线", blank: "空白", imageInfo: "图片信息",
         },
         project: {
@@ -312,6 +303,10 @@ export default {
         node: {
             node: "节点",
             untitled: "未命名节点", renameHint: "双击修改节点名称", group: "组", nodeCount: "{{count}} 个节点", generating: "生成中", failed: "生成失败", retry: "重试", missingPlugin: "缺少插件", missingPluginDescription: "节点类型“{{type}}”的插件未安装或未启用", generateImage: "用文本生图", generate: "生图", editText: "双击编辑文字", emptyImage: "空图片节点", emptyVideo: "空视频节点", emptyAudio: "空音频节点", audio: "音频", batchExpanded: "图片组已展开", batchCollapsed: "图片组已收起", textBatchExpanded: "备选文本已展开", textBatchCollapsed: "备选文本已收起", createCopy: "创建副本", setPrimary: "设为主图", setPrimaryText: "设为主文本",
+        },
+        character: {
+            empty: "空角色节点",
+            imageCount: "{{count}} 张",
         },
         videoFrames: { first: "截取首帧", last: "截取尾帧", current: "截取当前帧", firstTitle: "{{name}} 首帧", lastTitle: "{{name}} 尾帧", currentTitle: "{{name}} 当前帧", captured: "已生成图片节点", failed: "无法截取该画面，请重试" },
         sidePanel: {

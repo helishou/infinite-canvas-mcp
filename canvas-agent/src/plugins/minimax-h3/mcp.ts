@@ -115,9 +115,15 @@ function collectRefs(segment: H3Segment): { images: H3Ref[]; videos: H3Ref[]; au
         if (!value) return [];
         return Array.isArray(value) ? value : [value];
     };
-    const images = [...asArray(refs.image), ...(segment.refItems || []).filter((r) => r.type === "image" || (!r.type && /\.(png|jpe?g|webp|gif)$/i.test(r.name || "")))];
-    const videos = asArray(refs.video);
-    const audios = [...asArray(refs.audio), ...(segment.refItems || []).filter((r) => r.type === "audio" || (!r.type && /\.(mp3|wav|m4a|flac)$/i.test(r.name || "")))];
+    const bucketRefs = [...asArray(refs.image), ...asArray(refs.video), ...asArray(refs.audio)];
+    const orderedRefs = segment.refItems?.length ? segment.refItems : bucketRefs;
+    const sameRef = (left: H3Ref, right: H3Ref) => left.storageKey && right.storageKey
+        ? left.storageKey === right.storageKey
+        : left.url === right.url;
+    const unique = (items: H3Ref[]) => items.filter((item, index, all) => all.findIndex((candidate) => sameRef(candidate, item)) === index);
+    const images = unique(orderedRefs.filter((r) => r.type === "image" || (!r.type && /\.(png|jpe?g|webp|gif)$/i.test(r.name || ""))));
+    const videos = unique(orderedRefs.filter((r) => r.type === "video" || (!r.type && /\.(mp4|webm|mov)$/i.test(r.name || ""))));
+    const audios = unique(orderedRefs.filter((r) => r.type === "audio" || (!r.type && /\.(mp3|wav|m4a|flac)$/i.test(r.name || ""))));
     return { images, videos, audios };
 }
 
@@ -125,9 +131,9 @@ function collectRefs(segment: H3Segment): { images: H3Ref[]; videos: H3Ref[]; au
 async function resolveRefToPath(context: PluginMcpContext, ref: H3Ref): Promise<string> {
     const url = ref.url || "";
     const name = ref.name || "ref";
-    if (!url) throw new Error(`参考条目缺少可读取地址:${name}`);
     const storageKey = ref.storageKey || extractMediaStorageKey(url);
     if (storageKey) return (await context.backend.runtimeMediaStore(name, "", storageKey)).path;
+    if (!url) throw new Error(`参考条目缺少可读取地址:${name}`);
     if (url.startsWith("data:")) return (await context.backend.runtimeMediaStore(name, url)).path;
     if (/^https?:\/\//i.test(url)) {
         const response = await fetch(url);
@@ -160,6 +166,64 @@ function extractParams(segment: H3Segment, override: Record<string, unknown> = {
         if (value !== undefined && value !== null && value !== "") params[key] = value;
     }
     return { ...params, ...override };
+}
+
+async function projectIdForNode(context: PluginMcpContext, nodeId: string) {
+    const projects = await context.backend.listCanvasProjects();
+    const project = projects.find((item) => Array.isArray(item.nodes) && (item.nodes as Array<Record<string, unknown>>).some((node) => String(node.id || "") === nodeId));
+    return project && typeof project.id === "string" ? project.id : "";
+}
+
+function logRef(ref: H3Ref) {
+    return {
+        ...(ref.name ? { name: ref.name } : {}),
+        ...(ref.type ? { type: ref.type } : {}),
+        ...(ref.url ? { url: ref.url } : {}),
+        ...(ref.storageKey ? { storageKey: ref.storageKey } : {}),
+        ...(ref.mimeType ? { mimeType: ref.mimeType } : {}),
+    };
+}
+
+async function createMcpGenerationLog(context: PluginMcpContext, nodeId: string, segment: H3Segment, refs: H3Ref[], params: Record<string, unknown>) {
+    const projectId = await projectIdForNode(context, nodeId);
+    if (!projectId) throw new Error(`找不到 H3 节点所属画布:${nodeId}`);
+    const log = await context.backend.createGenerationLog({
+        projectId,
+        nodeId,
+        segmentId: String(segment.id || ""),
+        status: "queued",
+        platform: String(params.engine || "comfyui"),
+        workflow: "MiniMax H3",
+        model: String(params.modelName || ""),
+        taskMode: String(segment.taskMode || "r2v"),
+        prompt: String(segment.prompt || ""),
+        references: refs.map(logRef),
+        inputCounts: {
+            image: refs.filter((ref) => ref.type === "image").length,
+            video: refs.filter((ref) => ref.type === "video").length,
+            audio: refs.filter((ref) => ref.type === "audio").length,
+        },
+        startedAt: new Date().toISOString(),
+        durationMs: 0,
+        outputs: [],
+        params,
+    });
+    return log && typeof log === "object" && typeof (log as Record<string, unknown>).id === "string" ? String((log as Record<string, unknown>).id) : "";
+}
+
+async function updateMcpGenerationLog(context: PluginMcpContext, logId: string, task: Record<string, unknown>, status: "running" | "success" | "failed" | "cancelled", error?: string) {
+    if (!logId) return;
+    const result = task.result && typeof task.result === "object" ? task.result as Record<string, unknown> : {};
+    const media = Array.isArray(result.media) ? result.media.filter((item) => item && typeof item === "object") as Array<Record<string, unknown>> : [];
+    const actualSubmission = result.actualSubmission && typeof result.actualSubmission === "object" ? result.actualSubmission : undefined;
+    await context.backend.updateGenerationLog(logId, {
+        status,
+        ...(task.id ? { runtimeTaskId: String(task.id) } : {}),
+        ...(actualSubmission && typeof (actualSubmission as Record<string, unknown>).promptId === "string" ? { promptId: String((actualSubmission as Record<string, unknown>).promptId) } : {}),
+        ...(status === "success" ? { outputs: media.map((item) => ({ url: item.url, storageKey: item.storageKey, type: "video", mimeType: item.mimeType })) } : {}),
+        ...(error ? { error } : {}),
+        ...(status === "success" || status === "failed" || status === "cancelled" ? { finishedAt: new Date().toISOString() } : {}),
+    });
 }
 
 function selectSegment(segments: H3Segment[], index?: number): { segment: H3Segment; index: number } {
@@ -258,16 +322,20 @@ async function updateClipTask(context: PluginMcpContext, nodeId: string, clipId:
     await context.updateCanvasNode(nodeId, {}, nodePatch);
 }
 
-async function monitorClipTask(context: PluginMcpContext, nodeId: string, clipId: string, taskId: string) {
+async function monitorClipTask(context: PluginMcpContext, nodeId: string, clipId: string, taskId: string, logId = "") {
     try {
         for (;;) {
             const current = await context.backend.comfyGetTask(taskId);
             await updateClipTask(context, nodeId, clipId, current.task as unknown as Record<string, unknown>);
-            if (["succeeded", "failed", "cancelled"].includes(current.task.status)) return;
+            if (["succeeded", "failed", "cancelled"].includes(current.task.status)) {
+                await updateMcpGenerationLog(context, logId, current.task as unknown as Record<string, unknown>, current.task.status === "succeeded" ? "success" : current.task.status, current.task.error || undefined);
+                return;
+            }
             await new Promise((resolve) => setTimeout(resolve, 1500));
         }
     } catch (error) {
         await updateClipTask(context, nodeId, clipId, { id: taskId, status: "failed" }, error instanceof Error ? error.message : String(error));
+        await updateMcpGenerationLog(context, logId, { id: taskId, status: "failed" }, "failed", error instanceof Error ? error.message : String(error));
     }
 }
 
@@ -299,13 +367,19 @@ export const pluginMcp: PluginMcpModule = {
                 if (!node) throw new Error(`找不到画布节点:${nodeId}`);
                 if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
                 const index = typeof input.segmentIndex === "number" ? input.segmentIndex : undefined;
-                const selectedIndex = selectSegment(segmentsOf(node), index).index;
+                const selected = selectSegment(segmentsOf(node), index);
+                const selectedIndex = selected.index;
+                const segment = selected.segment;
+                const params = extractParams(segment, (input.params as Record<string, unknown>) || {});
+                const { images, videos, audios } = collectRefs(segment);
+                const logId = await createMcpGenerationLog(context, nodeId, segment, [...images, ...videos, ...audios], params);
                 const task = await runSegment(context, node, selectedIndex, (input.params as Record<string, unknown>) || {});
                 const clipId = String(segmentsOf(node)[selectedIndex]?.id || "");
                 if (!clipId) throw new Error("H3 Clip 缺少身份标识");
                 await updateClipTask(context, nodeId, clipId, task as unknown as Record<string, unknown>, undefined, true);
-                void monitorClipTask(context, nodeId, clipId, task.id);
-                return task;
+                await updateMcpGenerationLog(context, logId, task as unknown as Record<string, unknown>, "running");
+                void monitorClipTask(context, nodeId, clipId, task.id, logId);
+                return { ...task, generationLogId: logId };
             },
             h3_get_task: async (input) => {
                 const taskId = String(input.taskId || "");

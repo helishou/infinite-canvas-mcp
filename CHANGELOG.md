@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- [新增] 画布生成日志接入「类型」标签（生图/生视频/生音频/工作流）：`canvas-generation-log-dialog` 每条记录头部新增一个由 `platform + model` 推导的类型 tag 并按类型着色（生图蓝、生视频紫、生音频橙、工作流 geekblue）。后端 `CanvasImageDispatcher.start` 在任务创建时 `running` 记录一次、`succeeded` / `failed` 时更新一次，写入 `projectId` / `nodeId` / `platform` / `model` / `taskMode` / `prompt` / `references` / `inputCounts` / `outputs` / `error` / `startedAt` / `finishedAt` / `durationMs` / `runtimeTaskId`。`WorkflowExecutor.run` 签名新增 `projectId` / `nodeId` 入参，原写死的 `projectId: "workflow"` 改成透传调用方 projectId（兜底保留）。
+- [修复] MCP 批量生成的画布节点不再叠在同一点：前端 `applyCanvasAgentOps` 落点改为按连接关系做拓扑分层（`computeFlowLayout`）——输入节点在左、输出节点在右，同一层纵向堆叠；无连接时退回网格。显式坐标与同批其他节点重叠时仍自动向右铺开。
+- [调整] 画布工具栏「整理布局」按钮改为按数据流方向分层排布：源点（输入）在左、汇点（输出）在右，选中节点间有连接时依 `fromNodeId→toNodeId` 自动分层；无连接的选中簇退回网格，支持撤销。
+- [新增] 画布工具栏新增「角色」按钮（User 图标，置于「生成配置」与「组」之间）。点击后打开资产选择器并只显示角色资产；选中即在画布中央生成 1 个 Character 节点（与从资产库拖入、点击插入角色资产的行为统一，不再展开为 Group + N 张 Image）。同时移除 `buildCharacterGroupNodes` 这个早期"快速散开"实现。
+- [修复] H3 画布 MCP 参考媒体优先复用 `storageKey`：画布生成的图片不再因缺少临时 URL 或 MCP 进程内适配器仍强制要求 base64 而无法提交，角色资产、四视图、场景和分镜图可直接进入 H3。
+- [调整] 统一画布图片生成链路：前端图片节点和画布 MCP 均提交同一套后端生成请求，由统一调度器按所选模型分发到 GPT Image、内置 ComfyUI 预设或自定义工作流，任务状态和结果媒体统一回写，避免模型切换产生不同执行路径。
+- [修复] 自定义工作流（部分参考图缺失时）的虚假悬空错误：`WorkflowExecutor.run()` 把 `validatePromptGraph(full, removedIds)` 改成 `validatePromptGraph(prepared)`。原本是拿**裁剪前**的 full 来检查悬空引用，但 `removeEmptyImageNodes` 第 3 步已经清理掉存活节点上指向已删节点的 input，导致 prepared 实际有效却被报"节点 5 (SaveImage) 的输入 images 指向已被裁剪的节点 11"——这种「已被 step 3 清干净」的悬空会被原逻辑误判。修复后只对 prepared（即将提交给 ComfyUI 的最终图）做兜底校验。
+- [调整] 工作流管理的节点图去掉「删除此节点」入口（连同确认弹窗、相关字段和入连线的清理逻辑一起移除），节点图变更为纯只读 + 字段编辑；「未关联节点的字段」区的孤立字段清理仍保留。
+- [修复] 修正中英文 i18n 资源的对象括号与重复键，恢复前端 Vite 启动和构建。
+- [新增] 画布新增专门的「角色节点」（`CanvasNodeType.Character`）：从资产库"资产"标签把角色资产拖到画布即生成 1 个独立节点，主图大、底部 outfit 缩略图条 + 总数徽标；节点元数据带 `characterAssetId` 关联资产、并把 `images` 快照到 `metadata.characterImages`，下线后画布仍可独立工作。H3 / 生图 / 生视频节点通过现有 ref 槽拖入消费（每个角色节点展开为多张图资源），不需要改 H3 的 `readH3Refs`。
+- [新增] 项目 MCP 新增通用直连图片生成路由：图片/配置节点按自身选中的模型匹配 provider，目前已接入本地 chatgpt2api 的 `gpt-image-*`，支持参考图编辑、任务状态、后端媒体落盘和结果节点回写，不再依赖浏览器页面执行。
+- [调整] 资产库彻底以「角色资产」替代「复合资产」：旧 `kind=composite` 资产在 hydration 阶段一次性迁移为 `kind=character`（text → description 合并、image → images[]、video/audio → metadata.legacyItems 备查），前端 store / i18n / 画布 factory / 资产挑选器 / 导入导出 全部移除 composite 相关代码。角色表单新增英文名、描述、多张参考图（含 outfit / outfitDescription / 名称）的编辑能力，画布拖入角色资产会按 2 列网格展开为 1 个 Group + N 个 Image 子节点。
+- [修复] MCP 画布节点变更现在通过 Backend 事件总线实时同步到前端，无需刷新页面即可看到新增、修改和删除结果。
+- [修复] 修正多次 MCP 画布更新并发到达时的异步恢复竞态，旧快照不再覆盖最新节点的提示词、参考连线和模型设置。
+- [修复] 画布图片节点统一通过总后台 ComfyUI 媒体代理加载历史 `/view` 地址，修复图片节点、批量图片和角色缩略图因直接访问本机临时地址而显示空白。
+- [修复] 画布打开时自动把历史 MCP 写入的 ComfyUI 临时图片转存到 Backend 媒体库并记录 `storageKey`；画布元素侧栏也统一走媒体解析，修复历史图片节点持续显示破图。
 - [调整] 本地工作流统一隐藏质量、尺寸和宽高比设置，并允许删除包括 `z-image`、`flux2-klein` 在内的内置工作流及其节点。
 - [修复] 生图工作台与画布保持一致：本地自定义工作流自动使用参数默认值，并隐藏质量、尺寸和宽高比设置。
 - [修复] Flux2-Klein 工作流运行面板出现用户未勾选的 `152,156.width` / `152,156.height` 字段：其 `node` 是「同时注入节点152+156」的复合写法而非真实节点，工作流管理面板无法显示/删除（孤儿字段），却会出现在运行面板；且带 default 时 executor 会注入 0 覆盖节点 157（GetImageSize）的尺寸连接、破坏生图。改为数据库 migration（v2/v3 幂等）直接移除这两个冗余复合字段；尺寸本就由节点 157 自动驱动。前端工作流管理面板新增「未关联节点的字段」清理区，列出所有复合/无对应节点的孤儿字段并可一键删除，杜绝此类问题复发。
@@ -296,6 +312,8 @@
 
 + [修复] 总后台（backend）稳定性：①HTTP server 增加连接超时（keepAliveTimeout=30s/headersTimeout=35s/requestTimeout=120s），主动回收浏览器频繁开关产生的半关闭 socket，避免 CLOSE_WAIT 堆积至 fd 耗尽而“老是挂掉”；②新增 `uncaughtException`/`unhandledRejection` 进程级兜底，单点异常（如 SSE 断连后 EPIPE）只记日志不杀进程；③`/events` SSE 增加断连后写错误（EPIPE）保护，避免客户端断开瞬间写已关闭 socket 抛未捕获异常。
 + [优化] 总后台启动统一为 `tsx --watch src/index.ts`（原有无 watch 实例导致改源码不热重载、且多实例争抢端口），改 backend/src 后自动重载，无需手动重启。
++ [修复] 本地自定义工作流（Flux2-Klein 等）**任意张数参考图都报同一个 `HTTP 500 / 节点 315→155`** 的真凶：`WorkflowExecutor.run()` 调用 `processImageFields` 时把 `fieldValues` 与 `workflowJson` 位置写反（签名为 `(fields, workflow, fieldValues, …)`），导致函数内部把整张 workflow 当成 fieldValues 读取，每个图片字段都读到 `undefined`→置 `null`→`injectParams` 删空 `LoadImage.inputs.image`→`removeEmptyImageNodes` 删掉**全部** LoadImage→`validatePromptGraph` 对任意输入（哪怕 3 张图）都抛 315→155。裁剪/开关感知级联/`routeSizeImage` 尺寸路由/静态校验逻辑本身一直正确，仅被该写反的调用架空。修正调用参数顺序后，配合既有 `routeSizeImage`（尺寸源缺失时把 `GetImageSize` 上游 scaler(291) 改接到用户提供的图），**任意单图/少图/多图均可正常跑**，仅 0 图被清晰拦下。验证：真实图 7 种组合模拟全部 OK；起 mock ComfyUI 端到端发「仅 1 张图」请求返回 `HTTP 200` 且完整跑通上传→裁剪→提交→收图。
++ [修复] backend 线上实际运行的是编译产物 `dist/index.js`（HTTP 模式独占 17370），只改 `src` 不重新编译则线上一直跑旧逻辑——这就是"改了代码仍报同样错"的配套根因。`routes.ts` 请求体漏声明 `clientTaskId` 导致 `tsc` 报错、阻断 `npm run build` 生成 dist；已补该字段类型，现 `npm run build` 可正常编译。改完 `src` 后务必 `npm run build` 再重启 backend（或改用 `tsx --watch src/index.ts` 免重启）。
 
 ## v0.17.0 - 2026-09-02
 

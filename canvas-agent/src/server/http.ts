@@ -544,6 +544,17 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         res.status(500).json({ ok: false, error: error.message });
     });
 
+    const recoverActiveThread = () => {
+        const activeThreadId = initialWorkspace.activeThreadId || "";
+        if (!activeThreadId || !session.beginCodexMutation()) return;
+        void prepareExistingThread(activeThreadId).catch(async (error) => {
+            if (!isRecoverableThreadError(error)) return failPreparedConversation(error, activeThreadId);
+            session.beginConversation();
+            setActiveThread("", { emptyThread: true, draftThread: true }, true);
+            await prepareDraftThread("", "request");
+        }).finally(() => session.endCodexMutation()).catch(() => undefined);
+    };
+
     if (options.listen !== false) app.listen(port, "127.0.0.1", () => {
         console.log("Infinite Canvas Agent");
         checkVersions();
@@ -554,16 +565,9 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         console.log("Remove manually added MCP: codex mcp remove infinite-canvas");
         if (logger.enabled) console.log(`Debug log: ${logger.filePath}`);
         logger.info("Canvas Agent started", { url: config.url, workspace: ensureSiteWorkspace(config).workspacePath, debugLog: logger.filePath });
-        const activeThreadId = initialWorkspace.activeThreadId || "";
-        if (activeThreadId && session.beginCodexMutation()) {
-            void prepareExistingThread(activeThreadId).catch(async (error) => {
-                if (!isRecoverableThreadError(error)) return failPreparedConversation(error, activeThreadId);
-                session.beginConversation();
-                setActiveThread("", { emptyThread: true, draftThread: true }, true);
-                await prepareDraftThread("", "request");
-            }).finally(() => session.endCodexMutation()).catch(() => undefined);
-        }
+        recoverActiveThread();
     });
+    else recoverActiveThread();
     return { app, config, session, skillStore, backend, comfyUi };
 }
 

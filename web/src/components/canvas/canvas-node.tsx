@@ -1,16 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, User, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useBackendStore } from "@/stores/use-backend-store";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { resolveImageUrl } from "@/services/image-storage";
 import { useTranslation } from "react-i18next";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -131,6 +133,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     const hasImageContent = data.type === CanvasNodeType.Image && Boolean(data.metadata?.content);
     const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content);
     const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
+    const isCharacter = data.type === CanvasNodeType.Character;
+    const hasCharacterContent = isCharacter && (data.metadata?.characterImages?.length || 0) > 0;
     const isGroup = data.type === CanvasNodeType.Group;
     const batchCount = data.type === CanvasNodeType.Image ? data.metadata?.images?.length || 0 : data.type === CanvasNodeType.Text ? data.metadata?.texts?.length || 0 : 0;
     const isBatchRoot = batchCount > 1;
@@ -382,9 +386,9 @@ export const CanvasNode = React.memo(function CanvasNode({
             <div
                 className={`relative h-full w-full overflow-visible ${data.type === "minimax-h3:video" ? "rounded-lg border" : "rounded-3xl border-2"}`}
                 style={{
-                    background: isGroup || data.type === "minimax-h3:video" ? "transparent" : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
+                    background: isGroup || data.type === "minimax-h3:video" ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || transparentBg ? "transparent" : theme.node.fill,
                     borderRadius: data.type === "minimax-h3:video" ? 8 : undefined,
-                    borderColor: isGroup ? (isGroupDropTarget || isActive ? selectionBlue : theme.node.stroke) : hasImageContent ? imageBorderColor : isActive ? selectionBlue : isRelated ? theme.node.muted : transparentBg ? "transparent" : theme.node.stroke,
+                    borderColor: isGroup ? (isGroupDropTarget || isActive ? selectionBlue : theme.node.stroke) : hasImageContent || hasCharacterContent ? imageBorderColor : isActive ? selectionBlue : isRelated ? theme.node.muted : transparentBg ? "transparent" : theme.node.stroke,
                     borderStyle: isGroup ? "dashed" : "solid",
                     boxShadow: isGroupDropTarget ? `0 0 0 2px ${selectionBlue}66, inset 0 0 0 999px ${selectionBlue}10` : isActive ? `0 0 0 1px ${selectionBlue}55` : isRelated ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
                 }}
@@ -420,7 +424,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     className={`relative flex h-full w-full items-center justify-center ${data.type === "minimax-h3:video" ? "rounded-lg" : "rounded-[inherit]"} ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
                     style={
                         {
-                            background: isGroup ? "transparent" : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
+                            background: isGroup ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || transparentBg ? "transparent" : theme.node.fill,
                             pointerEvents: contentInteractive ? undefined : "none",
                         } as React.CSSProperties
                     }
@@ -510,6 +514,7 @@ const nodeContentRenderers = {
     [CanvasNodeType.Video]: VideoNodeContent,
     [CanvasNodeType.Audio]: AudioNodeContent,
     [CanvasNodeType.Group]: GroupNodeContent,
+    [CanvasNodeType.Character]: CharacterNodeContent,
 } satisfies Record<CanvasNodeType, (props: NodeContentRendererProps) => ReactNode>;
 
 function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererProps) {
@@ -731,6 +736,108 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
+/** 角色节点：主图（大）+ 底部 outfit 缩略图条。仅展示，不内嵌编辑；要改 outfit/换主图回资产库。 */
+function CharacterNodeContent({ node, theme }: NodeContentRendererProps) {
+    const { t } = useTranslation();
+    const images = node.metadata?.characterImages || [];
+    const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
+    const primary = images[primaryIndex];
+    const [primaryUrl, setPrimaryUrl] = useState<string | null>(null);
+    const [thumbUrls, setThumbUrls] = useState<Record<number, string>>({});
+    const urlCache = useRef<Record<string, string>>({});
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+
+    // 解析主图 URL（storageKey → blob URL / dataUrl）
+    useEffect(() => {
+        let cancelled = false;
+        if (!primary) { setPrimaryUrl(null); return; }
+        const key = primary.storageKey || primary.url;
+        if (!key) { setPrimaryUrl(null); return; }
+        if (urlCache.current[key]) { setPrimaryUrl(urlCache.current[key]); return; }
+        resolveImageUrl(key, primary.url).then((url) => {
+            if (cancelled) return;
+            if (url) urlCache.current[key] = url;
+            setPrimaryUrl(url);
+        }).catch(() => { if (!cancelled) setPrimaryUrl(null); });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, primary?.url, primary?.storageKey]);
+
+    // 解析所有缩略图 URL
+    useEffect(() => {
+        let cancelled = false;
+        const next: Record<number, string> = {};
+        Promise.all(images.map(async (image, idx) => {
+            const key = image.storageKey || image.url;
+            if (!key) return null;
+            if (urlCache.current[key]) { next[idx] = urlCache.current[key]; return; }
+            const url = await resolveImageUrl(key, image.url).catch(() => null);
+            if (url) { urlCache.current[key] = url; next[idx] = url; }
+            return null;
+        })).then(() => { if (!cancelled) setThumbUrls(next); });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, images]);
+
+    useEffect(() => () => { Object.values(urlCache.current).forEach((url) => URL.revokeObjectURL(url)); }, []);
+
+    if (!images.length) {
+        return (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-4" style={{ color: theme.node.placeholder }}>
+                <div className="flex size-14 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg }}>
+                    <User className="size-6 opacity-30" />
+                </div>
+                <span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.character.empty")}</span>
+            </div>
+        );
+    }
+
+    const visibleThumbs = images.slice(0, 5);
+    const overflow = images.length - visibleThumbs.length;
+
+    return (
+        <div className="flex h-full w-full flex-col">
+            <div className="relative flex-1 min-h-0 overflow-hidden bg-stone-100 dark:bg-stone-900" data-canvas-no-zoom>
+                {primaryUrl ? (
+                    <img src={primaryUrl} alt={primary.outfit || primary.name || node.title} className="size-full object-cover" draggable={false} />
+                ) : (
+                    <div className="flex size-full items-center justify-center" style={{ color: theme.node.placeholder }}>
+                        <User className="size-10 opacity-30" />
+                    </div>
+                )}
+                {primary?.outfit ? (
+                    <div className="absolute left-2 top-2 max-w-[calc(100%-16px)] truncate rounded-md bg-black/55 px-2 py-0.5 text-[11px] font-medium text-white">
+                        {primary.outfit}
+                    </div>
+                ) : null}
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5 border-t px-2 py-1.5" style={{ borderColor: theme.node.stroke, background: theme.node.fill }}>
+                {visibleThumbs.map((image, idx) => {
+                    const url = thumbUrls[idx];
+                    const active = idx === primaryIndex;
+                    return (
+                        <div
+                            key={idx}
+                            className="size-7 shrink-0 overflow-hidden rounded-md border"
+                            style={{ borderColor: active ? selectionBlue : theme.node.stroke, opacity: active ? 1 : 0.7 }}
+                            title={image.outfit || image.name}
+                        >
+                            {url ? <img src={url} alt="" className="size-full object-cover" draggable={false} /> : null}
+                        </div>
+                    );
+                })}
+                {overflow > 0 ? (
+                    <div className="grid size-7 shrink-0 place-items-center rounded-md border text-[10px] font-semibold" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                        +{overflow}
+                    </div>
+                ) : null}
+                <span className="ml-auto text-[10px] tabular-nums" style={{ color: theme.node.muted }}>
+                    {t("canvas.character.imageCount", { count: images.length })}
+                </span>
+            </div>
+        </div>
+    );
+}
+
 function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
     const { t } = useTranslation();
     if (!node.metadata?.content)
@@ -792,6 +899,21 @@ function ImageContent({
     const primaryImageId = node.metadata?.primaryImageId || images[0]?.id;
     const primaryImage = images.find((image) => image.id === primaryImageId);
     const primaryContent = primaryImage?.content || node.metadata?.content;
+    const [primaryUrl, setPrimaryUrl] = useState("");
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!primaryContent) {
+            setPrimaryUrl("");
+            return;
+        }
+        resolveImageUrl(primaryImage?.storageKey || node.metadata?.storageKey, primaryContent).then((url) => {
+            if (!cancelled) setPrimaryUrl(url);
+        });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, node.metadata?.storageKey, primaryContent, primaryImage?.storageKey]);
 
     return (
         <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded}>
@@ -801,9 +923,9 @@ function ImageContent({
                       .map((image, index) => <ExpandedImageCard key={image.id} node={node} image={image} index={index} onView={() => onViewBatchImage?.(image.id)} onSetPrimary={() => onSetBatchPrimary?.(image.id)} onDuplicate={() => onDuplicateBatchImage?.(image.id)} onDownload={() => onDownloadBatchImage?.(image.id)} onRetry={() => onRetryBatchImage?.(image.id)} onDelete={() => onDeleteBatchImage?.(image.id)} />)
                 : null}
             <div className="h-full w-full overflow-hidden rounded-3xl">
-                {primaryContent ? (
+                {primaryUrl ? (
                     <img
-                        src={primaryContent}
+                        src={primaryUrl}
                         alt={node.title}
                         draggable={false}
                         onDragStart={(event) => event.preventDefault()}
@@ -850,6 +972,9 @@ function ImageContent({
 function ExpandedImageCard({ node, image, index, onView, onSetPrimary, onDuplicate, onDownload, onRetry, onDelete }: { node: CanvasNodeData; image: CanvasNodeImage; index: number; onView: () => void; onSetPrimary: () => void; onDuplicate: () => void; onDownload: () => void; onRetry: () => void; onDelete: () => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
+    const [imageUrl, setImageUrl] = useState("");
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
     const count = node.metadata?.images?.length || 0;
     const columns = Math.min(count, 4);
     const rows = Math.ceil(count / columns);
@@ -859,6 +984,18 @@ function ExpandedImageCard({ node, image, index, onView, onSetPrimary, onDuplica
     const row = Math.floor(slot / columns);
     const x = column * (node.width + 18);
     const y = (row - rows + 1) * (node.height + 18);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!image.content) {
+            setImageUrl("");
+            return;
+        }
+        resolveImageUrl(image.storageKey, image.content).then((url) => {
+            if (!cancelled) setImageUrl(url);
+        });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, image.content, image.storageKey]);
 
     return (
         <div
@@ -885,7 +1022,7 @@ function ExpandedImageCard({ node, image, index, onView, onSetPrimary, onDuplica
                 onView();
             }}
         >
-            {image.content ? <img src={image.content} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
+            {imageUrl ? <img src={imageUrl} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
             {image.content ? (
                 <div className="absolute inset-x-2 top-2 flex items-center gap-1">
                     <button type="button" className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("common.download")} onClick={(event) => (event.stopPropagation(), onDownload())}>

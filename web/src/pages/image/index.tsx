@@ -168,7 +168,7 @@ export default function ImagePage() {
                 setWorkflowDetail(detail);
                 const initial: Record<string, unknown> = {};
                 for (const field of detail.config?.fields || []) {
-                    if (field.type === "image" || field.isPrompt) continue;
+                    if (isWorkflowImageField(field, detail.workflow) || field.isPrompt) continue;
                     if (field.id === "width" || field.id === "height") {
                         const size = resolveComfyImageSize(config.size);
                         initial[field.id] = field.id === "width" ? size.width : size.height;
@@ -416,7 +416,7 @@ export default function ImagePage() {
             if (local && workflowName) {
                 // 内置工作流走 WorkflowExecutor（与用户上传 workflow 同一条路径）
                 const detail = await fetchWorkflowDetail(workflowName);
-                const imageFields = (detail.config?.fields || []).filter((field) => field.type === "image");
+                const imageFields = (detail.config?.fields || []).filter((field) => isWorkflowImageField(field, detail.workflow));
                 const promptFields = (detail.config?.fields || []).filter((field) => field.type === "text" && field.isPrompt);
                 const workflowFields: Record<string, unknown> = { prompt: snapshot.text };
                 for (const field of promptFields) {
@@ -454,7 +454,7 @@ export default function ImagePage() {
                 // 4) runWorkflow 传真 config + fields，后端 processImageFields
                 //    会把 dataURL 上传到 ComfyUI 转文件名注入 workflow
                 const detail = await fetchWorkflowDetail(selectedModelName);
-                const imageFields = (detail.config?.fields || []).filter((field) => field.type === "image");
+                const imageFields = (detail.config?.fields || []).filter((field) => isWorkflowImageField(field, detail.workflow));
                 const promptFields = (detail.config?.fields || []).filter((field) => field.type === "text" && field.isPrompt);
                 const workflowFields: Record<string, unknown> = { prompt: snapshot.text };
                 for (const field of promptFields) {

@@ -3,7 +3,7 @@ import { saveAs } from "file-saver";
 import { createZip, readZip } from "@/lib/zip";
 import { getMediaBlob, setMediaBlob } from "@/services/file-storage";
 import { getImageBlob, setImageBlob } from "@/services/image-storage";
-import type { Asset, AudioAsset, CompositeAsset, ImageAsset, VideoAsset } from "@/stores/use-asset-store";
+import type { Asset, AudioAsset, CharacterAsset, ImageAsset, VideoAsset } from "@/stores/use-asset-store";
 
 type AssetExportFile = {
     app: "infinite-canvas";
@@ -40,17 +40,14 @@ export async function exportAssets(assets: Asset[], filename: string) {
                 const path = `files/${safeFileName(asset.data.storageKey)}.${fileExtension(blob.type, asset.kind)}`;
                 files.push({ storageKey: asset.data.storageKey, path, mimeType: blob.type || asset.data.mimeType, bytes: blob.size });
                 zipFiles.push({ name: path, data: blob });
-            } else if (asset.kind === "composite") {
-                for (const item of asset.data.items) {
-                    if (item.itemType !== "assetRef") continue;
-                    const refAsset = assets.find(a => a.id === item.refId);
-                    if (!refAsset || refAsset.kind === "composite" || refAsset.kind === "text") continue;
-                    const storageKey = refAsset.kind === "image" ? refAsset.data.storageKey : refAsset.data.storageKey;
-                    if (!storageKey) continue;
-                    const blob = refAsset.kind === "image" ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
+            } else if (asset.kind === "character") {
+                // 角色资产的每一张图都打包到 zip，并把 storageKey 一起导出，导入端按 storageKey 还原
+                for (const image of asset.data.images) {
+                    if (!image.storageKey) continue;
+                    const blob = await getImageBlob(image.storageKey);
                     if (!blob) continue;
-                    const path = `files/${safeFileName(storageKey)}.${fileExtension(blob.type, refAsset.kind)}`;
-                    files.push({ storageKey, path, mimeType: blob.type || (refAsset as ImageAsset | VideoAsset | AudioAsset).data.mimeType, bytes: blob.size });
+                    const path = `files/${safeFileName(image.storageKey)}.${fileExtension(blob.type, "image")}`;
+                    files.push({ storageKey: image.storageKey, path, mimeType: blob.type || image.mimeType, bytes: blob.size });
                     zipFiles.push({ name: path, data: blob });
                 }
             }

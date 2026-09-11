@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, Layers, ListChecks, Music2, Plus, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Square, Trash2, Type, User, Video } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -15,11 +15,11 @@ import { uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
+import { useBackendStore } from "@/stores/use-backend-store";
 import { CANVAS_SIDE_PANEL_MAX_WIDTH, CANVAS_SIDE_PANEL_MIN_WIDTH, CANVAS_SIDE_PANEL_MOTION_MS, useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
-import { resolveCompositeItems } from "./asset-picker-modal";
 import type { InsertAssetPayload } from "./asset-picker-modal";
 
 const PANEL_MOTION_SECONDS = CANVAS_SIDE_PANEL_MOTION_MS / 1000;
@@ -239,7 +239,7 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
                                     <button type="button" onClick={() => (selectMode ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.sidePanel.focusNode")}>
                                         {selectMode ? <CheckMark checked={isChecked} theme={theme} /> : null}
                                         <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
-                                            {isImage ? <img src={node.metadata!.content} alt={node.title} className="size-full object-cover" /> : <Icon className="size-5 opacity-60" />}
+                                            {isImage ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
                                         </span>
                                         <span className="min-w-0 flex-1 space-y-0.5">
                                             <span className="block truncate text-sm font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
@@ -284,6 +284,30 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
     );
 }
 
+function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
+    const [url, setUrl] = useState("");
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+    const content = node.metadata?.content || "";
+    const storageKey = node.metadata?.storageKey;
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!content && !storageKey) {
+            setUrl("");
+            return;
+        }
+        resolveImageUrl(storageKey, content).then((resolved) => {
+            if (!cancelled) setUrl(resolved);
+        }).catch(() => {
+            if (!cancelled) setUrl("");
+        });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, content, storageKey]);
+
+    return url ? <img src={url} alt={node.title} className="size-full object-cover" /> : <ImageIcon className="size-5 opacity-60" />;
+}
+
 function CheckMark({ checked, theme }: { checked: boolean; theme: CanvasTheme }) {
     return (
         <span className="grid size-4 shrink-0 place-items-center rounded border transition" style={{ borderColor: checked ? theme.toolbar.activeText : theme.node.stroke, background: checked ? theme.toolbar.activeText : "transparent" }}>
@@ -301,14 +325,14 @@ const ASSET_GROUPS: { kind: AssetKind; icon: typeof Square }[] = [
     { kind: "video", icon: Video },
     { kind: "audio", icon: Music2 },
     { kind: "text", icon: FileText },
-    { kind: "composite", icon: Layers },
+    { kind: "character", icon: User },
 ];
 
 function buildInsertPayload(asset: Asset): InsertAssetPayload {
     if (asset.kind === "text") return { kind: "text", content: asset.data.content, title: asset.title };
     if (asset.kind === "video") return { kind: "video", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, width: asset.data.width, height: asset.data.height };
     if (asset.kind === "audio") return { kind: "audio", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, bytes: asset.data.bytes, mimeType: asset.data.mimeType, durationMs: asset.data.durationMs };
-    if (asset.kind === "composite") return { kind: "composite", title: asset.title, items: resolveCompositeItems(asset.data.items, useAssetStore.getState().assets) };
+    if (asset.kind === "character") return { kind: "character", title: asset.title, images: asset.data.images };
     return { kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title };
 }
 
@@ -320,7 +344,8 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
     const removeAsset = useAssetStore((state) => state.removeAsset);
     const [keyword, setKeyword] = useState("");
     const [tagFilter, setTagFilter] = useState<string>("all");
-    const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+    // 默认全折叠，避免打开侧栏时被一堆自动展开的内容刷屏；用户手动展开过的会写入 setCollapsed 记录下来
+    const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => Object.fromEntries(ASSET_GROUPS.map((group) => [group.kind, true])));
     const [uploading, setUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -430,7 +455,25 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
 function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: CanvasTheme; onInsert: () => void; onRemove: () => void }) {
     const { t } = useTranslation();
     const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
-        if (asset.kind === "text" || asset.kind === "composite") return;
+        if (asset.kind === "text") return;
+        // 角色资产：拖到画布生成 Character 节点，而不是展开为多张图。
+        if (asset.kind === "character") {
+            const ref = {
+                type: "character",
+                kind: "character",
+                name: asset.title,
+                characterAssetId: asset.id,
+                characterName: asset.data.name || asset.title,
+                characterDescription: asset.data.description,
+                characterImages: asset.data.images,
+            };
+            const payload = JSON.stringify(ref);
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);
+            event.dataTransfer.setData("application/json", payload);
+            event.dataTransfer.setData("text/plain", payload);
+            return;
+        }
         const ref = asset.kind === "image"
             ? { url: asset.data.dataUrl, dataUrl: asset.data.dataUrl, type: "image", kind: "image", name: asset.title, storageKey: asset.data.storageKey }
             : { url: asset.data.url, type: asset.kind, kind: asset.kind, name: asset.title, storageKey: asset.data.storageKey };
@@ -441,7 +484,7 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
         event.dataTransfer.setData("text/plain", payload);
     };
     return (
-        <div draggable={asset.kind !== "text" && asset.kind !== "composite"} onDragStart={handleDragStart} className="group relative aspect-square overflow-hidden rounded-xl border transition duration-200 hover:-translate-y-0.5 hover:shadow-lg" style={{ borderColor: theme.node.stroke, background: theme.node.panel, cursor: asset.kind === "text" || asset.kind === "composite" ? undefined : "grab" }}>
+        <div draggable={asset.kind !== "text"} onDragStart={handleDragStart} className="group relative aspect-square overflow-hidden rounded-xl border transition duration-200 hover:-translate-y-0.5 hover:shadow-lg" style={{ borderColor: theme.node.stroke, background: theme.node.panel, cursor: asset.kind === "text" ? undefined : "grab" }}>
             <AssetCover asset={asset} />
             <div className="absolute inset-0 flex items-center justify-center gap-2.5 opacity-0 transition duration-200 group-hover:opacity-100">
                 <button
@@ -466,9 +509,8 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
     );
 }
 
-function CompositeCover({ asset }: { asset: Extract<Asset, { kind: "composite" }> }) {
+function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }> }) {
     const { t } = useTranslation();
-    const assets = useAssetStore((state) => state.assets);
     const [covers, setCovers] = useState<string[]>([]);
     useEffect(() => {
         let cancelled = false;
@@ -477,29 +519,21 @@ function CompositeCover({ asset }: { asset: Extract<Asset, { kind: "composite" }
         const addUrl = (url?: string) => { if (url && !urls.includes(url)) urls.push(url); };
         const addStorageKey = (key?: string) => { if (key && !storageKeys.includes(key)) storageKeys.push(key); };
         addUrl(asset.coverUrl);
-        for (const item of asset.data.items) {
-            if (item.itemType === "image") {
-                addUrl(item.url);
-                addStorageKey(item.storageKey);
-            } else if (item.itemType === "assetRef") {
-                const referenced = assets.find((candidate) => candidate.id === item.refId);
-                if (referenced?.kind === "image") {
-                    addUrl(referenced.data.dataUrl);
-                    addStorageKey(referenced.data.storageKey);
-                }
-            }
+        for (const image of asset.data.images) {
+            addUrl(image.url);
+            addStorageKey(image.storageKey);
         }
         Promise.all(storageKeys.map((key) => resolveImageUrl(key))).then((resolved) => {
             if (!cancelled) setCovers([...urls, ...resolved.filter((url): url is string => Boolean(url) && !urls.includes(url))]);
         }).catch(() => { if (!cancelled) setCovers(urls); });
         return () => { cancelled = true; };
-    }, [asset.id, asset.coverUrl, asset.data.items, assets]);
-    const count = asset.data.items.length;
+    }, [asset.id, asset.coverUrl, asset.data.images]);
+    const count = asset.data.images.length;
     if (covers.length) return <img src={covers[0]} alt="" onError={() => setCovers((current) => current.slice(1))} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     return (
         <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
-            <div className="text-[11px] font-medium text-stone-500 dark:text-stone-400">{t("assets.kinds.composite")}</div>
-            <div className="text-[10px] text-stone-400 dark:text-stone-500">{count} {count === 1 ? "item" : "items"}</div>
+            <div className="text-[11px] font-medium text-stone-500 dark:text-stone-400">{t("assets.kinds.character")}</div>
+            <div className="text-[10px] text-stone-400 dark:text-stone-500">{count} {count === 1 ? "image" : "images"}</div>
         </div>
     );
 }
@@ -511,7 +545,7 @@ function AssetCover({ asset }: { asset: Asset }) {
         if (asset.coverUrl) return <img src={asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
         return <video src={`${asset.data.url}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     }
-    if (asset.kind === "composite") return <CompositeCover asset={asset} />;
+    if (asset.kind === "character") return <CharacterCover asset={asset} />;
     if (asset.kind === "audio") {
         return (
             <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">

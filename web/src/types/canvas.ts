@@ -16,6 +16,8 @@ export enum CanvasNodeType {
     Video = "video",
     Audio = "audio",
     Group = "group",
+    /** 角色节点：承载一个角色资产（多张参考图 + outfit），可作为下游参考节点。 */
+    Character = "character",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -88,6 +90,12 @@ export type CanvasNodeMetadata = {
     groupId?: string;
     groupLocked?: boolean;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
+    // 角色节点：characterAssetId 关联到资产库里的 CharacterAsset；characterImages 是节点自带的角色图谱快照（来自资产库或本地编辑）。
+    characterAssetId?: string;
+    characterName?: string;
+    characterDescription?: string;
+    characterImages?: Array<{ url: string; storageKey?: string; name: string; outfit: string; outfitDescription: string; width: number; height: number; bytes: number; mimeType: string }>;
+    characterPrimaryIndex?: number;
 };
 
 export type CanvasNodeData = {

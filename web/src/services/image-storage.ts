@@ -1,6 +1,6 @@
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
-import { uploadBackendMedia, deleteBackendMedia, backendMediaUrl } from "@/services/backend-api";
+import { uploadBackendMedia, deleteBackendMedia, backendMediaUrl, resolveComfyMediaUrl } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { withLocalProxy } from "@/stores/use-config-store";
 
@@ -126,9 +126,11 @@ function throwIfAborted(signal?: AbortSignal) {
 }
 
 export async function resolveImageUrl(storageKey?: string, fallback = "") {
-    if (!storageKey) return fallback;
-    if (!useBackendStore.getState().connected) return fallback;
-    return backendMediaUrl(storageKey);
+    if (storageKey) {
+        if (!useBackendStore.getState().connected) return fallback;
+        return backendMediaUrl(storageKey);
+    }
+    return resolveComfyMediaUrl(fallback);
 }
 
 export async function getImageBlob(storageKey: string) {

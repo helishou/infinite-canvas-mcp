@@ -19,6 +19,9 @@ import { WorkflowStore } from "./workflows/store.js";
 import { WorkflowExecutor } from "./workflows/executor.js";
 import { registerWorkflowRoutes } from "./workflows/routes.js";
 import { startBackendMcpServer } from "./mcp.js";
+import { DirectImageBackend } from "./runtime/chatgpt-image.js";
+import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
+import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
 
 const logger = createLogger("main");
 
@@ -48,7 +51,10 @@ registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.event
 // Workflow import routes
 const workflowStore = new WorkflowStore(db);
 const workflowExecutor = new WorkflowExecutor(runtime.comfy, runtime.stores.tasks, runtime.stores.media, runtime.events, db);
+const directImage = new DirectImageBackend(runtime.stores.tasks, runtime.stores.media);
+const canvasImageDispatcher = new CanvasImageDispatcher(config, runtime.stores, runtime.comfy, directImage, workflowStore, workflowExecutor);
 registerWorkflowRoutes(app, workflowStore, workflowExecutor, runtime.comfy);
+registerCanvasGenerationRoutes(app, canvasImageDispatcher);
 registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat, runtime.events);
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events, basePath: "/agent" }, runtime.comfy);
 const agent = createAgentRuntime({ backendUrl: config.url, backendToken: config.token });

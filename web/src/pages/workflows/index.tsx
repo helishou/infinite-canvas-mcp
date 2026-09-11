@@ -269,7 +269,6 @@ export default function WorkflowsPage() {
                                                 workflow={selected.workflow}
                                                 fields={selected.config.fields}
                                                 onFieldsChange={handleFieldsChange}
-                                                canDeleteNode
                                                 onWorkflowChange={(workflow) => {
                                                     if (!selected) return;
                                                     const next = { ...selected, workflow };

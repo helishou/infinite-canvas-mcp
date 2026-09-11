@@ -25,6 +25,7 @@ export type CanvasProject = {
 type CanvasStore = {
     hydrated: boolean;
     projects: CanvasProject[];
+    backendRevisions: Record<string, number>;
     createProject: (title?: string) => string;
     importProject: (project: Partial<CanvasProject>) => string;
     openProject: (id: string) => CanvasProject | null;
@@ -108,6 +109,7 @@ export async function hydrateCanvasProjects() {
 export const useCanvasStore = create<CanvasStore>()((set, get) => ({
     hydrated: false,
     projects: loadFromLocalStorage(),
+    backendRevisions: {},
     createProject: (Title = i18n.t("canvas.project.untitled")) => {
         const now = new Date().toISOString();
         const id = nanoid();
@@ -188,8 +190,53 @@ function scheduleCanvasSync() {
     }, 400);
 }
 
+function applyBackendCanvasEvent(event: unknown) {
+    if (!event || typeof event !== "object") return;
+    const value = event as { type?: unknown; entityId?: unknown; payload?: unknown };
+    if (value.type !== "canvas.updated") return;
+    const payload = value.payload;
+    const isProject = (item: unknown): item is CanvasProject => Boolean(
+        item && typeof item === "object"
+        && typeof (item as { id?: unknown }).id === "string"
+        && Array.isArray((item as { nodes?: unknown }).nodes)
+        && Array.isArray((item as { connections?: unknown }).connections),
+    );
+    const isProjectList = payload && typeof payload === "object" && Array.isArray((payload as { projects?: unknown }).projects);
+    const projects = isProjectList
+        ? (payload as { projects: unknown[] }).projects.filter(isProject)
+        : isProject(payload) ? [payload] : [];
+    const entityId = typeof value.entityId === "string" ? value.entityId : "";
+    const deleted = payload && typeof payload === "object" && Number((payload as { deleted?: unknown }).deleted || 0) > 0;
+    if (!isProjectList && !projects.length && !(deleted && entityId)) return;
+    useCanvasStore.setState((state) => {
+        let nextProjects = state.projects;
+        const nextRevisions = { ...state.backendRevisions };
+        if (isProjectList) {
+            const changed = projects.some((project) => JSON.stringify(state.projects.find((item) => item.id === project.id)) !== JSON.stringify(project));
+            if (!changed) return state;
+            nextProjects = projects;
+            for (const project of projects) nextRevisions[project.id] = (nextRevisions[project.id] || 0) + 1;
+        } else if (projects.length) {
+            const remote = projects[0];
+            const local = state.projects.find((project) => project.id === remote.id);
+            if (local && JSON.stringify(local) === JSON.stringify(remote)) return state;
+            nextProjects = state.projects.some((project) => project.id === remote.id)
+                ? state.projects.map((project) => project.id === remote.id ? remote : project)
+                : [remote, ...state.projects];
+            nextRevisions[remote.id] = (nextRevisions[remote.id] || 0) + 1;
+        } else if (deleted) {
+            if (!state.projects.some((project) => project.id === entityId)) return state;
+            nextProjects = state.projects.filter((project) => project.id !== entityId);
+            nextRevisions[entityId] = (nextRevisions[entityId] || 0) + 1;
+        }
+        saveToLocalStorage(nextProjects);
+        return { projects: nextProjects, backendRevisions: nextRevisions };
+    });
+}
+
 if (typeof window !== "undefined") {
     window.addEventListener("backend-connected", () => { void hydrateCanvasProjects(); });
+    window.addEventListener("backend-event", (event) => applyBackendCanvasEvent((event as CustomEvent).detail));
     window.addEventListener("pagehide", persistCurrentCanvasSnapshot);
 }
 

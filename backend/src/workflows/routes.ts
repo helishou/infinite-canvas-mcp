@@ -106,7 +106,7 @@ export function registerWorkflowRoutes(
     router.post("/api/workflows/:name/run", async (req: Request, res: Response) => {
         try {
             const name = decodeURIComponent(req.params.name as string);
-            const body = (req.body || {}) as { fields?: Record<string, unknown>; config?: WorkflowConfig };
+            const body = (req.body || {}) as { fields?: Record<string, unknown>; config?: WorkflowConfig; clientTaskId?: string };
             // config 是 WorkflowExecutor.run 第一个会用到的字段（processImageFields 读
             // config.fields），前端如果漏传会让 executor 立刻崩
             // "Cannot read properties of undefined (reading 'fields')"。

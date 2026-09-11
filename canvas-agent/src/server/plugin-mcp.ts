@@ -54,6 +54,9 @@ export type PluginMcpBackend = {
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
     runtimeMediaStore(name: string, dataUrl: string, storageKey?: string): Promise<{ path: string }>;
     runtimeMediaPath?(ref: string): Promise<string>;
+    listGenerationLogs(options?: { projectId?: string; nodeId?: string; status?: string; limit?: number }): Promise<unknown[]>;
+    createGenerationLog(input: Record<string, unknown>): Promise<unknown>;
+    updateGenerationLog(id: string, patch: Record<string, unknown>): Promise<unknown>;
     comfyModels(signal?: AbortSignal): Promise<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; refreshedAt: string; error?: string }>;
     comfyRun(preset: string, input: Record<string, unknown>, params: Record<string, unknown>): Promise<import("../runtime/types.js").RuntimeTask>;
     comfyGetTask(id: string, after?: number): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;

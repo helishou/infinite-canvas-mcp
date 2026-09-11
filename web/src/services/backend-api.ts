@@ -21,13 +21,14 @@ export function getBackendUrl(): string {
     return localStorage.getItem("backend-url") || DEFAULT_URL;
 }
 
-export async function request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+export async function request<T = unknown>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
     const token = getBackendTokenShared();
     const url = `${getBackendUrl().replace(/\/$/, "")}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
     const res = await fetch(url, {
         method,
         headers: body ? { "content-type": "application/json" } : {},
         body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: options?.signal,
     });
     const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
     if (!res.ok) {
@@ -38,6 +39,36 @@ export async function request<T = unknown>(method: string, path: string, body?: 
     }
     return data;
 }
+
+export type CanvasImageGenerationRequest = {
+    model: string;
+    prompt: string;
+    references?: Array<{ name: string; dataUrl?: string; url?: string; storageKey?: string; mimeType?: string }>;
+    size?: string;
+    width?: number;
+    height?: number;
+    quality?: string;
+    count?: number;
+    params?: Record<string, unknown>;
+    provider?: { baseUrl?: string; apiKey?: string };
+    clientTaskId?: string;
+    // 画布生成日志关联：项目 id + 触发节点 id
+    projectId?: string;
+    nodeId?: string;
+};
+
+export type BackendRuntimeTask = {
+    id: string;
+    status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+    progress: number;
+    result?: { media?: BackendMediaResult[]; images?: BackendMediaResult[] } | null;
+    error?: string | null;
+};
+
+export function startCanvasImageGeneration(input: CanvasImageGenerationRequest, signal?: AbortSignal) {
+    return request<{ ok: boolean; taskId: string }>("POST", "/canvas/image-generation", input, { signal });
+}
+
 
 export async function backendHealth(): Promise<{ ok: boolean; protocolVersion?: number; node?: string; pid?: number }> {
     try {
@@ -196,6 +227,34 @@ export function backendMediaUrl(storageKey: string): string {
     return `${base}/media/${key}?token=${token}`;
 }
 
+/**
+ * 把历史 ComfyUI /view 地址改成总后台代理地址。
+ * 画布数据可能来自旧版本，节点里只保存了 127.0.0.1:8188 的临时地址；
+ * 直接交给浏览器加载会受运行环境影响，统一通过现有 /comfy/media 读取。
+ */
+export function resolveComfyMediaUrl(rawUrl: string): string {
+    if (!rawUrl || rawUrl.startsWith("data:") || rawUrl.startsWith("blob:")) return rawUrl;
+    try {
+        const parsed = new URL(rawUrl, typeof window === "undefined" ? DEFAULT_URL : window.location.origin);
+        if (parsed.pathname.endsWith("/comfy/media") || parsed.pathname.endsWith("/media")) return rawUrl;
+        const isLocalComfy = parsed.pathname === "/view" && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.port === "8188");
+        if (!isLocalComfy || !parsed.searchParams.get("filename")) return rawUrl;
+        const query = new URLSearchParams();
+        for (const key of ["filename", "subfolder", "type"]) {
+            const value = parsed.searchParams.get(key);
+            if (value !== null) query.set(key, value);
+        }
+        query.set("token", getBackendTokenShared());
+        const base = getBackendUrl().replace(/\/$/, "");
+        const isDev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
+        const isLocalBackend = base === DEFAULT_URL || base === "http://localhost:17370" || base === "";
+        const path = `/agent/comfy/media?${query.toString()}`;
+        return isDev && isLocalBackend ? path : `${base}${path}`;
+    } catch {
+        return rawUrl;
+    }
+}
+
 export function deleteBackendMedia(storageKey: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/media/${encodeURIComponent(storageKey)}`);
 }
@@ -252,8 +311,8 @@ export async function saveDataDir(dataDir: string): Promise<{ dataDir: string; c
 
 // ── Tasks ────────────────────────────────────────────────────────────────
 
-export function fetchBackendTask(id: string) {
-    return request<{ ok: boolean; task?: Record<string, unknown>; events?: unknown[] }>("GET", `/tasks/${encodeURIComponent(id)}`);
+export function fetchBackendTask(id: string, signal?: AbortSignal) {
+    return request<{ ok: boolean; task?: BackendRuntimeTask; events?: unknown[] }>("GET", `/tasks/${encodeURIComponent(id)}`, undefined, { signal });
 }
 
 export function createBackendTask(kind: string, input: Record<string, unknown> = {}, params: Record<string, unknown> = {}) {

@@ -10,7 +10,7 @@ import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
 import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { cn } from "@/lib/utils";
-import { useAssetStore, type Asset, type AssetKind, type ImageAsset, type VideoAsset, type AudioAsset, type CompositeItem } from "@/stores/use-asset-store";
+import { useAssetStore, type Asset, type AssetKind, type CharacterAsset, type CharacterImage, type ImageAsset, type VideoAsset, type AudioAsset } from "@/stores/use-asset-store";
 import { exportAssets, readAssetPackage } from "./asset-transfer";
 
 type AssetFormValues = {
@@ -26,7 +26,7 @@ type AssetFormValues = {
 type ImageDraft = ImageAsset["data"] | null;
 type VideoDraft = VideoAsset["data"] | null;
 
-const kindOptions = ["all", "text", "image", "video", "audio", "composite"] as const;
+const kindOptions = ["all", "text", "image", "video", "audio", "character"] as const;
 
 export default function AssetsPage() {
     const { message } = App.useApp();
@@ -61,12 +61,12 @@ export default function AssetsPage() {
     const [imageDraft, setImageDraft] = useState<ImageDraft>(null);
     const [videoDraft, setVideoDraft] = useState<VideoDraft>(null);
     const [audioDraft, setAudioDraft] = useState<AudioAsset["data"] | null>(null);
-    const [compositeItems, setCompositeItems] = useState<CompositeItem[]>([]);
+    const [characterImages, setCharacterImages] = useState<CharacterImage[]>([]);
     const coverUrl = Form.useWatch("coverUrl", form) || "";
     const title = Form.useWatch("title", form) || "";
     const tags = Form.useWatch("tags", form) || [];
     const content = Form.useWatch("content", form) || "";
-    const validAssets = useMemo(() => assets.filter((asset) => asset.kind === "text" || asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "composite"), [assets]);
+    const validAssets = useMemo(() => assets.filter((asset) => asset.kind === "text" || asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "character"), [assets]);
 
     const filteredAssets = useMemo(() => {
         const query = keyword.trim().toLowerCase();
@@ -210,7 +210,7 @@ export default function AssetsPage() {
             setImageDraft(null);
             setVideoDraft(null);
             setAudioDraft(null);
-            setCompositeItems([]);
+            setCharacterImages([]);
             setFormKind("text");
             form.setFieldsValue({ kind: "text", title: "", coverUrl: "", tags: [], source: t("assets.manual"), note: "", content: "" });
         setIsAssetOpen(true);
@@ -221,7 +221,7 @@ export default function AssetsPage() {
         setFormKind(asset.kind);
         setImageDraft(asset.kind === "image" ? asset.data as ImageAsset["data"] : null);
         setAudioDraft(asset.kind === "audio" ? asset.data as AudioAsset["data"] : null);
-        setCompositeItems(asset.kind === "composite" ? asset.data.items : []);
+        setCharacterImages(asset.kind === "character" ? asset.data.images : []);
         form.setFieldsValue({
             kind: asset.kind,
             title: asset.title,
@@ -229,7 +229,7 @@ export default function AssetsPage() {
             tags: asset.tags || [],
             source: asset.source,
             note: asset.note,
-            content: asset.kind === "text" ? asset.data.content : "",
+            content: asset.kind === "text" ? asset.data.content : asset.kind === "character" ? asset.data.description : "",
         });
         setIsAssetOpen(true);
     };
@@ -252,9 +252,20 @@ export default function AssetsPage() {
             if (!audioDraft) { message.error(t("assets.selectAudio")); return; }
             const asset = { ...base, kind: "audio" as const, data: audioDraft };
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
-        } else if (values.kind === "composite") {
-            if (!compositeItems.length) { message.error(t("assets.compositeRequireOne")); return; }
-            const asset = { ...base, kind: "composite" as const, data: { items: compositeItems } };
+        } else if (values.kind === "character") {
+            if (!characterImages.length) { message.error(t("assets.characterRequireOneImage")); return; }
+            const characterData: CharacterAsset["data"] = {
+                name: values.title.trim(),
+                englishName: "",
+                description: "",
+                voice: "",
+                voiceName: "",
+                voiceAssetId: "",
+                images: characterImages,
+            };
+            // 角色表单的"描述"从 form.content 读取（在表单里复用 content 字段避免再加一项）
+            if (values.content) characterData.description = values.content;
+            const asset = { ...base, kind: "character" as const, data: characterData, coverUrl: characterImages[0]?.url || base.coverUrl };
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         } else {
             if (!imageDraft) { message.error(t("assets.selectImage")); return; }
@@ -294,7 +305,7 @@ export default function AssetsPage() {
     };
 
     const downloadImage = async (asset: Asset) => {
-        if (asset.kind === "text" || asset.kind === "composite") return;
+        if (asset.kind === "text" || asset.kind === "character") return;
         try {
             const blob = await readAssetMediaBlob(asset);
             if (!blob) throw new Error("媒体不可读取");
@@ -315,22 +326,11 @@ export default function AssetsPage() {
         if (!file) return;
         try {
             const importedAssets = await readAssetPackage(file);
-            // 重新分配 id 并维护 旧→新 映射，修复复合资产内 assetRef 的跨资产引用（否则导入后子项 refId 悬空、图片显示不出来）
+            // 重新分配 id 并维护 旧→新 映射，保证跨资产引用仍然有效
             const idMap = new Map<string, string>();
             importedAssets.forEach((asset) => idMap.set(asset.id, nanoid()));
             importedAssets.forEach((asset) => {
-                let data = asset.data;
-                if (asset.kind === "composite") {
-                    data = {
-                        ...asset.data,
-                        items: asset.data.items.map((item) =>
-                            item.itemType === "assetRef" && idMap.has(item.refId)
-                                ? { ...item, refId: idMap.get(item.refId)! }
-                                : item,
-                        ),
-                    };
-                }
-                const payload = { ...asset, id: idMap.get(asset.id), data } as Record<string, unknown>;
+                const payload = { ...asset, id: idMap.get(asset.id) } as Record<string, unknown>;
                 delete payload.createdAt;
                 delete payload.updatedAt;
                 addAsset(payload as Parameters<typeof addAsset>[0]);
@@ -592,7 +592,7 @@ export default function AssetsPage() {
                                     { label: t("assets.kinds.image"), value: "image" },
                                     { label: t("assets.kinds.video"), value: "video" },
                                     { label: t("assets.kinds.audio"), value: "audio" },
-                                    { label: t("assets.kinds.composite"), value: "composite" },
+                                    { label: t("assets.kinds.character"), value: "character" },
                                 ]}
                                 onChange={(value) => setFormKind(value)}
                             />
@@ -640,10 +640,15 @@ export default function AssetsPage() {
                                     )}
                                 </div>
                             </Form.Item>
-                        ) : formKind === "composite" ? (
-                            <Form.Item label={t("assets.fields.compositeContent")} required>
-                                <CompositeEditor items={compositeItems} onChange={setCompositeItems} assets={assets} />
-                            </Form.Item>
+                        ) : formKind === "character" ? (
+                            <>
+                                <Form.Item name="content" label={t("assets.fields.characterDescription")}>
+                                    <Input.TextArea rows={4} placeholder={t("assets.fields.characterDescriptionPlaceholder")} />
+                                </Form.Item>
+                                <Form.Item label={t("assets.fields.characterImages")} required>
+                                    <CharacterEditor images={characterImages} onChange={setCharacterImages} />
+                                </Form.Item>
+                            </>
                         ) : (
                             <Form.Item label={t("assets.fields.imageContent")} required>
                                 <div className="rounded-lg border border-dashed border-stone-300 p-4 dark:border-stone-700">
@@ -740,17 +745,11 @@ function useResolvedCoverUrl(asset: Asset | null) {
         if (asset.kind === "image") {
             if (asset.data.dataUrl) lookups.push(Promise.resolve(asset.data.dataUrl));
             if (asset.data.storageKey) lookups.push(resolveImageUrl(asset.data.storageKey));
-        } else if (asset.kind === "composite") {
-            for (const item of asset.data.items) {
+        } else if (asset.kind === "character") {
+            for (const image of asset.data.images) {
                 if (lookups.length >= 4) break;
-                if (item.itemType === "image" && item.storageKey) {
-                    lookups.push(resolveImageUrl(item.storageKey));
-                } else if (item.itemType === "assetRef") {
-                    const ref = assets.find((a) => a.id === item.refId);
-                    if (!ref || ref.kind === "composite" || ref.kind === "text") continue;
-                    const storageKey = (ref as ImageAsset | VideoAsset | AudioAsset).data.storageKey;
-                    if (storageKey) lookups.push(ref.kind === "image" ? resolveImageUrl(storageKey) : resolveMediaUrl(storageKey));
-                }
+                if (image.storageKey) lookups.push(resolveImageUrl(image.storageKey));
+                else if (image.url) lookups.push(Promise.resolve(image.url));
             }
         }
         if (!lookups.length) return;
@@ -896,10 +895,19 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                                     {formatBytes(asset.data.bytes)}{asset.data.durationMs ? ` · ${Math.round(asset.data.durationMs / 1000)}s` : ""}
                                 </Typography.Text>
                             </div>
-                        ) : asset.kind === "composite" ? (
-                            <Typography.Text type="secondary" className="mt-2 block">
-                                {asset.data.items.length} items
-                            </Typography.Text>
+                        ) : asset.kind === "character" ? (
+                            <div className="mt-2 space-y-3">
+                                {asset.data.description ? (
+                                    <Typography.Paragraph className="!mb-0 whitespace-pre-wrap">{asset.data.description}</Typography.Paragraph>
+                                ) : null}
+                                {asset.data.images.length ? (
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {asset.data.images.map((image, idx) => (
+                                            <Image key={idx} src={image.url} alt={image.outfit || image.name} className="!rounded-md" />
+                                        ))}
+                                    </div>
+                                ) : null}
+                            </div>
                         ) : (
                             <Typography.Text className="mt-2 block">
                                 {asset.data.width}x{asset.data.height} · {formatBytes(asset.data.bytes)} · {asset.data.mimeType}
@@ -944,184 +952,137 @@ async function readAssetMediaBlob(asset: Extract<Asset, { kind: "image" | "video
 function assetSummary(asset: Asset) {
     if (asset.kind === "text") return asset.data.content;
     if (asset.kind === "audio") return `${formatBytes(asset.data.bytes)}${asset.data.durationMs ? ` · ${Math.round(asset.data.durationMs / 1000)}s` : ""}`;
-    if (asset.kind === "composite") return `${asset.data.items.length} items`;
+    if (asset.kind === "character") return asset.data.description || `${asset.data.images.length} images`;
     return `${asset.data.width}x${asset.data.height} · ${formatBytes(asset.data.bytes)} · ${asset.data.mimeType}`;
 }
 
 function assetSearchText(asset: Asset) {
-    const extra = asset.kind === "text" ? asset.data.content : asset.kind === "composite" ? `${asset.data.items.length} items` : asset.data.mimeType;
+    const extra = asset.kind === "text" ? asset.data.content
+        : asset.kind === "character" ? `${asset.data.name} ${asset.data.description} ${asset.data.images.length} images`
+        : asset.data.mimeType;
     return [asset.title, asset.source || "", asset.note || "", (asset.tags || []).join(" "), extra].join(" ").toLowerCase();
 }
 
-function CompositeEditor({ items, onChange, assets }: { items: CompositeItem[]; onChange: (items: CompositeItem[]) => void; assets: Asset[] }) {
+function CharacterEditor({ images, onChange }: { images: CharacterImage[]; onChange: (images: CharacterImage[]) => void }) {
     const { t } = useTranslation();
-    const imgInputRef = useRef<HTMLInputElement>(null);
-    const mediaInputRef = useRef<HTMLInputElement>(null);
-    const [mediaKind, setMediaKind] = useState<"video" | "audio">("video");
-    const [pendingIdx, setPendingIdx] = useState<number | null>(null);
-    // Resolved blob: URLs for preview, keyed by item index
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const pendingIdxRef = useRef<number | "new" | null>(null);
     const [previews, setPreviews] = useState<Record<number, string>>({});
-
-    // Cache of resolved blob: URLs keyed by storageKey — cleaned up on unmount
     const urlCache = useRef<Record<string, string>>({});
-    const resolveUrl = useCallback(async (item: CompositeItem) => {
-        if (item.itemType === "image" && item.storageKey) {
-            if (!urlCache.current[item.storageKey]) urlCache.current[item.storageKey] = await resolveImageUrl(item.storageKey, item.url);
-            return urlCache.current[item.storageKey];
+
+    const resolveUrl = useCallback(async (image: CharacterImage) => {
+        if (image.storageKey) {
+            if (!urlCache.current[image.storageKey]) urlCache.current[image.storageKey] = await resolveImageUrl(image.storageKey, image.url);
+            return urlCache.current[image.storageKey];
         }
-        if ((item.itemType === "video" || item.itemType === "audio") && item.storageKey) {
-            if (!urlCache.current[item.storageKey]) urlCache.current[item.storageKey] = await resolveMediaUrl(item.storageKey, item.url);
-            return urlCache.current[item.storageKey];
-        }
-        const imgItem = item as Extract<CompositeItem, { itemType: "image" }>;
-        return imgItem.url ?? "";
+        return image.url || "";
     }, []);
 
-    // Resolve previews when items change
     useEffect(() => {
         let cancelled = false;
-        items.forEach(async (item, idx) => {
-            const mediaItem = item as Extract<CompositeItem, { itemType: "image" | "video" | "audio" }>;
-            if (mediaItem.storageKey) {
-                const url = await resolveUrl(mediaItem);
-                if (!cancelled) setPreviews(prev => ({ ...prev, [idx]: url }));
-            }
+        images.forEach(async (image, idx) => {
+            const url = await resolveUrl(image);
+            if (!cancelled && url) setPreviews((prev) => ({ ...prev, [idx]: url }));
         });
         return () => { cancelled = true; };
-    }, [items, resolveUrl]);
+    }, [images, resolveUrl]);
 
-    // Revoke blob: URLs on unmount
-    useEffect(() => {
-        return () => { Object.values(urlCache.current).forEach(url => URL.revokeObjectURL(url)); };
-    }, []);
+    useEffect(() => () => { Object.values(urlCache.current).forEach((url) => URL.revokeObjectURL(url)); }, []);
 
-    const handleImgUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0]; if (!file || pendingIdx === null) return;
+    const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        e.target.value = "";
+        if (!file || pendingIdxRef.current === null) return;
         const result = await uploadImage(file, { category: "library" });
-        updateItem(pendingIdx, { url: result.url, storageKey: result.storageKey, width: result.width, height: result.height, bytes: result.bytes, mimeType: result.mimeType });
-        setPendingIdx(null); e.target.value = "";
+        const nextImage: CharacterImage = {
+            url: result.url,
+            storageKey: result.storageKey,
+            name: file.name,
+            width: result.width,
+            height: result.height,
+            bytes: result.bytes,
+            mimeType: result.mimeType,
+            outfit: "",
+            outfitDescription: "",
+        };
+        const idx = pendingIdxRef.current;
+        pendingIdxRef.current = null;
+        if (idx === "new") {
+            onChange([...images, nextImage]);
+        } else if (typeof idx === "number") {
+            const next = [...images];
+            next[idx] = nextImage;
+            onChange(next);
+        }
     };
-    const handleMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0]; if (!file || pendingIdx === null) return;
-        const result = await uploadMediaFile(file, mediaKind, "library");
-        updateItem(pendingIdx, { url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, durationMs: result.durationMs });
-        setPendingIdx(null); e.target.value = "";
-    };
-    const openImgUpload = (idx: number) => { setPendingIdx(idx); imgInputRef.current?.click(); };
-    const openMediaUpload = (idx: number, kind: "video" | "audio") => { setMediaKind(kind); setPendingIdx(idx); mediaInputRef.current?.click(); };
-    const addItem = (itemType: CompositeItem["itemType"]) => {
-        const base: CompositeItem =
-            itemType === "text" ? { itemType: "text", content: "" }
-            : itemType === "image" ? { itemType: "image", url: "", width: 0, height: 0, bytes: 0, mimeType: "" }
-            : itemType === "video" ? { itemType: "video", url: "", width: 0, height: 0, bytes: 0, mimeType: "" }
-            : itemType === "audio" ? { itemType: "audio", url: "", bytes: 0, mimeType: "" }
-            : { itemType: "assetRef", refId: "", refKind: "text" };
-        onChange([...items, base]);
-    };
-    const updateItem = (index: number, patch: Partial<CompositeItem>) => {
-        const next = [...items];
-        next[index] = { ...next[index], ...patch } as CompositeItem;
+
+    const updateImage = (idx: number, patch: Partial<CharacterImage>) => {
+        const next = [...images];
+        next[idx] = { ...next[idx], ...patch };
         onChange(next);
     };
-    const removeItem = (index: number) => onChange(items.filter((_, i) => i !== index));
-    const refOptions = assets.filter(a => a.kind !== "composite").map(a => ({ label: `${a.kind}: ${a.title || a.id}`, value: a.id, kind: a.kind }));
+    const removeImage = (idx: number) => onChange(images.filter((_, i) => i !== idx));
+    const moveImage = (idx: number, dir: -1 | 1) => {
+        const target = idx + dir;
+        if (target < 0 || target >= images.length) return;
+        const next = [...images];
+        [next[idx], next[target]] = [next[target], next[idx]];
+        onChange(next);
+    };
+
     return (
         <div className="space-y-3">
-            {items.map((item, idx) => (
+            {images.map((image, idx) => (
                 <div key={idx} className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
-                    <div className="mb-2 flex items-center gap-2">
-                        <Select size="small" value={item.itemType}
-                            options={[
-                                { label: t("assets.composite.itemType.text"), value: "text" },
-                                { label: t("assets.composite.itemType.image"), value: "image" },
-                                { label: t("assets.composite.itemType.video"), value: "video" },
-                                { label: t("assets.composite.itemType.audio"), value: "audio" },
-                                { label: t("assets.composite.itemType.assetRef"), value: "assetRef" },
-                            ]}
-                            onChange={(val) => {
-                                const next = [...items];
-                                next[idx] = item.itemType === val ? item : (
-                                    val === "text" ? { itemType: "text", content: "" }
-                                    : val === "image" ? { itemType: "image", url: "", width: 0, height: 0, bytes: 0, mimeType: "" }
-                                    : val === "video" ? { itemType: "video", url: "", width: 0, height: 0, bytes: 0, mimeType: "" }
-                                    : val === "audio" ? { itemType: "audio", url: "", bytes: 0, mimeType: "" }
-                                    : { itemType: "assetRef", refId: "", refKind: "text" }
-                                ) as CompositeItem;
-                                onChange(next);
-                            }}
-                        />
-                        <Button size="small" danger onClick={() => removeItem(idx)}>{t("common.delete")}</Button>
-                    </div>
-                    {item.itemType === "text" && (
-                        <Input.TextArea rows={3} value={item.content} onChange={e => updateItem(idx, { content: e.target.value })} placeholder={t("assets.composite.textPlaceholder")} />
-                    )}
-                    {item.itemType === "assetRef" && (
-                        <div className="flex gap-2">
-                            <Select className="flex-1" showSearch optionFilterProp="label" placeholder={t("assets.composite.selectAsset")} value={item.refId || undefined}
-                                options={refOptions}
-                                onChange={(val) => {
-                                    const refAsset = assets.find(a => a.id === val);
-                                    const refItem = item as { itemType: "assetRef"; refId: string; refKind: "text" | "image" | "video" | "audio" };
-                                    updateItem(idx, { refId: val, refKind: (refAsset?.kind ?? refItem.refKind) as "text" | "image" | "video" | "audio" });
-                                }}
+                    <div className="flex gap-3">
+                        <div className="size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-stone-50 dark:border-stone-700 dark:bg-stone-900">
+                            {previews[idx] ? (
+                                <img src={previews[idx]} alt={image.outfit || image.name} className="size-full object-cover" />
+                            ) : (
+                                <div className="flex size-full items-center justify-center text-xs text-stone-400">无图</div>
+                            )}
+                        </div>
+                        <div className="min-w-0 flex-1 space-y-2">
+                            <div className="grid gap-2 sm:grid-cols-2">
+                                <Input
+                                    size="small"
+                                    value={image.outfit}
+                                    onChange={(e) => updateImage(idx, { outfit: e.target.value })}
+                                    placeholder={t("assets.character.outfitPlaceholder")}
+                                />
+                                <Input
+                                    size="small"
+                                    value={image.name}
+                                    onChange={(e) => updateImage(idx, { name: e.target.value })}
+                                    placeholder={t("assets.character.namePlaceholder")}
+                                />
+                            </div>
+                            <Input.TextArea
+                                size="small"
+                                rows={2}
+                                value={image.outfitDescription}
+                                onChange={(e) => updateImage(idx, { outfitDescription: e.target.value })}
+                                placeholder={t("assets.character.outfitDescriptionPlaceholder")}
                             />
-                            <Tag>{(item as { itemType: "assetRef"; refId: string; refKind: string }).refKind}</Tag>
-                        </div>
-                    )}
-                    {item.itemType === "image" && (
-                        <div className="space-y-2">
-                            <div className="flex gap-2">
-                                <Input placeholder={t("assets.composite.mediaUrlPlaceholder")} value={item.url} onChange={e => updateItem(idx, { url: e.target.value, width: 0, height: 0, bytes: 0, mimeType: "" })} />
-                                <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => openImgUpload(idx)} />
-                            </div>
-                            {previews[idx] && (
-                                <div className="rounded border border-stone-200 dark:border-stone-700 overflow-hidden">
-                                    <img src={previews[idx]} alt="" className="max-h-24 object-contain" />
-                                </div>
-                            )}
-                            {item.width && item.height ? <Typography.Text type="secondary" className="text-xs">{item.width}x{item.height} · {formatBytes(item.bytes)} · {item.mimeType}</Typography.Text> : null}
-                        </div>
-                    )}
-                    {item.itemType === "video" && (
-                        <div className="space-y-2">
-                            <div className="flex gap-2">
-                                <Input placeholder={t("assets.composite.mediaUrlPlaceholder")} value={item.url} onChange={e => updateItem(idx, { url: e.target.value, bytes: 0, mimeType: "" })} />
-                                <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => openMediaUpload(idx, "video")} />
-                            </div>
-                            {previews[idx] && (
-                                <div className="rounded border border-stone-200 dark:border-stone-700 overflow-hidden">
-                                    <video src={previews[idx]} className="max-h-24 w-full object-contain" controls preload="metadata" />
-                                </div>
-                            )}
-                            {item.bytes ? <Typography.Text type="secondary" className="text-xs">{formatBytes(item.bytes)} · {item.mimeType}</Typography.Text> : null}
-                        </div>
-                    )}
-                    {item.itemType === "audio" && (
-                        <div className="space-y-2">
-                            <div className="flex gap-2">
-                                <Input placeholder={t("assets.composite.mediaUrlPlaceholder")} value={item.url} onChange={e => updateItem(idx, { url: e.target.value, bytes: 0, mimeType: "" })} />
-                                <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => openMediaUpload(idx, "audio")} />
-                            </div>
-                            {previews[idx] && (
-                                <div className="rounded border border-stone-200 dark:border-stone-700">
-                                    <audio src={previews[idx]} controls preload="metadata" className="w-full" />
-                                </div>
-                            )}
-                            <div className="flex gap-2 items-center">
-                                {item.bytes ? <Typography.Text type="secondary" className="text-xs">{formatBytes(item.bytes)}</Typography.Text> : null}
-                                {item.durationMs ? <Typography.Text type="secondary" className="text-xs">{Math.round(item.durationMs / 1000)}s</Typography.Text> : null}
+                            <div className="flex flex-wrap gap-1.5">
+                                <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => { pendingIdxRef.current = idx; fileInputRef.current?.click(); }}>{t("common.upload")}</Button>
+                                <Button size="small" disabled={idx === 0} onClick={() => moveImage(idx, -1)}>↑</Button>
+                                <Button size="small" disabled={idx === images.length - 1} onClick={() => moveImage(idx, 1)}>↓</Button>
+                                <Button size="small" danger onClick={() => removeImage(idx)}>{t("common.delete")}</Button>
                             </div>
                         </div>
-                    )}
+                    </div>
                 </div>
             ))}
-            <div className="flex flex-wrap gap-2">
-                {(["text", "image", "video", "audio", "assetRef"] as const).map(type => (
-                    <Button key={type} size="small" onClick={() => addItem(type)}>+ {type}</Button>
-                ))}
-            </div>
-            <input ref={imgInputRef} type="file" accept="image/*" className="hidden" onChange={handleImgUpload} />
-            <input ref={mediaInputRef} type="file" accept={mediaKind === "video" ? "video/*" : "audio/*"} className="hidden" onChange={handleMediaUpload} />
+            <Button
+                type="dashed"
+                block
+                icon={<Upload className="size-3.5" />}
+                onClick={() => { pendingIdxRef.current = "new"; fileInputRef.current?.click(); }}
+            >
+                {t("assets.character.addImage")}
+            </Button>
+            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleUpload} />
         </div>
     );
 }

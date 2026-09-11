@@ -5,9 +5,25 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
++ 画布生成日志：在画布上跑「生图」（任一模型）、「自定义工作流」两次生成，打开「生成记录」面板，确认两条记录都带「类型」标签（生图=蓝色、工作流=geekblue），其它平台/任务模式/模型 tag 仍存在。重新跑一次故意失败的生图，确认失败任务会带红色 status tag，并把 `error` 文本展开可见。换个画布项目（不同 projectId）跑生图，确认「生成记录」面板按当前 projectId 过滤，不会混到其它画布。
+
++ 画布图片生成统一调度：画布图片节点分别选择 `gpt-image-*`、`z-image`、`flux2-klein` 和 `custom/*.json`，确认前端按钮与 MCP 都创建统一的 `canvas-image` 后端任务；GPT Image 的文生和参考图编辑结果可轮询并直接显示，结果带 `storageKey` 且刷新后仍可显示。
+
++ 画布角色节点：画布底栏工具栏「角色」（User 图标）点击后弹出只显示角色资产的挑选器；选中即生成 1 个 Character 节点（主图 + outfit 缩略图条 + 总数徽标，标题显示角色名）。在画布侧栏「资产」标签下，把角色资产拖到画布也应生成 1 个 Character 节点（不要展开为 Group + 多图）。拖入第二个角色资产时不要和原节点冲突。把 Character 节点拖到 H3 节点的 ref 槽，确认被消费为多张图资源。点击 Character 节点标题可改名。
+
++ MCP 通用直连图片生成：在图片/配置节点分别选择模型后，通过 MCP 触发生成；确认 MCP 按节点 `metadata.model` 匹配 provider。目前用本机 `chatgpt2api` 的 `default::gpt-image-2` 验证一张或多张参考图，确认任务进入运行/完成状态，结果媒体写入 Backend，画布新增图片结果节点且无需浏览器刷新；验证失败时源配置节点显示错误信息，`generation_get_status` 能查到任务。
+
++ 角色资产迁移：打开我的素材库，确认原有「复合资产」自动变为「角色资产」（kind=character），原多张图片出现在新「参考图」列表中，标题/描述保留；视频/音频项是否确实写进了 `metadata.legacyItems`（可在浏览器 DevTools 看到）；新建一个角色资产，验证多张参考图能上传、改 outfit / outfitDescription / 名称，拖到画布后能按 2 列网格展开为 Group + 多个 Image 子节点；最后用导出包再次导入，确认 character 资产和图片 blob 都能完整还原。
+
++ MCP 画布同步：在当前画布打开页面后，通过 MCP 创建、移动、修改和删除节点，确认前端无需刷新即可实时显示；连续快速修改多个节点时，确认旧的异步恢复快照不会覆盖最新提示词、参考连线和模型设置；确认 MCP 写入失败时返回明确错误，且前端事件更新不会形成重复回写循环。
+
++ 画布图片显示：打开含有历史 ComfyUI `/view` 地址的图片节点、批量图片节点和角色节点，确认首次打开会自动转存到 Backend 媒体库并写入 `storageKey`，画布与左侧元素侧栏均正常显示；确认刷新页面后仍能显示，且新生成的 Backend 媒体不受影响。
+
++ H3 MCP 画布媒体引用：通过 `h3_run_clip` 运行一个带角色基础图、角色四视图、场景和分镜图的 H3 Clip，确认参考项只带 `storageKey` 也能被 Agent 直接解析为本地媒体路径，不再报「媒体必须是 base64 data URL」或「参考条目缺少可读取地址」。
+
 The current release needs manual verification in these areas:
 
-+ 本地工作流统一管理：确认 `z-image`、`flux2-klein` 和自定义工作流都不显示质量/尺寸/宽高比；在节点图删除节点并确认二次确认；删除内置工作流后确认列表和文件均移除。
++ 本地工作流统一管理：确认 `z-image`、`flux2-klein` 和自定义工作流都不显示质量/尺寸/宽高比；节点图不再提供"删除此节点"功能（只允许在"未关联节点的字段"区清理孤立字段）；删除内置工作流后确认列表和文件均移除。
 
 + 生图工作台本地工作流：选择自定义 ComfyUI 工作流，确认工作流参数显示默认值，质量、尺寸、宽高比不显示；切换回云端模型或内置工作流后确认通用设置恢复。
 
