@@ -38,6 +38,8 @@ export type PluginMcpDeclaration = {
 export type PluginMcpContext = {
     endpoint: string;
     token: string;
+    /** 总后台地址（GET /media、/runtime/media-file 免 token，用于把 H3 结果改写成前端可播放地址）。 */
+    backendUrl: string;
     /** 画布/素材/媒体/日志的唯一业务数据源。 */
     backend: PluginMcpBackend;
     /** ComfyUI 能力（Backend 唯一权威；见 comfy-client.ts）。 */
@@ -50,6 +52,7 @@ export type PluginMcpContext = {
 /** H3 MCP 需要的最小后端能力；HTTP BackendClient 和进程内 Store 适配器均可实现。 */
 export type PluginMcpBackend = {
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
+    upsertCanvasProject(project: Record<string, unknown>): Promise<Record<string, unknown>>;
     replaceCanvasProjects(projects: Record<string, unknown>[]): Promise<Record<string, unknown>[]>;
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
     runtimeMediaStore(name: string, dataUrl: string, storageKey?: string): Promise<{ path: string }>;
@@ -111,6 +114,7 @@ export function buildPluginMcpContext(config: CanvasAgentConfig, backend: Plugin
     return {
         endpoint: config.url,
         token: config.token,
+        backendUrl: config.backendUrl || `http://127.0.0.1:${Number(process.env.INFINITE_CANVAS_BACKEND_PORT) || 17370}`,
         backend,
         comfyUi,
         getCanvasNodes: readNodes,
@@ -125,8 +129,7 @@ export function buildPluginMcpContext(config: CanvasAgentConfig, backend: Plugin
                 if (metadataPatch) merged.metadata = { ...(node.metadata || {}), ...metadataPatch };
                 return merged;
             });
-            const nextProjects = projects.map((project) => (project === target ? { ...project, nodes: nextNodes } : project));
-            await backend.replaceCanvasProjects(nextProjects);
+            await backend.upsertCanvasProject({ ...target, nodes: nextNodes, updatedAt: new Date().toISOString() });
         },
     };
 }

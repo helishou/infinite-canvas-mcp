@@ -1338,10 +1338,13 @@ export async function collectOutputMedia(outputs: Record<string, any>, baseUrl: 
         if (Array.isArray(value)) { value.forEach(visit); return; }
         if (typeof value !== "object") return;
         if (typeof value.filename === "string" && value.filename) {
-            // 排除 type=input：LoadImage/LoadVideo 等节点会把加载的输入素材以 UI 预览
-            // 形式写进 history outputs（如 Motion Context 的上段视频），不排除会把输入
-            // 误当生成结果。temp 保留——z-image 等工作流的 PreviewImage 输出就是 temp。
-            if (String(value.type || "").trim().toLowerCase() === "input") return;
+            // LoadImage/LoadVideo 等节点会把输入素材以 type=input 写进 history outputs，
+            // 但部分 H3 VHS 输出也会落在 `infinite-canvas/output` 并错误标成 input。
+            // 只排除普通输入目录，保留明确位于 output 子目录的生成视频。
+            const outputType = String(value.type || "").trim().toLowerCase();
+            const subfolder = String(value.subfolder || "");
+            const isVideoOutput = /\.(mp4|webm|mov|m4v|mkv)$/i.test(String(value.filename)) && /(^|[\\/])output([\\/]|$)/i.test(subfolder);
+            if (outputType === "input" && !isVideoOutput) return;
             const key = `${value.filename}|${value.subfolder || ""}|${value.type || ""}`;
             if (!seen.has(key)) { seen.add(key); items.push(value); }
             return;

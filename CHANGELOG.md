@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- [修复] MCP 调用 H3 节点生成视频时，结果回写 clip 节点改为可播放地址：`updateClipTask` 经 `proxyH3ResultUrl` 把 ComfyUI 原始 `video.url`（`runtime-file:` / 相对路径）改写成相对 `/media/<storageKey>`（`GET /media` 免 token，前端 `H3ClipCard` 直接 `<video src>` 可播）或 `/runtime/media-file` 代理，并写入 `resultStorageKey`，与直接点击生成路径一致。
+- [修复] MCP H3 生成日志补齐实际运行参数：`runSegment` 现返回 `{ task, input, params }`，`updateMcpGenerationLog` 合并 `params` + `lastSubmitted`（实际 input+params）+ ComfyUI 回传的 `actualSubmission` 进 `params_json`，经 `h3_run_clip` / `h3_run_all_clips` 透传，与前端 `H3Runner.tsx` 记录的日志同构。
+- [修复] H3 MCP 生成现在会把空的 `refItems` 正确回退到图片/视频/音频参考桶，并创建、更新生成日志及将完成结果回写到 Clip 与 H3 节点。
+
 - [新增] 画布生成日志接入「类型」标签（生图/生视频/生音频/工作流）：`canvas-generation-log-dialog` 每条记录头部新增一个由 `platform + model` 推导的类型 tag 并按类型着色（生图蓝、生视频紫、生音频橙、工作流 geekblue）。后端 `CanvasImageDispatcher.start` 在任务创建时 `running` 记录一次、`succeeded` / `failed` 时更新一次，写入 `projectId` / `nodeId` / `platform` / `model` / `taskMode` / `prompt` / `references` / `inputCounts` / `outputs` / `error` / `startedAt` / `finishedAt` / `durationMs` / `runtimeTaskId`。`WorkflowExecutor.run` 签名新增 `projectId` / `nodeId` 入参，原写死的 `projectId: "workflow"` 改成透传调用方 projectId（兜底保留）。
 - [修复] MCP 批量生成的画布节点不再叠在同一点：前端 `applyCanvasAgentOps` 落点改为按连接关系做拓扑分层（`computeFlowLayout`）——输入节点在左、输出节点在右，同一层纵向堆叠；无连接时退回网格。显式坐标与同批其他节点重叠时仍自动向右铺开。
 - [调整] 画布工具栏「整理布局」按钮改为按数据流方向分层排布：源点（输入）在左、汇点（输出）在右，选中节点间有连接时依 `fromNodeId→toNodeId` 自动分层；无连接的选中簇退回网格，支持撤销。

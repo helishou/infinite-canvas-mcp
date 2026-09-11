@@ -83,7 +83,7 @@ export class CanvasImageDispatcher {
             quality: input.quality || "auto",
             count: Math.max(1, Math.min(4, Math.floor(input.count || 1))),
         });
-        // 画布生成日志：开始（running）+ 成功/失败（succeeded/failed）。仅当调用方传入 projectId 时才记录。
+        // 画布生成日志：开始（running）+ 成功/失败。仅当调用方传入 projectId 时才记录。
         const logId = input.projectId
             ? this.logs.create({
                 projectId: input.projectId,
@@ -94,14 +94,12 @@ export class CanvasImageDispatcher {
                 model,
                 taskMode: "i2v", // 占位：图生图/文生图统一记为 i2v；分类由 platform + model 表达
                 prompt: input.prompt,
-                references: input.references?.map((reference) => ({ name: reference.name, mimeType: reference.mimeType, storageKey: reference.storageKey })),
+                references: input.references?.map((reference) => ({ name: reference.name, mimeType: reference.mimeType, storageKey: reference.storageKey })) || [],
                 inputCounts: { references: input.references?.length || 0, count: Math.max(1, Math.min(4, Math.floor(input.count || 1))) },
                 runtimeTaskId: task.id,
                 startedAt: new Date().toISOString(),
-                finishedAt: null,
-                durationMs: null,
-                outputs: null,
-                error: null,
+                durationMs: 0,
+                outputs: [],
                 params: { size: input.size || `${input.width || 1024}x${input.height || 1024}`, quality: input.quality || "auto" },
             }).id
             : null;
@@ -132,7 +130,7 @@ export class CanvasImageDispatcher {
         this.stores.tasks.addEvent(task.id, "result", { media: result.media });
         if (logId) {
             this.logs.update(logId, {
-                status: "succeeded",
+                status: "success",
                 outputs: result.media.map((media) => ({ url: media.url, storageKey: media.storageKey, mimeType: media.mimeType })),
                 finishedAt: new Date().toISOString(),
                 durationMs: Date.now() - startedAt,

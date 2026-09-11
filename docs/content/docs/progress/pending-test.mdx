@@ -341,6 +341,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ## H3 Clip 参数继承
 
+- 通过画布 MCP 运行 H3 Clip 1，确认 Clip 的 6 个图片参考项可见且会随请求提交；生成日志应记录 `inputCounts.image=6`、运行任务 ID 和最终视频存储键，视频结果应同时回写 Clip 与 H3 节点。
 - 新建 Clip 会继承当前选中 Clip 的完整生成参数，包括完整 Sigma 序列。
 - 新 Clip 会插入当前选中 Clip 后方，并保持后续 Clip 的顺序。
 - 请切换到非最后一个 Clip，设置完整 Sigma 序列后新建 Clip，确认参数和插入位置均正确。

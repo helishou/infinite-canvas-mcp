@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { AgentCanvasNode, McpToolHandler, PluginMcpContext, PluginMcpModule, PluginMcpToolWire } from "../../server/plugin-mcp.js";
 
 // 一个 H3 参考图/视频/音频条目(与浏览器插件 H3Ref 对齐,此处防御式解析)
-type H3Ref = { url?: string; name?: string; type?: string; storageKey?: string };
+type H3Ref = { url?: string; name?: string; type?: string; storageKey?: string; mimeType?: string };
 
 // H3 片段(节点 metadata.segments 中的元素)
 type H3Segment = Record<string, unknown> & {
@@ -211,11 +211,18 @@ async function createMcpGenerationLog(context: PluginMcpContext, nodeId: string,
     return log && typeof log === "object" && typeof (log as Record<string, unknown>).id === "string" ? String((log as Record<string, unknown>).id) : "";
 }
 
-async function updateMcpGenerationLog(context: PluginMcpContext, logId: string, task: Record<string, unknown>, status: "running" | "success" | "failed" | "cancelled", error?: string) {
+async function updateMcpGenerationLog(context: PluginMcpContext, logId: string, task: Record<string, unknown>, status: "running" | "success" | "failed" | "cancelled", error?: string, extra?: { params?: Record<string, unknown>; lastSubmitted?: Record<string, unknown> }) {
     if (!logId) return;
     const result = task.result && typeof task.result === "object" ? task.result as Record<string, unknown> : {};
     const media = Array.isArray(result.media) ? result.media.filter((item) => item && typeof item === "object") as Array<Record<string, unknown>> : [];
     const actualSubmission = result.actualSubmission && typeof result.actualSubmission === "object" ? result.actualSubmission : undefined;
+    // 与前端直连路径对齐：把「实际提交的输入/参数」与「ComfyUI 实际落地的运行参数」(actualSubmission:
+    // promptId/seed/帧数/宽高/lora 等)一并写入 params，保证生成日志完整记录运行参数。
+    const logParams: Record<string, unknown> = {
+        ...(extra?.params && typeof extra.params === "object" ? extra.params : {}),
+        ...(extra?.lastSubmitted && typeof extra.lastSubmitted === "object" ? { lastSubmitted: extra.lastSubmitted } : {}),
+        ...(actualSubmission ? { actualSubmission } : {}),
+    };
     await context.backend.updateGenerationLog(logId, {
         status,
         ...(task.id ? { runtimeTaskId: String(task.id) } : {}),
@@ -223,6 +230,7 @@ async function updateMcpGenerationLog(context: PluginMcpContext, logId: string, 
         ...(status === "success" ? { outputs: media.map((item) => ({ url: item.url, storageKey: item.storageKey, type: "video", mimeType: item.mimeType })) } : {}),
         ...(error ? { error } : {}),
         ...(status === "success" || status === "failed" || status === "cancelled" ? { finishedAt: new Date().toISOString() } : {}),
+        ...(Object.keys(logParams).length ? { params: logParams } : {}),
     });
 }
 
@@ -260,7 +268,8 @@ async function runSegment(context: PluginMcpContext, node: AgentCanvasNode, inde
         ...(previousVideo ? { previousVideo } : {}),
     };
     const params = extractParams(segment, override);
-    return context.comfyUi.run("minimax-h3", input, params);
+    const task = await context.comfyUi.run("minimax-h3", input, params);
+    return { task, input, params };
 }
 
 async function waitForTask(context: PluginMcpContext, taskId: string) {
@@ -286,6 +295,29 @@ function taskVideo(task: Record<string, unknown>) {
     return media.find((item) => item && typeof item === "object" && String((item as Record<string, unknown>).mimeType || "").startsWith("video/")) as Record<string, unknown> | undefined;
 }
 
+/**
+ * 把 ComfyUI 任务返回的原始媒体地址改写成前端可直接播放的地址。
+ * 与前端直连路径(comfyui.ts proxyComfyMedia / use-plugin-host persistH3Result)对齐：
+ * 优先用 storageKey 生成 /media/<storageKey>(GET /media 免 token,见 backend server.ts)，
+ * 否则回退到 runtime-file / 绝对直链代理。clip 卡片直接用 segment.result 作 <video src>，
+ * 不二次代理，因此必须在此写入可播放地址，否则视频显示为空白/不可播放。
+ */
+function proxyH3ResultUrl(video: { url?: string; storageKey?: string }, backendUrl: string): { url: string; storageKey?: string } {
+    const storageKey = video.storageKey ? String(video.storageKey) : undefined;
+    if (storageKey) return { url: `/media/${encodeURIComponent(storageKey)}`, storageKey };
+    const raw = String(video.url || "");
+    if (raw.startsWith("/media/")) {
+        const key = decodeURIComponent(raw.slice("/media/".length).split("?")[0]);
+        if (key && !key.includes("/")) return { url: `/media/${key}`, storageKey: key };
+    }
+    if (raw.startsWith("runtime-file:")) {
+        const file = encodeURIComponent(raw.slice("runtime-file:".length));
+        return { url: `${backendUrl.replace(/\/$/, "")}/runtime/media-file?file=${file}` };
+    }
+    // 绝对 ComfyUI 直链等无法本地化的情况，原样透传(前端 /comfy/media 代理兜底)
+    return { url: raw };
+}
+
 async function updateClipTask(context: PluginMcpContext, nodeId: string, clipId: string, task: Record<string, unknown>, error?: string, bindTask = false) {
     const node = await context.getCanvasNode(nodeId);
     if (!node) return;
@@ -299,8 +331,11 @@ async function updateClipTask(context: PluginMcpContext, nodeId: string, clipId:
     if (!bindTask && (!taskId || String(segment.runtimeTaskId || "") !== taskId)) return;
     const status = error ? "error" : String(task.status || "running");
     const video = !error && status === "succeeded" ? taskVideo(task) : undefined;
-    const resultUrl = video?.url ? String(video.url) : undefined;
-    const resultStorageKey = video?.storageKey ? String(video.storageKey) : undefined;
+    // 与前端直连路径对齐：把 ComfyUI 原始媒体地址改写成前端可播放的 /media/<storageKey> 形式。
+    // 否则 clip 卡片用 segment.result 作 <video src> 会拿到不可播放的裸地址。
+    const proxied = video ? proxyH3ResultUrl(video, context.backendUrl) : undefined;
+    const resultUrl = proxied?.url;
+    const resultStorageKey = proxied?.storageKey;
     const segmentPatch: Record<string, unknown> = {
         status: status === "succeeded" ? "success" : status === "failed" || status === "cancelled" ? "error" : "running",
         runtimeTaskId: taskId || String(segment.runtimeTaskId || ""),
@@ -317,25 +352,26 @@ async function updateClipTask(context: PluginMcpContext, nodeId: string, clipId:
         runProgress: segmentPatch.progress,
         ...(segmentPatch.status === "running" ? { runStartedAt: Date.now(), errorDetails: undefined } : {}),
         ...(error ? { errorDetails: error, runFinishedAt: Date.now() } : {}),
-        ...(resultUrl ? { content: resultUrl, storageKey: resultStorageKey } : {}),
+        ...(resultUrl ? { content: resultUrl, ...(resultStorageKey ? { storageKey: resultStorageKey } : {}) } : {}),
     };
     await context.updateCanvasNode(nodeId, {}, nodePatch);
 }
 
-async function monitorClipTask(context: PluginMcpContext, nodeId: string, clipId: string, taskId: string, logId = "") {
+async function monitorClipTask(context: PluginMcpContext, nodeId: string, clipId: string, taskId: string, logId = "", params: Record<string, unknown> = {}, lastSubmitted: Record<string, unknown> = {}) {
     try {
         for (;;) {
             const current = await context.backend.comfyGetTask(taskId);
             await updateClipTask(context, nodeId, clipId, current.task as unknown as Record<string, unknown>);
             if (["succeeded", "failed", "cancelled"].includes(current.task.status)) {
-                await updateMcpGenerationLog(context, logId, current.task as unknown as Record<string, unknown>, current.task.status === "succeeded" ? "success" : current.task.status, current.task.error || undefined);
+                const finalStatus = current.task.status === "succeeded" ? "success" : current.task.status === "cancelled" ? "cancelled" : "failed";
+                await updateMcpGenerationLog(context, logId, current.task as unknown as Record<string, unknown>, finalStatus, current.task.error || undefined, { params, lastSubmitted });
                 return;
             }
             await new Promise((resolve) => setTimeout(resolve, 1500));
         }
     } catch (error) {
         await updateClipTask(context, nodeId, clipId, { id: taskId, status: "failed" }, error instanceof Error ? error.message : String(error));
-        await updateMcpGenerationLog(context, logId, { id: taskId, status: "failed" }, "failed", error instanceof Error ? error.message : String(error));
+        await updateMcpGenerationLog(context, logId, { id: taskId, status: "failed" }, "failed", error instanceof Error ? error.message : String(error), { params, lastSubmitted });
     }
 }
 
@@ -373,13 +409,14 @@ export const pluginMcp: PluginMcpModule = {
                 const params = extractParams(segment, (input.params as Record<string, unknown>) || {});
                 const { images, videos, audios } = collectRefs(segment);
                 const logId = await createMcpGenerationLog(context, nodeId, segment, [...images, ...videos, ...audios], params);
-                const task = await runSegment(context, node, selectedIndex, (input.params as Record<string, unknown>) || {});
+                const started = await runSegment(context, node, selectedIndex, (input.params as Record<string, unknown>) || {});
                 const clipId = String(segmentsOf(node)[selectedIndex]?.id || "");
                 if (!clipId) throw new Error("H3 Clip 缺少身份标识");
-                await updateClipTask(context, nodeId, clipId, task as unknown as Record<string, unknown>, undefined, true);
-                await updateMcpGenerationLog(context, logId, task as unknown as Record<string, unknown>, "running");
-                void monitorClipTask(context, nodeId, clipId, task.id, logId);
-                return { ...task, generationLogId: logId };
+                const lastSubmitted = { input: started.input, params: started.params };
+                await updateClipTask(context, nodeId, clipId, started.task as unknown as Record<string, unknown>, undefined, true);
+                await updateMcpGenerationLog(context, logId, started.task as unknown as Record<string, unknown>, "running", undefined, { params, lastSubmitted });
+                void monitorClipTask(context, nodeId, clipId, started.task.id, logId, params, lastSubmitted);
+                return { ...started.task, generationLogId: logId };
             },
             h3_get_task: async (input) => {
                 const taskId = String(input.taskId || "");
@@ -418,21 +455,30 @@ export const pluginMcp: PluginMcpModule = {
                     }
                     const clipId = String(segments[i].id || "");
                     let startedTaskId = "";
+                    let logId = "";
+                    let lastSubmitted: Record<string, unknown> = {};
                     try {
                         if (!clipId) throw new Error(`H3 Clip ${i + 1} 缺少身份标识`);
+                        const { images, videos, audios } = collectRefs(segments[i]);
+                        const params = extractParams(segments[i], override);
+                        logId = await createMcpGenerationLog(context, node.id, segments[i], [...images, ...videos, ...audios], params);
                         const started = await runSegment(context, node, i, override, previousVideo);
-                        startedTaskId = String(started.id || "");
-                        await updateClipTask(context, node.id, clipId, started as unknown as Record<string, unknown>, undefined, true);
-                        const task = await waitForTask(context, started.id);
+                        startedTaskId = String(started.task.id || "");
+                        lastSubmitted = { input: started.input, params: started.params };
+                        await updateClipTask(context, node.id, clipId, started.task as unknown as Record<string, unknown>, undefined, true);
+                        await updateMcpGenerationLog(context, logId, started.task as unknown as Record<string, unknown>, "running", undefined, { params, lastSubmitted });
+                        const task = await waitForTask(context, started.task.id);
                         await updateClipTask(context, node.id, clipId, task as unknown as Record<string, unknown>);
+                        await updateMcpGenerationLog(context, logId, task as unknown as Record<string, unknown>, "success", undefined, { params, lastSubmitted });
                         previousVideo = await previousVideoPath(context, task as unknown as Record<string, unknown>);
-                            tasks.push({ nodeId: node.id, segmentIndex: i, task });
+                        tasks.push({ nodeId: node.id, segmentIndex: i, task, generationLogId: logId });
                     } catch (error) {
                         await updateClipTask(context, node.id, clipId, { id: startedTaskId, status: "failed" }, error instanceof Error ? error.message : String(error), !startedTaskId);
-                            tasks.push({ nodeId: node.id, segmentIndex: i, error: error instanceof Error ? error.message : String(error) });
-                            break;
-                        }
+                        await updateMcpGenerationLog(context, logId, { id: startedTaskId, status: "failed" }, "failed", error instanceof Error ? error.message : String(error), { params, lastSubmitted });
+                        tasks.push({ nodeId: node.id, segmentIndex: i, generationLogId: logId, error: error instanceof Error ? error.message : String(error) });
+                        break;
                     }
+                }
                 }
                 return { count: tasks.length, tasks };
             },

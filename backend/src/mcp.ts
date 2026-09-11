@@ -9,7 +9,7 @@ import { BackendDatabase } from "./db.js";
 import { ComfyUiBackend } from "./comfyui/bridge.js";
 import { createStores } from "./stores/index.js";
 import { PluginMcpRegistry, buildPluginMcpContext, type PluginMcpDeclaration, type PluginMcpBackend } from "@basketikun/canvas-agent/plugin-mcp";
-import type { CanvasProject } from "./db.js";
+import type { CanvasProject, GenerationLogStatus } from "./db.js";
 import type { PluginDeclaration } from "./db.js";
 import type { ComfyUiClient } from "@basketikun/canvas-agent/runtime/comfy-client";
 import { toolDescriptions, toolInputSchemas, toolNames, type ToolName } from "@basketikun/canvas-agent/schemas";
@@ -34,6 +34,7 @@ export async function startBackendMcpServer() {
     const imageDispatcher = new CanvasImageDispatcher(config, stores, comfy, directImage, workflowStore, workflowExecutor);
     const directBackend: PluginMcpBackend = {
         listCanvasProjects: async () => db.listCanvasProjects(),
+        upsertCanvasProject: async (project) => db.upsertCanvasProject(project as CanvasProject),
         replaceCanvasProjects: async (projects) => db.replaceCanvasProjects(projects as CanvasProject[]),
         replacePluginDeclarations: async (declarations) => db.replacePluginDeclarations(declarations as PluginDeclaration[]),
         runtimeMediaStore: async (name, dataUrl, storageKey) => {
@@ -52,7 +53,7 @@ export async function startBackendMcpServer() {
             if (!media) throw new Error(`media not found: ${storageKey}`);
             return media.filePath;
         },
-        listGenerationLogs: async (options = {}) => stores.logs.list(options),
+        listGenerationLogs: async (options = {}) => stores.logs.list({ ...options, status: options.status && ["queued", "running", "success", "failed", "cancelled"].includes(options.status) ? options.status as GenerationLogStatus : undefined }),
         createGenerationLog: async (input) => stores.logs.create(input as never),
         updateGenerationLog: async (id, patch) => stores.logs.update(id, patch as never),
         comfyModels: (signal) => comfy.models(signal),
