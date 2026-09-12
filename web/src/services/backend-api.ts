@@ -2,6 +2,7 @@
 
 import { getBackendTokenShared } from "@/lib/backend-token";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult } from "@basketikun/canvas-agent/generation-contract";
+import { CANVAS_GENERATION_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
 
 export type BackendMediaResult = {
     storageKey: string;
@@ -67,7 +68,7 @@ export type BackendRuntimeTask = {
 
 /** 所有画布生成来源共用的任务提交客户端。 */
 export function startCanvasGeneration(input: CanvasGenerationCommand, signal?: AbortSignal) {
-    return request<{ ok: boolean } & CanvasGenerationStartResult>("POST", "/canvas/generation", input, { signal });
+    return request<{ ok: boolean } & CanvasGenerationStartResult>("POST", CANVAS_GENERATION_PATH, input, { signal });
 }
 
 export function syncBackendAiConfig(config: unknown) {
@@ -330,7 +331,7 @@ export async function saveDataDir(dataDir: string): Promise<{ dataDir: string; c
 // ── Tasks ────────────────────────────────────────────────────────────────
 
 export function fetchBackendTask(id: string, signal?: AbortSignal) {
-    return request<{ ok: boolean; task?: BackendRuntimeTask; events?: unknown[] }>("GET", `/tasks/${encodeURIComponent(id)}`, undefined, { signal });
+    return request<{ ok: boolean; task?: BackendRuntimeTask; events?: unknown[] }>("GET", canvasTaskPath(id), undefined, { signal });
 }
 
 export function fetchBackendTasks(options: { projectId?: string; nodeIds?: string[]; segmentIds?: string[]; scope?: "all" | "canvas" | "image" | "video"; status?: string; kind?: string; model?: string; taskId?: string; limit?: number; offset?: number } = {}) {
@@ -346,23 +347,23 @@ export function fetchBackendTasks(options: { projectId?: string; nodeIds?: strin
     if (options.limit) params.set("limit", String(options.limit));
     if (options.offset) params.set("offset", String(options.offset));
     const qs = params.toString();
-    return request<{ ok: boolean; tasks?: BackendRuntimeTask[] }>("GET", `/tasks${qs ? `?${qs}` : ""}`);
+    return request<{ ok: boolean; tasks?: BackendRuntimeTask[] }>("GET", `${CANVAS_TASKS_PATH}${qs ? `?${qs}` : ""}`);
 }
 
 export function createBackendTask(kind: string, input: Record<string, unknown> = {}, params: Record<string, unknown> = {}, clientTaskId?: string) {
-    return request<{ ok: boolean; task?: Record<string, unknown> }>("POST", "/tasks", { kind, input, params, ...(clientTaskId ? { clientTaskId } : {}) });
+    return request<{ ok: boolean; task?: Record<string, unknown> }>("POST", CANVAS_TASKS_PATH, { kind, input, params, ...(clientTaskId ? { clientTaskId } : {}) });
 }
 
 export function updateBackendTask(id: string, patch: { status?: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress?: number; error?: string | null }) {
-    return request<{ ok: boolean; task?: BackendRuntimeTask }>("PATCH", `/tasks/${encodeURIComponent(id)}`, patch);
+    return request<{ ok: boolean; task?: BackendRuntimeTask }>("PATCH", canvasTaskPath(id), patch);
 }
 
 export function cancelBackendTask(id: string) {
-    return request<{ ok: boolean; task?: Record<string, unknown> }>("POST", `/tasks/${encodeURIComponent(id)}/cancel`);
+    return request<{ ok: boolean; task?: Record<string, unknown> }>("POST", canvasTaskActionPath(id, "cancel"));
 }
 
 export function retryBackendTask(id: string) {
-    return request<{ ok: boolean; task?: BackendRuntimeTask; parentTaskId?: string }>("POST", `/tasks/${encodeURIComponent(id)}/retry`);
+    return request<{ ok: boolean; task?: BackendRuntimeTask; parentTaskId?: string }>("POST", canvasTaskActionPath(id, "retry"));
 }
 
 export function diagnoseBackendCanvasProject(projectId: string) {

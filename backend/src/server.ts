@@ -14,6 +14,7 @@ import type { GenerationLogInput, LogDeleteScope, Stores } from "./stores/types.
 import { BackendEventBus } from "./events.js";
 import type { CanvasOperation } from "./canvas/project-ops.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
+import { CANVAS_TASKS_PATH, CANVAS_TASK_ROUTE, canvasTaskActionRoute } from "@basketikun/canvas-agent/generation-api";
 
 const logger = createLogger("backend");
 
@@ -528,7 +529,7 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     });
 
     // ── Tasks ────────────────────────────────────────────────────────────
-    app.get("/tasks", (req, res) => {
+    app.get(CANVAS_TASKS_PATH, (req, res) => {
         const status = typeof req.query.status === "string" ? req.query.status : undefined;
         const kind = typeof req.query.kind === "string" ? req.query.kind : undefined;
         const model = typeof req.query.model === "string" ? req.query.model : undefined;
@@ -550,12 +551,12 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
             });
         res.json({ ok: true, tasks });
     });
-    app.get("/tasks/:id", (req, res) => {
+    app.get(CANVAS_TASK_ROUTE, (req, res) => {
         const task = stores.tasks.get(req.params.id);
         if (!task) return void res.status(404).json({ ok: false, error: "task not found" });
         res.json({ ok: true, task, events: stores.tasks.events(req.params.id, Number(req.query.after || 0)) });
     });
-    app.post("/tasks", (req, res) => {
+    app.post(CANVAS_TASKS_PATH, (req, res) => {
         const body = req.body as { kind?: string; clientTaskId?: string; input?: Record<string, unknown>; params?: Record<string, unknown> };
         if (!body.kind) return void res.status(400).json({ ok: false, error: "kind 必填" });
         const task = body.clientTaskId
@@ -564,7 +565,7 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         events.publish({ type: "task.created", entityId: task.id, payload: task });
         res.status(201).json({ ok: true, task });
     });
-    app.patch("/tasks/:id", (req, res) => {
+    app.patch(CANVAS_TASK_ROUTE, (req, res) => {
         const patch = req.body as { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null };
         try {
             const task = stores.tasks.update(req.params.id, patch);
@@ -574,20 +575,21 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
             res.status(404).json({ ok: false, error: (error as Error).message });
         }
     });
-    app.post("/tasks/:id/cancel", (req, res) => {
+    app.post(canvasTaskActionRoute("cancel"), (req, res) => {
         try {
-            const current = stores.tasks.get(req.params.id);
+            const taskId = String(req.params.id);
+            const current = stores.tasks.get(taskId);
             if (!current) return void res.status(404).json({ ok: false, error: "task not found" });
-            const task = deps.cancelTask ? deps.cancelTask(current) : stores.tasks.cancel(req.params.id);
+            const task = deps.cancelTask ? deps.cancelTask(current) : stores.tasks.cancel(taskId);
             events.publish({ type: "task.updated", entityId: task.id, payload: task });
             res.json({ ok: true, task });
         } catch (error) {
             res.status(409).json({ ok: false, error: (error as Error).message });
         }
     });
-    app.post("/tasks/:id/retry", async (req, res) => {
+    app.post(canvasTaskActionRoute("retry"), async (req, res) => {
         try {
-            const current = stores.tasks.get(req.params.id);
+            const current = stores.tasks.get(String(req.params.id));
             if (!current) return void res.status(404).json({ ok: false, error: "task not found" });
             if (!deps.retryTask) return void res.status(409).json({ ok: false, error: `任务类型 ${current.kind} 没有注册重试执行器` });
             const task = await deps.retryTask(current);

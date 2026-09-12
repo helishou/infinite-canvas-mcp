@@ -8,6 +8,7 @@ import { getLocalH3Task, getRunningHubH3Task, runVideoConcatTask } from "@/servi
 import { fetchComfyModels } from "@/services/api/canvas-agent";
 import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
 import { getBackendTokenShared } from "@/lib/backend-token";
+import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
@@ -150,13 +151,13 @@ export function usePluginHost(params: PluginHostParams) {
                 return task;
             },
             getCanvasH3Task: async (taskId) => {
-                const response = await fetch(`${getBackendUrl()}/tasks/${encodeURIComponent(taskId)}?token=${encodeURIComponent(getBackendTokenShared())}`);
+                const response = await fetch(`${getBackendUrl()}${canvasTaskPath(taskId)}?token=${encodeURIComponent(getBackendTokenShared())}`);
                 const data = await response.json() as { task?: import("@/types/canvas-plugin").LocalH3Task; error?: string };
                 if (!response.ok || !data.task) throw new Error(data.error || `读取 H3 运行失败（HTTP ${response.status}）`);
                 return data.task;
             },
             cancelCanvasH3Task: async (taskId) => {
-                const response = await fetch(`${getBackendUrl()}/tasks/${encodeURIComponent(taskId)}/cancel?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "POST" });
+                const response = await fetch(`${getBackendUrl()}${canvasTaskActionPath(taskId, "cancel")}?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "POST" });
                 const data = await response.json() as { task?: import("@/types/canvas-plugin").LocalH3Task; error?: string };
                 if (!response.ok || !data.task) throw new Error(data.error || `取消 H3 运行失败（HTTP ${response.status}）`);
                 return data.task;

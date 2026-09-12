@@ -10,6 +10,9 @@ function source(relativePath: string) {
 }
 
 test("前端、Agent 和 Backend 的生成调用方共用唯一 HTTP 入口", () => {
+    const api = source("canvas-agent/src/canvas/generation-api.ts");
+    assert.match(api, /CANVAS_GENERATION_PATH = "\/canvas\/generation"/);
+    assert.match(api, /CANVAS_TASKS_PATH = "\/tasks"/);
     const callers = [
         "web/src/services/backend-api.ts",
         "canvas-agent/src/runtime/backend-client.ts",
@@ -17,7 +20,7 @@ test("前端、Agent 和 Backend 的生成调用方共用唯一 HTTP 入口", ()
     ];
     for (const file of callers) {
         const text = source(file);
-        assert.match(text, /\/canvas\/generation/);
+        assert.match(text, /CANVAS_GENERATION_PATH/);
         assert.doesNotMatch(text, /\/canvas\/(?:h3\/runs|image-generation)/);
     }
     assert.match(source("backend/src/mcp.ts"), /backendApi\.canvasRunGeneration/);
@@ -27,8 +30,11 @@ test("前端、Agent 和 Backend 的生成调用方共用唯一 HTTP 入口", ()
 test("取消与重试由所有客户端共用 Backend 任务端点", () => {
     const web = source("web/src/services/backend-api.ts");
     const agent = source("canvas-agent/src/runtime/backend-client.ts");
-    for (const action of ["cancel", "retry"]) {
-        assert.match(web, new RegExp(`/tasks/\\$\\{encodeURIComponent\\(id\\)\\}/${action}`));
-        assert.match(agent, new RegExp(`/tasks/\\$\\{encodeURIComponent\\(id\\)\\}/${action}`));
-    }
+    const pluginHost = source("web/src/pages/canvas/hooks/use-plugin-host.tsx");
+    assert.match(web, /canvasTaskActionPath/);
+    assert.match(agent, /canvasTaskActionPath/);
+    assert.match(pluginHost, /canvasTaskActionPath/);
+    assert.doesNotMatch(web, /`\/tasks\/\$\{encodeURIComponent\(id\)\}/);
+    assert.doesNotMatch(agent, /`\/tasks\/\$\{encodeURIComponent\(id\)\}/);
+    assert.doesNotMatch(pluginHost, /`\$\{getBackendUrl\(\)\}\/tasks\//);
 });

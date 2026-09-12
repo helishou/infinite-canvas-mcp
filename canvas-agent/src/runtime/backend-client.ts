@@ -3,6 +3,7 @@ import path from "node:path";
 
 import type { RuntimeTask, RuntimeTaskEvent } from "./types.js";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult } from "../canvas/generation-contract.js";
+import { CANVAS_GENERATION_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath } from "../canvas/generation-api.js";
 
 /** 总后台 API 客户端（canvas-agent 作为调用方）。 */
 export class BackendClient {
@@ -84,7 +85,7 @@ export class BackendClient {
     }
 
     async canvasRunGeneration(input: CanvasGenerationCommand) {
-        const data = await this.post<{ ok: boolean } & CanvasGenerationStartResult>("/canvas/generation", input);
+        const data = await this.post<{ ok: boolean } & CanvasGenerationStartResult>(CANVAS_GENERATION_PATH, input);
         if (!data.task && !data.taskId) throw new Error("Backend canvas generation returned no task");
         return data;
     }
@@ -164,7 +165,7 @@ export class BackendClient {
     // ── Tasks ────────────────────────────────────────────────────────────
 
     async getTask(id: string): Promise<{ task: RuntimeTask; events: RuntimeTaskEvent[] }> {
-        const data = await this.get<{ ok: boolean; task?: RuntimeTask; events?: RuntimeTaskEvent[] }>(`/tasks/${encodeURIComponent(id)}`);
+        const data = await this.get<{ ok: boolean; task?: RuntimeTask; events?: RuntimeTaskEvent[] }>(canvasTaskPath(id));
         if (!data.task) throw new Error(`backend task not found: ${id}`);
         return { task: data.task, events: data.events || [] };
     }
@@ -181,28 +182,28 @@ export class BackendClient {
         if (options.taskId) query.set("taskId", options.taskId);
         if (options.limit) query.set("limit", String(options.limit));
         if (options.offset) query.set("offset", String(options.offset));
-        const data = await this.get<{ tasks?: RuntimeTask[] }>(`/tasks${query.size ? `?${query.toString()}` : ""}`);
+        const data = await this.get<{ tasks?: RuntimeTask[] }>(`${CANVAS_TASKS_PATH}${query.size ? `?${query.toString()}` : ""}`);
         return data.tasks || [];
     }
 
     async createTask(kind: string, input: Record<string, unknown> = {}, params: Record<string, unknown> = {}) {
-        const data = await this.post<{ ok: boolean; task?: unknown }>("/tasks", { kind, input, params });
+        const data = await this.post<{ ok: boolean; task?: unknown }>(CANVAS_TASKS_PATH, { kind, input, params });
         return data.task;
     }
 
     async updateTask(id: string, patch: Record<string, unknown>) {
-        const data = await this.patch<{ ok: boolean; task?: unknown }>(`/tasks/${encodeURIComponent(id)}`, patch);
+        const data = await this.patch<{ ok: boolean; task?: unknown }>(canvasTaskPath(id), patch);
         return data.task;
     }
 
     async cancelTask(id: string): Promise<RuntimeTask> {
-        const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(`/tasks/${encodeURIComponent(id)}/cancel`);
+        const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(canvasTaskActionPath(id, "cancel"));
         if (!data.task) throw new Error(`backend task cancel returned no task: ${id}`);
         return data.task;
     }
 
     async retryTask(id: string): Promise<RuntimeTask> {
-        const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(`/tasks/${encodeURIComponent(id)}/retry`);
+        const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(canvasTaskActionPath(id, "retry"));
         if (!data.task) throw new Error(`backend task retry returned no task: ${id}`);
         return data.task;
     }

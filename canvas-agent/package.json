@@ -11,6 +11,7 @@
     "./schemas": "./dist/canvas/schemas.js",
     "./operations": "./dist/canvas/operations.js",
     "./generation-contract": "./dist/canvas/generation-contract.js",
+    "./generation-api": "./dist/canvas/generation-api.js",
     "./model-workflow": "./dist/canvas/model-workflow.js",
     "./runtime/comfy-client": "./dist/runtime/comfy-client.js",
     "./runtime/agent-runtime": "./dist/runtime/agent-runtime.js",
