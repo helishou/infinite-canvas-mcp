@@ -190,6 +190,36 @@ export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string)
 export type LocalH3Preview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
 export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: LocalH3Preview | null; result?: LocalH3Result | null; error?: string | null };
 export type CanvasH3RunOptions = { projectId: string; nodeId: string; segmentIndex?: number; runFromCurrent?: boolean; params?: Record<string, unknown>; idempotencyKey?: string };
+export type CanvasGenerationCommand = {
+    mode: CanvasGenerationMode;
+    operation?: "generate" | "h3-run";
+    projectId?: string;
+    nodeId?: string;
+    nodeIds?: string[];
+    segmentId?: string;
+    segmentIndex?: number;
+    runFromCurrent?: boolean;
+    skipCompleted?: boolean;
+    model?: string;
+    prompt?: string;
+    references?: Array<Record<string, unknown>>;
+    size?: string;
+    width?: number;
+    height?: number;
+    quality?: string;
+    count?: number;
+    params?: Record<string, unknown>;
+    input?: Record<string, unknown>;
+    preset?: string;
+    workflow?: string;
+    comfyUrl?: string;
+    provider?: { baseUrl?: string; apiKey?: string };
+    resultPolicy?: "replace-active" | "append";
+    clientTaskId?: string;
+    idempotencyKey?: string;
+    writeBackCanvas?: boolean;
+};
+export type CanvasGenerationTask = { id: string; status: LocalH3Task["status"]; progress: number; result?: Record<string, unknown> | null; preview?: LocalH3Preview | null; error?: string | null; executor?: string; model?: string };
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 
 // 一个可选模型:value 传回给 generateXxx({ model }),label 用于展示
@@ -201,6 +231,7 @@ export type CanvasPluginAi = {
     generateImage: (prompt: string, options?: GenerateImageOptions) => Promise<GenerateImageResult>;
     generateVideo: (prompt: string, options?: GenerateVideoOptions) => Promise<GenerateVideoResult>;
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
+    runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
     runCanvasH3: (options: CanvasH3RunOptions) => Promise<LocalH3Task>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;

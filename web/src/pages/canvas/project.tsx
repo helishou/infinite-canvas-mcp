@@ -12,7 +12,7 @@ import { defaultConfig, modelHasWorkflowConfig, modelOptionName, modelWorkflowMi
 import { getComfyTask, resolveComfyImageSize, runVideoConcatTask } from "@/services/api/comfyui";
 import { uploadImage, type UploadedImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { backendMediaUrl, fetchBackendTask, startCanvasImageGeneration, type BackendMediaResult } from "@/services/backend-api";
+import { backendMediaUrl, fetchBackendTask, startCanvasGeneration, type BackendMediaResult } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -194,7 +194,8 @@ async function runLocalComfyImage(
     // 渠道模型配置里解析出的工作流名（文生 / 单图 / 多图各自路由），空则由后端按模型名推断
     workflow?: string,
 ): Promise<UploadedImage> {
-    const started = await startCanvasImageGeneration({
+    const started = await startCanvasGeneration({
+        mode: "image",
         model: selectedModelName,
         prompt,
         references,

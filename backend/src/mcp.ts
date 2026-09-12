@@ -10,6 +10,7 @@ import type { CanvasProject } from "./db.js";
 import { toolDescriptions, toolInputSchemas, toolNames, type ToolName } from "@basketikun/canvas-agent/schemas";
 import { buildCanvasToolRequest } from "@basketikun/canvas-agent/operations";
 import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasImageGenerationInput } from "./canvas/image-dispatcher.js";
 import { splitImageBuffer } from "./canvas/image-split.js";
 import { backendComfyUi, createBackendClient } from "@basketikun/canvas-agent/runtime/comfy-client";
@@ -28,6 +29,7 @@ export async function startBackendMcpServer() {
         listCanvasProjects: () => backendApi.listCanvasProjects(),
         applyCanvasOperations: (projectId, operations, expectedRevision) => backendApi.applyCanvasOperations(projectId, operations, expectedRevision),
         replacePluginDeclarations: (declarations) => backendApi.replacePluginDeclarations(declarations),
+        canvasRunGeneration: (input) => backendApi.canvasRunGeneration(input),
         canvasRunH3: (input) => backendApi.canvasRunH3(input),
         getTask: (id) => backendApi.getTask(id),
         cancelTask: (id) => backendApi.cancelTask(id),
@@ -108,7 +110,7 @@ async function executeDirectCanvasTool(config: ReturnType<typeof loadConfig>, ba
                 type: "update_node", id: sourceId, metadata: { status: "loading", runtimeTaskId: imageRequest.clientTaskId, errorDetails: undefined },
             }]);
             withLoadingState = loading.project;
-            const task = await startBackendCanvasImageGeneration(config, imageRequest);
+            const task = await backendApi.canvasRunGeneration({ ...imageRequest, mode: "image" });
             directTasks.push({ taskId: task.taskId, nodeId: sourceId, model: selectedModel });
         } else if (mode === "video") {
             const videoRequest = await buildCanvasVideoRequest(source, currentState, project.id, backendApi, op);
@@ -286,7 +288,7 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
     });
 }
 
-async function buildCanvasVideoRequest(source: Record<string, unknown>, project: Record<string, unknown>, projectId: string, backend: ReturnType<typeof createBackendClient>, op: Record<string, unknown>) {
+async function buildCanvasVideoRequest(source: Record<string, unknown>, project: Record<string, unknown>, projectId: string, backend: ReturnType<typeof createBackendClient>, op: Record<string, unknown>): Promise<CanvasGenerationCommand> {
     const metadata = recordOf(source.metadata);
     const segments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
     const segmentId = String(op.segmentId || metadata.selectedSegmentId || segments[0]?.id || "");
@@ -390,17 +392,6 @@ function buildCanvasImageRequest(source: Record<string, unknown>, project: Recor
         writeBackCanvas: true,
         resultPolicy: String(op.resultPolicy || "replace-active") === "append" ? "append" : "replace-active",
     };
-}
-
-async function startBackendCanvasImageGeneration(config: ReturnType<typeof loadConfig>, input: CanvasImageGenerationInput) {
-    const response = await fetch(`${config.url.replace(/\/$/, "")}/canvas/generation?token=${encodeURIComponent(config.token)}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...input, mode: "image" }),
-    });
-    const body = await response.json().catch(() => ({})) as { taskId?: string; logId?: string; error?: string };
-    if (!response.ok || !body.taskId) throw new Error(body.error || `图片生成提交失败: HTTP ${response.status}`);
-    return { taskId: body.taskId, logId: body.logId };
 }
 
 function normalizeGptImageSize(value: unknown) {

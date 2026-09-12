@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { RuntimeTask, RuntimeTaskEvent } from "./types.js";
+import type { CanvasGenerationCommand } from "../canvas/generation-contract.js";
 
 /** 总后台 API 客户端（canvas-agent 作为调用方）。 */
 export class BackendClient {
@@ -82,16 +83,16 @@ export class BackendClient {
         return this.get<{ ok: boolean; projectId: string; revision: number; issues: unknown[] }>(`/canvas/projects/${encodeURIComponent(projectId)}/diagnostics`);
     }
 
-    async canvasRunGeneration(input: Record<string, unknown>) {
+    async canvasRunGeneration(input: CanvasGenerationCommand) {
         const data = await this.post<{ ok: boolean; task?: RuntimeTask; taskId?: string; executor?: string }>("/canvas/generation", input);
         if (!data.task && !data.taskId) throw new Error("Backend canvas generation returned no task");
         return { task: data.task, taskId: data.taskId || data.task?.id || "", executor: data.executor || "" };
     }
 
-    async canvasRunH3(input: Record<string, unknown>) {
-        const data = await this.post<{ ok: boolean; task?: RuntimeTask }>("/canvas/h3/runs", input);
-        if (!data.task) throw new Error("Backend H3 run returned no task");
-        return data.task;
+    async canvasRunH3(input: Omit<CanvasGenerationCommand, "mode" | "operation">) {
+        const result = await this.canvasRunGeneration({ ...input, mode: "video", operation: "h3-run" });
+        if (!result.task) throw new Error("Backend H3 run returned no task");
+        return result.task;
     }
 
     // ── Assets ───────────────────────────────────────────────────────────

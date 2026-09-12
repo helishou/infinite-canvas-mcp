@@ -6,7 +6,7 @@ import { imageToDataUrl } from "@/services/image-storage";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { getLocalH3Task, getRunningHubH3Task, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
-import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, updateBackendGenerationLog } from "@/services/backend-api";
+import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
@@ -15,7 +15,7 @@ import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
-import type { CanvasAssetPickerImage, CanvasGenerationLogs, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost } from "@/types/canvas-plugin";
+import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
@@ -137,6 +137,11 @@ export function usePluginHost(params: PluginHostParams) {
                 const text = await requestImageQuestion(config, messages, (delta) => options?.onDelta?.(delta), { signal: options?.signal });
                 return { text };
             },
+            runCanvasGeneration: async (command: CanvasGenerationCommand) => {
+                const data = await startCanvasGeneration(command);
+                if (!data.task) throw new Error("画布生成失败：Backend 未返回任务");
+                return data.task as import("@/types/canvas-plugin").CanvasGenerationTask;
+            },
             getLocalH3Task: async (taskId) => {
                 const task = await getLocalH3Task(getBackendUrl(), getBackendTokenShared(), taskId) as Awaited<ReturnType<typeof getLocalH3Task>>;
                 if (task.status === "succeeded" && task.result?.url && !task.result.storageKey) {
@@ -145,14 +150,9 @@ export function usePluginHost(params: PluginHostParams) {
                 return task;
             },
             runCanvasH3: async (options) => {
-                const response = await fetch(`${getBackendUrl()}/canvas/h3/runs?token=${encodeURIComponent(getBackendTokenShared())}`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(options),
-                });
-                const data = await response.json() as { task?: import("@/types/canvas-plugin").LocalH3Task; error?: string };
-                if (!response.ok || !data.task) throw new Error(data.error || `启动 H3 运行失败（HTTP ${response.status}）`);
-                return data.task;
+                const data = await startCanvasGeneration({ ...options, mode: "video", operation: "h3-run" });
+                if (!data.task) throw new Error("启动 H3 运行失败：Backend 未返回任务");
+                return data.task as import("@/types/canvas-plugin").LocalH3Task;
             },
             getCanvasH3Task: async (taskId) => {
                 const response = await fetch(`${getBackendUrl()}/tasks/${encodeURIComponent(taskId)}?token=${encodeURIComponent(getBackendTokenShared())}`);

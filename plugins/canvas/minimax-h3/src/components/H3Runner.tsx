@@ -41,7 +41,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             if (!segments.length) throw new Error("当前节点没有可生成的 Clip");
             const selectedId = String(metadata.selectedSegmentId || segments[0].id || "");
             const segmentIndex = Math.max(0, segments.findIndex((segment) => String(segment.id || "") === selectedId));
-            await ctx.ai.runCanvasH3({ projectId: ctx.projectId, nodeId: ctx.node.id, segmentIndex, runFromCurrent });
+            await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentIndex, runFromCurrent });
         } catch (error) {
             update({ runtimeTaskId: "", runtimeRunId: "", status: "error", runProgress: 0, errorDetails: error instanceof Error ? error.message : String(error), cancelRequested: false });
         } finally {

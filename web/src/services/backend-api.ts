@@ -1,6 +1,7 @@
 /** 总后台 API client（Web 端）。 */
 
 import { getBackendTokenShared } from "@/lib/backend-token";
+import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
 export type BackendMediaResult = {
     storageKey: string;
@@ -44,25 +45,7 @@ export async function request<T = unknown>(method: string, path: string, body?: 
     return data;
 }
 
-export type CanvasImageGenerationRequest = {
-    model: string;
-    prompt: string;
-    references?: Array<{ name: string; dataUrl?: string; url?: string; storageKey?: string; mimeType?: string }>;
-    size?: string;
-    width?: number;
-    height?: number;
-    quality?: string;
-    count?: number;
-    params?: Record<string, unknown>;
-    provider?: { baseUrl?: string; apiKey?: string };
-    clientTaskId?: string;
-    // 渠道模型按输入场景解析出的 ComfyUI 工作流名；不传则由后端按模型名推断
-    workflow?: string;
-    // 画布生成日志关联：项目 id + 触发节点 id
-    projectId?: string;
-    nodeId?: string;
-    resultPolicy?: "replace-active" | "append";
-};
+export type CanvasGenerationRequest = CanvasGenerationCommand;
 
 export type BackendRuntimeTask = {
     id: string;
@@ -84,8 +67,9 @@ export type BackendRuntimeTask = {
     updatedAt?: string;
 };
 
-export function startCanvasImageGeneration(input: CanvasImageGenerationRequest, signal?: AbortSignal) {
-    return request<{ ok: boolean; taskId: string }>("POST", "/canvas/generation", { mode: "image", ...input }, { signal });
+/** 所有画布生成来源共用的任务提交客户端。 */
+export function startCanvasGeneration(input: CanvasGenerationRequest, signal?: AbortSignal) {
+    return request<{ ok: boolean; taskId: string; task?: BackendRuntimeTask; executor: string }>("POST", "/canvas/generation", input, { signal });
 }
 
 export function syncBackendAiConfig(config: unknown) {

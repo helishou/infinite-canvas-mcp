@@ -241,13 +241,17 @@ export const pluginMcp: PluginMcpModule = {
                 const node = await context.getCanvasNode(nodeId);
                 if (!node) throw new Error(`找不到画布节点:${nodeId}`);
                 if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
-                return context.backend.canvasRunH3({
+                const result = await context.backend.canvasRunGeneration({
+                    mode: "video",
+                    operation: "h3-run",
                     projectId,
                     nodeId,
                     ...(typeof input.segmentIndex === "number" ? { segmentIndex: input.segmentIndex } : {}),
                     params: (input.params as Record<string, unknown>) || {},
                     ...(typeof input.idempotencyKey === "string" ? { idempotencyKey: input.idempotencyKey } : {}),
                 });
+                if (!result.task) throw new Error("Backend H3 运行未返回任务");
+                return result.task;
             },
             h3_get_task: async (input) => {
                 const taskId = String(input.taskId || "");
@@ -277,7 +281,9 @@ export const pluginMcp: PluginMcpModule = {
                 const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
                 if (!project) throw new Error(`画布不存在:${projectId}`);
                 const nodes = (await context.getCanvasNodes()).filter((node) => isH3Node(node) && (!onlyIds || onlyIds.includes(node.id)) && Array.isArray(project.nodes) && (project.nodes as Array<Record<string, unknown>>).some((item) => String(item.id || "") === node.id));
-                return context.backend.canvasRunH3({ projectId, nodeIds: nodes.map((node) => node.id), runFromCurrent: true, skipCompleted: true, params: override });
+                const result = await context.backend.canvasRunGeneration({ mode: "video", operation: "h3-run", projectId, nodeIds: nodes.map((node) => node.id), runFromCurrent: true, skipCompleted: true, params: override });
+                if (!result.task) throw new Error("Backend H3 批量运行未返回任务");
+                return result.task;
             },
         };
     },

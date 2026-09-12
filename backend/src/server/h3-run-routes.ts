@@ -1,12 +1,13 @@
 import type { Request, Response, Router } from "express";
-import type { CanvasH3Runner } from "../canvas/h3-runner.js";
+import type { CanvasGenerationService } from "../canvas/generation-service.js";
 
-export function registerCanvasH3RunRoutes(router: Router, runner: CanvasH3Runner) {
-    router.post("/canvas/h3/runs", (req: Request, res: Response) => {
+/** 旧 H3 URL 仅保留协议兼容，执行仍进入 CanvasGenerationService。 */
+export function registerCanvasH3RunRoutes(router: Router, service: CanvasGenerationService) {
+    router.post("/canvas/h3/runs", async (req: Request, res: Response) => {
         try {
             const body = req.body || {};
-            const task = runner.start(body, typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() || undefined : undefined);
-            res.status(201).json({ ok: true, task });
+            const result = await service.start({ ...body, mode: "video", operation: "h3-run" });
+            res.status(201).json({ ok: true, task: result.task });
         } catch (error) {
             res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
         }

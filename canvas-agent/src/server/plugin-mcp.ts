@@ -6,6 +6,7 @@ import { backendComfyUi, createBackendClient, type ComfyUiClient } from "../runt
 import { loadConfig, type CanvasAgentConfig } from "../config.js";
 import { logger } from "../utils/logger.js";
 import type { ToolName } from "../canvas/schemas.js";
+import type { CanvasGenerationCommand } from "../canvas/generation-contract.js";
 
 // 画布节点在 Agent 侧的轻量形态(避免与 web 类型耦合)
 export type AgentCanvasNode = {
@@ -57,7 +58,8 @@ export type PluginMcpBackend = {
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
     applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[] }>;
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
-    canvasRunH3(input: Record<string, unknown>): Promise<import("../runtime/types.js").RuntimeTask>;
+    canvasRunGeneration(input: CanvasGenerationCommand): Promise<{ task?: import("../runtime/types.js").RuntimeTask; taskId: string; executor: string }>;
+    canvasRunH3(input: Omit<CanvasGenerationCommand, "mode" | "operation">): Promise<import("../runtime/types.js").RuntimeTask>;
     getTask(id: string): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;
     cancelTask(id: string): Promise<import("../runtime/types.js").RuntimeTask>;
     getH3Defaults(): Promise<Record<string, unknown>>;
