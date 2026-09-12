@@ -24,7 +24,7 @@ import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-i
 import { computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
-import { App, Button, Modal } from "antd";
+import { Alert, App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -138,8 +138,23 @@ const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
 type CanvasReferenceRole = "character_turnaround" | "storyboard" | "scene" | "motion_reference" | "audio_reference";
 type CanvasReferenceDrag = { nodeId: string; url: string; type: "image"; name: string; storageKey?: string; mimeType?: string; role?: CanvasReferenceRole; subjectId?: string };
-// 角色节点拖到 ref 槽：dispatchCanvasReferenceDrag 会按 images 数组逐张发 drop 事件。
-type CharacterReferenceDrag = { nodeId: string; images: Array<{ url: string; name: string; storageKey?: string; mimeType?: string; role?: CanvasReferenceRole; subjectId?: string }> };
+// 角色派发：H3 端按 characterGroupInput 建/复用角色组，由 group 派生 outfit image refs + voice audio ref
+type CharacterReferenceDrag = {
+    nodeId: string;
+    type: "character";
+    kind: "character";
+    characterAssetId?: string;
+    characterNodeId?: string;
+    characterName: string;
+    characterImages: Array<{ url: string; name: string; storageKey?: string; mimeType?: string }>;
+    characterVoiceUrl?: string;
+    characterVoiceName?: string;
+    characterVoiceStorageKey?: string;
+    characterVoiceAssetId?: string;
+    voice?: string;
+    voiceName?: string;
+    voiceAssetId?: string;
+};
 type AnyReferenceDrag = CanvasReferenceDrag | CharacterReferenceDrag;
 
 function canvasReferenceRole(node: CanvasNodeData): CanvasReferenceRole | undefined {
@@ -277,6 +292,8 @@ function InfiniteCanvasPage() {
     const deleteProjects = useCanvasStore((state) => state.deleteProjects);
     const currentProject = useCanvasStore((state) => state.projects.find((project) => project.id === projectId));
     const backendRevision = useCanvasStore((state) => state.backendRevisions[projectId] || 0);
+    const canvasConflict = useCanvasStore((state) => state.canvasConflicts[projectId]);
+    const clearCanvasConflict = useCanvasStore((state) => state.clearCanvasConflict);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [nodes, setNodes] = useState<CanvasNodeData[]>([]);
     const [connections, setConnections] = useState<CanvasConnection[]>([]);
@@ -1296,12 +1313,20 @@ function InfiniteCanvasPage() {
                     const url = String(node.metadata?.content || "").trim();
                     return url ? { nodeId: node.id, url, type: "image" as const, name: node.title || "图片", storageKey: node.metadata?.storageKey, mimeType: node.metadata?.mimeType, role: canvasReferenceRole(node), subjectId: canvasReferenceRole(node) === "character_turnaround" ? node.id : undefined } : undefined;
                 }
-                // Character 节点：每张 outfit 拆为单独 image ref，拖到 H3 ref 槽逐张加入。
+                // Character 节点：作为单个 character 派发到 H3 ref 槽，由 H3 端建/复用角色组并把 outfit/voice 拆为 refs。
                 if (node.type === CanvasNodeType.Character) {
                     const images = (node.metadata?.characterImages || []).filter((image) => image.url);
                     return images.length ? {
                         nodeId: node.id,
-                        images: images.map((image) => ({ url: image.url, name: `${node.title || "角色"} · ${image.outfit || image.name || "outfit"}`, storageKey: image.storageKey, mimeType: image.mimeType })),
+                        type: "character" as const,
+                        kind: "character" as const,
+                        characterNodeId: node.id,
+                        characterName: node.title || "角色",
+                        characterImages: images.map((image) => ({ url: image.url, name: image.outfit || image.name || "outfit", storageKey: image.storageKey, mimeType: image.mimeType })),
+                        characterVoiceUrl: node.metadata?.characterVoiceUrl,
+                        characterVoiceName: node.metadata?.characterVoiceName,
+                        characterVoiceStorageKey: node.metadata?.characterVoiceStorageKey,
+                        characterVoiceAssetId: node.metadata?.characterVoiceAssetId,
                     } : undefined;
                 }
                 return undefined;
@@ -1333,12 +1358,10 @@ function InfiniteCanvasPage() {
         const referenceDrag = dragRef.current.referenceDrag;
         const referenceTargetNodeId = dragRef.current.referenceTargetNodeId;
         if (referenceDrag && referenceTargetNodeId && clientX != null && clientY != null) {
-            // 角色节点：images 数组逐张发送 drop，让 H3 按张数添加
-            if ("images" in referenceDrag) {
-                for (const image of referenceDrag.images) {
-                    dispatchCanvasReferenceDrag("canvas-reference-drop", { nodeId: referenceDrag.nodeId, url: image.url, type: "image", name: image.name, storageKey: image.storageKey, mimeType: image.mimeType, role: image.role, subjectId: image.subjectId, targetNodeId: referenceTargetNodeId, clientX, clientY });
-                }
-                dispatchCanvasReferenceDrag("canvas-reference-drag-end", { nodeId: referenceDrag.nodeId, url: referenceDrag.images[0]?.url || "", type: "image", name: referenceDrag.images[0]?.name || "", targetNodeId: referenceTargetNodeId, clientX, clientY });
+            // 角色节点：以单条 character payload 派发，H3 端按 readCharacterGroupFromDrop + upsertCharacterGroup 建/复用组
+            if ("characterImages" in referenceDrag) {
+                dispatchCanvasReferenceDrag("canvas-reference-drop", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
+                dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, url: referenceDrag.characterImages[0]?.url || "", name: referenceDrag.characterImages[0]?.name || "", targetNodeId: referenceTargetNodeId, clientX, clientY });
             } else {
                 dispatchCanvasReferenceDrag("canvas-reference-drop", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
                 dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
@@ -3613,6 +3636,7 @@ function InfiniteCanvasPage() {
                     onGlobalPromptChange={setGlobalPrompt}
                     onOpenGenerationLogs={() => setGenerationLogsOpen(true)}
                 />
+                {canvasConflict ? <div className="pointer-events-auto absolute left-1/2 top-16 z-40 w-[min(680px,calc(100%-32px))] -translate-x-1/2"><Alert type="warning" showIcon closable onClose={() => clearCanvasConflict(projectId)} message={canvasConflict.message} description={`后端当前版本 ${canvasConflict.revision}，保留待同步操作 ${canvasConflict.pendingOperations} 个；继续编辑或重新提交即可按新版本同步。`} /></div> : null}
 
                 <InfiniteCanvas
                     containerRef={containerRef}

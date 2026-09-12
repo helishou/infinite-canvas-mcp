@@ -15,11 +15,12 @@ type H3TimelineProps = {
     selected?: H3Segment;
     total: number;
     onRemoveRef: (segmentId: string, ref: H3Ref) => void;
+    onOpenCharacterGroup: (segmentId: string, groupId: string) => void;
     onPlayAll: () => void;
     fmt: (value: number) => string;
 };
 
-export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlayAll, fmt }: H3TimelineProps) {
+export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpenCharacterGroup, onPlayAll, fmt }: H3TimelineProps) {
     const trackScrollRef = useRef<HTMLDivElement | null>(null);
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
     const pendingScrollIdRef = useRef<string | null>(null);
@@ -206,7 +207,19 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onPlay
         // 用 px 定位让 ref grid 跟随实际像素宽度（容器被拉宽时 clip 不会按比例缩成一条线）
         const left = Number(segment.start || 0) * 100;
         const width = Math.max(100, Number(segment.duration || 1) * 100);
-        return <div key={segment.id} data-segment-id={segment.id} className={`minimax-ref-grid ${slotCount === 0 ? "is-disabled" : ""} ${segment.id === selected?.id ? "active" : ""}`} style={{ left: `${left}px`, width: `${width}px`, ...(slotCount > 0 && slotCount <= 3 ? { gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))`, gridTemplateRows: "minmax(0, 1fr)" } : {}) }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>{slotCount === 0 ? <span className="minimax-ref-empty-label">无需参考素材</span> : Array.from({ length: slotCount }).map((_, index) => { const ref = refs[index]; const label = mode === "i2v" ? "首帧" : mode === "fl2v" ? index === 0 ? "首帧" : "尾帧" : `Ref ${index + 1}`; return <div key={index} data-ref-index={index} draggable={ref ? true : undefined} className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"}`}>{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>; })}</div>;
+        return <div key={segment.id} data-segment-id={segment.id} className={`minimax-ref-grid ${slotCount === 0 ? "is-disabled" : ""} ${segment.id === selected?.id ? "active" : ""}`} style={{ left: `${left}px`, width: `${width}px`, ...(slotCount > 0 && slotCount <= 3 ? { gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))`, gridTemplateRows: "minmax(0, 1fr)" } : {}) }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>{slotCount === 0 ? <span className="minimax-ref-empty-label">无需参考素材</span> : Array.from({ length: slotCount }).map((_, index) => {
+            const ref = refs[index];
+            const label = mode === "i2v" ? "首帧" : mode === "fl2v" ? index === 0 ? "首帧" : "尾帧" : `Ref ${index + 1}`;
+            const isGrouped = ref?.groupId;
+            return <div
+                key={index}
+                data-ref-index={index}
+                data-group-id={ref?.groupId || undefined}
+                draggable={ref ? true : undefined}
+                onDoubleClick={isGrouped ? (event) => { event.stopPropagation(); onOpenCharacterGroup(segment.id, ref.groupId!); } : undefined}
+                className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""}`}
+            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>;
+        })}</div>;
     };
     return <div className="minimax-edit-timeline">
         <div className="minimax-timeline-controls"><button type="button" title="连续播放全部 Clip" onClick={onPlayAll}><H3Icon name="play" /></button></div>

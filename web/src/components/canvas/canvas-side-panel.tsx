@@ -456,7 +456,7 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
     const { t } = useTranslation();
     const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
         if (asset.kind === "text") return;
-        // 角色资产：拖到画布生成 Character 节点，而不是展开为多张图。
+        // 角色资产：拖到画布生成 Character 节点，拖到 H3 ref 槽按角色组拆 outfit + voice。
         if (asset.kind === "character") {
             const ref = {
                 type: "character",
@@ -466,6 +466,9 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
                 characterName: asset.data.name || asset.title,
                 characterDescription: asset.data.description,
                 characterImages: asset.data.images,
+                voice: asset.data.voice,
+                voiceName: asset.data.voiceName,
+                voiceAssetId: asset.data.voiceAssetId,
             };
             const payload = JSON.stringify(ref);
             event.dataTransfer.effectAllowed = "copy";

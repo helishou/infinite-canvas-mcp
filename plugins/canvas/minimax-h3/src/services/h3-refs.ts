@@ -89,3 +89,41 @@ export function readCharacterImagesFromDrop(event: React.DragEvent<HTMLElement> 
         return [{ url, type: "image" as const, name: `${characterName} · ${String(ref.outfit || ref.name || "outfit")}`, storageKey: storageKeyOf(ref), mimeType: String(ref.mimeType || "") || undefined }];
     });
 }
+
+// 解析拖拽事件：如果是角色资产 / 角色节点 payload，返回完整 H3CharacterGroup 入参（不含 id，id 由 upsertCharacterGroup 生成）；
+// voice 字段从 characterVoiceUrl / characterVoiceName / characterVoiceStorageKey / characterVoiceAssetId 或 voice / voiceName / voiceAssetId 读取。
+export function readCharacterGroupFromDrop(event: React.DragEvent<HTMLElement> | { dataTransfer: { getData: (mime: string) => string } }): {
+    characterName: string;
+    characterAssetId?: string;
+    characterNodeId?: string;
+    outfits: Array<{ url: string; name: string; storageKey?: string; mimeType?: string }>;
+    voice?: { url: string; name: string; storageKey?: string; assetId?: string };
+} | null {
+    const transfer = event.dataTransfer;
+    const encoded = transfer.getData("application/x-infinite-canvas-ref");
+    const fallback = transfer.getData("text/plain");
+    if (!encoded && !fallback) return null;
+    let value: Record<string, unknown> = {};
+    try { value = JSON.parse(encoded || fallback) as Record<string, unknown>; } catch { return null; }
+    const kind = String(value.type || value.kind || "").toLowerCase();
+    if (kind !== "character") return null;
+    const characterName = String(value.characterName || value.name || "角色");
+    const characterAssetId = typeof value.characterAssetId === "string" ? value.characterAssetId : undefined;
+    const characterNodeId = typeof value.characterNodeId === "string" ? value.characterNodeId : undefined;
+    const images = Array.isArray(value.characterImages) ? value.characterImages : [];
+    const outfits = images.flatMap((image) => {
+        if (!image || typeof image !== "object") return [];
+        const ref = image as Record<string, unknown>;
+        const url = String(ref.url || ref.dataUrl || ref.localUrl || ref.originalLocalUrl || ref.sourceUrl || ref.path || "").trim();
+        if (!url) return [];
+        return [{ url, name: String(ref.outfit || ref.name || "outfit"), storageKey: typeof ref.storageKey === "string" ? ref.storageKey : undefined, mimeType: typeof ref.mimeType === "string" ? ref.mimeType : undefined }];
+    });
+    if (!outfits.length) return null;
+    // voice 字段兼容：老 payload 用 characterVoice*，新 payload 用 voice*；character 节点 metadata 也用 characterVoice*
+    const voiceUrl = String(value.characterVoiceUrl || value.voice || "").trim();
+    const voiceName = String(value.characterVoiceName || value.voiceName || "声线");
+    const voiceStorageKey = typeof value.characterVoiceStorageKey === "string" ? value.characterVoiceStorageKey : undefined;
+    const voiceAssetId = typeof value.characterVoiceAssetId === "string" ? value.characterVoiceAssetId : (typeof value.voiceAssetId === "string" ? value.voiceAssetId : undefined);
+    const voice = voiceUrl ? { url: voiceUrl, name: voiceName, storageKey: voiceStorageKey, assetId: voiceAssetId } : undefined;
+    return { characterName, characterAssetId, characterNodeId, outfits, voice };
+}

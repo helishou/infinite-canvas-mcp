@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
-import type { H3Ref, H3Segment } from "../types";
+import type { H3CharacterGroup, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
-import { refsForSegment, resultUrl, withSegmentRefs } from "../services/h3-data";
-import { normalizeDroppedH3Ref, readCharacterImagesFromDrop, readH3Refs } from "../services/h3-refs";
+import { applyCharacterGroupEdits, refsForSegment, removeCharacterGroup, resultUrl, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
+import { normalizeDroppedH3Ref, readCharacterGroupFromDrop, readCharacterImagesFromDrop, readH3Refs } from "../services/h3-refs";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
@@ -13,6 +13,7 @@ import { H3Timeline } from "./H3Timeline";
 import { H3MaterialLibrary } from "./H3MaterialLibrary";
 import { H3Runner } from "./H3Runner";
 import { H3WorkbenchToolbar } from "./H3WorkbenchToolbar";
+import { H3CharacterRefModal } from "./H3CharacterRefModal";
 
 export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const metadata = ctx.node.metadata || {};
@@ -83,27 +84,47 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const [smartStoryboardUploads, setSmartStoryboardUploads] = useState<H3Ref[]>([]);
     const [canvasReferenceDragOver, setCanvasReferenceDragOver] = useState(false);
     const workbenchRef = useRef<HTMLDivElement | null>(null);
+    const [editingGroup, setEditingGroup] = useState<{ segmentId: string; groupId: string } | null>(null);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => selected && patchSelectedSegment(ctx, { ...metadata, selectedSegmentId: selected.id }, patch), [ctx, metadata, selected]);
-    const removeTimelineRef = (segmentId: string, ref: H3Ref) => ctx.updateMetadata({ segments: segments.map((item) => item.id === segmentId ? { ...item, refItems: refsForSegment(item).filter((entry) => entry.url !== ref.url), refs: { image: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "image"), video: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "video"), audio: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "audio") } } : item) });
+    const removeTimelineRef = (segmentId: string, ref: H3Ref) => {
+        const segment = segments.find((item) => item.id === segmentId);
+        if (!segment) return;
+        // 属于角色组的 ref：把对应 outfit 设为 disabled / 关闭 voice，由 group → refs 派生逻辑重写
+        if (ref.groupId) {
+            const group = segment.h3CharacterGroups?.[ref.groupId];
+            if (group) {
+                const isVoice = ref.role === "character_voice" || (ref.type === "audio" && !ref.outfitId);
+                const nextSegment = isVoice
+                    ? applyCharacterGroupEdits(segment, ref.groupId, { voiceEnabled: false })
+                    : applyCharacterGroupEdits(segment, ref.groupId, { outfitEnabled: ref.outfitId ? { [ref.outfitId]: false } : undefined });
+                ctx.updateMetadata({ segments: segments.map((item) => item.id === segmentId ? nextSegment : item) });
+                return;
+            }
+        }
+        ctx.updateMetadata({ segments: segments.map((item) => item.id === segmentId ? { ...item, refItems: refsForSegment(item).filter((entry) => entry.url !== ref.url), refs: { image: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "image"), video: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "video"), audio: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "audio") } } : item) });
+    };
+    const openCharacterGroup = (segmentId: string, groupId: string) => setEditingGroup({ segmentId, groupId });
+    const applyCharacterGroupEditsAndClose = (groupId: string, patch: { outfitEnabled?: Record<string, boolean>; voiceEnabled?: boolean }) => {
+        if (!editingGroup) return;
+        ctx.updateMetadata({ segments: segments.map((item) => item.id === editingGroup.segmentId ? applyCharacterGroupEdits(item, groupId, patch) : item) });
+    };
+    const deleteCharacterGroupAndClose = (groupId: string) => {
+        if (!editingGroup) return;
+        ctx.updateMetadata({ segments: segments.map((item) => item.id === editingGroup.segmentId ? removeCharacterGroup(item, groupId) : item) });
+        setEditingGroup(null);
+    };
     const addDroppedReference = (event: React.DragEvent<HTMLElement>) => {
         if ((event.target as HTMLElement).closest(".minimax-ref-track")) return;
         event.preventDefault();
         event.stopPropagation();
         if (!selected) return;
         const mode = String(selected.mode || selected.taskMode || "ref2va");
-        // 角色资产 / 角色节点：每张 outfit 拆为单独 image ref
-        const characterImages = readCharacterImagesFromDrop(event);
-        if (characterImages.length) {
+        // 角色资产 / 角色节点：建/复用角色组，outfit 拆为 image refs、voice 拆为 audio ref（占 audio 槽，受 3 上限约束）
+        const characterGroupInput = readCharacterGroupFromDrop(event);
+        if (characterGroupInput) {
             if (mode === "t2v") return;
-            const refs = refsForSegment(selected);
-            const existing = new Set(refs.map((item) => item.url));
-            const additions = characterImages.filter((item) => !existing.has(item.url));
-            if (!additions.length) return;
-            const max = mode === "i2v" ? 1 : mode === "fl2v" ? 2 : 9;
-            const imageCount = refs.filter((item) => item.type === "image").length;
-            const room = Math.max(0, max - imageCount);
-            if (!room) return;
-            ctx.updateMetadata({ selectedSegmentId: selected.id, segments: segments.map((item) => item.id === selected.id ? withSegmentRefs(item, [...refs, ...additions.slice(0, room)]) : item) });
+            const updated = upsertCharacterGroup(selected, characterGroupInput);
+            ctx.updateMetadata({ selectedSegmentId: selected.id, segments: segments.map((item) => item.id === selected.id ? updated : item) });
             return;
         }
         const ref = normalizeDroppedH3Ref(event);
@@ -115,11 +136,6 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         ctx.updateMetadata({ selectedSegmentId: selected.id, segments: segments.map((item) => item.id === selected.id ? withSegmentRefs(item, [...refs, ref]) : item) });
     };
     const addCanvasReference = (detail: Record<string, unknown>) => {
-        const url = String(detail.url || "").trim();
-        if (!url || !selected) return;
-        const allowedRoles = new Set<H3Ref["role"]>(["character_turnaround", "storyboard", "scene", "motion_reference", "audio_reference"]);
-        const role = typeof detail.role === "string" && allowedRoles.has(detail.role as H3Ref["role"]) ? detail.role as H3Ref["role"] : undefined;
-        const ref: H3Ref = { url, type: "image", name: String(detail.name || "图片"), storageKey: typeof detail.storageKey === "string" ? detail.storageKey : undefined, mimeType: typeof detail.mimeType === "string" ? detail.mimeType : undefined, ...(role ? { role } : {}), ...(detail.subjectId ? { subjectId: String(detail.subjectId) } : {}) };
         const x = Number(detail.clientX);
         const y = Number(detail.clientY);
         // 优先用鼠标实际命中的 ref 格子（精确），避免坐标换算误差导致落点与悬停位置不符
@@ -139,9 +155,34 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
             }
         }
         target = target || selected;
-        // t2v 段不接收参考素材（格子为「无需参考素材」）
+        if (!target) return;
         const targetMode = String(target.mode || target.taskMode || "ref2va");
         if (targetMode === "t2v") return;
+        // 角色节点派发：建/复用角色组
+        const kind = String(detail.type || detail.kind || "").toLowerCase();
+        if (kind === "character") {
+            const outfits = Array.isArray(detail.characterImages) ? detail.characterImages as Array<Record<string, unknown>> : [];
+            const valid = outfits.map((image) => ({ url: String(image.url || "").trim(), name: String(image.outfit || image.name || "outfit"), storageKey: typeof image.storageKey === "string" ? image.storageKey : undefined, mimeType: typeof image.mimeType === "string" ? image.mimeType : undefined })).filter((image) => image.url);
+            if (!valid.length) return;
+            const voiceUrl = String(detail.characterVoiceUrl || detail.voice || "").trim();
+            const voiceName = String(detail.characterVoiceName || detail.voiceName || "声线");
+            const voiceStorageKey = typeof detail.characterVoiceStorageKey === "string" ? detail.characterVoiceStorageKey : undefined;
+            const voiceAssetId = typeof detail.characterVoiceAssetId === "string" ? detail.characterVoiceAssetId : (typeof detail.voiceAssetId === "string" ? detail.voiceAssetId : undefined);
+            const updated = upsertCharacterGroup(target, {
+                characterName: String(detail.characterName || "角色"),
+                characterAssetId: typeof detail.characterAssetId === "string" ? detail.characterAssetId : undefined,
+                characterNodeId: typeof detail.characterNodeId === "string" ? detail.characterNodeId : undefined,
+                outfits: valid,
+                voice: voiceUrl ? { url: voiceUrl, name: voiceName, storageKey: voiceStorageKey, assetId: voiceAssetId } : undefined,
+            });
+            ctx.updateMetadata({ selectedSegmentId: target.id, segments: segments.map((item) => item.id === target.id ? updated : item) });
+            return;
+        }
+        const url = String(detail.url || "").trim();
+        if (!url) return;
+        const allowedRoles = new Set<H3Ref["role"]>(["character_turnaround", "storyboard", "scene", "motion_reference", "audio_reference"]);
+        const role = typeof detail.role === "string" && allowedRoles.has(detail.role as H3Ref["role"]) ? detail.role as H3Ref["role"] : undefined;
+        const ref: H3Ref = { url, type: "image", name: String(detail.name || "图片"), storageKey: typeof detail.storageKey === "string" ? detail.storageKey : undefined, mimeType: typeof detail.mimeType === "string" ? detail.mimeType : undefined, ...(role ? { role } : {}), ...(detail.subjectId ? { subjectId: String(detail.subjectId) } : {}) };
         const max = targetMode === "i2v" ? 1 : targetMode === "fl2v" ? 2 : 9;
         const targetRefs = refsForSegment(target);
         if (targetRefs.filter((item) => item.type === "image").length >= max || targetRefs.some((item) => item.url === ref.url)) return;
@@ -198,11 +239,17 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         <H3RulerScrubber key="ruler-scrubber" ctx={ctx} total={total} previewH={effPreviewH} />
         <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} outputs={outputs} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} />
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
+        {editingGroup ? (() => {
+            const segment = segments.find((item) => item.id === editingGroup.segmentId);
+            const group = segment?.h3CharacterGroups?.[editingGroup.groupId];
+            if (!segment || !group) return null;
+            return <H3CharacterRefModal key="character-ref-modal" ctx={ctx} group={group} onApply={(patch) => applyCharacterGroupEditsAndClose(group.id, patch)} onDelete={() => deleteCharacterGroupAndClose(group.id)} onClose={() => setEditingGroup(null)} />;
+        })() : null}
         <style key="workbench-style">{`.minimax-canvas-workbench{--minimax-prompt-w:${promptW}px;--minimax-preview-w:${previewW}px;--minimax-preview-h:${effPreviewH}px;--minimax-timeline-h:${effTimelineH}px;--minimax-ref-h:${effRefLaneH}px}`}</style>
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
             <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} /></div>
-            <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onPlayAll={playAll} fmt={fmt} />
+            <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onOpenCharacterGroup={openCharacterGroup} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         </div>

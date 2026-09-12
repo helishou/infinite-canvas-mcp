@@ -184,6 +184,11 @@
 .minimax-ref-grid.active { z-index:2; }
 .minimax-ref-clip { position:relative; min-width:0; min-height:0; border:1px solid #2a333d; border-radius:6px; background:#20252c; overflow:hidden; cursor:pointer; }
 .minimax-ref-clip.active { border-color:#cbd5e1; background:#29313a; }
+/* 角色组高亮：与该角色在同一 segment 的所有 outfit 格子共享同色边框 + 浅色背景；声线用另一种高亮色 */
+.minimax-ref-clip.is-character-group { border-color:#a78bfa; box-shadow:inset 0 0 0 1px rgba(167,139,250,0.35); background:#2a2438; }
+.minimax-ref-clip.is-character-group:hover { background:#322b48; }
+.minimax-ref-clip.is-character-voice { border-color:#f59e0b; background:#2e2618; }
+.minimax-ref-clip.is-character-voice:hover { background:#38291a; }
 .minimax-ref-clip.is-empty { display:flex; align-items:center; gap:10px; padding:0 6px; opacity:.32; border-style:dashed; }
 .minimax-ref-clip.is-empty > svg { position:static; flex:0 0 auto; }
 .minimax-ref-clip.is-empty > span { position:static; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

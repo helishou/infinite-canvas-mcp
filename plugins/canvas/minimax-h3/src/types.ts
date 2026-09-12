@@ -1,5 +1,32 @@
-export type H3ReferenceRole = "character_turnaround" | "storyboard" | "scene" | "motion_reference" | "audio_reference";
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; order?: number };
+export type H3ReferenceRole = "character_turnaround" | "storyboard" | "scene" | "motion_reference" | "audio_reference" | "character_voice";
+
+export type H3CharacterOutfit = {
+    id: string;
+    url: string;
+    name: string;
+    storageKey?: string;
+    mimeType?: string;
+    enabled: boolean;
+};
+
+export type H3CharacterVoice = {
+    url: string;
+    name: string;
+    storageKey?: string;
+    assetId?: string;
+};
+
+export type H3CharacterGroup = {
+    id: string;
+    characterName: string;
+    characterAssetId?: string;
+    characterNodeId?: string;
+    voice?: H3CharacterVoice;
+    outfits: H3CharacterOutfit[];
+    voiceEnabled: boolean;
+};
+
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; order?: number; groupId?: string; outfitId?: string };
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
@@ -124,6 +151,7 @@ export type H3Segment = {
     referenceLongEdge?: number;
     refs?: { image?: H3Ref[]; video?: H3Ref[]; audio?: H3Ref[] };
     refItems?: H3Ref[];
+    h3CharacterGroups?: Record<string, H3CharacterGroup>;
     aspectRatio?: string;
     megapixels?: number;
     videoSteps?: number;

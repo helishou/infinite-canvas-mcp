@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- [新增] 画布诊断与任务中心：Backend 提供只读诊断、重复/悬空连线与缺失媒体检查，前端可查看任务进度、取消和重试，任务重试通过 parentTaskId 关联历史。
+- [调整] 画布导出包升级为 v4：加入媒体 SHA-256 清单、生成日志和终态任务摘要；导入先校验媒体并按原 storageKey 重新登记到 Backend，运行中任务不会恢复执行。
+- [修复] 画布同步遇到 revision 冲突时保留待提交操作并在页面提示，不再静默吞掉冲突；直连图片任务支持父子任务取消，避免外层任务卡住。
+- [新增] H3 角色组管理：拖入角色资产 / 角色节点到 H3 ref 槽时在 segment 上登记 `h3CharacterGroups`（含 outfit 列表、声线、当前勾选项与声线开关），并把每张 enabled outfit 拆为 `image ref`、声线拆为 `role: "character_voice"` 的 `audio ref`（共用 audio 槽 3 上限），同组 ref 用紫色高亮、声线 ref 用橙色高亮。Ref 槽任意一个角色组格子**双击**打开「角色服装与声线」模态框，可勾选哪些 outfit 进 ref 槽、切换声线开关、删除整组。
 - [修复] H3 角色集成对齐简化模型：移除 `h3CharacterAssets` 读路径与对应 hydration；`canvasReferenceRole` 去掉 Character 节点特判与 `/character/` 正则误用，角色资产 / 角色节点拖到 H3 ref 槽直接按 outfit 拆为 image ref（无 `character_turnaround` 角色），不再有「角色节点被拒绝加入 H3」行为。
 - [修复] H3 参考清单统一按角色四视图、分镜和场景标注并排除身份基础图；RunningHub 任务也纳入 Backend 重启恢复，避免重复提交或丢失轮询。
 - [新增] 角色节点能力增强：图片节点可「转为角色节点」（hover 工具栏 User 按钮）；角色节点支持 BatchFrame 横向展开 + 设为主图（已在的 `setBatchPrimary` / `deleteBatchImage` 扩展支持 `characterPrimaryIndex` 与 `characterImages` 维护）；双击角色节点打开完整编辑面板 `CharacterNodeEditModal`，可改标题/描述/参考图 outfit/声线（支持从音频资产库选或上传本地文件）；角色节点 hover 工具栏新增「存为角色资产」按钮，按 `data.name` 去重，同名则替换资产；画布可拖入图片/音频到角色节点，图片作 outfit，音频作声线。
