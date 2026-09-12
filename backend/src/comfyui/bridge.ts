@@ -949,6 +949,25 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
 const NANFENG_VHS_CLASS = "VHS_VideoCombine";
 const NANFENG_REF2VA_MODES = new Set(["ref2va"]);
 
+/**
+ * 防字幕/水印约束。
+ *
+ * 南风的 NanFengH3PromptDraft 节点靠「不要字幕水印Logo」开关往提示词尾部追加一句约束
+ * （见 custom_nodes/nanfeng_prompt_nodes/nodes.py:102-103）。但本后端走的是
+ * NanFengH3MultiReferenceGeneratorV10 直连，不经过 PromptDraft，因此该开关永远不会生效——
+ * 实测两版提示词（平铺/结构化、都在正文写了禁字幕）输出都在画面底部烧进了中文字幕。
+ * 这里按南风的原句补上，作为每段提示词的固定尾缀。
+ */
+const H3_NO_TEXT_CONSTRAINT = "\n画面不要额外字幕、文字、水印或Logo。";
+
+/** 给提示词尾部追加防字幕约束（幂等：已含则不加）。 */
+function withNoTextConstraint(prompt: string): string {
+    const body = String(prompt || "");
+    if (!body.trim()) return body;
+    if (body.includes("不要额外字幕")) return body;
+    return body.trimEnd() + H3_NO_TEXT_CONSTRAINT;
+}
+
 /** 正常路径：交给南风 V10 主节点内部 GraphBuilder 展开，保留其原生释放/加载依赖。 */
 export async function buildNativeNanFengV10Workflow(input: Record<string, unknown>, params: Record<string, unknown>, upload: (file: string) => Promise<string>, _comfyUrl: string, signal: AbortSignal): Promise<Record<string, any>> {
     if (signal.aborted) throw new Error("任务已取消");
@@ -968,7 +987,7 @@ export async function buildNativeNanFengV10Workflow(input: Record<string, unknow
     const sageAttention = selectedAttention === "关闭" ? "disabled" : selectedAttention === "自动" || selectedAttention === "H3专用Sage加速" ? "auto" : selectedAttention;
     const inputs: Record<string, unknown> = {
         "模型": String(value("modelName", "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors")), "文本编码器": String(value("textEncoder", "qwen3vl_32b_minimax_h3_fp8.safetensors")), "文本编码器类型": String(value("textEncoderType", "minimax")), "文本编码器设备": String(value("textEncoderDevice", "default")), "视频VAE": String(value("videoVae", "minimax_h3_video_vae_fp16.safetensors")), "音频VAE": String(value("audioVae", "minimax_h3_audio_vae_fp32.safetensors")), "模型权重精度": String(value("precision", "default")),
-        "SageAttention": sageAttention, "H3专用注意力": selectedAttention, "允许编译": value("allowCompile", false), "画面比例": normalizeH3AspectRatio(String(value("aspectRatio", "16:9 (Widescreen)"))), "百万像素": Number(value("megapixels", 0.4)), "尺寸倍数": Number(value("sizeMultiple", 32)), "时长秒": Number(value("duration", 5)), "提示词": String(input.prompt || ""), "恒定触发词": String(value("constantTriggerWord", "")), "随机种子": Number.isFinite(Number(params.seed)) && Number(params.seed) >= 0 ? Number(params.seed) : Math.floor(Math.random() * 1125899906842624), "采样器": String(value("sampler", "res_multistep")), "调度器": String(value("scheduler", "simple")), "采样步数": Number(value("steps", 20)), "降噪强度": Number(value("denoise", 1)), "参考图尺寸": String(value("refImageSize", "match")),
+        "SageAttention": sageAttention, "H3专用注意力": selectedAttention, "允许编译": value("allowCompile", false), "画面比例": normalizeH3AspectRatio(String(value("aspectRatio", "16:9 (Widescreen)"))), "百万像素": Number(value("megapixels", 0.4)), "尺寸倍数": Number(value("sizeMultiple", 32)), "时长秒": Number(value("duration", 5)), "提示词": withNoTextConstraint(String(input.prompt || "")), "恒定触发词": String(value("constantTriggerWord", "")), "随机种子": Number.isFinite(Number(params.seed)) && Number(params.seed) >= 0 ? Number(params.seed) : Math.floor(Math.random() * 1125899906842624), "采样器": String(value("sampler", "res_multistep")), "调度器": String(value("scheduler", "simple")), "采样步数": Number(value("steps", 20)), "降噪强度": Number(value("denoise", 1)), "参考图尺寸": String(value("refImageSize", "match")),
         "文生视频": mode === "t2v", "图生视频": mode === "i2v", "首尾帧": mode === "fl2v", "启用LoRA": slots.some((slot: any) => slot?.enabled !== false && String(slot?.name || "").trim()), "启用锁音频": value("lockAudio", false), "开启音频驱动模式": value("audioDrive", false), "音频驱动文件": params.audioDrive === true ? uploadedAudios[0] || "" : "", "运行时预留显存GB": Number(value("reservedVramGb", 0.6)), "启用运行时预留显存": value("runtimeReserveEnabled", false), "启用UniBlockSwap": value("uniBlockSwapEnabled", false), "UniBlockSwap常驻块数": Number(value("uniBlockSwapBlocks", 1)), "启用H3潜空间放大二采": value("latentUpscaleEnabled", false), "H3潜空间放大模型": String(value("latentUpscaleModel", "minimax_h3_latent_upscaler_3d_fp16.safetensors")), "H3潜空间目标百万像素": Number(value("latentUpscaleMegapixels", 1)), "H3潜空间对齐": Number(value("latentUpscaleAlign", 2)), "H3潜空间精度": String(value("latentUpscalePrecision", "bf16")), "H3一采步数": Number(value("h3FirstSteps", 6)), "H3二采步数": Number(value("h3SecondSteps", 4)), "H3完整Sigma序列": String(value("h3FullSigma", "")), "V81一采使用手动Sigma": value("v81ManualSigma", false), "启用实时预览": value("realtimePreviewEnabled", true), "实时预览最长边": Number(value("realtimePreviewLongEdge", 512)), "实时预览帧数": Number(value("realtimePreviewFrames", 12)), "实时预览帧率": Number(value("realtimePreviewFps", 8)), "实时预览JPEG质量": Number(value("realtimePreviewJpegQuality", 75)), "参考图最长边": Number(value("referenceLongEdge", 1920)), "启用H3 SLA": value("slaEnabled", false), "SLA稀疏率": Number(value("slaSparsity", 0.9)), "SLA块大小": String(value("slaBlockSize", "64")), "SLA最短序列": Number(value("slaMinSequence", 4096)), "SLA末尾稠密步数": Number(value("slaDenseLastSteps", 1)), "SLA保护音频": value("slaProtectAudio", true), "SLA指定稠密步": String(value("slaDenseSteps", "0")), "SLA稠密后端": String(value("slaBackend", "comfy_kitchen")), "SLA关闭FP16累加": value("slaDisableFp16Accum", true), "SLA稳定运动": value("slaStabilizeMotion", true),
         // V10 要求完整继承链的每一个字段，即使对应功能未启用也必须显式提交默认值。
         "启用SolAttn": value("solEnabled", false), "SolAttn_tau": Number(value("solTau", 1.2)), "SolAttn阈值类型": String(value("solThresholdType", "diag")), "SolAttn精确模式": String(value("solExactMode", "exact_kv")), "SolAttn完整末步": Number(value("solFullFinalSteps", 1)), "SolAttn末段比例": Number(value("solTailRatio", 0)), "SolAttn前缀Token": Number(value("solPrefixTokens", 0)),
@@ -1037,7 +1056,7 @@ export async function buildExpandedNanFengV10Workflow(
     const clip = node("nf_clip", "CLIPLoader", { clip_name: textEncoder, type: String(params.textEncoderType || "minimax"), device: String(params.textEncoderDevice || "default") });
     const videoVae = node("nf_video_vae", "VAELoader", { vae_name: videoVaeName });
     const audioVae = node("nf_audio_vae", "VAELoader", { vae_name: audioVaeName });
-    const promptBody = String(input.prompt || "").trim();
+    const promptBody = withNoTextConstraint(String(input.prompt || "").trim());
     const trigger = String(params.constantTriggerWord || "").trim();
     const prompt = trigger && promptBody ? `${trigger}\n${promptBody}` : trigger || promptBody;
     const refs = Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : [];

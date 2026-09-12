@@ -92,6 +92,8 @@ description: Implemented changes that still need manual verification
 
 + H3 中文翻译切换：在 H3 节点 prompt 输入框写一段英文 prompt，输入框右下角出现「翻译」按钮，点击后 textarea 内容变成中文、按钮变成「原提示词」、textarea 只读（光标 not-allowed 但仍可选中文字）；再点一次切回英文。在英文态编辑任意字符，textarea 立刻从「中文态」退回「英文态」（display 逻辑：缓存的 prompt 不匹配时显示原文）。切到其他 Clip 再切回来，原 prompt 还在但翻译态已退出，需重新点击。点「Run 生成当前 Clip」时确认实际提交给 H3 的是英文原文而不是中文（去任务中心看提交记录里的 prompt 字段）。故意配一个无文本模型的 channel，再点翻译，验证左下角红字「翻译失败：…」出现。
 
++ 图像对比同高：双击同一节点上的不同尺寸/比例的两个图（比如一张 16:9 横向 + 一张 1:1 方形），弹出的 Before/After 对比应保证两张图**同高**——方形图被横向等比放大到与 16:9 同高，或 16:9 被等比缩放到与方形同高，取决于视口约束。拖动滑块时左右两侧的视觉位置应保持稳定，不会因为两图高度不同导致一图多出一截空白。同一高度长宽比相同的两个图（最常见情况）打开即用，无明显加载闪烁。**关键回归项**：不同长宽比下，Before 图的显示高度必须**始终等于 After 图**——之前用 `overflow: hidden` 子容器 + 显式 `width/height` 的写法会被浏览器在子容器变窄时 stretch 内容，看上去高度在随滑块变。修法是两张图都 100% 充满固定容器 + `clip-path: inset(0 X% 0 0)` 按滑块裁切渲染结果。如果发现 Before 的人脸/物体高度在不同滑块位置看起来在变（特别是竖图 vs 横图对比时），说明又回到 stretch bug 了。
+
 The current release needs manual verification in these areas:
 
 + 本地工作流统一管理：确认 `z-image`、`flux2-klein` 和自定义工作流都不显示质量/尺寸/宽高比；节点图不再提供"删除此节点"功能（只允许在"未关联节点的字段"区清理孤立字段）；删除内置工作流后确认列表和文件均移除。

@@ -126,6 +126,15 @@ export function H3PromptSection({
   const [mentionPosition, setMentionPosition] = useState({ left: 8, top: 106 });
   const [helpOpen, setHelpOpen] = useState(false);
   const [enhancing, setEnhancing] = useState(false);
+  // 翻译态：缓存最近一次翻译结果（按 prompt 内容做 key），切换时优先复用，prompt 变化自动失效
+  type Translation = { prompt: string; text: string };
+  const [translation, setTranslation] = useState<Translation | null>(null);
+  const [translating, setTranslating] = useState(false);
+  const [isTranslated, setIsTranslated] = useState(false);
+  const [translateError, setTranslateError] = useState<string | null>(null);
+  // 用来在异步翻译返回时校验 prompt 是否已被用户改掉，避免显示错配的中文
+  const promptRef = useRef(prompt);
+  useEffect(() => { promptRef.current = prompt; }, [prompt]);
   const models = ctx.ai.listModels("text");
   const promptModel = String(
     ctx.node.metadata?.minimaxLlmModel ||
@@ -187,6 +196,12 @@ export function H3PromptSection({
     lastPromptRef.current = newPrompt;
     isProgrammaticRef.current = false;
   }, [selected?.id, selected?.prompt]);
+
+  // 外部修改 prompt（用户键入、切 clip、外部 patch）时退出翻译态，
+  // 避免显示错配的中文；缓存的 translation 保留，下次点击同 prompt 仍可复用。
+  useEffect(() => {
+    setIsTranslated(false);
+  }, [prompt]);
 
   const undo = () => {
     const id = selected?.id;
@@ -283,6 +298,58 @@ export function H3PromptSection({
     } finally {
       setEnhancing(false);
       ctx.updateMetadata({ promptEnhancing: false });
+    }
+  };
+
+  // 翻译 system prompt：只翻自然语言，保留南风官方结构标记、引用标签和数值
+  const TRANSLATION_SYSTEM_PROMPT = [
+    "You are a translator for H3 video prompts. Translate the following to Simplified Chinese.",
+    "Rules:",
+    "- Keep section headers ending with ':' (e.g., subject_definitions:, summary:) exactly as in the original; they are official structure markers.",
+    "- Keep reference tags like <Subject 1>, <Picture 1>, <Video 1>, <Audio 1> exactly as in the original.",
+    "- Keep timestamps, numerical values, and proper nouns unchanged.",
+    "- Translate all other natural language to natural Simplified Chinese.",
+    "- Preserve line breaks, indentation, and overall structure.",
+    "- Return only the translated prompt. No explanations, no Markdown fences, no preamble.",
+  ].join("\n");
+
+  const handleTranslateToggle = async () => {
+    if (isTranslated) {
+      setIsTranslated(false);
+      return;
+    }
+    if (!prompt.trim()) return;
+    // 缓存命中：直接切到中文态
+    if (translation && translation.prompt === prompt) {
+      setIsTranslated(true);
+      return;
+    }
+    const promptAtCall = prompt;
+    setTranslating(true);
+    setTranslateError(null);
+    try {
+      const model = String(
+        ctx.node.metadata?.minimaxLlmModel ||
+          ctx.node.metadata?.llmModel ||
+          ctx.ai.defaultModel("text") ||
+          "",
+      );
+      const result = await ctx.ai.generateText(promptAtCall.trim(), {
+        model,
+        system: TRANSLATION_SYSTEM_PROMPT,
+      });
+      const text = result.text.trim();
+      if (text) {
+        setTranslation({ prompt: promptAtCall, text });
+        // 异步期间 prompt 可能已被用户改掉，只在没变时才切到中文态
+        if (promptRef.current === promptAtCall) setIsTranslated(true);
+      } else {
+        setTranslateError("翻译模型未返回内容，请检查文本模型配置或重试");
+      }
+    } catch (error) {
+      setTranslateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTranslating(false);
     }
   };
 
@@ -413,9 +480,9 @@ export function H3PromptSection({
         <button
           key="enhance"
           type="button"
-          disabled={enhancing}
+          disabled={enhancing || !prompt.trim()}
           onClick={() => void enhancePrompt()}
-          title="调用当前文本模型增强提示词"
+          title={!prompt.trim() ? "请先输入提示词" : "调用当前文本模型增强提示词"}
         >
           {enhancing ? "增强中…" : "增强提示词"}
         </button>
@@ -508,32 +575,65 @@ export function H3PromptSection({
               : "当前可引用：@图片1"}
         </span>
       </div>
-      <textarea
-        key="prompt-textarea"
-        ref={textareaRef}
-        value={prompt}
-        placeholder="请输入提示词"
-        onChange={(event) => {
-          setPrompt(event.target.value);
-          syncMention(event.target);
-        }}
-        onKeyDown={handleKeyDown}
-        onBlur={() => {
-          setMentionOpen(false);
-          setMentionPosition({ left: 8, top: 106 });
-        }}
-        onScroll={() => {
-          if (mentionOpen) updateMentionPosition(textareaRef.current!);
-        }}
-        onMouseUp={() => {
-          const ta = textareaRef.current;
-          if (ta) syncMention(ta);
-        }}
-        onKeyUp={() => {
-          const ta = textareaRef.current;
-          if (ta) syncMention(ta);
-        }}
-      />
+      <div key="prompt-textarea-wrap" className="minimax-prompt-translate-wrap">
+        <textarea
+          key="prompt-textarea"
+          ref={textareaRef}
+          value={isTranslated && translation && translation.prompt === prompt ? translation.text : prompt}
+          readOnly={isTranslated}
+          placeholder={isTranslated ? "中文翻译（只读）" : "请输入提示词"}
+          onChange={(event) => {
+            setPrompt(event.target.value);
+            syncMention(event.target);
+          }}
+          onKeyDown={handleKeyDown}
+          onBlur={() => {
+            setMentionOpen(false);
+            setMentionPosition({ left: 8, top: 106 });
+          }}
+          onScroll={() => {
+            if (mentionOpen) updateMentionPosition(textareaRef.current!);
+          }}
+          onMouseUp={() => {
+            const ta = textareaRef.current;
+            if (ta) syncMention(ta);
+          }}
+          onKeyUp={() => {
+            const ta = textareaRef.current;
+            if (ta) syncMention(ta);
+          }}
+        />
+        <button
+          key="prompt-translate"
+          type="button"
+          onClick={() => void handleTranslateToggle()}
+          disabled={translating || (!isTranslated && !prompt.trim())}
+          className={`minimax-prompt-translate${isTranslated ? " is-translated" : ""}`}
+          aria-label={
+            isTranslated
+              ? "切换回原提示词"
+              : translating
+                ? "正在翻译"
+                : "查看中文翻译"
+          }
+          title={
+            isTranslated
+              ? "切换回原提示词"
+              : translating
+                ? "正在翻译…"
+                : !prompt.trim()
+                  ? "请先输入提示词"
+                  : "查看中文翻译"
+          }
+        >
+          {translating ? "…" : isTranslated ? "EN" : "译"}
+        </button>
+        {translateError ? (
+          <div key="prompt-translate-error" className="minimax-prompt-translate-error" role="alert">
+            翻译失败：{translateError}
+          </div>
+        ) : null}
+      </div>
       {mentionOpen && visibleMentionItems.length ? (
         <div
           key="prompt-mentions"

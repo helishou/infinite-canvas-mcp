@@ -338,7 +338,11 @@ export class BackendDatabase {
             const metadata = node.metadata || {};
             const segments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
             const index = segments.findIndex((segment) => String(segment.id || "") === binding.segmentId);
-            if (index < 0 || String(segments[index].runtimeTaskId || "") !== task.id) {
+            // 只在「被另一条更新的任务接管」时放弃回写（非空且不匹配）。
+            // runtimeTaskId 为空说明没有更新的任务接管本段（例如被 h3_update_clip 清空），
+            // 此时必须照常回写，否则任务成功却静默丢结果。
+            const currentTaskId = index >= 0 ? String(segments[index].runtimeTaskId || "") : "";
+            if (index < 0 || (currentTaskId && currentTaskId !== task.id)) {
                 this.db.exec("COMMIT");
                 return null;
             }
