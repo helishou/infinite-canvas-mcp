@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
 
 import type { AgentCanvasNode, McpToolHandler, PluginMcpContext, PluginMcpModule, PluginMcpToolWire } from "../../server/plugin-mcp.js";
+import { normalizeH3GenerationSettings, normalizePlannedSegment, validateVideoPlan, type H3PlannedSegment } from "./video-plan.js";
 
 // 一个 H3 参考图/视频/音频条目(与浏览器插件 H3Ref 对齐,此处防御式解析)
-type H3Ref = { url?: string; name?: string; type?: string; storageKey?: string; mimeType?: string };
+type H3Ref = { url?: string; name?: string; type?: string; storageKey?: string; mimeType?: string; role?: string; subjectId?: string; order?: number; nodeId?: string };
 
 // H3 片段(节点 metadata.segments 中的元素)
 type H3Segment = Record<string, unknown> & {
@@ -16,12 +17,24 @@ type H3Segment = Record<string, unknown> & {
     refItems?: H3Ref[];
 };
 
+// 与 H3 前端 Settings 面板的可持久化字段保持同一份有序协议；领域字段使用 videoSteps，
+// 仅在提交 ComfyUI 时映射为它要求的 steps。
 const H3_PARAM_KEYS = [
-    "mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "noiseSeed", "noiseSeedMode",
-    "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile",
-    "sampler", "scheduler", "loraSlots", "lockAudio", "audioDrive", "audioDriveFile", "constantTriggerWord",
-    "textEncoderType", "textEncoderDevice", "allowCompile", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd",
-];
+    "mode", "taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "steps", "denoise", "noiseSeedMode", "noiseSeed", "seed",
+    "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sizeMultiple", "sampler", "scheduler",
+    "loraSlots", "constantTriggerWord", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd",
+    "solAttnEnabled", "solAttnTau", "solAttnThresholdType", "solAttnExactMode", "solAttnDenseSteps", "solAttnStepOff", "solAttnSinkTokens",
+    "t8Enabled", "t8ResidualThreshold", "t8StartPercent", "t8EndPercent", "t8MaxConsecutiveHits", "t8CacheDevice", "t8MetricStride", "t8Verbose",
+    "sigmaEnabled", "videoSigmaShift", "audioSigmaShift", "sigmaMode", "lowSigmaStart", "lowSigmaEnd", "sigmaRefineSteps", "sigmaCurve", "manualSigma", "dualSampling", "dualSamplingRatio", "dualSampler",
+    "secondPassEnabled", "firstPassSteps", "secondPassSteps", "secondPassMegapixels", "secondPassUpscaleMethod", "secondPassDenoise", "secondPassSampler", "secondPassScheduler", "secondPassModel", "secondPassSigma",
+    "dedicatedAttention", "startupMode", "faceRepairSingle", "faceRepairMulti", "globalRepair", "lowMemoryAttentionHeads", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks",
+    "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
+    "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality",
+    "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
+    "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion",
+    "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "teAccel", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
+    "referenceVideoPolicy", "trimIn", "trimOut", "motionContextEnabled", "tailFrameEnabled", "motionContextNoiseEnabled", "motionContextNoiseAlpha", "motionContextNoiseAlphaEnd", "motionContextNoiseRampFrames", "combatLoraWeight", "cinematicLoraWeight",
+] as const;
 
 // 工具元信息(声明,供 Agent 动态注册)
 const TOOLS: PluginMcpToolWire[] = [
@@ -37,7 +50,7 @@ const TOOLS: PluginMcpToolWire[] = [
         version: "1.2.0",
         name: "H3 读取画布节点",
         description: "按节点 id 读取画布上的 MiniMax H3 节点及其片段/参考图配置。",
-        inputJsonSchema: { type: "object", properties: { nodeId: { type: "string", description: "画布节点 id" } }, required: ["nodeId"] },
+        inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string", description: "画布节点 id" } }, required: ["projectId", "nodeId"] },
     },
     {
         id: "h3_run_clip",
@@ -48,11 +61,41 @@ const TOOLS: PluginMcpToolWire[] = [
             type: "object",
             properties: {
                 nodeId: { type: "string", description: "画布节点 id" },
+                projectId: { type: "string", description: "画布项目 id" },
                 segmentIndex: { type: "integer", description: "片段下标;省略则运行首个未完成的片段" },
                 params: { type: "object", description: "覆盖片段自带参数的生成参数" },
+                idempotencyKey: { type: "string", description: "幂等提交键，重复提交复用原任务" },
             },
-            required: ["nodeId"],
+            required: ["projectId", "nodeId"],
         },
+    },
+    {
+        id: "h3_get_defaults",
+        version: "1.3.0",
+        name: "H3 读取默认参数",
+        description: "读取 Backend 中保存的 MiniMax H3 默认参数。",
+        inputJsonSchema: { type: "object", properties: {} },
+    },
+    {
+        id: "h3_set_defaults",
+        version: "1.3.0",
+        name: "H3 保存默认参数",
+        description: "把 H3 生成参数保存为全局默认参数，新建节点和 MCP 运行共享该配置。",
+        inputJsonSchema: { type: "object", properties: { settings: { type: "object" } }, required: ["settings"] },
+    },
+    {
+        id: "h3_reset_defaults",
+        version: "1.3.0",
+        name: "H3 重置默认参数",
+        description: "删除 Backend 中保存的 H3 默认参数。",
+        inputJsonSchema: { type: "object", properties: {} },
+    },
+    {
+        id: "h3_apply_video_plan",
+        version: "1.3.0",
+        name: "H3 应用结构化视频计划",
+        description: "把按镜号拆分的结构化中文视频计划写入 H3 节点，并按角色化参考清单生成最终提示词。",
+        inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, replaceSegments: { type: "boolean" }, language: { type: "string", enum: ["zh-CN"] }, segments: { type: "array", items: { type: "object" } } }, required: ["projectId", "nodeId", "segments"] },
     },
     {
         id: "h3_get_task",
@@ -77,10 +120,11 @@ const TOOLS: PluginMcpToolWire[] = [
             type: "object",
             properties: {
                 nodeId: { type: "string", description: "画布节点 id" },
+                projectId: { type: "string", description: "画布项目 id" },
                 segmentIndex: { type: "integer", description: "片段下标" },
                 patch: { type: "object", description: "要合并进该片段的字段" },
             },
-            required: ["nodeId", "segmentIndex", "patch"],
+            required: ["projectId", "nodeId", "segmentIndex", "patch"],
         },
     },
     {
@@ -91,9 +135,11 @@ const TOOLS: PluginMcpToolWire[] = [
         inputJsonSchema: {
             type: "object",
             properties: {
+                projectId: { type: "string", description: "画布项目 id" },
                 nodeIds: { type: "array", items: { type: "string" }, description: "限定运行的节点 id;省略则运行全部 H3 节点" },
                 params: { type: "object", description: "覆盖片段自带参数的生成参数" },
             },
+            required: ["projectId"],
         },
     },
 ];
@@ -116,7 +162,9 @@ function collectRefs(segment: H3Segment): { images: H3Ref[]; videos: H3Ref[]; au
         return Array.isArray(value) ? value : [value];
     };
     const bucketRefs = [...asArray(refs.image), ...asArray(refs.video), ...asArray(refs.audio)];
-    const orderedRefs = segment.refItems?.length ? segment.refItems : bucketRefs;
+    const orderedRefs = (segment.refItems?.length ? segment.refItems : bucketRefs)
+        .filter((ref) => ref.role !== "character_identity")
+        .sort((a, b) => Number(a.order ?? 0) - Number(b.order ?? 0));
     const sameRef = (left: H3Ref, right: H3Ref) => left.storageKey && right.storageKey
         ? left.storageKey === right.storageKey
         : left.url === right.url;
@@ -159,19 +207,38 @@ function extractMediaStorageKey(url: string) {
     }
 }
 
-function extractParams(segment: H3Segment, override: Record<string, unknown> = {}): Record<string, unknown> {
+function extractParams(segment: H3Segment, override: Record<string, unknown> = {}, nodeMetadata: Record<string, unknown> = {}, defaults: Record<string, unknown> = {}): Record<string, unknown> {
     const params: Record<string, unknown> = {};
+    const nodeParams = nodeMetadata.comfyParams && typeof nodeMetadata.comfyParams === "object" && !Array.isArray(nodeMetadata.comfyParams)
+        ? nodeMetadata.comfyParams as Record<string, unknown> : {};
     for (const key of H3_PARAM_KEYS) {
-        const value = segment[key];
+        const value = override[key] ?? segment[key] ?? nodeMetadata[key] ?? nodeParams[key] ?? defaults[key];
         if (value !== undefined && value !== null && value !== "") params[key] = value;
     }
-    return { ...params, ...override };
+    if (override.steps === undefined) {
+        const videoSteps = override.videoSteps ?? segment.videoSteps ?? nodeMetadata.videoSteps ?? nodeParams.videoSteps ?? defaults.videoSteps;
+        if (videoSteps !== undefined && videoSteps !== null && videoSteps !== "") params.steps = videoSteps;
+    }
+    delete params.videoSteps;
+    const normalizedOverride = { ...override };
+    if (normalizedOverride.videoSteps !== undefined && normalizedOverride.steps === undefined) normalizedOverride.steps = normalizedOverride.videoSteps;
+    delete normalizedOverride.videoSteps;
+    delete normalizedOverride.idempotencyKey;
+    delete normalizedOverride.clientTaskId;
+    return { ...params, ...normalizedOverride };
 }
 
 async function projectIdForNode(context: PluginMcpContext, nodeId: string) {
     const projects = await context.backend.listCanvasProjects();
     const project = projects.find((item) => Array.isArray(item.nodes) && (item.nodes as Array<Record<string, unknown>>).some((node) => String(node.id || "") === nodeId));
     return project && typeof project.id === "string" ? project.id : "";
+}
+
+async function assertProjectNode(context: PluginMcpContext, projectId: string, nodeId: string) {
+    if (!projectId) throw new Error("projectId 必填，MCP 不再自动选择画布");
+    const actual = await projectIdForNode(context, nodeId);
+    if (!actual) throw new Error(`找不到节点所属画布:${nodeId}`);
+    if (actual !== projectId) throw new Error(`节点不属于指定画布:${projectId}`);
 }
 
 function logRef(ref: H3Ref) {
@@ -181,6 +248,9 @@ function logRef(ref: H3Ref) {
         ...(ref.url ? { url: ref.url } : {}),
         ...(ref.storageKey ? { storageKey: ref.storageKey } : {}),
         ...(ref.mimeType ? { mimeType: ref.mimeType } : {}),
+        ...(ref.role ? { role: ref.role } : {}),
+        ...(ref.subjectId ? { subjectId: ref.subjectId } : {}),
+        ...(ref.order !== undefined ? { order: ref.order } : {}),
     };
 }
 
@@ -246,7 +316,7 @@ function selectSegment(segments: H3Segment[], index?: number): { segment: H3Segm
     return { segment: segments[chosen], index: chosen };
 }
 
-async function runSegment(context: PluginMcpContext, node: AgentCanvasNode, index: number | undefined, override: Record<string, unknown>, previousVideo = "") {
+async function runSegment(context: PluginMcpContext, node: AgentCanvasNode, index: number | undefined, override: Record<string, unknown>, previousVideo = "", defaults: Record<string, unknown> = {}, binding?: Record<string, unknown>) {
     const segments = segmentsOf(node);
     const selected = selectSegment(segments, index);
     const { segment } = selected;
@@ -267,26 +337,21 @@ async function runSegment(context: PluginMcpContext, node: AgentCanvasNode, inde
         video: videoPaths[0],
         ...(previousVideo ? { previousVideo } : {}),
     };
-    const params = extractParams(segment, override);
-    const task = await context.comfyUi.run("minimax-h3", input, params);
+    const params = { ...extractParams(segment, override, node.metadata || {}, defaults), ...(binding ? { canvasBinding: binding } : {}) };
+    const idempotencyKey = typeof override.idempotencyKey === "string" ? String(override.idempotencyKey) : undefined;
+    const started = await context.backend.canvasRunGeneration({
+        mode: "video",
+        model: "minimax-h3:video",
+        preset: "minimax-h3",
+        projectId: binding?.projectId,
+        nodeId: binding?.nodeId,
+        segmentId: binding?.segmentId,
+        input,
+        params,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+    });
+    const task = started.task || (await context.backend.comfyGetTask(started.taskId)).task;
     return { task, input, params };
-}
-
-async function waitForTask(context: PluginMcpContext, taskId: string) {
-    for (;;) {
-        const current = await context.backend.comfyGetTask(taskId);
-        if (current.task.status === "succeeded") return current.task;
-        if (current.task.status === "failed" || current.task.status === "cancelled") throw new Error(current.task.error || `H3 任务${current.task.status}`);
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-    }
-}
-
-async function previousVideoPath(context: PluginMcpContext, task: Record<string, unknown>) {
-    if (!context.backend.runtimeMediaPath) return "";
-    const result = task.result && typeof task.result === "object" ? task.result as Record<string, unknown> : {};
-    const media = Array.isArray(result.media) ? result.media : [];
-    const video = media.find((item) => item && typeof item === "object" && String((item as Record<string, unknown>).mimeType || "").startsWith("video/")) as Record<string, unknown> | undefined;
-    return video?.url ? context.backend.runtimeMediaPath(String(video.url)) : "";
 }
 
 function taskVideo(task: Record<string, unknown>) {
@@ -329,6 +394,7 @@ async function updateClipTask(context: PluginMcpContext, nodeId: string, clipId:
     // 后台轮询是异步的：Clip 被重跑、重排或删除后，旧任务的回调必须失效。
     // 首次提交仅用于建立 Clip ID -> task ID 绑定；之后每次更新都双重校验。
     if (!bindTask && (!taskId || String(segment.runtimeTaskId || "") !== taskId)) return;
+    if (bindTask && String(segment.runtimeTaskId || "") === taskId && ["success", "error", "cancelled"].includes(String(segment.status || ""))) return;
     const status = error ? "error" : String(task.status || "running");
     const video = !error && status === "succeeded" ? taskVideo(task) : undefined;
     // 与前端直连路径对齐：把 ComfyUI 原始媒体地址改写成前端可播放的 /media/<storageKey> 形式。
@@ -357,30 +423,34 @@ async function updateClipTask(context: PluginMcpContext, nodeId: string, clipId:
     await context.updateCanvasNode(nodeId, {}, nodePatch);
 }
 
-async function monitorClipTask(context: PluginMcpContext, nodeId: string, clipId: string, taskId: string, logId = "", params: Record<string, unknown> = {}, lastSubmitted: Record<string, unknown> = {}) {
-    try {
-        for (;;) {
-            const current = await context.backend.comfyGetTask(taskId);
-            await updateClipTask(context, nodeId, clipId, current.task as unknown as Record<string, unknown>);
-            if (["succeeded", "failed", "cancelled"].includes(current.task.status)) {
-                const finalStatus = current.task.status === "succeeded" ? "success" : current.task.status === "cancelled" ? "cancelled" : "failed";
-                await updateMcpGenerationLog(context, logId, current.task as unknown as Record<string, unknown>, finalStatus, current.task.error || undefined, { params, lastSubmitted });
-                return;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 1500));
-        }
-    } catch (error) {
-        await updateClipTask(context, nodeId, clipId, { id: taskId, status: "failed" }, error instanceof Error ? error.message : String(error));
-        await updateMcpGenerationLog(context, logId, { id: taskId, status: "failed" }, "failed", error instanceof Error ? error.message : String(error), { params, lastSubmitted });
-    }
-}
-
 export const pluginMcp: PluginMcpModule = {
     id: "minimax-h3",
-    version: "1.2.0",
+    version: "1.3.0",
     tools: TOOLS,
     createHandler(context: PluginMcpContext): Record<string, McpToolHandler> {
         return {
+            h3_get_defaults: async () => context.backend.getH3Defaults(),
+            h3_set_defaults: async (input) => {
+                const settings = input.settings && typeof input.settings === "object" && !Array.isArray(input.settings) ? input.settings as Record<string, unknown> : {};
+                return { defaults: await context.backend.setH3Defaults(normalizeH3GenerationSettings(settings)) };
+            },
+            h3_reset_defaults: async () => { await context.backend.resetH3Defaults(); return { ok: true, defaults: null }; },
+            h3_apply_video_plan: async (input) => {
+                const projectId = String(input.projectId || "");
+                const nodeId = String(input.nodeId || "");
+                if (input.language !== undefined && String(input.language) !== "zh-CN") throw new Error("H3 视频计划当前只接受 language=zh-CN");
+                const node = await context.getCanvasNode(nodeId);
+                if (!node) throw new Error(`找不到画布节点:${nodeId}`);
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                if (!project || !Array.isArray(project.nodes) || !(project.nodes as Array<Record<string, unknown>>).some((item) => String(item.id || "") === nodeId)) throw new Error(`节点不属于指定画布:${projectId}`);
+                const rawSegments = Array.isArray(input.segments) ? input.segments as H3PlannedSegment[] : [];
+                validateVideoPlan(rawSegments);
+                const existing = segmentsOf(node);
+                const next = rawSegments.map(normalizePlannedSegment);
+                const segments = input.replaceSegments === false ? [...existing, ...next] : next;
+                await context.updateCanvasNode(nodeId, {}, { segments, status: "idle", errorDetails: "", runProgress: 0 });
+                return { ok: true, projectId, nodeId, count: next.length, segments };
+            },
             h3_list_models: async () => {
                 const catalog = await context.comfyUi.models();
                 return {
@@ -393,12 +463,16 @@ export const pluginMcp: PluginMcpModule = {
                 };
             },
             h3_get_node: async (input) => {
-                const node = await context.getCanvasNode(String(input.nodeId || ""));
+                const nodeId = String(input.nodeId || "");
+                await assertProjectNode(context, String(input.projectId || ""), nodeId);
+                const node = await context.getCanvasNode(nodeId);
                 if (!node) throw new Error(`找不到画布节点:${String(input.nodeId || "")}`);
                 return node;
             },
             h3_run_clip: async (input) => {
                 const nodeId = String(input.nodeId || "");
+                const projectId = String(input.projectId || "");
+                await assertProjectNode(context, projectId, nodeId);
                 const node = await context.getCanvasNode(nodeId);
                 if (!node) throw new Error(`找不到画布节点:${nodeId}`);
                 if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
@@ -406,29 +480,37 @@ export const pluginMcp: PluginMcpModule = {
                 const selected = selectSegment(segmentsOf(node), index);
                 const selectedIndex = selected.index;
                 const segment = selected.segment;
-                const params = extractParams(segment, (input.params as Record<string, unknown>) || {});
+                const defaults = await context.backend.getH3Defaults();
+                const requestedParams = { ...((input.params as Record<string, unknown>) || {}), ...(typeof input.idempotencyKey === "string" ? { idempotencyKey: input.idempotencyKey } : {}) };
+                if (typeof input.idempotencyKey === "string" && input.idempotencyKey.trim()) {
+                    try {
+                        const existing = await context.backend.getTask(input.idempotencyKey.trim());
+                        if (existing.task.id === input.idempotencyKey.trim()) return existing.task;
+                    } catch { /* 首次提交时任务尚不存在 */ }
+                }
+                const params = extractParams(segment, requestedParams, node.metadata || {}, defaults);
                 const { images, videos, audios } = collectRefs(segment);
                 const logId = await createMcpGenerationLog(context, nodeId, segment, [...images, ...videos, ...audios], params);
-                const started = await runSegment(context, node, selectedIndex, (input.params as Record<string, unknown>) || {});
+                const started = await runSegment(context, node, selectedIndex, requestedParams, "", defaults, { projectId, nodeId, segmentId: String(segment.id || ""), generationLogId: logId });
                 const clipId = String(segmentsOf(node)[selectedIndex]?.id || "");
                 if (!clipId) throw new Error("H3 Clip 缺少身份标识");
                 const lastSubmitted = { input: started.input, params: started.params };
                 await updateClipTask(context, nodeId, clipId, started.task as unknown as Record<string, unknown>, undefined, true);
                 await updateMcpGenerationLog(context, logId, started.task as unknown as Record<string, unknown>, "running", undefined, { params, lastSubmitted });
-                void monitorClipTask(context, nodeId, clipId, started.task.id, logId, params, lastSubmitted);
                 return { ...started.task, generationLogId: logId };
             },
             h3_get_task: async (input) => {
                 const taskId = String(input.taskId || "");
-                const { task } = await context.backend.comfyGetTask(taskId);
+                const { task } = await context.backend.getTask(taskId);
                 return task;
             },
             h3_cancel_task: async (input) => {
                 const taskId = String(input.taskId || "");
-                return context.comfyUi.cancel(taskId);
+                return context.backend.cancelTask(taskId);
             },
             h3_update_clip: async (input) => {
                 const nodeId = String(input.nodeId || "");
+                await assertProjectNode(context, String(input.projectId || ""), nodeId);
                 const node = await context.getCanvasNode(nodeId);
                 if (!node) throw new Error(`找不到画布节点:${nodeId}`);
                 const index = Number(input.segmentIndex);
@@ -439,9 +521,13 @@ export const pluginMcp: PluginMcpModule = {
                 return { ok: true, nodeId, segmentIndex: index, segment: nextSegments[index] };
             },
             h3_run_all_clips: async (input) => {
+                const projectId = String(input.projectId || "");
                 const override = (input.params as Record<string, unknown>) || {};
                 const onlyIds = Array.isArray(input.nodeIds) ? (input.nodeIds as string[]).map(String) : null;
-                const nodes = (await context.getCanvasNodes()).filter((node) => isH3Node(node) && (!onlyIds || onlyIds.includes(node.id)));
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                if (!project) throw new Error(`画布不存在:${projectId}`);
+                const nodes = (await context.getCanvasNodes()).filter((node) => isH3Node(node) && (!onlyIds || onlyIds.includes(node.id)) && Array.isArray(project.nodes) && (project.nodes as Array<Record<string, unknown>>).some((item) => String(item.id || "") === node.id));
+                const defaults = await context.backend.getH3Defaults();
                 const tasks: unknown[] = [];
                 for (const node of nodes) {
                     const segments = segmentsOf(node);
@@ -456,22 +542,19 @@ export const pluginMcp: PluginMcpModule = {
                     const clipId = String(segments[i].id || "");
                     let startedTaskId = "";
                     let logId = "";
+                    let params: Record<string, unknown> = {};
                     let lastSubmitted: Record<string, unknown> = {};
                     try {
                         if (!clipId) throw new Error(`H3 Clip ${i + 1} 缺少身份标识`);
                         const { images, videos, audios } = collectRefs(segments[i]);
-                        const params = extractParams(segments[i], override);
+                        params = extractParams(segments[i], override, node.metadata || {}, defaults);
                         logId = await createMcpGenerationLog(context, node.id, segments[i], [...images, ...videos, ...audios], params);
-                        const started = await runSegment(context, node, i, override, previousVideo);
+                        const started = await runSegment(context, node, i, override, previousVideo, defaults, { projectId, nodeId: node.id, segmentId: clipId, generationLogId: logId });
                         startedTaskId = String(started.task.id || "");
                         lastSubmitted = { input: started.input, params: started.params };
                         await updateClipTask(context, node.id, clipId, started.task as unknown as Record<string, unknown>, undefined, true);
                         await updateMcpGenerationLog(context, logId, started.task as unknown as Record<string, unknown>, "running", undefined, { params, lastSubmitted });
-                        const task = await waitForTask(context, started.task.id);
-                        await updateClipTask(context, node.id, clipId, task as unknown as Record<string, unknown>);
-                        await updateMcpGenerationLog(context, logId, task as unknown as Record<string, unknown>, "success", undefined, { params, lastSubmitted });
-                        previousVideo = await previousVideoPath(context, task as unknown as Record<string, unknown>);
-                        tasks.push({ nodeId: node.id, segmentIndex: i, task, generationLogId: logId });
+                        tasks.push({ nodeId: node.id, segmentIndex: i, task: started.task, generationLogId: logId, status: "queued" });
                     } catch (error) {
                         await updateClipTask(context, node.id, clipId, { id: startedTaskId, status: "failed" }, error instanceof Error ? error.message : String(error), !startedTaskId);
                         await updateMcpGenerationLog(context, logId, { id: startedTaskId, status: "failed" }, "failed", error instanceof Error ? error.message : String(error), { params, lastSubmitted });

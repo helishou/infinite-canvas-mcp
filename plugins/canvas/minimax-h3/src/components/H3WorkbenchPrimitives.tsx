@@ -62,6 +62,19 @@ const H3_PANE_META: Record<H3PaneKey, { metadataKey: string; axis: "x" | "y"; si
 const H3_PANE_BOUNDS: Record<H3PaneKey, [number, number]> = { previewH: [130, 2000], previewW: [280, 1400], promptW: [220, 900], timelineH: [250, 2000], refLaneH: [60, 900] };
 const H3_PANE_DEFAULTS: Record<H3PaneKey, number> = { previewH: 220, previewW: 960, promptW: 480, timelineH: 320, refLaneH: 150 };
 
+// 从节点 metadata 解析当前各模块区域的实际宽高（钳到 bounds，缺失/非法用内置默认），
+// 供「设为默认参数」把布局快照持久化，让新建节点恢复同一套工作台布局。
+export function resolveH3PaneSizes(metadata: Record<string, unknown> | null | undefined = {}): Record<string, number> {
+    const sizes: Record<string, number> = {};
+    (Object.keys(H3_PANE_META) as H3PaneKey[]).forEach((key) => {
+        const metaKey = H3_PANE_META[key].metadataKey;
+        const [min, max] = H3_PANE_BOUNDS[key];
+        const raw = Number(metadata?.[metaKey]);
+        sizes[metaKey] = Math.round(Math.max(min, Math.min(max, Number.isFinite(raw) && raw > 0 ? raw : H3_PANE_DEFAULTS[key])));
+    });
+    return sizes;
+}
+
 // 行高布局常量（拖拽侧与读取侧共用的唯一口径，此前散在三处导致互相打架）：
 // wb-body 自身 padding+gap 合计 36；Output 行保底 80；
 // 时间轴面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110 + 余量 ≈ 190 + Refs 行高。

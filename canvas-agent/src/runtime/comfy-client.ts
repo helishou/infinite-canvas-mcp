@@ -23,7 +23,7 @@ export type ComfyUiClient = {
     status(): Promise<Record<string, unknown>>;
     models(signal?: AbortSignal): Promise<ComfyModelCatalog>;
     presets(): ComfyPreset[];
-    run(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string): Promise<RuntimeTask>;
+    run(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string, clientTaskId?: string): Promise<RuntimeTask>;
     cancel(id: string): Promise<RuntimeTask>;
     getUrl(): Promise<string>;
     setUrl(url: string): Promise<string>;
@@ -35,7 +35,7 @@ export function backendComfyUi(client: BackendClient, presets: () => ComfyPreset
         status: () => client.comfyStatus(),
         models: (signal) => client.comfyModels(signal),
         presets,
-        run: (preset, input, params, baseUrl) => client.comfyRun(preset, input, params, baseUrl),
+        run: (preset, input, params, baseUrl, clientTaskId) => client.comfyRun(preset, input, params, baseUrl, clientTaskId),
         cancel: (id) => client.comfyCancel(id),
         getUrl: async () => (await client.comfyConfig()).url,
         setUrl: async (url) => (await client.comfySetConfig(url)).url,

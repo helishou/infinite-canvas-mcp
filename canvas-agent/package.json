@@ -11,7 +11,8 @@
     "./schemas": "./dist/canvas/schemas.js",
     "./operations": "./dist/canvas/operations.js",
     "./runtime/comfy-client": "./dist/runtime/comfy-client.js",
-    "./runtime/agent-runtime": "./dist/runtime/agent-runtime.js"
+    "./runtime/agent-runtime": "./dist/runtime/agent-runtime.js",
+    "./plugins/minimax-h3/node-factory": "./dist/plugins/minimax-h3/node-factory.js"
   },
   "types": "./dist/index.d.ts",
   "bin": {

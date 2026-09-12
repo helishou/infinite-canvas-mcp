@@ -147,10 +147,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         const clientId = String(req.query.clientId || "") || undefined;
         session.updateState(req.body, clientId);
         const state = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : null;
-        const projectId = String(state?.projectId || "").trim();
-        if (projectId && state?.hasCanvas !== false) {
-            void backend.upsertCanvasProject({ ...state, id: projectId, updatedAt: new Date().toISOString() }).catch((error) => logger.warn("Canvas state backend sync failed", { error: String(error), projectId }));
-        }
+        // 这里仅保存 Agent 的会话投影；画布权威写入由 Web Store 直接经 Backend /ops 完成，
+        // 不再把浏览器快照从 Agent 侧全量覆盖回 Backend。
         res.json({ ok: true });
     });
     app.post("/canvas/activate", (req, res) => {

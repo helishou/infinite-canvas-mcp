@@ -55,6 +55,11 @@ export type CanvasPluginAi = {
     listModels: (capability?: PluginModelCapability) => ModelOption[];
     defaultModel: (capability: PluginModelCapability) => string;
 };
+export type CanvasH3Defaults = {
+    get: () => Promise<Record<string, unknown>>;
+    set: (settings: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    reset: () => Promise<void>;
+};
 
 // Node-specific buttons appended to the hover toolbar.
 export type CanvasNodeToolbarItem = {
@@ -92,6 +97,7 @@ export type CanvasNodeContext = {
     on: (event: string, handler: (payload: unknown) => void) => () => void;
     // AI image, video, and text generation using the host model configuration.
     ai: CanvasPluginAi;
+    h3Defaults: CanvasH3Defaults;
     // Opens or closes the custom panel below this node; the definition must provide a Panel.
     openPanel: () => void;
     closePanel: () => void;
@@ -120,6 +126,7 @@ export type CanvasPluginHost = {
     applyOps: (ops: CanvasAgentOp[]) => void;
     // AI generation using the current canvas model and credential configuration.
     ai: CanvasPluginAi;
+    h3Defaults: CanvasH3Defaults;
     // Opens or closes the custom panel below a specified node.
     openPanel: (nodeId: string) => void;
     closePanel: () => void;

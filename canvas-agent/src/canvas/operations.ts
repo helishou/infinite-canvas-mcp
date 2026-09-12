@@ -31,11 +31,34 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
         const configId = `config-${crypto.randomUUID()}`;
         const mode = generationMode(input.mode);
         const prompt = String(input.prompt || "");
-        return applyOps([configNodeOp(configId, input, x, y), ...(input.autoRun ? [runGenerationOp(configId, mode, prompt)] : [])]);
+        return applyOps([configNodeOp(configId, input, x, y), ...(input.autoRun ? [runGenerationOp({
+            nodeId: configId,
+            mode,
+            prompt,
+            params: input.params as Record<string, unknown> | undefined,
+            idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined,
+            resultPolicy: input.resultPolicy as "replace-active" | "append" | undefined,
+        })] : [])]);
     }
     if (name === "canvas_create_generation_flow") return applyOps(generationFlowOps(input, state));
     if (name === "canvas_generate_text" || name === "canvas_generate_image" || name === "canvas_generate_video" || name === "canvas_generate_audio") {
         return applyOps(generationFlowOps({ ...input, mode: name.replace("canvas_generate_", ""), autoRun: true }, state));
+    }
+    if (name === "canvas_set_generation_references") {
+        const data = input as { nodeId: string; referenceNodeIds: string[] };
+        const targetNodeId = String(data.nodeId || "");
+        const referenceNodeIds = [...new Set(data.referenceNodeIds || [])];
+        if (!state) throw new Error("替换生成参考图前必须先读取当前画布");
+        const nodeById = new Map((state.nodes || []).map((node) => [node.id, node]));
+        if (!nodeById.has(targetNodeId)) throw new Error(`找不到生成节点：${targetNodeId}`);
+        const oldReferenceConnectionIds = (state.connections || [])
+            .filter((connection) => connection.toNodeId === targetNodeId)
+            .filter((connection) => nodeById.get(connection.fromNodeId)?.type !== "text")
+            .map((connection) => connection.id);
+        return applyOps([
+            ...(oldReferenceConnectionIds.length ? [{ type: "delete_connections", ids: oldReferenceConnectionIds }] : []),
+            ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: targetNodeId, role: "reference", order })),
+        ]);
     }
     if (name === "canvas_update_node") {
         const data = input as { id: string; patch?: Record<string, unknown>; metadata?: Record<string, unknown> };
@@ -58,14 +81,27 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
     }
     if (name === "canvas_delete_nodes") return applyOps([{ type: "delete_node", ids: (input as { ids: string[] }).ids }]);
     if (name === "canvas_connect_nodes") {
-        const data = input as { connections: Array<{ fromNodeId: string; toNodeId: string }> };
+        const data = input as { connections: Array<{ fromNodeId: string; toNodeId: string; role?: string; order?: number }> };
         return applyOps(data.connections.map((connection) => ({ type: "connect_nodes", ...connection })));
     }
     if (name === "canvas_select_nodes") return applyOps([{ type: "select_nodes", ids: (input as { ids: string[] }).ids }]);
     if (name === "canvas_set_viewport") return applyOps([{ type: "set_viewport", viewport: (input as { viewport: unknown }).viewport }]);
     if (name === "canvas_run_generation") {
-        const data = input as { nodeId: string; mode?: string; prompt?: string };
-        return applyOps([runGenerationOp(data.nodeId, generationMode(data.mode), data.prompt)]);
+        const data = input as { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append" };
+        const referenceNodeIds = [...new Set(data.referenceNodeIds || [])];
+        if (!referenceNodeIds.length) return applyOps([runGenerationOp({ ...data, mode: generationMode(data.mode) })]);
+        if (!state) throw new Error("替换生成参考图前必须先读取当前画布");
+        const nodeById = new Map((state.nodes || []).map((node) => [node.id, node]));
+        if (!nodeById.has(data.nodeId)) throw new Error(`找不到生成节点：${data.nodeId}`);
+        const oldReferenceConnectionIds = (state.connections || [])
+            .filter((connection) => connection.toNodeId === data.nodeId)
+            .filter((connection) => nodeById.get(connection.fromNodeId)?.type !== "text")
+            .map((connection) => connection.id);
+        return applyOps([
+            ...(oldReferenceConnectionIds.length ? [{ type: "delete_connections", ids: oldReferenceConnectionIds }] : []),
+            ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: data.nodeId, role: "reference", order })),
+            runGenerationOp({ ...data, mode: generationMode(data.mode), referenceNodeIds: undefined }),
+        ]);
     }
     throw new Error(`未知工具：${name}`);
 }
@@ -115,6 +151,7 @@ function configNodeOp(id: string, input: Record<string, unknown>, x: number, y: 
             audioFormat: input.audioFormat,
             audioSpeed: input.audioSpeed,
             audioInstructions: input.audioInstructions,
+            params: input.params,
         }),
     };
 }
@@ -138,15 +175,22 @@ function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot
         ...(reuseReferences ? [] : [textNodeOp({ id: textId, text: prompt, title: String(input.title || "提示词") }, x, y)]),
         configNodeOp(configId, { ...input, prompt: tokens.join("\n") }, x + 420, y),
         ...(reuseReferences ? [] : [{ type: "connect_nodes", fromNodeId: textId, toNodeId: configId }]),
-        ...referenceNodeIds.map((fromNodeId) => ({ type: "connect_nodes", fromNodeId, toNodeId: configId })),
+        ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: configId, role: "reference", order })),
         { type: "select_nodes", ids: [configId] },
-        ...(input.autoRun ? [runGenerationOp(configId, mode, tokens.join("\n"))] : []),
+        ...(input.autoRun ? [runGenerationOp({
+            nodeId: configId,
+            mode,
+            prompt: tokens.join("\n"),
+            params: input.params as Record<string, unknown> | undefined,
+            idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined,
+            resultPolicy: input.resultPolicy as "replace-active" | "append" | undefined,
+        })] : []),
     ];
 }
 
 /** 创建触发节点生成的画布操作。 */
-function runGenerationOp(nodeId: string, mode: "text" | "image" | "video" | "audio", prompt?: string) {
-    return { type: "run_generation", nodeId, mode, prompt };
+function runGenerationOp(input: { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append" }) {
+    return { type: "run_generation", nodeId: input.nodeId, ...(input.mode ? { mode: input.mode } : {}), prompt: input.prompt, ...cleanRecord({ params: input.params, idempotencyKey: input.idempotencyKey, resultPolicy: input.resultPolicy }) };
 }
 
 /** 将未知生成模式归一为画布支持的模式。 */

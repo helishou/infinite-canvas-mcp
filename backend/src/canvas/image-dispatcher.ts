@@ -7,6 +7,7 @@ import { DirectImageBackend, type ChatGptImageReference } from "../runtime/chatg
 import type { GenerationLogStore, Stores, TaskStore } from "../stores/types.js";
 import type { WorkflowExecutor } from "../workflows/executor.js";
 import type { WorkflowStore } from "../workflows/store.js";
+import { resolveCanvasExecutor } from "./executor-registry.js";
 
 export type CanvasImageReference = {
     id?: string;
@@ -20,6 +21,7 @@ export type CanvasImageReference = {
 export type CanvasImageGenerationInput = {
     projectId?: string;
     nodeId?: string;
+    segmentId?: string;
     model: string;
     prompt: string;
     references?: CanvasImageReference[];
@@ -31,6 +33,8 @@ export type CanvasImageGenerationInput = {
     params?: Record<string, unknown>;
     provider?: { baseUrl?: string; apiKey?: string };
     clientTaskId?: string;
+    writeBackCanvas?: boolean;
+    resultPolicy?: "replace-active" | "append";
 };
 
 export type CanvasImageGenerationResult = {
@@ -73,11 +77,17 @@ export class CanvasImageDispatcher {
         if (!input.prompt.trim()) throw new Error("画布图片生成缺少提示词");
 
         const taskId = input.clientTaskId || `canvas-${crypto.randomUUID()}`;
+        const existing = this.stores.tasks.get(taskId);
+        if (existing) return { taskId: existing.id, logId: undefined };
         const task = this.stores.tasks.create(taskId, "canvas-image", {
+            projectId: input.projectId,
+            nodeId: input.nodeId,
             model,
             prompt: input.prompt,
             references: input.references?.length || 0,
         }, {
+            projectId: input.projectId,
+            nodeId: input.nodeId,
             model,
             size: input.size || `${input.width || 1024}x${input.height || 1024}`,
             quality: input.quality || "auto",
@@ -140,13 +150,14 @@ export class CanvasImageDispatcher {
     }
 
     private async dispatch(input: CanvasImageGenerationInput, taskId: string): Promise<CanvasImageGenerationResult> {
-        if (this.directImage.supports(input.model)) return this.dispatchDirect(input, taskId);
+        const executor = resolveCanvasExecutor({ mode: "image", model: input.model }, this.directImage.supports(input.model));
+        if (executor === "direct-image") return this.dispatchDirect(input, taskId);
 
         const preset = builtinPreset(input.model);
-        if (preset) return this.dispatchBuiltin(input, taskId, preset);
+        if (executor === "builtin-comfy" && preset) return this.dispatchBuiltin(input, taskId, preset);
 
         const workflowName = workflowNameFromModel(input.model);
-        if (workflowName) return this.dispatchWorkflow(input, taskId, workflowName);
+        if (executor === "comfy-workflow" && workflowName) return this.dispatchWorkflow(input, taskId, workflowName);
 
         throw new Error(`没有可用的画布图片执行器：${input.model}`);
     }
@@ -212,9 +223,10 @@ export class CanvasImageDispatcher {
             crypto.randomUUID(),
             undefined,
             workflowName,
-            taskId,
+            `workflow-child-${taskId}`,
             input.projectId,
             input.nodeId,
+            taskId,
         );
         return { taskId, media: result.media };
     }

@@ -69,6 +69,24 @@ export function usePluginHost(params: PluginHostParams) {
             remove: async (options: any) => { const result = await deleteBackendGenerationLogs(options); return Number(result.deleted || 0); },
         };
     }, [projectId]);
+    const h3Defaults = useMemo(() => ({
+        get: async () => {
+            const response = await fetch(`${getBackendUrl()}/plugins/minimax-h3/defaults?token=${encodeURIComponent(getBackendTokenShared())}`);
+            if (!response.ok) throw new Error(`读取 H3 默认参数失败（HTTP ${response.status}）`);
+            const data = await response.json() as { defaults?: Record<string, unknown> | null };
+            return data.defaults || {};
+        },
+        set: async (settings: Record<string, unknown>) => {
+            const response = await fetch(`${getBackendUrl()}/plugins/minimax-h3/defaults?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings) });
+            if (!response.ok) throw new Error(`保存 H3 默认参数失败（HTTP ${response.status}）`);
+            return ((await response.json()) as { defaults?: Record<string, unknown> }).defaults || settings;
+        },
+        reset: async () => {
+            const response = await fetch(`${getBackendUrl()}/plugins/minimax-h3/defaults?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "DELETE" });
+            if (!response.ok) throw new Error(`重置 H3 默认参数失败（HTTP ${response.status}）`);
+            window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: {} }));
+        },
+    }), []);
 
     // Host capabilities available to plugin nodes; methods receive nodeId and are not bound to a specific node.
     const pluginAi = useMemo<CanvasPluginAi>(() => {
@@ -174,24 +192,21 @@ export function usePluginHost(params: PluginHostParams) {
                 return { models: result.data?.models || [], loras: result.data?.loras || [], textEncoders: result.data?.textEncoders || [], videoVaes: result.data?.videoVaes || [], audioVaes: result.data?.audioVaes || [], latentUpscaleModels: result.data?.latentUpscaleModels || [], nanfeng: result.data?.nanfeng || {} };
             },
             runRunningHubH3: async (prompt, input, params, options) => {
-                const agent = useAgentStore.getState();
-                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法运行 RunningHub MiniMax H3");
-                const result = await runRunningHubH3Task(agent.url, agent.token, prompt, input, params, options?.signal, options?.onTaskId);
+                const backendUrl = getBackendUrl();
+                const backendToken = getBackendTokenShared();
+                if (!(await fetch(`${backendUrl}/health`).then((response) => response.ok).catch(() => false))) throw new Error("总后台未连接，无法运行 RunningHub MiniMax H3");
+                const result = await runRunningHubH3Task(backendUrl, backendToken, prompt, input, params, options?.signal, options?.onTaskId);
                 return persistH3Result(result);
             },
             getRunningHubH3Task: async (taskId) => {
-                const agent = useAgentStore.getState();
-                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法查询 RunningHub H3 任务");
-                const task = await getRunningHubH3Task(agent.url, agent.token, taskId) as Awaited<ReturnType<typeof getRunningHubH3Task>>;
+                const task = await getRunningHubH3Task(getBackendUrl(), getBackendTokenShared(), taskId) as Awaited<ReturnType<typeof getRunningHubH3Task>>;
                 if (task.status === "succeeded" && task.result?.url && !task.result.storageKey) {
                     return { ...task, result: await persistH3Result(task.result) };
                 }
                 return task;
             },
             cancelRunningHubH3Task: async (taskId) => {
-                const agent = useAgentStore.getState();
-                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法取消 RunningHub H3 任务");
-                const task = await cancelRunningHubH3Task(agent.url, agent.token, taskId);
+                const task = await cancelRunningHubH3Task(getBackendUrl(), getBackendTokenShared(), taskId);
                 return { id: task.id, status: task.status, progress: task.progress, error: task.error, result: null };
             },
             // List configured models for a capability; labels use the model name without the channel prefix.
@@ -230,12 +245,13 @@ export function usePluginHost(params: PluginHostParams) {
             },
             applyOps: (ops) => applyAgentOps(ops),
             ai: pluginAi,
+            h3Defaults,
             openPanel: (nodeId) => setDialogNodeId(nodeId),
             closePanel: () => setDialogNodeId(null),
             openAssetPicker,
             generationLogs,
         }),
-        [applyAgentOps, generationLogs, openAssetPicker, pluginAi, projectId, updateProject],
+        [applyAgentOps, generationLogs, h3Defaults, openAssetPicker, pluginAi, projectId, updateProject],
     );
 
     const renderPluginPanel = useCallback(
@@ -271,12 +287,37 @@ export function usePluginHost(params: PluginHostParams) {
     );
 
     // Load installed remote plugins on startup.
+    // v2 布局快照（layout）只存浏览器镜像：后端默认参数是生成参数集合，
+    // 上行同步/下行回写都必须剥掉 layout，避免布局混进生成参数。
+    const stripLayout = (settings: Record<string, unknown>): Record<string, unknown> => {
+        const { layout: _layout, ...rest } = settings;
+        return rest;
+    };
     useEffect(() => {
+        void (async () => {
+            const raw = localStorage.getItem("minimax-h3-default-params");
+            const local = raw ? (() => { try { const parsed = JSON.parse(raw) as { settings?: Record<string, unknown> }; return parsed.settings || {}; } catch { return {}; } })() : {};
+            const remote = await h3Defaults.get().catch(() => ({}));
+            if (Object.keys(remote).length) {
+                window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: stripLayout(remote) }));
+                if (raw) localStorage.removeItem("minimax-h3-default-params");
+            } else if (Object.keys(stripLayout(local)).length) {
+                const migrated = await h3Defaults.set(stripLayout(local));
+                window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: stripLayout(migrated) }));
+                localStorage.removeItem("minimax-h3-default-params");
+            }
+        })();
         void ensurePluginsLoaded();
         const reloadPlugins = () => void ensurePluginsLoaded();
+        const refreshH3Defaults = (event: Event) => {
+            const detail = (event as CustomEvent<{ type?: string; entityId?: string }>).detail;
+            if (detail?.type !== "settings.updated" || detail.entityId !== "plugin:minimax-h3:defaults:v1") return;
+            void h3Defaults.get().then((settings) => window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: stripLayout(settings) })));
+        };
         window.addEventListener("backend-connected", reloadPlugins);
-        return () => window.removeEventListener("backend-connected", reloadPlugins);
-    }, []);
+        window.addEventListener("backend-event", refreshH3Defaults);
+        return () => { window.removeEventListener("backend-connected", reloadPlugins); window.removeEventListener("backend-event", refreshH3Defaults); };
+    }, [h3Defaults]);
 
     return { pluginHost, renderPluginPanel, buildNodeToolbarItems };
 }

@@ -93,9 +93,15 @@ export type CanvasNodeMetadata = {
     // 角色节点：characterAssetId 关联到资产库里的 CharacterAsset；characterImages 是节点自带的角色图谱快照（来自资产库或本地编辑）。
     characterAssetId?: string;
     characterName?: string;
+    characterEnglishName?: string;
     characterDescription?: string;
     characterImages?: Array<{ url: string; storageKey?: string; name: string; outfit: string; outfitDescription: string; width: number; height: number; bytes: number; mimeType: string }>;
     characterPrimaryIndex?: number;
+    // 拖入角色节点的声线（音频）：从音频节点/音频资产/音频文件拖入后记录，存入资产库映射到 CharacterAsset.voice*。
+    characterVoiceName?: string;
+    characterVoiceUrl?: string;
+    characterVoiceStorageKey?: string;
+    characterVoiceAssetId?: string;
 };
 
 export type CanvasNodeData = {
@@ -112,6 +118,8 @@ export type CanvasConnection = {
     id: string;
     fromNodeId: string;
     toNodeId: string;
+    role?: string;
+    order?: number;
 };
 
 export type CanvasAssistantReference = {

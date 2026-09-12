@@ -55,18 +55,31 @@ export type CanvasImageGenerationRequest = {
     // 画布生成日志关联：项目 id + 触发节点 id
     projectId?: string;
     nodeId?: string;
+    resultPolicy?: "replace-active" | "append";
 };
 
 export type BackendRuntimeTask = {
     id: string;
+    kind?: string;
+    parentTaskId?: string;
+    projectId?: string;
+    nodeId?: string;
+    segmentId?: string;
+    executor?: string;
+    model?: string;
     status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
     progress: number;
+    input?: Record<string, unknown>;
+    params?: Record<string, unknown>;
     result?: { media?: BackendMediaResult[]; images?: BackendMediaResult[] } | null;
+    outputs?: Array<Record<string, unknown>>;
     error?: string | null;
+    createdAt?: string;
+    updatedAt?: string;
 };
 
 export function startCanvasImageGeneration(input: CanvasImageGenerationRequest, signal?: AbortSignal) {
-    return request<{ ok: boolean; taskId: string }>("POST", "/canvas/image-generation", input, { signal });
+    return request<{ ok: boolean; taskId: string }>("POST", "/canvas/generation", { mode: "image", ...input }, { signal });
 }
 
 
@@ -104,6 +117,12 @@ export function saveBackendProjects(projects: Record<string, unknown>[]) {
 
 export function upsertBackendProject(project: Record<string, unknown>) {
     return request<{ ok: boolean; project?: Record<string, unknown> }>("POST", "/canvas/projects", project);
+}
+
+export function applyBackendCanvasOperations(projectId: string, operations: Array<Record<string, unknown>>, expectedRevision?: number) {
+    return request<{ ok: boolean; project?: Record<string, unknown>; revision?: number; operationResults?: unknown[] }>(
+        "POST", `/canvas/projects/${encodeURIComponent(projectId)}/ops`, { expectedRevision, operations },
+    );
 }
 
 export function deleteBackendProject(id: string) {
@@ -315,8 +334,25 @@ export function fetchBackendTask(id: string, signal?: AbortSignal) {
     return request<{ ok: boolean; task?: BackendRuntimeTask; events?: unknown[] }>("GET", `/tasks/${encodeURIComponent(id)}`, undefined, { signal });
 }
 
-export function createBackendTask(kind: string, input: Record<string, unknown> = {}, params: Record<string, unknown> = {}) {
-    return request<{ ok: boolean; task?: Record<string, unknown> }>("POST", "/tasks", { kind, input, params });
+export function fetchBackendTasks(options: { projectId?: string; nodeIds?: string[]; segmentIds?: string[]; scope?: "all" | "canvas" | "image" | "video"; status?: string; kind?: string; taskId?: string } = {}) {
+    const params = new URLSearchParams();
+    if (options.projectId) params.set("projectId", options.projectId);
+    if (options.nodeIds?.length) params.set("nodeIds", options.nodeIds.join(","));
+    if (options.segmentIds?.length) params.set("segmentIds", options.segmentIds.join(","));
+    if (options.scope) params.set("scope", options.scope);
+    if (options.status) params.set("status", options.status);
+    if (options.kind) params.set("kind", options.kind);
+    if (options.taskId) params.set("taskId", options.taskId);
+    const qs = params.toString();
+    return request<{ ok: boolean; tasks?: BackendRuntimeTask[] }>("GET", `/tasks${qs ? `?${qs}` : ""}`);
+}
+
+export function createBackendTask(kind: string, input: Record<string, unknown> = {}, params: Record<string, unknown> = {}, clientTaskId?: string) {
+    return request<{ ok: boolean; task?: Record<string, unknown> }>("POST", "/tasks", { kind, input, params, ...(clientTaskId ? { clientTaskId } : {}) });
+}
+
+export function updateBackendTask(id: string, patch: { status?: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress?: number; error?: string | null }) {
+    return request<{ ok: boolean; task?: BackendRuntimeTask }>("PATCH", `/tasks/${encodeURIComponent(id)}`, patch);
 }
 
 export function cancelBackendTask(id: string) {

@@ -11,6 +11,13 @@ export type RuntimeTask = {
     error?: string | null;
     createdAt: string;
     updatedAt: string;
+    parentTaskId?: string;
+    projectId?: string;
+    nodeId?: string;
+    segmentId?: string;
+    executor?: string;
+    model?: string;
+    outputs?: Array<Record<string, unknown>>;
 };
 
 export type RuntimeTaskEvent = {

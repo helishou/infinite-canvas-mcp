@@ -429,6 +429,7 @@ export class WorkflowExecutor {
         // 画布生成日志关联：项目 id + 触发节点 id（为空时仍允许走，但没有日志）
         projectId?: string,
         nodeId?: string,
+        parentTaskId?: string,
     ): Promise<RunResult> {
         const controller = new AbortController();
         const url = comfyUrl ?? this.bridge.getUrl();
@@ -495,8 +496,8 @@ export class WorkflowExecutor {
             saveImagePresent: Object.values(prepared).some((n) => (n as WfNode)?.class_type === "SaveImage"),
         });
         const task = clientTaskId
-            ? this.tasks.create(clientTaskId, "workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, params)
-            : this.tasks.create("workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, params);
+            ? this.tasks.create(clientTaskId, "workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) })
+            : this.tasks.create("workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) });
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
 
         try {
@@ -575,7 +576,7 @@ export class WorkflowExecutor {
                             const msg = JSON.parse(raw);
                             if (!msg?.type || !capturedPromptId || msg?.data?.prompt_id !== capturedPromptId) return;
                             if (msg.type === "executed" || msg.type === "execution_success") {
-                                wsExecuted = true;
+                                if (msg.type === "execution_success") wsExecuted = true;
                                 if (msg.data?.output && typeof msg.data.output === "object") {
                                     wsOutputs = { ...(wsOutputs || {}), ...(msg.data.output as Record<string, unknown>) };
                                 }
@@ -620,14 +621,12 @@ export class WorkflowExecutor {
                 if (wsError) throw wsError;
 
                 if (wsExecuted) {
-                    const useOutputs = wsExecutionSuccessOutputs ?? wsOutputs;
+                    const useOutputs = wsOutputs ?? wsExecutionSuccessOutputs;
                     if (useOutputs && Object.keys(useOutputs).length > 0) {
                         const media = await collectOutputMedia(useOutputs, comfyUrl, this.media, controller.signal);
-                        return { promptId, outputs: useOutputs, media, status: { status_str: "success", completed: true } };
+                        if (media.length) return { promptId, outputs: useOutputs, media, status: { status_str: "success", completed: true } };
                     }
                     if (Date.now() - startedAt > 60000) throw new Error("ComfyUI 已在 WebSocket 报告完成但取回结果");
-                    await new Promise((r) => setTimeout(r, 1500));
-                    continue;
                 }
 
                 if (wsClosed) throw new Error("WebSocket 已关闭但未收到 executed");
@@ -642,7 +641,8 @@ export class WorkflowExecutor {
                     if (statusStr === "success" || item?.status?.completed || hasOutputs) {
                         if (!hasOutputs) throw new Error("ComfyUI 执行结束但无输出");
                         const media = await collectOutputMedia(item.outputs, comfyUrl, this.media, controller.signal);
-                        return { promptId, outputs: item.outputs, media, status: item.status || {} };
+                        if (media.length) return { promptId, outputs: item.outputs, media, status: item.status || {} };
+                        if (Date.now() - startedAt > 60000) throw new Error("ComfyUI 执行结束但输出中没有可用媒体");
                     }
                 }
                 await new Promise((r) => setTimeout(r, 1500));

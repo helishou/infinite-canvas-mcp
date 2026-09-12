@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
+import { applyCanvasProjectOperations, type CanvasOperation } from "./canvas/project-ops.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -15,6 +16,13 @@ export type RuntimeTask = {
     input: Record<string, unknown>; params: Record<string, unknown>;
     result: Record<string, unknown> | null; error: string | null;
     createdAt: string; updatedAt: string;
+    parentTaskId?: string;
+    projectId?: string;
+    nodeId?: string;
+    segmentId?: string;
+    executor?: string;
+    model?: string;
+    outputs: Array<Record<string, unknown>>;
 };
 export type RuntimeTaskEvent = {
     id: number; taskId: string; type: string;
@@ -274,10 +282,196 @@ export class BackendDatabase {
     upsertCanvasProject(project: CanvasProject) {
         const now = new Date().toISOString();
         const updatedAt = String(project.updatedAt || now);
+        const current = this.getCanvasProject(project.id);
+        const currentRevision = Number(current?.revision || 0);
+        const incomingRevision = Number(project.revision ?? currentRevision);
+        // revision 是画布写入的权威顺序；旧全量快照不能靠较新的时间戳覆盖新操作。
+        if (current && incomingRevision < currentRevision) return current;
+        // 客户端可能持有旧的全量画布快照；不能让它覆盖 MCP 刚写入的节点状态。
+        if (current && Date.parse(String(current.updatedAt || "")) > Date.parse(updatedAt)) return current;
+        project.revision = Math.max(currentRevision, incomingRevision);
         this.db.prepare(
             "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
         ).run(project.id, JSON.stringify(project), updatedAt);
         return this.getCanvasProject(project.id)!;
+    }
+
+    applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[]) {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const current = this.getCanvasProject(id);
+            if (!current) throw new Error(`画布不存在: ${id}`);
+            const currentRevision = Number(current.revision || 0);
+            if (expectedRevision !== undefined && expectedRevision !== currentRevision) {
+                const error = new Error("画布版本冲突");
+                (error as Error & { code?: string; project?: CanvasProject; revision?: number }).code = "REVISION_CONFLICT";
+                (error as Error & { project?: CanvasProject }).project = current;
+                (error as Error & { revision?: number }).revision = currentRevision;
+                throw error;
+            }
+            const project = structuredClone(current) as Record<string, unknown>;
+            const operationResults = applyCanvasProjectOperations(project, operations);
+            const revision = currentRevision + 1;
+            project.revision = revision;
+            project.updatedAt = new Date().toISOString();
+            const saved = this.upsertCanvasProject(project as CanvasProject);
+            this.db.exec("COMMIT");
+            return { project: saved, revision, operationResults };
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+    }
+
+    writeBackH3Task(
+        task: RuntimeTask,
+        binding: { projectId: string; nodeId: string; segmentId: string; generationLogId?: string },
+        output: Record<string, unknown> | null,
+    ): { project: CanvasProject; log: GenerationLog | null } | null {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const project = this.getCanvasProject(binding.projectId);
+            if (!project) { this.db.exec("COMMIT"); return null; }
+            const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+            const node = nodes.find((item) => String(item.id || "") === binding.nodeId);
+            if (!node) { this.db.exec("COMMIT"); return null; }
+            const metadata = node.metadata || {};
+            const segments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
+            const index = segments.findIndex((segment) => String(segment.id || "") === binding.segmentId);
+            if (index < 0 || String(segments[index].runtimeTaskId || "") !== task.id) {
+                this.db.exec("COMMIT");
+                return null;
+            }
+            const terminalStatus = task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "error";
+            const nextSegment = {
+                ...segments[index],
+                status: terminalStatus,
+                progress: task.progress,
+                ...(output ? { result: output.url, resultStorageKey: output.storageKey } : {}),
+                ...(task.error ? { errorDetails: task.error } : {}),
+            };
+            const nextProject: CanvasProject = {
+                ...project,
+                revision: Number(project.revision || 0) + 1,
+                updatedAt: new Date().toISOString(),
+                nodes: nodes.map((item) => item.id !== node.id ? item : {
+                    ...item,
+                    metadata: {
+                        ...(item.metadata || {}),
+                        segments: segments.map((segment, segmentIndex) => segmentIndex === index ? nextSegment : segment),
+                        status: terminalStatus,
+                        runProgress: task.progress,
+                        ...(output ? { content: output.url, storageKey: output.storageKey } : {}),
+                    },
+                }),
+            };
+            this.db.prepare(
+                "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
+            ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
+            const log = binding.generationLogId
+                ? this.updateGenerationLog(binding.generationLogId, {
+                    status: task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "failed",
+                    finishedAt: new Date().toISOString(),
+                    outputs: output ? [output] : [],
+                    ...(task.error ? { error: task.error } : {}),
+                })
+                : null;
+            this.db.exec("COMMIT");
+            return { project: this.getCanvasProject(nextProject.id)!, log };
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+    }
+
+    writeBackCanvasImageTask(
+        task: RuntimeTask,
+        input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append" },
+        media: Array<Record<string, unknown>>,
+    ): CanvasProject | null {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const project = this.getCanvasProject(input.projectId);
+            if (!project) { this.db.exec("COMMIT"); return null; }
+            const nodes = Array.isArray(project.nodes) ? structuredClone(project.nodes) as Array<Record<string, any>> : [];
+            const connections = Array.isArray(project.connections) ? structuredClone(project.connections) as Array<Record<string, any>> : [];
+            const source = nodes.find((item) => String(item.id || "") === input.nodeId);
+            if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) { this.db.exec("COMMIT"); return null; }
+            const sourceMetadata = recordOf(source.metadata);
+            const activeIds = new Set(Array.isArray(sourceMetadata.generatedResultIds)
+                ? sourceMetadata.generatedResultIds.map(String)
+                : [String(sourceMetadata.primaryImageId || "")].filter(Boolean));
+            if ((input.resultPolicy || "replace-active") === "replace-active" && activeIds.size) {
+                for (let index = nodes.length - 1; index >= 0; index--) if (activeIds.has(String(nodes[index].id || ""))) nodes.splice(index, 1);
+                for (let index = connections.length - 1; index >= 0; index--) {
+                    if (activeIds.has(String(connections[index].fromNodeId || "")) || activeIds.has(String(connections[index].toNodeId || ""))) connections.splice(index, 1);
+                }
+            }
+            const sourcePosition = recordOf(source.position);
+            const sourceWidth = Number(source.width || 320);
+            const createdIds: string[] = [];
+            media.forEach((output, index) => {
+                const id = `image-${crypto.randomUUID()}`;
+                createdIds.push(id);
+                const width = Number(output.width || 680);
+                const height = Number(output.height || 454);
+                nodes.push({
+                    id,
+                    type: "image",
+                    title: `${String(source.title || "图片生成")}｜结果${media.length > 1 ? ` ${index + 1}` : ""}`,
+                    position: { x: Number(sourcePosition.x || 0) + sourceWidth + 96 + index * 720, y: Number(sourcePosition.y || 0) },
+                    width,
+                    height,
+                    metadata: {
+                        content: output.url,
+                        url: output.url,
+                        storageKey: output.storageKey || "",
+                        mimeType: output.mimeType || "image/png",
+                        bytes: output.bytes,
+                        naturalWidth: output.width,
+                        naturalHeight: output.height,
+                        prompt: input.prompt,
+                        model: input.model,
+                        generationType: input.references?.length ? "edit" : "generation",
+                        source: "Backend canvas image dispatcher",
+                        status: "success",
+                    },
+                });
+                connections.push({ id: `connection-${crypto.randomUUID()}`, fromNodeId: input.nodeId, toNodeId: id });
+            });
+            if (!createdIds.length) throw new Error("生成完成但没有返回图片");
+            source.metadata = { ...sourceMetadata, status: "success", runtimeTaskId: undefined, errorDetails: undefined, model: input.model, prompt: input.prompt, primaryImageId: createdIds[0], generatedResultIds: createdIds, generationTaskId: task.id };
+            const nextProject: CanvasProject = { ...project, nodes, connections, revision: Number(project.revision || 0) + 1, updatedAt: new Date().toISOString() };
+            this.db.prepare(
+                "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
+            ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
+            this.db.exec("COMMIT");
+            return this.getCanvasProject(nextProject.id);
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+    }
+
+    markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): CanvasProject | null {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const project = this.getCanvasProject(input.projectId);
+            if (!project) { this.db.exec("COMMIT"); return null; }
+            const nodes = Array.isArray(project.nodes) ? structuredClone(project.nodes) as Array<Record<string, any>> : [];
+            const source = nodes.find((item) => String(item.id || "") === input.nodeId);
+            if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) { this.db.exec("COMMIT"); return null; }
+            source.metadata = { ...recordOf(source.metadata), status: "error", runtimeTaskId: undefined, errorDetails: error };
+            const nextProject: CanvasProject = { ...project, nodes, revision: Number(project.revision || 0) + 1, updatedAt: new Date().toISOString() };
+            this.db.prepare(
+                "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
+            ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
+            this.db.exec("COMMIT");
+            return this.getCanvasProject(nextProject.id);
+        } catch (caught) {
+            this.db.exec("ROLLBACK");
+            throw caught;
+        }
     }
 
     replaceCanvasProjects(projects: CanvasProject[]): CanvasProject[] {
@@ -551,6 +745,8 @@ export class BackendDatabase {
     updateGenerationLog(id: string, patch: Partial<Omit<GenerationLog, "id" | "projectId" | "createdAt">>): GenerationLog {
         const current = this.getGenerationLog(id);
         if (!current) throw new Error(`Generation log not found: ${id}`);
+        const terminal = new Set<GenerationLogStatus>(["success", "failed", "cancelled"]);
+        if (terminal.has(current.status) && patch.status && !terminal.has(patch.status)) return current;
         const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
         this.db.prepare(`
             UPDATE generation_logs SET
@@ -656,17 +852,48 @@ export class BackendDatabase {
     getTask(id: string): RuntimeTask | null {
         const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Record<string, unknown> | undefined;
         if (!row) return null;
+        const input = parseJsonObject(row.input_json);
+        const params = parseJsonObject(row.params_json);
+        const result = row.result_json ? parseJsonObject(row.result_json) : null;
+        const binding = params.canvasBinding && typeof params.canvasBinding === "object" && !Array.isArray(params.canvasBinding)
+            ? params.canvasBinding as Record<string, unknown> : {};
+        const outputs = result && Array.isArray(result.media) ? result.media.filter((item) => item && typeof item === "object") as Array<Record<string, unknown>>
+            : result && Array.isArray(result.images) ? result.images.filter((item) => item && typeof item === "object") as Array<Record<string, unknown>> : [];
         return {
             id: String(row.id), kind: String(row.kind),
             status: String(row.status) as RuntimeTaskStatus,
             progress: Number(row.progress),
-            input: parseJsonObject(row.input_json),
-            params: parseJsonObject(row.params_json),
-            result: row.result_json ? parseJsonObject(row.result_json) : null,
+            input, params, result,
             error: row.error ? String(row.error) : null,
             createdAt: String(row.created_at),
             updatedAt: String(row.updated_at),
+            parentTaskId: String(params.parentTaskId || "") || undefined,
+            projectId: String(input.projectId || params.projectId || binding.projectId || "") || undefined,
+            nodeId: String(input.nodeId || params.nodeId || binding.nodeId || "") || undefined,
+            segmentId: String(input.segmentId || params.segmentId || binding.segmentId || "") || undefined,
+            executor: String(params.executor || (String(row.kind).startsWith("comfyui:") ? "comfy" : String(row.kind))) || undefined,
+            model: String(params.model || params.modelName || input.model || "") || undefined,
+            outputs,
         };
+    }
+
+    listTasks(filter: { status?: RuntimeTaskStatus; kind?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[] } = {}): RuntimeTask[] {
+        const clauses: string[] = [];
+        const values: string[] = [];
+        if (filter.status) { clauses.push("status = ?"); values.push(filter.status); }
+        if (filter.kind) { clauses.push("kind = ?"); values.push(filter.kind); }
+        const rows = this.db.prepare(`SELECT id FROM tasks ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at ASC`).all(...values) as Array<{ id: string }>;
+        const nodeIds = new Set((filter.nodeIds || []).map(String));
+        const segmentIds = new Set((filter.segmentIds || []).map(String));
+        return rows.map((row) => this.getTask(String(row.id))).filter((task): task is RuntimeTask => Boolean(task)).filter((task) => {
+            if (filter.scope === "canvas" && !task.projectId) return false;
+            if (filter.scope === "image" && !/image/i.test(`${task.kind} ${task.executor || ""} ${task.model || ""}`)) return false;
+            if (filter.scope === "video" && !/video|h3/i.test(`${task.kind} ${task.executor || ""} ${task.model || ""}`)) return false;
+            if (filter.projectId && task.projectId !== filter.projectId) return false;
+            if (nodeIds.size && (!task.nodeId || !nodeIds.has(task.nodeId))) return false;
+            if (segmentIds.size && (!task.segmentId || !segmentIds.has(task.segmentId))) return false;
+            return true;
+        });
     }
 
     addTaskEvent(taskId: string, type: string, payload: Record<string, unknown>): RuntimeTaskEvent {
@@ -700,6 +927,14 @@ export class BackendDatabase {
             "INSERT INTO runtime_settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
         ).run(key, JSON.stringify(value), new Date().toISOString());
     }
+
+    deleteSetting(key: string) {
+        this.db.prepare("DELETE FROM runtime_settings WHERE key = ?").run(key);
+    }
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 // ── Row mappers ───────────────────────────────────────────────────────────────

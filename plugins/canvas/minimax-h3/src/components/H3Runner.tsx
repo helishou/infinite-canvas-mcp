@@ -6,7 +6,6 @@ import { compatibleH3Settings, normalizeH3Model } from "../services/h3-compatibi
 import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
 import { appendVideoMaterials, refsForSegment, resultUrl, nextPictureNumber, buildTailFrameContinuation, captureVideoTailFrameDataUrl } from "../services/h3-data";
 import { restorableParams } from "../services/h3-segment-utils";
-import { readH3Refs } from "../services/h3-refs";
 import { createH3Log } from "../services/h3-logs";
 import { useH3TaskPolling } from "../hooks/useH3TaskPolling";
 import { useH3RunEvents } from "../hooks/useH3RunEvents";
@@ -21,7 +20,6 @@ function normalizeH3TaskMode(value: unknown) {
 
 export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
     const metadata = ctx.node.metadata || {};
-    const upstream = useMemo(() => readH3Refs(ctx), [ctx.node.id, ctx.getConnections().length, ctx.getNodes().length]);
     const combatLoraWeight = String(metadata.combatLoraWeight || metadata.minimaxCombatLoraWeight || "0");
     const cinematicLoraWeight = String(metadata.cinematicLoraWeight || metadata.minimaxCinematicLoraWeight || "0");
     const teAccel = metadata.teAccel === true || metadata.minimaxTeAccel === true;
@@ -58,7 +56,8 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         const liveDuration = String(liveSelected?.duration || liveMetadata.duration || "8");
         const liveRatio = String(liveSelected?.aspectRatio || liveMetadata.aspectRatio || "16:9");
         const liveMegapixels = Number(liveSelected?.megapixels || liveMetadata.megapixels || liveMetadata.minimaxGlobalMegapixels || 0.4);
-        const liveSettings = liveSelected ? compatibleH3Settings(liveSelected, String(liveMetadata.minimaxBaseModel || liveMetadata.modelName || defaultH3Model), String(liveMetadata.minimaxLoraName || liveMetadata.loraName || ""), upstream) : { modelName: defaultH3Model, loraName: "", defaultSteps: 20 };
+        const liveSegmentRefs = liveSelected ? refsForSegment(liveSelected) : [];
+        const liveSettings = liveSelected ? compatibleH3Settings(liveSelected, String(liveMetadata.minimaxBaseModel || liveMetadata.modelName || defaultH3Model), String(liveMetadata.minimaxLoraName || liveMetadata.loraName || ""), liveSegmentRefs) : { modelName: defaultH3Model, loraName: "", defaultSteps: 20 };
         const liveSteps = Number(liveSelected?.videoSteps || liveMetadata.videoSteps || liveMetadata.minimaxGlobalVideoSteps || liveSettings.defaultSteps);
         const liveDenoise = Number(liveSelected?.denoise ?? liveMetadata.denoise ?? 1);
         const liveSeed = liveSelected?.seed ?? liveMetadata.seed ?? liveMetadata.noiseSeed ?? "";
@@ -77,9 +76,6 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         const motion = liveMotion;
         const combatLoraWeight = String(liveSelected?.combatLoraWeight ?? liveMetadata.minimaxCombatLoraWeight ?? "0");
         const cinematicLoraWeight = String(liveSelected?.cinematicLoraWeight ?? liveMetadata.minimaxCinematicLoraWeight ?? "0");
-        const video = upstream.find((ref) => ref.type === "video");
-        const images = upstream.filter((ref) => ref.type === "image");
-        const audios = upstream.filter((ref) => ref.type === "audio");
         // 只校验实际要运行的片段：t2v 不需要素材，其他模式需要对应 clip 的 refs 里有视频或图片
         const activeIdx = Math.max(0, liveSegments.findIndex((segment) => String(segment.id) === liveSelectedId));
         const relevantSegments = runFromCurrent ? liveSegments.slice(activeIdx) : liveSegments.filter((segment) => String(segment.id) === liveSelectedId);
@@ -96,20 +92,11 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         }
         if (runInFlightRef.current) return;
         runInFlightRef.current = true;
-        // 日志的 refs 必须与真正提交给 ComfyUI 的 finalReferences 保持一致：
-        // 优先用 liveSelected 自身的 segmentRefs，segmentRefs 为空时才回退到 upstream。
-        // 否则当用户只往 clip3 拖了一张图、但画布里给 H3 节点连了 2 张图时，
-        // createH3Log 会先记 2 张，line 286 的 update 才是 1 张；update 失败或延迟时
-        // 日志就一直显示成 2 张参考，与 segment 实际使用的 1 张不符。
+        // 日志的 refs 必须与真正提交给 ComfyUI 的 finalReferences 保持一致。
+        // H3 Clip 的结构化引用清单是唯一来源，不再扫描节点上游连线猜测用途，
+        // 这样身份图、旧分镜和其他 Clip 的素材不会被隐式混入当前任务。
         const logSegmentRefs = liveSelected ? refsForSegment(liveSelected) : [];
-        const logSegImages = logSegmentRefs.filter((ref) => ref.type === "image");
-        const logSegVideos = logSegmentRefs.filter((ref) => ref.type === "video");
-        const logSegAudios = logSegmentRefs.filter((ref) => ref.type === "audio");
-        const logRefs = [
-            ...(logSegImages.length ? logSegImages : images),
-            ...(logSegVideos.length ? logSegVideos : (video ? [video] : [])),
-            ...(logSegAudios.length ? logSegAudios : audios),
-        ] as H3Ref[];
+        const logRefs = logSegmentRefs as H3Ref[];
         let generationLogId = "";
         const lastSubmitted = { taskMode: "", video: 0, images: 0, audios: 0, model: "" };
         const runtimeRunId = String((ctx.getNode(ctx.node.id)?.metadata || liveMetadata).runtimeRunId || liveMetadata.runRequestId || `h3-${Date.now()}`);
@@ -173,7 +160,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 // 避免“上次生成的视频被塞入当前 Clip”（即便关掉 Motion Context 仍被当视频参考喂模型）。
                 const usePreviousContext = runFromCurrent && index > 0 && segment.motionContextEnabled !== false;
                 const segmentVideo = !isT2v && !isI2vFl2v
-                    ? (segmentRefs.find((ref) => ref.type === "video") || (usePreviousContext ? previousVideo : video))
+                    ? (segmentRefs.find((ref) => ref.type === "video") || (usePreviousContext ? previousVideo : undefined))
                     : undefined;
                 const segmentImages = isT2v || isV2v ? [] : segmentRefs.filter((ref) => ref.type === "image");
                 const segmentAudios = isT2v || isV2v || isI2vFl2v ? [] : segmentRefs.filter((ref) => ref.type === "audio");
@@ -204,13 +191,13 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 if (tailFrameDataUrl && !tailFrameRef) console.warn(`[minimax-h3] 尾帧接续：下一段为 ${effectiveTaskMode} 模式（图片数被固定），仅注入提示词文本，不附加尾帧参考图`);
                 // 尾帧接续开启时：尾帧作为 Picture 1（首位），原有参考图顺延（Picture 1 -> 2, 2 -> 3, ...）
                 const effectiveSegmentImages = tailFrameRef ? [tailFrameRef, ...segmentImages] : segmentImages;
-                if (effectiveSegmentImages.length > 9 || images.length > 9) throw new Error("MiniMax H3 最多支持 9 张参考图片");
-                if (segmentRefs.filter((ref) => ref.type === "video").length > 3 || upstream.filter((ref) => ref.type === "video").length > 3) throw new Error("MiniMax H3 最多支持 3 段参考视频");
-                if (segmentAudios.length > 3 || audios.length > 3) throw new Error("MiniMax H3 最多支持 3 段参考音频");
+                if (effectiveSegmentImages.length > 9) throw new Error("MiniMax H3 最多支持 9 张参考图片");
+                if (segmentRefs.filter((ref) => ref.type === "video").length > 3) throw new Error("MiniMax H3 最多支持 3 段参考视频");
+                if (segmentAudios.length > 3) throw new Error("MiniMax H3 最多支持 3 段参考音频");
                 if (requestedTaskMode === "i2v" && segmentImages.length !== 1) throw new Error("I2V 必须且只能使用 1 张图片作为首帧");
                 if (requestedTaskMode === "fl2v" && segmentImages.length !== 2) throw new Error("FL2V 必须使用 2 张图片作为首尾帧");
                 // t2v 模式下不传递任何图片给 compatibleH3Settings，避免影响模型选择
-                const upstreamForSettings = isT2v ? [] : [...images, ...(video ? [video] : [])];
+                const upstreamForSettings = isT2v ? [] : segmentRefs;
                 const segmentSettings = compatibleH3Settings({ ...segmentForRun, taskMode: effectiveTaskMode }, liveModelName, liveLoraName, upstreamForSettings);
                 const segmentSteps = Number(segment.videoSteps || liveMetadata.minimaxGlobalVideoSteps || segmentSettings.defaultSteps);
                 const h3RunnerImpl = String(liveMetadata.minimaxEngine || "").toLowerCase() === "runninghub" ? ctx.ai.runRunningHubH3 : ctx.ai.runLocalH3;
@@ -286,6 +273,12 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                     });
                     return h3RunnerImpl(promptText, inputData, {
                         ...baseParams,
+                        canvasBinding: {
+                            projectId: ctx.projectId,
+                            nodeId: ctx.node.id,
+                            segmentId: segment.id,
+                            ...(generationLogId ? { generationLogId } : {}),
+                        },
                         mode: segment.mode || effectiveTaskMode,
                         steps: Number(segment.steps || segmentSteps),
                         textEncoder: segment.textEncoder,
@@ -384,9 +377,9 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 // 透传 storageKey：后端媒体引用（图片/视频/音频）直接用 storageKey 复用，
                 // 避免只留 url 时 extractStorageKey 反推出被 URL 编码的 key（如 image%3A<uuid>）
                 // 导致后端查不到（404）或退化到 dataUrl 分支（400 畸形 data URL）。
-                const finalReferences = isT2v || isV2v ? [] : (isI2vFl2v ? segmentImages : (effectiveSegmentImages.length ? effectiveSegmentImages : images)).map((ref) => ({ name: `${ref.name}.png`, url: ref.url, type: ref.type, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) }));
+                const finalReferences = isT2v || isV2v ? [] : (isI2vFl2v ? segmentImages : effectiveSegmentImages).map((ref) => ({ name: `${ref.name}.png`, url: ref.url, type: ref.type, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) }));
                 const finalVideo = !isT2v && !isI2vFl2v ? (segmentVideo ? { name: `${segmentVideo.name}.mp4`, url: segmentVideo.url, type: "video", ...(segmentVideo.storageKey ? { storageKey: segmentVideo.storageKey } : {}) } : undefined) : undefined;
-                const finalAudios = isR2vOrRv2v ? (segmentAudios.length ? segmentAudios : audios).map((ref) => ({ name: `${ref.name}.mp3`, url: ref.url, type: ref.type, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) })) : [];
+                const finalAudios = isR2vOrRv2v ? segmentAudios.map((ref) => ({ name: `${ref.name}.mp3`, url: ref.url, type: ref.type, ...(ref.storageKey ? { storageKey: ref.storageKey } : {}) })) : [];
                 // 记录提交信息用于错误日志
                 lastSubmitted.taskMode = effectiveTaskMode;
                 lastSubmitted.video = finalVideo ? 1 : 0;

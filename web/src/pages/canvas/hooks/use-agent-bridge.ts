@@ -45,9 +45,25 @@ export function useAgentBridge(params: AgentBridgeParams) {
             const safeOps = Array.isArray(ops) ? ops.filter((op) => op?.type) : [];
             const before = { projectId, title: projectTitle, nodes: nodesRef.current, connections: connectionsRef.current, selectedNodeIds: Array.from(selectedNodeIdsRef.current), viewport: viewportRef.current };
             const generationOps = safeOps.filter((op): op is Extract<CanvasAgentOp, { type: "run_generation" }> => op.type === "run_generation" && Boolean(op.nodeId));
+            const referenceOps = generationOps.flatMap((op) => {
+                const referenceNodeIds = [...new Set(op.referenceNodeIds || [])];
+                if (!referenceNodeIds.length) return [];
+                const nodeIds = new Set(before.nodes.map((node) => node.id));
+                if (!nodeIds.has(op.nodeId)) throw new Error(`找不到生成节点：${op.nodeId}`);
+                const missing = referenceNodeIds.filter((id) => !nodeIds.has(id));
+                if (missing.length) throw new Error(`找不到参考节点：${missing.join(",")}`);
+                const oldIds = before.connections
+                    .filter((connection) => connection.toNodeId === op.nodeId)
+                    .filter((connection) => before.nodes.find((node) => node.id === connection.fromNodeId)?.type !== "text")
+                    .map((connection) => connection.id);
+                return [
+                    ...(oldIds.length ? [{ type: "delete_connections" as const, ids: oldIds }] : []),
+                    ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes" as const, fromNodeId, toNodeId: op.nodeId, role: "reference", order })),
+                ];
+            });
             const next = applyCanvasAgentOps(
                 before,
-                safeOps.filter((op) => op.type !== "run_generation"),
+                [...safeOps.filter((op) => op.type !== "run_generation"), ...referenceOps],
             );
             nodesRef.current = next.nodes;
             connectionsRef.current = next.connections;

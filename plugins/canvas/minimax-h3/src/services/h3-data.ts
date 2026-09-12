@@ -10,7 +10,7 @@ export function refsForSegment(segment: H3Segment) {
     // persisting an empty refItems array. Treat that empty array as absent;
     // once refItems contains entries it is the canonical ordered list.
     const items = segment.refItems?.length ? segment.refItems : bucketItems;
-    const refs = items.filter((item) => item?.url || item?.storageKey).map((item) => ({ ...item, type: item.type || (item as H3Ref & { kind?: H3Ref["type"] }).kind || "image" as const }));
+    const refs = items.filter((item) => (item?.url || item?.storageKey) && String(item.role || "") !== "character_identity").map((item) => ({ ...item, type: item.type || (item as H3Ref & { kind?: H3Ref["type"] }).kind || "image" as const }));
     return refs.filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
 }
 

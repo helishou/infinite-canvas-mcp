@@ -17,6 +17,7 @@ export type ComfyUiDeps = {
     settings: SettingStore;
     media: MediaStore;
     events?: BackendEventBus;
+    onTaskTerminal?: (task: RuntimeTask) => void | Promise<void>;
 };
 
 export type ComfyPreset = { id: string; name: string; kind: "image" | "video"; inputs: string[]; params: string[] };
@@ -245,15 +246,18 @@ export class ComfyUiBackend {
         }
     }
 
-    async run(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string, clientTaskId?: string) {
+    async run(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string, clientTaskId?: string, onCreated?: (task: RuntimeTask) => Promise<void> | void) {
         const definition = PRESETS.find((item) => item.id === preset);
         if (!definition) throw new Error(`Unknown ComfyUI preset: ${preset}`);
         const taskUrl = baseUrl ? normalizeUrl(baseUrl) : this.url;
         // 客户端预生成 taskId：让前端在「请求还没回到后端」时就能把 ID 写进节点元数据，
         // 避免用户刷新瞬间 race 造成 `runtimeTaskId` 丢失、节点被误判为「中断」。
+        const existing = clientTaskId ? this.deps.tasks.get(clientTaskId) : null;
+        if (existing) return existing;
         const task = clientTaskId
             ? this.deps.tasks.create(clientTaskId, `comfyui:${preset}`, input, params)
             : this.deps.tasks.create(`comfyui:${preset}`, input, params);
+        await onCreated?.(task);
         void this.execute(task, definition, taskUrl).catch((error) => this.fail(task.id, error));
         return task;
     }
@@ -263,6 +267,7 @@ export class ComfyUiBackend {
         void this.cancelComfyExecution(id);
         const task = this.deps.tasks.cancel(id);
         this.deps.events?.publish({ type: "task.updated", entityId: id, payload: task });
+        void this.deps.onTaskTerminal?.(task);
         return task;
     }
 
@@ -648,6 +653,7 @@ export class ComfyUiBackend {
         if (["succeeded", "failed", "cancelled"].includes(task.status)) this.pendingPreviews.delete(id);
         const type = task.status === "succeeded" ? "task.completed" : task.status === "failed" ? "task.failed" : task.status === "queued" || task.status === "running" || task.status === "cancelled" ? "task.updated" : "task.updated";
         this.deps.events?.publish({ type, entityId: id, payload: task });
+        if (["succeeded", "failed", "cancelled"].includes(task.status)) void this.deps.onTaskTerminal?.(task);
         return task;
     }
 }

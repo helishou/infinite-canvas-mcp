@@ -45,14 +45,12 @@ export function SmartStoryboardModal({
     if (generating) return;
     onClose();
     const formImages = uploads.filter((item) => item?.type === "image");
-    // fallback 必须是图片 refs，不能把上游 video/audio 也当成"分镜参考"塞进去：
-    // 上游 video/audio 是上一段生成结果，强行继承会导致新分镜莫名其妙把上一段
-    // 当成参考，并且新段执行时也会把上一段视频当 video ref 传出去。
-    // const upstreamImages = upstream.filter((ref) => ref.type === "image");
-    // console.log("SmartStoryboardModal submit", { formImages, upstreamImages });
+    // 智能分镜只接收图片参考；没有手动上传时使用上游图片节点，不能把
+    // 上游视频/音频结果混进分镜规划或后续 H3 Clip 的参考清单。
+    const storyboardRefs = formImages.length ? formImages : upstream.filter((ref) => ref.type === "image");
     void generateSmartStoryboard(
       ctx,
-       formImages
+       storyboardRefs
     );
   };
   const pickCanvasAt = async (index: number) => {
@@ -108,10 +106,8 @@ export function SmartStoryboardModal({
         onReorder={reorder}
       />
       <div style={{ marginTop: 10, color: ctx.theme.node.muted, fontSize: 11, lineHeight: 1.5 }}>
-        看图 API、语言模型和 Skill 沿用当前默认配置；未上传图片时 fallback
-        使用当前节点上游图片（
-        {upstream.filter((ref) => ref.type === "image").length}{" "}
-        张），不会把上一段生成的视频当参考。
+        看图 API、语言模型和 Skill 沿用当前默认配置；未上传图片时使用当前节点上游图片（
+        {upstream.filter((ref) => ref.type === "image").length} 张），不会把上一段生成的视频当参考。
       </div>
     </Modal>
   );

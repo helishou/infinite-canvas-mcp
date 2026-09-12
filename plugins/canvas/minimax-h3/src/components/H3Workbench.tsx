@@ -101,7 +101,9 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const addCanvasReference = (detail: Record<string, unknown>) => {
         const url = String(detail.url || "").trim();
         if (!url || !selected) return;
-        const ref: H3Ref = { url, type: "image", name: String(detail.name || "图片"), storageKey: typeof detail.storageKey === "string" ? detail.storageKey : undefined, mimeType: typeof detail.mimeType === "string" ? detail.mimeType : undefined };
+        const allowedRoles = new Set<H3Ref["role"]>(["character_turnaround", "storyboard", "scene", "motion_reference", "audio_reference"]);
+        const role = typeof detail.role === "string" && allowedRoles.has(detail.role as H3Ref["role"]) ? detail.role as H3Ref["role"] : undefined;
+        const ref: H3Ref = { url, type: "image", name: String(detail.name || "图片"), storageKey: typeof detail.storageKey === "string" ? detail.storageKey : undefined, mimeType: typeof detail.mimeType === "string" ? detail.mimeType : undefined, ...(role ? { role } : {}), ...(detail.subjectId ? { subjectId: String(detail.subjectId) } : {}) };
         const x = Number(detail.clientX);
         const y = Number(detail.clientY);
         // 优先用鼠标实际命中的 ref 格子（精确），避免坐标换算误差导致落点与悬停位置不符

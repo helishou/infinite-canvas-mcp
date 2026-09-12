@@ -4,6 +4,7 @@ import type { H3Ref } from "../types";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { segmentsFor, compactSegmentStarts } from "../hooks/useH3Segments";
 import { refsForSegment, segmentRefsPatch } from "./h3-data";
+import { materializePlanSegment, parseStructuredStoryboard } from "./h3-video-plan";
 
 export type StoryboardMode = "ref2va" | "i2va" | "t2va" | "fl2va";
 export type StoryboardSkill = "regular_storyboard" | "ns_storyboard";
@@ -37,7 +38,7 @@ export function storyboardMessages(skill: string, idea: string, count: number, i
         const label = ref.type === "image" ? "图片" : ref.type === "video" ? "视频" : "音频";
         return `@${label}${ordinal}：${ref.name || "未命名素材"}`;
     }).join("\n") || "无参考素材";
-    return [{ role: "system" as const, content: `严格执行下面的H3官方提示词Skill和当前模式契约，只输出正式结果，不解释。\n\n${skill}` }, { role: "user" as const, content: `当前官方模式：${modeLabels[mode]}\n硬性时长先决条件：每个分镜对应${duration}秒视频。必须按该时长规划动作密度、镜头数量、对白长度、动作收束和段尾状态，不得按默认时长写作。\n${modeContract(mode, count)}\n\n用户想法：\n${idea || "请根据参考素材合理创作。"}\n\n固定上传槽位：\n${manifest}\n\n逐图看图结果：\n${analysis || "无"}\n\n禁止追问。图片编号严格绑定上传槽位，不重排、不编造；用户原有对白必须保留说话人、原意和顺序。` }];
+    return [{ role: "system" as const, content: `你是 H3 视频导演。参考下面的官方 Skill 设计动作，但输出契约优先：只输出一个合法 JSON 对象，不要 Markdown、解释或英文模板。所有自然语言字段使用中文；模型保留标识只放在 referenceSlots 数字中。\n\n${skill}` }, { role: "user" as const, content: `当前官方模式：${modeLabels[mode]}\n请生成恰好${count}段结构化视频计划。每段 duration 独立决定，${duration}秒只作为常用时长参考，不得把所有段强行固定为同一时长。\n${modeContract(mode, count)}\n\nJSON 格式必须为：{"segments":[{"id":"S01-A","sourceShotId":"S01","title":"中文标题","duration":5,"subjects":[{"subjectId":"character-1","name":"主体"}],"openingState":"起始状态","timeline":[{"start":0,"end":2,"action":"动作","camera":"运镜","composition":"构图","effects":"效果"}],"endingState":"结束状态","continuityIn":"接入状态","continuityOut":"接出状态","soundscape":"声音环境","music":"配乐","constraints":["限制"],"referenceSlots":[1]}]}。timeline 必须从0开始连续覆盖到该段 duration；发生硬切、瞬移、空间或主体重点变化时拆成 S01-A、S01-B，并让相邻段状态连续。referenceSlots 只能使用下面固定上传槽位中的数字。\n\n用户想法：\n${idea || "请根据参考素材合理创作。"}\n\n固定上传槽位：\n${manifest}\n\n逐图看图结果：\n${analysis || "无"}\n\n禁止追问。不要写 Picture、Video、Audio、subject_definitions 等英文模板段落；不要编造未列出的参考槽位。` }];
 }
 
 export function parseStoryboard(text: string, count: number) {
@@ -165,7 +166,7 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
             console.error("generateSmartStoryboard body failed", { errorName, raw, aiDefaults, imageCount: modelRefs.length, stack: error instanceof Error ? error.stack : undefined });
             throw new Error(`生成智能分镜正文失败：${raw}${errorName && errorName !== "Error" ? ` (${errorName})` : ""}`);
         }
-        const parsed = parseStoryboard(result.text, count);
+        const parsed = parseStructuredStoryboard(result.text, count);
         const taskMode = mode === "t2va" ? "t2v" : mode === "i2va" ? "i2v" : mode === "fl2va" ? "fl2v" : "r2v";
         const metadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
         const continuityEnabled = metadata.smartStoryboardContinuityEnabled !== false;
@@ -192,7 +193,7 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
         const inherited = selected
             ? { ...selected, ...segmentRefsPatch(inheritedRefs), result: "", resultStorageKey: undefined, results: [], status: "idle", progress: 0, runtimeTaskId: "" }
             : { ...segmentRefsPatch(inheritedRefs), duration, taskMode, status: "idle" as const, result: "", resultStorageKey: undefined, results: [], progress: 0, runtimeTaskId: "" };
-        const created = parsed.segments.map((prompt, index) => ({ ...inherited, id: `smart-${Date.now()}-${index}`, prompt: parsed.global ? `全局提示词：\n${parsed.global}\n\n${prompt}` : prompt, duration, taskMode, motionContextEnabled: continuityEnabled, result: "", results: [], status: "idle" }));
+        const created = parsed.map((draft) => ({ ...inherited, ...materializePlanSegment(draft, allowedRefs, taskMode, continuityEnabled), id: draft.id, taskMode, motionContextEnabled: continuityEnabled }));
         const insertAt = selectedIndex < 0 ? existing.length : selectedIndex + 1;
         const segments = compactSegmentStarts([...existing.slice(0, insertAt), ...created, ...existing.slice(insertAt)]);
         console.log("[smart-storyboard] merged", {
@@ -208,7 +209,7 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
         // 成功后保持用户原选中段，不要强制跳到 created[0]：否则用户选中 clip4 生成三段后，
         // UI 会瞬间选中新生成的第一段，Prompt 面板显示第一段提示词，视觉上就像
         // 「clip4 的提示词被替换成了分镜第一段」。新段插在 clip4 之后，用户可自行点击查看。
-        ctx.updateMetadata({ segments, selectedSegmentId: selected?.id || created[0]?.id, smartStoryboardGlobal: parsed.global, smartStoryboardRaw: parsed.raw, smartStoryboardVisionAnalysis: analysisParts.join("\n\n"), smartStoryboardOutputBudget: storyboardOutputBudget(count), smartStoryboardStatus: "success", smartStoryboardError: "" });
+        ctx.updateMetadata({ segments, selectedSegmentId: selected?.id || created[0]?.id, smartStoryboardGlobal: "", smartStoryboardRaw: result.text, smartStoryboardVisionAnalysis: analysisParts.join("\n\n"), smartStoryboardOutputBudget: storyboardOutputBudget(count), smartStoryboardStatus: "success", smartStoryboardError: "" });
     } catch (error) {
         // 阶段化错误信息：让用户从一行文字判断是哪一步失败、底层原因是什么。
         // 智能分镜流程长(参考图分析 -> LLM 提示词 -> 解析 -> 写入 segments)，

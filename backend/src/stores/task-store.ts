@@ -4,8 +4,9 @@ import type { TaskStore } from "./types.js";
 /** 任务 store：任务生命周期 + 事件流。 */
 export function createTaskStore(db: BackendDatabase): TaskStore {
     return {
-        create: (kind, input, params) => db.createTask(kind, input, params),
+        create: (kindOrId, inputOrKind, paramsOrInput, maybeParams) => db.createTask(kindOrId, inputOrKind, paramsOrInput, maybeParams),
         get: (id) => db.getTask(id),
+        list: (filter) => db.listTasks(filter),
         update: (id, patch) => {
             const task = db.updateTask(id, patch);
             if (patch.status) db.addTaskEvent(id, `status:${patch.status}`, { taskId: id, status: patch.status });

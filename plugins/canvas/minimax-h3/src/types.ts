@@ -1,4 +1,5 @@
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; params?: Record<string, unknown> };
+export type H3ReferenceRole = "character_turnaround" | "storyboard" | "scene" | "motion_reference" | "audio_reference";
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; order?: number };
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
@@ -159,3 +160,6 @@ export type H3Segment = {
     constantTriggerWord?: string;
     nanfengExpandedSections?: Record<string, boolean>;
 };
+
+/** H3 领域设置的共享语义：界面与计划只使用 videoSteps，ComfyUI 适配层再映射为 steps。 */
+export type H3GenerationSettings = Partial<Omit<H3Segment, "id" | "start" | "prompt" | "result" | "results" | "status" | "progress" | "runtimeTaskId" | "errorDetails" | "refs" | "refItems">>;

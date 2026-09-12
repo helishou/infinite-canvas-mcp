@@ -221,6 +221,11 @@ export type CanvasPluginAi = {
     // 该能力当前默认选中的模型 value(可作为下拉框初始值)
     defaultModel: (capability: ModelCapability) => string;
 };
+export type CanvasH3Defaults = {
+    get: () => Promise<Record<string, unknown>>;
+    set: (settings: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    reset: () => Promise<void>;
+};
 
 // ---------------------------------------------------------------------------
 // 节点上下文:每个节点渲染时注入,是插件与画布交互的核心接口
@@ -270,6 +275,7 @@ export type CanvasNodeContext = {
     on: (event: string, handler: (payload: unknown) => void) => () => void;
     // AI 生成能力(生图/生视频/生文本),复用宿主模型配置
     ai: CanvasPluginAi;
+    h3Defaults: CanvasH3Defaults;
     // 打开/关闭本节点下方的自定义 Panel(需在节点定义里提供 Panel)
     openPanel: () => void;
     closePanel: () => void;

@@ -69,6 +69,21 @@ export class BackendClient {
         return data.project || project;
     }
 
+    async applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number) {
+        const data = await this.post<{ ok: boolean; project?: Record<string, unknown>; revision?: number; operationResults?: unknown[] }>(
+            `/canvas/projects/${encodeURIComponent(projectId)}/ops`,
+            { expectedRevision, operations },
+        );
+        if (!data.project) throw new Error(`Backend canvas ops returned no project: ${projectId}`);
+        return { project: data.project, revision: Number(data.revision ?? data.project.revision ?? 0), operationResults: data.operationResults || [] };
+    }
+
+    async canvasRunGeneration(input: Record<string, unknown>) {
+        const data = await this.post<{ ok: boolean; task?: RuntimeTask; taskId?: string; executor?: string }>("/canvas/generation", input);
+        if (!data.task && !data.taskId) throw new Error("Backend canvas generation returned no task");
+        return { task: data.task, taskId: data.taskId || data.task?.id || "", executor: data.executor || "" };
+    }
+
     // ── Assets ───────────────────────────────────────────────────────────
 
     async listAssets(options: { kind?: string; folderId?: string } = {}) {
@@ -78,6 +93,11 @@ export class BackendClient {
         const qs = params.toString();
         const data = await this.get<{ ok: boolean; assets?: unknown[]; folders?: unknown[] }>(`/canvas/assets${qs ? `?${qs}` : ""}`);
         return { assets: data.assets || [], folders: data.folders || [] };
+    }
+
+    async upsertAsset(asset: Record<string, unknown>) {
+        const data = await this.post<{ asset?: Record<string, unknown> }>("/canvas/assets", asset);
+        return data.asset || asset;
     }
 
     async replaceAssets(assets: unknown[], folders: unknown[]) {
@@ -131,9 +151,23 @@ export class BackendClient {
 
     // ── Tasks ────────────────────────────────────────────────────────────
 
-    async getTask(id: string) {
-        const data = await this.get<{ ok: boolean; task?: unknown; events?: unknown[] }>(`/tasks/${encodeURIComponent(id)}`);
+    async getTask(id: string): Promise<{ task: RuntimeTask; events: RuntimeTaskEvent[] }> {
+        const data = await this.get<{ ok: boolean; task?: RuntimeTask; events?: RuntimeTaskEvent[] }>(`/tasks/${encodeURIComponent(id)}`);
+        if (!data.task) throw new Error(`backend task not found: ${id}`);
         return { task: data.task, events: data.events || [] };
+    }
+
+    async listTasks(options: { status?: string; kind?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; taskId?: string } = {}) {
+        const query = new URLSearchParams();
+        if (options.status) query.set("status", options.status);
+        if (options.kind) query.set("kind", options.kind);
+        if (options.scope) query.set("scope", options.scope);
+        if (options.projectId) query.set("projectId", options.projectId);
+        if (options.nodeIds?.length) query.set("nodeIds", options.nodeIds.join(","));
+        if (options.segmentIds?.length) query.set("segmentIds", options.segmentIds.join(","));
+        if (options.taskId) query.set("taskId", options.taskId);
+        const data = await this.get<{ tasks?: RuntimeTask[] }>(`/tasks${query.size ? `?${query.toString()}` : ""}`);
+        return data.tasks || [];
     }
 
     async createTask(kind: string, input: Record<string, unknown> = {}, params: Record<string, unknown> = {}) {
@@ -146,8 +180,9 @@ export class BackendClient {
         return data.task;
     }
 
-    async cancelTask(id: string) {
-        const data = await this.post<{ ok: boolean; task?: unknown }>(`/tasks/${encodeURIComponent(id)}/cancel`);
+    async cancelTask(id: string): Promise<RuntimeTask> {
+        const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(`/tasks/${encodeURIComponent(id)}/cancel`);
+        if (!data.task) throw new Error(`backend task cancel returned no task: ${id}`);
         return data.task;
     }
 
@@ -193,8 +228,8 @@ export class BackendClient {
         return { ...data.data, latentUpscaleModels: data.data.latentUpscaleModels || [] };
     }
 
-    async comfyRun(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string) {
-        const data = await this.post<{ ok: boolean; task?: RuntimeTask }>("/comfy/tasks", { preset, input, params, ...(baseUrl ? { comfyUrl: baseUrl } : {}) });
+    async comfyRun(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string, clientTaskId?: string) {
+        const data = await this.post<{ ok: boolean; task?: RuntimeTask }>("/comfy/tasks", { preset, input, params, ...(baseUrl ? { comfyUrl: baseUrl } : {}), ...(clientTaskId ? { clientTaskId } : {}) });
         if (!data.task) throw new Error("backend comfy run missing task");
         return data.task;
     }
@@ -216,9 +251,28 @@ export class BackendClient {
         return { url: data.url };
     }
 
+    async comfyPresets() {
+        const data = await this.get<{ data?: unknown[] }>("/comfy/presets");
+        return data.data || [];
+    }
+
     async comfySetConfig(url: string): Promise<{ url: string }> {
         const data = await this.put<{ ok: boolean; url: string }>("/comfy/config", { url });
         return { url: data.url };
+    }
+
+    async getH3Defaults(): Promise<Record<string, unknown>> {
+        const data = await this.get<{ defaults?: Record<string, unknown> | null }>("/plugins/minimax-h3/defaults");
+        return data.defaults && typeof data.defaults === "object" ? data.defaults : {};
+    }
+
+    async setH3Defaults(settings: Record<string, unknown>): Promise<Record<string, unknown>> {
+        const data = await this.put<{ defaults?: Record<string, unknown> }>("/plugins/minimax-h3/defaults", settings);
+        return data.defaults || settings;
+    }
+
+    async resetH3Defaults(): Promise<void> {
+        await this.delete("/plugins/minimax-h3/defaults");
     }
 
 }

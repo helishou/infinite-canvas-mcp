@@ -4,11 +4,12 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
-import { createBackendGenerationLog, deleteBackendProject, fetchBackendProjects, upsertBackendProject } from "@/services/backend-api";
+import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationLog, deleteBackendProject, fetchBackendProjects, upsertBackendProject } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
 export type CanvasProject = {
     id: string;
+    revision?: number;
     title: string;
     createdAt: string;
     updatedAt: string;
@@ -38,7 +39,9 @@ type CanvasStore = {
 const CANVAS_PROJECTS_KEY = "infinite-canvas-projects-v1";
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let syncGeneration = 0;
 let knownProjectIds = new Set<string>();
+const syncBases = new Map<string, CanvasProject>();
 
 function loadFromLocalStorage(): CanvasProject[] {
     try {
@@ -62,12 +65,36 @@ function persistCurrentCanvasSnapshot() {
     saveToLocalStorage(useCanvasStore.getState().projects);
 }
 
-async function syncCanvasProjects(projects: CanvasProject[]) {
+async function syncCanvasProjects(projects: CanvasProject[], generation: number) {
     saveToLocalStorage(projects);
     if (!useBackendStore.getState().connected) return;
     try {
         const ids = new Set(projects.map((project) => project.id));
-        await Promise.all(projects.map((project) => upsertBackendProject(project as unknown as Record<string, unknown>)));
+        for (const project of projects) {
+            if (generation !== syncGeneration) return;
+            const base = syncBases.get(project.id);
+            if (!base) {
+                const response = await upsertBackendProject(project as unknown as Record<string, unknown>);
+                const saved = response.project as unknown as CanvasProject | undefined;
+                if (saved) syncBases.set(project.id, saved);
+                continue;
+            }
+            const operations = diffCanvasProject(base, project);
+            if (!operations.length) {
+                syncBases.set(project.id, project);
+                continue;
+            }
+            const response = await applyBackendCanvasOperations(project.id, operations, Number(base.revision || 0));
+            const saved = response.project as unknown as CanvasProject | undefined;
+            if (saved) {
+                syncBases.set(project.id, saved);
+                const current = useCanvasStore.getState().projects.find((item) => item.id === project.id);
+                if (current?.updatedAt === project.updatedAt) {
+                    useCanvasStore.setState((state) => ({ projects: state.projects.map((item) => item.id === project.id ? saved : item) }));
+                }
+            }
+        }
+        if (generation !== syncGeneration) return;
         await Promise.all([...knownProjectIds].filter((id) => !ids.has(id)).map((id) => deleteBackendProject(id)));
         knownProjectIds = ids;
     } catch { /* Backend 失败由下一次同步重试 */ }
@@ -78,20 +105,22 @@ async function hydrateCanvasProjectsFromBackend() {
     if (!backendConnected) return false;
     try {
         const response = await fetchBackendProjects();
-        const remoteProjects = Array.isArray(response.projects) ? response.projects as unknown as CanvasProject[] : [];
+        const remoteProjects = Array.isArray(response.projects) ? response.projects.map((project) => normalizeProjectMediaUrls(project as unknown as CanvasProject)) : [];
         const localProjects = useCanvasStore.getState().projects;
         const localById = new Map(localProjects.map((project) => [project.id, project]));
-        const remoteById = new Map(remoteProjects.map((project) => [project.id, project]));
+        const normalizedRemoteProjects = remoteProjects.map(normalizeProjectMediaUrls);
+        const remoteById = new Map(normalizedRemoteProjects.map((project) => [project.id, project]));
         const mergedProjects = [...new Set([...remoteById.keys(), ...localById.keys()])].map((id) => {
             const remote = remoteById.get(id);
             const local = localById.get(id);
             if (!remote) return local!;
             if (!local) return remote;
-            // 启动恢复期间可能先拿到空画布快照；不能让它覆盖已有节点。
-            if (local.nodes.length > 0 && remote.nodes.length === 0) return local;
-            return Date.parse(local.updatedAt || "") > Date.parse(remote.updatedAt || "") ? local : remote;
+            // Backend 是唯一权威快照；本地同 id 的旧投影不能依据时间戳反向覆盖
+            // MCP 或其它窗口刚提交的节点。只有 Backend 没有该项目时才保留本地项目。
+            return remote;
         });
-        knownProjectIds = new Set(remoteProjects.map((project) => project.id));
+        knownProjectIds = new Set(normalizedRemoteProjects.map((project) => project.id));
+        for (const project of normalizedRemoteProjects) syncBases.set(project.id, project);
         saveToLocalStorage(mergedProjects);
         useCanvasStore.setState({ projects: mergedProjects });
         if (mergedProjects.some((project) => !remoteById.has(project.id) || project.updatedAt !== remoteById.get(project.id)?.updatedAt)) scheduleCanvasSync();
@@ -108,7 +137,7 @@ export async function hydrateCanvasProjects() {
 
 export const useCanvasStore = create<CanvasStore>()((set, get) => ({
     hydrated: false,
-    projects: loadFromLocalStorage(),
+    projects: loadFromLocalStorage().map(normalizeProjectMediaUrls),
     backendRevisions: {},
     createProject: (Title = i18n.t("canvas.project.untitled")) => {
         const now = new Date().toISOString();
@@ -184,15 +213,56 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
 
 function scheduleCanvasSync() {
     if (saveTimer) clearTimeout(saveTimer);
+    const generation = syncGeneration;
     saveTimer = setTimeout(() => {
         saveTimer = null;
-        void syncCanvasProjects(useCanvasStore.getState().projects);
+        void syncCanvasProjects(useCanvasStore.getState().projects, generation);
     }, 400);
+}
+
+function diffCanvasProject(base: CanvasProject, next: CanvasProject): Array<Record<string, unknown>> {
+    const operations: Array<Record<string, unknown>> = [];
+    const baseNodes = new Map(base.nodes.map((node) => [node.id, node]));
+    const nextNodes = new Map(next.nodes.map((node) => [node.id, node]));
+    for (const node of next.nodes) {
+        if (!baseNodes.has(node.id)) {
+            operations.push({ type: "add_node", id: node.id, nodeType: node.type, title: node.title, position: node.position, width: node.width, height: node.height, metadata: node.metadata || {} });
+            continue;
+        }
+        const previous = baseNodes.get(node.id)!;
+        const patch: Record<string, unknown> = {};
+        for (const key of ["type", "title", "position", "width", "height"] as const) {
+            if (JSON.stringify(previous[key]) !== JSON.stringify(node[key])) patch[key] = node[key];
+        }
+        const previousMetadata = previous.metadata || {};
+        if (JSON.stringify(previousMetadata) !== JSON.stringify(node.metadata || {})) operations.push({ type: "update_node", id: node.id, patch, metadata: node.metadata || {} });
+        else if (Object.keys(patch).length) operations.push({ type: "update_node", id: node.id, patch });
+    }
+    for (const node of base.nodes) if (!nextNodes.has(node.id)) operations.push({ type: "delete_node", id: node.id });
+
+    const baseConnections = new Map(base.connections.map((connection) => [connection.id, connection]));
+    const nextConnections = new Map(next.connections.map((connection) => [connection.id, connection]));
+    const removedConnections = base.connections.filter((connection) => !nextConnections.has(connection.id)).map((connection) => connection.id);
+    if (removedConnections.length) operations.push({ type: "delete_connections", ids: removedConnections });
+    for (const connection of next.connections) {
+        const previous = baseConnections.get(connection.id);
+        if (!previous || JSON.stringify(previous) !== JSON.stringify(connection)) {
+            if (previous) operations.push({ type: "delete_connections", ids: [connection.id] });
+            operations.push({ type: "connect_nodes", id: connection.id, fromNodeId: connection.fromNodeId, toNodeId: connection.toNodeId, role: connection.role, order: connection.order });
+        }
+    }
+    if (JSON.stringify(base.viewport) !== JSON.stringify(next.viewport)) operations.push({ type: "set_viewport", viewport: next.viewport });
+    const projectPatch: Record<string, unknown> = {};
+    for (const key of ["title", "chatSessions", "activeChatId", "backgroundMode", "showImageInfo", "globalPrompt"] as const) {
+        if (JSON.stringify(base[key]) !== JSON.stringify(next[key])) projectPatch[key] = next[key];
+    }
+    if (Object.keys(projectPatch).length) operations.push({ type: "update_project", patch: projectPatch });
+    return operations;
 }
 
 function applyBackendCanvasEvent(event: unknown) {
     if (!event || typeof event !== "object") return;
-    const value = event as { type?: unknown; entityId?: unknown; payload?: unknown };
+    const value = event as { type?: unknown; entityId?: unknown; revision?: unknown; payload?: unknown };
     if (value.type !== "canvas.updated") return;
     const payload = value.payload;
     const isProject = (item: unknown): item is CanvasProject => Boolean(
@@ -203,11 +273,17 @@ function applyBackendCanvasEvent(event: unknown) {
     );
     const isProjectList = payload && typeof payload === "object" && Array.isArray((payload as { projects?: unknown }).projects);
     const projects = isProjectList
-        ? (payload as { projects: unknown[] }).projects.filter(isProject)
-        : isProject(payload) ? [payload] : [];
+        ? (payload as { projects: unknown[] }).projects.filter(isProject).map(normalizeProjectMediaUrls)
+        : isProject(payload) ? [normalizeProjectMediaUrls(payload)] : [];
     const entityId = typeof value.entityId === "string" ? value.entityId : "";
     const deleted = payload && typeof payload === "object" && Number((payload as { deleted?: unknown }).deleted || 0) > 0;
     if (!isProjectList && !projects.length && !(deleted && entityId)) return;
+    // MCP/其他窗口的远程写入必须使旧的延迟保存失效，否则旧快照会在实时事件之后再次覆盖节点。
+    if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+    }
+    syncGeneration += 1;
     useCanvasStore.setState((state) => {
         let nextProjects = state.projects;
         const nextRevisions = { ...state.backendRevisions };
@@ -215,15 +291,19 @@ function applyBackendCanvasEvent(event: unknown) {
             const changed = projects.some((project) => JSON.stringify(state.projects.find((item) => item.id === project.id)) !== JSON.stringify(project));
             if (!changed) return state;
             nextProjects = projects;
-            for (const project of projects) nextRevisions[project.id] = (nextRevisions[project.id] || 0) + 1;
+            for (const project of projects) { nextRevisions[project.id] = Number(project.revision || 0); syncBases.set(project.id, project); }
         } else if (projects.length) {
             const remote = projects[0];
             const local = state.projects.find((project) => project.id === remote.id);
+            const remoteRevision = Number(remote.revision || value.revision || 0);
+            const knownRevision = Number(local?.revision || nextRevisions[remote.id] || 0);
+            if (remoteRevision && remoteRevision < knownRevision) return state;
             if (local && JSON.stringify(local) === JSON.stringify(remote)) return state;
             nextProjects = state.projects.some((project) => project.id === remote.id)
                 ? state.projects.map((project) => project.id === remote.id ? remote : project)
                 : [remote, ...state.projects];
-            nextRevisions[remote.id] = (nextRevisions[remote.id] || 0) + 1;
+            nextRevisions[remote.id] = remoteRevision || (nextRevisions[remote.id] || 0) + 1;
+            syncBases.set(remote.id, remote);
         } else if (deleted) {
             if (!state.projects.some((project) => project.id === entityId)) return state;
             nextProjects = state.projects.filter((project) => project.id !== entityId);
@@ -262,4 +342,49 @@ async function importLegacyGenerationLogs(projectId: string, value: unknown) {
             });
         } catch { /* imported logs are best-effort and must not block project import */ }
     }
+}
+
+/** Backend 只保存 storageKey/相对媒体路径；浏览器投影统一展开成 Backend 可读 URL。 */
+function normalizeProjectMediaUrls(project: CanvasProject): CanvasProject {
+    const normalizeMetadata = (metadata: Record<string, unknown> | undefined) => {
+        if (!metadata) return metadata;
+        const next = { ...metadata };
+        const normalizeMedia = (value: unknown) => {
+            if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+            const media = { ...(value as Record<string, unknown>) };
+            if (typeof media.storageKey === "string" && media.storageKey) media.url = backendMediaUrl(media.storageKey);
+            return media;
+        };
+        const storageKey = typeof next.storageKey === "string" ? next.storageKey : "";
+        if (storageKey) {
+            next.content = backendMediaUrl(storageKey);
+            next.url = backendMediaUrl(storageKey);
+        }
+        if (Array.isArray(next.segments)) {
+            next.segments = next.segments.map((value) => {
+                if (!value || typeof value !== "object") return value;
+                const segment = { ...(value as Record<string, unknown>) };
+                if (typeof segment.resultStorageKey === "string" && segment.resultStorageKey) segment.result = backendMediaUrl(segment.resultStorageKey);
+                if (Array.isArray(segment.refItems)) segment.refItems = segment.refItems.map(normalizeMedia);
+                if (Array.isArray(segment.results)) segment.results = segment.results.map(normalizeMedia);
+                if (segment.refs && typeof segment.refs === "object" && !Array.isArray(segment.refs)) {
+                    segment.refs = Object.fromEntries(Object.entries(segment.refs as Record<string, unknown>).map(([key, value]) => [key, Array.isArray(value) ? value.map(normalizeMedia) : normalizeMedia(value)]));
+                }
+                return segment;
+            });
+        }
+        if (Array.isArray(next.images)) {
+            next.images = next.images.map((value) => {
+                if (!value || typeof value !== "object") return value;
+                const image = { ...(value as Record<string, unknown>) };
+                if (typeof image.storageKey === "string" && image.storageKey) image.content = backendMediaUrl(image.storageKey);
+                return image;
+            });
+        }
+        return next;
+    };
+    return {
+        ...project,
+        nodes: project.nodes.map((node) => ({ ...node, metadata: normalizeMetadata(node.metadata) })),
+    };
 }

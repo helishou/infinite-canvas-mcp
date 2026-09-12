@@ -4,6 +4,7 @@ import type {
     GenerationLog, GenerationLogStatus, MediaFile,
     RuntimeTask, RuntimeTaskEvent, RuntimeTaskStatus,
 } from "../db.js";
+import type { CanvasOperation } from "../canvas/project-ops.js";
 
 /** 各 store 的筛选条件。 */
 export type AssetFilter = { kind?: string; folderId?: string };
@@ -29,6 +30,19 @@ export type CanvasProjectStore = {
     upsert(project: CanvasProject): CanvasProject;
     replaceAll(projects: CanvasProject[]): CanvasProject[];
     delete(id: string): number;
+    applyOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[]): { project: CanvasProject; revision: number; operationResults: unknown[] };
+    /** H3 任务终态与 Clip、生成日志在同一数据库事务中回写。 */
+    writeBackH3Task(
+        task: RuntimeTask,
+        binding: { projectId: string; nodeId: string; segmentId: string; generationLogId?: string },
+        output: Record<string, unknown> | null,
+    ): { project: CanvasProject; log: GenerationLog | null } | null;
+    writeBackCanvasImageTask(
+        task: RuntimeTask,
+        input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append" },
+        media: Array<Record<string, unknown>>,
+    ): CanvasProject | null;
+    markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): CanvasProject | null;
 };
 
 /** 资产 store：assets + asset_folders 统一入口。 */
@@ -74,6 +88,7 @@ export type TaskStore = {
      */
     create(kindOrId: string, inputOrKind: string | Record<string, unknown>, paramsOrInput: Record<string, unknown>, maybeParams?: Record<string, unknown>): RuntimeTask;
     get(id: string): RuntimeTask | null;
+    list(filter?: { status?: RuntimeTaskStatus; kind?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[] }): RuntimeTask[];
     update(id: string, patch: TaskPatch): RuntimeTask;
     cancel(id: string): RuntimeTask;
     events(id: string, after?: number): RuntimeTaskEvent[];
@@ -94,6 +109,7 @@ export type GenerationLogStore = {
 export type SettingStore = {
     get(key: string): unknown;
     set(key: string, value: unknown): void;
+    delete(key: string): void;
 };
 
 /** 总后台 store 集合：server 路由和业务模块的统一依赖。 */

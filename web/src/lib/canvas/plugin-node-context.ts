@@ -24,6 +24,7 @@ export function buildNodeContext(host: CanvasPluginHost, node: CanvasNodeData, t
         emit: (event, payload) => emitCanvasEvent(event, payload),
         on: (event, handler) => onCanvasEvent(event, handler),
         ai: host.ai,
+        h3Defaults: host.h3Defaults,
         openPanel: () => host.openPanel(node.id),
         closePanel: () => host.closePanel(),
         openAssetPicker: (options) => host.openAssetPicker(options),

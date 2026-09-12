@@ -5,13 +5,37 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
++ 画布 MCP 操作协议：用两个客户端对同一 projectId 并发提交 ops，旧 expectedRevision 应返回 409；重复 connect 不增加连线；delete_connections 返回真实删除数量；未知 operation 返回错误；前端收到带 revision 的 SSE 后无需刷新即可显示。
+
++ H3 默认参数统一：前端 Setting 点击“设为默认参数”后，用 MCP `h3_get_defaults` 读取；新建节点和 `h3_run_clip` 逐字段使用同一份默认值，Clip/节点/本次运行覆盖顺序符合约定；重启 Backend 后默认值仍存在。
+
++ H3 视频计划：调用 `h3_apply_video_plan` 写入包含 S01-A/S01-B 的计划，确认 duration 不再批量固定 8 秒、时间轴末端等于 duration、最终提示词为中文结构化文本，Picture 编号与 refItems 顺序一致，character_identity 参考被拒绝。
+
++ H3 持久回写：通过 MCP 提交 H3 后关闭 MCP 客户端，确认 Backend 仍完成 ComfyUI 任务并回写对应 Clip、媒体和日志；Backend 重启后遗留任务继续观察；同一 idempotencyKey 重复提交不产生第二条任务。
+
++ 图片 replace-active：同一图片配置节点连续运行两次，确认当前活动结果节点被替换、旧生成记录保留；使用 resultPolicy=append 时才追加结果。
+
++ 统一视频入口：通过前端按钮和 MCP `canvas_run_generation` 分别提交 H3 视频，确认任务创建前节点已绑定 project/node/segment，MCP 退出后 Backend 仍能完成并回写对应 Clip 与日志；重复 idempotencyKey 不创建第二条任务。
+
++ 生成节点参考替换：同一图片生成配置连续进行两次分镜生成，第二次先调用 MCP `canvas_set_generation_references` 传入新的 referenceNodeIds；确认旧图片连线被删除、文本提示词连线保留、参考图数量和顺序只对应第二次清单，且前端无需刷新即可同步。
+
++ 统一生成运行参数：通过 `canvas_run_generation` 传入自定义 `params`、`idempotencyKey` 和 `resultPolicy`，确认配置节点、图片/视频 Backend 任务均收到同一份参数，重复幂等键不新建任务，`append` 才追加结果；前端 Agent 直接提交带 `referenceNodeIds` 的运行操作时也应先替换旧媒体连线。
+
++ H3 节点工厂：前端新建 H3 节点与 MCP `canvas_create_node(nodeType="minimax-h3:video")` 的基础字段、默认模型、默认片段和 Backend 已保存默认参数逐项一致。
+
++ 智能分镜结构化计划：在智能分镜未手动上传图片时确认使用上游图片；模型返回 JSON 后确认每段 duration 可不同、timeline 从 0 连续覆盖到末端、复杂镜号生成 S01-A/S01-B，Clip Prompt 为中文结构化内容且参考槽位与实际图片顺序一致。
+
 + 画布生成日志：在画布上跑「生图」（任一模型）、「自定义工作流」两次生成，打开「生成记录」面板，确认两条记录都带「类型」标签（生图=蓝色、工作流=geekblue），其它平台/任务模式/模型 tag 仍存在。重新跑一次故意失败的生图，确认失败任务会带红色 status tag，并把 `error` 文本展开可见。换个画布项目（不同 projectId）跑生图，确认「生成记录」面板按当前 projectId 过滤，不会混到其它画布。
 
 + 画布图片生成统一调度：画布图片节点分别选择 `gpt-image-*`、`z-image`、`flux2-klein` 和 `custom/*.json`，确认前端按钮与 MCP 都创建统一的 `canvas-image` 后端任务；GPT Image 的文生和参考图编辑结果可轮询并直接显示，结果带 `storageKey` 且刷新后仍可显示。
 
-+ 画布角色节点：画布底栏工具栏「角色」（User 图标）点击后弹出只显示角色资产的挑选器；选中即生成 1 个 Character 节点（主图 + outfit 缩略图条 + 总数徽标，标题显示角色名）。在画布侧栏「资产」标签下，把角色资产拖到画布也应生成 1 个 Character 节点（不要展开为 Group + 多图）。拖入第二个角色资产时不要和原节点冲突。把 Character 节点拖到 H3 节点的 ref 槽，确认被消费为多张图资源。点击 Character 节点标题可改名。
++ 画布角色节点：画布底栏工具栏「角色」（User 图标）点击后弹出只显示角色资产的挑选器；选中即生成 1 个 Character 节点（主图 + outfit 缩略图条 + 总数徽标，标题显示角色名）。在画布侧栏「资产」标签下，把角色资产拖到画布也应生成 1 个 Character 节点（不要展开为 Group + 多图）。拖入第二个角色资产时不要和原节点冲突。Character 节点可用于图片生成参考；拖到 H3 的 ref 槽时应被识别为身份资产并拒绝加入，H3 必须改用独立四视图图片节点。点击 Character 节点标题可改名。
+
++ 画布角色节点能力：图片节点 hover 工具栏 User 按钮「转为角色节点」，原图作 character.images 第一张 outfit、原 prompt 转 characterDescription、保持原位置/大小/标题。Character 节点右上展开按钮展开 BatchFrame，缩略图「设为主图」能更新主图（边框高亮）。双击 Character 节点或标题打开编辑面板，编辑标题/描述/参考图 outfit/声线后保存应回写。hover 工具栏「存为角色资产」按节点标题同名去重（同名则替换原资产、不同名则新增）。从资产库拖动图片到角色节点会追加为 outfit，拖动音频则设置为声线（metadata.characterVoiceUrl）。
 
 + MCP 通用直连图片生成：在图片/配置节点分别选择模型后，通过 MCP 触发生成；确认 MCP 按节点 `metadata.model` 匹配 provider。目前用本机 `chatgpt2api` 的 `default::gpt-image-2` 验证一张或多张参考图，确认任务进入运行/完成状态，结果媒体写入 Backend，画布新增图片结果节点且无需浏览器刷新；验证失败时源配置节点显示错误信息，`generation_get_status` 能查到任务。
+
++ MCP 生成断线回写：通过 MCP 提交一个耗时的自定义 ComfyUI 图片工作流后立即结束 MCP 客户端，等待任务完成；确认常驻 Backend 仍把源配置改为 `success`、创建结果图片及连线，并通过 `canvas.updated` 推送到已打开的画布。确认任务表中的外层 `canvas-image` taskId 与节点 `generationTaskId` 一致，ComfyUI 文本节点先完成时不会产生 `media: []` 的虚假成功。
 
 + 角色资产迁移：打开我的素材库，确认原有「复合资产」自动变为「角色资产」（kind=character），原多张图片出现在新「参考图」列表中，标题/描述保留；视频/音频项是否确实写进了 `metadata.legacyItems`（可在浏览器 DevTools 看到）；新建一个角色资产，验证多张参考图能上传、改 outfit / outfitDescription / 名称，拖到画布后能按 2 列网格展开为 Group + 多个 Image 子节点；最后用导出包再次导入，确认 character 资产和图片 blob 都能完整还原。
 
@@ -19,7 +43,7 @@ description: Implemented changes that still need manual verification
 
 + 画布图片显示：打开含有历史 ComfyUI `/view` 地址的图片节点、批量图片节点和角色节点，确认首次打开会自动转存到 Backend 媒体库并写入 `storageKey`，画布与左侧元素侧栏均正常显示；确认刷新页面后仍能显示，且新生成的 Backend 媒体不受影响。
 
-+ H3 MCP 画布媒体引用：通过 `h3_run_clip` 运行一个带角色基础图、角色四视图、场景和分镜图的 H3 Clip，确认参考项只带 `storageKey` 也能被 Agent 直接解析为本地媒体路径，不再报「媒体必须是 base64 data URL」或「参考条目缺少可读取地址」。
++ H3 MCP 画布媒体引用：通过 `h3_run_clip` 运行一个带角色基础图、角色四视图、场景和分镜图的 H3 Clip，确认角色基础图被排除、仅角色四视图进入参考项；参考项只带 `storageKey` 时也能被 Agent 直接解析为本地媒体路径，不再报「媒体必须是 base64 data URL」或「参考条目缺少可读取地址」。
 
 The current release needs manual verification in these areas:
 
@@ -134,6 +158,7 @@ The current release needs manual verification in these areas:
 + H3 日志结果准确性：生成视频后替换 Clip 挂载视频，再刷新或触发任务轮询，确认日志 outputs 和节点结果仍指向本次 ComfyUI 返回的视频，不指向替换后的挂载视频。
 + 本地 H3 Backend 直连：关闭 Canvas Agent、保持 Backend 和 ComfyUI 运行，确认模型读取、Ref2VA 生成、任务轮询和取消均可用；关闭 Backend 时显示 Backend 未连接。
 + H3 MCP 状态同步：通过 MCP 运行单段和全部 Clip，确认 ComfyUI 进入运行后画布节点立即显示运行中，进度、成功结果和失败信息均回写到对应 Clip，刷新页面后状态仍一致。
++ RunningHub H3 统一入口：切换 H3 Engine 为 RunningHub 后，从前端按钮运行和通过 MCP 运行各一条任务，确认两者都进入 `/canvas/generation`，任务可在 Backend 重启后继续，且完成后正确回写对应 Clip；重复提交相同幂等键不产生第二条任务。
 + 组节点双向锁定：锁定组后确认组内节点不能拖出，外部节点也不能拖入；解锁后两种拖动均恢复。
 + 组节点锁定：锁定组后拖动组内节点到组外，确认节点仍被限制在组内；在组内拖动和整体移动组仍正常，解锁后可以移出。
 + 连线断开：选中或悬停节点连线后点击中间叉号，确认对应连线立即消失，节点本身不受影响。
@@ -349,3 +374,4 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - 运行 H3 后打开生成日志，确认每个 Clip 的完整参数、提示词、参考素材和完整 Sigma 序列均已记录。
 - 新建 H3 节点或清空降噪设置后运行，确认实际 ComfyUI 请求的降噪强度为 1.0。
 - 在 H3 采样器输入框键入 `er_sde` 或其他采样器名称，确认能搜索、选择并保存到实际 ComfyUI 请求。
+- H3 参考角色与恢复：连接角色节点、四视图、场景和分镜图后，确认运行请求只保留当前片段参考，身份基础图被排除且 `refItems.order` 与提示词编号一致；RunningHub 任务提交后重启 Backend，确认按已保存远端 taskId 继续轮询，不重复创建远端任务。

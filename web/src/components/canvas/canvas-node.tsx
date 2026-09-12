@@ -46,6 +46,10 @@ type CanvasNodeProps = {
     onResize: (nodeId: string, width: number, height: number, position?: Position) => void;
     onResizeEnd: (nodeId: string) => void;
     onContentChange: (nodeId: string, content: string) => void;
+    // 角色节点双击标题：打开完整编辑面板（名字/描述/参考图/声线）
+    onEditCharacter?: (node: CanvasNodeData) => void;
+    // 拖入图片/音频到角色节点
+    onCharacterDrop?: (node: CanvasNodeData, ref: { url: string; type: "image" | "audio"; name?: string; storageKey?: string; mimeType?: string }) => void;
     onTitleChange: (nodeId: string, title: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (nodeId: string, itemId: string) => void;
@@ -57,6 +61,7 @@ type CanvasNodeProps = {
     onViewImage?: (node: CanvasNodeData, imageId?: string) => void;
     onSelectReference?: (nodeId: string) => void;
     onContextMenu: (event: React.MouseEvent, nodeId: string) => void;
+    onEditCharacter?: (nodeId: string) => void;
 };
 
 type NodeContentRendererProps = {
@@ -121,6 +126,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onViewImage,
     onSelectReference,
     onContextMenu,
+    onEditCharacter,
 }: CanvasNodeProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
@@ -374,7 +380,11 @@ export const CanvasNode = React.memo(function CanvasNode({
                             title={t("canvas.node.renameHint")}
                             onDoubleClick={(event) => {
                                 event.stopPropagation();
-                                setIsEditingTitle(true);
+                                if (data.type === CanvasNodeType.Character && onEditCharacter) {
+                                    onEditCharacter(data);
+                                } else {
+                                    setIsEditingTitle(true);
+                                }
                             }}
                         >
                             {data.title || t("canvas.node.untitled")}
@@ -384,6 +394,7 @@ export const CanvasNode = React.memo(function CanvasNode({
             )}
 
             <div
+                data-character-drop={data.type === CanvasNodeType.Character ? "true" : undefined}
                 className={`relative h-full w-full overflow-visible ${data.type === "minimax-h3:video" ? "rounded-lg border" : "rounded-3xl border-2"}`}
                 style={{
                     background: isGroup || data.type === "minimax-h3:video" ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || transparentBg ? "transparent" : theme.node.fill,
@@ -415,9 +426,44 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onViewImage?.(data);
                         return;
                     }
+                    if (data.type === CanvasNodeType.Character) {
+                        event.stopPropagation();
+                        onEditCharacter?.(data);
+                        return;
+                    }
                     if (data.type !== CanvasNodeType.Text) return;
                     event.stopPropagation();
                     setIsEditingContent(true);
+                }}
+                onDragOver={(event) => {
+                    if (data.type !== CanvasNodeType.Character) return;
+                    const types = Array.from(event.dataTransfer?.types || []);
+                    if (types.includes("application/x-infinite-canvas-ref")) {
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = "copy";
+                    }
+                }}
+                onDrop={(event) => {
+                    if (data.type !== CanvasNodeType.Character) return;
+                    const raw = event.dataTransfer.getData("application/x-infinite-canvas-ref")
+                        || event.dataTransfer.getData("application/json")
+                        || event.dataTransfer.getData("text/plain");
+                    if (!raw) return;
+                    try {
+                        const ref = JSON.parse(raw) as { url?: string; type?: string; kind?: string; storageKey?: string; name?: string; mimeType?: string };
+                        const kind = ref.kind || ref.type;
+                        if (kind === "image" && ref.url) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            onCharacterDrop?.(data, { url: ref.url, type: "image", name: ref.name, storageKey: ref.storageKey, mimeType: ref.mimeType });
+                        } else if (kind === "audio" && ref.url) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            onCharacterDrop?.(data, { url: ref.url, type: "audio", name: ref.name, storageKey: ref.storageKey, mimeType: ref.mimeType });
+                        }
+                    } catch {
+                        // ignore
+                    }
                 }}
             >
                 <div
@@ -736,12 +782,15 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
-/** 角色节点：主图（大）+ 底部 outfit 缩略图条。仅展示，不内嵌编辑；要改 outfit/换主图回资产库。 */
-function CharacterNodeContent({ node, theme }: NodeContentRendererProps) {
+/** 角色节点：主图（大）+ 底部 outfit 缩略图条；多图时像多图片输出节点一样可横向展开，点缩略图或“设为主图”切换主图。 */
+function CharacterNodeContent(props: NodeContentRendererProps) {
+    const { node, theme, batchExpanded, onToggleBatch, onSetBatchPrimary, onDeleteBatchImage, onViewBatchImage } = props;
     const { t } = useTranslation();
     const images = node.metadata?.characterImages || [];
     const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
     const primary = images[primaryIndex];
+    const voiceUrl = node.metadata?.characterVoiceUrl || "";
+    const voiceName = node.metadata?.characterVoiceName || "";
     const [primaryUrl, setPrimaryUrl] = useState<string | null>(null);
     const [thumbUrls, setThumbUrls] = useState<Record<number, string>>({});
     const urlCache = useRef<Record<string, string>>({});
@@ -793,47 +842,144 @@ function CharacterNodeContent({ node, theme }: NodeContentRendererProps) {
 
     const visibleThumbs = images.slice(0, 5);
     const overflow = images.length - visibleThumbs.length;
+    const isBatchRoot = images.length > 1;
 
     return (
-        <div className="flex h-full w-full flex-col">
-            <div className="relative flex-1 min-h-0 overflow-hidden bg-stone-100 dark:bg-stone-900" data-canvas-no-zoom>
-                {primaryUrl ? (
-                    <img src={primaryUrl} alt={primary.outfit || primary.name || node.title} className="size-full object-cover" draggable={false} />
-                ) : (
-                    <div className="flex size-full items-center justify-center" style={{ color: theme.node.placeholder }}>
-                        <User className="size-10 opacity-30" />
-                    </div>
-                )}
-                {primary?.outfit ? (
-                    <div className="absolute left-2 top-2 max-w-[calc(100%-16px)] truncate rounded-md bg-black/55 px-2 py-0.5 text-[11px] font-medium text-white">
-                        {primary.outfit}
-                    </div>
-                ) : null}
-            </div>
-            <div className="flex shrink-0 items-center gap-1.5 border-t px-2 py-1.5" style={{ borderColor: theme.node.stroke, background: theme.node.fill }}>
-                {visibleThumbs.map((image, idx) => {
-                    const url = thumbUrls[idx];
-                    const active = idx === primaryIndex;
-                    return (
-                        <div
-                            key={idx}
-                            className="size-7 shrink-0 overflow-hidden rounded-md border"
-                            style={{ borderColor: active ? selectionBlue : theme.node.stroke, opacity: active ? 1 : 0.7 }}
-                            title={image.outfit || image.name}
-                        >
-                            {url ? <img src={url} alt="" className="size-full object-cover" draggable={false} /> : null}
+        <BatchFrame batchCount={images.length} batchExpanded={batchExpanded}>
+            {batchExpanded
+                ? images.map((image, index) => (
+                      <ExpandedCharacterImageCard
+                          key={index}
+                          node={node}
+                          image={image}
+                          index={index}
+                          primary={index === primaryIndex}
+                          onSetPrimary={() => onSetBatchPrimary?.(node.id, String(index))}
+                          onDelete={() => onDeleteBatchImage?.(node.id, String(index))}
+                          onView={() => onViewBatchImage?.(node.id, String(index))}
+                      />
+                  ))
+                : null}
+            <div className="flex h-full w-full flex-col">
+                <div className="relative flex-1 min-h-0 overflow-hidden bg-stone-100 dark:bg-stone-900" data-canvas-no-zoom>
+                    {primaryUrl ? (
+                        <img src={primaryUrl} alt={primary.outfit || primary.name || node.title} className="size-full object-cover" draggable={false} />
+                    ) : (
+                        <div className="flex size-full items-center justify-center" style={{ color: theme.node.placeholder }}>
+                            <User className="size-10 opacity-30" />
                         </div>
-                    );
-                })}
-                {overflow > 0 ? (
-                    <div className="grid size-7 shrink-0 place-items-center rounded-md border text-[10px] font-semibold" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
-                        +{overflow}
-                    </div>
-                ) : null}
-                <span className="ml-auto text-[10px] tabular-nums" style={{ color: theme.node.muted }}>
-                    {t("canvas.character.imageCount", { count: images.length })}
-                </span>
+                    )}
+                    {primary?.outfit ? (
+                        <div className="absolute left-2 top-2 max-w-[calc(100%-16px)] truncate rounded-md bg-black/55 px-2 py-0.5 text-[11px] font-medium text-white">
+                            {primary.outfit}
+                        </div>
+                    ) : null}
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5 border-t px-2 py-1.5" style={{ borderColor: theme.node.stroke, background: theme.node.fill }}>
+                    {visibleThumbs.map((image, idx) => {
+                        const url = thumbUrls[idx];
+                        const active = idx === primaryIndex;
+                        return (
+                            <button
+                                key={idx}
+                                type="button"
+                                className="size-7 shrink-0 overflow-hidden rounded-md border p-0 transition hover:opacity-100"
+                                style={{ borderColor: active ? selectionBlue : theme.node.stroke, opacity: active ? 1 : 0.7 }}
+                                title={image.outfit || image.name}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    onSetBatchPrimary?.(node.id, String(idx));
+                                }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                            >
+                                {url ? <img src={url} alt="" className="size-full object-cover" draggable={false} /> : null}
+                            </button>
+                        );
+                    })}
+                    {overflow > 0 ? (
+                        <div className="grid size-7 shrink-0 place-items-center rounded-md border text-[10px] font-semibold" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            +{overflow}
+                        </div>
+                    ) : null}
+                    {voiceUrl ? (
+                        <span className="flex items-center gap-1 text-[10px] tabular-nums" style={{ color: theme.node.muted }} title={voiceName || t("canvas.character.voice")}>
+                            <Music2 className="size-3" />
+                            <span className="max-w-[60px] truncate">{voiceName || t("canvas.character.voice")}</span>
+                        </span>
+                    ) : null}
+                    <span className="ml-auto text-[10px] tabular-nums" style={{ color: theme.node.muted }}>
+                        {t("canvas.character.imageCount", { count: images.length })}
+                    </span>
+                </div>
             </div>
+            {isBatchRoot ? (
+                <button
+                    type="button"
+                    className="absolute right-2.5 top-2.5 z-30 flex h-8 items-center justify-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
+                    aria-label={batchExpanded ? t("canvas.character.collapsed") : t("canvas.character.expanded")}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onToggleBatch?.(node.id);
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                >
+                    <span className="leading-none">{t("canvas.character.imageCount", { count: images.length })}</span>
+                    <ChevronRight className={`size-3.5 opacity-80 transition-transform ${batchExpanded ? "rotate-90" : ""}`} />
+                </button>
+            ) : null}
+        </BatchFrame>
+    );
+}
+
+/** 角色节点横向展开时的单张参考图卡片（排在节点右侧）。点“设为主图”切换主图，可删除。 */
+function ExpandedCharacterImageCard({ node, image, index, primary, onSetPrimary, onDelete, onView }: { node: CanvasNodeData; image: NonNullable<CanvasNodeData["metadata"]>["characterImages"] extends Array<infer T> ? T : never; index: number; primary: boolean; onSetPrimary: () => void; onDelete: () => void; onView: () => void }) {
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const { t } = useTranslation();
+    const [imageUrl, setImageUrl] = useState("");
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+    const x = (index + 1) * (node.width + 18);
+    const y = 0;
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!image.url && !image.storageKey) {
+            setImageUrl("");
+            return;
+        }
+        resolveImageUrl(image.storageKey, image.url).then((url) => {
+            if (!cancelled) setImageUrl(url);
+        });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, image.url, image.storageKey]);
+
+    return (
+        <div
+            className="absolute z-20 overflow-hidden rounded-3xl border shadow-[0_18px_50px_rgba(28,25,23,.14)]"
+            style={{ left: x, top: y, width: node.width, height: node.height, background: "transparent", borderColor: primary ? selectionBlue : theme.node.stroke, animation: `canvas-batch-child-in 320ms ${index * 35}ms cubic-bezier(.2,.85,.18,1) both` }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => {
+                if (!image.url || (event.target instanceof Element && event.target.closest("button"))) return;
+                event.stopPropagation();
+                onView();
+            }}
+        >
+            {imageUrl ? <img src={imageUrl} alt={image.outfit || image.name} draggable={false} className="pointer-events-none h-full w-full select-none object-cover" /> : <ImageSlotStatus />}
+            {image.url ? (
+                <div className="absolute inset-x-2 top-2 flex items-center gap-1">
+                    <button type="button" className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("canvas.character.setMain")} onClick={(event) => (event.stopPropagation(), onSetPrimary())}>
+                        <Star className="size-3 shrink-0" style={{ color: primary ? selectionBlue : theme.node.muted }} />
+                        <span className="truncate">{t("canvas.character.setMain")}</span>
+                    </button>
+                    <button type="button" className="grid size-8 shrink-0 place-items-center rounded-lg border shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }} onClick={(event) => (event.stopPropagation(), onDelete())} aria-label={t("common.delete")} title={t("common.delete")}>
+                        <Trash2 className="size-3.5" />
+                    </button>
+                </div>
+            ) : null}
         </div>
     );
 }

@@ -12,6 +12,7 @@ import { createLogger } from "./logger.js";
 import { createStores } from "./stores/index.js";
 import type { GenerationLogInput, LogDeleteScope, Stores } from "./stores/types.js";
 import { BackendEventBus } from "./events.js";
+import type { CanvasOperation } from "./canvas/project-ops.js";
 
 const logger = createLogger("backend");
 
@@ -125,6 +126,26 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         res.json({ ok: true, settings: loadFrontendSettings() });
     });
 
+    // H3 默认参数是 Backend 权威设置；浏览器 localStorage 只用于一次性迁移。
+    const H3_DEFAULTS_KEY = "plugin:minimax-h3:defaults:v1";
+    app.get("/plugins/minimax-h3/defaults", (_req, res) => {
+        res.json({ ok: true, defaults: stores.settings.get(H3_DEFAULTS_KEY) || null });
+    });
+    app.put("/plugins/minimax-h3/defaults", (req, res) => {
+        if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) return void res.status(400).json({ ok: false, error: "defaults 必须是对象" });
+        const settings = { ...(req.body as Record<string, unknown>) };
+        if (settings.videoSteps === undefined && settings.steps !== undefined) settings.videoSteps = settings.steps;
+        delete settings.steps;
+        stores.settings.set(H3_DEFAULTS_KEY, settings);
+        events.publish({ type: "settings.updated", entityId: H3_DEFAULTS_KEY, payload: settings });
+        res.json({ ok: true, defaults: settings });
+    });
+    app.delete("/plugins/minimax-h3/defaults", (_req, res) => {
+        stores.settings.delete(H3_DEFAULTS_KEY);
+        events.publish({ type: "settings.updated", entityId: H3_DEFAULTS_KEY, payload: null });
+        res.json({ ok: true, defaults: null });
+    });
+
     // ── Runtime status ────────────────────────────────────────────────
     app.get("/runtime/status", async (_req, res) => {
         const extra: Record<string, unknown> = { sqlite: true, node: process.version };
@@ -165,8 +186,23 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         const project = req.body as CanvasProject;
         if (!project?.id) return void res.status(400).json({ ok: false, error: "project.id 必填" });
         const result = stores.projects.upsert(project);
-        events.publish({ type: "canvas.updated", entityId: result.id, payload: result });
+        events.publish({ type: "canvas.updated", entityId: result.id, revision: Number(result.revision || 0), payload: result });
         res.status(201).json({ ok: true, project: result });
+    });
+    app.post("/canvas/projects/:id/ops", (req, res) => {
+        const expectedRevision = req.body?.expectedRevision === undefined ? undefined : Number(req.body.expectedRevision);
+        const operations = Array.isArray(req.body?.operations) ? req.body.operations as CanvasOperation[] : [];
+        if (!operations.length) return void res.status(400).json({ ok: false, error: "operations 不能为空" });
+        try {
+            const result = db.applyCanvasProjectOperations(req.params.id, expectedRevision, operations);
+            events.publish({ type: "canvas.updated", entityId: result.project.id, revision: result.revision, payload: result.project });
+            res.json({ ok: true, projectId: result.project.id, revision: result.revision, operationResults: result.operationResults, project: result.project });
+        } catch (error) {
+            const value = error as Error & { code?: string; project?: CanvasProject; revision?: number };
+            if (value.code === "REVISION_CONFLICT") return void res.status(409).json({ ok: false, error: value.message, projectId: req.params.id, revision: value.revision, project: value.project });
+            if (value.message.startsWith("画布不存在:")) return void res.status(404).json({ ok: false, error: value.message });
+            res.status(400).json({ ok: false, error: value.message || String(error) });
+        }
     });
     app.delete("/canvas/projects/:id", (req, res) => {
         const deleted = stores.projects.delete(req.params.id);
@@ -463,15 +499,35 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     });
 
     // ── Tasks ────────────────────────────────────────────────────────────
+    app.get("/tasks", (req, res) => {
+        const status = typeof req.query.status === "string" ? req.query.status : undefined;
+        const kind = typeof req.query.kind === "string" ? req.query.kind : undefined;
+        const scope = ["all", "canvas", "image", "video"].includes(String(req.query.scope)) ? String(req.query.scope) as "all" | "canvas" | "image" | "video" : undefined;
+        const list = (value: unknown) => typeof value === "string" ? value.split(",").map((item) => item.trim()).filter(Boolean) : [];
+        const taskId = typeof req.query.taskId === "string" ? req.query.taskId : "";
+        const tasks = taskId
+            ? (stores.tasks.get(taskId) ? [stores.tasks.get(taskId)!] : [])
+            : stores.tasks.list({
+                status: status as RuntimeTaskStatus | undefined,
+                kind,
+                scope,
+                projectId: typeof req.query.projectId === "string" ? req.query.projectId : undefined,
+                nodeIds: list(req.query.nodeIds),
+                segmentIds: list(req.query.segmentIds),
+            });
+        res.json({ ok: true, tasks });
+    });
     app.get("/tasks/:id", (req, res) => {
         const task = stores.tasks.get(req.params.id);
         if (!task) return void res.status(404).json({ ok: false, error: "task not found" });
         res.json({ ok: true, task, events: stores.tasks.events(req.params.id, Number(req.query.after || 0)) });
     });
     app.post("/tasks", (req, res) => {
-        const body = req.body as { kind?: string; input?: Record<string, unknown>; params?: Record<string, unknown> };
+        const body = req.body as { kind?: string; clientTaskId?: string; input?: Record<string, unknown>; params?: Record<string, unknown> };
         if (!body.kind) return void res.status(400).json({ ok: false, error: "kind 必填" });
-        const task = stores.tasks.create(body.kind, body.input || {}, body.params || {});
+        const task = body.clientTaskId
+            ? stores.tasks.create(body.clientTaskId, body.kind, body.input || {}, body.params || {})
+            : stores.tasks.create(body.kind, body.input || {}, body.params || {});
         events.publish({ type: "task.created", entityId: task.id, payload: task });
         res.status(201).json({ ok: true, task });
     });

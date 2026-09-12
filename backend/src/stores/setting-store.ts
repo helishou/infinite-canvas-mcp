@@ -6,5 +6,6 @@ export function createSettingStore(db: BackendDatabase): SettingStore {
     return {
         get: (key) => db.getSetting(key),
         set: (key, value) => db.setSetting(key, value),
+        delete: (key) => db.deleteSetting(key),
     };
 }

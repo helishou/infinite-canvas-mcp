@@ -52,7 +52,8 @@ export type PluginMcpContext = {
 /** H3 MCP 需要的最小后端能力；HTTP BackendClient 和进程内 Store 适配器均可实现。 */
 export type PluginMcpBackend = {
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
-    upsertCanvasProject(project: Record<string, unknown>): Promise<Record<string, unknown>>;
+    applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[] }>;
+    canvasRunGeneration(input: Record<string, unknown>): Promise<{ task?: import("../runtime/types.js").RuntimeTask; taskId: string; executor: string }>;
     replaceCanvasProjects(projects: Record<string, unknown>[]): Promise<Record<string, unknown>[]>;
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
     runtimeMediaStore(name: string, dataUrl: string, storageKey?: string): Promise<{ path: string }>;
@@ -60,10 +61,15 @@ export type PluginMcpBackend = {
     listGenerationLogs(options?: { projectId?: string; nodeId?: string; status?: string; limit?: number }): Promise<unknown[]>;
     createGenerationLog(input: Record<string, unknown>): Promise<unknown>;
     updateGenerationLog(id: string, patch: Record<string, unknown>): Promise<unknown>;
+    getTask(id: string): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;
+    cancelTask(id: string): Promise<import("../runtime/types.js").RuntimeTask>;
     comfyModels(signal?: AbortSignal): Promise<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; refreshedAt: string; error?: string }>;
     comfyRun(preset: string, input: Record<string, unknown>, params: Record<string, unknown>): Promise<import("../runtime/types.js").RuntimeTask>;
     comfyGetTask(id: string, after?: number): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;
     comfyCancel(id: string): Promise<import("../runtime/types.js").RuntimeTask>;
+    getH3Defaults(): Promise<Record<string, unknown>>;
+    setH3Defaults(settings: Record<string, unknown>): Promise<Record<string, unknown>>;
+    resetH3Defaults(): Promise<void>;
 };
 
 export type McpToolHandler = (input: Record<string, unknown>, context: PluginMcpContext) => Promise<unknown>;
@@ -80,7 +86,7 @@ export type PluginMcpModule = {
 type FirstPartyEntry = { version: string; load: () => Promise<PluginMcpModule> };
 export const KNOWN_FIRST_PARTY: Record<string, FirstPartyEntry> = {
     "minimax-h3": {
-        version: "1.2.0",
+        version: "1.3.0",
         load: async () => (await import("../plugins/minimax-h3/mcp.js")).pluginMcp,
     },
 };
@@ -123,13 +129,8 @@ export function buildPluginMcpContext(config: CanvasAgentConfig, backend: Plugin
             const projects = await backend.listCanvasProjects() as Array<{ id?: string; nodes?: AgentCanvasNode[] }>;
             const target = projects.find((project) => Array.isArray(project.nodes) && project.nodes.some((node) => node.id === id));
             if (!target) throw new Error(`找不到画布节点：${id}`);
-            const nextNodes = (target.nodes || []).map((node) => {
-                if (node.id !== id) return node;
-                const merged: AgentCanvasNode = { ...node, ...patch };
-                if (metadataPatch) merged.metadata = { ...(node.metadata || {}), ...metadataPatch };
-                return merged;
-            });
-            await backend.upsertCanvasProject({ ...target, nodes: nextNodes, updatedAt: new Date().toISOString() });
+            const operation = { type: "update_node", id, patch: { ...patch }, ...(metadataPatch ? { metadata: metadataPatch } : {}) };
+            await backend.applyCanvasOperations(String(target.id), [operation], Number((target as Record<string, unknown>).revision || 0));
         },
     };
 }

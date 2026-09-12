@@ -2,9 +2,24 @@
 
 ## Unreleased
 
+- [修复] H3 参考清单统一按角色四视图、分镜和场景标注并排除身份基础图；RunningHub 任务也纳入 Backend 重启恢复，避免重复提交或丢失轮询。
+- [新增] 角色节点能力增强：图片节点可「转为角色节点」（hover 工具栏 User 按钮）；角色节点支持 BatchFrame 横向展开 + 设为主图（已在的 `setBatchPrimary` / `deleteBatchImage` 扩展支持 `characterPrimaryIndex` 与 `characterImages` 维护）；双击角色节点打开完整编辑面板 `CharacterNodeEditModal`，可改标题/描述/参考图 outfit/声线（支持从音频资产库选或上传本地文件）；角色节点 hover 工具栏新增「存为角色资产」按钮，按 `data.name` 去重，同名则替换资产；画布可拖入图片/音频到角色节点，图片作 outfit，音频作声线。
+- [新增] 画布 MCP 统一操作协议：Backend 新增带 revision/CAS 的 `/canvas/projects/:projectId/ops`，严格执行节点、连线、选区、视口和生成操作，未知操作报错、连线去重并返回逐操作结果。
+- [新增] H3 默认参数迁移到 Backend 设置，并新增 `h3_get_defaults`、`h3_set_defaults`、`h3_reset_defaults`；前端入口保留，浏览器旧 localStorage 仅执行一次性迁移。
+- [新增] H3 结构化视频计划 `h3_apply_video_plan`：支持 S01-A 子段、动态时长、连续性、角色化参考清单和中文 Prompt Compiler，运行时排除人物身份基础图。
+- [修复] H3 任务增加画布/节点/片段/日志持久绑定，Backend 终态回写 Clip、媒体、日志；MCP 退出或 Backend 重启后不再依赖进程内 monitor，重复提交可按 idempotencyKey 复用任务。
+- [调整] 图片生成默认采用 replace-active，保留生成日志历史，避免重跑持续堆积结果节点；`videoSteps` 在提交 ComfyUI 时统一映射为 `steps`。
+- [修复] MCP 图片生成改为提交到与前端相同的 Backend 画布生成端点，并由常驻 Backend 在任务结束后创建结果节点、连线和发布实时画布更新；MCP 客户端提前退出也不再丢失回写。
+- [修复] 修正客户端指定 taskId 的任务存储参数透传，并等待 ComfyUI `execution_success` 后汇总输出，避免任务 ID 错位及文本节点先完成时把实际已生成图片误记为空结果。
+- [修复] MCP 回写画布节点时取消旧的前端延迟全量同步，并让 Backend 忽略时间戳更旧的画布快照，避免 ComfyUI 已完成的视频被旧前端状态覆盖而只剩少数 Clip 记录。
 - [修复] MCP 调用 H3 节点生成视频时，结果回写 clip 节点改为可播放地址：`updateClipTask` 经 `proxyH3ResultUrl` 把 ComfyUI 原始 `video.url`（`runtime-file:` / 相对路径）改写成相对 `/media/<storageKey>`（`GET /media` 免 token，前端 `H3ClipCard` 直接 `<video src>` 可播）或 `/runtime/media-file` 代理，并写入 `resultStorageKey`，与直接点击生成路径一致。
 - [修复] MCP H3 生成日志补齐实际运行参数：`runSegment` 现返回 `{ task, input, params }`，`updateMcpGenerationLog` 合并 `params` + `lastSubmitted`（实际 input+params）+ ComfyUI 回传的 `actualSubmission` 进 `params_json`，经 `h3_run_clip` / `h3_run_all_clips` 透传，与前端 `H3Runner.tsx` 记录的日志同构。
 - [修复] H3 MCP 生成现在会把空的 `refItems` 正确回退到图片/视频/音频参考桶，并创建、更新生成日志及将完成结果回写到 Clip 与 H3 节点。
+- [调整] 智能分镜改为严格结构化 JSON 计划：每段独立时长、时间轴、起止状态、连续性和参考槽位由中文编译器生成 H3 提示词；无手动上传时只继承上游图片，不再混入视频/音频结果。
+- [修复] 统一画布视频入口在 ComfyUI 创建任务前绑定 project/node/segment，Backend 以事务同时回写 H3 Clip 与生成日志；通用画布操作也可提交视频生成，不再只处理图片。
+- [调整] RunningHub H3 兼容分支也改走统一 `/canvas/generation`，复用 Backend 任务绑定、幂等提交、持久监控和终态回写，不再由前端或 MCP 直接提交 RunningHub 任务。
+- [修复] 新增 `canvas_set_generation_references`，二次生成或重做分镜时原子替换生成节点的媒体参考输入，保留提示词连线，避免旧参考图与新参考图混传。
+- [调整] `canvas_run_generation` 现在完整透传本次运行参数、幂等键和结果策略；H3 节点默认 metadata 抽为前端与 MCP 共用的节点工厂，避免新建节点字段漂移。
 
 - [新增] 画布生成日志接入「类型」标签（生图/生视频/生音频/工作流）：`canvas-generation-log-dialog` 每条记录头部新增一个由 `platform + model` 推导的类型 tag 并按类型着色（生图蓝、生视频紫、生音频橙、工作流 geekblue）。后端 `CanvasImageDispatcher.start` 在任务创建时 `running` 记录一次、`succeeded` / `failed` 时更新一次，写入 `projectId` / `nodeId` / `platform` / `model` / `taskMode` / `prompt` / `references` / `inputCounts` / `outputs` / `error` / `startedAt` / `finishedAt` / `durationMs` / `runtimeTaskId`。`WorkflowExecutor.run` 签名新增 `projectId` / `nodeId` 入参，原写死的 `projectId: "workflow"` 改成透传调用方 projectId（兜底保留）。
 - [修复] MCP 批量生成的画布节点不再叠在同一点：前端 `applyCanvasAgentOps` 落点改为按连接关系做拓扑分层（`computeFlowLayout`）——输入节点在左、输出节点在右，同一层纵向堆叠；无连接时退回网格。显式坐标与同批其他节点重叠时仍自动向右铺开。
@@ -15,7 +30,7 @@
 - [修复] 自定义工作流（部分参考图缺失时）的虚假悬空错误：`WorkflowExecutor.run()` 把 `validatePromptGraph(full, removedIds)` 改成 `validatePromptGraph(prepared)`。原本是拿**裁剪前**的 full 来检查悬空引用，但 `removeEmptyImageNodes` 第 3 步已经清理掉存活节点上指向已删节点的 input，导致 prepared 实际有效却被报"节点 5 (SaveImage) 的输入 images 指向已被裁剪的节点 11"——这种「已被 step 3 清干净」的悬空会被原逻辑误判。修复后只对 prepared（即将提交给 ComfyUI 的最终图）做兜底校验。
 - [调整] 工作流管理的节点图去掉「删除此节点」入口（连同确认弹窗、相关字段和入连线的清理逻辑一起移除），节点图变更为纯只读 + 字段编辑；「未关联节点的字段」区的孤立字段清理仍保留。
 - [修复] 修正中英文 i18n 资源的对象括号与重复键，恢复前端 Vite 启动和构建。
-- [新增] 画布新增专门的「角色节点」（`CanvasNodeType.Character`）：从资产库"资产"标签把角色资产拖到画布即生成 1 个独立节点，主图大、底部 outfit 缩略图条 + 总数徽标；节点元数据带 `characterAssetId` 关联资产、并把 `images` 快照到 `metadata.characterImages`，下线后画布仍可独立工作。H3 / 生图 / 生视频节点通过现有 ref 槽拖入消费（每个角色节点展开为多张图资源），不需要改 H3 的 `readH3Refs`。
+- [新增] 画布新增专门的「角色节点」（`CanvasNodeType.Character`）：从资产库"资产"标签把角色资产拖到画布即生成 1 个独立节点，主图大、底部 outfit 缩略图条 + 总数徽标；节点元数据带 `characterAssetId` 关联资产、并把 `images` 快照到 `metadata.characterImages`，下线后画布仍可独立工作。图片生成流程可消费角色资产快照；H3 参考输入改为只接受独立四视图节点，避免把身份基础图混入视频。
 - [新增] 项目 MCP 新增通用直连图片生成路由：图片/配置节点按自身选中的模型匹配 provider，目前已接入本地 chatgpt2api 的 `gpt-image-*`，支持参考图编辑、任务状态、后端媒体落盘和结果节点回写，不再依赖浏览器页面执行。
 - [调整] 资产库彻底以「角色资产」替代「复合资产」：旧 `kind=composite` 资产在 hydration 阶段一次性迁移为 `kind=character`（text → description 合并、image → images[]、video/audio → metadata.legacyItems 备查），前端 store / i18n / 画布 factory / 资产挑选器 / 导入导出 全部移除 composite 相关代码。角色表单新增英文名、描述、多张参考图（含 outfit / outfitDescription / 名称）的编辑能力，画布拖入角色资产会按 2 列网格展开为 1 个 Group + N 个 Image 子节点。
 - [修复] MCP 画布节点变更现在通过 Backend 事件总线实时同步到前端，无需刷新页面即可看到新增、修改和删除结果。

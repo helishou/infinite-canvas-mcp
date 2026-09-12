@@ -37,6 +37,7 @@ import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
+import { CharacterNodeEditModal } from "@/components/canvas/character-node-edit-modal";
 import { ImageCompareModal } from "@/components/canvas/image-compare-modal";
 import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
@@ -135,10 +136,19 @@ const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
-type CanvasReferenceDrag = { nodeId: string; url: string; type: "image"; name: string; storageKey?: string; mimeType?: string };
+type CanvasReferenceRole = "character_turnaround" | "storyboard" | "scene" | "motion_reference" | "audio_reference";
+type CanvasReferenceDrag = { nodeId: string; url: string; type: "image"; name: string; storageKey?: string; mimeType?: string; role?: CanvasReferenceRole; subjectId?: string };
 // 角色节点拖到 ref 槽：dispatchCanvasReferenceDrag 会按 images 数组逐张发 drop 事件。
-type CharacterReferenceDrag = { nodeId: string; images: Array<{ url: string; name: string; storageKey?: string; mimeType?: string }> };
+type CharacterReferenceDrag = { nodeId: string; images: Array<{ url: string; name: string; storageKey?: string; mimeType?: string; role?: CanvasReferenceRole; subjectId?: string }> };
 type AnyReferenceDrag = CanvasReferenceDrag | CharacterReferenceDrag;
+
+function canvasReferenceRole(node: CanvasNodeData): CanvasReferenceRole | undefined {
+    const value = `${node.type} ${node.title || ""}`.toLowerCase();
+    if (node.type === CanvasNodeType.Character || /四视图|turnaround|character/.test(value)) return "character_turnaround";
+    if (/分镜|storyboard/.test(value)) return "storyboard";
+    if (/场景|scene/.test(value)) return "scene";
+    return undefined;
+}
 
 function h3DropTargetAt(clientX: number, clientY: number) {
     return document.elementsFromPoint(clientX, clientY).map((element) => element.closest<HTMLElement>("[data-canvas-ref-drop-target]")).find(Boolean) || null;
@@ -312,6 +322,7 @@ function InfiniteCanvasPage() {
     const [titleDraft, setTitleDraft] = useState("");
     const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
     const [expandedBatchNodeIds, setExpandedBatchNodeIds] = useState<Set<string>>(new Set());
+    const [characterEditNodeId, setCharacterEditNodeId] = useState<string | null>(null);
     const [isNodeDragging, setIsNodeDragging] = useState(false);
     const [isNodeResizing, setIsNodeResizing] = useState(false);
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
@@ -1282,13 +1293,9 @@ function InfiniteCanvasPage() {
                 if (!node) return undefined;
                 if (node.type === CanvasNodeType.Image) {
                     const url = String(node.metadata?.content || "").trim();
-                    return url ? { nodeId: node.id, url, type: "image" as const, name: node.title || "图片", storageKey: node.metadata?.storageKey, mimeType: node.metadata?.mimeType } : undefined;
+                    return url ? { nodeId: node.id, url, type: "image" as const, name: node.title || "图片", storageKey: node.metadata?.storageKey, mimeType: node.metadata?.mimeType, role: canvasReferenceRole(node), subjectId: canvasReferenceRole(node) === "character_turnaround" ? node.id : undefined } : undefined;
                 }
-                if (node.type === CanvasNodeType.Character) {
-                    // 角色节点拖到 ref 槽：把 images 全部带过去，下游按张数展开为 image refs
-                    const images = (node.metadata?.characterImages || []).filter((image) => image.url).map((image) => ({ url: image.url, name: image.outfit || image.name || node.title || "角色参考图", storageKey: image.storageKey, mimeType: image.mimeType }));
-                    return images.length ? { nodeId: node.id, images } : undefined;
-                }
+                // Character 节点是身份资产；四视图必须从独立的四视图图片节点拖入。
                 return undefined;
             })(),
         };
@@ -1321,7 +1328,7 @@ function InfiniteCanvasPage() {
             // 角色节点：images 数组逐张发送 drop，让 H3 按张数添加
             if ("images" in referenceDrag) {
                 for (const image of referenceDrag.images) {
-                    dispatchCanvasReferenceDrag("canvas-reference-drop", { nodeId: referenceDrag.nodeId, url: image.url, type: "image", name: image.name, storageKey: image.storageKey, mimeType: image.mimeType, targetNodeId: referenceTargetNodeId, clientX, clientY });
+                    dispatchCanvasReferenceDrag("canvas-reference-drop", { nodeId: referenceDrag.nodeId, url: image.url, type: "image", name: image.name, storageKey: image.storageKey, mimeType: image.mimeType, role: image.role, subjectId: image.subjectId, targetNodeId: referenceTargetNodeId, clientX, clientY });
                 }
                 dispatchCanvasReferenceDrag("canvas-reference-drag-end", { nodeId: referenceDrag.nodeId, url: referenceDrag.images[0]?.url || "", type: "image", name: referenceDrag.images[0]?.name || "", targetNodeId: referenceTargetNodeId, clientX, clientY });
             } else {
@@ -1795,6 +1802,25 @@ function InfiniteCanvasPage() {
         setNodes((prev) =>
             prev.map((node) => {
                 if (node.id !== nodeId) return node;
+                if (node.type === CanvasNodeType.Character) {
+                    const images = node.metadata?.characterImages || [];
+                    const nextIndex = images.findIndex((_, idx) => String(idx) === itemId);
+                    if (nextIndex < 0) return node;
+                    const primary = images[nextIndex];
+                    return {
+                        ...node,
+                        metadata: {
+                            ...node.metadata,
+                            characterPrimaryIndex: nextIndex,
+                            content: primary?.url,
+                            storageKey: primary?.storageKey,
+                            naturalWidth: primary?.width,
+                            naturalHeight: primary?.height,
+                            bytes: primary?.bytes,
+                            mimeType: primary?.mimeType,
+                        },
+                    };
+                }
                 if (node.type === CanvasNodeType.Text) {
                     const text = node.metadata?.texts?.find((item) => item.id === itemId);
                     return text?.content ? { ...node, metadata: { ...node.metadata, content: text.content, primaryTextId: text.id } } : node;
@@ -1954,6 +1980,197 @@ function InfiniteCanvasPage() {
             message.success(t("common.addedToAssets"));
         },
         [addAsset, message, t],
+    );
+
+    // 把当前画布上的图片节点就地转成角色节点：保留位置 / 大小 / 标题，把原图作为
+    // character.images 的第一张 outfit（主图），原 metadata 里的 prompt 当作 description。
+    const convertImageNodeToCharacter = useCallback(
+        (node: CanvasNodeData) => {
+            if (node.type !== CanvasNodeType.Image || !node.metadata?.content) {
+                message.warning(t("canvas.character.convertNoImage"));
+                return;
+            }
+            const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Character];
+            setNodes((prev) =>
+                prev.map((item) =>
+                    item.id === node.id
+                        ? {
+                              ...item,
+                              type: CanvasNodeType.Character,
+                              title: item.title || t("canvas.nodeTypes.character"),
+                              width: spec.width,
+                              height: spec.height,
+                              metadata: {
+                                  ...item.metadata,
+                                  status: NODE_STATUS_SUCCESS,
+                                  characterAssetId: undefined,
+                                  characterName: item.title,
+                                  characterDescription: typeof item.metadata?.prompt === "string" ? item.metadata.prompt : "",
+                                  characterImages: [
+                                      {
+                                          url: item.metadata.content,
+                                          storageKey: item.metadata.storageKey,
+                                          name: item.title || "image",
+                                          assetId: undefined,
+                                          outfit: "",
+                                          outfitDescription: "",
+                                          width: Number(item.metadata.naturalWidth) || item.width,
+                                          height: Number(item.metadata.naturalHeight) || item.height,
+                                          bytes: Number(item.metadata.bytes) || 0,
+                                          mimeType: item.metadata.mimeType || "image/png",
+                                      },
+                                  ],
+                                  characterPrimaryIndex: 0,
+                              },
+                          }
+                        : item,
+                ),
+            );
+            message.success(t("canvas.character.converted"));
+        },
+        [message, t],
+    );
+
+    // 把拖入的资源（图片/音频）落到角色节点上：图片 -> outfit，音频 -> 声线。
+    const dropOnCharacterNode = useCallback(
+        (node: CanvasNodeData, ref: { url: string; type: "image" | "audio"; name?: string; storageKey?: string; mimeType?: string }) => {
+            if (node.type !== CanvasNodeType.Character) return;
+            setNodes((prev) =>
+                prev.map((item) => {
+                    if (item.id !== node.id) return item;
+                    if (ref.type === "image") {
+                        const images = item.metadata?.characterImages || [];
+                        const nextImage: NonNullable<typeof item.metadata.characterImages>[number] = {
+                            url: ref.url,
+                            storageKey: ref.storageKey,
+                            name: ref.name || `outfit-${images.length + 1}`,
+                            assetId: undefined,
+                            outfit: "",
+                            outfitDescription: "",
+                            width: 0,
+                            height: 0,
+                            bytes: 0,
+                            mimeType: ref.mimeType || "image/*",
+                        };
+                        return {
+                            ...item,
+                            metadata: { ...item.metadata, characterImages: [...images, nextImage] },
+                        };
+                    }
+                    return {
+                        ...item,
+                        metadata: {
+                            ...item.metadata,
+                            characterVoiceUrl: ref.url,
+                            characterVoiceName: ref.name,
+                            characterVoiceStorageKey: ref.storageKey,
+                            characterVoiceAssetId: undefined,
+                        },
+                    };
+                }),
+            );
+        },
+        [],
+    );
+
+    // 双击角色节点：记录要编辑的节点 id，触发 CharacterNodeEditModal。
+    const openCharacterEditor = useCallback((node: CanvasNodeData) => {
+        if (node.type !== CanvasNodeType.Character) return;
+        setCharacterEditNodeId(node.id);
+    }, []);
+
+    const closeCharacterEditor = useCallback(() => setCharacterEditNodeId(null), []);
+
+    const saveCharacterEdit = useCallback(
+        (patch: {
+            title: string;
+            characterName: string;
+            characterDescription: string;
+            characterImages: CanvasNodeMetadata["characterImages"];
+            characterPrimaryIndex: number;
+            characterVoiceUrl: string;
+            characterVoiceName: string;
+            characterVoiceAssetId: string;
+        }) => {
+            if (!characterEditNodeId) return;
+            setNodes((prev) =>
+                prev.map((item) =>
+                    item.id === characterEditNodeId
+                        ? {
+                              ...item,
+                              title: patch.title,
+                              metadata: {
+                                  ...item.metadata,
+                                  characterName: patch.characterName,
+                                  characterDescription: patch.characterDescription,
+                                  characterImages: patch.characterImages,
+                                  characterPrimaryIndex: patch.characterPrimaryIndex,
+                                  characterVoiceUrl: patch.characterVoiceUrl || undefined,
+                                  characterVoiceName: patch.characterVoiceName || undefined,
+                                  characterVoiceAssetId: patch.characterVoiceAssetId || undefined,
+                              },
+                          }
+                        : item,
+                ),
+            );
+        },
+        [characterEditNodeId],
+    );
+
+    // 单个角色节点保存为角色资产：按 name 去重（同名就替换，否则新建）。
+    const saveCharacterNodeToAsset = useCallback(
+        async (node: CanvasNodeData) => {
+            if (node.type !== CanvasNodeType.Character) return;
+            const images = node.metadata?.characterImages || [];
+            if (!images.length) {
+                message.warning(t("assets.characterRequireOneImage"));
+                return;
+            }
+            const primary = images[Math.min(node.metadata?.characterPrimaryIndex || 0, images.length - 1)];
+            const name = (node.title || "").trim();
+            if (!name) {
+                message.warning(t("canvas.character.saveNameRequired"));
+                return;
+            }
+            const existing = useAssetStore.getState().assets.find(
+                (asset) => asset.kind === "character" && (asset.data.name || asset.title) === name,
+            );
+            const coverUrl = primary?.url || images[0].url;
+            const data = {
+                name,
+                englishName: node.metadata?.characterEnglishName || "",
+                description: node.metadata?.characterDescription || "",
+                voice: node.metadata?.characterVoiceUrl || "",
+                voiceName: node.metadata?.characterVoiceName || "",
+                voiceAssetId: node.metadata?.characterVoiceAssetId || "",
+                images,
+            };
+            try {
+                if (existing) {
+                    useAssetStore.getState().updateAsset(existing.id, {
+                        title: name,
+                        coverUrl,
+                        data,
+                        metadata: { source: "canvas", nodeId: node.id, replaced: true },
+                    });
+                } else {
+                    useAssetStore.getState().addAsset({
+                        kind: "character",
+                        title: name,
+                        coverUrl,
+                        tags: [],
+                        source: "Canvas",
+                        data,
+                        metadata: { source: "canvas", nodeId: node.id },
+                    });
+                }
+                message.success(t("canvas.character.saveToAssetsSuccess"));
+            } catch (error) {
+                const message_ = error instanceof Error ? error.message : String(error);
+                message.error(t("canvas.character.saveToAssetsFailed", { error: message_ }));
+            }
+        },
+        [message, t],
     );
 
     const createImageReversePromptNodes = useCallback(
@@ -3054,6 +3271,36 @@ function InfiniteCanvasPage() {
 
     const deleteBatchImage = useCallback((nodeId: string, imageId: string) => {
         const node = nodesRef.current.find((item) => item.id === nodeId);
+        if (node?.type === CanvasNodeType.Character) {
+            const images = node.metadata?.characterImages || [];
+            if (images.length <= 1) return; // 至少保留 1 张 outfit
+            const index = images.findIndex((_, idx) => String(idx) === imageId);
+            if (index < 0) return;
+            const nextImages = images.filter((_, idx) => idx !== index);
+            setNodes((prev) =>
+                prev.map((item) => {
+                    if (item.id !== nodeId) return item;
+                    const previousPrimary = item.metadata?.characterPrimaryIndex || 0;
+                    const newPrimary = previousPrimary === index ? 0 : previousPrimary > index ? previousPrimary - 1 : previousPrimary;
+                    const primaryImage = nextImages[newPrimary];
+                    return {
+                        ...item,
+                        metadata: {
+                            ...item.metadata,
+                            characterImages: nextImages,
+                            characterPrimaryIndex: newPrimary,
+                            content: primaryImage?.url,
+                            storageKey: primaryImage?.storageKey,
+                            naturalWidth: primaryImage?.width,
+                            naturalHeight: primaryImage?.height,
+                            bytes: primaryImage?.bytes,
+                            mimeType: primaryImage?.mimeType,
+                        },
+                    };
+                }),
+            );
+            return;
+        }
         if ((node?.metadata?.images?.length || 0) <= 2) setExpandedBatchNodeIds((current) => new Set([...current].filter((id) => id !== nodeId)));
         setNodes((prev) =>
             prev.map((item) => {
@@ -3452,6 +3699,8 @@ function InfiniteCanvasPage() {
                             onViewImage={handleNodeViewImage}
                             onSelectReference={selectNodeReference}
                             onContextMenu={handleNodeContextMenu}
+                            onEditCharacter={openCharacterEditor}
+                            onCharacterDrop={dropOnCharacterNode}
                         />
                     ))}
 
@@ -3497,6 +3746,8 @@ function InfiniteCanvasPage() {
                     onUpload={(node) => handleUploadRequest(node.id)}
                     onDownload={downloadNodeImage}
                     onSaveAsset={(node) => void saveNodeAsset(node)}
+                    onConvertToCharacter={convertImageNodeToCharacter}
+                    onSaveCharacterToAsset={(node) => void saveCharacterNodeToAsset(node)}
                     onMaskEdit={(node) => setMaskEditNodeId(node.id)}
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
@@ -3593,6 +3844,13 @@ function InfiniteCanvasPage() {
                 </Modal>
 
                 {angleNode?.metadata?.content ? <CanvasNodeAngleDialog dataUrl={angleNode.metadata.content} open={Boolean(angleNode)} onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode!, params)} /> : null}
+
+                <CharacterNodeEditModal
+                    open={Boolean(characterEditNodeId)}
+                    node={characterEditNodeId ? nodesRef.current.find((node) => node.id === characterEditNodeId) || null : null}
+                    onClose={closeCharacterEditor}
+                    onSave={saveCharacterEdit}
+                />
 
                 <ImageCompareModal
                     open={Boolean(previewContent)}

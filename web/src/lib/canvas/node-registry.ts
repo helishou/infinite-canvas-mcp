@@ -60,7 +60,12 @@ const FALLBACK_SPEC = { width: 340, height: 240, title: i18n.t("canvas.node.node
 export function getNodeSpec(type: string) {
     const def = definitions.get(type);
     if (!def) return FALLBACK_SPEC;
-    return { width: def.defaultSize.width, height: def.defaultSize.height, title: def.title, metadata: def.defaultMetadata };
+    // H3 定义挂了一个 defaultLayoutSize getter：用户在节点上点「设为默认参数」会
+    // 把节点宽高存进该 getter 读取的布局快照里，新建节点时优先用它。
+    const layoutSize = (def as CanvasNodeDefinition & { defaultLayoutSize?: { width?: number; height?: number } }).defaultLayoutSize;
+    const width = layoutSize?.width && layoutSize.width > 0 ? layoutSize.width : def.defaultSize.width;
+    const height = layoutSize?.height && layoutSize.height > 0 ? layoutSize.height : def.defaultSize.height;
+    return { width, height, title: def.title, metadata: def.defaultMetadata };
 }
 
 export function isBuiltinNodeType(type: string) {

@@ -5,86 +5,56 @@ import crypto from "node:crypto";
 import { nanoid } from "nanoid";
 
 import { loadConfig } from "./config.js";
-import { BackendDatabase } from "./db.js";
-import { ComfyUiBackend } from "./comfyui/bridge.js";
-import { createStores } from "./stores/index.js";
-import { PluginMcpRegistry, buildPluginMcpContext, type PluginMcpDeclaration, type PluginMcpBackend } from "@basketikun/canvas-agent/plugin-mcp";
-import type { CanvasProject, GenerationLogStatus } from "./db.js";
-import type { PluginDeclaration } from "./db.js";
-import type { ComfyUiClient } from "@basketikun/canvas-agent/runtime/comfy-client";
+import { PluginMcpRegistry, buildPluginMcpContext, loadPluginMcpDeclarationsFromBackend, type PluginMcpBackend } from "@basketikun/canvas-agent/plugin-mcp";
+import type { CanvasProject } from "./db.js";
 import { toolDescriptions, toolInputSchemas, toolNames, type ToolName } from "@basketikun/canvas-agent/schemas";
 import { buildCanvasToolRequest } from "@basketikun/canvas-agent/operations";
-import { DirectImageBackend } from "./runtime/chatgpt-image.js";
-import { CanvasImageDispatcher, type CanvasImageGenerationInput, type CanvasImageGenerationResult } from "./canvas/image-dispatcher.js";
-import { WorkflowStore } from "./workflows/store.js";
-import { WorkflowExecutor } from "./workflows/executor.js";
+import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import type { CanvasImageGenerationInput } from "./canvas/image-dispatcher.js";
+import { backendComfyUi, createBackendClient } from "@basketikun/canvas-agent/runtime/comfy-client";
 
 /** 当前活动画布 ID（MCP 进程内状态，用于多画布路由）。 */
 let activeProjectId: string | null = null;
 
-/** Backend 进程外的 MCP stdio 入口：直接打开 Backend 数据库和 ComfyUI Bridge。 */
+/** Backend 进程外的 MCP stdio 入口：所有业务写入都经由常驻 Backend API。 */
 export async function startBackendMcpServer() {
     const config = loadConfig(true);
-    const db = new BackendDatabase();
-    const stores = createStores(db);
-    const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings, media: stores.media });
-    const directImage = new DirectImageBackend(stores.tasks, stores.media);
-    const workflowStore = new WorkflowStore(db);
-    const workflowExecutor = new WorkflowExecutor(comfy, stores.tasks, stores.media, undefined, db);
-    const imageDispatcher = new CanvasImageDispatcher(config, stores, comfy, directImage, workflowStore, workflowExecutor);
+    // 插件 MCP（尤其 H3）只通过常驻 Backend API 访问画布、任务、媒体和设置，
+    // 不再在 MCP 进程内创建自己的 ComfyUI/SQLite 业务副本。
+    const backendApi = createBackendClient(config.url);
+    const backendComfy = backendComfyUi(backendApi, () => []);
     const directBackend: PluginMcpBackend = {
-        listCanvasProjects: async () => db.listCanvasProjects(),
-        upsertCanvasProject: async (project) => db.upsertCanvasProject(project as CanvasProject),
-        replaceCanvasProjects: async (projects) => db.replaceCanvasProjects(projects as CanvasProject[]),
-        replacePluginDeclarations: async (declarations) => db.replacePluginDeclarations(declarations as PluginDeclaration[]),
+        listCanvasProjects: () => backendApi.listCanvasProjects(),
+        applyCanvasOperations: (projectId, operations, expectedRevision) => backendApi.applyCanvasOperations(projectId, operations, expectedRevision),
+        canvasRunGeneration: (input) => backendApi.canvasRunGeneration(input),
+        replaceCanvasProjects: (projects) => backendApi.replaceCanvasProjects(projects),
+        replacePluginDeclarations: (declarations) => backendApi.replacePluginDeclarations(declarations),
         runtimeMediaStore: async (name, dataUrl, storageKey) => {
-            if (storageKey) {
-                const media = stores.media.meta(decodeURIComponent(storageKey));
-                if (!media) throw new Error(`media not found: ${storageKey}`);
-                return { path: media.filePath };
-            }
-            return { path: stores.media.storeDataUrl(dataUrl, name).path };
+            return { path: (await backendApi.runtimeMediaStore(name, dataUrl, storageKey)).path };
         },
-        runtimeMediaPath: async (ref) => {
-            const url = new URL(ref || "", config.url);
-            if (!url.pathname.startsWith("/media/")) return ref;
-            const storageKey = decodeURIComponent(url.pathname.slice("/media/".length));
-            const media = stores.media.meta(storageKey);
-            if (!media) throw new Error(`media not found: ${storageKey}`);
-            return media.filePath;
-        },
-        listGenerationLogs: async (options = {}) => stores.logs.list({ ...options, status: options.status && ["queued", "running", "success", "failed", "cancelled"].includes(options.status) ? options.status as GenerationLogStatus : undefined }),
-        createGenerationLog: async (input) => stores.logs.create(input as never),
-        updateGenerationLog: async (id, patch) => stores.logs.update(id, patch as never),
-        comfyModels: (signal) => comfy.models(signal),
-        comfyRun: (preset, input, params) => comfy.run(preset, input, params),
-        comfyGetTask: async (id, after = 0) => {
-            const task = stores.tasks.get(id);
-            if (!task) throw new Error(`task not found: ${id}`);
-            return { task, events: stores.tasks.events(id, after) };
-        },
-        comfyCancel: async (id) => comfy.cancel(id),
-    };
-    const comfyClient: ComfyUiClient = {
-        status: () => comfy.status(), models: (signal) => comfy.models(signal), presets: () => comfy.presets(),
-        run: (preset, input, params) => comfy.run(preset, input, params), cancel: (id) => Promise.resolve(comfy.cancel(id)),
-        getUrl: async () => comfy.getUrl(), setUrl: async (url) => comfy.setUrl(url),
+        runtimeMediaPath: (ref) => backendApi.runtimeMediaPath(ref),
+        listGenerationLogs: (options = {}) => backendApi.listGenerationLogs(options),
+        createGenerationLog: (input) => backendApi.createGenerationLog(input),
+        updateGenerationLog: (id, patch) => backendApi.updateGenerationLog(id, patch),
+        getTask: (id) => backendApi.getTask(id),
+        cancelTask: (id) => backendApi.cancelTask(id),
+        comfyModels: (signal) => backendApi.comfyModels(signal),
+        comfyRun: (preset, input, params) => backendApi.comfyRun(preset, input, params),
+        comfyGetTask: (id, after = 0) => backendApi.comfyGetTask(id, after),
+        comfyCancel: (id) => backendApi.comfyCancel(id),
+        getH3Defaults: () => backendApi.getH3Defaults(),
+        setH3Defaults: (settings) => backendApi.setH3Defaults(settings),
+        resetH3Defaults: () => backendApi.resetH3Defaults(),
     };
     const server = new McpServer({ name: "infinite-canvas-backend", version: "0.1.0" });
-    registerDirectCanvasTools(server, db, stores, config, imageDispatcher);
-    registerDirectComfyTools(server, comfy, stores);
+    registerDirectCanvasTools(server, config, backendApi);
+    registerDirectComfyTools(server, backendApi);
     registerBrowserCompatibilityTools(server, config);
-    const context = buildPluginMcpContext({ url: config.url, token: config.token, backendUrl: config.url }, directBackend, comfyClient);
+    const context = buildPluginMcpContext({ url: config.url, token: config.token, backendUrl: config.url }, directBackend, backendComfy);
     const registry = new PluginMcpRegistry(server, context);
-    const readDeclarations = () => db.listPluginDeclarations().map((item): PluginMcpDeclaration => ({
-        id: item.id,
-        name: item.name,
-        version: item.version,
-        mcp: { enabled: item.enabled, tools: item.tools as never },
-    }));
-    await registry.apply(readDeclarations());
+    await registry.apply(await loadPluginMcpDeclarationsFromBackend(backendApi));
     const declarationSync = setInterval(() => {
-        void registry.apply(readDeclarations()).catch((error) => console.error("plugin MCP sync failed", error));
+        void loadPluginMcpDeclarationsFromBackend(backendApi).then((declarations) => registry.apply(declarations)).catch((error) => console.error("plugin MCP sync failed", error));
     }, 3000);
     declarationSync.unref();
     await server.connect(new StdioServerTransport());
@@ -94,61 +64,76 @@ const DIRECT_CANVAS_TOOLS = [
     "canvas_list_projects", "canvas_get_state", "canvas_get_selection", "canvas_export_snapshot", "canvas_apply_ops",
     "canvas_create_node", "canvas_create_text_node", "canvas_create_text_nodes", "canvas_create_config_node",
     "canvas_create_image_prompt_flow", "canvas_create_generation_flow", "canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio",
-    "canvas_update_node", "canvas_update_node_text", "canvas_move_nodes", "canvas_resize_node", "canvas_delete_nodes", "canvas_connect_nodes", "canvas_select_nodes", "canvas_set_viewport", "canvas_run_generation", "generation_get_status",
+    "canvas_update_node", "canvas_update_node_text", "canvas_move_nodes", "canvas_resize_node", "canvas_delete_nodes", "canvas_connect_nodes", "canvas_set_generation_references", "canvas_select_nodes", "canvas_set_viewport", "canvas_run_generation", "generation_get_status",
 ] as ToolName[];
 const DIRECT_TOOL_NAMES = new Set<ToolName>([...DIRECT_CANVAS_TOOLS, "assets_list", "assets_add", "comfyui_status", "comfyui_list_presets", "comfyui_run", "comfyui_get_task", "comfyui_cancel_task", "generation_get_status"]);
 
-function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, stores: ReturnType<typeof createStores>, config: ReturnType<typeof loadConfig>, imageDispatcher: CanvasImageDispatcher) {
+function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof loadConfig>, backendApi: ReturnType<typeof createBackendClient>) {
     for (const name of DIRECT_CANVAS_TOOLS) {
         const schema = toolInputSchemas[name];
         server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput: Record<string, unknown>) => {
             const input = schema.parse(rawInput) as Record<string, unknown>;
             if (name === "canvas_list_projects") {
                 const keyword = String(input.keyword || "").trim().toLowerCase();
-                const all = db.listCanvasProjects()
+                const all = (await fetchCanvasProjects(config))
                     .filter((project) => !keyword || String(project.title || project.name || "").toLowerCase().includes(keyword))
                     .map((project) => ({ id: project.id, title: project.title, updatedAt: project.updatedAt, nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0, connectionCount: Array.isArray(project.connections) ? project.connections.length : 0 }));
                 const pageSize = Math.max(1, Math.min(100, Number(input.pageSize || 20)));
                 const page = Math.max(1, Number(input.page || 1));
                 return textResult({ projects: all.slice((page - 1) * pageSize, page * pageSize), total: all.length, page, pageSize });
             }
-            if (name === "generation_get_status") return textResult(listTasks(db, input));
-            const project = currentProject(db); const state = project as Record<string, unknown>;
+            if (name === "generation_get_status") return textResult(await listTasksFromBackend(backendApi, input));
+            const projectId = String(rawInput.projectId || activeProjectId || "");
+            const project = await fetchCurrentCanvasProject(config, projectId); const state = project as Record<string, unknown>;
             if (name === "canvas_get_state" || name === "canvas_export_snapshot") return textResult(compactProject(state));
             if (name === "canvas_get_selection") { const ids = new Set(Array.isArray(state.selectedNodeIds) ? state.selectedNodeIds.map(String) : []); return textResult({ nodes: nodesOf(state).filter((node) => ids.has(String(node.id))) }); }
-            const request = buildCanvasToolRequest(name, input, { nodes: nodesOf(state), connections: connectionsOf(state), viewport: state.viewport as never } as never);
-            const ops = Array.isArray(request.input.ops) ? request.input.ops as Array<Record<string, unknown>> : [];
-            applyCanvasOps(state, ops);
-            state.updatedAt = new Date().toISOString();
-            const saved = await saveCanvasProject(config, state as CanvasProject);
+            const toolInput = name === "canvas_create_node"
+                ? await applyNodeFactoryDefaults(input, backendApi)
+                : input;
+            const request = buildCanvasToolRequest(name, toolInput, { nodes: nodesOf(state), connections: connectionsOf(state), viewport: state.viewport as never } as never);
+            const rawOps = Array.isArray(request.input.ops) ? request.input.ops as Array<Record<string, unknown>> : [];
+            const ops = await Promise.all(rawOps.map(async (op) => op.type === "add_node" && String(op.nodeType || "") === "minimax-h3:video"
+                ? await applyNodeFactoryDefaults(op, backendApi)
+                : op));
+            const operationResponse = await applyBackendCanvasOperations(config, project.id, Number(project.revision || 0), ops);
+            const operationResults = operationResponse.operationResults;
+            const saved = operationResponse.project;
             const directTasks: Array<{ taskId: string; nodeId: string; model: string }> = [];
+            let withLoadingState = saved;
             for (const op of ops) {
-                if (op.type !== "run_generation" || String(op.mode || "image") !== "image") continue;
-                const source = nodesOf(state).find((node) => String(node.id) === String(op.nodeId));
+                if (op.type !== "run_generation") continue;
+                const currentState = withLoadingState as Record<string, unknown>;
+                const source = nodesOf(currentState).find((node) => String(node.id) === String(op.nodeId));
                 if (!source) continue;
                 const sourceMetadata = recordOf(source.metadata);
-                const selectedModel = String(sourceMetadata.model || "").trim();
-                if (!selectedModel) continue;
-                const imageRequest = buildCanvasImageRequest(source, state, op, selectedModel);
                 const sourceId = String(source.id);
-                const task = imageDispatcher.start(imageRequest, {
-                    onCompleted: (result, completed) => completeCanvasImageGeneration(config, db, saved.id, sourceId, imageRequest.prompt, selectedModel, result, completed.id),
-                    onFailed: (error, failed) => failDirectImageGeneration(config, db, saved.id, sourceId, failed.id, error.message),
-                });
-                markDirectImageLoading(state, sourceId, task.taskId);
-                directTasks.push({ taskId: task.taskId, nodeId: sourceId, model: selectedModel });
+                const mode = String(op.mode || "image");
+                if (mode === "image") {
+                    const selectedModel = String(sourceMetadata.model || "").trim();
+                    if (!selectedModel) continue;
+                    const imageRequest = buildCanvasImageRequest(source, currentState, op, selectedModel);
+                    const loading = await applyBackendCanvasOperations(config, project.id, Number(withLoadingState.revision || 0), [{
+                        type: "update_node", id: sourceId, metadata: { status: "loading", runtimeTaskId: imageRequest.clientTaskId, errorDetails: undefined },
+                    }]);
+                    withLoadingState = loading.project;
+                    const task = await startBackendCanvasImageGeneration(config, imageRequest);
+                    directTasks.push({ taskId: task.taskId, nodeId: sourceId, model: selectedModel });
+                } else if (mode === "video") {
+                    const videoRequest = await buildCanvasVideoRequest(source, currentState, project.id, backendApi, op);
+                    const task = await backendApi.canvasRunGeneration(videoRequest);
+                    directTasks.push({ taskId: task.taskId, nodeId: sourceId, model: String(videoRequest.model || "") });
+                }
             }
-            const withLoadingState = directTasks.length ? await saveCanvasProject(config, state as CanvasProject) : saved;
-            return textResult({ ok: true, projectId: withLoadingState.id, directTasks, state: compactProject(withLoadingState as Record<string, unknown>) });
+            return textResult({ ok: true, projectId: withLoadingState.id, operationResults, directTasks, state: compactProject(withLoadingState as Record<string, unknown>) });
         });
     }
     for (const name of ["assets_list", "assets_add"] as ToolName[]) {
         const schema = toolInputSchemas[name];
         server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput: Record<string, unknown>) => {
             const input = schema.parse(rawInput) as Record<string, unknown>;
-            if (name === "assets_list") return textResult(stores.assets.list({ kind: input.kind && input.kind !== "all" ? String(input.kind) : undefined }));
+            if (name === "assets_list") return textResult((await backendApi.listAssets({ kind: input.kind && input.kind !== "all" ? String(input.kind) : undefined })).assets);
             const now = new Date().toISOString();
-            const asset = stores.assets.upsert({ id: `asset-${crypto.randomUUID()}`, kind: String(input.kind || "text"), title: String(input.title || ""), coverUrl: String(input.imageUrl || ""), tags: Array.isArray(input.tags) ? input.tags.map(String) : [], folderId: null, data: { content: input.content || "", imageUrl: input.imageUrl || "" }, note: input.note ? String(input.note) : null, source: input.source ? String(input.source) : null, metadata: {}, createdAt: now, updatedAt: now });
+            const asset = await backendApi.upsertAsset({ id: `asset-${crypto.randomUUID()}`, kind: String(input.kind || "text"), title: String(input.title || ""), coverUrl: String(input.imageUrl || ""), tags: Array.isArray(input.tags) ? input.tags.map(String) : [], folderId: null, data: { content: input.content || "", imageUrl: input.imageUrl || "" }, note: input.note ? String(input.note) : null, source: input.source ? String(input.source) : null, metadata: {}, createdAt: now, updatedAt: now });
             return textResult(asset);
         });
     }
@@ -162,6 +147,7 @@ function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, store
         const id = nanoid();
         const project: CanvasProject = {
             id, title, createdAt: now, updatedAt: now,
+            revision: 0,
             nodes: [], connections: [], chatSessions: [], activeChatId: null,
             backgroundMode: "lines", showImageInfo: false, globalPrompt: "",
             viewport: { x: 0, y: 0, zoom: 1 },
@@ -180,12 +166,12 @@ function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, store
         return textResult({ ok: true, deleted: deleted > 0 });
     });
     server.registerTool("canvas_set_active_project", {
-        description: "设置当前活动画布（后续 MCP 操作目标）。不传 id 则清空（fallback 到列表第一个）。",
+        description: "设置当前活动画布（后续 MCP 操作目标）。不传 id 则清空；存在多个画布时不会自动挑选目标。",
         inputSchema: z.object({ id: z.string().optional() }).shape,
     }, async (rawInput: Record<string, unknown>) => {
         const id = rawInput.id ? String(rawInput.id) : "";
         if (id) {
-            const project = db.getCanvasProject(id);
+            const project = (await fetchCanvasProjects(config)).find((item) => item.id === id);
             if (!project) throw new Error(`画布不存在: ${id}`);
             activeProjectId = id;
         } else {
@@ -193,6 +179,53 @@ function registerDirectCanvasTools(server: McpServer, db: BackendDatabase, store
         }
         return textResult({ ok: true, activeProjectId: activeProjectId || null });
     });
+}
+
+async function buildCanvasVideoRequest(source: Record<string, unknown>, project: Record<string, unknown>, projectId: string, backend: ReturnType<typeof createBackendClient>, op: Record<string, unknown>) {
+    const metadata = recordOf(source.metadata);
+    const segments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
+    const segmentId = String(op.segmentId || metadata.selectedSegmentId || segments[0]?.id || "");
+    const segment = segments.find((item) => String(item.id || "") === segmentId) || segments[0] || {};
+    const refs = (Array.isArray(segment.refItems) ? segment.refItems as Array<Record<string, unknown>> : [
+        ...(Array.isArray(recordOf(segment.refs).image) ? recordOf(segment.refs).image as Array<Record<string, unknown>> : []),
+        ...(Array.isArray(recordOf(segment.refs).video) ? recordOf(segment.refs).video as Array<Record<string, unknown>> : []),
+        ...(Array.isArray(recordOf(segment.refs).audio) ? recordOf(segment.refs).audio as Array<Record<string, unknown>> : []),
+    ]).filter((ref) => ref.role !== "character_identity");
+    const paths = await Promise.all(refs.map(async (ref): Promise<Record<string, unknown> & { path: string }> => {
+        const value = String(ref.storageKey || ref.url || "");
+        return { ...ref, path: value ? await backend.runtimeMediaPath(value) : "" };
+    }));
+    const images = paths.filter((ref) => String(ref.type || "image") === "image" && ref.path).map((ref) => ref.path);
+    const videos = paths.filter((ref) => String(ref.type || "") === "video" && ref.path).map((ref) => ref.path);
+    const audios = paths.filter((ref) => String(ref.type || "") === "audio" && ref.path).map((ref) => ref.path);
+    const previousIndex = Math.max(0, segments.findIndex((item) => String(item.id || "") === String(segment.id || "")) - 1);
+    const previous = previousIndex >= 0 ? String(segments[previousIndex]?.result || "") : "";
+    const previousVideo = previous ? await backend.runtimeMediaPath(previous) : "";
+    const params: Record<string, unknown> = { ...recordOf(metadata.comfyParams), ...metadata, ...segment, ...recordOf(op.params), modelName: String(segment.modelName || metadata.modelName || metadata.minimaxBaseModel || ""), canvasBinding: { projectId, nodeId: String(source.id || ""), segmentId } };
+    for (const key of ["segments", "refs", "refItems", "result", "results", "content", "url", "storageKey"]) delete params[key];
+    return {
+        mode: "video",
+        model: "minimax-h3:video",
+        preset: "minimax-h3",
+        projectId,
+        nodeId: String(source.id || ""),
+        segmentId,
+        input: { prompt: String(op.prompt || segment.prompt || metadata.prompt || ""), references: images, video: videos[0], audios, ...(previousVideo ? { previousVideo } : {}) },
+        params,
+        idempotencyKey: String(op.idempotencyKey || `canvas-${crypto.randomUUID()}`),
+    };
+}
+
+async function applyNodeFactoryDefaults(input: Record<string, unknown>, backend: ReturnType<typeof createBackendClient>) {
+    if (String(input.nodeType || "") !== "minimax-h3:video") return input;
+    const defaults = await backend.getH3Defaults();
+    const metadata = recordOf(input.metadata);
+    return {
+        ...input,
+        width: input.width ?? 1960,
+        height: input.height ?? 1080,
+        metadata: createH3NodeMetadata(defaults, metadata),
+    };
 }
 
 function buildCanvasImageRequest(source: Record<string, unknown>, project: Record<string, unknown>, op: Record<string, unknown>, model: string): CanvasImageGenerationInput {
@@ -233,10 +266,12 @@ function buildCanvasImageRequest(source: Record<string, unknown>, project: Recor
             mimeType: String(nodeMetadata.mimeType || "image/png"),
         }];
     });
-    const params = recordOf(metadata.params || metadata.customFieldValues);
+    const params = { ...recordOf(metadata.params || metadata.customFieldValues), ...recordOf(op.params) };
     const size = normalizeGptImageSize(metadata.size);
     const [width, height] = size.split("x").map(Number);
     return {
+        projectId: String(project.id || "") || undefined,
+        nodeId: String(source.id || "") || undefined,
         model,
         prompt,
         references,
@@ -246,76 +281,21 @@ function buildCanvasImageRequest(source: Record<string, unknown>, project: Recor
         quality: String(metadata.quality || "auto"),
         count: Math.max(1, Math.min(4, Number(metadata.count || 1))),
         params,
-        clientTaskId: `canvas-${crypto.randomUUID()}`,
+        clientTaskId: String(op.idempotencyKey || `canvas-${crypto.randomUUID()}`),
+        writeBackCanvas: true,
+        resultPolicy: String(op.resultPolicy || "replace-active") === "append" ? "append" : "replace-active",
     };
 }
 
-async function completeCanvasImageGeneration(
-    config: ReturnType<typeof loadConfig>,
-    db: BackendDatabase,
-    projectId: string,
-    sourceId: string,
-    prompt: string,
-    model: string,
-    result: CanvasImageGenerationResult,
-    taskId: string,
-) {
-    const project = db.getCanvasProject(projectId);
-    if (!project) return;
-    const nodes = nodesOf(project);
-    const connections = connectionsOf(project);
-    const source = nodes.find((node) => String(node.id) === sourceId);
-    if (!source) return;
-    const sourcePosition = recordOf(source.position);
-    const sourceWidth = Number(source.width || 320);
-    const createdIds: string[] = [];
-    result.media.forEach((output, index) => {
-        const id = `image-${crypto.randomUUID()}`;
-        createdIds.push(id);
-        nodes.push({
-            id,
-            type: "image",
-            title: `${String(source.title || "图片生成")}｜结果${result.media.length > 1 ? ` ${index + 1}` : ""}`,
-            position: { x: Number(sourcePosition.x || 0) + sourceWidth + 96 + index * 720, y: Number(sourcePosition.y || 0) },
-            width: output.width || 680,
-            height: output.height || 454,
-            metadata: {
-                content: output.url,
-                url: output.url,
-                storageKey: output.storageKey || "",
-                mimeType: output.mimeType || "image/png",
-                bytes: output.bytes,
-                naturalWidth: output.width,
-                naturalHeight: output.height,
-                prompt,
-                model,
-                generationType: result.media.length && model.toLowerCase().includes("gpt-image") ? "edit" : "generation",
-                source: "MCP canvas image dispatcher",
-                status: "success",
-            },
-        });
-        connections.push({ id: `connection-${crypto.randomUUID()}`, fromNodeId: sourceId, toNodeId: id });
+async function startBackendCanvasImageGeneration(config: ReturnType<typeof loadConfig>, input: CanvasImageGenerationInput) {
+    const response = await fetch(`${config.url.replace(/\/$/, "")}/canvas/generation?token=${encodeURIComponent(config.token)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...input, mode: "image" }),
     });
-    if (!createdIds.length) throw new Error("生成完成但没有返回图片");
-    source.metadata = { ...recordOf(source.metadata), status: "success", runtimeTaskId: undefined, errorDetails: undefined, model, prompt, primaryImageId: createdIds[0], generationTaskId: taskId };
-    project.updatedAt = new Date().toISOString();
-    await saveCanvasProject(config, project);
-}
-
-function markDirectImageLoading(project: Record<string, unknown>, nodeId: string, taskId: string) {
-    const node = nodesOf(project).find((item) => String(item.id) === nodeId);
-    if (!node) return;
-    node.metadata = { ...recordOf(node.metadata), status: "loading", runtimeTaskId: taskId, errorDetails: undefined };
-}
-
-async function failDirectImageGeneration(config: ReturnType<typeof loadConfig>, db: BackendDatabase, projectId: string, sourceId: string, taskId: string, error: string) {
-    const project = db.getCanvasProject(projectId);
-    if (!project) return;
-    const source = nodesOf(project).find((node) => String(node.id) === sourceId);
-    if (!source) return;
-    source.metadata = { ...recordOf(source.metadata), status: "error", runtimeTaskId: undefined, errorDetails: error };
-    project.updatedAt = new Date().toISOString();
-    await saveCanvasProject(config, project);
+    const body = await response.json().catch(() => ({})) as { taskId?: string; logId?: string; error?: string };
+    if (!response.ok || !body.taskId) throw new Error(body.error || `图片生成提交失败: HTTP ${response.status}`);
+    return { taskId: body.taskId, logId: body.logId };
 }
 
 function normalizeGptImageSize(value: unknown) {
@@ -330,22 +310,73 @@ function recordOf(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function listTasks(db: BackendDatabase, input: Record<string, unknown>) {
+async function listTasksFromBackend(backend: ReturnType<typeof createBackendClient>, input: Record<string, unknown>) {
     const taskId = typeof input.taskId === "string" ? input.taskId : "";
-    const rows = taskId
-        ? db.db.prepare("SELECT * FROM tasks WHERE id = ?").all(taskId)
-        : db.db.prepare("SELECT * FROM tasks ORDER BY updated_at DESC LIMIT ?").all(Math.max(1, Math.min(500, Number(input.limit || 100))));
-    return (rows as Array<Record<string, unknown>>).map((row) => ({ id: String(row.id), kind: String(row.kind), status: String(row.status), progress: Number(row.progress), input: parseJson(row.input_json), params: parseJson(row.params_json), result: row.result_json ? parseJson(row.result_json) : null, error: row.error ? String(row.error) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }));
+    const source = (taskId ? [await backend.getTask(taskId).then((value) => value.task).catch(() => null)] : await backend.listTasks({
+        scope: ["all", "canvas", "image", "video"].includes(String(input.scope || "all")) ? String(input.scope || "all") as "all" | "canvas" | "image" | "video" : "all",
+        projectId: typeof input.projectId === "string" ? input.projectId : undefined,
+        nodeIds: Array.isArray(input.nodeIds) ? input.nodeIds.map(String) : undefined,
+        segmentIds: Array.isArray(input.segmentIds) ? input.segmentIds.map(String) : undefined,
+    })) as Array<{ id?: string; kind: string; input?: Record<string, unknown>; params?: Record<string, unknown>; status: string; progress: number; result?: unknown; error?: string | null; createdAt: string; updatedAt: string; executor?: string; model?: string; projectId?: string; nodeId?: string; segmentId?: string }>;
+    const nodeIds = new Set(Array.isArray(input.nodeIds) ? input.nodeIds.map(String) : []);
+    const segmentIds = new Set(Array.isArray(input.segmentIds) ? input.segmentIds.map(String) : []);
+    const projectId = String(input.projectId || "");
+    const scope = String(input.scope || "all");
+    const tasks = source.filter((task): task is NonNullable<typeof task> => Boolean(task)).filter((task) => {
+        const taskInput = task.input || {};
+        const params = task.params || {};
+        const taskProjectId = String(task.projectId || taskInput.projectId || params.projectId || "");
+        const taskNodeId = String(task.nodeId || taskInput.nodeId || params.nodeId || "");
+        const taskSegmentId = String(task.segmentId || taskInput.segmentId || params.segmentId || "");
+        const taskExecutor = String(task.executor || params.executor || "");
+        const taskModel = String(task.model || params.model || params.modelName || taskInput.model || "");
+        if (projectId && taskProjectId !== projectId) return false;
+        if (nodeIds.size && !nodeIds.has(taskNodeId)) return false;
+        if (segmentIds.size && !segmentIds.has(taskSegmentId)) return false;
+        if (scope === "canvas" && !taskProjectId) return false;
+        if (scope === "image" && !/image/i.test(`${task.kind} ${taskExecutor} ${taskModel}`)) return false;
+        if (scope === "video" && !/video|h3/i.test(`${task.kind} ${taskExecutor} ${taskModel}`)) return false;
+        return true;
+    }).slice(0, Math.max(1, Math.min(500, Number(input.limit || 100)))).map(toCanvasTask);
+    return { tasks };
 }
-function parseJson(value: unknown): Record<string, unknown> { try { const parsed = JSON.parse(String(value || "{}")); return parsed && typeof parsed === "object" ? parsed : {}; } catch { return {}; } }
 
-function currentProject(db: BackendDatabase) {
-    const projects = db.listCanvasProjects();
-    if (activeProjectId) {
-        const found = projects.find((p) => p.id === activeProjectId);
+function toCanvasTask(task: { id?: string; kind: string; input?: Record<string, unknown>; params?: Record<string, unknown>; status: string; progress: number; result?: unknown; error?: string | null; createdAt: string; updatedAt: string; parentTaskId?: string; projectId?: string; nodeId?: string; segmentId?: string; executor?: string; model?: string; outputs?: Array<Record<string, unknown>> }) {
+    const input = task.input || {};
+    const params = task.params || {};
+    const binding = params.canvasBinding && typeof params.canvasBinding === "object" ? params.canvasBinding as Record<string, unknown> : {};
+    const result = task.result && typeof task.result === "object" ? task.result as Record<string, unknown> : {};
+    return {
+        taskId: String(task.id || ""),
+        parentTaskId: task.parentTaskId || (typeof params.parentTaskId === "string" ? params.parentTaskId : undefined),
+        projectId: task.projectId || String(input.projectId || params.projectId || binding.projectId || "") || undefined,
+        nodeId: task.nodeId || String(input.nodeId || params.nodeId || binding.nodeId || "") || undefined,
+        segmentId: task.segmentId || String(input.segmentId || params.segmentId || binding.segmentId || "") || undefined,
+        executor: task.executor || String(params.executor || (task.kind.startsWith("comfyui:") ? "comfy" : task.kind)),
+        model: task.model || String(params.model || params.modelName || input.model || "") || undefined,
+        status: task.status,
+        progress: Number(task.progress || 0),
+        outputs: Array.isArray(task.outputs) ? task.outputs : Array.isArray(result.media) ? result.media : Array.isArray(result.images) ? result.images : [],
+        error: task.error || undefined,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+    };
+}
+async function fetchCanvasProjects(config: ReturnType<typeof loadConfig>): Promise<CanvasProject[]> {
+    const response = await fetch(`${config.url.replace(/\/$/, "")}/canvas/projects?token=${encodeURIComponent(config.token)}`);
+    const body = await response.json().catch(() => ({})) as { projects?: CanvasProject[]; error?: string };
+    if (!response.ok || !Array.isArray(body.projects)) throw new Error(body.error || `读取画布失败: HTTP ${response.status}`);
+    return body.projects;
+}
+
+async function fetchCurrentCanvasProject(config: ReturnType<typeof loadConfig>, projectId: string): Promise<CanvasProject> {
+    const projects = await fetchCanvasProjects(config);
+    if (projectId) {
+        const found = projects.find((project) => project.id === projectId);
         if (found) return found;
+        throw new Error(`画布不存在: ${projectId}`);
     }
-    if (projects.length === 0) throw new Error("当前没有画布项目");
+    if (projects.length !== 1) throw new Error("请显式指定 projectId 或先设置唯一活动画布");
     return projects[0];
 }
 function nodesOf(project: Record<string, unknown>) { return Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : []; }
@@ -364,6 +395,17 @@ async function saveCanvasProject(config: ReturnType<typeof loadConfig>, project:
     return body.project;
 }
 
+async function applyBackendCanvasOperations(config: ReturnType<typeof loadConfig>, projectId: string, expectedRevision: number, operations: Array<Record<string, unknown>>) {
+    const response = await fetch(`${config.url.replace(/\/$/, "")}/canvas/projects/${encodeURIComponent(projectId)}/ops?token=${encodeURIComponent(config.token)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expectedRevision, operations }),
+    });
+    const body = await response.json().catch(() => ({})) as { project?: CanvasProject; operationResults?: unknown[]; revision?: number; error?: string };
+    if (!response.ok || !body.project) throw new Error(body.error || `画布操作失败: HTTP ${response.status}`);
+    return { project: body.project, operationResults: body.operationResults || [], revision: Number(body.revision || body.project.revision || 0) };
+}
+
 async function deleteCanvasProject(config: ReturnType<typeof loadConfig>, id: string): Promise<number> {
     const response = await fetch(`${config.url.replace(/\/$/, "")}/canvas/projects/${encodeURIComponent(id)}?token=${encodeURIComponent(config.token)}`, { method: "DELETE" });
     const body = await response.json().catch(() => ({})) as { deleted?: number; error?: string };
@@ -371,27 +413,12 @@ async function deleteCanvasProject(config: ReturnType<typeof loadConfig>, id: st
     return Number(body.deleted || 0);
 }
 
-function applyCanvasOps(project: Record<string, unknown>, ops: Array<Record<string, unknown>>) {
-    const nodes = nodesOf(project); const connections = connectionsOf(project);
-    project.nodes = nodes;
-    project.connections = connections;
-    for (const op of ops) {
-        if (op.type === "add_node") { const node = { id: String(op.id || `${String(op.nodeType || "node")}-${crypto.randomUUID()}`), type: String(op.nodeType || "text"), title: String(op.title || ""), position: op.position || { x: Number(op.x || 0), y: Number(op.y || 0) }, width: Number(op.width || 320), height: Number(op.height || 240), metadata: op.metadata || {} }; nodes.push(node); }
-        if (op.type === "update_node") { const node = nodes.find((item) => item.id === op.id); if (!node) throw new Error(`找不到节点：${String(op.id)}`); Object.assign(node, op.patch || {}); if (op.metadata) node.metadata = { ...(node.metadata as object || {}), ...(op.metadata as object) }; }
-        if (op.type === "delete_node") { const ids = new Set(Array.isArray(op.ids) ? op.ids.map(String) : [String(op.id || "")]); for (let index = nodes.length - 1; index >= 0; index--) if (ids.has(String(nodes[index].id))) nodes.splice(index, 1); for (let index = connections.length - 1; index >= 0; index--) if (ids.has(String(connections[index].fromNodeId)) || ids.has(String(connections[index].toNodeId))) connections.splice(index, 1); }
-        if (op.type === "connect_nodes") connections.push({ id: `connection-${crypto.randomUUID()}`, fromNodeId: op.fromNodeId, toNodeId: op.toNodeId });
-        if (op.type === "select_nodes") project.selectedNodeIds = Array.isArray(op.ids) ? op.ids : [];
-        if (op.type === "set_viewport") project.viewport = op.viewport;
-    }
-}
-
-
-function registerDirectComfyTools(server: McpServer, comfy: ComfyUiBackend, stores: ReturnType<typeof createStores>) {
-    server.registerTool("comfyui_status", { description: "检查本地 ComfyUI 连接和系统状态。", inputSchema: z.object({}).shape }, async () => ({ content: [{ type: "text", text: JSON.stringify(await comfy.status()) }] }));
-    server.registerTool("comfyui_list_presets", { description: "列出本地 ComfyUI 内置预设。", inputSchema: z.object({}).shape }, async () => ({ content: [{ type: "text", text: JSON.stringify(comfy.presets()) }] }));
-    server.registerTool("comfyui_run", { description: "运行本地 ComfyUI 预设。", inputSchema: z.object({ preset: z.string(), input: z.record(z.unknown()).optional(), params: z.record(z.unknown()).optional() }).shape }, async (input) => ({ content: [{ type: "text", text: JSON.stringify(await comfy.run(input.preset, input.input || {}, input.params || {})) }] }));
-    server.registerTool("comfyui_get_task", { description: "查询 ComfyUI 任务。", inputSchema: z.object({ taskId: z.string() }).shape }, async ({ taskId }) => { const task = stores.tasks.get(taskId); if (!task) throw new Error(`task not found: ${taskId}`); return { content: [{ type: "text", text: JSON.stringify({ task, events: stores.tasks.events(taskId) }) }] }; });
-    server.registerTool("comfyui_cancel_task", { description: "取消 ComfyUI 任务。", inputSchema: z.object({ taskId: z.string() }).shape }, async ({ taskId }) => ({ content: [{ type: "text", text: JSON.stringify(comfy.cancel(taskId)) }] }));
+function registerDirectComfyTools(server: McpServer, backend: ReturnType<typeof createBackendClient>) {
+    server.registerTool("comfyui_status", { description: "检查本地 ComfyUI 连接和系统状态。", inputSchema: z.object({}).shape }, async () => ({ content: [{ type: "text", text: JSON.stringify(await backend.comfyStatus()) }] }));
+    server.registerTool("comfyui_list_presets", { description: "列出本地 ComfyUI 内置预设。", inputSchema: z.object({}).shape }, async () => ({ content: [{ type: "text", text: JSON.stringify(await backend.comfyPresets()) }] }));
+    server.registerTool("comfyui_run", { description: "运行本地 ComfyUI 预设。", inputSchema: z.object({ preset: z.string(), input: z.record(z.unknown()).optional(), params: z.record(z.unknown()).optional(), clientTaskId: z.string().optional() }).shape }, async (input) => ({ content: [{ type: "text", text: JSON.stringify(await backend.comfyRun(input.preset, input.input || {}, input.params || {}, undefined, input.clientTaskId)) }] }));
+    server.registerTool("comfyui_get_task", { description: "查询 ComfyUI 任务。", inputSchema: z.object({ taskId: z.string() }).shape }, async ({ taskId }) => { const result = await backend.comfyGetTask(taskId); return { content: [{ type: "text", text: JSON.stringify(result) }] }; });
+    server.registerTool("comfyui_cancel_task", { description: "取消 ComfyUI 任务。", inputSchema: z.object({ taskId: z.string() }).shape }, async ({ taskId }) => ({ content: [{ type: "text", text: JSON.stringify(await backend.comfyCancel(taskId)) }] }));
 }
 
 /** 工作台、网页导航和对话工具仍需要当前浏览器会话，保留旧协议兼容入口。 */
