@@ -31,15 +31,36 @@ export type CanvasGenerationCommand = {
     preset?: string;
     workflow?: string;
     comfyUrl?: string;
-    provider?: { baseUrl?: string; apiKey?: string };
     resultPolicy?: "replace-active" | "append";
     clientTaskId?: string;
     idempotencyKey?: string;
-    writeBackCanvas?: boolean;
+};
+
+export type CanvasGenerationTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export type CanvasGenerationTask = {
+    id: string;
+    kind: string;
+    status: CanvasGenerationTaskStatus;
+    progress: number;
+    input: Record<string, unknown>;
+    params: Record<string, unknown>;
+    result?: Record<string, unknown> | null;
+    preview?: Record<string, unknown> | null;
+    error?: string | null;
+    createdAt: string;
+    updatedAt: string;
+    parentTaskId?: string;
+    projectId?: string;
+    nodeId?: string;
+    segmentId?: string;
+    executor?: string;
+    model?: string;
+    outputs?: Array<Record<string, unknown>>;
 };
 
 export type CanvasGenerationStartResult = {
     taskId: string;
-    task?: Record<string, unknown>;
+    task?: CanvasGenerationTask;
     executor: string;
 };

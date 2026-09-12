@@ -8,7 +8,6 @@ import type { RunningHubBackend } from "../runtime/runninghub.js";
 import { CanvasH3Runner } from "./h3-runner.js";
 import { CanvasImageDispatcher, type CanvasImageGenerationInput } from "./image-dispatcher.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
-import { hasConfiguredWorkflows } from "./model-workflow.js";
 import type { Stores } from "../stores/types.js";
 
 /**
@@ -32,15 +31,15 @@ export class CanvasGenerationService {
         const operation = command.operation || "generate";
         if (operation === "h3-run") return this.startH3(command);
         if (command.mode === "image") return this.startImage(command);
-        if (command.mode === "video") return await this.startVideo(command);
+        if (command.mode === "video") return this.startVideo(command);
         throw new Error(`画布生成模式暂不支持：${command.mode}`);
     }
 
     private startH3(command: CanvasGenerationCommand) {
-        if (!command.projectId || !command.nodeId) throw new Error("H3 生成缺少 projectId 或 nodeId");
+        if (!command.projectId || (!command.nodeId && !command.nodeIds?.length)) throw new Error("H3 生成缺少 projectId 或节点 ID");
         const task = this.h3.start({
             projectId: command.projectId,
-            nodeId: command.nodeId,
+            ...(command.nodeId ? { nodeId: command.nodeId } : {}),
             ...(command.nodeIds?.length ? { nodeIds: command.nodeIds } : {}),
             ...(command.segmentIndex !== undefined ? { segmentIndex: command.segmentIndex } : {}),
             ...(command.runFromCurrent !== undefined ? { runFromCurrent: command.runFromCurrent } : {}),
@@ -52,12 +51,9 @@ export class CanvasGenerationService {
 
     private startImage(command: CanvasGenerationCommand) {
         if (!command.model || !command.prompt) throw new Error("画布图片生成缺少 model 或 prompt");
-        const executor = hasConfiguredWorkflows(this.stores.settings.get("ai.config"), command.model)
-            ? "comfy-workflow"
-            : resolveCanvasExecutor({ mode: "image", model: command.model }, /(^|::)gpt-image(?:-|$)/i.test(command.model));
         const result = this.image.start(command as CanvasImageGenerationInput);
         const task = this.stores.tasks.get(result.taskId);
-        return { ...result, task, taskId: result.taskId, executor };
+        return { ...result, task: task || undefined };
     }
 
     private async startVideo(command: CanvasGenerationCommand) {

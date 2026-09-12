@@ -2,22 +2,28 @@ import { useMemo } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
+import {
+    WORKFLOW_ROUTE_UNSUPPORTED,
+    builtinWorkflowName,
+    resolveWorkflowForModel,
+    scenarioFromReferenceCount,
+    type ModelInputScenario,
+} from "@basketikun/canvas-agent/model-workflow";
 
 import i18n from "@/i18n";
+
+export { WORKFLOW_ROUTE_UNSUPPORTED, builtinWorkflowName, scenarioFromReferenceCount } from "@basketikun/canvas-agent/model-workflow";
+export type { ModelInputScenario } from "@basketikun/canvas-agent/model-workflow";
 
 export type ApiCallFormat = "openai" | "openai-chat" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
 export const VIDEO_CONCAT_MODEL = "__local_video_concat__";
 export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 
-/** 输入场景：没有参考输入 = 文生，1 个参考 = 单图，多个参考 = 多图（视频 / 文本 / 音频同理按参考数量区分）。 */
-export type ModelInputScenario = "text" | "single" | "multi";
 export type ModelWorkflowRouting = Partial<Record<ModelInputScenario, string>>;
 /** 按输入场景存的工作流参数覆盖值（key = WorkflowField.id）。不同场景走不同工作流，参数也随之不同。 */
 export type ModelWorkflowParams = Partial<Record<ModelInputScenario, Record<string, unknown>>>;
 export const MODEL_INPUT_SCENARIOS: ModelInputScenario[] = ["text", "single", "multi"];
-/** 场景路由的哨兵值：显式声明该模型不支持这种输入场景（无参考 / 单参考 / 多参考）。 */
-export const WORKFLOW_ROUTE_UNSUPPORTED = "__unsupported__";
 /** 场景中文标签（按能力区分「文生图 / 文生视频 / 文生文本 / 文生音频」）。 */
 export const MODEL_SCENARIO_LABELS: Record<ModelCapability, Record<ModelInputScenario, string>> = {
     image: { text: "文生图", single: "单图", multi: "多图" },
@@ -219,21 +225,6 @@ export function resolveModelScript(config: AiConfig, value: string) {
     return findChannelModel(config, value)?.model.script?.trim() || "";
 }
 
-/** 参考输入数量 → 输入场景：0 = 文生，1 = 单图，≥2 = 多图。 */
-export function scenarioFromReferenceCount(count: number): ModelInputScenario {
-    return count <= 0 ? "text" : count === 1 ? "single" : "multi";
-}
-
-/** 模型名自带的内置工作流（与后端 workflowNameFromModel 保持同一套约定）。 */
-export function builtinWorkflowName(value: string) {
-    const name = modelOptionName(value).trim();
-    if (/^z-image$/i.test(name)) return "Z-Image.json";
-    if (/^flux2-klein$/i.test(name)) return "Flux2-Klein.json";
-    if (/^flashvsr-1\.1$/i.test(name)) return "custom/视频修复FlashVSR1.1.json";
-    if (/\.json$/i.test(name) || /^custom\//i.test(name)) return name;
-    return "";
-}
-
 /** 读取某模型挂载的工作流与场景路由。 */
 export function modelWorkflowConfig(config: AiConfig, value: string): { workflows: string[]; routing: ModelWorkflowRouting } {
     const model = findChannelModel(config, value)?.model;
@@ -248,19 +239,14 @@ export function modelWorkflowConfig(config: AiConfig, value: string): { workflow
  * 4. 都没配 → 回退到模型名对应的内置工作流；ComfyUI 渠道下模型名本身也视作工作流名。
  */
 export function resolveModelWorkflow(config: AiConfig, value: string, referenceCount: number) {
-    const { workflows, routing } = modelWorkflowConfig(config, value);
-    const routed = String(routing[scenarioFromReferenceCount(referenceCount)] || "").trim();
-    if (routed === WORKFLOW_ROUTE_UNSUPPORTED) return "";
-    if (routed) return routed;
-    if (workflows.length) return workflows[0];
-    const builtin = builtinWorkflowName(value);
-    if (builtin) return builtin;
-    return resolveModelChannel(config, value).kind === "comfyui" ? modelOptionName(value).trim() : "";
+    const result = resolveWorkflowForModel(config, value, referenceCount);
+    return result.ok ? result.workflow : "";
 }
 
 /** 该模型在当前输入场景下是否被显式标记为「不支持」。 */
 export function modelScenarioUnsupported(config: AiConfig, value: string, referenceCount: number) {
-    return modelWorkflowConfig(config, value).routing[scenarioFromReferenceCount(referenceCount)] === WORKFLOW_ROUTE_UNSUPPORTED;
+    const result = resolveWorkflowForModel(config, value, referenceCount);
+    return !result.ok && result.reason === "unsupported";
 }
 
 /** 解析不到工作流时的报错文案：区分「没配工作流」与「该输入场景被标记为不支持」。 */
@@ -284,8 +270,8 @@ export function modelHasWorkflowConfig(config: AiConfig, value: string) {
  * 调用方把它作为字段默认值：节点/工作台上手填的值优先级更高。
  */
 export function resolveModelWorkflowParams(config: AiConfig, value: string, referenceCount: number): Record<string, unknown> {
-    const params = findChannelModel(config, value)?.model.workflowParams?.[scenarioFromReferenceCount(referenceCount)];
-    return params ? { ...params } : {};
+    const result = resolveWorkflowForModel(config, value, referenceCount);
+    return result.ok ? result.params : {};
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {

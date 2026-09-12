@@ -13,6 +13,4 @@ export function registerCanvasGenerationRoutes(router: Router, service: CanvasGe
         }
     };
     router.post("/canvas/generation", (req: Request, res: Response) => submit(req, res, (req.body || {}) as CanvasGenerationCommand));
-    // 旧客户端入口只做协议转换，禁止再增加业务逻辑。
-    router.post("/canvas/image-generation", (req: Request, res: Response) => submit(req, res, { ...(req.body || {}), mode: "image" } as CanvasGenerationCommand));
 }

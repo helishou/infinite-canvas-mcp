@@ -30,7 +30,6 @@ export async function startBackendMcpServer() {
         applyCanvasOperations: (projectId, operations, expectedRevision) => backendApi.applyCanvasOperations(projectId, operations, expectedRevision),
         replacePluginDeclarations: (declarations) => backendApi.replacePluginDeclarations(declarations),
         canvasRunGeneration: (input) => backendApi.canvasRunGeneration(input),
-        canvasRunH3: (input) => backendApi.canvasRunH3(input),
         getTask: (id) => backendApi.getTask(id),
         cancelTask: (id) => backendApi.cancelTask(id),
         getH3Defaults: () => backendApi.getH3Defaults(),
@@ -373,7 +372,7 @@ function buildCanvasImageRequest(source: Record<string, unknown>, project: Recor
             mimeType: String(nodeMetadata.mimeType || "image/png"),
         }];
     });
-    const params = { ...recordOf(metadata.params || metadata.customFieldValues), ...recordOf(op.params), ...(String(model).includes("::") ? { channelId: String(model).split("::", 1)[0] } : {}) };
+    const params = { ...recordOf(metadata.params || metadata.customFieldValues), ...recordOf(op.params) };
     const size = normalizeGptImageSize(metadata.size);
     const [width, height] = size.split("x").map(Number);
     return {
@@ -389,7 +388,6 @@ function buildCanvasImageRequest(source: Record<string, unknown>, project: Recor
         count: Math.max(1, Math.min(4, Number(metadata.count || 1))),
         params,
         clientTaskId: String(op.idempotencyKey || `canvas-${crypto.randomUUID()}`),
-        writeBackCanvas: true,
         resultPolicy: String(op.resultPolicy || "replace-active") === "append" ? "append" : "replace-active",
     };
 }

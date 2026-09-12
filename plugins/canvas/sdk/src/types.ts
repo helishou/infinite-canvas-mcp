@@ -1,12 +1,14 @@
 // Infinite Canvas 插件公共契约类型。
 //
-// 这是插件作者面向的「公开接口」子集,自包含、不依赖宿主 `@/` 内部模块,
+// 这是插件作者面向的「公开接口」子集,不依赖宿主 `@/` 内部模块,
 // 因此可以被独立构建的插件包直接 import,获得完整的 TS 提示。
 //
-// 真源:宿主 `web/src/types/canvas-plugin.ts` 及其引用的类型。本文件是它的公开镜像,
-// 若宿主契约变更,请同步更新此处(两者结构保持一致即可,无需逐字节相同)。
+// 生成协议直接复用 canvas-agent 的跨进程契约，其余 UI 类型仍与宿主保持一致。
 
 import type { ComponentType, ReactNode } from "react";
+import type { CanvasGenerationCommand, CanvasGenerationMode, CanvasGenerationTask } from "@basketikun/canvas-agent/generation-contract";
+
+export type { CanvasGenerationCommand, CanvasGenerationMode, CanvasGenerationTask } from "@basketikun/canvas-agent/generation-contract";
 
 // ---------------------------------------------------------------------------
 // 画布基础几何与节点数据
@@ -21,7 +23,6 @@ export type CanvasBuiltinNodeType = "image" | "text" | "config" | "video" | "aud
 export type CanvasNodeTypeId = CanvasBuiltinNodeType | (string & {});
 
 export type CanvasNodeStatus = "idle" | "queued" | "success" | "loading" | "error" | "cancelled";
-export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
 
 // 节点 metadata 是扁平可选字段袋;插件自定义字段可直接写入(内容惯例放 content)。
@@ -189,37 +190,6 @@ export type LocalH3Result = { url: string; storageKey?: string; mimeType: string
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Preview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
 export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: LocalH3Preview | null; result?: LocalH3Result | null; error?: string | null };
-export type CanvasH3RunOptions = { projectId: string; nodeId: string; segmentIndex?: number; runFromCurrent?: boolean; params?: Record<string, unknown>; idempotencyKey?: string };
-export type CanvasGenerationCommand = {
-    mode: CanvasGenerationMode;
-    operation?: "generate" | "h3-run";
-    projectId?: string;
-    nodeId?: string;
-    nodeIds?: string[];
-    segmentId?: string;
-    segmentIndex?: number;
-    runFromCurrent?: boolean;
-    skipCompleted?: boolean;
-    model?: string;
-    prompt?: string;
-    references?: Array<Record<string, unknown>>;
-    size?: string;
-    width?: number;
-    height?: number;
-    quality?: string;
-    count?: number;
-    params?: Record<string, unknown>;
-    input?: Record<string, unknown>;
-    preset?: string;
-    workflow?: string;
-    comfyUrl?: string;
-    provider?: { baseUrl?: string; apiKey?: string };
-    resultPolicy?: "replace-active" | "append";
-    clientTaskId?: string;
-    idempotencyKey?: string;
-    writeBackCanvas?: boolean;
-};
-export type CanvasGenerationTask = { id: string; status: LocalH3Task["status"]; progress: number; result?: Record<string, unknown> | null; preview?: LocalH3Preview | null; error?: string | null; executor?: string; model?: string };
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 
 // 一个可选模型:value 传回给 generateXxx({ model }),label 用于展示
@@ -233,7 +203,6 @@ export type CanvasPluginAi = {
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
     runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
-    runCanvasH3: (options: CanvasH3RunOptions) => Promise<LocalH3Task>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
     runVideoConcat: (videos: Array<{ name: string; url?: string; storageKey?: string }>, options?: LocalH3Options) => Promise<LocalVideoConcatResult>;

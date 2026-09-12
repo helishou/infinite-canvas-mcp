@@ -4,6 +4,9 @@ import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasConnection, CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 import type { CanvasResourceKind } from "@/lib/canvas/canvas-resource-references";
+import type { CanvasGenerationCommand, CanvasGenerationTask } from "@basketikun/canvas-agent/generation-contract";
+
+export type { CanvasGenerationCommand, CanvasGenerationTask } from "@basketikun/canvas-agent/generation-contract";
 
 // Resource emitted when a plugin node is consumed as an upstream input.
 export type CanvasNodeResource = { kind: CanvasResourceKind; text?: string; url?: string; storageKey?: string };
@@ -21,37 +24,6 @@ export type LocalH3Result = { url: string; mimeType: string; taskId?: string; wi
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Preview = { dataUrl: string; mime?: string; promptId?: string; step?: number; total?: number };
 export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: LocalH3Result | null; preview?: LocalH3Preview | null; error?: string | null };
-export type CanvasH3RunOptions = { projectId: string; nodeId: string; segmentIndex?: number; runFromCurrent?: boolean; params?: Record<string, unknown>; idempotencyKey?: string };
-export type CanvasGenerationCommand = {
-    mode: "text" | "image" | "video" | "audio";
-    operation?: "generate" | "h3-run";
-    projectId?: string;
-    nodeId?: string;
-    nodeIds?: string[];
-    segmentId?: string;
-    segmentIndex?: number;
-    runFromCurrent?: boolean;
-    skipCompleted?: boolean;
-    model?: string;
-    prompt?: string;
-    references?: Array<Record<string, unknown>>;
-    size?: string;
-    width?: number;
-    height?: number;
-    quality?: string;
-    count?: number;
-    params?: Record<string, unknown>;
-    input?: Record<string, unknown>;
-    preset?: string;
-    workflow?: string;
-    comfyUrl?: string;
-    provider?: { baseUrl?: string; apiKey?: string };
-    resultPolicy?: "replace-active" | "append";
-    clientTaskId?: string;
-    idempotencyKey?: string;
-    writeBackCanvas?: boolean;
-};
-export type CanvasGenerationTask = { id: string; status: LocalH3Task["status"]; progress: number; result?: Record<string, unknown> | null; preview?: LocalH3Preview | null; error?: string | null; executor?: string; model?: string };
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 export type PluginModelCapability = "image" | "video" | "text" | "audio";
 export type ModelOption = { value: string; label: string };
@@ -77,7 +49,6 @@ export type CanvasPluginAi = {
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
     runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
-    runCanvasH3: (options: CanvasH3RunOptions) => Promise<LocalH3Task>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
     runVideoConcat: (videos: Array<{ name: string; url?: string; storageKey?: string }>, options?: LocalH3Options) => Promise<LocalVideoConcatResult>;

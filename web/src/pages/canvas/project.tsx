@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
-import { defaultConfig, modelHasWorkflowConfig, modelOptionName, modelWorkflowMissingMessage, resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
+import { defaultConfig, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
 import { getComfyTask, resolveComfyImageSize, runVideoConcatTask } from "@/services/api/comfyui";
 import { uploadImage, type UploadedImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
@@ -119,7 +119,7 @@ type CanvasHistoryEntry = Pick<CanvasClipboard, "nodes" | "connections"> & {
     showImageInfo: boolean;
 };
 
-type CanvasGenerationRequest = {
+type ActiveGenerationRequest = {
     targetNodeId: string;
     originNodeId: string;
     runningNodeId: string;
@@ -188,11 +188,8 @@ async function runLocalComfyImage(
     customFieldValues?: Record<string, unknown>,
     // 客户端预生成的 taskId；提前告知后端用同一行创建，跨刷新也能恢复
     clientTaskId?: string,
-    provider?: { baseUrl?: string; apiKey?: string },
     // 画布生成日志关联：projectId + 触发的源节点 id
     logContext?: { projectId: string; nodeId?: string },
-    // 渠道模型配置里解析出的工作流名（文生 / 单图 / 多图各自路由），空则由后端按模型名推断
-    workflow?: string,
 ): Promise<UploadedImage> {
     const started = await startCanvasGeneration({
         mode: "image",
@@ -204,8 +201,6 @@ async function runLocalComfyImage(
         size: `${size.width}x${size.height}`,
         params: customFieldValues,
         clientTaskId,
-        provider,
-        workflow: workflow || undefined,
         projectId: logContext?.projectId,
         nodeId: logContext?.nodeId,
     }, signal);
@@ -366,7 +361,7 @@ function InfiniteCanvasPage() {
     const connectionTargetNodeIdRef = useRef(connectionTargetNodeId);
     const selectionBoxRef = useRef(selectionBox);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
-    const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
+    const generationRequestsRef = useRef(new Map<string, ActiveGenerationRequest>());
     const dragPreviewPositionsRef = useRef<Map<string, Position>>(EMPTY_DRAG_PREVIEW);
     const resizePreviewBoundsRef = useRef<Map<string, { width: number; height: number; position: Position }>>(EMPTY_RESIZE_PREVIEW);
 
@@ -2844,17 +2839,8 @@ function InfiniteCanvasPage() {
                     const localComfy = comfyChannel.kind === "comfyui";
                     const selectedImageModel = modelOptionName(generationConfig.model).trim();
                     const useCanvasDispatcher = localComfy || /^gpt-image(?:-|$)/i.test(selectedImageModel);
-                    // 渠道模型挂了工作流时按输入场景（文生 / 单图 / 多图）解析并显式交给后端；
-                    // 没挂的模型保持原样：由后端按模型名推断（z-image / flux2-klein 内置、*.json / custom/* 工作流文件）。
-                    const hasComfyWorkflowConfig = localComfy && modelHasWorkflowConfig(generationConfig, generationConfig.model);
-                    const comfyWorkflow = hasComfyWorkflowConfig ? resolveModelWorkflow(generationConfig, generationConfig.model, referenceImages.length) : "";
-                    // 挂了工作流但当前输入场景解析不到（该场景被标记为「不支持」）→ 明确报错，不回退到后端按模型名推断。
-                    if (hasComfyWorkflowConfig && !comfyWorkflow) throw new Error(modelWorkflowMissingMessage(generationConfig, generationConfig.model, referenceImages.length));
-                    if (/flux2-klein/i.test(comfyWorkflow) && !referenceImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
-                    // 渠道设置里为当前输入场景配的工作流参数作为默认值，节点设置面板上手填的值优先。
-                    const comfyParams = hasComfyWorkflowConfig
-                        ? { ...resolveModelWorkflowParams(generationConfig, generationConfig.model, referenceImages.length), ...(sourceNode?.metadata?.comfyParams || {}) }
-                        : sourceNode?.metadata?.comfyParams;
+                    // 工作流路由、场景默认参数和渠道凭据由 Backend 统一解析；前端只提交节点手填参数。
+                    const comfyParams = sourceNode?.metadata?.comfyParams;
                     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
                     const generationMetadata = buildImageGenerationMetadata(generationType, generationConfig, count, referenceImages);
                     const parentConfig = NODE_DEFAULT_SIZE[isConfigNode ? CanvasNodeType.Config : isImageNode ? CanvasNodeType.Image : CanvasNodeType.Text];
@@ -2930,7 +2916,7 @@ function InfiniteCanvasPage() {
                         imageIds.map(async (imageId) => {
                             try {
                                 const image = useCanvasDispatcher
-                                    ? await runLocalComfyImage(selectedImageModel, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (_taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, primaryImageId: imageId } } : item)), comfyParams, clientTaskId ? (imageId === imageIds[0] ? clientTaskId : `${clientTaskId}-${imageId}`) : undefined, /^gpt-image(?:-|$)/i.test(selectedImageModel) ? { baseUrl: comfyChannel.baseUrl, apiKey: comfyChannel.apiKey } : undefined, { projectId, nodeId: rootId }, comfyWorkflow)
+                                    ? await runLocalComfyImage(generationConfig.model, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (_taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, primaryImageId: imageId } } : item)), comfyParams, clientTaskId ? (imageId === imageIds[0] ? clientTaskId : `${clientTaskId}-${imageId}`) : undefined, { projectId, nodeId: rootId })
                                     : referenceImages.length
                                       ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
                                       : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
@@ -3343,18 +3329,9 @@ function InfiniteCanvasPage() {
                 const retryLocalComfy = retryComfyChannel.kind === "comfyui";
                 const retrySelectedImageModel = modelOptionName(generationConfig.model).trim();
                 const retryUseCanvasDispatcher = retryLocalComfy || /^gpt-image(?:-|$)/i.test(retrySelectedImageModel);
-                // 重试同样按「当前参考图数量」解析渠道模型的工作流路由（没挂工作流的模型仍由后端按模型名推断）。
-                const retryHasComfyWorkflowConfig = retryLocalComfy && modelHasWorkflowConfig(generationConfig, generationConfig.model);
-                const retryComfyWorkflow = retryHasComfyWorkflowConfig ? resolveModelWorkflow(generationConfig, generationConfig.model, retryImages.length) : "";
-                // 当前输入场景被标记为「不支持」→ 明确报错，不回退。
-                if (retryHasComfyWorkflowConfig && !retryComfyWorkflow) throw new Error(modelWorkflowMissingMessage(generationConfig, generationConfig.model, retryImages.length));
-                if (/flux2-klein/i.test(retryComfyWorkflow) && !retryImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
-                // 重试同样按当前场景套用渠道配置的工作流参数（节点手填优先）。
-                const retryComfyParams = retryHasComfyWorkflowConfig
-                    ? { ...resolveModelWorkflowParams(generationConfig, generationConfig.model, retryImages.length), ...(sourceNode.metadata?.comfyParams || {}) }
-                    : sourceNode.metadata?.comfyParams;
+                const retryComfyParams = sourceNode.metadata?.comfyParams;
                 const image = retryUseCanvasDispatcher
-                    ? await runLocalComfyImage(retrySelectedImageModel, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal, undefined, retryComfyParams, retryClientTaskId, /^gpt-image(?:-|$)/i.test(retrySelectedImageModel) ? { baseUrl: retryComfyChannel.baseUrl, apiKey: retryComfyChannel.apiKey } : undefined, undefined, retryComfyWorkflow)
+                    ? await runLocalComfyImage(generationConfig.model, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal, undefined, retryComfyParams, retryClientTaskId)
                     : useReferenceImages
                       ? await requestEdit(generationConfig, prompt, retryImages, { signal: controller.signal }).then((items) => items[0])
                       : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);

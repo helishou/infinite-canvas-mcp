@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- [调整] 画布生成收敛为统一 `CanvasGenerationCommand` 与 Backend `CanvasGenerationService`：前端、MCP、插件共用同一任务提交入口，旧 H3 URL 仅保留协议兼容，新增生成能力不再复制入口级分支。
+- [调整] 画布生成收敛为统一 `CanvasGenerationCommand` 与 Backend `CanvasGenerationService`：前端、MCP、插件共用 `/canvas/generation`，移除旧 `/canvas/h3/runs`、`/canvas/image-generation` 及重复执行器分流。
 - [调整] 任务中心按 parentTaskId 把父/子任务折叠成可展开组：父任务一行带折叠按钮，子任务收在父卡片内并带左侧连接线；折叠态显示「N 段 · X 完成 / Y 运行 / Z 失败」摘要。有活跃工作的组默认展开，用户手动折叠的会保留折叠（不被自动规则重新撑开）。原本平铺的两条任务（父 + 子）现在看上去是一个组。
 - [修复] H3 节点「增强提示词」按钮在提示词为空时静默 return（既不显示 loading、也不报错），UI 上完全无反馈。改为提示词为空时按钮 disabled + 鼠标提示「请先输入提示词」，让用户立刻知道要先写内容。
 - [新增] H3 节点提示词新增「翻译」按钮：放在 textarea 右下角，点击切换显示中文 / 原提示词；切到中文时 textarea 只读、提交给模型的始终是原文。同一段 prompt 的翻译结果会缓存，再次切换不重复调用模型；prompt 变化时自动退出翻译态。翻译失败在按钮左下角以小字红字提示。和「增强提示词」互不阻塞。

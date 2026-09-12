@@ -25,7 +25,6 @@ import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
 import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
 import { CanvasH3Runner } from "./canvas/h3-runner.js";
-import { registerCanvasH3RunRoutes } from "./server/h3-run-routes.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
 
 const logger = createLogger("main");
@@ -82,7 +81,6 @@ const { app } = startServer(runtime.db, config, {
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
 registerWorkflowRoutes(app, workflowStore, workflowExecutor, runtime.comfy);
 registerCanvasGenerationRoutes(app, canvasGeneration);
-registerCanvasH3RunRoutes(app, canvasGeneration);
 registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat, runtime.events);
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events, basePath: "/agent" }, runtime.comfy);
 const agent = createAgentRuntime({ backendUrl: config.url, backendToken: config.token });

@@ -1,7 +1,7 @@
 /** 总后台 API client（Web 端）。 */
 
 import { getBackendTokenShared } from "@/lib/backend-token";
-import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
+import type { CanvasGenerationCommand, CanvasGenerationStartResult } from "@basketikun/canvas-agent/generation-contract";
 
 export type BackendMediaResult = {
     storageKey: string;
@@ -45,8 +45,6 @@ export async function request<T = unknown>(method: string, path: string, body?: 
     return data;
 }
 
-export type CanvasGenerationRequest = CanvasGenerationCommand;
-
 export type BackendRuntimeTask = {
     id: string;
     kind?: string;
@@ -68,8 +66,8 @@ export type BackendRuntimeTask = {
 };
 
 /** 所有画布生成来源共用的任务提交客户端。 */
-export function startCanvasGeneration(input: CanvasGenerationRequest, signal?: AbortSignal) {
-    return request<{ ok: boolean; taskId: string; task?: BackendRuntimeTask; executor: string }>("POST", "/canvas/generation", input, { signal });
+export function startCanvasGeneration(input: CanvasGenerationCommand, signal?: AbortSignal) {
+    return request<{ ok: boolean } & CanvasGenerationStartResult>("POST", "/canvas/generation", input, { signal });
 }
 
 export function syncBackendAiConfig(config: unknown) {

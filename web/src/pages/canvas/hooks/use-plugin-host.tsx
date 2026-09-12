@@ -140,7 +140,7 @@ export function usePluginHost(params: PluginHostParams) {
             runCanvasGeneration: async (command: CanvasGenerationCommand) => {
                 const data = await startCanvasGeneration(command);
                 if (!data.task) throw new Error("画布生成失败：Backend 未返回任务");
-                return data.task as import("@/types/canvas-plugin").CanvasGenerationTask;
+                return data.task;
             },
             getLocalH3Task: async (taskId) => {
                 const task = await getLocalH3Task(getBackendUrl(), getBackendTokenShared(), taskId) as Awaited<ReturnType<typeof getLocalH3Task>>;
@@ -148,11 +148,6 @@ export function usePluginHost(params: PluginHostParams) {
                     return { ...task, result: await persistH3Result(task.result) };
                 }
                 return task;
-            },
-            runCanvasH3: async (options) => {
-                const data = await startCanvasGeneration({ ...options, mode: "video", operation: "h3-run" });
-                if (!data.task) throw new Error("启动 H3 运行失败：Backend 未返回任务");
-                return data.task as import("@/types/canvas-plugin").LocalH3Task;
             },
             getCanvasH3Task: async (taskId) => {
                 const response = await fetch(`${getBackendUrl()}/tasks/${encodeURIComponent(taskId)}?token=${encodeURIComponent(getBackendTokenShared())}`);
