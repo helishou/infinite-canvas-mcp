@@ -167,8 +167,9 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
         if (!storageKey) throw new Error(`节点 ${nodeId} 没有 storageKey（不是图片结果节点？）`);
 
         const source = await fetchMediaBuffer(config, storageKey);
+        const inset = Math.max(0, Math.min(40, Math.floor(Number(rawInput.inset ?? 0))));
         const { pieces } = await splitImageBuffer(source, {
-            rows, columns,
+            rows, columns, inset,
             horizontalLines: Array.isArray(rawInput.horizontalLines) ? rawInput.horizontalLines.map(Number) : undefined,
             verticalLines: Array.isArray(rawInput.verticalLines) ? rawInput.verticalLines.map(Number) : undefined,
         });
