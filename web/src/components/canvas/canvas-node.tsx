@@ -20,6 +20,8 @@ const selectionBlue = "#2f80ff";
 
 type CanvasNodeProps = {
     data: CanvasNodeData;
+    previewPosition?: Position;
+    previewBounds?: { width: number; height: number; position: Position };
     scale: number;
     isSelected: boolean;
     isRelated: boolean;
@@ -66,6 +68,7 @@ type CanvasNodeProps = {
 type NodeContentRendererProps = {
     node: CanvasNodeData;
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
+    scale: number;
     isEditingContent: boolean;
     textareaRef: React.RefObject<HTMLTextAreaElement | null>;
     isBatchRoot: boolean;
@@ -89,6 +92,8 @@ type NodeContentRendererProps = {
 
 export const CanvasNode = React.memo(function CanvasNode({
     data,
+    previewPosition,
+    previewBounds,
     scale,
     isSelected,
     isRelated,
@@ -307,9 +312,9 @@ export const CanvasNode = React.memo(function CanvasNode({
             data-node-id={data.id}
             className={`node-element absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : ""}`}
             style={{
-                transform: `translate(${data.position.x}px, ${data.position.y}px)`,
-                width: data.width,
-                height: data.height,
+                transform: `translate(${(previewBounds?.position || previewPosition || data.position).x}px, ${(previewBounds?.position || previewPosition || data.position).y}px)`,
+                width: previewBounds?.width || data.width,
+                height: previewBounds?.height || data.height,
                 transition: "box-shadow 200ms ease",
                 contain: "layout style",
             }}
@@ -478,6 +483,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     <NodeContent
                         node={data}
                         theme={theme}
+                        scale={scale}
                         isEditingContent={isEditingContent}
                         textareaRef={textareaRef}
                         isBatchRoot={isBatchRoot}
@@ -984,7 +990,7 @@ function ExpandedCharacterImageCard({ node, image, index, primary, onSetPrimary,
     );
 }
 
-function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
+function VideoNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     const { t } = useTranslation();
     if (!node.metadata?.content)
         return (
@@ -993,6 +999,14 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
                 <span className="text-sm">{t("canvas.node.emptyVideo")}</span>
             </div>
         );
+    if (scale < 0.2) {
+        return (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2 rounded-[18px] bg-black/10" style={{ color: theme.node.muted }}>
+                <Video className="size-7 opacity-60" />
+                <span className="max-w-[80%] truncate text-[10px]">{node.title || t("canvas.nodeTypes.video")}</span>
+            </div>
+        );
+    }
     return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />;
 }
 

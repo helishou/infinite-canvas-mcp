@@ -21,6 +21,7 @@ type H3TimelineProps = {
 };
 
 export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpenCharacterGroup, onPlayAll, fmt }: H3TimelineProps) {
+    const compactMedia = ctx.scale < 0.2;
     const trackScrollRef = useRef<HTMLDivElement | null>(null);
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
     const pendingScrollIdRef = useRef<string | null>(null);
@@ -218,7 +219,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
                 draggable={ref ? true : undefined}
                 onDoubleClick={isGrouped ? (event) => { event.stopPropagation(); onOpenCharacterGroup(segment.id, ref.groupId!); } : undefined}
                 className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""}`}
-            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>;
+            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>;
         })}</div>;
     };
     return <div className="minimax-edit-timeline">

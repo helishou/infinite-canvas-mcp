@@ -1,14 +1,16 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { useState } from "react";
+import { memo, useState } from "react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasConnection, CanvasNodeData, ConnectionHandle, Position } from "@/types/canvas";
 
-export function ConnectionPath({
+export const ConnectionPath = memo(function ConnectionPath({
     connection,
     from,
     to,
+    fromPosition,
+    toPosition,
     active,
     onSelect,
     onContextMenu,
@@ -17,18 +19,22 @@ export function ConnectionPath({
     connection: CanvasConnection;
     from: CanvasNodeData;
     to: CanvasNodeData;
+    fromPosition?: Position;
+    toPosition?: Position;
     active: boolean;
-    onSelect: () => void;
-    onContextMenu?: (event: ReactMouseEvent<SVGPathElement>) => void;
-    onDelete?: () => void;
+    onSelect: (connectionId: string) => void;
+    onContextMenu?: (event: ReactMouseEvent<SVGPathElement>, connectionId: string) => void;
+    onDelete?: (connectionId: string) => void;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [hovered, setHovered] = useState(false);
     const [deleteHovered, setDeleteHovered] = useState(false);
-    const startX = from.position.x + from.width;
-    const startY = from.position.y + from.height / 2;
-    const endX = to.position.x;
-    const endY = to.position.y + to.height / 2;
+    const sourcePosition = fromPosition || from.position;
+    const targetPosition = toPosition || to.position;
+    const startX = sourcePosition.x + from.width;
+    const startY = sourcePosition.y + from.height / 2;
+    const endX = targetPosition.x;
+    const endY = targetPosition.y + to.height / 2;
     const dx = Math.abs(endX - startX);
     const curvature = Math.max(dx * 0.5, 50);
     const pathD = `M ${startX} ${startY} C ${startX + curvature} ${startY}, ${endX - curvature} ${endY}, ${endX} ${endY}`;
@@ -52,12 +58,12 @@ export function ConnectionPath({
                 style={{ cursor: "pointer", pointerEvents: "stroke" }}
                 onClick={(event) => {
                     event.stopPropagation();
-                    onSelect();
+                    onSelect(connection.id);
                 }}
                 onContextMenu={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    onContextMenu?.(event);
+                    onContextMenu?.(event, connection.id);
                 }}
             />
             <path
@@ -75,14 +81,22 @@ export function ConnectionPath({
                     style={{ pointerEvents: "none" }}
                 >
                     <title>断开连线</title>
-                    <rect x={-10} y={-10} width={20} height={20} rx={5} fill={theme.node.panel} fillOpacity={0.96} stroke={deleteHovered ? "#f87171" : theme.node.muted} strokeWidth={1.2} style={{ pointerEvents: "all", cursor: "pointer", filter: "drop-shadow(0 2px 5px rgba(0,0,0,.28))" }} onMouseEnter={() => setDeleteHovered(true)} onMouseLeave={() => setDeleteHovered(false)} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onDelete(); }} onClick={(event) => event.stopPropagation()} />
+                    <rect x={-10} y={-10} width={20} height={20} rx={5} fill={theme.node.panel} fillOpacity={0.96} stroke={deleteHovered ? "#f87171" : theme.node.muted} strokeWidth={1.2} style={{ pointerEvents: "all", cursor: "pointer", filter: "drop-shadow(0 2px 5px rgba(0,0,0,.28))" }} onMouseEnter={() => setDeleteHovered(true)} onMouseLeave={() => setDeleteHovered(false)} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onDelete?.(connection.id); }} onClick={(event) => event.stopPropagation()} />
                     <line x1={-3.5} y1={-3.5} x2={3.5} y2={3.5} stroke={deleteHovered ? "#fca5a5" : theme.node.text} strokeWidth={1.7} strokeLinecap="round" style={{ pointerEvents: "none" }} />
                     <line x1={3.5} y1={-3.5} x2={-3.5} y2={3.5} stroke={deleteHovered ? "#fca5a5" : theme.node.text} strokeWidth={1.7} strokeLinecap="round" style={{ pointerEvents: "none" }} />
                 </g>
             )}
         </g>
     );
-}
+}, (previous, next) => previous.connection === next.connection
+    && previous.from === next.from
+    && previous.to === next.to
+    && previous.fromPosition === next.fromPosition
+    && previous.toPosition === next.toPosition
+    && previous.active === next.active
+    && previous.onSelect === next.onSelect
+    && previous.onContextMenu === next.onContextMenu
+    && previous.onDelete === next.onDelete);
 
 export function ActiveConnectionPath({ node, handle, mouseWorld, target }: { node?: CanvasNodeData; handle: ConnectionHandle; mouseWorld: Position; target?: CanvasNodeData }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];

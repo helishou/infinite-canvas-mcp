@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import localforage from "localforage";
 
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
@@ -39,8 +40,10 @@ type CanvasStore = {
 };
 
 const CANVAS_PROJECTS_KEY = "infinite-canvas-projects-v1";
+const CANVAS_PROJECT_INDEX_KEY = "infinite-canvas-project-index-v2";
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let localSnapshotTimer: ReturnType<typeof setTimeout> | null = null;
 let syncPromise: Promise<void> | null = null;
 let syncRequested = false;
 let syncGeneration = 0;
@@ -51,24 +54,57 @@ let deferredBackendEventsWaiter: Promise<void> | null = null;
 
 function loadFromLocalStorage(): CanvasProject[] {
     try {
-        const raw = localStorage.getItem(CANVAS_PROJECTS_KEY);
+        const raw = localStorage.getItem(CANVAS_PROJECT_INDEX_KEY);
         if (!raw) return [];
         const val = JSON.parse(raw);
-        return Array.isArray(val) ? (val as CanvasProject[]) : [];
+        return Array.isArray(val) ? val.map((item) => ({
+            ...item,
+            nodes: [],
+            connections: [],
+            chatSessions: [],
+            activeChatId: null,
+            backgroundMode: "lines" as const,
+            showImageInfo: false,
+            globalPrompt: "",
+            viewport: initialViewport,
+        })) as CanvasProject[] : [];
     } catch { return []; }
 }
 
 function saveToLocalStorage(projects: CanvasProject[]) {
     try {
-        // 精简：只存 meta，不存大节点内容（减少 localStorage 体积）
-        const meta = projects.map(({ id, title, createdAt, updatedAt, nodes, connections, chatSessions, activeChatId, backgroundMode, showImageInfo, globalPrompt, viewport }) =>
-            ({ id, title, createdAt, updatedAt, nodes, connections, chatSessions, activeChatId, backgroundMode, showImageInfo, globalPrompt, viewport }));
-        localStorage.setItem(CANVAS_PROJECTS_KEY, JSON.stringify(meta));
+        const index = projects.map(({ id, title, createdAt, updatedAt }) => ({ id, title, createdAt, updatedAt }));
+        localStorage.setItem(CANVAS_PROJECT_INDEX_KEY, JSON.stringify(index));
     } catch { /* localStorage 满了就放弃 */ }
 }
 
 function persistCurrentCanvasSnapshot() {
-    saveToLocalStorage(useCanvasStore.getState().projects);
+    if (localSnapshotTimer) clearTimeout(localSnapshotTimer);
+    localSnapshotTimer = setTimeout(() => {
+        localSnapshotTimer = null;
+        void persistCanvasSnapshot(useCanvasStore.getState().projects);
+    }, 250);
+}
+
+async function persistCanvasSnapshot(projects: CanvasProject[]) {
+    try {
+        await localforage.setItem(CANVAS_PROJECTS_KEY, projects);
+        saveToLocalStorage(projects);
+    } catch (error) {
+        console.error("画布本地快照保存失败", error);
+    }
+}
+
+async function hydrateCanvasProjectsFromLocalStore() {
+    try {
+        const projects = await localforage.getItem<CanvasProject[]>(CANVAS_PROJECTS_KEY);
+        if (!Array.isArray(projects)) return;
+        const normalizedProjects = projects.map(normalizeProjectMediaUrls);
+        saveToLocalStorage(normalizedProjects);
+        useCanvasStore.setState({ projects: normalizedProjects });
+    } catch {
+        // IndexedDB 不可用时保持当前内存状态，错误不会阻塞 Backend hydration。
+    }
 }
 
 async function syncCanvasProjects(projects: CanvasProject[], generation: number) {
@@ -149,6 +185,7 @@ async function hydrateCanvasProjectsFromBackend() {
 }
 
 export async function hydrateCanvasProjects() {
+    await hydrateCanvasProjectsFromLocalStore();
     await hydrateCanvasProjectsFromBackend();
     useCanvasStore.setState({ hydrated: true });
 }
@@ -365,7 +402,7 @@ function applyBackendCanvasEvent(event: unknown, preservePendingLocalChanges = f
 if (typeof window !== "undefined") {
     window.addEventListener("backend-connected", () => { void hydrateCanvasProjects(); });
     window.addEventListener("backend-event", (event) => applyBackendCanvasEvent((event as CustomEvent).detail));
-    window.addEventListener("pagehide", persistCurrentCanvasSnapshot);
+    window.addEventListener("pagehide", () => { void persistCanvasSnapshot(useCanvasStore.getState().projects); });
 }
 
 async function importLegacyGenerationLogs(projectId: string, value: unknown) {

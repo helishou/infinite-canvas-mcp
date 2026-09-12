@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Square, Trash2, Type, User, Video } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
@@ -148,6 +149,7 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
     const [checked, setChecked] = useState<Set<string>>(new Set());
     const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
     const [exporting, setExporting] = useState(false);
+    const listRef = useRef<HTMLDivElement>(null);
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
@@ -169,6 +171,12 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
             return [{ node, depth: 0, hasChildren: groupChildren.length > 0 }, ...(collapsedGroups.has(node.id) ? [] : groupChildren.map((child) => ({ node: child, depth: 1, hasChildren: false })))];
         });
     }, [collapsedGroups, filtered, nodes]);
+    const rowVirtualizer = useVirtualizer({
+        count: treeRows.length,
+        getScrollElement: () => listRef.current,
+        estimateSize: () => 52,
+        overscan: 8,
+    });
 
     const exitSelect = () => {
         setSelectMode(false);
@@ -220,16 +228,17 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
             <div className="px-3 pb-2.5">
                 <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+            <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 {treeRows.length ? (
-                    <div className="space-y-1.5">
-                        {treeRows.map(({ node, depth, hasChildren }) => {
+                    <div className="relative w-full" style={{ height: rowVirtualizer.getTotalSize() }}>
+                        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                            const { node, depth, hasChildren } = treeRows[virtualRow.index];
                             const Icon = NODE_TYPE_ICON[node.type] || FileText;
                             const isImage = node.type === CanvasNodeType.Image && node.metadata?.content;
                             const isChecked = checked.has(node.id);
                             const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
                             return (
-                                <div key={node.id} className={cn("group relative flex items-center rounded-lg transition", depth && "ml-5", active ? "" : "hover:bg-black/5 dark:hover:bg-white/5")} style={active ? { background: theme.toolbar.activeBg } : undefined}>
+                                <div key={node.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className={cn("group absolute left-0 top-0 flex w-full items-center rounded-lg transition", depth && "ml-5", active ? "" : "hover:bg-black/5 dark:hover:bg-white/5")} style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)`, ...(active ? { background: theme.toolbar.activeBg } : {}) }}>
                                     {depth ? <span className="pointer-events-none absolute -left-3 top-[calc(-50%-0.4rem)] h-[calc(100%+0.4rem)] w-3 rounded-bl-md border-b border-l opacity-45" style={{ borderColor: theme.node.stroke }} /> : null}
                                     {node.type === CanvasNodeType.Group && hasChildren ? (
                                         <button type="button" onClick={() => setCollapsedGroups((prev) => (prev.has(node.id) ? new Set([...prev].filter((id) => id !== node.id)) : new Set(prev).add(node.id)))} className="ml-1 grid size-6 shrink-0 place-items-center opacity-55 transition hover:opacity-100" aria-label={node.title}>
