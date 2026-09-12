@@ -5,6 +5,8 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
++ 统一生成契约回归：运行 Backend 测试与 canvas-agent 测试，确认共享 `CanvasGenerationCommand` 校验、统一 `/canvas/generation` 入口、H3/图片/视频参数透传，以及取消/重试任务端点护栏持续通过。
+
 + 统一画布生成命令：通过前端 H3 按钮、MCP H3 工具和插件 H3 调用分别提交任务，确认三者都命中 `/canvas/generation` 与 `CanvasGenerationService`；批量 H3 只传 `nodeIds` 也能启动。再通过 MCP 图片生成确认图片入口返回的 taskId、executor 和任务状态与前端入口一致；旧 `/canvas/h3/runs`、`/canvas/image-generation` 应返回 404。
 + 大画布性能：创建 500 个以上节点并连续拖动、缩放、平移，确认交互过程中无明显卡顿；拖动结束后刷新页面，确认节点位置、尺寸和项目内容均已保存。
 + 大画布本地存储：断开 Backend 后创建或移动节点，刷新页面确认画布仍能从本地恢复；重新连接 Backend 后确认远程同步不重复创建项目。

@@ -1,3 +1,7 @@
+import type { CanvasGenerationMode } from "@basketikun/canvas-agent/generation-contract";
+
+export type { CanvasGenerationMode } from "@basketikun/canvas-agent/generation-contract";
+
 export type Position = {
     x: number;
     y: number;
@@ -24,7 +28,6 @@ export enum CanvasNodeType {
 export type CanvasNodeTypeId = CanvasNodeType | (string & {});
 
 export type CanvasNodeStatus = "idle" | "queued" | "success" | "loading" | "error" | "cancelled";
-export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
 export type CanvasGenerationEngine = "cloud" | "comfyui" | "video-concat";
 
