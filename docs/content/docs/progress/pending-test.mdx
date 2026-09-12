@@ -29,7 +29,7 @@ description: Implemented changes that still need manual verification
 
 + 画布图片生成统一调度：画布图片节点分别选择 `gpt-image-*`、`z-image`、`flux2-klein` 和 `custom/*.json`，确认前端按钮与 MCP 都创建统一的 `canvas-image` 后端任务；GPT Image 的文生和参考图编辑结果可轮询并直接显示，结果带 `storageKey` 且刷新后仍可显示。
 
-+ 画布角色节点：画布底栏工具栏「角色」（User 图标）点击后弹出只显示角色资产的挑选器；选中即生成 1 个 Character 节点（主图 + outfit 缩略图条 + 总数徽标，标题显示角色名）。在画布侧栏「资产」标签下，把角色资产拖到画布也应生成 1 个 Character 节点（不要展开为 Group + 多图）。拖入第二个角色资产时不要和原节点冲突。Character 节点可用于图片生成参考；拖到 H3 的 ref 槽时应被识别为身份资产并拒绝加入，H3 必须改用独立四视图图片节点。点击 Character 节点标题可改名。
++ 画布角色节点：画布底栏工具栏「角色」（User 图标）点击后弹出只显示角色资产的挑选器；选中即生成 1 个 Character 节点（主图 + outfit 缩略图条 + 总数徽标，标题显示角色名）。在画布侧栏「资产」标签下，把角色资产拖到画布也应生成 1 个 Character 节点（不要展开为 Group + 多图）。拖入第二个角色资产时不要和原节点冲突。Character 节点可用于图片生成参考；从画布把 Character 节点拖到 H3 的 ref 槽时，每张 outfit 应自动拆为单独 image ref（无特殊 role / subjectId），ref2va 模式下最多 9 张，i2v 模式 1 张，fl2v 模式 2 张，超出时静默截断。侧栏把角色资产直接拖到 H3 节点上同样应拆为 per-image ref，命名带「角色名 · outfit 名」。点击 Character 节点标题可改名。
 
 + 画布角色节点能力：图片节点 hover 工具栏 User 按钮「转为角色节点」，原图作 character.images 第一张 outfit、原 prompt 转 characterDescription、保持原位置/大小/标题。Character 节点右上展开按钮展开 BatchFrame，缩略图「设为主图」能更新主图（边框高亮）。双击 Character 节点或标题打开编辑面板，编辑标题/描述/参考图 outfit/声线后保存应回写。hover 工具栏「存为角色资产」按节点标题同名去重（同名则替换原资产、不同名则新增）。从资产库拖动图片到角色节点会追加为 outfit，拖动音频则设置为声线（metadata.characterVoiceUrl）。
 

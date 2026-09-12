@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- [修复] H3 角色集成对齐简化模型：移除 `h3CharacterAssets` 读路径与对应 hydration；`canvasReferenceRole` 去掉 Character 节点特判与 `/character/` 正则误用，角色资产 / 角色节点拖到 H3 ref 槽直接按 outfit 拆为 image ref（无 `character_turnaround` 角色），不再有「角色节点被拒绝加入 H3」行为。
 - [修复] H3 参考清单统一按角色四视图、分镜和场景标注并排除身份基础图；RunningHub 任务也纳入 Backend 重启恢复，避免重复提交或丢失轮询。
 - [新增] 角色节点能力增强：图片节点可「转为角色节点」（hover 工具栏 User 按钮）；角色节点支持 BatchFrame 横向展开 + 设为主图（已在的 `setBatchPrimary` / `deleteBatchImage` 扩展支持 `characterPrimaryIndex` 与 `characterImages` 维护）；双击角色节点打开完整编辑面板 `CharacterNodeEditModal`，可改标题/描述/参考图 outfit/声线（支持从音频资产库选或上传本地文件）；角色节点 hover 工具栏新增「存为角色资产」按钮，按 `data.name` 去重，同名则替换资产；画布可拖入图片/音频到角色节点，图片作 outfit，音频作声线。
 - [新增] 画布 MCP 统一操作协议：Backend 新增带 revision/CAS 的 `/canvas/projects/:projectId/ops`，严格执行节点、连线、选区、视口和生成操作，未知操作报错、连线去重并返回逐操作结果。

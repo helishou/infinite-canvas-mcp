@@ -144,7 +144,8 @@ type AnyReferenceDrag = CanvasReferenceDrag | CharacterReferenceDrag;
 
 function canvasReferenceRole(node: CanvasNodeData): CanvasReferenceRole | undefined {
     const value = `${node.type} ${node.title || ""}`.toLowerCase();
-    if (node.type === CanvasNodeType.Character || /四视图|turnaround|character/.test(value)) return "character_turnaround";
+    // 角色节点是身份资产，不是四视图；拖到 ref 槽时只展开为普通 image ref。
+    if (/四视图|turnaround/.test(value)) return "character_turnaround";
     if (/分镜|storyboard/.test(value)) return "storyboard";
     if (/场景|scene/.test(value)) return "scene";
     return undefined;
@@ -1295,7 +1296,14 @@ function InfiniteCanvasPage() {
                     const url = String(node.metadata?.content || "").trim();
                     return url ? { nodeId: node.id, url, type: "image" as const, name: node.title || "图片", storageKey: node.metadata?.storageKey, mimeType: node.metadata?.mimeType, role: canvasReferenceRole(node), subjectId: canvasReferenceRole(node) === "character_turnaround" ? node.id : undefined } : undefined;
                 }
-                // Character 节点是身份资产；四视图必须从独立的四视图图片节点拖入。
+                // Character 节点：每张 outfit 拆为单独 image ref，拖到 H3 ref 槽逐张加入。
+                if (node.type === CanvasNodeType.Character) {
+                    const images = (node.metadata?.characterImages || []).filter((image) => image.url);
+                    return images.length ? {
+                        nodeId: node.id,
+                        images: images.map((image) => ({ url: image.url, name: `${node.title || "角色"} · ${image.outfit || image.name || "outfit"}`, storageKey: image.storageKey, mimeType: image.mimeType })),
+                    } : undefined;
+                }
                 return undefined;
             })(),
         };
@@ -3902,7 +3910,6 @@ function migrateLegacyH3Node(node: CanvasNodeData): CanvasNodeData {
     copy("selectedSegmentId", "selectedSegmentId");
     copy("seed", "seed", "noiseSeed");
     copy("videoSource", "minimaxSourceVideoUrl", "videoSource");
-    copy("h3CharacterAssets", "characterAssets");
     copy("h3Refs", "refs");
     copy("assetRefs", "assetRefs");
     copy("materials", "materials");

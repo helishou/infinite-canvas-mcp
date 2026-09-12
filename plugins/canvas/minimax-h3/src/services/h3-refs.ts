@@ -22,18 +22,6 @@ export function readH3Refs(ctx: CanvasNodeContext): H3Ref[] {
         const type = mime.startsWith("video/") || node.type === "video" ? "video" : mime.startsWith("audio/") || node.type === "audio" ? "audio" : "image";
         return [{ url, type: type as H3Ref["type"], name: node.title || type, storageKey: storageKeyOf(media), mimeType: String(media.mimeType || "") || undefined, ...(role ? { role } : {}), ...(subjectId ? { subjectId } : {}) }];
     });
-    const characterAssets = currentNode.metadata?.h3CharacterAssets;
-    const characterRefs = Array.isArray(characterAssets) ? characterAssets.flatMap((asset) => {
-        if (!asset || typeof asset !== "object") return [];
-        const item = asset as Record<string, unknown>;
-        const role = String(item.name || item.characterName || "角色");
-        return (Array.isArray(item.images) ? item.images : []).flatMap((image) => {
-            if (!image || typeof image !== "object") return [];
-            const ref = image as Record<string, unknown>;
-            const url = String(ref.url || ref.dataUrl || ref.localUrl || ref.originalLocalUrl || ref.sourceUrl || ref.path || "").trim();
-            return url ? [{ url, type: "image" as const, name: `${role} · ${String(ref.name || "角色四视图")}`, storageKey: storageKeyOf(ref), mimeType: String(ref.mimeType || "") || undefined, role: "character_turnaround" as const, subjectId: String(item.id || item.characterAssetId || role) }] : [];
-        });
-    }) : [];
     const legacy = currentNode.metadata?.h3Refs;
     const legacyRefs = legacy && typeof legacy === "object" ? Object.entries(legacy as Record<string, unknown>).flatMap(([kind, values]) => (Array.isArray(values) ? values : []).flatMap((value) => {
         if (!value || typeof value !== "object") return [];
@@ -42,7 +30,7 @@ export function readH3Refs(ctx: CanvasNodeContext): H3Ref[] {
         if (!url) return [];
         return [{ url, type: (kind === "video" ? "video" : kind === "audio" ? "audio" : "image") as H3Ref["type"], name: String(item.name || `${kind}-ref`), storageKey: storageKeyOf(item), mimeType: String(item.mimeType || "") || undefined, ...(item.role ? { role: String(item.role) as H3Ref["role"] } : {}), ...(item.subjectId ? { subjectId: String(item.subjectId) } : {}) }];
     })) : [];
-    return [...connected, ...characterRefs, ...legacyRefs]
+    return [...connected, ...legacyRefs]
         .filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index)
         .map((item, order) => ({ ...item, order }));
 }
@@ -79,4 +67,25 @@ export function normalizeDroppedH3Ref(event: React.DragEvent<HTMLElement>): H3Re
 
 function referenceRoleOf(value: unknown): H3Ref["role"] | undefined {
     return value === "character_turnaround" || value === "storyboard" || value === "scene" || value === "motion_reference" || value === "audio_reference" ? value : undefined;
+}
+
+// 解析拖拽事件：如果是角色资产 / 角色节点 payload，返回每张 outfit 拆出的 image ref 列表；否则返回空。
+export function readCharacterImagesFromDrop(event: React.DragEvent<HTMLElement> | { dataTransfer: { getData: (mime: string) => string } }): H3Ref[] {
+    const transfer = event.dataTransfer;
+    const encoded = transfer.getData("application/x-infinite-canvas-ref");
+    const fallback = transfer.getData("text/plain");
+    if (!encoded && !fallback) return [];
+    let value: Record<string, unknown> = {};
+    try { value = JSON.parse(encoded || fallback) as Record<string, unknown>; } catch { return []; }
+    const kind = String(value.type || value.kind || "").toLowerCase();
+    if (kind !== "character") return [];
+    const images = Array.isArray(value.characterImages) ? value.characterImages : [];
+    const characterName = String(value.characterName || value.name || "角色");
+    return images.flatMap((image) => {
+        if (!image || typeof image !== "object") return [];
+        const ref = image as Record<string, unknown>;
+        const url = String(ref.url || ref.dataUrl || ref.localUrl || ref.originalLocalUrl || ref.sourceUrl || ref.path || "").trim();
+        if (!url) return [];
+        return [{ url, type: "image" as const, name: `${characterName} · ${String(ref.outfit || ref.name || "outfit")}`, storageKey: storageKeyOf(ref), mimeType: String(ref.mimeType || "") || undefined }];
+    });
 }

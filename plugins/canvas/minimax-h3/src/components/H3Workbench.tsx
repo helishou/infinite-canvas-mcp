@@ -3,7 +3,7 @@ import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { refsForSegment, resultUrl, withSegmentRefs } from "../services/h3-data";
-import { normalizeDroppedH3Ref, readH3Refs } from "../services/h3-refs";
+import { normalizeDroppedH3Ref, readCharacterImagesFromDrop, readH3Refs } from "../services/h3-refs";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
@@ -89,9 +89,25 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         if ((event.target as HTMLElement).closest(".minimax-ref-track")) return;
         event.preventDefault();
         event.stopPropagation();
-        const ref = normalizeDroppedH3Ref(event);
-        if (!ref || !selected) return;
+        if (!selected) return;
         const mode = String(selected.mode || selected.taskMode || "ref2va");
+        // 角色资产 / 角色节点：每张 outfit 拆为单独 image ref
+        const characterImages = readCharacterImagesFromDrop(event);
+        if (characterImages.length) {
+            if (mode === "t2v") return;
+            const refs = refsForSegment(selected);
+            const existing = new Set(refs.map((item) => item.url));
+            const additions = characterImages.filter((item) => !existing.has(item.url));
+            if (!additions.length) return;
+            const max = mode === "i2v" ? 1 : mode === "fl2v" ? 2 : 9;
+            const imageCount = refs.filter((item) => item.type === "image").length;
+            const room = Math.max(0, max - imageCount);
+            if (!room) return;
+            ctx.updateMetadata({ selectedSegmentId: selected.id, segments: segments.map((item) => item.id === selected.id ? withSegmentRefs(item, [...refs, ...additions.slice(0, room)]) : item) });
+            return;
+        }
+        const ref = normalizeDroppedH3Ref(event);
+        if (!ref) return;
         if (mode === "t2v" || (mode !== "ref2va" && ref.type !== "image")) return;
         const refs = refsForSegment(selected);
         const max = ref.type === "image" ? (mode === "i2v" ? 1 : mode === "fl2v" ? 2 : 9) : 3;
