@@ -6,6 +6,7 @@ export default {
     theme: { toggle: "切换主题" },
     common: {
         cancel: "取消",
+        confirm: "确定",
         save: "保存",
         edit: "编辑",
         done: "完成",
@@ -62,6 +63,10 @@ export default {
         loading: "加载中...",
         loadMore: "继续向下滚动加载更多",
         end: "已经到底了",
+        custom: {
+            addTitle: "新增自定义提示词", editTitle: "编辑提示词", added: "已添加", updated: "已更新", deleted: "已删除", saveFailed: "保存失败", deleteFailed: "删除失败", deleteConfirm: "确定要删除这个自定义提示词吗？", notImage: "请选择图片文件", imageReadFailed: "读取图片失败，请重试或换一张", fileTooLarge: "单张图片不能超过 {{size}}", tip: "当前有 {{count}} 条自定义提示词，仅保存在本地浏览器。",
+            form: { title: "标题", titleRequired: "请输入标题", titlePlaceholder: "给提示词起个容易检索的名字", prompt: "提示词内容", promptRequired: "请输入提示词内容", promptPlaceholder: "可以直接粘贴英文提示词，中文也支持", description: "描述（可选）", descriptionPlaceholder: "给其他协作者 / 未来的自己解释一下用途", tags: "标签（可选）", tagsPlaceholder: "用逗号分隔，例如：人物, 电影感", cover: "封面图（可选）", coverUpload: "上传封面图", references: "参考图（可选）", referencesAdd: "添加参考图" },
+        },
     },
     assets: {
         title: "我的资产",
@@ -328,7 +333,7 @@ export default {
         sidePanel: {
             canvas: "画布", assets: "资产", prompts: "提示词库", resize: "调整左侧面板宽度", elements: "画布元素", select: "选择", searchNodes: "搜索节点", focusNode: "定位到节点", preview: "放大预览", noNodes: "画布暂无节点", clearAll: "取消全选", selected: "已选 {{count}}", exporting: "正在导出选中元素…", exportName: "画布元素-{{count}}个", exported: "已导出 {{count}} 个元素", exportFailed: "导出失败，请重试",
             addingAssets: "正在添加资产…", addedAssets: "已添加 {{count}} 个资产", mediaOnly: "仅支持图片或视频文件", addFailed: "添加失败，请重试", searchAssets: "搜索资产", add: "添加", noAssets: "暂无资产", inserted: "插入画布", removeAssetTitle: "移除该资产？", remove: "移除", removeAsset: "移除资产", assetRemoved: "资产已移除",
-            searchPrompts: "搜索提示词", noPrompts: "暂无提示词", promptCopied: "已复制提示词", copyFailed: "复制失败", loadFailedRetry: "加载失败，点击重试", noMatchingPrompts: "无匹配提示词", sourceEmpty: "该来源暂无提示词", viewDetails: "查看详情",
+            searchPrompts: "搜索提示词", noPrompts: "暂无提示词", promptCopied: "已复制提示词", copyFailed: "复制失败", loadFailedRetry: "加载失败，点击重试", noMatchingPrompts: "无匹配提示词", sourceEmpty: "该来源暂无提示词", customEmpty: "还没有自定义提示词，去「提示词库」页加几条吧", viewDetails: "查看详情",
             filter: { image: "图片", video: "视频", text: "文本", audio: "音频", config: "配置", group: "分组" },
         },
         assetPicker: { title: "选择资产", insert: "插入", search: "搜索资产", empty: "没有资产" },

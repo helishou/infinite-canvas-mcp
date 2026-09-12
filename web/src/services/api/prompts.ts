@@ -1,5 +1,6 @@
 import { runPromptSource, type RawPrompt } from "./prompt-source-runtime";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
+import { CUSTOM_PROMPTS_CATEGORY, CUSTOM_PROMPTS_SOURCE_ID, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
 import { fetchBackendPromptCache, saveBackendPromptCache } from "@/services/backend-api";
 import i18n from "@/i18n";
 import type { PromptSource } from "./prompt-source-presets";
@@ -9,6 +10,8 @@ export type Prompt = RawPrompt & {
     category: string;
     githubUrl: string;
 };
+
+export const isCustomPrompt = (prompt: Prompt) => prompt.sourceId === CUSTOM_PROMPTS_SOURCE_ID;
 
 export const ALL_PROMPTS_OPTION = "all";
 
@@ -47,6 +50,7 @@ type SourceCache = PromptSourceStatus & {
 const cacheTtlMs = 1000 * 60 * 60;
 const promptCache = new Map<string, SourceCache>();
 const loadingSources = new Map<string, Promise<PromptSourceRefreshResult>>();
+const customPromptSource: PromptSource = { id: CUSTOM_PROMPTS_SOURCE_ID, name: CUSTOM_PROMPTS_CATEGORY, url: "", homepage: "", enabled: true, builtIn: false };
 
 function enabledSources() {
     return usePromptSourceStore.getState().sources.filter((source) => source.enabled);
@@ -72,6 +76,10 @@ function withSourceMeta(source: PromptSource, items: RawPrompt[]): Prompt[] {
         category: source.name,
         githubUrl: item.sourceUrl || source.homepage,
     }));
+}
+
+export function withCustomPromptMeta(items: RawPrompt[]): Prompt[] {
+    return withSourceMeta(customPromptSource, items);
 }
 
 async function readSourceCache(sourceId: string) {
@@ -145,16 +153,23 @@ async function getSourcePrompts(source: PromptSource): Promise<Prompt[]> {
 }
 
 async function getAllPrompts(): Promise<Prompt[]> {
-    const settled = await Promise.all(
-        enabledSources().map(async (source) => {
+    const [custom, settled] = await Promise.all([
+        getCustomPrompts(),
+        Promise.all(enabledSources().map(async (source) => {
             try {
                 return await getSourcePrompts(source);
             } catch {
                 return [];
             }
-        }),
-    );
-    return settled.flat();
+        })),
+    ]);
+    return [...custom, ...settled.flat()];
+}
+
+async function getCustomPrompts(): Promise<Prompt[]> {
+    const store = useCustomPromptsStore.getState();
+    if (!store.loaded) await store.load();
+    return withCustomPromptMeta(useCustomPromptsStore.getState().prompts);
 }
 
 export async function fetchPrompts({ keyword = "", tag = [], category = ALL_PROMPTS_OPTION, page = 1, pageSize = 20 }: { keyword?: string; tag?: string[]; category?: string; page?: number; pageSize?: number } = {}) {
@@ -164,7 +179,7 @@ export async function fetchPrompts({ keyword = "", tag = [], category = ALL_PROM
     const normalizedPageSize = Math.max(1, Math.min(100, pageSize));
     const withoutTagFilter = filterPrompts(items, { keyword: normalizedKeyword, category, tags: [] });
     const filtered = filterPrompts(items, { keyword: normalizedKeyword, category, tags: tag });
-    const categories = enabledSources().map((source) => source.name);
+    const categories = [CUSTOM_PROMPTS_CATEGORY, ...enabledSources().map((source) => source.name)];
 
     return {
         items: filtered.slice((normalizedPage - 1) * normalizedPageSize, normalizedPage * normalizedPageSize),

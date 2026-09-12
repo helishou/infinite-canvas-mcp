@@ -6,6 +6,7 @@ export default {
     theme: { toggle: "Toggle theme" },
     common: {
         cancel: "Cancel",
+        confirm: "Confirm",
         save: "Save",
         edit: "Edit",
         done: "Done",
@@ -62,6 +63,10 @@ export default {
         loading: "Loading...",
         loadMore: "Scroll down to load more",
         end: "You've reached the end",
+        custom: {
+            addTitle: "Add custom prompt", editTitle: "Edit prompt", added: "Added", updated: "Updated", deleted: "Deleted", saveFailed: "Save failed", deleteFailed: "Delete failed", deleteConfirm: "Delete this custom prompt?", notImage: "Please select an image file", imageReadFailed: "Failed to read the image. Try again or pick another one.", fileTooLarge: "Each image must be no larger than {{size}}", tip: "You have {{count}} custom prompts saved locally in this browser.",
+            form: { title: "Title", titleRequired: "Please enter a title", titlePlaceholder: "Give the prompt a memorable name", prompt: "Prompt content", promptRequired: "Please enter prompt content", promptPlaceholder: "Paste an English prompt here; Chinese works too", description: "Description (optional)", descriptionPlaceholder: "Explain the use case to your collaborators / future self", tags: "Tags (optional)", tagsPlaceholder: "Comma-separated, e.g. portrait, cinematic", cover: "Cover image (optional)", coverUpload: "Upload cover image", references: "Reference images (optional)", referencesAdd: "Add reference" },
+        },
     },
     assets: {
         title: "My Assets",
@@ -328,7 +333,7 @@ export default {
         sidePanel: {
             canvas: "Canvas", assets: "Assets", prompts: "Prompt Library", resize: "Resize left panel", elements: "Canvas elements", select: "Select", searchNodes: "Search nodes", focusNode: "Focus node", preview: "Large preview", noNodes: "No nodes on this canvas", clearAll: "Clear all", selected: "{{count}} selected", exporting: "Exporting selected elements…", exportName: "canvas-elements-{{count}}", exported: "Exported {{count}} elements", exportFailed: "Export failed. Try again.",
             addingAssets: "Adding assets…", addedAssets: "Added {{count}} assets", mediaOnly: "Only image and video files are supported", addFailed: "Failed to add assets. Try again.", searchAssets: "Search assets", add: "Add", noAssets: "No assets", inserted: "Insert into canvas", removeAssetTitle: "Remove this asset?", remove: "Remove", removeAsset: "Remove asset", assetRemoved: "Asset removed",
-            searchPrompts: "Search prompts", noPrompts: "No prompts", promptCopied: "Prompt copied", copyFailed: "Copy failed", loadFailedRetry: "Load failed. Click to retry.", noMatchingPrompts: "No matching prompts", sourceEmpty: "No prompts from this source", viewDetails: "View details",
+            searchPrompts: "Search prompts", noPrompts: "No prompts", promptCopied: "Prompt copied", copyFailed: "Copy failed", loadFailedRetry: "Load failed. Click to retry.", noMatchingPrompts: "No matching prompts", sourceEmpty: "No prompts from this source", customEmpty: "No custom prompts yet. Add some on the Prompt Library page.", viewDetails: "View details",
             filter: { image: "Image", video: "Video", text: "Text", audio: "Audio", config: "Configuration", group: "Group" },
         },
         assetPicker: { title: "Select assets", insert: "Insert", search: "Search assets", empty: "No assets" },

@@ -43,6 +43,7 @@ function CustomFieldInput({ field, value, onChange }: { field: WorkflowField; va
                         onChange={(next) => onChange(next)}
                         options={options.map((option) => ({ value: option, label: option }))}
                         className="w-full"
+                        popupStyle={{ zIndex: 1300 }}
                     />
                 </label>
             );

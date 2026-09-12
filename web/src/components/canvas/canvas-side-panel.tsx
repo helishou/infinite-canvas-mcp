@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactP
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Square, Trash2, Type, User, Video } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -11,10 +11,11 @@ import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
-import { fetchSourcePrompts, type Prompt } from "@/services/api/prompts";
+import { fetchSourcePrompts, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
+import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { CANVAS_SIDE_PANEL_MAX_WIDTH, CANVAS_SIDE_PANEL_MIN_WIDTH, CANVAS_SIDE_PANEL_MOTION_MS, useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
@@ -578,9 +579,18 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
     const { t } = useTranslation();
     const sources = usePromptSourceStore((state) => state.sources);
     const enabledSources = useMemo(() => sources.filter((source) => source.enabled), [sources]);
+    const customPrompts = useCustomPromptsStore((state) => state.prompts);
+    const customPromptItems = useMemo(() => withCustomPromptMeta(customPrompts), [customPrompts]);
+    const customLoaded = useCustomPromptsStore((state) => state.loaded);
+    const loadCustomPrompts = useCustomPromptsStore((state) => state.load);
     const [keyword, setKeyword] = useState("");
     const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+    const [customOpen, setCustomOpen] = useState(true);
     const [detail, setDetail] = useState<Prompt | null>(null);
+
+    useEffect(() => {
+        if (!customLoaded) void loadCustomPrompts().catch(() => message.error(t("prompts.loadFailed")));
+    }, [customLoaded, loadCustomPrompts, message, t]);
 
     const copyPrompt = async (prompt: string) => {
         try {
@@ -598,6 +608,7 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 <div className="space-y-1">
+                    {customLoaded ? <PromptItemsGroup items={customPromptItems} keyword={keyword} open={customOpen} sourceName={CUSTOM_PROMPTS_CATEGORY} icon={Sparkles} theme={theme} onToggle={() => setCustomOpen((value) => !value)} onInsert={onInsert} onView={setDetail} emptyText={t("canvas.sidePanel.customEmpty")} /> : null}
                     {enabledSources.length ? enabledSources.map((source) => (
                         <PromptSourceGroup
                             key={source.id}
@@ -610,7 +621,8 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
                             onInsert={onInsert}
                             onView={setDetail}
                         />
-                    )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("canvas.sidePanel.noPrompts")} className="pt-12" />}
+                    )) : null}
+                    {!enabledSources.length && customPrompts.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("canvas.sidePanel.noPrompts")} className="pt-12" /> : null}
                 </div>
             </div>
             <PromptDetailDialog prompt={detail} onClose={() => setDetail(null)} onCopy={(prompt) => void copyPrompt(prompt)} />
@@ -642,33 +654,60 @@ function PromptSourceGroup({
     const showResults = open || !!keyword.trim();
     const query = useQuery({ queryKey: ["side-panel-prompts", sourceId], queryFn: () => fetchSourcePrompts(sourceId), enabled: showResults, staleTime: 1000 * 60 * 60 });
 
+    return <PromptItemsGroup items={query.data || []} keyword={keyword} open={open} sourceName={sourceName} icon={BookOpen} theme={theme} onToggle={onToggle} onInsert={onInsert} onView={onView} loading={query.isLoading} error={query.isError} onRetry={() => void query.refetch()} emptyText={t("canvas.sidePanel.sourceEmpty")} />;
+}
+
+function PromptItemsGroup({
+    items,
+    keyword,
+    open,
+    sourceName,
+    icon: Icon,
+    theme,
+    onToggle,
+    onInsert,
+    onView,
+    loading = false,
+    error = false,
+    onRetry,
+    emptyText,
+}: {
+    items: Prompt[];
+    keyword: string;
+    open: boolean;
+    sourceName: string;
+    icon: LucideIcon;
+    theme: CanvasTheme;
+    onToggle: () => void;
+    onInsert: (payload: InsertAssetPayload) => void;
+    onView: (prompt: Prompt) => void;
+    loading?: boolean;
+    error?: boolean;
+    onRetry?: () => void;
+    emptyText: string;
+}) {
+    const { t } = useTranslation();
+    const showResults = open || !!keyword.trim();
     const filtered = useMemo(() => {
-        const items = query.data || [];
         const q = keyword.trim().toLowerCase();
         if (!q) return items;
-        return items.filter((item) => [item.title, item.prompt, ...item.tags].join(" ").toLowerCase().includes(q));
-    }, [query.data, keyword]);
-
+        return items.filter((item) => [item.title, item.prompt, item.description, ...item.tags].join(" ").toLowerCase().includes(q));
+    }, [items, keyword]);
     const insertPrompt = (item: Prompt) => onInsert({ kind: "text", content: item.prompt, title: item.title });
-
     return (
         <div>
             <button type="button" onClick={onToggle} className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-xs font-semibold opacity-75 transition hover:opacity-100">
                 <ChevronRight className={cn("size-3.5 transition-transform", showResults && "rotate-90")} />
-                <BookOpen className="size-3.5" />
+                <Icon className="size-3.5" />
                 <span className="min-w-0 flex-1 truncate">{sourceName}</span>
-                {showResults && query.isSuccess ? <span className="opacity-50">{filtered.length}</span> : null}
+                {!loading && !error && items.length > 0 ? <span className="opacity-50">{filtered.length}</span> : null}
             </button>
             {showResults ? (
                 <div className="px-1 pb-2 pt-1">
-                    {query.isLoading ? (
-                        <div className="flex justify-center py-6">
-                            <Spin size="small" />
-                        </div>
-                    ) : query.isError ? (
-                        <button type="button" onClick={() => void query.refetch()} className="block w-full py-4 text-center text-xs text-red-500 opacity-80 transition hover:opacity-100">
-                            {t("canvas.sidePanel.loadFailedRetry")}
-                        </button>
+                    {loading ? (
+                        <div className="flex justify-center py-6"><Spin size="small" /></div>
+                    ) : error ? (
+                        <button type="button" onClick={onRetry} className="block w-full py-4 text-center text-xs text-red-500 opacity-80 transition hover:opacity-100">{t("canvas.sidePanel.loadFailedRetry")}</button>
                     ) : filtered.length ? (
                         <div className="space-y-1.5">
                             {filtered.map((item) => (
@@ -676,7 +715,7 @@ function PromptSourceGroup({
                             ))}
                         </div>
                     ) : (
-                        <div className="py-4 text-center text-xs opacity-40">{keyword.trim() ? t("canvas.sidePanel.noMatchingPrompts") : t("canvas.sidePanel.sourceEmpty")}</div>
+                        <div className="py-4 text-center text-xs opacity-40">{keyword.trim() ? t("canvas.sidePanel.noMatchingPrompts") : emptyText}</div>
                     )}
                 </div>
             ) : null}
