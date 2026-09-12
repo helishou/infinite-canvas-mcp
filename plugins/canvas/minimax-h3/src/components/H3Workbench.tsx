@@ -84,6 +84,14 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const [smartStoryboardUploads, setSmartStoryboardUploads] = useState<H3Ref[]>([]);
     const [canvasReferenceDragOver, setCanvasReferenceDragOver] = useState(false);
     const workbenchRef = useRef<HTMLDivElement | null>(null);
+    // 播放期间由 rAF 调用：直接改写 ruler 上所有 .minimax-playhead 指针的 left（= 绝对时间秒 ×100px），
+    // 不写 metadata、不 setState，因此不会触发 canvas 框架重绘/重载，且 60fps 匀速推进。
+    const livePlayheadTick = useCallback((absoluteTime: number) => {
+        const root = workbenchRef.current;
+        if (!root) return;
+        const px = absoluteTime * 100;
+        root.querySelectorAll<HTMLElement>(".minimax-playhead").forEach((el) => { el.style.left = `${px}px`; });
+    }, []);
     const [editingGroup, setEditingGroup] = useState<{ segmentId: string; groupId: string } | null>(null);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => selected && patchSelectedSegment(ctx, { ...metadata, selectedSegmentId: selected.id }, patch), [ctx, metadata, selected]);
     const removeTimelineRef = (segmentId: string, ref: H3Ref) => {
@@ -212,11 +220,14 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         const localPlayhead = Math.max(0, playhead - Number(fromSegment.start || 0));
         ctx.updateMetadata({ selectedSegmentId: fromSegment.id, playhead: Number(fromSegment.start || 0) + localPlayhead, h3PlayRequest: Number(metadata.h3PlayRequest || 0) + 1, h3PlaybackAll: true });
     };
-    const advancePlayback = () => {
+    // continuedFromSlot=true 表示播放器的双槽交叉淡入已经自己把下一段起播了（buffer 槽接手）。
+    // 这时**绝不能**再递增 h3PlayRequest：播放器的 playRequest effect 是 toggle 语义，
+    // 会把「已在播放的下一段」当成用户点击而 pause，表现为连续播放播完一段就停住。
+    const advancePlayback = (continuedFromSlot = false) => {
         if (metadata.h3PlaybackAll !== true) return;
         const next = segments.slice(selectedIndex + 1).find((item) => Boolean(resultUrl(item.result)));
         if (!next) { ctx.updateMetadata({ h3PlaybackAll: false, playhead: total }); return; }
-        ctx.updateMetadata({ selectedSegmentId: next.id, playhead: Number(next.start || 0), h3PlayRequest: Number(metadata.h3PlayRequest || 0) + 1 });
+        ctx.updateMetadata({ selectedSegmentId: next.id, playhead: Number(next.start || 0), ...(continuedFromSlot ? {} : { h3PlayRequest: Number(metadata.h3PlayRequest || 0) + 1 }) });
     };
     const nextSegment = segments.slice(selectedIndex + 1).find((item) => Boolean(resultUrl(item.result)));
     const nextUrl = nextSegment ? resultUrl(nextSegment.result) : undefined;
@@ -247,7 +258,7 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         })() : null}
         <style key="workbench-style">{`.minimax-canvas-workbench{--minimax-prompt-w:${promptW}px;--minimax-preview-w:${previewW}px;--minimax-preview-h:${effPreviewH}px;--minimax-timeline-h:${effTimelineH}px;--minimax-ref-h:${effRefLaneH}px}`}</style>
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
-            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} /></div>
+            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} /></div>
             <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onOpenCharacterGroup={openCharacterGroup} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />

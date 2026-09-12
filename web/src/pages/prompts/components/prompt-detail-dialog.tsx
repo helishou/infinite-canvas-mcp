@@ -1,6 +1,6 @@
 import { Copy, FileText, FolderPlus } from "lucide-react";
 import { Button, Image, Modal, Space, Tag } from "antd";
-import { cloneElement, type ReactElement } from "react";
+import { cloneElement, type CSSProperties, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 
 import { formatPromptDate, type Prompt } from "@/services/api/prompts";
@@ -47,6 +47,7 @@ export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset }: { p
     );
 }
 
-function enlargePreviewImage(image: ReactElement) {
-    return cloneElement(image, { style: { ...image.props.style, maxHeight: "calc(100vh - 32px)", maxWidth: "100vw" } });
+function enlargePreviewImage(image: ReactElement<unknown>, _info: { transform: unknown; image: unknown }) {
+    const element = image as ReactElement<{ style?: CSSProperties }>;
+    return cloneElement(element, { style: { ...element.props.style, maxHeight: "calc(100vh - 32px)", maxWidth: "100vw" } });
 }

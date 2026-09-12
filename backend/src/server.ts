@@ -13,6 +13,7 @@ import { createStores } from "./stores/index.js";
 import type { GenerationLogInput, LogDeleteScope, Stores } from "./stores/types.js";
 import { BackendEventBus } from "./events.js";
 import type { CanvasOperation } from "./canvas/project-ops.js";
+import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
 
 const logger = createLogger("backend");
 
@@ -21,6 +22,8 @@ export type ServerDeps = {
     comfy?: ComfyUiBackend;
     events?: BackendEventBus;
     stores?: Stores;
+    cancelTask?: (task: RuntimeTask) => RuntimeTask;
+    retryTask?: (task: RuntimeTask) => RuntimeTask | Promise<RuntimeTask>;
 };
 
 /** 启动总后台 HTTP 服务，返回 Express app（listen 由 index.ts 负责）。 */
@@ -125,6 +128,17 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         saveFrontendSettings({ ...current, ...patch });
         res.json({ ok: true, settings: loadFrontendSettings() });
     });
+    const AI_CONFIG_KEY = "ai.config";
+    app.get("/settings/ai-config", (_req, res) => {
+        res.json({ ok: true, config: stores.settings.get(AI_CONFIG_KEY) || null });
+    });
+    app.put("/settings/ai-config", (req, res) => {
+        const config = req.body?.config;
+        if (!config || typeof config !== "object" || Array.isArray(config)) return void res.status(400).json({ ok: false, error: "AI 配置必须是对象" });
+        stores.settings.set(AI_CONFIG_KEY, config);
+        events.publish({ type: "settings.updated", entityId: AI_CONFIG_KEY, payload: { synced: true } });
+        res.json({ ok: true });
+    });
 
     // H3 默认参数是 Backend 权威设置；浏览器 localStorage 只用于一次性迁移。
     const H3_DEFAULTS_KEY = "plugin:minimax-h3:defaults:v1";
@@ -208,6 +222,11 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         const deleted = stores.projects.delete(req.params.id);
         events.publish({ type: "canvas.updated", entityId: req.params.id, payload: { deleted } });
         res.json({ ok: true, deleted });
+    });
+    app.get("/canvas/projects/:id/diagnostics", (req, res) => {
+        const project = stores.projects.get(req.params.id);
+        if (!project) return void res.status(404).json({ ok: false, error: `画布不存在: ${req.params.id}` });
+        res.json({ ok: true, projectId: project.id, revision: Number(project.revision || 0), issues: diagnoseCanvasProject(project, stores) });
     });
 
     // ── Assets ───────────────────────────────────────────────────────────
@@ -300,12 +319,14 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         const mimeType = String(req.headers["content-type"] || "application/octet-stream").split(";", 1)[0];
         const categoryHeader = String(req.headers["x-media-category"] || "input");
         const category = categoryHeader === "output" || categoryHeader === "library" ? categoryHeader : "input";
+        const storageKeyHeader = String(req.headers["x-media-storage-key"] || "").trim();
         if (!body.length) return void res.status(400).json({ ok: false, error: "媒体内容为空" });
         try {
             const media = stores.media.store(body, {
                 name,
                 mimeType,
                 category,
+                storageKey: storageKeyHeader || undefined,
                 width: Number(req.headers["x-media-width"]) || null,
                 height: Number(req.headers["x-media-height"]) || null,
                 durationMs: Number(req.headers["x-media-duration-ms"]) || null,
@@ -464,7 +485,15 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         const status = ["queued", "running", "success", "failed", "cancelled"].includes(req.query.status as string)
             ? req.query.status as GenerationLogStatus : undefined;
         const limit = Number(req.query.limit || 500);
-        res.json({ ok: true, logs: stores.logs.list({ projectId, nodeId, status, limit }) });
+        res.json({ ok: true, logs: stores.logs.list({
+            projectId, nodeId, status, limit, offset: Number(req.query.offset || 0),
+            segmentId: typeof req.query.segmentId === "string" ? req.query.segmentId : undefined,
+            runtimeTaskId: typeof req.query.runtimeTaskId === "string" ? req.query.runtimeTaskId : undefined,
+            platform: typeof req.query.platform === "string" ? req.query.platform : undefined,
+            model: typeof req.query.model === "string" ? req.query.model : undefined,
+            from: typeof req.query.from === "string" ? req.query.from : undefined,
+            to: typeof req.query.to === "string" ? req.query.to : undefined,
+        }) });
     });
     app.post("/generation-logs", (req, res) => {
         const body = req.body as GenerationLogInput;
@@ -502,6 +531,7 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.get("/tasks", (req, res) => {
         const status = typeof req.query.status === "string" ? req.query.status : undefined;
         const kind = typeof req.query.kind === "string" ? req.query.kind : undefined;
+        const model = typeof req.query.model === "string" ? req.query.model : undefined;
         const scope = ["all", "canvas", "image", "video"].includes(String(req.query.scope)) ? String(req.query.scope) as "all" | "canvas" | "image" | "video" : undefined;
         const list = (value: unknown) => typeof value === "string" ? value.split(",").map((item) => item.trim()).filter(Boolean) : [];
         const taskId = typeof req.query.taskId === "string" ? req.query.taskId : "";
@@ -510,10 +540,13 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
             : stores.tasks.list({
                 status: status as RuntimeTaskStatus | undefined,
                 kind,
+                model,
                 scope,
                 projectId: typeof req.query.projectId === "string" ? req.query.projectId : undefined,
                 nodeIds: list(req.query.nodeIds),
                 segmentIds: list(req.query.segmentIds),
+                limit: Number(req.query.limit || 500),
+                offset: Number(req.query.offset || 0),
             });
         res.json({ ok: true, tasks });
     });
@@ -543,11 +576,25 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     });
     app.post("/tasks/:id/cancel", (req, res) => {
         try {
-            const task = stores.tasks.cancel(req.params.id);
+            const current = stores.tasks.get(req.params.id);
+            if (!current) return void res.status(404).json({ ok: false, error: "task not found" });
+            const task = deps.cancelTask ? deps.cancelTask(current) : stores.tasks.cancel(req.params.id);
             events.publish({ type: "task.updated", entityId: task.id, payload: task });
             res.json({ ok: true, task });
         } catch (error) {
             res.status(409).json({ ok: false, error: (error as Error).message });
+        }
+    });
+    app.post("/tasks/:id/retry", async (req, res) => {
+        try {
+            const current = stores.tasks.get(req.params.id);
+            if (!current) return void res.status(404).json({ ok: false, error: "task not found" });
+            if (!deps.retryTask) return void res.status(409).json({ ok: false, error: `任务类型 ${current.kind} 没有注册重试执行器` });
+            const task = await deps.retryTask(current);
+            events.publish({ type: "task.created", entityId: task.id, payload: task });
+            res.status(201).json({ ok: true, task, parentTaskId: current.id });
+        } catch (error) {
+            res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
         }
     });
 

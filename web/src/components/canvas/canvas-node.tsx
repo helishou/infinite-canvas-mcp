@@ -61,7 +61,6 @@ type CanvasNodeProps = {
     onViewImage?: (node: CanvasNodeData, imageId?: string) => void;
     onSelectReference?: (nodeId: string) => void;
     onContextMenu: (event: React.MouseEvent, nodeId: string) => void;
-    onEditCharacter?: (nodeId: string) => void;
 };
 
 type NodeContentRendererProps = {
@@ -127,6 +126,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onSelectReference,
     onContextMenu,
     onEditCharacter,
+    onCharacterDrop,
 }: CanvasNodeProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
@@ -854,9 +854,9 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
                           image={image}
                           index={index}
                           primary={index === primaryIndex}
-                          onSetPrimary={() => onSetBatchPrimary?.(node.id, String(index))}
-                          onDelete={() => onDeleteBatchImage?.(node.id, String(index))}
-                          onView={() => onViewBatchImage?.(node.id, String(index))}
+                          onSetPrimary={() => onSetBatchPrimary?.(String(index))}
+                          onDelete={() => onDeleteBatchImage?.(String(index))}
+                          onView={() => onViewBatchImage?.(String(index))}
                       />
                   ))
                 : null}
@@ -888,7 +888,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
                                 title={image.outfit || image.name}
                                 onClick={(event) => {
                                     event.stopPropagation();
-                                    onSetBatchPrimary?.(node.id, String(idx));
+                                    onSetBatchPrimary?.(String(idx));
                                 }}
                                 onMouseDown={(event) => event.stopPropagation()}
                                 onPointerDown={(event) => event.stopPropagation()}
@@ -921,7 +921,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
                     aria-label={batchExpanded ? t("canvas.character.collapsed") : t("canvas.character.expanded")}
                     onClick={(event) => {
                         event.stopPropagation();
-                        onToggleBatch?.(node.id);
+                        onToggleBatch?.();
                     }}
                     onMouseDown={(event) => event.stopPropagation()}
                     onPointerDown={(event) => event.stopPropagation()}
@@ -935,7 +935,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
 }
 
 /** 角色节点横向展开时的单张参考图卡片（排在节点右侧）。点“设为主图”切换主图，可删除。 */
-function ExpandedCharacterImageCard({ node, image, index, primary, onSetPrimary, onDelete, onView }: { node: CanvasNodeData; image: NonNullable<CanvasNodeData["metadata"]>["characterImages"] extends Array<infer T> ? T : never; index: number; primary: boolean; onSetPrimary: () => void; onDelete: () => void; onView: () => void }) {
+function ExpandedCharacterImageCard({ node, image, index, primary, onSetPrimary, onDelete, onView }: { node: CanvasNodeData; image: NonNullable<NonNullable<CanvasNodeData["metadata"]>["characterImages"]>[number]; index: number; primary: boolean; onSetPrimary: () => void; onDelete: () => void; onView: () => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
     const [imageUrl, setImageUrl] = useState("");

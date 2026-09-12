@@ -8,7 +8,7 @@ import type { CanvasOperation } from "../canvas/project-ops.js";
 
 /** 各 store 的筛选条件。 */
 export type AssetFilter = { kind?: string; folderId?: string };
-export type LogFilter = { projectId?: string; nodeId?: string; status?: GenerationLogStatus; limit?: number; offset?: number };
+export type LogFilter = { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number };
 export type LogDeleteScope = { id?: string; projectId?: string; nodeId?: string };
 export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null };
 export type GenerationLogInput = Omit<GenerationLog, "id" | "createdAt" | "updatedAt">;
@@ -88,7 +88,7 @@ export type TaskStore = {
      */
     create(kindOrId: string, inputOrKind: string | Record<string, unknown>, paramsOrInput: Record<string, unknown>, maybeParams?: Record<string, unknown>): RuntimeTask;
     get(id: string): RuntimeTask | null;
-    list(filter?: { status?: RuntimeTaskStatus; kind?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[] }): RuntimeTask[];
+    list(filter?: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number }): RuntimeTask[];
     update(id: string, patch: TaskPatch): RuntimeTask;
     cancel(id: string): RuntimeTask;
     events(id: string, after?: number): RuntimeTaskEvent[];

@@ -4,7 +4,7 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
-import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationLog, deleteBackendProject, fetchBackendProjects, upsertBackendProject } from "@/services/backend-api";
+import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, deleteBackendProject, fetchBackendProjects, upsertBackendProject } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
 export type CanvasProject = {
@@ -27,6 +27,8 @@ type CanvasStore = {
     hydrated: boolean;
     projects: CanvasProject[];
     backendRevisions: Record<string, number>;
+    canvasConflicts: Record<string, { message: string; revision: number; pendingOperations: number }>;
+    clearCanvasConflict: (id: string) => void;
     createProject: (title?: string) => string;
     importProject: (project: Partial<CanvasProject>) => string;
     openProject: (id: string) => CanvasProject | null;
@@ -39,9 +41,13 @@ type CanvasStore = {
 const CANVAS_PROJECTS_KEY = "infinite-canvas-projects-v1";
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let syncPromise: Promise<void> | null = null;
+let syncRequested = false;
 let syncGeneration = 0;
 let knownProjectIds = new Set<string>();
 const syncBases = new Map<string, CanvasProject>();
+let deferredBackendEvents: unknown[] = [];
+let deferredBackendEventsWaiter: Promise<void> | null = null;
 
 function loadFromLocalStorage(): CanvasProject[] {
     try {
@@ -68,9 +74,11 @@ function persistCurrentCanvasSnapshot() {
 async function syncCanvasProjects(projects: CanvasProject[], generation: number) {
     saveToLocalStorage(projects);
     if (!useBackendStore.getState().connected) return;
+    let currentProjectId = "";
     try {
         const ids = new Set(projects.map((project) => project.id));
         for (const project of projects) {
+            currentProjectId = project.id;
             if (generation !== syncGeneration) return;
             const base = syncBases.get(project.id);
             if (!base) {
@@ -97,7 +105,17 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number)
         if (generation !== syncGeneration) return;
         await Promise.all([...knownProjectIds].filter((id) => !ids.has(id)).map((id) => deleteBackendProject(id)));
         knownProjectIds = ids;
-    } catch { /* Backend 失败由下一次同步重试 */ }
+    } catch (error) {
+        if (error instanceof BackendApiError && error.status === 409 && currentProjectId) {
+            const remote = error.details.project as CanvasProject | undefined;
+            const revision = Number(error.details.revision || remote?.revision || 0);
+            if (remote) syncBases.set(currentProjectId, remote);
+            const pending = useCanvasStore.getState().projects.find((item) => item.id === currentProjectId);
+            useCanvasStore.setState((state) => ({ canvasConflicts: { ...state.canvasConflicts, [currentProjectId]: { message: "画布已被其他窗口更新，待同步操作已保留", revision, pendingOperations: pending ? diffCanvasProject(remote || syncBases.get(currentProjectId) || pending, pending).length : 0 } } }));
+            window.dispatchEvent(new CustomEvent("canvas-sync-conflict", { detail: { projectId: currentProjectId, revision } }));
+        }
+        // 保留本地投影和 syncBases，下一次显式修改会按新 revision 重试待提交操作。
+    }
 }
 
 async function hydrateCanvasProjectsFromBackend() {
@@ -139,6 +157,8 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
     hydrated: false,
     projects: loadFromLocalStorage().map(normalizeProjectMediaUrls),
     backendRevisions: {},
+    canvasConflicts: {},
+    clearCanvasConflict: (id) => set((state) => { const next = { ...state.canvasConflicts }; delete next[id]; return { canvasConflicts: next }; }),
     createProject: (Title = i18n.t("canvas.project.untitled")) => {
         const now = new Date().toISOString();
         const id = nanoid();
@@ -213,11 +233,25 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
 
 function scheduleCanvasSync() {
     if (saveTimer) clearTimeout(saveTimer);
-    const generation = syncGeneration;
     saveTimer = setTimeout(() => {
         saveTimer = null;
-        void syncCanvasProjects(useCanvasStore.getState().projects, generation);
+        syncRequested = true;
+        if (!syncPromise) {
+            syncPromise = flushCanvasSync().finally(() => {
+                syncPromise = null;
+                if (syncRequested) scheduleCanvasSync();
+            });
+        }
     }, 400);
+}
+
+async function flushCanvasSync() {
+    while (syncRequested) {
+        syncRequested = false;
+        const generation = syncGeneration;
+        await syncCanvasProjects(useCanvasStore.getState().projects, generation);
+        if (generation !== syncGeneration) syncRequested = true;
+    }
 }
 
 function diffCanvasProject(base: CanvasProject, next: CanvasProject): Array<Record<string, unknown>> {
@@ -260,10 +294,23 @@ function diffCanvasProject(base: CanvasProject, next: CanvasProject): Array<Reco
     return operations;
 }
 
-function applyBackendCanvasEvent(event: unknown) {
+function applyBackendCanvasEvent(event: unknown, preservePendingLocalChanges = false) {
     if (!event || typeof event !== "object") return;
     const value = event as { type?: unknown; entityId?: unknown; revision?: unknown; payload?: unknown };
     if (value.type !== "canvas.updated") return;
+    if (syncPromise) {
+        deferredBackendEvents.push(event);
+        if (!deferredBackendEventsWaiter) {
+            const currentSync = syncPromise;
+            deferredBackendEventsWaiter = currentSync.finally(() => {
+                deferredBackendEventsWaiter = null;
+                const pending = deferredBackendEvents;
+                deferredBackendEvents = [];
+                pending.forEach((item) => applyBackendCanvasEvent(item, true));
+            });
+        }
+        return;
+    }
     const payload = value.payload;
     const isProject = (item: unknown): item is CanvasProject => Boolean(
         item && typeof item === "object"
@@ -278,8 +325,9 @@ function applyBackendCanvasEvent(event: unknown) {
     const entityId = typeof value.entityId === "string" ? value.entityId : "";
     const deleted = payload && typeof payload === "object" && Number((payload as { deleted?: unknown }).deleted || 0) > 0;
     if (!isProjectList && !projects.length && !(deleted && entityId)) return;
-    // MCP/其他窗口的远程写入必须使旧的延迟保存失效，否则旧快照会在实时事件之后再次覆盖节点。
-    if (saveTimer) {
+    // 没有本页面正在提交时，远程写入才需要使旧的延迟快照失效；提交期间保留定时器，
+    // 让本页面连续产生的后续修改排队等待前一个 revision 完成。
+    if (saveTimer && !preservePendingLocalChanges) {
         clearTimeout(saveTimer);
         saveTimer = null;
     }

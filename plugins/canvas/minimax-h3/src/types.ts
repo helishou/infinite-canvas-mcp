@@ -158,10 +158,16 @@ export type H3Segment = {
     denoise?: number;
     trimIn?: number;
     trimOut?: number;
+    // 已失效的遗留字段：南风 V10 主节点没有任何 motion/context 输入，且活跃预设会跳过
+    // prepareH3MotionContext，因此该开关现在不产生任何效果（保留仅为兼容历史数据）。
     motionContextEnabled?: boolean;
-    tailFrameEnabled?: boolean;
+    // 上一段成品视频作为「参考视频」喂进本段：必须显式开启，默认关闭。
+    // 只有链式续跑（runFromCurrent）时生效；标在本段上（index > 0 才有意义）。
+    // 注意：唯一有效键名是 previousVideoAsReference，不要再引入别名。
+    previousVideoAsReference?: boolean;
     // 尾帧接续：本段运行结束后，下一段运行自动抓取本段尾帧作为首帧参考并拼接到提示词
     // （仅运行时拼接，不写回 prompt 编辑区）。该开关标在本段上，表示「把我的尾帧传给下一段」。
+    // 注意：唯一有效键名是 tailFrameContinuation；不要再引入 tailFrameEnabled 之类的别名。
     tailFrameContinuation?: boolean;
     motionContextNoiseEnabled?: boolean;
     motionContextNoiseAlpha?: number;

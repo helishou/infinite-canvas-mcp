@@ -70,16 +70,16 @@ export function validateVideoPlan(segments: H3PlannedSegment[]) {
 }
 
 export function compileChineseH3Prompt(segment: H3PlannedSegment, refs = segment.references): string {
-    const ordered = [...refs].sort((a, b) => a.order - b.order);
+    const ordered = [...(refs || [])].sort((a, b) => a.order - b.order);
     const counters = { image: 0, video: 0, audio: 0 };
     const references = ordered.map((ref) => {
         const label = ref.type === "image" ? "图片" : ref.type === "video" ? "视频" : "音频";
         const ordinal = ++counters[ref.type];
         return `@${label}${ordinal}：${ref.name}`;
     }).join("；") || "无";
-    const timeline = segment.timeline.map((item) => `${item.start.toFixed(1)}-${item.end.toFixed(1)}秒：动作：${item.action}；运镜：${item.camera}${item.composition ? `；构图：${item.composition}` : ""}${item.effects ? `；效果：${item.effects}` : ""}`).join("\n");
+    const timeline = (segment.timeline || []).map((item) => `${item.start.toFixed(1)}-${item.end.toFixed(1)}秒：动作：${item.action}；运镜：${item.camera}${item.composition ? `；构图：${item.composition}` : ""}${item.effects ? `；效果：${item.effects}` : ""}`).join("\n");
     return [
-        `主体定义：${segment.subjects.map((item) => item.name || item.subjectId).join("、") || "按参考图保持主体一致"}`,
+        `主体定义：${(segment.subjects || []).map((item) => item.name || item.subjectId).join("、") || "按参考图保持主体一致"}`,
         `镜头目标：${segment.title || segment.sourceShotId}`,
         `起始画面：${segment.openingState}`,
         `时间轴动作与运镜：\n${timeline}`,
@@ -87,7 +87,7 @@ export function compileChineseH3Prompt(segment: H3PlannedSegment, refs = segment
         segment.continuityIn ? `连续性要求（接入）：${segment.continuityIn}` : "",
         segment.continuityOut ? `连续性要求（接出）：${segment.continuityOut}` : "",
         `参考素材：${references}`,
-        `光影与物理效果：${segment.timeline.map((item) => item.effects).filter(Boolean).join("；") || "遵循起始画面与参考素材的光照、材质和空间关系自然变化"}`,
+        `光影与物理效果：${(segment.timeline || []).map((item) => item.effects).filter(Boolean).join("；") || "遵循起始画面与参考素材的光照、材质和空间关系自然变化"}`,
         segment.soundscape ? `声音环境：${segment.soundscape}` : "",
         segment.music ? `配乐：${segment.music}` : "",
         segment.constraints?.length ? `限制条件：${segment.constraints.join("；")}` : "",
@@ -96,7 +96,9 @@ export function compileChineseH3Prompt(segment: H3PlannedSegment, refs = segment
 }
 
 export function normalizePlannedSegment(segment: H3PlannedSegment) {
-    const refs = [...segment.references].sort((a, b) => a.order - b.order);
+    // references/subjects 允许缺省：validateVideoPlan 用 `|| []` 容错，这里若直接展开会抛
+    // "segment.references is not iterable" —— 两边口径必须一致。
+    const refs = [...(segment.references || [])].sort((a, b) => a.order - b.order);
     const images = refs.filter((ref) => ref.type === "image");
     const videos = refs.filter((ref) => ref.type === "video");
     const audios = refs.filter((ref) => ref.type === "audio");
@@ -113,7 +115,7 @@ export function normalizePlannedSegment(segment: H3PlannedSegment) {
         continuityIn: segment.continuityIn,
         continuityOut: segment.continuityOut,
         timeline: segment.timeline,
-        subjects: segment.subjects,
+        subjects: segment.subjects || [],
         refs: { image: images, video: videos, audio: audios },
         refItems: refs,
         status: "idle",

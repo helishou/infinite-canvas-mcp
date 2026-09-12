@@ -86,6 +86,8 @@ npx -y @basketikun/infinite-canvas-backend mcp
 
 使用时可以直接在 Codex 里说“打开 Infinite Canvas”。网页只连接 Backend 的一个地址和 Token；旧版需要 `17371` 的客户端仍可启动 `canvas-agent`，它现在只是转发到 Backend，不再创建独立业务数据库。
 
+画布 MCP 的读写和生成统一经由 Backend 原生执行层，复用统一的画布操作、任务、媒体落库、日志和结果回写；调用画布生成工具不需要打开目标画布页面，页面打开后会通过 Backend 事件同步结果。
+
 使用 Backend MCP：
 
 ```bash

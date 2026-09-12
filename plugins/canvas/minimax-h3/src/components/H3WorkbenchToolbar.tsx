@@ -20,16 +20,16 @@ type Props = {
     onPlayAll: () => void;
 };
 
-export function H3WorkbenchToolbar({ ctx, metadata, segments, selected, selectedIndex, outputs, playhead, total, fmt, onPlayAll, status, error, onRetry }: Props) {
+export function H3WorkbenchToolbar({ ctx, metadata, segments, selected, selectedIndex, outputs, playhead, total, fmt }: Props) {
     const [timelineDownloading, setTimelineDownloading] = useState(false);
     const addSegment = () => {
         const next = compactSegmentStarts([...segments, { id: `segment-${Date.now()}`, prompt: String(metadata.prompt || defaultPrompt), duration: 5, status: "idle" }]);
         ctx.updateMetadata({ segments: next, selectedSegmentId: next[next.length - 1].id });
     };
-    const timelineVideos = segments.map((segment, index) => {
+    const timelineVideos: Array<{ name: string; url: string; storageKey?: string }> = segments.flatMap((segment, index) => {
         const url = resultUrl(segment.result) || segment.results?.find((item) => item.type === "video")?.url || "";
-        return url ? { name: `Clip-${index + 1}.mp4`, url, storageKey: segment.resultStorageKey } : null;
-    }).filter((item): item is { name: string; url: string; storageKey?: string } => Boolean(item));
+        return url ? [{ name: `Clip-${index + 1}.mp4`, url, storageKey: segment.resultStorageKey }] : [];
+    });
     const downloadTimeline = async () => {
         if (!timelineVideos.length || timelineDownloading) return;
         setTimelineDownloading(true);

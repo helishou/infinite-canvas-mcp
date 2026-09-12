@@ -47,6 +47,9 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const [prompt, setPrompt] = useState(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
     const [expanded, setExpanded] = useState(false);
+    // 本次会带上的参考图数量（连接来的图片节点 + 提示词里 @ 到的图片）：
+    // 决定输入场景（0 = 文生 / 1 = 单图 / ≥2 = 多图），进而决定参数字段读哪个工作流。
+    const referenceCount = connectedNodes.filter((item) => item.type === CanvasNodeType.Image).length + mentionReferences.filter((item) => item.kind === "image").length;
 
     // Restore prompts only when switching nodes; preserve the current input after generation on the same node.
     useEffect(() => {
@@ -108,6 +111,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                                 onOpenChange={onImageSettingsOpenChange}
                                 comfyParams={node.metadata?.comfyParams}
                                 onComfyParamsChange={(value) => onConfigChange(node.id, { comfyParams: value })}
+                                referenceCount={referenceCount}
                             />
                         </>
                     ) : mode === "video" ? (

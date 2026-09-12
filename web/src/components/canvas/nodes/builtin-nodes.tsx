@@ -29,7 +29,7 @@ function builtinResource(node: CanvasNodeData): CanvasNodeResource | null | Canv
 
 const iconClass = "size-5";
 
-const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
+const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = ([
     { type: CanvasNodeType.Text, title: i18n.t("assets.kinds.text"), icon: <FileText className={iconClass} />, minimapColor: undefined, resource: builtinResource },
     { type: CanvasNodeType.Image, title: i18n.t("assets.kinds.image"), icon: <ImageIcon className={iconClass} />, minimapColor: "#10b981", keepAspectRatio: (node: CanvasNodeData) => !node.metadata?.freeResize, resource: builtinResource },
     { type: CanvasNodeType.Video, title: i18n.t("assets.kinds.video"), icon: <Video className={iconClass} />, minimapColor: "#f97316", keepAspectRatio: () => true, resource: builtinResource },
@@ -37,10 +37,10 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
     { type: CanvasNodeType.Config, title: i18n.t("canvas.configNode.title"), icon: <Settings2 className={iconClass} />, minimapColor: "#60a5fa", hasSourceHandle: false },
     { type: CanvasNodeType.Group, title: i18n.t("canvas.node.group"), icon: <Group className={iconClass} />, minimapColor: "#94a3b8" },
     { type: CanvasNodeType.Character, title: i18n.t("assets.kinds.character"), icon: <User className={iconClass} />, minimapColor: "#f43f5e", resource: builtinResource },
-    h3SystemDefinition,
-].map((def) => {
-    const spec = NODE_SPECS[def.type];
-    return spec ? { ...def, title: spec.title, defaultSize: { width: spec.width, height: spec.height }, defaultMetadata: spec.metadata } : def;
+    h3SystemDefinition as unknown as CanvasNodeDefinition,
+] as Array<Partial<CanvasNodeDefinition> & { type: string }>).map((def) => {
+    const spec = NODE_SPECS[def.type as CanvasNodeType];
+    return (spec ? { ...def, title: spec.title, defaultSize: { width: spec.width, height: spec.height }, defaultMetadata: spec.metadata } : def) as CanvasNodeDefinition;
 });
 
 let registered = false;

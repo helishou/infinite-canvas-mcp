@@ -23,7 +23,7 @@ const rtxQualities = ["ULTRA", "HIGH", "MEDIUM"];
 function H3Dropdown({ values, value, onChange, placeholder, allowClear = false, format, searchable = false, listId = "nfh3-options" }: { values: Array<string | number>; value?: string | number; onChange: (value: string | number) => void; placeholder?: string; allowClear?: boolean; format?: (value: string | number) => string; searchable?: boolean; listId?: string }) {
     const selected = value === undefined || value === null ? undefined : String(value);
     const options = values.map((item) => ({ value: String(item), label: format ? format(item) : String(item) }));
-    return <Select size="small" showSearch={searchable} allowClear={allowClear} value={selected} placeholder={placeholder} optionFilterProp="label" options={options} onChange={(v) => { onChange(v as string); }} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} style={{ width: "100%" }} popupMatchSelectWidth={false} />;
+    return <Select size="small" showSearch={searchable} allowClear={allowClear} value={selected} placeholder={placeholder} optionFilterProp="label" options={options} onChange={(v) => { onChange(v as string); }} onMouseDown={(event) => event.stopPropagation()} style={{ width: "100%" }} popupMatchSelectWidth={false} />;
 }
 
 export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
@@ -55,8 +55,8 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         void ctx.storage.get<Record<string, string>>("h3-sigma-presets").then((stored) => {
             const merged = Object.fromEntries(Object.entries({ ...legacy, ...(stored || {}) }).filter(([, value]) => typeof value === "string" && value.trim()));
             if (Object.keys(merged).length && JSON.stringify(merged) !== JSON.stringify(stored || {})) void ctx.storage.set("h3-sigma-presets", merged);
-            if (active) setSigmaPresets(merged);
-        }).catch(() => { if (active) setSigmaPresets(Object.fromEntries(Object.entries(legacy).filter(([, value]) => typeof value === "string" && value.trim()))); });
+            if (active) setSigmaPresets(merged as Record<string, string>);
+        }).catch(() => { if (active) setSigmaPresets(Object.fromEntries(Object.entries(legacy).filter(([, value]) => typeof value === "string" && value.trim())) as Record<string, string>); });
         return () => { active = false; };
     }, [ctx.storage, segment?.id]);
     if (!segment) return null;

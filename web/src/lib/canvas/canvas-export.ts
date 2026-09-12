@@ -4,6 +4,7 @@ import i18n from "@/i18n";
 import { createZip } from "@/lib/zip";
 import { getMediaBlob } from "@/services/file-storage";
 import { getImageBlob } from "@/services/image-storage";
+import { fetchBackendGenerationLogs, fetchBackendTasks } from "@/services/backend-api";
 import type { CanvasExportAsset, CanvasExportFile } from "@/types/canvas-export";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
@@ -18,17 +19,26 @@ export async function exportCanvasProjects(projects: CanvasProject[], fileName =
                     const blob = storageKey.startsWith("image:") ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
                     if (!blob) return;
                     const path = `projects/${project.id}/files/${safeFileName(storageKey)}.${fileExtension(blob.type, storageKey)}`;
-                    files.push({ storageKey, path, mimeType: blob.type || "application/octet-stream", bytes: blob.size });
+                    files.push({ storageKey, path, mimeType: blob.type || "application/octet-stream", bytes: blob.size, sha256: await sha256(blob) });
                     zipFiles.push({ name: path, data: blob });
                 }),
             );
-            return { project, files };
+            const [logs, tasks] = await Promise.all([
+                fetchBackendGenerationLogs({ projectId: project.id, limit: 500 }).then((result) => result.logs || []).catch(() => []),
+                fetchBackendTasks({ projectId: project.id, limit: 500, offset: 0 }).then((result) => (result.tasks || []).filter((task) => ["succeeded", "failed", "cancelled"].includes(task.status))).catch(() => []),
+            ]);
+            return { project, files, logs: logs as Array<Record<string, unknown>>, taskSummaries: tasks as Array<Record<string, unknown>> };
         }),
     );
 
     const data: CanvasExportFile = { app: "infinite-canvas", version: 3, exportedAt: new Date().toISOString(), projects: exportedProjects };
     const zip = await createZip([{ name: "projects.json", data: JSON.stringify(data, null, 2) }, ...zipFiles]);
     saveAs(zip, `${safeFileName(fileName)}.zip`);
+}
+
+async function sha256(blob: Blob) {
+    const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+    return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
 export async function exportCanvasNodes(nodes: CanvasNodeData[], fileName = i18n.t("canvas.export.defaultNodesName")) {

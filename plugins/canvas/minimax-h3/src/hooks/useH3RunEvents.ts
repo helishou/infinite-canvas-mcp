@@ -42,9 +42,8 @@ export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3, update: (patc
             }
             return;
         }
-        const runningHub = String(current.minimaxEngine || "").toLowerCase() === "runninghub";
         updateRef.current({ cancelRequested: true });
-        void (runningHub ? ctx.ai.cancelRunningHubH3Task(taskId) : ctx.ai.cancelLocalH3Task(taskId)).then(() => updateRef.current({ status: "cancelled", errorDetails: "任务已取消", runProgress: 0, runtimeTaskId: "", runtimeRunId: "" })).catch((error) => updateRef.current({ status: "error", errorDetails: error instanceof Error ? error.message : String(error), runtimeRunId: "" }));
+        void ctx.ai.cancelCanvasH3Task(taskId).then(() => updateRef.current({ status: "cancelled", errorDetails: "任务已取消", runProgress: 0, runtimeTaskId: "", runtimeRunId: "" })).catch((error) => updateRef.current({ status: "error", errorDetails: error instanceof Error ? error.message : String(error), runtimeRunId: "" }));
     }), [ctx.node.id]);
 
     useEffect(() => {

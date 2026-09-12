@@ -410,6 +410,7 @@ async function processImageFields(
 }
 
 export class WorkflowExecutor {
+    private readonly controllers = new Map<string, AbortController>();
     constructor(
         private readonly bridge: ComfyUiBackend,
         private readonly tasks: TaskStore,
@@ -498,6 +499,7 @@ export class WorkflowExecutor {
         const task = clientTaskId
             ? this.tasks.create(clientTaskId, "workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) })
             : this.tasks.create("workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) });
+        this.controllers.set(task.id, controller);
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
 
         try {
@@ -527,8 +529,10 @@ export class WorkflowExecutor {
             return { taskId: task.id, ...finalResult };
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            this.tasks.update(task.id, { status: "failed", error: message });
-            this.events?.publish({ type: "task.failed", entityId: task.id, payload: { error: message } });
+            if (this.tasks.get(task.id)?.status !== "cancelled") {
+                this.tasks.update(task.id, { status: "failed", error: message });
+                this.events?.publish({ type: "task.failed", entityId: task.id, payload: { error: message } });
+            }
             this.db?.createGenerationLog({
                 projectId: projectId || "workflow",
                 nodeId,
@@ -545,7 +549,19 @@ export class WorkflowExecutor {
                 params: { fields: fieldValues, configTitle: config.title },
             });
             throw error;
+        } finally {
+            this.controllers.delete(task.id);
         }
+    }
+
+    cancel(id: string) {
+        this.controllers.get(id)?.abort();
+        this.controllers.delete(id);
+        const task = this.tasks.get(id);
+        if (!task || !["queued", "running"].includes(task.status)) throw new Error(`任务状态 ${task?.status || "unknown"} 不可取消`);
+        const updated = this.tasks.cancel(id);
+        this.events?.publish({ type: "task.updated", entityId: id, payload: updated });
+        return updated;
     }
 
     private async executeWorkflow(

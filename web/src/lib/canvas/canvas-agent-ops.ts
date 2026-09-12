@@ -78,16 +78,36 @@ export function computeFlowLayout(opts: {
     anchorX: number;
     anchorY: number;
     gap?: number;
+    /** 这些节点不参与分层排布，统一停到排布结果的最右列（纵向堆叠）。用于把大型节点（如 H3 导演台）排除在流程之外并靠右停放。 */
+    parkAtRight?: string[];
 }): Map<string, { x: number; y: number }> {
     const { nodes, connections, ids, scopeEdges = false, anchorX, anchorY } = opts;
     const gap = opts.gap ?? AUTO_LAYOUT_GAP;
-    const idSet = new Set(ids);
+    const parkSet = new Set(opts.parkAtRight ?? []);
+    // 真正参与分层排布的节点：排除被停放（park）的节点。
+    const flowIds = ids.filter((id) => !parkSet.has(id));
+    const result = new Map<string, { x: number; y: number }>();
+
+    // 没有任何可排布的非停放节点：仅把停放节点纵向堆叠在 anchor 处。
+    if (flowIds.length === 0) {
+        let stackedY = anchorY;
+        ids.filter((id) => parkSet.has(id)).forEach((id) => {
+            const node = nodes.find((n) => n.id === id);
+            const h = node?.height ?? 0;
+            const pos = resolveFreePosition(nodes, { x: anchorX, y: stackedY }, node?.width ?? 0, h);
+            result.set(id, pos);
+            stackedY = pos.y + h + gap;
+        });
+        return result;
+    }
+
+    const idSet = new Set(flowIds);
     const byId = new Map(nodes.map((node) => [node.id, node]));
     const edges = connections.filter((conn) => idSet.has(conn.toNodeId) && (scopeEdges ? idSet.has(conn.fromNodeId) : byId.has(conn.fromNodeId)));
 
     const indeg = new Map<string, number>();
     const outAdj = new Map<string, string[]>();
-    ids.forEach((id) => {
+    flowIds.forEach((id) => {
         indeg.set(id, 0);
         outAdj.set(id, []);
     });
@@ -99,7 +119,7 @@ export function computeFlowLayout(opts: {
     // 最长路径分层：Kahn 拓扑 + 松弛兜底环。
     const level = new Map<string, number>();
     const queue: string[] = [];
-    ids.forEach((id) => {
+    flowIds.forEach((id) => {
         if ((indeg.get(id) ?? 0) === 0) {
             level.set(id, 0);
             queue.push(id);
@@ -114,7 +134,7 @@ export function computeFlowLayout(opts: {
             if (d === 0) queue.push(v);
         }
     }
-    for (let pass = 0; pass < ids.length; pass++) {
+    for (let pass = 0; pass < flowIds.length; pass++) {
         let changed = false;
         for (const conn of edges) {
             const lv = Math.max(level.get(conn.toNodeId) ?? 0, (level.get(conn.fromNodeId) ?? 0) + 1);
@@ -125,35 +145,72 @@ export function computeFlowLayout(opts: {
         }
         if (!changed) break;
     }
-    ids.forEach((id) => {
+    flowIds.forEach((id) => {
         if (!level.has(id)) level.set(id, 0);
     });
 
-    const maxW = Math.max(...ids.map((id) => byId.get(id)?.width ?? 0));
-    const maxH = Math.max(...ids.map((id) => byId.get(id)?.height ?? 0));
-    const colStride = maxW + gap;
+    const maxH = Math.max(...flowIds.map((id) => byId.get(id)?.height ?? 0));
     const rowStride = maxH + gap;
     const maxLayer = Math.max(...level.values());
 
-    const result = new Map<string, { x: number; y: number }>();
+    // 计算每列（层）的实际最大宽度：列间距只取决于该列内最宽节点，
+    // 不再被选集中某个特别宽的节点（如 H3 导演台）把全局列间距撑大 → 解决「水平距离太远」。
+    const colMaxW = new Map<number, number>();
+    flowIds.forEach((id) => {
+        const layer = level.get(id) ?? 0;
+        colMaxW.set(layer, Math.max(colMaxW.get(layer) ?? 0, byId.get(id)?.width ?? 0));
+    });
+
+    // 逐列累加列左缘：第 0 列从 anchorX 起，之后每列 = 上一列左缘 + 上一列最宽 + gap。
+    const colX = new Map<number, number>();
+    let xCursor = anchorX;
+    [...colMaxW.keys()].sort((a, b) => a - b).forEach((layer) => {
+        colX.set(layer, xCursor);
+        xCursor += (colMaxW.get(layer) ?? 0) + gap;
+    });
+
     // 没有内部连接（全平铺）→ 退回网格，避免单列拉得太长。
     if (maxLayer === 0) {
-        const cols = Math.max(1, Math.ceil(Math.sqrt(ids.length)));
-        ids.forEach((id, index) => {
+        const cols = Math.max(1, Math.ceil(Math.sqrt(flowIds.length)));
+        // 网格按列切分：每列宽度取该列节点实际最大宽，列间距贴合内容而非全局最宽。
+        const colWidths = new Array(cols).fill(0);
+        flowIds.forEach((id, index) => {
+            const col = index % cols;
+            colWidths[col] = Math.max(colWidths[col], byId.get(id)?.width ?? 0);
+        });
+        const gridColX = new Array(cols).fill(0);
+        let gx = anchorX;
+        for (let c = 0; c < cols; c++) {
+            gridColX[c] = gx;
+            gx += colWidths[c] + gap;
+        }
+        flowIds.forEach((id, index) => {
             const col = index % cols;
             const row = Math.floor(index / cols);
-            result.set(id, { x: anchorX + col * colStride, y: anchorY + row * rowStride });
+            result.set(id, { x: gridColX[col], y: anchorY + row * rowStride });
         });
-        return result;
+    } else {
+        // 分层：层 0（输入）在最左，层越大越靠右；同层纵向堆叠。
+        const layerRows = new Map<number, number>();
+        [...level.entries()].sort((a, b) => a[1] - b[1] || (byId.get(a[0])?.position.y ?? 0) - (byId.get(b[0])?.position.y ?? 0)).forEach(([id, layer]) => {
+            const row = layerRows.get(layer) ?? 0;
+            layerRows.set(layer, row + 1);
+            result.set(id, { x: colX.get(layer) ?? anchorX, y: anchorY + row * rowStride });
+        });
     }
 
-    // 分层：层 0（输入）在最左，层越大越靠右；同层纵向堆叠。
-    const layerRows = new Map<number, number>();
-    [...level.entries()].sort((a, b) => a[1] - b[1] || (byId.get(a[0])?.position.y ?? 0) - (byId.get(b[0])?.position.y ?? 0)).forEach(([id, layer]) => {
-        const row = layerRows.get(layer) ?? 0;
-        layerRows.set(layer, row + 1);
-        result.set(id, { x: anchorX + layer * colStride, y: anchorY + row * rowStride });
+    // 停放节点：统一放到排布结果的最右列，纵向堆叠（从 anchorY 起，互不重叠，且避让画布上其它节点）。
+    const rightEdge = Math.max(...[...result.entries()].map(([id, pos]) => pos.x + (byId.get(id)?.width ?? 0)), anchorX) + gap;
+    let parkY = anchorY;
+    ids.filter((id) => parkSet.has(id)).forEach((id) => {
+        const node = byId.get(id);
+        const w = node?.width ?? 0;
+        const h = node?.height ?? 0;
+        const pos = resolveFreePosition(nodes, { x: rightEdge, y: parkY }, w, h);
+        result.set(id, pos);
+        parkY = pos.y + h + gap;
     });
+
     return result;
 }
 

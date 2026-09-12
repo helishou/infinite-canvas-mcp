@@ -12,6 +12,8 @@ export type CanvasExecutionRequest = {
     mode: "text" | "image" | "video" | "audio";
     model?: string;
     preset?: string;
+    /** 渠道模型显式配置的工作流；优先于按模型名推断的登记项。 */
+    workflow?: string;
 };
 
 const modelRegistry: CanvasModelDeclaration[] = [
@@ -36,6 +38,8 @@ export function listCanvasModels(): CanvasModelDeclaration[] {
 export function resolveCanvasExecutor(request: CanvasExecutionRequest, directImageSupports = false): CanvasExecutorId {
     const model = String(request.model || "").split("::").pop()?.trim() || "";
     const preset = String(request.preset || "").trim();
+    // 渠道模型显式配置的工作流（文生 / 单图 / 多图路由结果）优先于按模型名推断。
+    if (String(request.workflow || "").trim()) return "comfy-workflow";
     for (const declaration of modelRegistry) {
         if (!declaration.modes.includes(request.mode) || !declaration.matches?.(model, preset)) continue;
         if (declaration.executor === "direct-image" && !directImageSupports) continue;

@@ -347,9 +347,21 @@ export class BackendDatabase {
                 ...segments[index],
                 status: terminalStatus,
                 progress: task.progress,
-                ...(output ? { result: output.url, resultStorageKey: output.storageKey } : {}),
+                runtimeTaskId: "",
+                ...(output ? {
+                    result: output.url,
+                    resultStorageKey: output.storageKey,
+                    results: [
+                        ...(Array.isArray(segments[index].results) ? segments[index].results as Array<Record<string, unknown>> : []).filter((item) => String(item.url || "") !== String(output.url || "")),
+                        { ...output, name: `Clip ${index + 1}` },
+                    ],
+                } : {}),
                 ...(task.error ? { errorDetails: task.error } : {}),
             };
+            const materials = output ? [
+                ...(Array.isArray(metadata.materials) ? metadata.materials as Array<Record<string, unknown>> : []).filter((item) => String(item.url || "") !== String(output.url || "")),
+                { ...output, name: "H3 输出", segmentId: binding.segmentId },
+            ] : metadata.materials;
             const nextProject: CanvasProject = {
                 ...project,
                 revision: Number(project.revision || 0) + 1,
@@ -361,6 +373,7 @@ export class BackendDatabase {
                         segments: segments.map((segment, segmentIndex) => segmentIndex === index ? nextSegment : segment),
                         status: terminalStatus,
                         runProgress: task.progress,
+                        ...(materials ? { materials } : {}),
                         ...(output ? { content: output.url, storageKey: output.storageKey } : {}),
                     },
                 }),
@@ -368,11 +381,15 @@ export class BackendDatabase {
             this.db.prepare(
                 "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
             ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
+            const currentLog = binding.generationLogId ? this.getGenerationLog(binding.generationLogId) : null;
+            const actualSubmission = task.result?.actualSubmission && typeof task.result.actualSubmission === "object" ? task.result.actualSubmission as Record<string, unknown> : null;
             const log = binding.generationLogId
                 ? this.updateGenerationLog(binding.generationLogId, {
                     status: task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "failed",
                     finishedAt: new Date().toISOString(),
+                    durationMs: Math.max(0, Date.now() - new Date(String(currentLog?.startedAt || Date.now())).getTime()),
                     outputs: output ? [output] : [],
+                    ...(actualSubmission ? { params: { ...(currentLog?.params || {}), actualSubmission }, promptId: String(actualSubmission.promptId || "") || undefined } : {}),
                     ...(task.error ? { error: task.error } : {}),
                 })
                 : null;
@@ -410,16 +427,19 @@ export class BackendDatabase {
             const sourcePosition = recordOf(source.position);
             const sourceWidth = Number(source.width || 320);
             const createdIds: string[] = [];
+            // 结果节点尺寸收口到图片节点默认尺寸（340×240 包围盒）并保持原始宽高比，
+            // 与前端画布生成同一口径；不再直接用图片原始像素（gpt-image 输出 1024/1536 会让节点异常巨大）。
+            const outputSizes = media.map((output) => fitImageNodeSize(Number(output.width || 0), Number(output.height || 0)));
+            let resultX = Number(sourcePosition.x || 0) + sourceWidth + 96;
             media.forEach((output, index) => {
                 const id = `image-${crypto.randomUUID()}`;
                 createdIds.push(id);
-                const width = Number(output.width || 680);
-                const height = Number(output.height || 454);
+                const { width, height } = outputSizes[index];
                 nodes.push({
                     id,
                     type: "image",
                     title: `${String(source.title || "图片生成")}｜结果${media.length > 1 ? ` ${index + 1}` : ""}`,
-                    position: { x: Number(sourcePosition.x || 0) + sourceWidth + 96 + index * 720, y: Number(sourcePosition.y || 0) },
+                    position: { x: resultX, y: Number(sourcePosition.y || 0) },
                     width,
                     height,
                     metadata: {
@@ -438,6 +458,8 @@ export class BackendDatabase {
                     },
                 });
                 connections.push({ id: `connection-${crypto.randomUUID()}`, fromNodeId: input.nodeId, toNodeId: id });
+                // 多张结果按实际节点宽度依次排开（原先按固定 720 步长，是 680 宽节点的假设）
+                resultX += width + 40;
             });
             if (!createdIds.length) throw new Error("生成完成但没有返回图片");
             source.metadata = { ...sourceMetadata, status: "success", runtimeTaskId: undefined, errorDetails: undefined, model: input.model, prompt: input.prompt, primaryImageId: createdIds[0], generatedResultIds: createdIds, generationTaskId: task.id };
@@ -461,7 +483,7 @@ export class BackendDatabase {
             const nodes = Array.isArray(project.nodes) ? structuredClone(project.nodes) as Array<Record<string, any>> : [];
             const source = nodes.find((item) => String(item.id || "") === input.nodeId);
             if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) { this.db.exec("COMMIT"); return null; }
-            source.metadata = { ...recordOf(source.metadata), status: "error", runtimeTaskId: undefined, errorDetails: error };
+            source.metadata = { ...recordOf(source.metadata), status: task.status === "cancelled" ? "cancelled" : "error", runtimeTaskId: undefined, errorDetails: task.status === "cancelled" ? undefined : error };
             const nextProject: CanvasProject = { ...project, nodes, revision: Number(project.revision || 0) + 1, updatedAt: new Date().toISOString() };
             this.db.prepare(
                 "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
@@ -771,12 +793,18 @@ export class BackendDatabase {
         return row ? generationLogFromRow(row) : null;
     }
 
-    listGenerationLogs(options: { projectId?: string; nodeId?: string; status?: GenerationLogStatus; limit?: number; offset?: number } = {}): GenerationLog[] {
+    listGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number } = {}): GenerationLog[] {
         const clauses: string[] = [];
         const values: Array<string | number> = [];
         if (options.projectId) { clauses.push("project_id = ?"); values.push(options.projectId); }
         if (options.nodeId) { clauses.push("node_id = ?"); values.push(options.nodeId); }
+        if (options.segmentId) { clauses.push("segment_id = ?"); values.push(options.segmentId); }
+        if (options.runtimeTaskId) { clauses.push("runtime_task_id = ?"); values.push(options.runtimeTaskId); }
+        if (options.platform) { clauses.push("platform = ?"); values.push(options.platform); }
+        if (options.model) { clauses.push("model = ?"); values.push(options.model); }
         if (options.status) { clauses.push("status = ?"); values.push(options.status); }
+        if (options.from) { clauses.push("created_at >= ?"); values.push(options.from); }
+        if (options.to) { clauses.push("created_at <= ?"); values.push(options.to); }
         const limit = Math.max(1, Math.min(500, Number(options.limit || 500)));
         const offset = Math.max(0, Number(options.offset || 0));
         const rows = this.db.prepare(
@@ -877,23 +905,26 @@ export class BackendDatabase {
         };
     }
 
-    listTasks(filter: { status?: RuntimeTaskStatus; kind?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[] } = {}): RuntimeTask[] {
+    listTasks(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {
         const clauses: string[] = [];
         const values: string[] = [];
         if (filter.status) { clauses.push("status = ?"); values.push(filter.status); }
         if (filter.kind) { clauses.push("kind = ?"); values.push(filter.kind); }
-        const rows = this.db.prepare(`SELECT id FROM tasks ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at ASC`).all(...values) as Array<{ id: string }>;
+        const limit = Math.max(1, Math.min(500, Number(filter.limit || 500)));
+        const offset = Math.max(0, Number(filter.offset || 0));
+        const rows = this.db.prepare(`SELECT id FROM tasks ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at DESC`).all(...values) as Array<{ id: string }>;
         const nodeIds = new Set((filter.nodeIds || []).map(String));
         const segmentIds = new Set((filter.segmentIds || []).map(String));
         return rows.map((row) => this.getTask(String(row.id))).filter((task): task is RuntimeTask => Boolean(task)).filter((task) => {
             if (filter.scope === "canvas" && !task.projectId) return false;
             if (filter.scope === "image" && !/image/i.test(`${task.kind} ${task.executor || ""} ${task.model || ""}`)) return false;
             if (filter.scope === "video" && !/video|h3/i.test(`${task.kind} ${task.executor || ""} ${task.model || ""}`)) return false;
+            if (filter.model && task.model !== filter.model) return false;
             if (filter.projectId && task.projectId !== filter.projectId) return false;
             if (nodeIds.size && (!task.nodeId || !nodeIds.has(task.nodeId))) return false;
             if (segmentIds.size && (!task.segmentId || !segmentIds.has(task.segmentId))) return false;
             return true;
-        });
+        }).slice(offset, offset + limit);
     }
 
     addTaskEvent(taskId: string, type: string, payload: Record<string, unknown>): RuntimeTaskEvent {
@@ -931,6 +962,13 @@ export class BackendDatabase {
     deleteSetting(key: string) {
         this.db.prepare("DELETE FROM runtime_settings WHERE key = ?").run(key);
     }
+}
+
+/** 图片结果节点尺寸：收口到图片节点默认尺寸（340×240）包围盒并保持原始宽高比；无有效宽高时用默认尺寸。 */
+function fitImageNodeSize(width: number, height: number) {
+    if (!(width > 0) || !(height > 0)) return { width: 340, height: 240 };
+    const scale = Math.min(1, 340 / width, 240 / height);
+    return { width: width * scale, height: height * scale };
 }
 
 function recordOf(value: unknown): Record<string, unknown> {

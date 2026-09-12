@@ -18,7 +18,17 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected }: 
     // cancel 一个已终态(success)的任务而报错。加 status 守卫后，只要任务已结束
     // （success/error/cancelled/idle），按钮一律回归初始态"生成当前 Clip"。
     const status = String(metadata.status || "idle");
-    const busy = !!String(metadata.runtimeTaskId || "").trim() && ["queued", "loading"].includes(status);
+    const runtimeTaskId = String(metadata.runtimeTaskId || "");
+    // busy 只认生成状态位：status 处于 queued/loading 即视为忙碌。
+    // 绝不能把 runtimeTaskId 作为 busy 的先决条件——否则「status 卡在 loading 但
+    // runtimeTaskId 为空」(父任务创建前请求中断或历史状态残留) 时 busy 反为假，
+    // 按钮显示“生成当前 Clip”，但 requestH3Run 的 status
+    // 守卫会静默吞掉点击，表现成“点不了生成按钮”。原注释担心的“任务成功后残留 taskId
+    // 让按钮卡在取消”不会发生：成功时 status 已是 success，busy 本就为假。
+    const busy = ["queued", "loading"].includes(status);
+    // stuck = 处于运行态却拿不到真实后端任务 id（任务失联 / 日志丢失 / 刷新后轮询无法恢复）。
+    // 此时 cancel 后端无意义，应直接清状态回 idle 让用户重新点生成（见下方 onClick 的 stuck 分支）。
+    const stuck = busy && !runtimeTaskId;
     const fileRef = useRef<HTMLInputElement | null>(null);
     const [transferMessage, setTransferMessage] = useState("");
     const downloadSettings = () => {
@@ -67,6 +77,6 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected }: 
     return <div className="minimax-clip-parameters">
         <div key="settings-header" className="minimax-section-label"><H3Icon name="sliders" /> <span>Setting</span><span className="nfh3-settings-transfer"><button type="button" title="导入参数设置" onClick={() => fileRef.current?.click()}><H3Icon name="restore" /></button><button type="button" title="导出参数设置" onClick={downloadSettings}><H3Icon name="download" /></button><button type="button" title="设为默认参数（新建 H3 节点将自动携带当前参数）" onClick={saveAsDefault}><H3Icon name="database" /></button><input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void readSettings(file); event.currentTarget.value = ""; }} /></span><small className="nfh3-transfer-message">{transferMessage}</small><small className="nfh3-panel-status">{busy ? "运行中" : "就绪"}</small></div>
         <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} patch={patchSelected} />
-        <div key="panel-actions" className="nfh3-panel-actions"><button type="button" className={busy ? "minimax-reset" : "minimax-run"} onClick={() => { const runtimeTaskId = String(metadata.runtimeTaskId || ""); const stuck = busy && !runtimeTaskId; if (busy && !stuck) { ctx.emit("minimax-h3:cancel", { nodeId: ctx.node.id }); return; } ctx.openPanel(); if (stuck) ctx.updateMetadata({ status: "idle", errorDetails: "", runtimeTaskId: "", runProgress: 0, cancelRequested: false, runRequestId: "", runRequestConsumedId: "" }); requestH3Run(ctx); }}><H3Icon name={busy ? "close" : "sparkles"} /> {busy ? "取消生成" : "生成当前 Clip"}</button><button type="button" className={busy ? "minimax-reset" : "minimax-run-all"} onClick={() => { if (busy) { ctx.emit("minimax-h3:cancel", { nodeId: ctx.node.id }); return; } ctx.openPanel(); requestH3Run(ctx, true); }}><H3Icon name={busy ? "close" : "forward"} /> {busy ? "取消运行" : "运行当前及后续"}</button></div>
+        <div key="panel-actions" className="nfh3-panel-actions"><button type="button" className={(busy || stuck) ? "minimax-reset" : "minimax-run"} onClick={() => { if (busy && !stuck) { ctx.emit("minimax-h3:cancel", { nodeId: ctx.node.id }); return; } ctx.openPanel(); if (stuck) ctx.updateMetadata({ status: "idle", errorDetails: "", runtimeTaskId: "", runProgress: 0, cancelRequested: false, runRequestId: "", runRequestConsumedId: "" }); requestH3Run(ctx); }}><H3Icon name={(busy && !stuck) ? "close" : "sparkles"} /> {stuck ? "重置并重新生成" : busy ? "取消生成" : "生成当前 Clip"}</button><button type="button" className={(busy && !stuck) ? "minimax-reset" : "minimax-run-all"} onClick={() => { if (busy && !stuck) { ctx.emit("minimax-h3:cancel", { nodeId: ctx.node.id }); return; } ctx.openPanel(); if (stuck) ctx.updateMetadata({ status: "idle", errorDetails: "", runtimeTaskId: "", runProgress: 0, cancelRequested: false, runRequestId: "", runRequestConsumedId: "" }); requestH3Run(ctx, true); }}><H3Icon name={(busy && !stuck) ? "close" : "forward"} /> {stuck ? "重置并重新运行" : busy ? "取消运行" : "运行当前及后续"}</button></div>
     </div>;
 }

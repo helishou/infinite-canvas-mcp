@@ -41,6 +41,9 @@ test("H3 audit summary reads the submitted API graph instead of raw UI fields", 
         promptId: promptA, seed: 272289703718811, frames: 141, width: 960, height: 544,
         loras: [{ name: "minimax/turbo.safetensors", strength: 1 }, { name: "minimax/cinematic.safetensors", strength: 0.7 }],
         attention: "auto", sigma: "手动：1.0, 0.8, 0.5, 0.0",
+        // 审计必须把真正落到图片/视频/音频槽位的媒体记下来，否则「上一段成品被当成视频1 塞进来」
+        // 这类隐式注入在日志里完全不可见（正是这次修复要防的盲点）。
+        mediaInputs: { images: ["uploaded-reference.png"], videos: [], audios: [] },
     });
     assert.deepEqual(attachH3ActualSubmission({ promptId: promptA, media: [] }, summary, promptA).actualSubmission, summary);
 });
@@ -56,4 +59,5 @@ test("H3 audit reports scheduler Sigma and 192-frame graph values", async () => 
     assert.equal(summary.seed, 792393709737869);
     assert.equal(summary.attention, "disabled");
     assert.equal(summary.sigma, "调度器：simple / 20 步");
+    assert.deepEqual(summary.mediaInputs, { images: ["uploaded-reference.png"], videos: [], audios: [] });
 });

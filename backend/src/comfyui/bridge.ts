@@ -56,6 +56,12 @@ export type H3ActualSubmission = {
     loras?: Array<{ name: string; strength: number }>;
     attention?: string;
     sigma?: string;
+    /**
+     * 实际进入 prompt 图的媒体槽位（图片N/视频N/音频N）。
+     * 之前只记模型/LoRA/步数/尺寸，导致「上一段成品被当成视频1 塞进来」这类
+     * 隐式注入在 UI 的「实际提交配置」和生成日志里完全看不出来。
+     */
+    mediaInputs?: { images: string[]; videos: string[]; audios: string[] };
 };
 
 export type H3LivePreview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
@@ -80,7 +86,8 @@ export function summarizeH3Workflow(workflow: Record<string, any>, promptId: str
         const width = Math.max(32, Math.round(Math.sqrt(megapixels * 1024 * 1024 * ratioWidth(ratio) / ratioHeight(ratio)) / multiple) * multiple);
         const loras = Array.from({ length: 8 }, (_, index) => ({ name: String(native[`LoRA${index + 1}`] || ""), strength: Number(native[`LoRA${index + 1}强度`] ?? 1), enabled: native[`LoRA${index + 1}启用`] === true })).filter((item) => item.enabled && item.name && item.name !== "未选择").map(({ name, strength }) => ({ name, strength }));
         const manual = native["V81一采使用手动Sigma"] === true ? native["H3完整Sigma序列"] : native["西格玛模式"] === "手动序列" ? native["手动西格玛"] : "";
-        return { promptId, seed: Number(native["随机种子"]), frames: durationToFrames(Number(native["时长秒"] || 5)), ...(requestedRatio === "原图比例" ? {} : { width, height: Math.max(32, Math.round(width * ratioHeight(ratio) / ratioWidth(ratio) / multiple) * multiple) }), ...(loras.length ? { loras } : {}), attention: native["启用H3 SLA"] === true ? "H3 SLA" : String(native.SageAttention || "disabled"), sigma: manual ? `手动：${String(manual)}` : `调度器：${String(native["调度器"] || "")} / ${Number(native["采样步数"] || 0)} 步` };
+        const mediaInputs = { images: pickNativeSlots(native, "图片", 9), videos: pickNativeSlots(native, "视频", 3), audios: pickNativeSlots(native, "音频", 3) };
+        return { promptId, seed: Number(native["随机种子"]), frames: durationToFrames(Number(native["时长秒"] || 5)), ...(requestedRatio === "原图比例" ? {} : { width, height: Math.max(32, Math.round(width * ratioHeight(ratio) / ratioWidth(ratio) / multiple) * multiple) }), ...(loras.length ? { loras } : {}), attention: native["启用H3 SLA"] === true ? "H3 SLA" : String(native.SageAttention || "disabled"), sigma: manual ? `手动：${String(manual)}` : `调度器：${String(native["调度器"] || "")} / ${Number(native["采样步数"] || 0)} 步`, mediaInputs };
     }
     const inputsOf = (type: string) => nodes.find((node) => node.class_type === type)?.inputs || {};
     const condition = nodes.find((node) => node.class_type === "MiniMaxH3ReferenceToVideo" || node.class_type === "MiniMaxH3ImageToVideo")?.inputs || {};
@@ -101,7 +108,17 @@ export function summarizeH3Workflow(workflow: Record<string, any>, promptId: str
         ...(loras.length ? { loras } : {}),
         attention,
         sigma: manual ? `手动：${String(manual)}` : `调度器：${String(scheduler.scheduler || "")} / ${Number(scheduler.steps || 0)} 步`,
+        mediaInputs: {
+            images: nodes.filter((node) => node.class_type === "LoadImage").map((node) => String(node.inputs?.image || "")).filter(Boolean),
+            videos: nodes.filter((node) => node.class_type === "LoadVideo").map((node) => String(node.inputs?.file || node.inputs?.video || "")).filter(Boolean),
+            audios: nodes.filter((node) => node.class_type === "LoadAudio").map((node) => String(node.inputs?.audio || "")).filter(Boolean),
+        },
     };
+}
+
+/** 读取南风 V10 主节点上真正落到槽位里的媒体名（图片1..9 / 视频1..3 / 音频1..3），跳过「未选择」。 */
+function pickNativeSlots(native: Record<string, any>, prefix: string, count: number) {
+    return Array.from({ length: count }, (_, index) => String(native[`${prefix}${index + 1}`] ?? "").trim()).filter((value) => value && value !== "未选择");
 }
 
 /** 总后台侧 ComfyUI Bridge：任务持久化统一走总后台 SQLite。 */
@@ -330,15 +347,35 @@ export class ComfyUiBackend {
         if (this.deps.tasks.get(task.id)?.status === "cancelled") return;
         const controller = new AbortController(); this.controllers.set(task.id, controller);
         this.comfyExecutions.set(task.id, { url: comfyUrl });
+        let executionCacheCleared = false;
         try {
             this.updateTask(task.id, { status: "running", progress: 0.05 });
             this.deps.tasks.addEvent(task.id, "status", { status: "running" });
             const result = preset.id === "minimax-h3" && task.params.autoSplit === true && typeof task.input.video === "string"
                 ? await this.executeH3Segments(task, preset.id, task.input, task.params, comfyUrl, controller)
                 : await this.executeWorkflow(task, preset.id, task.input, task.params, comfyUrl, controller);
+            if (preset.id === "minimax-h3") {
+                await this.clearComfyExecutionCache(comfyUrl);
+                executionCacheCleared = true;
+            }
             this.updateTask(task.id, { status: "succeeded", progress: 1, result });
             this.deps.tasks.addEvent(task.id, "result", result);
-        } finally { this.controllers.delete(task.id); this.comfyExecutions.delete(task.id); }
+        } finally {
+            if (preset.id === "minimax-h3" && !executionCacheCleared) {
+                try { await this.clearComfyExecutionCache(comfyUrl); } catch (error) { console.warn("[comfyui] H3 执行缓存清理失败:", error instanceof Error ? error.message : String(error)); }
+            }
+            this.controllers.delete(task.id); this.comfyExecutions.delete(task.id);
+        }
+    }
+
+    /** 清掉 ComfyUI 的执行上下文和 CUDA allocator 缓存，但保留 H3 模型，避免下一 Clip 重新加载模型。 */
+    private async clearComfyExecutionCache(comfyUrl: string) {
+        const response = await fetch(`${comfyUrl}/free`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ unload_models: false, free_memory: true }),
+        });
+        if (!response.ok) throw new Error(`ComfyUI /free failed: HTTP ${response.status}`);
     }
 
     private async executeH3Segments(task: RuntimeTask, preset: string, input: Record<string, unknown>, params: Record<string, unknown>, comfyUrl: string, controller: AbortController) {
@@ -887,7 +924,9 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
                 if (source["136"]?.inputs) source["136"].inputs[source["136"]?.class_type === "JZL_MiniMaxH3ReferenceToVideo2" ? `ref_audio_${index}` : `ref_audios.ref_audio_${index}`] = [loadId, 0];
             }
             const previousVideo = String(input.previousVideo || "");
-            if (previousVideo && params.motionContext !== false) {
+            // 只有显式开启「上一段作为参考视频」才注入 motion context；旧条件 params.motionContext !== false
+            // 会让任何带了 previousVideo 的调用（含链式续跑）静默改图，故收紧为显式白名单。
+            if (previousVideo && params.previousVideoAsReference === true) {
                 const previousName = await upload(previousVideo);
                 source["9106"] = { class_type: "LoadVideo", inputs: { file: previousName }, _meta: { title: "MiniMax Motion Context previous clip" } };
                 source["9107"] = { class_type: "GetVideoComponents", inputs: { video: ["9106", 0] }, _meta: { title: "MiniMax Motion Context frames" } };

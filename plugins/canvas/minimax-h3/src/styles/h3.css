@@ -73,6 +73,10 @@
 .minimax-clip-motion:hover { opacity:1; }
 .minimax-clip-motion.off { color:#64748b; opacity:.5; }
 .minimax-clip-motion.off:hover { opacity:.85; color:#94a3b8; }
+/* 上一段作为参考视频开关「开启」状态：实心天蓝 + 发光，和关闭态明显区分
+   （该位置原为已失效的 Motion Context 开关，现改为显式的参考视频注入开关） */
+.minimax-clip-motion.on { color:#082f49; background:#38bdf8; opacity:1; box-shadow:0 0 0 1px #7dd3fc, 0 0 8px rgba(56,189,248,.55); }
+.minimax-clip-motion.on:hover { background:#7dd3fc; color:#082f49; }
 
 .minimax-tl-clip { position:absolute; top:10px; bottom:10px; min-width:54px; border:1px solid #334155; border-radius:5px; background:#24272b; color:#e5e7eb; overflow:hidden; cursor:pointer; }
 .minimax-tl-clip.active { border-color:#ef4444; background:#334155; box-shadow:0 0 0 1px #ef4444 inset; }

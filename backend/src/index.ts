@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 import { loadConfig, saveConfig, ensureDataDirs } from "./config.js";
 import { BackendDatabase } from "./db.js";
@@ -23,6 +24,8 @@ import { DirectImageBackend } from "./runtime/chatgpt-image.js";
 import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
 import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
+import { CanvasH3Runner } from "./canvas/h3-runner.js";
+import { registerCanvasH3RunRoutes } from "./server/h3-run-routes.js";
 
 const logger = createLogger("main");
 
@@ -41,21 +44,43 @@ ensureDataDirs();
 const db = new BackendDatabase();
 const stores = createStores(db);
 const events = new BackendEventBus();
-const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings, media: stores.media, events, onTaskTerminal: (task) => writeBackH3Task(stores, events, task) });
+const writeBackStandaloneH3Task = (task: import("./db.js").RuntimeTask) => task.params?.parentTaskId ? undefined : writeBackH3Task(stores, events, task);
+const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings, media: stores.media, events, onTaskTerminal: writeBackStandaloneH3Task });
 const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
-const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events, runtime.media, (task) => writeBackH3Task(stores, events, task));
+const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events, runtime.media, writeBackStandaloneH3Task);
+const canvasH3Runner = new CanvasH3Runner(runtime.stores, runtime.events, runtime.comfy, runningHub);
 const videoConcat = new VideoConcatBackend(runtime.tasks, undefined, runtime.events, runtime.media);
-
-const { app } = startServer(runtime.db, config, { comfy: runtime.comfy, events: runtime.events, stores: runtime.stores });
-registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
 
 // Workflow import routes
 const workflowStore = new WorkflowStore(db);
 const workflowExecutor = new WorkflowExecutor(runtime.comfy, runtime.stores.tasks, runtime.stores.media, runtime.events, db);
 const directImage = new DirectImageBackend(runtime.stores.tasks, runtime.stores.media);
-const canvasImageDispatcher = new CanvasImageDispatcher(config, runtime.stores, runtime.comfy, directImage, workflowStore, workflowExecutor);
+const canvasImageDispatcher = new CanvasImageDispatcher(config, runtime.stores, runtime.comfy, directImage, workflowStore, workflowExecutor, runtime.events);
+const { app } = startServer(runtime.db, config, {
+    comfy: runtime.comfy, events: runtime.events, stores: runtime.stores,
+    cancelTask: (task) => {
+        if (task.kind === "canvas-image") return canvasImageDispatcher.cancel(task.id);
+        if (task.kind === "canvas-h3-run") return canvasH3Runner.cancel(task.id);
+        if (task.kind.startsWith("comfyui:")) return runtime.comfy.cancel(task.id);
+        if (task.kind === "runninghub:minimax-h3") return runningHub.cancel(task.id);
+        if (task.kind === "video-concat") return videoConcat.cancel(task.id);
+        if (task.kind === "workflow") return workflowExecutor.cancel(task.id);
+        if (task.kind.startsWith("image:")) return directImage.cancel(task.id);
+        throw new Error(`任务类型 ${task.kind} 没有注册取消执行器`);
+    },
+    retryTask: async (task) => {
+        if (task.kind === "canvas-image") return canvasImageDispatcher.retry(task);
+        const clientTaskId = `retry-${crypto.randomUUID()}`;
+        const params = { ...task.params, parentTaskId: task.id };
+        if (task.kind.startsWith("comfyui:")) return runtime.comfy.run(task.kind.slice("comfyui:".length), task.input, params, undefined, clientTaskId);
+        if (task.kind === "runninghub:minimax-h3") return runningHub.run(task.input, params, clientTaskId);
+        throw new Error(`任务类型 ${task.kind} 没有注册重试执行器`);
+    },
+});
+registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
 registerWorkflowRoutes(app, workflowStore, workflowExecutor, runtime.comfy);
 registerCanvasGenerationRoutes(app, canvasImageDispatcher, runtime.stores, runtime.events, runtime.comfy, runningHub);
+registerCanvasH3RunRoutes(app, canvasH3Runner);
 registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat, runtime.events);
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events, basePath: "/agent" }, runtime.comfy);
 const agent = createAgentRuntime({ backendUrl: config.url, backendToken: config.token });
@@ -63,6 +88,8 @@ runtime.agent = agent;
 app.use("/agent", agent.app);
 // Backend 重启后继续观察已提交但尚未结束的 ComfyUI 任务；绑定信息在 SQLite 中。
 for (const task of stores.tasks.list()) {
+    if (["queued", "running"].includes(task.status) && task.kind === "canvas-image") canvasImageDispatcher.resume(task);
+    if (["queued", "running"].includes(task.status) && task.kind === "canvas-h3-run") canvasH3Runner.resume(task);
     if (["queued", "running"].includes(task.status) && task.kind.startsWith("comfyui:")) runtime.comfy.resume(task.id);
     if (["queued", "running"].includes(task.status) && task.kind === "runninghub:minimax-h3") runningHub.resume(task.id);
 }

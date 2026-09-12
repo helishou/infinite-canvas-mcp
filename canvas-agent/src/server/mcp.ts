@@ -16,7 +16,7 @@ export async function startMcpServer() {
     const backend = createBackendClient(config.backendUrl || `http://127.0.0.1:17370`);
     const server = new McpServer({ name: "canvas-agent", version: VERSION }, { instructions: AGENT_PROMPT });
     toolNames.forEach((name) => registerCanvasTool(server, backend, name));
-    await startPluginMcp(server); // 插件 MCP 动态注册(冷启动加载 + 轮询浏览器启用态)
+    await startPluginMcp(server, (toolName, toolInput) => postCanvasAgentTool(backend, toolName, toolInput)); // 插件 MCP 动态注册(冷启动加载 + 轮询浏览器启用态)
     await server.connect(new StdioServerTransport());
 }
 

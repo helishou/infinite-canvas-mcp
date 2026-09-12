@@ -10,7 +10,7 @@ import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
-import { modelOptionLabel, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionLabel, modelWorkflowMissingMessage, resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
@@ -19,7 +19,7 @@ import { backendMediaUrl } from "@/services/backend-api";
 import { deleteStoredImages, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
-import { resolveComfyImageSize, resolveComfyEndpoint } from "@/services/api/comfyui";
+import { resolveComfyImageSize } from "@/services/api/comfyui";
 import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow } from "@/services/api/workflows";
 import type { WorkflowDetail } from "@/services/api/workflows";
 import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
@@ -147,28 +147,30 @@ export default function ImagePage() {
         return () => window.removeEventListener("backend-event", refresh);
     }, []);
 
-    // 当选中 ComfyUI 工作流模型时，拉取详情并初始化非 image / 非提示词的自定义字段值
+    // 选中 ComfyUI 渠道模型时，按「本次参考图数量」解析该场景实际会跑的工作流，拉它的详情渲染参数面板，
+    // 并用渠道设置里为该场景配的参数作为初值；参考图数量变化 → 场景变化 → 工作流与参数字段一起切换。
     useEffect(() => {
         const channel = resolveModelChannel(config, model);
-        if (channel.kind !== "comfyui") {
-            setWorkflowDetail(null);
-            setCustomFieldValues({});
-            return;
-        }
-        const name = modelOptionName(model).trim();
-        if (!name) {
+        const workflowName = channel.kind === "comfyui" ? resolveModelWorkflow(config, model, references.length) : "";
+        if (!workflowName) {
             setWorkflowDetail(null);
             setCustomFieldValues({});
             return;
         }
         let cancelled = false;
-        fetchWorkflowDetail(name)
+        fetchWorkflowDetail(workflowName)
             .then((detail) => {
                 if (cancelled) return;
                 setWorkflowDetail(detail);
+                const routedParams = resolveModelWorkflowParams(config, model, references.length);
                 const initial: Record<string, unknown> = {};
                 for (const field of detail.config?.fields || []) {
                     if (isWorkflowImageField(field, detail.workflow) || field.isPrompt) continue;
+                    // 渠道设置里为当前场景配的参数优先，其余按字段默认值
+                    if (routedParams[field.id] !== undefined) {
+                        initial[field.id] = routedParams[field.id];
+                        continue;
+                    }
                     if (field.id === "width" || field.id === "height") {
                         const size = resolveComfyImageSize(config.size);
                         initial[field.id] = field.id === "width" ? size.width : size.height;
@@ -189,7 +191,7 @@ export default function ImagePage() {
                 setCustomFieldValues({});
             });
         return () => { cancelled = true; };
-    }, [model]);
+    }, [config, model, references.length]);
 
     const addReferences = async (files?: FileList | null) => {
         const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
@@ -399,22 +401,17 @@ export default function ImagePage() {
         try {
             const channel = resolveModelChannel(snapshot.config, snapshot.config.model);
             const local = channel.kind === "comfyui";
-            const selectedModelName = modelOptionName(snapshot.config.model).trim();
-            const selectedModelKey = selectedModelName.toLowerCase();
-            // ComfyUI 渠道下分流：
-            //   - 内置 preset（z-image / flux2-klein / flashvsr-1.1）现在也走 runWorkflow → /api/workflows/:name/run
-            //   - 其他（用户上传的 workflow，含 "custom/xxx" 等）也走 runWorkflow
-            // runComfyTask 路径已废弃（bridge.ts 的 buildWorkflow 已删除）
-            const workflowNameMap: Record<string, string> = {
-                "z-image": "Z-Image.json",
-                "flux2-klein": "Flux2-Klein.json",
-                "flashvsr-1.1": "custom/视频修复FlashVSR1.1.json",
-            };
-            const workflowName = workflowNameMap[selectedModelKey];
-            const comfyEndpoint = resolveComfyEndpoint();
+            // ComfyUI 渠道统一走工作流执行器（/api/workflows/:name/run）：工作流名由渠道模型配置的
+            // 输入场景路由（文生 / 单图 / 多图）解析，未配置路由时回退到模型名对应的内置工作流；
+            // 该场景被标记为「不支持」时解析结果为空，直接报错不回退。
+            const workflowName = local ? resolveModelWorkflow(snapshot.config, snapshot.config.model, snapshot.references.length) : "";
             let result: { url: string } | { dataUrl: string } | undefined;
-            if (local && workflowName) {
-                // 内置工作流走 WorkflowExecutor（与用户上传 workflow 同一条路径）
+            if (local) {
+                if (!workflowName) throw new Error(modelWorkflowMissingMessage(snapshot.config, snapshot.config.model, snapshot.references.length));
+                // 1) 拉 workflow 详情：拿 config.fields 里 type=image 的 input 节点
+                // 2) 把生图工作台写的 prompt 注入到标记为「作为提示词」的文本字段
+                // 3) 把生图工作台选的 references 按 image field 顺序塞到 fields
+                // 4) runWorkflow 传真 config + fields，后端 processImageFields 会把 dataURL 上传到 ComfyUI 转文件名注入 workflow
                 const detail = await fetchWorkflowDetail(workflowName);
                 const imageFields = (detail.config?.fields || []).filter((field) => isWorkflowImageField(field, detail.workflow));
                 const promptFields = (detail.config?.fields || []).filter((field) => field.type === "text" && field.isPrompt);
@@ -434,36 +431,6 @@ export default function ImagePage() {
                     const field = imageFields[index];
                     const ref = snapshot.references[index];
                     if (!ref) continue;
-                    const dataUrl = ref.dataUrl || ref.url;
-                    if (typeof dataUrl === "string" && dataUrl) workflowFields[field.id] = dataUrl;
-                }
-                // 合并用户在工作台自定义字段面板填写的值（非 image、非提示词）
-                for (const [id, value] of Object.entries(customFieldValues)) {
-                    workflowFields[id] = value;
-                }
-                const run = await runWorkflow(workflowName, workflowFields, detail.config);
-                if (run.error) throw new Error(run.error);
-                const first = run.media?.[0];
-                if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");
-                result = { url: first.url };
-            } else if (local) {
-                // 用户上传的 ComfyUI workflow（含 / 的名字是后端 store 允许的 custom/ 前缀）
-                // 1) 拉 workflow 详情：拿 config.fields 里 type=image 的 input 节点
-                // 2) 把生图工作台写的 prompt 注入到标记为「作为提示词」的文本字段
-                // 3) 把生图工作台选的 references 按 image field 顺序塞到 fields
-                // 4) runWorkflow 传真 config + fields，后端 processImageFields
-                //    会把 dataURL 上传到 ComfyUI 转文件名注入 workflow
-                const detail = await fetchWorkflowDetail(selectedModelName);
-                const imageFields = (detail.config?.fields || []).filter((field) => isWorkflowImageField(field, detail.workflow));
-                const promptFields = (detail.config?.fields || []).filter((field) => field.type === "text" && field.isPrompt);
-                const workflowFields: Record<string, unknown> = { prompt: snapshot.text };
-                for (const field of promptFields) {
-                    workflowFields[field.id] = snapshot.text;
-                }
-                for (let index = 0; index < imageFields.length; index += 1) {
-                    const field = imageFields[index];
-                    const ref = snapshot.references[index];
-                    if (!ref) continue;
                     // dataUrl 优先，storageKey 也带上让后端可选走 media 引用
                     const dataUrl = ref.dataUrl || ref.url;
                     if (typeof dataUrl === "string" && dataUrl) workflowFields[field.id] = dataUrl;
@@ -472,7 +439,7 @@ export default function ImagePage() {
                 for (const [id, value] of Object.entries(customFieldValues)) {
                     workflowFields[id] = value;
                 }
-                const run = await runWorkflow(selectedModelName, workflowFields, detail.config);
+                const run = await runWorkflow(workflowName, workflowFields, detail.config);
                 if (run.error) throw new Error(run.error);
                 const first = run.media?.[0];
                 if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");

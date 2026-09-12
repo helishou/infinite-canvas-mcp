@@ -18,7 +18,7 @@ export function registerCanvasGenerationRoutes(router: Router, dispatcher: Canva
                     onFailed: (error: Error, task: { id: string }) => writeBackFailure(stores, events, body, task.id, error.message),
                 } : undefined;
                 const result = dispatcher.start(body, hooks);
-                return void res.json({ ok: true, ...result, executor: resolveCanvasExecutor({ mode, model: body.model }, /^gpt-image(?:-|$)/i.test(String(body.model || ""))) });
+                return void res.json({ ok: true, ...result, executor: resolveCanvasExecutor({ mode, model: body.model, workflow: body.workflow }, /^gpt-image(?:-|$)/i.test(String(body.model || ""))) });
             }
             if (mode !== "video") throw new Error(`画布生成模式暂不支持：${mode}`);
             const executor = resolveCanvasExecutor({ mode, model: body.model, preset: body.preset });
@@ -28,8 +28,8 @@ export function registerCanvasGenerationRoutes(router: Router, dispatcher: Canva
             const clientTaskId = body.idempotencyKey || body.clientTaskId || (binding ? `canvas-${crypto.randomUUID()}` : undefined);
             const engine = String(params.minimaxEngine || params.engine || "").trim().toLowerCase();
             const task = engine === "runninghub"
-                ? await runningHub?.run(body.input || {}, params, clientTaskId, binding ? (created) => bindCanvasTask(stores, events, binding, created.id) : undefined)
-                : await comfy?.run(body.preset || "minimax-h3", body.input || {}, params, body.comfyUrl, clientTaskId, binding ? (created) => bindCanvasTask(stores, events, binding, created.id) : undefined);
+                ? await runningHub?.run(body.input || {}, params, clientTaskId, binding && binding.bindOnStart !== false ? (created) => bindCanvasTask(stores, events, binding, created.id) : undefined)
+                : await comfy?.run(body.preset || "minimax-h3", body.input || {}, params, body.comfyUrl, clientTaskId, binding && binding.bindOnStart !== false ? (created) => bindCanvasTask(stores, events, binding, created.id) : undefined);
             if (!task) throw new Error(engine === "runninghub" ? "RunningHub 执行器未初始化" : "ComfyUI 执行器未初始化");
             return void res.json({ ok: true, task, taskId: task.id, executor });
         } catch (error) {

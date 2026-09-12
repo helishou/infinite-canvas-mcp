@@ -178,7 +178,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         const previousIndex = selected ? segments.findIndex((segment) => segment.id === selected.id) : -1;
         const previous = previousIndex >= 0 ? segments[previousIndex] : segments[segments.length - 1];
         const inherited = previous ? (() => {
-            const { id, start, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, ...settings } = previous;
+            const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, ...settings } = previous;
             return settings;
         })() : {};
         const nextSegment = {

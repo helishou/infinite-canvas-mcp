@@ -31,6 +31,7 @@ export type ChatGptImageOutput = {
 
 /** 通用直连图片生成入口；具体模型由 provider 按模型名接管。 */
 export class DirectImageBackend {
+    private readonly controllers = new Map<string, AbortController>();
     constructor(
         private readonly tasks: TaskStore,
         private readonly media: MediaStore,
@@ -45,8 +46,14 @@ export class DirectImageBackend {
     run(request: ChatGptImageRequest, hooks?: {
         onCompleted?: (outputs: ChatGptImageOutput[], task: RuntimeTask) => Promise<void> | void;
         onFailed?: (error: Error, task: RuntimeTask) => Promise<void> | void;
-    }, clientTaskId?: string) {
+    }, clientTaskId?: string, taskParams: Record<string, unknown> = {}) {
         if (!this.supports(request.model)) throw new Error(`当前 MCP 没有图片模型 provider：${request.model}`);
+        const existing = clientTaskId ? this.tasks.get(clientTaskId) : null;
+        if (existing) {
+            // Backend 重启后内存中的 controller 消失；同一个持久 task 重新绑定本次请求即可恢复执行。
+            if (["queued", "running"].includes(existing.status) && !this.controllers.has(existing.id)) this.startTask(existing, request, hooks);
+            return existing;
+        }
         const task = clientTaskId
             ? this.tasks.create(clientTaskId, `image:${request.model}`, { prompt: request.prompt }, {
                 model: request.model,
@@ -54,6 +61,7 @@ export class DirectImageBackend {
                 quality: request.quality || "auto",
                 count: Math.max(1, Math.min(4, Math.floor(request.count || 1))),
                 referenceCount: request.references?.length || 0,
+                ...taskParams,
             })
             : this.tasks.create(`image:${request.model}`, { prompt: request.prompt }, {
             model: request.model,
@@ -61,18 +69,35 @@ export class DirectImageBackend {
             quality: request.quality || "auto",
             count: Math.max(1, Math.min(4, Math.floor(request.count || 1))),
             referenceCount: request.references?.length || 0,
+            ...taskParams,
             });
-        void this.execute(task, request, hooks).catch((error) => this.fail(task.id, error));
+        this.startTask(task, request, hooks);
         return task;
+    }
+
+    private startTask(task: RuntimeTask, request: ChatGptImageRequest, hooks?: Parameters<DirectImageBackend["run"]>[1]) {
+        const controller = new AbortController();
+        this.controllers.set(task.id, controller);
+        void this.execute(task, request, hooks, controller.signal).catch((error) => this.fail(task.id, error)).finally(() => this.controllers.delete(task.id));
+    }
+
+    cancel(id: string) {
+        this.controllers.get(id)?.abort();
+        this.controllers.delete(id);
+        const task = this.tasks.get(id);
+        if (!task || !["queued", "running"].includes(task.status)) throw new Error(`任务状态 ${task?.status || "unknown"} 不可取消`);
+        const updated = this.tasks.cancel(id);
+        this.tasks.addEvent(id, "cancelled", { taskId: id });
+        return updated;
     }
 
     private async execute(task: RuntimeTask, request: ChatGptImageRequest, hooks?: {
         onCompleted?: (outputs: ChatGptImageOutput[], task: RuntimeTask) => Promise<void> | void;
         onFailed?: (error: Error, task: RuntimeTask) => Promise<void> | void;
-    }) {
+    }, signal?: AbortSignal) {
         this.update(task.id, { status: "running", progress: 0.05 });
         try {
-            const images = await requestImages(request.apiUrl || this.apiUrl, request.authKey || this.authKey, request);
+            const images = await requestImages(request.apiUrl || this.apiUrl, request.authKey || this.authKey, request, signal);
             const outputs: ChatGptImageOutput[] = [];
             for (let index = 0; index < images.length; index++) {
                 const image = images[index];
@@ -117,9 +142,11 @@ export class DirectImageBackend {
 
 type ImageResponseItem = { b64_json?: string; url?: string };
 
-async function requestImages(apiUrl: string, authKey: string, request: ChatGptImageRequest) {
+async function requestImages(apiUrl: string, authKey: string, request: ChatGptImageRequest, signal?: AbortSignal) {
     const count = Math.max(1, Math.min(4, Math.floor(request.count || 1)));
-    const baseUrl = apiUrl.replace(/\/$/, "");
+    // 渠道 baseUrl 既可能是 `http://host:port` 也可能是 `http://host:port/v1`（本机 ai.config 就是后者）。
+    // 这里统一剥掉结尾的 /v1，避免拼出 `/v1/v1/images/edits` → HTTP 405 Method Not Allowed。
+    const baseUrl = apiUrl.replace(/\/+$/, "").replace(/\/v1$/i, "");
     const headers = { Authorization: `Bearer ${authKey}` };
     let response: Response;
 
@@ -135,12 +162,13 @@ async function requestImages(apiUrl: string, authKey: string, request: ChatGptIm
         for (const reference of request.references) {
             form.append(field, new Blob([reference.data as unknown as BlobPart], { type: reference.mimeType }), reference.name);
         }
-        response = await fetch(`${baseUrl}/v1/images/edits`, { method: "POST", headers, body: form });
+        response = await fetch(`${baseUrl}/v1/images/edits`, { method: "POST", headers, body: form, signal });
     } else {
         response = await fetch(`${baseUrl}/v1/images/generations`, {
             method: "POST",
             headers: { ...headers, "content-type": "application/json" },
             body: JSON.stringify({ model: request.model, prompt: request.prompt, n: count, size: request.size || "1024x1024", quality: request.quality || "auto", output_format: "png" }),
+            signal,
         });
     }
 
@@ -156,7 +184,7 @@ async function readImageResponse(item: ImageResponseItem) {
     const dataUrl = /^data:([^;,]+);base64,(.+)$/s.exec(value);
     if (dataUrl) return { data: Buffer.from(dataUrl[2], "base64"), mimeType: dataUrl[1] };
     if (!/^https?:\/\//i.test(value)) throw new Error("GPT Image 返回了无法读取的图片地址");
-    const response = await fetch(value);
+    const response = await fetch(value, { signal: undefined });
     if (!response.ok) throw new Error(`读取 GPT Image 结果失败（HTTP ${response.status}）`);
     return { data: Buffer.from(await response.arrayBuffer()), mimeType: response.headers.get("content-type")?.split(";", 1)[0] || "image/png" };
 }

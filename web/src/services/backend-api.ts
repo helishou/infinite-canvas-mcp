@@ -21,6 +21,10 @@ export function getBackendUrl(): string {
     return localStorage.getItem("backend-url") || DEFAULT_URL;
 }
 
+export class BackendApiError extends Error {
+    constructor(message: string, readonly status: number, readonly details: Record<string, unknown> = {}) { super(message); this.name = "BackendApiError"; }
+}
+
 export async function request<T = unknown>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
     const token = getBackendTokenShared();
     const url = `${getBackendUrl().replace(/\/$/, "")}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
@@ -35,7 +39,7 @@ export async function request<T = unknown>(method: string, path: string, body?: 
         // 把后端返回的 error 字符串完整透传（之前 30 字符截断导致 500 错看不到）
         const errText = (data && typeof data === "object" && "error" in data && typeof data.error === "string") ? data.error : "";
         const extra = errText || (res.headers.get("content-type")?.includes("application/json") ? "" : (await res.text().catch(() => "")));
-        throw new Error(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim());
+        throw new BackendApiError(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim(), res.status, data && typeof data === "object" ? data as Record<string, unknown> : {});
     }
     return data;
 }
@@ -52,6 +56,8 @@ export type CanvasImageGenerationRequest = {
     params?: Record<string, unknown>;
     provider?: { baseUrl?: string; apiKey?: string };
     clientTaskId?: string;
+    // 渠道模型按输入场景解析出的 ComfyUI 工作流名；不传则由后端按模型名推断
+    workflow?: string;
     // 画布生成日志关联：项目 id + 触发节点 id
     projectId?: string;
     nodeId?: string;
@@ -80,6 +86,10 @@ export type BackendRuntimeTask = {
 
 export function startCanvasImageGeneration(input: CanvasImageGenerationRequest, signal?: AbortSignal) {
     return request<{ ok: boolean; taskId: string }>("POST", "/canvas/generation", { mode: "image", ...input }, { signal });
+}
+
+export function syncBackendAiConfig(config: unknown) {
+    return request<{ ok: boolean }>("PUT", "/settings/ai-config", { config });
 }
 
 
@@ -214,6 +224,7 @@ export async function uploadBackendMedia(options: {
     if (options.height !== undefined) headers["x-media-height"] = String(options.height);
     if (options.durationMs !== undefined) headers["x-media-duration-ms"] = String(options.durationMs);
     if (options.category) headers["x-media-category"] = options.category;
+    if (options.storageKey) headers["x-media-storage-key"] = options.storageKey;
     const url = `${getBackendUrl().replace(/\/$/, "")}/media/upload-binary?token=${encodeURIComponent(token)}`;
     const res = await fetch(url, { method: "POST", headers, body: options.blob });
     const data = (await res.json().catch(() => ({}))) as { media?: BackendMediaResult; error?: string };
@@ -291,11 +302,17 @@ export type BackendGenerationLog = {
     params: Record<string, unknown>; createdAt: string; updatedAt: string;
 };
 
-export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; status?: string; limit?: number; offset?: number } = {}) {
+export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number } = {}) {
     const params = new URLSearchParams();
     if (options.projectId) params.set("projectId", options.projectId);
     if (options.nodeId) params.set("nodeId", options.nodeId);
+    if (options.segmentId) params.set("segmentId", options.segmentId);
+    if (options.runtimeTaskId) params.set("runtimeTaskId", options.runtimeTaskId);
+    if (options.platform) params.set("platform", options.platform);
+    if (options.model) params.set("model", options.model);
     if (options.status) params.set("status", options.status);
+    if (options.from) params.set("from", options.from);
+    if (options.to) params.set("to", options.to);
     if (options.limit) params.set("limit", String(options.limit));
     if (typeof options.offset === "number" && options.offset > 0) params.set("offset", String(options.offset));
     const qs = params.toString();
@@ -334,7 +351,7 @@ export function fetchBackendTask(id: string, signal?: AbortSignal) {
     return request<{ ok: boolean; task?: BackendRuntimeTask; events?: unknown[] }>("GET", `/tasks/${encodeURIComponent(id)}`, undefined, { signal });
 }
 
-export function fetchBackendTasks(options: { projectId?: string; nodeIds?: string[]; segmentIds?: string[]; scope?: "all" | "canvas" | "image" | "video"; status?: string; kind?: string; taskId?: string } = {}) {
+export function fetchBackendTasks(options: { projectId?: string; nodeIds?: string[]; segmentIds?: string[]; scope?: "all" | "canvas" | "image" | "video"; status?: string; kind?: string; model?: string; taskId?: string; limit?: number; offset?: number } = {}) {
     const params = new URLSearchParams();
     if (options.projectId) params.set("projectId", options.projectId);
     if (options.nodeIds?.length) params.set("nodeIds", options.nodeIds.join(","));
@@ -342,7 +359,10 @@ export function fetchBackendTasks(options: { projectId?: string; nodeIds?: strin
     if (options.scope) params.set("scope", options.scope);
     if (options.status) params.set("status", options.status);
     if (options.kind) params.set("kind", options.kind);
+    if (options.model) params.set("model", options.model);
     if (options.taskId) params.set("taskId", options.taskId);
+    if (options.limit) params.set("limit", String(options.limit));
+    if (options.offset) params.set("offset", String(options.offset));
     const qs = params.toString();
     return request<{ ok: boolean; tasks?: BackendRuntimeTask[] }>("GET", `/tasks${qs ? `?${qs}` : ""}`);
 }
@@ -357,4 +377,12 @@ export function updateBackendTask(id: string, patch: { status?: "queued" | "runn
 
 export function cancelBackendTask(id: string) {
     return request<{ ok: boolean; task?: Record<string, unknown> }>("POST", `/tasks/${encodeURIComponent(id)}/cancel`);
+}
+
+export function retryBackendTask(id: string) {
+    return request<{ ok: boolean; task?: BackendRuntimeTask; parentTaskId?: string }>("POST", `/tasks/${encodeURIComponent(id)}/retry`);
+}
+
+export function diagnoseBackendCanvasProject(projectId: string) {
+    return request<{ ok: boolean; projectId: string; revision: number; issues: Array<Record<string, unknown>> }>("GET", `/canvas/projects/${encodeURIComponent(projectId)}/diagnostics`);
 }

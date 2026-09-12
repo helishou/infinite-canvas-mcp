@@ -8,9 +8,9 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
-import { defaultConfig, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
+import { defaultConfig, modelHasWorkflowConfig, modelOptionName, modelWorkflowMissingMessage, resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
 import { getComfyTask, resolveComfyImageSize, runVideoConcatTask } from "@/services/api/comfyui";
-import { uploadImage } from "@/services/image-storage";
+import { uploadImage, type UploadedImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { backendMediaUrl, fetchBackendTask, startCanvasImageGeneration, type BackendMediaResult } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -189,7 +189,9 @@ async function runLocalComfyImage(
     provider?: { baseUrl?: string; apiKey?: string },
     // 画布生成日志关联：projectId + 触发的源节点 id
     logContext?: { projectId: string; nodeId?: string },
-): Promise<BackendMediaResult> {
+    // 渠道模型配置里解析出的工作流名（文生 / 单图 / 多图各自路由），空则由后端按模型名推断
+    workflow?: string,
+): Promise<UploadedImage> {
     const started = await startCanvasImageGeneration({
         model: selectedModelName,
         prompt,
@@ -200,6 +202,7 @@ async function runLocalComfyImage(
         params: customFieldValues,
         clientTaskId,
         provider,
+        workflow: workflow || undefined,
         projectId: logContext?.projectId,
         nodeId: logContext?.nodeId,
     }, signal);
@@ -207,10 +210,12 @@ async function runLocalComfyImage(
     for (;;) {
         const response = await fetchBackendTask(started.taskId, signal);
         const task = response.task;
+        if (!task) throw new Error("画布图片任务查询没有返回任务");
         if (task.status === "succeeded") {
             const media = task.result?.media?.[0] || task.result?.images?.[0];
             if (!media?.url) throw new Error("画布图片任务完成但没有返回媒体");
-            return { ...media, url: media.storageKey ? backendMediaUrl(media.storageKey) : media.url };
+            if (media.width == null || media.height == null) throw new Error("画布图片任务完成但没有返回图片尺寸");
+            return { url: media.storageKey ? backendMediaUrl(media.storageKey) : media.url, storageKey: media.storageKey, width: media.width, height: media.height, bytes: media.bytes, mimeType: media.mimeType };
         }
         if (task.status === "failed" || task.status === "cancelled") throw new Error(task.error || `画布图片任务${task.status}`);
         await new Promise<void>((resolve, reject) => {
@@ -436,7 +441,6 @@ function InfiniteCanvasPage() {
         if (!hydrated) return;
         const restoreGeneration = ++restoreGenerationRef.current;
         if (backendRevision > 0) suppressNextProjectPersistRef.current = true;
-        setProjectLoaded(false);
         const project = openProject(projectId);
         if (!project) {
             navigate("/canvas", { replace: true });
@@ -928,6 +932,8 @@ function InfiniteCanvasPage() {
         if (selected.length < 2) return;
         const minX = Math.min(...selected.map((node) => node.position.x));
         const minY = Math.min(...selected.map((node) => node.position.y));
+        // H3 导演台节点很大，整理时排除出分层逻辑，并统一停到最右列，避免把其它节点间距撑开。
+        const h3Ids = selected.filter((node) => node.type === "minimax-h3:video").map((node) => node.id);
         // 只取两端都在选择集内的边，按子图做分层（输入在左、输出在右，无连接时退回网格）。
         const positions = computeFlowLayout({
             nodes: nodesRef.current,
@@ -936,6 +942,7 @@ function InfiniteCanvasPage() {
             scopeEdges: true,
             anchorX: minX,
             anchorY: minY,
+            parkAtRight: h3Ids,
         });
         const ops = [...positions.entries()].map(([id, pos]) => ({ type: "update_node" as const, id, patch: { position: pos } }));
         applyAgentOps(ops);
@@ -1361,7 +1368,7 @@ function InfiniteCanvasPage() {
             // 角色节点：以单条 character payload 派发，H3 端按 readCharacterGroupFromDrop + upsertCharacterGroup 建/复用组
             if ("characterImages" in referenceDrag) {
                 dispatchCanvasReferenceDrag("canvas-reference-drop", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
-                dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, url: referenceDrag.characterImages[0]?.url || "", name: referenceDrag.characterImages[0]?.name || "", targetNodeId: referenceTargetNodeId, clientX, clientY });
+                dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
             } else {
                 dispatchCanvasReferenceDrag("canvas-reference-drop", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
                 dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: referenceTargetNodeId, clientX, clientY });
@@ -1743,10 +1750,10 @@ function InfiniteCanvasPage() {
                 return;
             }
 
+            // 已移除「按 Delete/Backspace 删除选中节点」的键盘快捷方式：选中节点后误按删除键会直接删掉整个节点且难以恢复（用户明确要求）。
+            // 删除节点仍可通过右键菜单 / 节点悬浮工具栏 / 顶部删除按钮等有意操作完成。连线删除保留（风险低、易重连）。
             if (event.key === "Delete" || event.key === "Backspace") {
-                if (selectedNodeIdsRef.current.size) {
-                    deleteNodes(new Set(selectedNodeIdsRef.current));
-                } else if (selectedConnectionId) {
+                if (selectedConnectionId) {
                     deleteConnection(selectedConnectionId);
                 }
             }
@@ -1858,8 +1865,8 @@ function InfiniteCanvasPage() {
                 }
                 const image = node.metadata?.images?.find((item) => item.id === itemId);
                 if (!image?.content) return node;
-                const edge = Math.max(node.width, node.height);
-                const size = node.metadata?.freeResize ? { width: node.width, height: node.height } : fitNodeSize(image.naturalWidth, image.naturalHeight, edge, edge);
+                const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+                const size = node.metadata?.freeResize ? { width: node.width, height: node.height } : fitNodeSize(image.naturalWidth, image.naturalHeight, imageConfig.width, imageConfig.height);
                 return {
                     ...node,
                     position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 },
@@ -1883,8 +1890,8 @@ function InfiniteCanvasPage() {
         const image = node.metadata?.images?.find((item) => item.id === imageId);
         if (!image?.content) return;
         const id = nanoid();
-        const edge = Math.max(node.width, node.height);
-        const size = fitNodeSize(image.naturalWidth, image.naturalHeight, edge, edge);
+        const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+        const size = fitNodeSize(image.naturalWidth, image.naturalHeight, imageConfig.width, imageConfig.height);
         const copy: CanvasNodeData = {
             id,
             type: CanvasNodeType.Image,
@@ -2023,9 +2030,11 @@ function InfiniteCanvasPage() {
             }
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Character];
             setNodes((prev) =>
-                prev.map((item) =>
-                    item.id === node.id
-                        ? {
+                prev.map((item) => {
+                    if (item.id !== node.id) return item;
+                    const itemMetadata = item.metadata;
+                    if (!itemMetadata?.content) return item;
+                    return {
                               ...item,
                               type: CanvasNodeType.Character,
                               title: item.title || t("canvas.nodeTypes.character"),
@@ -2039,23 +2048,21 @@ function InfiniteCanvasPage() {
                                   characterDescription: typeof item.metadata?.prompt === "string" ? item.metadata.prompt : "",
                                   characterImages: [
                                       {
-                                          url: item.metadata.content,
-                                          storageKey: item.metadata.storageKey,
+                                          url: itemMetadata.content,
+                                          storageKey: itemMetadata.storageKey,
                                           name: item.title || "image",
-                                          assetId: undefined,
                                           outfit: "",
                                           outfitDescription: "",
-                                          width: Number(item.metadata.naturalWidth) || item.width,
-                                          height: Number(item.metadata.naturalHeight) || item.height,
-                                          bytes: Number(item.metadata.bytes) || 0,
-                                          mimeType: item.metadata.mimeType || "image/png",
+                                          width: Number(itemMetadata.naturalWidth) || item.width,
+                                          height: Number(itemMetadata.naturalHeight) || item.height,
+                                          bytes: Number(itemMetadata.bytes) || 0,
+                                          mimeType: itemMetadata.mimeType || "image/png",
                                       },
                                   ],
                                   characterPrimaryIndex: 0,
                               },
-                          }
-                        : item,
-                ),
+                          };
+                }),
             );
             message.success(t("canvas.character.converted"));
         },
@@ -2071,11 +2078,10 @@ function InfiniteCanvasPage() {
                     if (item.id !== node.id) return item;
                     if (ref.type === "image") {
                         const images = item.metadata?.characterImages || [];
-                        const nextImage: NonNullable<typeof item.metadata.characterImages>[number] = {
+                        const nextImage: NonNullable<NonNullable<CanvasNodeData["metadata"]>["characterImages"]>[number] = {
                             url: ref.url,
                             storageKey: ref.storageKey,
                             name: ref.name || `outfit-${images.length + 1}`,
-                            assetId: undefined,
                             outfit: "",
                             outfitDescription: "",
                             width: 0,
@@ -2742,16 +2748,23 @@ function InfiniteCanvasPage() {
                     const localComfy = comfyChannel.kind === "comfyui";
                     const selectedImageModel = modelOptionName(generationConfig.model).trim();
                     const useCanvasDispatcher = localComfy || /^gpt-image(?:-|$)/i.test(selectedImageModel);
-                    const localComfyPreset = localComfy
-                        ? (modelOptionName(generationConfig.model).trim().toLowerCase() === "z-image" ? "z-image" : modelOptionName(generationConfig.model).trim().toLowerCase() === "flux2-klein" ? "flux2-klein" : "")
-                        : "";
-                    if (localComfyPreset === "flux2-klein" && !referenceImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
+                    // 渠道模型挂了工作流时按输入场景（文生 / 单图 / 多图）解析并显式交给后端；
+                    // 没挂的模型保持原样：由后端按模型名推断（z-image / flux2-klein 内置、*.json / custom/* 工作流文件）。
+                    const hasComfyWorkflowConfig = localComfy && modelHasWorkflowConfig(generationConfig, generationConfig.model);
+                    const comfyWorkflow = hasComfyWorkflowConfig ? resolveModelWorkflow(generationConfig, generationConfig.model, referenceImages.length) : "";
+                    // 挂了工作流但当前输入场景解析不到（该场景被标记为「不支持」）→ 明确报错，不回退到后端按模型名推断。
+                    if (hasComfyWorkflowConfig && !comfyWorkflow) throw new Error(modelWorkflowMissingMessage(generationConfig, generationConfig.model, referenceImages.length));
+                    if (/flux2-klein/i.test(comfyWorkflow) && !referenceImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
+                    // 渠道设置里为当前输入场景配的工作流参数作为默认值，节点设置面板上手填的值优先。
+                    const comfyParams = hasComfyWorkflowConfig
+                        ? { ...resolveModelWorkflowParams(generationConfig, generationConfig.model, referenceImages.length), ...(sourceNode?.metadata?.comfyParams || {}) }
+                        : sourceNode?.metadata?.comfyParams;
                     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
                     const generationMetadata = buildImageGenerationMetadata(generationType, generationConfig, count, referenceImages);
                     const parentConfig = NODE_DEFAULT_SIZE[isConfigNode ? CanvasNodeType.Config : isImageNode ? CanvasNodeType.Image : CanvasNodeType.Text];
                     const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                     const parentPosition = sourceNode?.position || { x: 0, y: 0 };
-                    const outputSize = isImageNode && sourceNode ? { width: sourceNode.width, height: sourceNode.height } : imageConfig;
+                    const outputSize = imageConfig;
                     const rootId = isEmptyImageNode ? nodeId : nanoid();
                     const imageIds = Array.from({ length: count }, () => nanoid());
                     pendingChildIds = [rootId];
@@ -2821,12 +2834,14 @@ function InfiniteCanvasPage() {
                         imageIds.map(async (imageId) => {
                             try {
                                 const image = useCanvasDispatcher
-                                    ? await runLocalComfyImage(selectedImageModel, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (_taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, primaryImageId: imageId } } : item)), sourceNode?.metadata?.comfyParams, clientTaskId ? (imageId === imageIds[0] ? clientTaskId : `${clientTaskId}-${imageId}`) : undefined, /^gpt-image(?:-|$)/i.test(selectedImageModel) ? { baseUrl: comfyChannel.baseUrl, apiKey: comfyChannel.apiKey } : undefined, { projectId, nodeId: rootId })
+                                    ? await runLocalComfyImage(selectedImageModel, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (_taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, primaryImageId: imageId } } : item)), comfyParams, clientTaskId ? (imageId === imageIds[0] ? clientTaskId : `${clientTaskId}-${imageId}`) : undefined, /^gpt-image(?:-|$)/i.test(selectedImageModel) ? { baseUrl: comfyChannel.baseUrl, apiKey: comfyChannel.apiKey } : undefined, { projectId, nodeId: rootId }, comfyWorkflow)
                                     : referenceImages.length
                                       ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
                                       : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
-                                const uploaded = useCanvasDispatcher ? image : await uploadImage((image as { dataUrl: string }).dataUrl, { signal: controller.signal });
-                                const imageSize = isImageNode && sourceNode ? { width: sourceNode.width, height: sourceNode.height } : fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
+                                let uploaded: UploadedImage;
+                                if (useCanvasDispatcher) uploaded = image as UploadedImage;
+                                else uploaded = await uploadImage((image as { dataUrl: string }).dataUrl, { signal: controller.signal });
+                                const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                                 const item: CanvasNodeImage = { id: imageId, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
                                 setNodes((prev) =>
                                     prev.map((node) => {
@@ -3232,18 +3247,24 @@ function InfiniteCanvasPage() {
                 const retryLocalComfy = retryComfyChannel.kind === "comfyui";
                 const retrySelectedImageModel = modelOptionName(generationConfig.model).trim();
                 const retryUseCanvasDispatcher = retryLocalComfy || /^gpt-image(?:-|$)/i.test(retrySelectedImageModel);
-                const retryComfyPreset = retryLocalComfy
-                    ? (modelOptionName(generationConfig.model).trim().toLowerCase() === "z-image" ? "z-image" : modelOptionName(generationConfig.model).trim().toLowerCase() === "flux2-klein" ? "flux2-klein" : "")
-                    : "";
-                if (retryComfyPreset === "flux2-klein" && !retryImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
+                // 重试同样按「当前参考图数量」解析渠道模型的工作流路由（没挂工作流的模型仍由后端按模型名推断）。
+                const retryHasComfyWorkflowConfig = retryLocalComfy && modelHasWorkflowConfig(generationConfig, generationConfig.model);
+                const retryComfyWorkflow = retryHasComfyWorkflowConfig ? resolveModelWorkflow(generationConfig, generationConfig.model, retryImages.length) : "";
+                // 当前输入场景被标记为「不支持」→ 明确报错，不回退。
+                if (retryHasComfyWorkflowConfig && !retryComfyWorkflow) throw new Error(modelWorkflowMissingMessage(generationConfig, generationConfig.model, retryImages.length));
+                if (/flux2-klein/i.test(retryComfyWorkflow) && !retryImages.length) throw new Error("Flux2-Klein 至少需要一张参考图");
+                // 重试同样按当前场景套用渠道配置的工作流参数（节点手填优先）。
+                const retryComfyParams = retryHasComfyWorkflowConfig
+                    ? { ...resolveModelWorkflowParams(generationConfig, generationConfig.model, retryImages.length), ...(sourceNode.metadata?.comfyParams || {}) }
+                    : sourceNode.metadata?.comfyParams;
                 const image = retryUseCanvasDispatcher
-                    ? await runLocalComfyImage(retrySelectedImageModel, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal, undefined, sourceNode.metadata?.comfyParams, retryClientTaskId, /^gpt-image(?:-|$)/i.test(retrySelectedImageModel) ? { baseUrl: retryComfyChannel.baseUrl, apiKey: retryComfyChannel.apiKey } : undefined)
+                    ? await runLocalComfyImage(retrySelectedImageModel, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal, undefined, retryComfyParams, retryClientTaskId, /^gpt-image(?:-|$)/i.test(retrySelectedImageModel) ? { baseUrl: retryComfyChannel.baseUrl, apiKey: retryComfyChannel.apiKey } : undefined, undefined, retryComfyWorkflow)
                     : useReferenceImages
                       ? await requestEdit(generationConfig, prompt, retryImages, { signal: controller.signal }).then((items) => items[0])
                       : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
-                const uploadedImage = retryUseCanvasDispatcher
-                    ? image
-                    : await uploadImage((image as { dataUrl: string }).dataUrl, { signal: controller.signal });
+                let uploadedImage: UploadedImage;
+                if (retryUseCanvasDispatcher) uploadedImage = image as UploadedImage;
+                else uploadedImage = await uploadImage((image as { dataUrl: string }).dataUrl, { signal: controller.signal });
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                 const retryImage: CanvasNodeImage = {
                     id: imageId || node.metadata?.primaryImageId || nanoid(),
@@ -3270,8 +3291,7 @@ function InfiniteCanvasPage() {
                     prev.map((item) => {
                         if (item.id !== node.id) return item;
                         const makePrimary = !imageId || !item.metadata?.content;
-                        const edge = imageId ? Math.max(item.width, item.height) : 0;
-                        const imageSize = imageId && item.metadata?.freeResize ? { width: item.width, height: item.height } : imageId ? fitNodeSize(uploadedImage.width, uploadedImage.height, edge, edge) : fitNodeSize(uploadedImage.width, uploadedImage.height, imageConfig.width, imageConfig.height);
+                        const imageSize = imageId && item.metadata?.freeResize ? { width: item.width, height: item.height } : fitNodeSize(uploadedImage.width, uploadedImage.height, imageConfig.width, imageConfig.height);
                         return {
                             ...item,
                             type: CanvasNodeType.Image,
@@ -3938,6 +3958,7 @@ function migrateLegacyH3Node(node: CanvasNodeData): CanvasNodeData {
     copy("assetRefs", "assetRefs");
     copy("materials", "materials");
     copy("motionContextEnabled", "motionContextEnabled");
+    copy("previousVideoAsReference", "previousVideoAsReference");
     copy("motionContextNoiseEnabled", "motionContextNoiseEnabled", "minimaxMotionContextNoiseEnabled");
     copy("minimaxEngine", "minimaxEngine");
     copy("minimaxRunningHubWorkflowId", "minimaxRunningHubWorkflowId");

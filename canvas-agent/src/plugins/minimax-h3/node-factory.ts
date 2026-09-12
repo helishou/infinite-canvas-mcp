@@ -6,6 +6,8 @@ export const BASE_H3_NODE_METADATA: Record<string, unknown> = {
     content: "", prompt: defaultPrompt, status: "idle", duration: "8", aspectRatio: "16:9",
     videoSteps: 8, denoise: 1, modelName: defaultH3Model, minimaxBaseModel: defaultH3Model,
     motionContextEnabled: true, motionContextNoiseEnabled: false,
+    // 上一段成品作为参考视频注入下一段：默认关闭，必须由用户在 Clip 卡上显式开启。
+    previousVideoAsReference: false,
     smartStoryboardCount: 3, smartStoryboardMode: "ref2va", smartStoryboardSkill: "regular_storyboard",
     textEncoder: "qwen3vl_32b_minimax_h3_fp8.safetensors",
     videoVae: "minimax_h3_video_vae_fp16.safetensors",

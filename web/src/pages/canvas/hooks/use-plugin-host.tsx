@@ -4,8 +4,8 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageQuestion, type AiTextMessage } from "@/services/api/image";
 import { imageToDataUrl } from "@/services/image-storage";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
-import { runLocalH3Task, getLocalH3Task, cancelLocalH3Task, runRunningHubH3Task, getRunningHubH3Task, cancelRunningHubH3Task, runVideoConcatTask } from "@/services/api/comfyui";
-import { fetchComfyModels, fetchComfyStatus } from "@/services/api/canvas-agent";
+import { getLocalH3Task, getRunningHubH3Task, runVideoConcatTask } from "@/services/api/comfyui";
+import { fetchComfyModels } from "@/services/api/canvas-agent";
 import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, updateBackendGenerationLog } from "@/services/backend-api";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { useAgentStore } from "@/stores/use-agent-store";
@@ -137,39 +137,6 @@ export function usePluginHost(params: PluginHostParams) {
                 const text = await requestImageQuestion(config, messages, (delta) => options?.onDelta?.(delta), { signal: options?.signal });
                 return { text };
             },
-            runLocalH3: async (prompt, input, params, options) => {
-                const backendUrl = getBackendUrl();
-                const backendToken = getBackendTokenShared();
-                if (!(await fetch(`${backendUrl}/health`).then((response) => response.ok).catch(() => false))) throw new Error("总后台未连接，无法运行本地 MiniMax H3");
-                let comfy = await fetch(`${backendUrl}/comfy/config?token=${encodeURIComponent(backendToken)}`).then(async (response) => {
-                    if (!response.ok) throw new Error(`读取 ComfyUI 配置失败（HTTP ${response.status}）`);
-                    return await response.json() as { url?: string };
-                });
-                const comfyuiBasePath = String(effectiveConfig.comfyuiBasePath || "").trim();
-                if (comfyuiBasePath) {
-                    comfy = await fetch(`${backendUrl}/comfy/config?token=${encodeURIComponent(backendToken)}`, {
-                        method: "PUT",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ localH3RootDir: comfyuiBasePath }),
-                    }).then(async (response) => {
-                        if (!response.ok) throw new Error(`配置 H3 本地直读失败（HTTP ${response.status}）`);
-                        return await response.json() as { url?: string };
-                    });
-                }
-                if (!comfy.url) throw new Error("尚未配置本地 ComfyUI 地址");
-                let comfyStatus;
-                try {
-                    comfyStatus = await fetchComfyStatus(backendUrl, backendToken);
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error);
-                    throw new Error(`无法检查 ComfyUI 状态：${message}`);
-                }
-                if (comfyStatus.connected !== true) {
-                    throw new Error(`ComfyUI 未启动，请先启动 ComfyUI${comfyStatus.url ? `（${comfyStatus.url}）` : ""}`);
-                }
-                const result = await runLocalH3Task(backendUrl, backendToken, comfy.url, prompt, input, params, options?.signal, options?.onTaskId);
-                return persistH3Result(result);
-            },
             getLocalH3Task: async (taskId) => {
                 const task = await getLocalH3Task(getBackendUrl(), getBackendTokenShared(), taskId) as Awaited<ReturnType<typeof getLocalH3Task>>;
                 if (task.status === "succeeded" && task.result?.url && !task.result.storageKey) {
@@ -177,9 +144,27 @@ export function usePluginHost(params: PluginHostParams) {
                 }
                 return task;
             },
-            cancelLocalH3Task: async (taskId) => {
-                const task = await cancelLocalH3Task(getBackendUrl(), getBackendTokenShared(), taskId);
-                return { id: task.id, status: task.status, progress: task.progress, error: task.error, result: null };
+            runCanvasH3: async (options) => {
+                const response = await fetch(`${getBackendUrl()}/canvas/h3/runs?token=${encodeURIComponent(getBackendTokenShared())}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(options),
+                });
+                const data = await response.json() as { task?: import("@/types/canvas-plugin").LocalH3Task; error?: string };
+                if (!response.ok || !data.task) throw new Error(data.error || `启动 H3 运行失败（HTTP ${response.status}）`);
+                return data.task;
+            },
+            getCanvasH3Task: async (taskId) => {
+                const response = await fetch(`${getBackendUrl()}/tasks/${encodeURIComponent(taskId)}?token=${encodeURIComponent(getBackendTokenShared())}`);
+                const data = await response.json() as { task?: import("@/types/canvas-plugin").LocalH3Task; error?: string };
+                if (!response.ok || !data.task) throw new Error(data.error || `读取 H3 运行失败（HTTP ${response.status}）`);
+                return data.task;
+            },
+            cancelCanvasH3Task: async (taskId) => {
+                const response = await fetch(`${getBackendUrl()}/tasks/${encodeURIComponent(taskId)}/cancel?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "POST" });
+                const data = await response.json() as { task?: import("@/types/canvas-plugin").LocalH3Task; error?: string };
+                if (!response.ok || !data.task) throw new Error(data.error || `取消 H3 运行失败（HTTP ${response.status}）`);
+                return data.task;
             },
             runVideoConcat: async (videos, options) => {
                 const agent = useAgentStore.getState();
@@ -191,23 +176,12 @@ export function usePluginHost(params: PluginHostParams) {
                 const result = await fetchComfyModels(getBackendUrl(), getBackendTokenShared());
                 return { models: result.data?.models || [], loras: result.data?.loras || [], textEncoders: result.data?.textEncoders || [], videoVaes: result.data?.videoVaes || [], audioVaes: result.data?.audioVaes || [], latentUpscaleModels: result.data?.latentUpscaleModels || [], nanfeng: result.data?.nanfeng || {} };
             },
-            runRunningHubH3: async (prompt, input, params, options) => {
-                const backendUrl = getBackendUrl();
-                const backendToken = getBackendTokenShared();
-                if (!(await fetch(`${backendUrl}/health`).then((response) => response.ok).catch(() => false))) throw new Error("总后台未连接，无法运行 RunningHub MiniMax H3");
-                const result = await runRunningHubH3Task(backendUrl, backendToken, prompt, input, params, options?.signal, options?.onTaskId);
-                return persistH3Result(result);
-            },
             getRunningHubH3Task: async (taskId) => {
                 const task = await getRunningHubH3Task(getBackendUrl(), getBackendTokenShared(), taskId) as Awaited<ReturnType<typeof getRunningHubH3Task>>;
                 if (task.status === "succeeded" && task.result?.url && !task.result.storageKey) {
                     return { ...task, result: await persistH3Result(task.result) };
                 }
                 return task;
-            },
-            cancelRunningHubH3Task: async (taskId) => {
-                const task = await cancelRunningHubH3Task(getBackendUrl(), getBackendTokenShared(), taskId);
-                return { id: task.id, status: task.status, progress: task.progress, error: task.error, result: null };
             },
             // List configured models for a capability; labels use the model name without the channel prefix.
             listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: decodeChannelModel(value)?.model || value })),

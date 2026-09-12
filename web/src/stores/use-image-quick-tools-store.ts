@@ -32,7 +32,7 @@ async function hydrate() {
         const data = settings.imageQuickTools as Partial<ImageQuickToolsConfig>;
         const ids = Array.isArray(data.ids) ? (data.ids as ImageQuickToolId[]) : defaultImageQuickToolIds;
         const showLabels = data.showLabels === true;
-        set({ ids, showLabels });
+        useImageQuickToolsStore.setState({ ids, showLabels });
     }
 }
 

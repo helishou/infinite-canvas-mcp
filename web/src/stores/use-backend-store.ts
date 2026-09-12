@@ -14,6 +14,7 @@ type BackendStore = {
 };
 
 let backendEvents: EventSource | null = null;
+let backendEventsKey = "";
 const seenBackendEventIds = new Set<string>();
 
 // 本地总后台（127.0.0.1/localhost:17370）在浏览器直连时会经过系统代理，
@@ -33,16 +34,19 @@ function isLocalBackendUrl(url: string): boolean {
 function stopBackendEvents() {
     backendEvents?.close();
     backendEvents = null;
+    backendEventsKey = "";
 }
 
 function startBackendEvents(url: string, token: string) {
     if (typeof window === "undefined" || !token) return;
-    stopBackendEvents();
     const eventsUrl = isLocalBackendUrl(url)
         ? `/events?token=${encodeURIComponent(token)}`
         : `${url.replace(/\/$/, "")}/events?token=${encodeURIComponent(token)}`;
+    if (backendEvents && backendEventsKey === eventsUrl) return;
+    stopBackendEvents();
     const source = new EventSource(eventsUrl);
     backendEvents = source;
+    backendEventsKey = eventsUrl;
     const handleMessage = (message: MessageEvent<string>) => {
         try {
             const event = JSON.parse(message.data) as { id?: string; type?: string; entityId?: string; payload?: unknown };
@@ -55,17 +59,24 @@ function startBackendEvents(url: string, token: string) {
     for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "asset.updated"]) {
         source.addEventListener(eventType, handleMessage);
     }
-    source.onerror = () => {
-        if (useBackendStore.getState().connected) {
-            stopBackendEvents();
-            useBackendStore.setState({ connected: false, checking: false, error: `无法连接总后台 ${url}` });
-        }
-    };
+    // EventSource 会自行重连；短暂断流不应把 Backend 标记为离线，
+    // 否则下一次健康检查会广播 backend-connected，导致画布重新 hydration。
 }
 
 function syncAgentEndpoint(url: string, token: string) {
     if (typeof window === "undefined") return;
     void import("@/stores/use-agent-store").then(({ useAgentStore }) => useAgentStore.getState().setAgentState({ url: `${url.replace(/\/$/, "")}/agent`, token }));
+}
+
+function syncAiConfigToBackend() {
+    if (typeof window === "undefined") return;
+    void Promise.all([
+        import("@/services/backend-api"),
+        import("@/stores/use-config-store"),
+    ]).then(([api, config]) => {
+        if (useBackendStore.getState().connected) return api.syncBackendAiConfig(config.useConfigStore.getState().config);
+        return undefined;
+    }).catch(() => undefined);
 }
 
 /** 总后台连接状态 store。自动在启动时检测连通性。 */
@@ -106,7 +117,10 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
             return;
         }
         set({ connected: true, checking: false, error: "" });
-        if (!wasConnected) window.dispatchEvent(new Event("backend-connected"));
+        if (!wasConnected) {
+            window.dispatchEvent(new Event("backend-connected"));
+            syncAiConfigToBackend();
+        }
         startBackendEvents(getBackendUrl(), get().token);
     },
 

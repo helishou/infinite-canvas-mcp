@@ -78,10 +78,20 @@ export class BackendClient {
         return { project: data.project, revision: Number(data.revision ?? data.project.revision ?? 0), operationResults: data.operationResults || [] };
     }
 
+    async diagnoseCanvasProject(projectId: string) {
+        return this.get<{ ok: boolean; projectId: string; revision: number; issues: unknown[] }>(`/canvas/projects/${encodeURIComponent(projectId)}/diagnostics`);
+    }
+
     async canvasRunGeneration(input: Record<string, unknown>) {
         const data = await this.post<{ ok: boolean; task?: RuntimeTask; taskId?: string; executor?: string }>("/canvas/generation", input);
         if (!data.task && !data.taskId) throw new Error("Backend canvas generation returned no task");
         return { task: data.task, taskId: data.taskId || data.task?.id || "", executor: data.executor || "" };
+    }
+
+    async canvasRunH3(input: Record<string, unknown>) {
+        const data = await this.post<{ ok: boolean; task?: RuntimeTask }>("/canvas/h3/runs", input);
+        if (!data.task) throw new Error("Backend H3 run returned no task");
+        return data.task;
     }
 
     // ── Assets ───────────────────────────────────────────────────────────
@@ -123,12 +133,19 @@ export class BackendClient {
 
     // ── Generation logs ──────────────────────────────────────────────────
 
-    async listGenerationLogs(options: { projectId?: string; nodeId?: string; status?: string; limit?: number } = {}) {
+    async listGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number } = {}) {
         const params = new URLSearchParams();
         if (options.projectId) params.set("projectId", options.projectId);
         if (options.nodeId) params.set("nodeId", options.nodeId);
+        if (options.segmentId) params.set("segmentId", options.segmentId);
+        if (options.runtimeTaskId) params.set("runtimeTaskId", options.runtimeTaskId);
+        if (options.platform) params.set("platform", options.platform);
+        if (options.model) params.set("model", options.model);
         if (options.status) params.set("status", options.status);
+        if (options.from) params.set("from", options.from);
+        if (options.to) params.set("to", options.to);
         if (options.limit) params.set("limit", String(options.limit));
+        if (options.offset) params.set("offset", String(options.offset));
         const qs = params.toString();
         const data = await this.get<{ ok: boolean; logs?: unknown[] }>(`/generation-logs${qs ? `?${qs}` : ""}`);
         return data.logs || [];
@@ -157,15 +174,18 @@ export class BackendClient {
         return { task: data.task, events: data.events || [] };
     }
 
-    async listTasks(options: { status?: string; kind?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; taskId?: string } = {}) {
+    async listTasks(options: { status?: string; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; taskId?: string; limit?: number; offset?: number } = {}) {
         const query = new URLSearchParams();
         if (options.status) query.set("status", options.status);
         if (options.kind) query.set("kind", options.kind);
+        if (options.model) query.set("model", options.model);
         if (options.scope) query.set("scope", options.scope);
         if (options.projectId) query.set("projectId", options.projectId);
         if (options.nodeIds?.length) query.set("nodeIds", options.nodeIds.join(","));
         if (options.segmentIds?.length) query.set("segmentIds", options.segmentIds.join(","));
         if (options.taskId) query.set("taskId", options.taskId);
+        if (options.limit) query.set("limit", String(options.limit));
+        if (options.offset) query.set("offset", String(options.offset));
         const data = await this.get<{ tasks?: RuntimeTask[] }>(`/tasks${query.size ? `?${query.toString()}` : ""}`);
         return data.tasks || [];
     }
@@ -183,6 +203,12 @@ export class BackendClient {
     async cancelTask(id: string): Promise<RuntimeTask> {
         const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(`/tasks/${encodeURIComponent(id)}/cancel`);
         if (!data.task) throw new Error(`backend task cancel returned no task: ${id}`);
+        return data.task;
+    }
+
+    async retryTask(id: string): Promise<RuntimeTask> {
+        const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(`/tasks/${encodeURIComponent(id)}/retry`);
+        if (!data.task) throw new Error(`backend task retry returned no task: ${id}`);
         return data.task;
     }
 

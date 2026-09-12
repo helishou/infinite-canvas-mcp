@@ -184,11 +184,12 @@ export type GenerateTextOptions = {
 export type GenerateTextResult = {
     text: string;
 };
-export type LocalH3Input = { video?: { name: string; dataUrl?: string; url?: string }; references?: Array<{ name: string; dataUrl?: string; url?: string }>; audios?: Array<{ name: string; dataUrl?: string; url?: string }>; previousVideo?: { name: string; dataUrl?: string; url?: string } };
-export type LocalH3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string };
+export type LocalH3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
 export type LocalH3Result = { url: string; storageKey?: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; actualSubmission?: LocalH3ActualSubmission; segments?: Array<{ media?: Array<{ url: string; storageKey?: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
-export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: LocalH3Result | null; error?: string | null };
+export type LocalH3Preview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
+export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: LocalH3Preview | null; result?: LocalH3Result | null; error?: string | null };
+export type CanvasH3RunOptions = { projectId: string; nodeId: string; segmentIndex?: number; runFromCurrent?: boolean; params?: Record<string, unknown>; idempotencyKey?: string };
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 
 // 一个可选模型:value 传回给 generateXxx({ model }),label 用于展示
@@ -200,9 +201,10 @@ export type CanvasPluginAi = {
     generateImage: (prompt: string, options?: GenerateImageOptions) => Promise<GenerateImageResult>;
     generateVideo: (prompt: string, options?: GenerateVideoOptions) => Promise<GenerateVideoResult>;
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
-    runLocalH3: (prompt: string, input: LocalH3Input, params: Record<string, unknown>, options?: LocalH3Options) => Promise<LocalH3Result>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
-    cancelLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
+    runCanvasH3: (options: CanvasH3RunOptions) => Promise<LocalH3Task>;
+    getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
+    cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
     runVideoConcat: (videos: Array<{ name: string; url?: string; storageKey?: string }>, options?: LocalH3Options) => Promise<LocalVideoConcatResult>;
     listLocalH3Models: () => Promise<{
         models: string[];
@@ -213,9 +215,7 @@ export type CanvasPluginAi = {
         latentUpscaleModels?: string[];
         nanfeng?: Record<string, unknown[]>;
     }>;
-    runRunningHubH3: (prompt: string, input: LocalH3Input, params: Record<string, unknown>, options?: LocalH3Options) => Promise<LocalH3Result>;
     getRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
-    cancelRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
     // 列出某能力下用户已配置的可选模型;不传能力则返回全部
     listModels: (capability?: ModelCapability) => ModelOption[];
     // 该能力当前默认选中的模型 value(可作为下拉框初始值)
@@ -236,6 +236,8 @@ export type PluginStorage = {
     set: (key: string, value: unknown) => Promise<void>;
     remove: (key: string) => Promise<void>;
 };
+
+export type CanvasAssetPickerImage = { kind: "image"; dataUrl: string; title: string; storageKey?: string };
 
 export type CanvasGenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 export type CanvasGenerationLog = {
@@ -279,6 +281,7 @@ export type CanvasNodeContext = {
     // 打开/关闭本节点下方的自定义 Panel(需在节点定义里提供 Panel)
     openPanel: () => void;
     closePanel: () => void;
+    openAssetPicker: (options?: { kind?: "image" }) => Promise<CanvasAssetPickerImage | null>;
     // 插件私有持久化,按插件 id 命名空间隔离
     storage: PluginStorage;
     generationLogs: CanvasGenerationLogs;

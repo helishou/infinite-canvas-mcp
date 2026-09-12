@@ -19,7 +19,7 @@ export function resolveComfyEndpoint(): { endpoint: string; token: string } {
 export type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
 type ComfyMedia = { url: string; mimeType: string; storageKey?: string };
 type ComfyPreview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
-export type H3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string };
+export type H3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
 export type LocalH3TaskResult = { url: string; storageKey?: string; mimeType: string; taskId: string; width?: number; height?: number; durationMs?: number; actualSubmission?: H3ActualSubmission; segments?: Array<{ media?: ComfyMedia[] }> };
 type ComfyTask = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: ComfyPreview | null; result?: { media?: ComfyMedia[]; actualSubmission?: H3ActualSubmission; segments?: Array<{ media?: ComfyMedia[] }> } | null; error?: string | null };
 type VideoConcatTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia } | null; error?: string | null };
@@ -125,43 +125,6 @@ export async function getComfyTask(endpoint: string, token: string, taskId: stri
     return { ...task, result: output ? { url: proxyComfyMedia(output, endpoint, token).url, storageKey: output.storageKey, mimeType: output.mimeType } : null };
 }
 
-export type LocalH3Input = {
-    video?: LocalReference;
-    references?: LocalReference[];
-    audios?: LocalReference[];
-    previousVideo?: LocalReference;
-};
-
-/** Run the packaged MiniMax H3 workflow through the Agent runtime. The plugin never talks to ComfyUI directly. */
-export async function runLocalH3Task(endpoint: string, token: string, comfyUrl: string, prompt: string, input: LocalH3Input, params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void): Promise<LocalH3TaskResult> {
-    const refs = [...(input.references || []), ...(input.audios || []), ...(input.video ? [input.video] : []), ...(input.previousVideo ? [input.previousVideo] : [])];
-    // 旧画布/H3 输出可能只有可播放 URL，没有 storageKey。此时仍然把 URL
-    // 同步到 backend runtime media，避免移除 Assets 面板后这类素材无法参与生成。
-    const synced = await Promise.all(refs.map(async (reference) => ({ reference, path: await syncReference(endpoint, token, reference, signal, true) })));
-    const pathFor = (reference?: LocalReference) => synced.find((item) => item.reference === reference)?.path;
-    const created = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, "/canvas/generation", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "video", model: params.modelName || "minimax-h3:video", preset: "minimax-h3", input: { prompt, references: (input.references || []).map(pathFor).filter(Boolean), audios: (input.audios || []).map(pathFor).filter(Boolean), video: pathFor(input.video), previousVideo: pathFor(input.previousVideo) }, params, comfyUrl }) });
-    onTaskId?.(created.task.id);
-    for (;;) {
-        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const response = await pollTaskWithRetry(() => fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${created.task.id}`), signal);
-        if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
-            // cancelled 不是失败：抛出可识别错误，调用方会按 cancelRequested 走取消分支，
-            // 不再被 catch 误判成 "MiniMax H3 任务失败"。
-            if (response.task.status === "cancelled") {
-                const err = new Error(response.task.error || "H3 任务已取消");
-                err.name = "H3RunCancelled";
-                throw err;
-            }
-            if (response.task.status !== "succeeded") throw new Error(response.task.error || "MiniMax H3 任务失败");
-            const media = response.task.result?.media?.find((item) => String(item.mimeType || "video/mp4").startsWith("video/")) || response.task.result?.media?.[0];
-            if (!media) throw new Error("MiniMax H3 完成但没有返回视频");
-            const proxy = (item: ComfyMedia) => proxyComfyMedia(item, endpoint, token);
-            return { ...proxy(media), actualSubmission: response.task.result?.actualSubmission, segments: (response.task.result?.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })), taskId: created.task.id };
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1200));
-    }
-}
-
 export async function getLocalH3Task(endpoint: string, token: string, taskId: string): Promise<Omit<ComfyTask, "result"> & { result: LocalH3TaskResult | null }> {
     const response = await fetchAgentJson<{ task: ComfyTask; preview?: ComfyPreview | null }>(endpoint, token, `/comfy/tasks/${encodeURIComponent(taskId)}`);
     const proxy = (item: ComfyMedia) => proxyComfyMedia(item, endpoint, token);
@@ -170,10 +133,6 @@ export async function getLocalH3Task(endpoint: string, token: string, taskId: st
     const media = (response.task.result.media || []).map(proxy);
     const output = media.find((item) => item.mimeType.startsWith("video/")) || media[0];
     return { ...response.task, preview, result: { url: output?.url || "", storageKey: output?.storageKey, mimeType: output?.mimeType || "video/mp4", taskId: response.task.id, actualSubmission: response.task.result.actualSubmission, segments: (response.task.result.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })) } };
-}
-
-export async function cancelLocalH3Task(endpoint: string, token: string, taskId: string) {
-    return (await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" })).task;
 }
 
 export async function runVideoConcatTask(endpoint: string, token: string, videos: LocalReference[], signal?: AbortSignal) {
@@ -196,41 +155,12 @@ export async function runVideoConcatTask(endpoint: string, token: string, videos
     }
 }
 
-/** RunningHub H3 也走统一画布生成入口；这里只保留前端轮询适配。 */
-export async function runRunningHubH3Task(endpoint: string, token: string, prompt: string, input: LocalH3Input, params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void) {
-    const refs = [...(input.references || []), ...(input.audios || []), ...(input.video ? [input.video] : []), ...(input.previousVideo ? [input.previousVideo] : [])];
-    const synced = await Promise.all(refs.map(async (reference) => ({ reference, path: await syncReference(endpoint, token, reference, signal, true) })));
-    const pathFor = (reference?: LocalReference) => synced.find((item) => item.reference === reference)?.path;
-    const created = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, "/canvas/generation", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "video", model: params.modelName || "minimax-h3:video", preset: "minimax-h3", input: { prompt, references: (input.references || []).map(pathFor).filter(Boolean), audios: (input.audios || []).map(pathFor).filter(Boolean), video: pathFor(input.video), previousVideo: pathFor(input.previousVideo) }, params }) });
-    onTaskId?.(created.task.id);
-    for (;;) {
-        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const response = await pollTaskWithRetry(() => fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/agent/runtime/tasks/${created.task.id}`), signal);
-        if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
-            if (response.task.status === "cancelled") {
-                const err = new Error(response.task.error || "H3 任务已取消");
-                err.name = "H3RunCancelled";
-                throw err;
-            }
-            if (response.task.status !== "succeeded") throw new Error(response.task.error || "RunningHub H3 任务失败");
-            const media = response.task.result?.media?.find((item) => item.mimeType.startsWith("video/")) || response.task.result?.media?.[0];
-            if (!media) throw new Error("RunningHub H3 完成但没有返回媒体");
-            return { ...media, mimeType: media.mimeType || "video/mp4", taskId: created.task.id };
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1200));
-    }
-}
-
 export async function getRunningHubH3Task(endpoint: string, token: string, taskId: string) {
     const task = (await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/agent/runtime/tasks/${encodeURIComponent(taskId)}`)).task;
     if (!task.result) return { ...task, result: null };
     const media = task.result.media || [];
     const output = media.find((item) => String(item.mimeType || "video/mp4").startsWith("video/")) || media[0];
     return { ...task, result: output ? { url: output.url, storageKey: output.storageKey, mimeType: output.mimeType || "video/mp4", taskId: task.id } : null };
-}
-
-export async function cancelRunningHubH3Task(endpoint: string, token: string, taskId: string) {
-    return (await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/agent/runninghub/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" })).task;
 }
 
 async function fetchAsBlob(url: string, signal?: AbortSignal) {

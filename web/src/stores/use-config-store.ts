@@ -10,10 +10,32 @@ export type ModelCapability = "image" | "video" | "text" | "audio";
 export const VIDEO_CONCAT_MODEL = "__local_video_concat__";
 export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 
+/** 输入场景：没有参考输入 = 文生，1 个参考 = 单图，多个参考 = 多图（视频 / 文本 / 音频同理按参考数量区分）。 */
+export type ModelInputScenario = "text" | "single" | "multi";
+export type ModelWorkflowRouting = Partial<Record<ModelInputScenario, string>>;
+/** 按输入场景存的工作流参数覆盖值（key = WorkflowField.id）。不同场景走不同工作流，参数也随之不同。 */
+export type ModelWorkflowParams = Partial<Record<ModelInputScenario, Record<string, unknown>>>;
+export const MODEL_INPUT_SCENARIOS: ModelInputScenario[] = ["text", "single", "multi"];
+/** 场景路由的哨兵值：显式声明该模型不支持这种输入场景（无参考 / 单参考 / 多参考）。 */
+export const WORKFLOW_ROUTE_UNSUPPORTED = "__unsupported__";
+/** 场景中文标签（按能力区分「文生图 / 文生视频 / 文生文本 / 文生音频」）。 */
+export const MODEL_SCENARIO_LABELS: Record<ModelCapability, Record<ModelInputScenario, string>> = {
+    image: { text: "文生图", single: "单图", multi: "多图" },
+    video: { text: "文生视频", single: "单图", multi: "多图" },
+    text: { text: "文生文本", single: "单图", multi: "多图" },
+    audio: { text: "文生音频", single: "单图", multi: "多图" },
+};
+
 export type ChannelModel = {
     name: string;
     capability: ModelCapability;
     script?: string;
+    /** ComfyUI 渠道：该模型对外暴露时可用的工作流（可挂多个）。 */
+    workflows?: string[];
+    /** ComfyUI 渠道：三种输入场景分别走哪个工作流；未配置的场景回退到第一个工作流。 */
+    workflowRouting?: ModelWorkflowRouting;
+    /** ComfyUI 渠道：三种输入场景各自的工作流参数覆盖（该场景走哪个工作流就用它的字段）。 */
+    workflowParams?: ModelWorkflowParams;
 };
 
 export type ModelChannel = {
@@ -197,10 +219,90 @@ export function resolveModelScript(config: AiConfig, value: string) {
     return findChannelModel(config, value)?.model.script?.trim() || "";
 }
 
+/** 参考输入数量 → 输入场景：0 = 文生，1 = 单图，≥2 = 多图。 */
+export function scenarioFromReferenceCount(count: number): ModelInputScenario {
+    return count <= 0 ? "text" : count === 1 ? "single" : "multi";
+}
+
+/** 模型名自带的内置工作流（与后端 workflowNameFromModel 保持同一套约定）。 */
+export function builtinWorkflowName(value: string) {
+    const name = modelOptionName(value).trim();
+    if (/^z-image$/i.test(name)) return "Z-Image.json";
+    if (/^flux2-klein$/i.test(name)) return "Flux2-Klein.json";
+    if (/^flashvsr-1\.1$/i.test(name)) return "custom/视频修复FlashVSR1.1.json";
+    if (/\.json$/i.test(name) || /^custom\//i.test(name)) return name;
+    return "";
+}
+
+/** 读取某模型挂载的工作流与场景路由。 */
+export function modelWorkflowConfig(config: AiConfig, value: string): { workflows: string[]; routing: ModelWorkflowRouting } {
+    const model = findChannelModel(config, value)?.model;
+    return { workflows: model?.workflows || [], routing: model?.workflowRouting || {} };
+}
+
+/**
+ * 解析某次生成实际要跑的工作流：
+ * 1. 命中该模型在当前输入场景（文生 / 单图 / 多图）下的路由配置 → 用它；
+ * 2. 该场景被显式标记为「不支持」→ 返回空字符串（调用方给出明确报错，不回退）；
+ * 3. 只配了工作流列表没配路由 → 用列表第一个（「一个工作流做三份工作」即此情形）；
+ * 4. 都没配 → 回退到模型名对应的内置工作流；ComfyUI 渠道下模型名本身也视作工作流名。
+ */
+export function resolveModelWorkflow(config: AiConfig, value: string, referenceCount: number) {
+    const { workflows, routing } = modelWorkflowConfig(config, value);
+    const routed = String(routing[scenarioFromReferenceCount(referenceCount)] || "").trim();
+    if (routed === WORKFLOW_ROUTE_UNSUPPORTED) return "";
+    if (routed) return routed;
+    if (workflows.length) return workflows[0];
+    const builtin = builtinWorkflowName(value);
+    if (builtin) return builtin;
+    return resolveModelChannel(config, value).kind === "comfyui" ? modelOptionName(value).trim() : "";
+}
+
+/** 该模型在当前输入场景下是否被显式标记为「不支持」。 */
+export function modelScenarioUnsupported(config: AiConfig, value: string, referenceCount: number) {
+    return modelWorkflowConfig(config, value).routing[scenarioFromReferenceCount(referenceCount)] === WORKFLOW_ROUTE_UNSUPPORTED;
+}
+
+/** 解析不到工作流时的报错文案：区分「没配工作流」与「该输入场景被标记为不支持」。 */
+export function modelWorkflowMissingMessage(config: AiConfig, value: string, referenceCount: number) {
+    const name = modelOptionName(value).trim();
+    const scenario = scenarioFromReferenceCount(referenceCount);
+    if (modelScenarioUnsupported(config, value, referenceCount)) {
+        const capability = findChannelModel(config, value)?.model.capability || "image";
+        return `模型「${name}」不支持${MODEL_SCENARIO_LABELS[capability][scenario]}输入（已在渠道设置里把该场景标记为「不支持」），请改用其它模型或调整它的工作流路由`;
+    }
+    return `模型「${name}」没有可用工作流，请到渠道设置里为它配置工作流`;
+}
+
+/** 该模型是否挂了工作流（用于 UI 展示与「是否走本地工作流」判断）。 */
+export function modelHasWorkflowConfig(config: AiConfig, value: string) {
+    return modelWorkflowConfig(config, value).workflows.length > 0;
+}
+
+/**
+ * 读取某模型在当前输入场景下的工作流参数覆盖值（渠道设置里按场景配的默认参数）。
+ * 调用方把它作为字段默认值：节点/工作台上手填的值优先级更高。
+ */
+export function resolveModelWorkflowParams(config: AiConfig, value: string, referenceCount: number): Record<string, unknown> {
+    const params = findChannelModel(config, value)?.model.workflowParams?.[scenarioFromReferenceCount(referenceCount)];
+    return params ? { ...params } : {};
+}
+
 function isAiConfigReady(config: AiConfig, model: string) {
     const channel = resolveModelChannel(config, model);
     if (channel.kind === "comfyui") return Boolean(model.trim() && channel.baseUrl.trim());
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
+}
+
+function syncConfigToBackend(config: AiConfig) {
+    if (typeof window === "undefined") return;
+    void Promise.all([
+        import("@/services/backend-api"),
+        import("@/stores/use-backend-store"),
+    ]).then(([api, backend]) => {
+        if (backend.useBackendStore.getState().connected) return api.syncBackendAiConfig(config);
+        return undefined;
+    }).catch(() => undefined);
 }
 
 export const useConfigStore = create<ConfigStore>()(
@@ -211,17 +313,18 @@ export const useConfigStore = create<ConfigStore>()(
             isConfigOpen: false,
             configTab: "channels",
             shouldPromptContinue: false,
-            updateConfig: (key, value) =>
-                set((state) => ({
-                    config: {
-                        ...state.config,
-                        [key]: value,
-                    },
-                })),
+            updateConfig: (key, value) => {
+                const config = { ...get().config, [key]: value };
+                set({ config });
+                syncConfigToBackend(config);
+            },
             importChannelCredentials: (input) => {
                 const config = get().config;
                 const result = upsertChannelCredentials(config, input);
-                if (result.config !== config) set({ config: result.config });
+                if (result.config !== config) {
+                    set({ config: result.config });
+                    syncConfigToBackend(result.config);
+                }
                 return { status: result.status, channelName: result.channelName };
             },
             updateWebdavConfig: (key, value) =>
@@ -275,6 +378,9 @@ export const useConfigStore = create<ConfigStore>()(
                     },
                 };
             },
+            onRehydrateStorage: () => (state) => {
+                if (state?.config) syncConfigToBackend(state.config);
+            },
         },
     ),
 );
@@ -294,9 +400,65 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         seen.add(name);
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
-        result.push({ name, capability, script });
+        const workflows = typeof item === "string" ? [] : normalizeWorkflowList(item.workflows);
+        const workflowRouting = typeof item === "string" ? undefined : normalizeWorkflowRouting(item.workflowRouting, workflows);
+        const workflowParams = typeof item === "string" ? undefined : normalizeModelWorkflowParams(item.workflowParams, workflows, workflowRouting);
+        result.push({ name, capability, script, ...(workflows.length ? { workflows } : {}), ...(workflowRouting ? { workflowRouting } : {}), ...(workflowParams ? { workflowParams } : {}) });
     }
     return result;
+}
+
+function normalizeWorkflowList(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    return Array.from(new Set(value.map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
+/** 路由里的工作流必须在挂载列表内；工作流被移除时回落到列表第一个。 */
+function normalizeWorkflowRouting(value: unknown, workflows: string[]): ModelWorkflowRouting | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const source = value as Record<string, unknown>;
+    const routing: ModelWorkflowRouting = {};
+    for (const scenario of MODEL_INPUT_SCENARIOS) {
+        const routed = String(source[scenario] || "").trim();
+        if (!routed) continue;
+        // 「不支持」是显式声明的场景状态，不属于工作流列表，不能按「已被移除」回落。
+        routing[scenario] = routed === WORKFLOW_ROUTE_UNSUPPORTED ? routed : workflows.length && !workflows.includes(routed) ? workflows[0] : routed;
+    }
+    return Object.keys(routing).length ? routing : undefined;
+}
+
+/**
+ * 场景路由的生效值：配置过的按配置（含「不支持」哨兵），没配置的落到第一个工作流
+ * （「一个工作流做三份工作」即此情形）。展示口径与保存口径都以它为准。
+ */
+export function effectiveWorkflowRouting(workflows: string[], routing: ModelWorkflowRouting | undefined): ModelWorkflowRouting {
+    const fallback = workflows[0] || "";
+    const next: ModelWorkflowRouting = {};
+    for (const scenario of MODEL_INPUT_SCENARIOS) {
+        const routed = routing?.[scenario];
+        next[scenario] = routed === WORKFLOW_ROUTE_UNSUPPORTED ? routed : routed && workflows.includes(routed) ? routed : fallback;
+    }
+    return next;
+}
+
+/**
+ * 场景参数只在「该场景确实路由到某个已挂工作流」时才保留：
+ * 场景被标记为「不支持」、或它指向的工作流被移除后，对应参数一并丢弃，避免存下用不到的脏数据。
+ */
+export function normalizeModelWorkflowParams(value: unknown, workflows: string[], routing: ModelWorkflowRouting | undefined): ModelWorkflowParams | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const source = value as Record<string, unknown>;
+    const effective = effectiveWorkflowRouting(workflows, routing);
+    const params: ModelWorkflowParams = {};
+    for (const scenario of MODEL_INPUT_SCENARIOS) {
+        const routed = effective[scenario];
+        if (!routed || routed === WORKFLOW_ROUTE_UNSUPPORTED || !workflows.includes(routed)) continue;
+        const raw = source[scenario];
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+        const entries = Object.entries(raw as Record<string, unknown>).filter(([, item]) => item !== undefined && item !== null && item !== "");
+        if (entries.length) params[scenario] = Object.fromEntries(entries);
+    }
+    return Object.keys(params).length ? params : undefined;
 }
 
 export function createModelChannel(channel?: Partial<ModelChannel>): ModelChannel {

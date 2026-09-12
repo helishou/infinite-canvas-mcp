@@ -10,10 +10,13 @@ import { setImageBlob } from "@/services/image-storage";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
 import { CanvasProjectCard } from "@/components/canvas/canvas-project-card";
 import type { CanvasExportFile } from "@/types/canvas-export";
+import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { hasAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
+import { uploadBackendMedia } from "@/services/backend-api";
+import { useBackendStore } from "@/stores/use-backend-store";
 
 export default function CanvasPage() {
     const { message } = App.useApp();
@@ -44,17 +47,21 @@ export default function CanvasPage() {
             const projectFile = zip.get("projects.json");
             if (!projectFile) throw new Error("missing projects.json");
             const data = JSON.parse(await projectFile.text()) as CanvasExportFile;
-            await Promise.all(
-                data.projects.flatMap((project) =>
-                    project.files.map(async (item) => {
-                        const blob = zip.get(item.path);
-                        if (!blob) return;
-                        const typedBlob = blob.type ? blob : blob.slice(0, blob.size, item.mimeType);
-                        await (item.storageKey.startsWith("image:") ? setImageBlob(item.storageKey, typedBlob) : setMediaBlob(item.storageKey, typedBlob));
-                    }),
-                ),
-            );
-            data.projects.forEach((item) => importProject(item.project));
+            if (data.app !== "infinite-canvas" || ![3, 4].includes(Number(data.version)) || !Array.isArray(data.projects)) throw new Error("不支持的画布导出包");
+            const entries = data.projects.flatMap((project) => project.files.map((item) => ({ project, item, blob: zip.get(item.path) })));
+            if (entries.some((entry) => !entry.blob)) throw new Error("导出包缺少媒体文件");
+            for (const entry of entries) {
+                const blob = entry.blob!;
+                const typedBlob = blob.type ? blob : blob.slice(0, blob.size, entry.item.mimeType);
+                if (entry.item.sha256 && await sha256(typedBlob) !== entry.item.sha256) throw new Error(`媒体校验失败：${entry.item.storageKey}`);
+            }
+            const backendConnected = useBackendStore.getState().connected;
+            for (const entry of entries) {
+                const typedBlob = entry.blob!.type ? entry.blob! : entry.blob!.slice(0, entry.blob!.size, entry.item.mimeType);
+                if (backendConnected) await uploadBackendMedia({ name: entry.item.path.split("/").pop() || "media.bin", blob: typedBlob, storageKey: entry.item.storageKey, mimeType: entry.item.mimeType, category: "library" });
+                await (entry.item.storageKey.startsWith("image:") ? setImageBlob(entry.item.storageKey, typedBlob) : setMediaBlob(entry.item.storageKey, typedBlob));
+            }
+            data.projects.forEach((item) => importProject({ ...item.project, logs: item.logs || [] } as Partial<CanvasProject> & { logs: Array<Record<string, unknown>> }));
             message.success(t("canvas.imported", { count: data.projects.length }));
         } catch {
             message.error(t("canvas.importFailed"));
@@ -128,4 +135,9 @@ export default function CanvasPage() {
             <CanvasDeleteProjectsDialog />
         </main>
     );
+}
+
+async function sha256(blob: Blob) {
+    const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+    return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }

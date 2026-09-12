@@ -5,9 +5,10 @@ import i18n from "@/i18n";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
-import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
+import { boolConfig, buildApiUrl, modelOptionName, modelWorkflowMissingMessage, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, resolveModelWorkflow, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
 import { runModelPlugin } from "./model-plugin";
 import { runComfyTask, resolveComfyEndpoint, type LocalReference } from "./comfyui";
+import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow } from "./workflows";
 import type { ReferenceImage } from "@/types/image";
 
 type VideoResponse = { id: string; status?: string; error?: { message?: string }; url?: string; result_url?: string; video_url?: string; content?: { video_url?: string; url?: string } | null };
@@ -35,8 +36,29 @@ function aiHeaders(config: AiConfig, contentType?: string) {
 }
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
-    const requestConfig = resolveModelRequestConfig(config, (config.model || config.videoModel).trim());
-    if (requestConfig.model === "flashvsr-1.1" && resolveModelChannel(config, (config.model || config.videoModel).trim()).kind === "comfyui") {
+    const selectedModel = (config.model || config.videoModel).trim();
+    if (resolveModelChannel(config, selectedModel).kind === "comfyui") return runComfyVideoGeneration(config, selectedModel, prompt, references, options);
+    const task = await createVideoGenerationTask(config, prompt, references, options);
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const state = await pollVideoGenerationTask(config, task, options);
+        if (state.status === "completed") return state.result;
+        if (state.status === "failed") throw new Error(state.error);
+        if (attempt === 119) throw new Error(apiText("videoTimeout", { provider: "" }));
+        await delay(2500, options?.signal);
+    }
+    throw new Error(apiText("videoTimeout", { provider: "" }));
+}
+
+/**
+ * ComfyUI 渠道的视频生成：工作流由渠道模型配置的输入场景路由（文生视频 / 单图 / 多图）解析，
+ * 未配置路由时回退到模型名对应的内置工作流；该场景被标记为「不支持」时直接报错，不回退。
+ * FlashVSR 这类「拿源视频做修复」的工作流仍走原本的 preset 链路（通用工作流执行器只注入提示词与参考图）。
+ */
+async function runComfyVideoGeneration(config: AiConfig, selectedModel: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationResult> {
+    const workflowName = resolveModelWorkflow(config, selectedModel, references.length);
+    if (!workflowName) throw new Error(modelWorkflowMissingMessage(config, selectedModel, references.length));
+    if (/flashvsr/i.test(workflowName)) {
         const comfyEndpoint = resolveComfyEndpoint();
         const comfy = await fetch(`${comfyEndpoint.endpoint}/comfy/config?token=${encodeURIComponent(comfyEndpoint.token)}`).then(async (response) => {
             if (!response.ok) throw new Error(`读取 ComfyUI 配置失败（HTTP ${response.status}）`);
@@ -48,16 +70,23 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
         const result = await runComfyTask(comfyEndpoint.endpoint, comfyEndpoint.token, comfy.url, "flashvsr-1.1", prompt, [video], { longEdge: config.size }, options?.signal, options?.onTaskId);
         return { url: result.url, mimeType: result.mimeType || "video/mp4" };
     }
-    const task = await createVideoGenerationTask(config, prompt, references, options);
-    for (let attempt = 0; attempt < 120; attempt += 1) {
-        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const state = await pollVideoGenerationTask(config, task, options);
-        if (state.status === "completed") return state.result;
-        if (state.status === "failed") throw new Error(state.error);
-        if (attempt === 119) throw new Error(apiText("videoTimeout", { provider: "" }));
-        await delay(2500, options?.signal);
+    const detail = await fetchWorkflowDetail(workflowName);
+    const workflowFields: Record<string, unknown> = { prompt };
+    for (const field of detail.config?.fields || []) {
+        if (field.type === "text" && field.isPrompt) workflowFields[field.id] = prompt;
     }
-    throw new Error(apiText("videoTimeout", { provider: "" }));
+    const imageFields = (detail.config?.fields || []).filter((field) => isWorkflowImageField(field, detail.workflow));
+    for (let index = 0; index < imageFields.length; index += 1) {
+        const reference = references[index];
+        if (!reference) continue;
+        const dataUrl = await imageToDataUrl(reference);
+        if (dataUrl) workflowFields[imageFields[index].id] = dataUrl;
+    }
+    const run = await runWorkflow(workflowName, workflowFields, detail.config);
+    if (run.error) throw new Error(run.error);
+    const first = run.media?.[0];
+    if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");
+    return { url: first.url, mimeType: first.mimeType || "video/mp4" };
 }
 
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationTask> {

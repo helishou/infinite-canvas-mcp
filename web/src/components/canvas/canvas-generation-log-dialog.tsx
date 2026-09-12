@@ -4,6 +4,7 @@ import { ChevronDown, ChevronUp, Copy, Trash2 } from "lucide-react";
 
 import { deleteBackendGenerationLogs, fetchBackendGenerationLogs, backendMediaUrl, type BackendGenerationLog as GenerationLog } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
+import { CanvasTaskCenter } from "./canvas-task-center";
 
 const PAGE_SIZE = 30;
 const ESTIMATED_ROW_HEIGHT = 220;
@@ -14,6 +15,7 @@ export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: 
     const [loading, setLoading] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
     const [hasMore, setHasMore] = useState(false);
+    const [tasksOpen, setTasksOpen] = useState(false);
     const load = useCallback(async () => {
         if (!connected || !projectId) return;
         setLoading(true);
@@ -38,10 +40,10 @@ export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: 
         await deleteBackendGenerationLogs(id ? { id } : { projectId });
         await load();
     };
-    return <Modal title={`生成日志${logs.length ? ` (${logs.length}${hasMore ? "+" : ""})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
-        <div className="mb-3 flex justify-end"><Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button></div>
+    return <><Modal title={`生成日志${logs.length ? ` (${logs.length}${hasMore ? "+" : ""})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
+        <div className="mb-3 flex justify-end gap-2"><Button size="small" onClick={() => setTasksOpen(true)}>任务中心</Button><Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button></div>
         {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? "加载中…" : "暂无生成日志"} /> : <LogList logs={logs} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={(id) => void remove(id)} />}
-    </Modal>;
+    </Modal><CanvasTaskCenter open={tasksOpen} projectId={projectId} onClose={() => setTasksOpen(false)} /></>;
 }
 
 function LogList({ logs, hasMore, loadingMore, onLoadMore, onDelete }: { logs: GenerationLog[]; hasMore: boolean; loadingMore: boolean; onLoadMore: () => void; onDelete: (id: string) => void }) {
@@ -87,6 +89,13 @@ function actualSubmissionText(params: unknown) {
     if (!submission || typeof submission !== "object") return "";
     const value = submission as Record<string, unknown>;
     const loras = Array.isArray(value.loras) ? value.loras.map((item) => item && typeof item === "object" ? `${String((item as Record<string, unknown>).name || "")} @ ${String((item as Record<string, unknown>).strength ?? "")}`.trim() : "").filter(Boolean).join("，") : "";
+    // 媒体槽位：图片N/视频N/音频N 是「上一段成品被当成视频1 塞进来」这类隐式注入唯一的可见证据。
+    const media = value.mediaInputs && typeof value.mediaInputs === "object" ? value.mediaInputs as Record<string, unknown> : undefined;
+    const slotText = (key: string, prefix: string) => {
+        const list = media && Array.isArray(media[key]) ? media[key] as unknown[] : [];
+        const names = list.map((item) => String(item || "")).filter(Boolean);
+        return `${prefix}${names.length}：${names.length ? names.map((name, index) => `${prefix}${index + 1}=${name}`).join("，") : "无"}`;
+    };
     return [
         `ComfyUI promptId：${String(value.promptId || "-")}`,
         `Seed：${String(value.seed ?? "-")}`,
@@ -95,6 +104,7 @@ function actualSubmissionText(params: unknown) {
         `LoRA：${loras || "无"}`,
         `注意力：${String(value.attention || "-")}`,
         `Sigma：${String(value.sigma || "-")}`,
+        ...(media ? [slotText("images", "图片"), slotText("videos", "视频"), slotText("audios", "音频")] : []),
     ].join("\n");
 }
 
