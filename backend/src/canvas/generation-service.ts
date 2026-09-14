@@ -42,6 +42,7 @@ export class CanvasGenerationService {
             projectId: command.projectId,
             ...(command.nodeId ? { nodeId: command.nodeId } : {}),
             ...(command.nodeIds?.length ? { nodeIds: command.nodeIds } : {}),
+            ...(command.segmentId ? { segmentId: command.segmentId } : {}),
             ...(command.segmentIndex !== undefined ? { segmentIndex: command.segmentIndex } : {}),
             ...(command.runFromCurrent !== undefined ? { runFromCurrent: command.runFromCurrent } : {}),
             ...(command.skipCompleted !== undefined ? { skipCompleted: command.skipCompleted } : {}),
@@ -112,17 +113,21 @@ function bindCanvasTask(stores: Stores, events: BackendEventBus, binding: Record
     const metadata = recordOf(node.metadata);
     const segments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
     if (!segments.some((segment) => String(segment.id || "") === segmentId)) throw new Error(`找不到 H3 片段: ${segmentId}`);
-    const result = stores.projects.applyOperations(projectId, Number(project.revision || 0), [{
-        type: "update_node",
-        id: nodeId,
-        metadata: {
-            runtimeTaskId: taskId,
-            status: "loading",
-            runProgress: 0,
-            segments: segments.map((segment) => String(segment.id || "") === segmentId ? { ...segment, runtimeTaskId: taskId, status: "loading", progress: 0, errorDetails: undefined } : segment),
+    const result = stores.projects.applyOperations(projectId, Number(project.revision || 0), [
+        {
+            type: "update_node",
+            id: nodeId,
+            metadata: { runtimeTaskId: taskId, status: "loading", runProgress: 0 },
+            metadataDelete: ["errorDetails"],
         },
-        metadataDelete: ["errorDetails"],
-    }]);
+        {
+            type: "update_h3_segment",
+            nodeId,
+            segmentId,
+            patch: { runtimeTaskId: taskId, status: "loading", progress: 0 },
+            patchDelete: ["errorDetails"],
+        },
+    ]);
     events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || "") });
 }
 

@@ -11,6 +11,7 @@ type H3RunInput = {
     projectId: string;
     nodeId?: string;
     nodeIds?: string[];
+    segmentId?: string;
     segmentIndex?: number;
     runFromCurrent?: boolean;
     skipCompleted?: boolean;
@@ -186,7 +187,10 @@ export class CanvasH3Runner {
         const metadata = recordOf(node.metadata);
         const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
         if (!segments.length) return [];
-        const selected = input.segmentIndex ?? Math.max(0, segments.findIndex((segment) => !segment.result));
+        const selected = input.segmentId
+            ? segments.findIndex((segment) => String(segment.id || "") === input.segmentId)
+            : input.segmentIndex ?? Math.max(0, segments.findIndex((segment) => !segment.result));
+        if (selected < 0) throw new Error(`找不到 H3 片段: ${input.segmentId}`);
         const indices = input.runFromCurrent ? segments.map((_, index) => index).filter((index) => index >= selected) : [selected];
         return indices.filter((index) => segments[index]).filter((index) => !input.skipCompleted || !segments[index].result).map((segmentIndex) => {
             const segment = segments[segmentIndex];
@@ -297,9 +301,12 @@ export class CanvasH3Runner {
         const projectId = String(parent.input.projectId);
         const project = this.stores.projects.get(projectId)!;
         const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId)!;
-        const metadata = recordOf(node.metadata);
-        const segments = (metadata.segments as H3Segment[]).map((segment) => String(segment.id || "") === plan.segmentId ? { ...segment, runtimeTaskId: childId, status: "loading", progress: 0, errorDetails: undefined } : segment);
-        this.updateNode(projectId, plan.nodeId, { runtimeTaskId: parentId, status: "loading", segments });
+        if (!node) throw new Error(`找不到 H3 节点: ${plan.nodeId}`);
+        const result = this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [
+            { type: "update_node", id: plan.nodeId, metadata: { runtimeTaskId: parentId, status: "loading" } },
+            { type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch: { runtimeTaskId: childId, status: "loading", progress: 0 }, patchDelete: ["errorDetails"] },
+        ]);
+        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || "") });
         const log = this.stores.logs.update(generationLogId, { status: "running", runtimeTaskId: childId });
         this.events.publish({ type: "generation-log.updated", entityId: log.id, payload: log });
     }
@@ -428,7 +435,7 @@ function normalizeInput(input: H3RunInput): H3RunInput {
     const projectId = String(input.projectId || "");
     if (!projectId) throw new Error("projectId 必填");
     if (!input.nodeId && !input.nodeIds?.length) throw new Error("nodeId 或 nodeIds 必填");
-    return { ...input, projectId, nodeId: input.nodeId ? String(input.nodeId) : undefined, nodeIds: input.nodeIds?.map(String), params: recordOf(input.params) };
+    return { ...input, projectId, nodeId: input.nodeId ? String(input.nodeId) : undefined, nodeIds: input.nodeIds?.map(String), segmentId: input.segmentId ? String(input.segmentId) : undefined, params: recordOf(input.params) };
 }
 
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }

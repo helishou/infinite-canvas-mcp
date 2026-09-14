@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Group, Video } from "lucide-react";
@@ -23,6 +23,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
+import { needsViewportCull, viewportRenderPadding } from "@/lib/canvas/canvas-viewport";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
 import { Alert, App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
@@ -40,7 +41,7 @@ import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeRespons
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { CharacterNodeEditModal } from "@/components/canvas/character-node-edit-modal";
 import { ImageCompareModal } from "@/components/canvas/image-compare-modal";
-import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
+import { InfiniteCanvas, type ViewportChangeOptions } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
 import { CanvasNodePromptPanel, type CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
@@ -361,6 +362,46 @@ function InfiniteCanvasPage() {
     const connectionsRef = useRef(connections);
     const selectedNodeIdsRef = useRef(selectedNodeIds);
     const viewportRef = useRef(viewport);
+    // 拖动/滚轮时视口每帧都在变。走 setState 会让整棵画布树重渲染（几百个节点时直接掉到 30fps），
+    // 所以高频阶段只把变换命令式写进 DOM，React state 只在拖动结束时同步一次。
+    const liveViewportRef = useRef<ViewportTransform>(viewport);
+    /** 上一次重算视口裁剪时的视口，用来判断「拖动是否已经移出已渲染范围」。 */
+    const cullViewportRef = useRef<ViewportTransform>(viewport);
+    const viewportWriterRef = useRef<((next: ViewportTransform) => void) | null>(null);
+    const registerViewportWriter = useCallback((writer: ((next: ViewportTransform) => void) | null) => {
+        viewportWriterRef.current = writer;
+    }, []);
+    /**
+     * 高频视口变更：写 DOM + 更新实时 ref，不触发 React 渲染。
+     * 但拖动一旦移出当前已渲染范围就会露出空白，所以按「距上次重算点的屏幕位移」补一次 state——
+     * 阈值与裁剪 padding 都按屏幕像素定义（见 canvas-viewport.ts），保证补渲染总发生在空白露出来之前。
+     */
+    const applyViewportLive = useCallback((next: ViewportTransform) => {
+        liveViewportRef.current = next;
+        viewportRef.current = next;
+        viewportWriterRef.current?.(next);
+        if (!needsViewportCull(cullViewportRef.current, next)) return;
+        cullViewportRef.current = next;
+        // 低优先级：这次重渲染（几百个节点的裁剪重算）可以被打断，不会卡住拖动/缩放的那一帧。
+        startTransition(() => setViewport(next));
+    }, []);
+    /** 显式视口变更（聚焦、缩放按钮、小地图、初始化）：同步 state 并重算裁剪。 */
+    const commitViewport = useCallback((next: ViewportTransform) => {
+        liveViewportRef.current = next;
+        viewportRef.current = next;
+        cullViewportRef.current = next;
+        viewportWriterRef.current?.(next);
+        setViewport(next);
+    }, []);
+    /** 画布容器回传的视口变更：拖动/滚轮走 live（零 React 渲染），其余走 commit。 */
+    const handleViewportChange = useCallback(
+        (next: ViewportTransform, options?: ViewportChangeOptions) => {
+            setContextMenu(null);
+            if (options?.live) applyViewportLive(next);
+            else commitViewport(next);
+        },
+        [applyViewportLive, commitViewport],
+    );
     const focusAnimRef = useRef<number | null>(null);
     const generateNodeRef = useRef<((nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => Promise<void>) | null>(null);
     const connectingParamsRef = useRef(connectingParams);
@@ -468,7 +509,7 @@ function InfiniteCanvasPage() {
             setActiveChatId(project.activeChatId || null);
             setBackgroundMode(project.backgroundMode);
             setShowImageInfo(project.showImageInfo || false);
-            setViewport(project.viewport);
+            commitViewport(project.viewport);
             historyRef.current = { past: [], future: [] };
             if (historyCommitTimerRef.current) {
                 clearTimeout(historyCommitTimerRef.current);
@@ -616,7 +657,7 @@ function InfiniteCanvasPage() {
             setSize({ width: rect.width, height: rect.height });
             if (!didInitialCenterRef.current) {
                 didInitialCenterRef.current = true;
-                setViewport({ x: rect.width / 2, y: rect.height / 2, k: 1 });
+                commitViewport({ x: rect.width / 2, y: rect.height / 2, k: 1 });
             }
         };
 
@@ -746,7 +787,7 @@ function InfiniteCanvasPage() {
     const nodeById = graphIndex.nodeById;
 
     const visibleNodes = useMemo(() => {
-        const padding = 280;
+        const padding = viewportRenderPadding(viewport.k);
         const rect = containerRef.current?.getBoundingClientRect();
         const width = rect?.width || size.width;
         const height = rect?.height || size.height;
@@ -759,7 +800,7 @@ function InfiniteCanvasPage() {
     }, [nodes, size.height, size.width, viewport.k, viewport.x, viewport.y]);
 
     const visibleConnections = useMemo(() => {
-        const padding = 280;
+        const padding = viewportRenderPadding(viewport.k);
         const rect = containerRef.current?.getBoundingClientRect();
         const width = rect?.width || size.width;
         const height = rect?.height || size.height;
@@ -1192,9 +1233,9 @@ function InfiniteCanvasPage() {
     }, [getCanvasCenter]);
 
     const resetViewport = useCallback(() => {
-        setViewport({ x: size.width / 2, y: size.height / 2, k: 1 });
+        commitViewport({ x: size.width / 2, y: size.height / 2, k: 1 });
         setContextMenu(null);
-    }, [size.height, size.width]);
+    }, [commitViewport, size.height, size.width]);
 
     const focusNode = useCallback(
         (nodeId: string) => {
@@ -1213,16 +1254,21 @@ function InfiniteCanvasPage() {
             const duration = 450;
             const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
             let startTime: number | null = null;
+            // 先把 state 推到目标视口，让目标区域的节点进入渲染范围；
+            // 动画过程本身只写 DOM，不再每帧重渲染整棵画布树。
+            setViewport(target);
             const step = (now: number) => {
                 if (startTime === null) startTime = now;
                 const progress = Math.min((now - startTime) / duration, 1);
                 const t = easeOutCubic(progress);
-                setViewport({ x: start.x + (target.x - start.x) * t, y: start.y + (target.y - start.y) * t, k: start.k + (target.k - start.k) * t });
+                const next = { x: start.x + (target.x - start.x) * t, y: start.y + (target.y - start.y) * t, k: start.k + (target.k - start.k) * t };
+                if (progress < 1) applyViewportLive(next);
+                else commitViewport(next);
                 focusAnimRef.current = progress < 1 ? requestAnimationFrame(step) : null;
             };
             focusAnimRef.current = requestAnimationFrame(step);
         },
-        [size.height, size.width],
+        [applyViewportLive, commitViewport, size.height, size.width],
     );
 
     useEffect(() => () => void (focusAnimRef.current && cancelAnimationFrame(focusAnimRef.current)), []);
@@ -1230,14 +1276,15 @@ function InfiniteCanvasPage() {
     const setZoomScale = useCallback(
         (scale: number) => {
             const nextScale = Math.min(Math.max(scale, 0.05), 5);
-            setViewport((prev) => ({
+            const prev = liveViewportRef.current;
+            commitViewport({
                 x: size.width / 2 - ((size.width / 2 - prev.x) / prev.k) * nextScale,
                 y: size.height / 2 - ((size.height / 2 - prev.y) / prev.k) * nextScale,
                 k: nextScale,
-            }));
+            });
             setContextMenu(null);
         },
-        [size.height, size.width],
+        [commitViewport, size.height, size.width],
     );
 
     const applyHistory = useCallback((entry: CanvasHistoryEntry) => {
@@ -3782,12 +3829,11 @@ function InfiniteCanvasPage() {
                 <InfiniteCanvas
                     containerRef={containerRef}
                     viewport={viewport}
+                    viewportRef={liveViewportRef}
+                    registerViewportWriter={registerViewportWriter}
                     tool={canvasTool}
                     backgroundMode={backgroundMode}
-                    onViewportChange={(next) => {
-                        setViewport(next);
-                        setContextMenu(null);
-                    }}
+                    onViewportChange={handleViewportChange}
                     onCanvasMouseDown={(event) => {
                         if (!referencePickerNodeId) handleCanvasMouseDown(event);
                     }}
@@ -3962,7 +4008,7 @@ function InfiniteCanvasPage() {
                     onShowImageInfoChange={setShowImageInfo}
                 />
 
-                {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={setViewport} /> : null}
+                {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={commitViewport} /> : null}
 
                 <CanvasZoomControls scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
                 <CanvasGenerationLogDialog open={generationLogsOpen} projectId={projectId} onClose={() => setGenerationLogsOpen(false)} />

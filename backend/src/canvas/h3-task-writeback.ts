@@ -36,7 +36,11 @@ export async function writeBackH3Task(stores: Stores, events: BackendEventBus, t
         segmentId: binding.segmentId,
         ...(binding.generationLogId ? { generationLogId: binding.generationLogId } : {}),
     }, output);
-    if (!saved) return false;
+    if (!saved) {
+        const log = binding.generationLogId ? stores.logs.get(binding.generationLogId) : null;
+        if (log) events.publish({ type: "generation-log.updated", entityId: log.id, payload: log });
+        return false;
+    }
     events.publishCanvasDelta({ entityId: saved.project.id, revision: Number(saved.project.revision || 0), operations: saved.operations, updatedAt: String(saved.project.updatedAt || "") });
     if (saved.log) events.publish({ type: "generation-log.updated", entityId: saved.log.id, payload: saved.log });
     return true;

@@ -312,7 +312,9 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
             }
             const operations = diffCanvasProject(base, project);
             if (!operations.length) {
-                syncBases.set(project.id, project);
+                // syncBase 是 Backend 的权威基线，不能用本地投影替换它。
+                // H3 的运行状态/结果字段刻意不进入 diff；若这里写入本地快照，
+                // 过期的 loading/result 就会伪装成最新远端基线。
                 continue;
             }
             recordSyncedChanges(project.id, operations);
@@ -401,8 +403,16 @@ async function hydrateCanvasProjectsFromBackend() {
 
 export function isLocalProjectNewer(local: CanvasProject, remote: CanvasProject) {
     if (JSON.stringify(local) === JSON.stringify(remote)) return false;
+    const localRevision = Number(local.revision || 0);
+    const remoteRevision = Number(remote.revision || 0);
     const localTime = Date.parse(String(local.updatedAt || ""));
     const remoteTime = Date.parse(String(remote.updatedAt || ""));
+    // revision 先判断远端是否已经推进；只有本地编辑时间明确晚于远端时，
+    // 才把 revision 落后的本地投影视为未提交网页编辑而保留。
+    if (remoteRevision > localRevision) {
+        return Number.isFinite(localTime) && Number.isFinite(remoteTime) && localTime > remoteTime;
+    }
+    if (localRevision > remoteRevision) return true;
     return Number.isFinite(localTime) && localTime > remoteTime;
 }
 
@@ -909,6 +919,15 @@ function applyBackendCanvasEvent(event: unknown, preservePendingLocalChanges = f
                 const remoteForStore = local ? { ...remote, viewport: local.viewport } : remote;
                 const base = syncBases.get(remote.id);
                 const pendingOps = base && local ? diffCanvasProject(base, local) : [];
+                // 本地快照 revision 落后且时间也不新，说明它是刷新/恢复留下的旧投影，
+                // 不是当前用户刚编辑的内容。先接受远端，不能把它当 pending ops 自动重提。
+                if (local && !isLocalProjectNewer(local, remote) && Number(remote.revision || 0) > Number(local.revision || 0)) {
+                    nextProjects.push(remoteForStore);
+                    nextRevisions[remote.id] = Number(remote.revision || 0);
+                    syncBases.set(remote.id, remote);
+                    if (JSON.stringify(local) !== JSON.stringify(remoteForStore)) changed = true;
+                    continue;
+                }
                 if (local && pendingOps.length) {
                     const conflicts = detectCanvasConflicts(pendingOps, remote, base);
                     if (conflicts.length) {

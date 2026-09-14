@@ -329,6 +329,20 @@ export class BackendDatabase {
         binding: { projectId: string; nodeId: string; segmentId: string; generationLogId?: string },
         output: Record<string, unknown> | null,
     ): { project: CanvasProject; log: GenerationLog | null; operations: CanvasOperation[] } | null {
+        // 日志描述的是任务本身的终态，不受画布 Clip 是否已被另一任务接管影响。
+        // 先收口日志，再用 runtimeTaskId CAS 尝试更新画布投影；否则 CAS 失败会留下永久 running 日志。
+        const currentLog = binding.generationLogId ? this.getGenerationLog(binding.generationLogId) : null;
+        const actualSubmission = task.result?.actualSubmission && typeof task.result.actualSubmission === "object" ? task.result.actualSubmission as Record<string, unknown> : null;
+        const log = binding.generationLogId
+            ? this.updateGenerationLog(binding.generationLogId, {
+                status: task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "failed",
+                finishedAt: new Date().toISOString(),
+                durationMs: Math.max(0, Date.now() - new Date(String(currentLog?.startedAt || Date.now())).getTime()),
+                outputs: output ? [output] : [],
+                ...(actualSubmission ? { params: { ...(currentLog?.params || {}), actualSubmission }, promptId: String(actualSubmission.promptId || "") || undefined } : {}),
+                ...(task.error ? { error: task.error } : {}),
+            })
+            : null;
         // 不在外部再开 BEGIN IMMEDIATE：applyCanvasProjectOperations 内部自管事务，SQLite 不支持嵌套。
         // 先做「被另一条更新的任务接管」检查（runtimeTaskId CAS），命中则放弃回写。
         const project = this.getCanvasProject(binding.projectId);
@@ -388,18 +402,6 @@ export class BackendDatabase {
             if (/CAS 失败|expectedRevision|revision/i.test(message)) return null;
             throw error;
         }
-        const currentLog = binding.generationLogId ? this.getGenerationLog(binding.generationLogId) : null;
-        const actualSubmission = task.result?.actualSubmission && typeof task.result.actualSubmission === "object" ? task.result.actualSubmission as Record<string, unknown> : null;
-        const log = binding.generationLogId
-            ? this.updateGenerationLog(binding.generationLogId, {
-                status: task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "failed",
-                finishedAt: new Date().toISOString(),
-                durationMs: Math.max(0, Date.now() - new Date(String(currentLog?.startedAt || Date.now())).getTime()),
-                outputs: output ? [output] : [],
-                ...(actualSubmission ? { params: { ...(currentLog?.params || {}), actualSubmission }, promptId: String(actualSubmission.promptId || "") || undefined } : {}),
-                ...(task.error ? { error: task.error } : {}),
-            })
-            : null;
         return { project: this.getCanvasProject(binding.projectId)!, log, operations };
     }
 

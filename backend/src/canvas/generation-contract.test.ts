@@ -27,6 +27,13 @@ test("前端、Agent 和 Backend 的生成调用方共用唯一 HTTP 入口", ()
     assert.match(source("canvas-agent/src/plugins/minimax-h3/mcp.ts"), /context\.backend\.canvasRunGeneration/);
 });
 
+test("H3 片段更新按稳定 segmentId 定位，禁止 MCP 依赖数组下标", () => {
+    const agentMcp = source("canvas-agent/src/plugins/minimax-h3/mcp.ts");
+    assert.match(agentMcp, /segmentId: \{ type: "string"/);
+    assert.match(agentMcp, /required: \["projectId", "nodeId", "segmentId", "patch"\]/);
+    assert.match(agentMcp, /findIndex\(\(segment\) => String\(segment\.id \|\| ""\) === segmentId\)/);
+});
+
 test("取消与重试由所有客户端共用 Backend 任务端点", () => {
     const web = source("web/src/services/backend-api.ts");
     const agent = source("canvas-agent/src/runtime/backend-client.ts");

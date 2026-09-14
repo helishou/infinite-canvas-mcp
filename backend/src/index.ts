@@ -98,6 +98,13 @@ for (const task of stores.tasks.list()) {
     if (["succeeded", "failed", "cancelled"].includes(task.status) && task.kind === "canvas-h3-run") {
         void canvasH3Runner.reconcileTerminal(task).catch((error) => logger.warn("H3 终态节点回写修复失败", { taskId: task.id, error: error instanceof Error ? error.message : String(error) }));
     }
+    if (["succeeded", "failed", "cancelled"].includes(task.status) && (task.kind === "comfyui:minimax-h3" || task.kind === "runninghub:minimax-h3")) {
+        const binding = task.params?.canvasBinding as { generationLogId?: string } | undefined;
+        const log = binding?.generationLogId ? stores.logs.get(binding.generationLogId) : null;
+        if (log && (log.status === "queued" || log.status === "running")) {
+            void writeBackH3Task(stores, runtime.events, task).catch((error) => logger.warn("H3 子任务终态日志修复失败", { taskId: task.id, error: error instanceof Error ? error.message : String(error) }));
+        }
+    }
     if (["queued", "running"].includes(task.status) && task.kind.startsWith("comfyui:")) runtime.comfy.resume(task.id);
     if (["queued", "running"].includes(task.status) && task.kind === "runninghub:minimax-h3") runningHub.resume(task.id);
 }

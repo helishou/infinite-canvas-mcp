@@ -41,7 +41,7 @@ const TOOLS: PluginMcpToolWire[] = [
     },
     {
         id: "h3_run_clip",
-        version: "1.2.0",
+        version: "1.3.0",
         name: "H3 运行单段",
         description: "通过 Backend H3 执行器运行指定片段，复用画布任务、媒体落库和终态回写，不依赖打开画布页面。",
         inputJsonSchema: {
@@ -49,7 +49,8 @@ const TOOLS: PluginMcpToolWire[] = [
             properties: {
                 nodeId: { type: "string", description: "画布节点 id" },
                 projectId: { type: "string", description: "画布项目 id" },
-                segmentIndex: { type: "integer", description: "片段下标;省略则运行首个未完成的片段" },
+                segmentId: { type: "string", description: "片段稳定 id；优先使用它定位片段" },
+                segmentIndex: { type: "integer", description: "兼容旧调用的片段下标；省略则运行首个未完成的片段" },
                 params: { type: "object", description: "覆盖片段自带参数的生成参数" },
                 idempotencyKey: { type: "string", description: "幂等提交键，重复提交复用原任务" },
             },
@@ -58,7 +59,7 @@ const TOOLS: PluginMcpToolWire[] = [
     },
     {
         id: "h3_get_defaults",
-        version: "1.3.0",
+        version: "1.2.0",
         name: "H3 读取默认参数",
         description: "读取 Backend 中保存的 MiniMax H3 默认参数。",
         inputJsonSchema: { type: "object", properties: {} },
@@ -108,10 +109,10 @@ const TOOLS: PluginMcpToolWire[] = [
             properties: {
                 nodeId: { type: "string", description: "画布节点 id" },
                 projectId: { type: "string", description: "画布项目 id" },
-                segmentIndex: { type: "integer", description: "片段下标" },
+                segmentId: { type: "string", description: "片段稳定 id；不要用会因重排变化的数组下标" },
                 patch: { type: "object", description: "要合并进该片段的字段" },
             },
-            required: ["projectId", "nodeId", "segmentIndex", "patch"],
+            required: ["projectId", "nodeId", "segmentId", "patch"],
         },
     },
     {
@@ -270,6 +271,7 @@ export const pluginMcp: PluginMcpModule = {
                     operation: "h3-run",
                     projectId,
                     nodeId,
+                    ...(typeof input.segmentId === "string" ? { segmentId: input.segmentId } : {}),
                     ...(typeof input.segmentIndex === "number" ? { segmentIndex: input.segmentIndex } : {}),
                     params: (input.params as Record<string, unknown>) || {},
                     ...(typeof input.idempotencyKey === "string" ? { idempotencyKey: input.idempotencyKey } : {}),
@@ -291,14 +293,19 @@ export const pluginMcp: PluginMcpModule = {
                 await assertProjectNode(context, String(input.projectId || ""), nodeId);
                 const node = await context.getCanvasNode(nodeId);
                 if (!node) throw new Error(`找不到画布节点:${nodeId}`);
-                const index = Number(input.segmentIndex);
                 const segments = segmentsOf(node);
-                if (!segments[index]) throw new Error(`片段下标越界:${index}`);
+                const segmentId = String(input.segmentId || "");
+                if (!segmentId) throw new Error("segmentId 必填");
+                const index = segments.findIndex((segment) => String(segment.id || "") === segmentId);
+                if (index < 0) throw new Error(`找不到片段:${segmentId}`);
                 const target = segments[index];
                 if (!target.id) throw new Error(`片段 ${index} 缺少 id，无法使用细粒度 update_h3_segment`);
                 const patch = (input.patch as Record<string, unknown>) || {};
                 await context.updateH3Segment(nodeId, String(target.id), patch);
-                return { ok: true, nodeId, segmentIndex: index, segmentId: String(target.id), segment: { ...target, ...patch } };
+                const refreshed = await context.getCanvasNode(nodeId);
+                const refreshedSegment = refreshed && segmentsOf(refreshed).find((segment) => String(segment.id || "") === segmentId);
+                if (!refreshedSegment) throw new Error(`片段更新后读取失败:${segmentId}`);
+                return { ok: true, nodeId, segmentIndex: index, segmentId, segment: refreshedSegment };
             },
             h3_run_all_clips: async (input) => {
                 const projectId = String(input.projectId || "");

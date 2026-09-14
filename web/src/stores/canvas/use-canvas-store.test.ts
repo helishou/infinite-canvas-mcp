@@ -213,6 +213,18 @@ test("刷新恢复：同一时间戳但内容不同不把不明快照当成网�
     assert.equal(isLocalProjectNewer(local, remote), false);
 });
 
+test("刷新恢复：revision 更新后的远端不能被旧网页快照重新提交覆盖", () => {
+    const remote = makeProject([], { revision: 2, updatedAt: "2026-01-01T00:00:02.000Z" });
+    const stale = makeProject([makeH3Node("h3-1", [{ id: "s1", duration: 9 }])], { revision: 1, updatedAt: "2026-01-01T00:00:01.000Z" });
+    assert.equal(isLocalProjectNewer(stale, remote), false);
+});
+
+test("刷新恢复：远端已推进但本地随后编辑，保留未提交网页修改", () => {
+    const remote = makeProject([], { revision: 2, updatedAt: "2026-01-01T00:00:02.000Z" });
+    const local = makeProject([makeH3Node("h3-1", [{ id: "s1", duration: 6 }])], { revision: 1, updatedAt: "2026-01-01T00:00:03.000Z" });
+    assert.equal(isLocalProjectNewer(local, remote), true);
+});
+
 test("MCP 内容 diff 忽略浏览器视口变化", () => {
     const base = makeProject([]);
     const movedViewport = makeProject([], { viewport: { x: 480, y: -220, k: 0.72 } });

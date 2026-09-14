@@ -1,15 +1,22 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ViewportTransform } from "@/types/canvas";
 
+/** 平移/缩放时是否只做命令式 DOM 写入（跳过 React 渲染）。 */
+export type ViewportChangeOptions = { live?: boolean };
+
 type InfiniteCanvasProps = {
     containerRef: React.RefObject<HTMLDivElement | null>;
     viewport: ViewportTransform;
+    /** 实时视口。渲染时读它而不是 state，避免命令式写入被滞后的 state 覆盖回去。 */
+    viewportRef: React.RefObject<ViewportTransform>;
+    /** 注册「立即把视口写进 DOM」的函数，父组件在拖动/滚轮中直接调用，跳过 React 渲染。 */
+    registerViewportWriter?: (writer: ((next: ViewportTransform) => void) | null) => void;
     tool: "select" | "pan";
     backgroundMode?: CanvasBackgroundMode;
-    onViewportChange: (viewport: ViewportTransform) => void;
+    onViewportChange: (viewport: ViewportTransform, options?: ViewportChangeOptions) => void;
     onCanvasMouseDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
     onCanvasDeselect?: () => void;
     onCanvasDoubleClick?: (event: React.MouseEvent<HTMLDivElement>) => void;
@@ -18,8 +25,30 @@ type InfiniteCanvasProps = {
     children: React.ReactNode;
 };
 
-export function InfiniteCanvas({ containerRef, viewport, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onCanvasDoubleClick, onContextMenu, onDrop, children }: InfiniteCanvasProps) {
+export function InfiniteCanvas({ containerRef, viewport, viewportRef, registerViewportWriter, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onCanvasDoubleClick, onContextMenu, onDrop, children }: InfiniteCanvasProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const transformRef = useRef<HTMLDivElement | null>(null);
+    const gridRef = useRef<HTMLDivElement | null>(null);
+    // 平移/缩放期间视口每帧都在变，走 React state 会让整棵画布树（几百个节点）跟着重渲染。
+    // 这里直接把变换写进 DOM：拖动只改 style，React 一次都不跑。
+    const writeViewport = useCallback((next: ViewportTransform) => {
+        const frame = transformRef.current;
+        if (frame) frame.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.k})`;
+        const grid = gridRef.current;
+        if (grid) {
+            const gridSize = 48 * next.k;
+            grid.style.backgroundSize = `${gridSize}px ${gridSize}px`;
+            grid.style.backgroundPosition = `${next.x % gridSize}px ${next.y % gridSize}px`;
+        }
+    }, []);
+    useEffect(() => {
+        registerViewportWriter?.(writeViewport);
+        return () => registerViewportWriter?.(null);
+    }, [registerViewportWriter, writeViewport]);
+    // 每次 React 渲染后与最新视口对齐，避免重渲染把 transform 退回滞后的 state 值。
+    useEffect(() => {
+        writeViewport(viewportRef.current);
+    });
     const panState = useRef({
         isPanning: false,
         startX: 0,
@@ -90,20 +119,22 @@ export function InfiniteCanvas({ containerRef, viewport, tool, backgroundMode = 
 
         const delta = -event.deltaY;
         const factor = Math.pow(1.1, delta / 100);
-        const newScale = Math.min(Math.max(viewport.k * factor, 0.05), 5);
+        // 读实时视口：缩放走命令式写入，state 是滞后的，用它会算错增量。
+        const current = viewportRef.current;
+        const newScale = Math.min(Math.max(current.k * factor, 0.05), 5);
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
 
         const mouseX = event.clientX - rect.left;
         const mouseY = event.clientY - rect.top;
-        const worldX = (mouseX - viewport.x) / viewport.k;
-        const worldY = (mouseY - viewport.y) / viewport.k;
+        const worldX = (mouseX - current.x) / current.k;
+        const worldY = (mouseY - current.y) / current.k;
 
         onViewportChange({
             x: mouseX - worldX * newScale,
             y: mouseY - worldY * newScale,
             k: newScale,
-        });
+        }, { live: true });
     };
 
     const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -163,12 +194,17 @@ export function InfiniteCanvas({ containerRef, viewport, tool, backgroundMode = 
             if (frameRef.current) return;
             frameRef.current = requestAnimationFrame(() => {
                 frameRef.current = null;
-                if (nextViewportRef.current) onViewportChange(nextViewportRef.current);
+                // live：父组件只做命令式 DOM 写入，不 setState，拖动期间零 React 渲染。
+                if (nextViewportRef.current) onViewportChange(nextViewportRef.current, { live: true });
             });
         };
 
         const handlePointerUp = () => {
             if (!panState.current.isPanning) return;
+            if (frameRef.current) {
+                cancelAnimationFrame(frameRef.current);
+                frameRef.current = null;
+            }
 
             if (!panState.current.hasMoved && panState.current.startedOnBackground) {
                 onCanvasDeselect?.();
@@ -176,6 +212,8 @@ export function InfiniteCanvas({ containerRef, viewport, tool, backgroundMode = 
             panState.current.isPanning = false;
             setIsPanning(false);
             document.body.style.cursor = "";
+            // 拖动结束后提交最终视口，触发一次视口裁剪重算。
+            if (panState.current.hasMoved && nextViewportRef.current) onViewportChange(nextViewportRef.current, { live: false });
         };
 
         window.addEventListener("pointermove", handlePointerMove);
@@ -219,11 +257,12 @@ export function InfiniteCanvas({ containerRef, viewport, tool, backgroundMode = 
             onDragOver={(event) => event.preventDefault()}
             onDrop={onDrop}
         >
-            <CanvasGrid viewport={viewport} mode={backgroundMode} />
+            <CanvasGrid viewport={viewportRef.current} mode={backgroundMode} gridRef={gridRef} />
             <div
+                ref={transformRef}
                 className="absolute origin-top-left"
                 style={{
-                    transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.k})`,
+                    transform: `translate(${viewportRef.current.x}px, ${viewportRef.current.y}px) scale(${viewportRef.current.k})`,
                 }}
             >
                 {children}
@@ -232,7 +271,7 @@ export function InfiniteCanvas({ containerRef, viewport, tool, backgroundMode = 
     );
 }
 
-function CanvasGrid({ viewport, mode }: { viewport: ViewportTransform; mode: CanvasBackgroundMode }) {
+function CanvasGrid({ viewport, mode, gridRef }: { viewport: ViewportTransform; mode: CanvasBackgroundMode; gridRef?: React.RefObject<HTMLDivElement | null> }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     if (mode === "blank") return null;
 
@@ -245,6 +284,7 @@ function CanvasGrid({ viewport, mode }: { viewport: ViewportTransform; mode: Can
 
     return (
         <div
+            ref={gridRef}
             className="pointer-events-none absolute inset-0 opacity-40"
             style={{
                 backgroundImage,

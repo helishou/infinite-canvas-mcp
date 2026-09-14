@@ -15,7 +15,27 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         const poll = async () => {
             try {
                 const parent = await ctx.ai.getCanvasH3Task(taskId);
-                if (stopped || ["succeeded", "failed", "cancelled"].includes(parent.status)) return;
+                if (stopped) return;
+                if (["succeeded", "failed", "cancelled"].includes(parent.status)) {
+                    const terminalStatus = parent.status === "succeeded" ? "success" : parent.status === "cancelled" ? "cancelled" : "error";
+                    const current = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+                    const errorDetails = parent.error || "";
+                    const segments = segmentsFor(current).map((segment) => ["queued", "loading"].includes(String(segment.status || ""))
+                        ? { ...segment, status: terminalStatus, progress: parent.progress, runtimeTaskId: "", errorDetails }
+                        : segment);
+                    update({
+                        segments,
+                        status: terminalStatus,
+                        runProgress: parent.progress,
+                        errorDetails,
+                        runtimeTaskId: "",
+                        runtimeRunId: "",
+                        runRequestId: "",
+                        runRequestConsumedId: "",
+                        cancelRequested: false,
+                    });
+                    return;
+                }
                 const result = (parent.result || {}) as Record<string, unknown>;
                 const childId = String(result.currentChildTaskId || "");
                 const childKind = String(result.currentChildKind || "");
@@ -40,8 +60,8 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             const segments = segmentsFor(metadata);
             if (!segments.length) throw new Error("当前节点没有可生成的 Clip");
             const selectedId = String(metadata.selectedSegmentId || segments[0].id || "");
-            const segmentIndex = Math.max(0, segments.findIndex((segment) => String(segment.id || "") === selectedId));
-            await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentIndex, runFromCurrent });
+            if (!selectedId) throw new Error("当前节点没有可定位的 Clip");
+            await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent });
         } catch (error) {
             update({ runtimeTaskId: "", runtimeRunId: "", status: "error", runProgress: 0, errorDetails: error instanceof Error ? error.message : String(error), cancelRequested: false });
         } finally {
