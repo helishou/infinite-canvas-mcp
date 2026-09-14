@@ -29,15 +29,21 @@ function mediaRef(item: Record<string, unknown> | undefined) {
 export async function writeBackH3Task(stores: Stores, events: BackendEventBus, task: RuntimeTask) {
     const binding = bindingOf(task);
     if (!binding?.projectId || !binding.nodeId || !binding.segmentId) return false;
+    const log = binding.generationLogId ? stores.logs.get(binding.generationLogId) : null;
     const output = mediaRef(resultVideo(task));
+    const restoreSnapshot = log ? {
+        ...(log.params || {}),
+        prompt: log.prompt,
+        refs: log.references,
+    } : null;
+    const persistedOutput = output && restoreSnapshot ? { ...output, params: restoreSnapshot } : output;
     const saved = stores.projects.writeBackH3Task(task, {
         projectId: binding.projectId,
         nodeId: binding.nodeId,
         segmentId: binding.segmentId,
         ...(binding.generationLogId ? { generationLogId: binding.generationLogId } : {}),
-    }, output);
+    }, persistedOutput);
     if (!saved) {
-        const log = binding.generationLogId ? stores.logs.get(binding.generationLogId) : null;
         if (log) events.publish({ type: "generation-log.updated", entityId: log.id, payload: log });
         return false;
     }

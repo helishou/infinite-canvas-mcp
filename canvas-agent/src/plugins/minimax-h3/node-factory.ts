@@ -25,7 +25,7 @@ export const BASE_H3_NODE_METADATA: Record<string, unknown> = {
     strictPromptTags: true, referenceVideoPolicy: "official_2_to_15s", latentUpscaleEnabled: false,
     slaEnabled: false, uniBlockSwapEnabled: false, rtxEnabled: false, teAccel: false, lockAudio: false, audioDrive: false,
     combatLoraWeight: 0, cinematicLoraWeight: 0, runtimeReserveEnabled: false, reservedVramGb: 0.6,
-    loraSlots: [{ name: "", strength: 1, enabled: false }],
+    loraSlots: [{ name: "", strength: 1, enabled: false }], keepModelCache: true,
 };
 
 const NODE_LEVEL_KEYS = [

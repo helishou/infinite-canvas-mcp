@@ -5,8 +5,19 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## 画布首次加载优化
+
+- 首次打开 `/canvas/:id` 时应先显示本地快照并可交互，Backend 项目合并、历史媒体恢复在后台完成；Backend 响应较慢或暂时离线时不应一直停留在刷新占位层。首次进入图片、视频、素材等其它页面时应按需加载对应页面代码，返回画布后功能正常。
+
+## H3 连续生成显存策略
+
+- H3「还原 Clip」回归：生成一个带提示词和多张图片/视频参考的 Clip，修改当前段的提示词与参考素材后，在输出素材库点击「还原 Clip」；确认提示词、`refItems` 及 `refs` 槽位恢复为该输出生成时的内容，刷新页面后再次还原仍然有效。
+
+- 在 H3「显存与卸载」中确认「连续生成模式（保留模型缓存）」默认开启；关闭时日志仍出现起始/条件阶段释放，开启后连续运行两个 Clip 时不再执行跨 Clip 起始释放，并复用已加载模型。确认开启后单段峰值显存仍可完成，关闭开关后恢复原有释放行为；前端、MCP `h3_update_clip` 与任务执行使用同一 `keepModelCache` 参数。
+
 ## 画布同步与 H3 稳定片段定位
 
+- H3 MCP 参数与前端面板一致性：通过 MCP `h3_update_clip` 修改一个或多个 Clip 的模型、百万像素、RTX、采样、VAE 等参数，确认对应片段和节点面板同时显示新值；修改后不自动启动生成、不覆盖提示词、参考图、运行状态或结果历史。确认 BF16 H3 模型出现在模型下拉框，实际提交使用 `h3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-bf16.safetensors`。
 - 让网页保留一个旧 H3 本地快照，再通过 MCP 更新同一项目的 duration / prompt / refs；确认页面收到更高 revision 后直接显示远端值，不会自动把旧快照重新提交。确认远端推进后本地确实新编辑的字段仍能进入冲突/rebase 流程。
 - 重排 Clip 后用 MCP `h3_update_clip(segmentId=...)` 更新指定片段，确认仍命中原片段；前端按钮、MCP 单段运行和 Backend 任务回写均使用同一 `segmentId`，不因数组下标变化而错写，也不提交整段 `metadata.segments`。
 

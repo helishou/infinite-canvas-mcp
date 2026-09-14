@@ -78,6 +78,7 @@ const syncBases = new Map<string, CanvasProject>();
 let deferredBackendEvents: unknown[] = [];
 let deferredBackendEventsWaiter: Promise<void> | null = null;
 let canvasHydrationPromise: Promise<void> | null = null;
+let localCanvasHydrated = false;
 const canvasDeltaRecovery = new Set<string>();
 
 // H3 节点 metadata 里"不进本地 diff 提交"的字段集合：
@@ -419,9 +420,13 @@ export function isLocalProjectNewer(local: CanvasProject, remote: CanvasProject)
 export async function hydrateCanvasProjects() {
     if (canvasHydrationPromise) return canvasHydrationPromise;
     canvasHydrationPromise = (async () => {
-        await hydrateCanvasProjectsFromLocalStore();
+        // 本地快照是首屏渲染所需的最小数据；Backend 合并放在后面，避免网络连接拖住画布出现。
+        if (!localCanvasHydrated) {
+            await hydrateCanvasProjectsFromLocalStore();
+            localCanvasHydrated = true;
+            useCanvasStore.setState({ hydrated: true });
+        }
         await hydrateCanvasProjectsFromBackend();
-        useCanvasStore.setState({ hydrated: true });
     })().finally(() => { canvasHydrationPromise = null; });
     return canvasHydrationPromise;
 }
@@ -1039,6 +1044,7 @@ function applyBackendCanvasEvent(event: unknown, preservePendingLocalChanges = f
 }
 
 if (typeof window !== "undefined") {
+    void hydrateCanvasProjects();
     window.addEventListener("backend-connected", () => { void hydrateCanvasProjects(); });
     window.addEventListener("backend-event", (event) => applyBackendCanvasEvent((event as CustomEvent).detail));
     const flushCanvasPersistence = () => {

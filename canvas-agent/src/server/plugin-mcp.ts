@@ -49,8 +49,8 @@ export type PluginMcpContext = {
     getCanvasNodes: () => Promise<AgentCanvasNode[]>;
     getCanvasNode: (id: string) => Promise<AgentCanvasNode | null>;
     updateCanvasNode: (id: string, patch: Partial<AgentCanvasNode>, metadataPatch?: Record<string, unknown>) => Promise<void>;
-    /** H3 单段原子更新：仅 patch 这一段，节点级 metadata（status/materials/...）请用 updateCanvasNode 走 update_node。 */
-    updateH3Segment: (nodeId: string, segmentId: string, patch: Record<string, unknown>) => Promise<void>;
+    /** H3 单段原子更新；可选 nodeMetadataPatch 用于把当前面板配置同步到节点级投影。 */
+    updateH3Segment: (nodeId: string, segmentId: string, patch: Record<string, unknown>, nodeMetadataPatch?: Record<string, unknown>) => Promise<void>;
     addH3Segment: (nodeId: string, segment: Record<string, unknown>) => Promise<void>;
     deleteH3Segment: (nodeId: string, segmentId: string) => Promise<void>;
     /** 完全替换 H3 节点的 segments（plan 重排等场景）。 */
@@ -137,12 +137,13 @@ export function buildPluginMcpContext(config: CanvasAgentConfig, backend: Plugin
             const operation = { type: "update_node", id, patch: { ...patch }, ...(metadataPatch ? { metadata: metadataPatch } : {}) };
             await backend.applyCanvasOperations(String(target.id), [operation], Number((target as Record<string, unknown>).revision || 0));
         },
-        updateH3Segment: async (nodeId, segmentId, patch) => {
+        updateH3Segment: async (nodeId, segmentId, patch, nodeMetadataPatch) => {
             const projects = await backend.listCanvasProjects() as Array<{ id?: string; revision?: number; nodes?: AgentCanvasNode[] }>;
             const target = projects.find((project) => Array.isArray(project.nodes) && project.nodes.some((node) => node.id === nodeId));
             if (!target) throw new Error(`找不到画布节点：${nodeId}`);
-            const op = { type: "update_h3_segment", nodeId, segmentId, patch };
-            await backend.applyCanvasOperations(String(target.id), [op], Number(target.revision || 0));
+            const operations: Record<string, unknown>[] = [{ type: "update_h3_segment", nodeId, segmentId, patch }];
+            if (nodeMetadataPatch && Object.keys(nodeMetadataPatch).length) operations.push({ type: "update_node", id: nodeId, metadata: nodeMetadataPatch });
+            await backend.applyCanvasOperations(String(target.id), operations, Number(target.revision || 0));
         },
         addH3Segment: async (nodeId, segment) => {
             const projects = await backend.listCanvasProjects() as Array<{ id?: string; revision?: number; nodes?: AgentCanvasNode[] }>;

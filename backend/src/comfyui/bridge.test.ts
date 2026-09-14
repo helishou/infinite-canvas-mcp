@@ -34,6 +34,7 @@ test("H3 audit summary reads the submitted API graph instead of raw UI fields", 
     );
     assert.equal(graph.nf_v10.class_type, "NanFengH3MultiReferenceGeneratorV10");
     assert.equal(graph.nf_v10.inputs["图片1"], "uploaded-reference.png");
+    assert.equal(graph.nf_v10.inputs["连续生成模式"], true);
     assert.equal(graph.nf_v10.inputs.SageAttention, "auto");
     assert.equal(graph.nf_v10.inputs["H3专用注意力"], "H3专用Sage加速");
     const summary = summarizeH3Workflow(graph, promptA);
@@ -60,4 +61,13 @@ test("H3 audit reports scheduler Sigma and 192-frame graph values", async () => 
     assert.equal(summary.attention, "disabled");
     assert.equal(summary.sigma, "调度器：simple / 20 步");
     assert.deepEqual(summary.mediaInputs, { images: ["uploaded-reference.png"], videos: [], audios: [] });
+});
+
+test("H3 native workflow forwards continuous model cache mode", async () => {
+    const graph = await buildNativeNanFengV10Workflow(
+        { prompt: "@图片1", references: ["reference.png"] },
+        { mode: "ref2va", keepModelCache: true },
+        upload, "http://comfy.local", new AbortController().signal,
+    );
+    assert.equal(graph.nf_v10.inputs["连续生成模式"], true);
 });

@@ -101,6 +101,8 @@ export type H3Segment = {
     runtimeReserveEnabled?: boolean;
     uniBlockSwapEnabled?: boolean;
     uniBlockSwapBlocks?: number;
+    /** 连续生成模式：保留跨 Clip 的 H3 模型缓存，减少下一段冷启动。默认关闭。 */
+    keepModelCache?: boolean;
     latentUpscaleEnabled?: boolean;
     h3FirstSteps?: number;
     h3SecondSteps?: number;

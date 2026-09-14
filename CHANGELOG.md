@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- [修复] H3 输出卡片点击「还原 Clip」时同步恢复生成时的提示词、参考素材与参数快照；新生成结果会持久化还原所需的快照。
+- [优化] 画布首次打开改为先显示本地快照，后台再完成 Backend 合并与媒体恢复；路由页面改为按需加载，减少首屏等待与初始脚本体积。
+- [新增] H3「连续生成模式（保留模型缓存）」开关（默认开启）：开启后跳过跨 Clip 的起始/条件阶段显存清理，复用已加载模型以减少连续片段的冷启动；关闭时保持原有释放策略。
+- [修复] H3 MCP 片段参数更新现在与前端面板保持同一份根级配置投影，模型、精度、百万像素、RTX、采样和 VAE 等参数通过原子操作同步，新增 BF16 H3 模型选项，避免 MCP 已修改但面板仍显示旧值。
 - [修复] 「视频拼接」不再因为没打开 Canvas Agent 面板而报「Canvas Agent 未连接，无法运行视频拼接」：该请求打的是总后台的 `/agent/video-concat/tasks`，与 Agent 面板的连接状态无关，原先却用 `useAgentStore.connected/token` 做前置判定，导致用户只启动 backend 时直接被打回。改为统一走新增的 `resolveBackendAgentEndpoint()`（`{backendUrl}/agent` + backend token），生成路径、重试路径、插件宿主三处一起改（重试路径原先虽无门槛，但取的是 Agent 面板 token，未连接时为空会被后端鉴权拒掉）。顺带修掉同一根因的「刷新后恢复轮询」：未连 Agent 面板时，Backend 上跑着的图片 / 视频任务永远不会回写状态，节点一直停在「运行中」；改用既有的 `resolveComfyEndpoint()` 后不再要求 Agent 在线。注意 endpoint 必须带 `/agent` 前缀，实测同一 backend 上 `POST /video-concat/tasks` → 404、`POST /agent/video-concat/tasks` → 任务正常创建，`GET /agent/runtime/tasks/{id}` → 200 且 `executor: video-concat` 正常执行；不能拿 comfy 的情况套用（`/comfy/*` 与 `/agent/comfy/*` 都注册了，两条都通）。
 - [修复] 画布同步改用 Backend revision 作为远端新旧判据，并禁止无用户操作时用本地 H3 运行快照污染 `syncBase`，避免刷新/恢复后的旧时长、提示词和参考图再次覆盖 MCP 回写。
 - [调整] H3 片段更新与前端单段运行统一以稳定 `segmentId` 定位；任务绑定改为节点级与片段级原子操作，避免数组重排或整段快照造成错写和并发冲突。

@@ -496,16 +496,16 @@ function InfiniteCanvasPage() {
             return;
         }
 
-        const restore = async () => {
-            const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes.map(migrateLegacyH3Node)));
-            const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
+        const restore = () => {
+            const rawNodes = resetInterruptedGeneration(project.nodes.map(migrateLegacyH3Node));
+            const rawSessions = project.chatSessions || [];
             if (restoreGeneration !== restoreGenerationRef.current || uiVersion !== projectUiVersionRef.current) return;
-            // 多个 MCP 更新可能同时触发恢复；只有最后一次恢复完成后，才允许它进入本地持久化链路。
+            // 先挂载本地快照，让画布立即可交互；媒体 URL 修复和历史媒体迁移放到后台。
             suppressNextProjectPersistRef.current = true;
             suppressNextViewportPersistRef.current = true;
-            setNodes(restoredNodes);
+            setNodes(rawNodes);
             setConnections(project.connections);
-            setChatSessions(restoredSessions);
+            setChatSessions(rawSessions);
             setActiveChatId(project.activeChatId || null);
             setBackgroundMode(project.backgroundMode);
             setShowImageInfo(project.showImageInfo || false);
@@ -516,17 +516,25 @@ function InfiniteCanvasPage() {
                 historyCommitTimerRef.current = null;
             }
             lastHistoryRef.current = {
-                nodes: restoredNodes,
+                nodes: rawNodes,
                 connections: project.connections,
-                chatSessions: restoredSessions,
+                chatSessions: rawSessions,
                 activeChatId: project.activeChatId || null,
                 backgroundMode: project.backgroundMode,
                 showImageInfo: project.showImageInfo || false,
             };
             setHistoryState({ canUndo: false, canRedo: false });
             setProjectLoaded(true);
+
+            void Promise.all([hydrateCanvasImages(rawNodes), hydrateAssistantImages(rawSessions)]).then(([hydratedNodes, hydratedSessions]) => {
+                if (restoreGeneration !== restoreGenerationRef.current) return;
+                const nodesChanged = hydratedNodes.some((node, index) => node !== rawNodes[index]);
+                const sessionsChanged = hydratedSessions.some((session, index) => session !== rawSessions[index]);
+                if (nodesChanged) startTransition(() => setNodes((current) => current === rawNodes ? hydratedNodes : current));
+                if (sessionsChanged) startTransition(() => setChatSessions((current) => current === rawSessions ? hydratedSessions : current));
+            }).catch((error) => console.warn("画布媒体后台恢复失败", error));
         };
-        void restore();
+        restore();
     }, [backendRevision, hydrated, navigate, openProject, projectId, updateProject]);
 
     useEffect(() => {
