@@ -4,12 +4,11 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageQuestion, type AiTextMessage } from "@/services/api/image";
 import { imageToDataUrl } from "@/services/image-storage";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
-import { getLocalH3Task, getRunningHubH3Task, runVideoConcatTask } from "@/services/api/comfyui";
+import { getLocalH3Task, getRunningHubH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
 import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
-import { useAgentStore } from "@/stores/use-agent-store";
 import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
@@ -163,10 +162,8 @@ export function usePluginHost(params: PluginHostParams) {
                 return data.task;
             },
             runVideoConcat: async (videos, options) => {
-                const agent = useAgentStore.getState();
-                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法运行视频拼接");
-                const result = await runVideoConcatTask(agent.url, agent.token, videos, options?.signal);
-                return result;
+                const { endpoint, token } = resolveBackendAgentEndpoint();
+                return runVideoConcatTask(endpoint, token, videos, options?.signal);
             },
             listLocalH3Models: async () => {
                 const result = await fetchComfyModels(getBackendUrl(), getBackendTokenShared());

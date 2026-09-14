@@ -16,6 +16,22 @@ export function resolveComfyEndpoint(): { endpoint: string; token: string } {
     return { endpoint: getBackendUrl().replace(/\/$/, ""), token: getBackendTokenShared() };
 }
 
+/**
+ * 总后台 `/agent/*` 能力的请求端点解析（视频拼接 `/agent/video-concat/tasks` 等）。
+ *
+ * 这些路由由总后台提供，**与 Canvas Agent 面板是否连接无关**：曾经用
+ * `useAgentStore.connected/token` 做前置判定，导致用户只启动 backend、没开 Agent 面板时
+ * 直接报「Canvas Agent 未连接，无法运行视频拼接」，而 backend 其实一直可用。
+ *
+ * endpoint 必须带 `/agent` 前缀——实测同一个 backend 上：
+ * `GET /ffmpeg/status` → 404、`GET /agent/ffmpeg/status` → 200；
+ * `POST /video-concat/tasks` → 404、`POST /agent/video-concat/tasks` → 500（路由存在、业务校验生效）。
+ * 注意不要拿 comfy 的情况套用：`/comfy/*` 与 `/agent/comfy/*` 都注册了，两条都能通。
+ */
+export function resolveBackendAgentEndpoint(): { endpoint: string; token: string } {
+    return { endpoint: `${getBackendUrl().replace(/\/$/, "")}/agent`, token: getBackendTokenShared() };
+}
+
 export type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
 type ComfyMedia = { url: string; mimeType: string; storageKey?: string };
 type ComfyPreview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };

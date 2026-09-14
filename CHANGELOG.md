@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- [修复] 「视频拼接」不再因为没打开 Canvas Agent 面板而报「Canvas Agent 未连接，无法运行视频拼接」：该请求打的是总后台的 `/agent/video-concat/tasks`，与 Agent 面板的连接状态无关，原先却用 `useAgentStore.connected/token` 做前置判定，导致用户只启动 backend 时直接被打回。改为统一走新增的 `resolveBackendAgentEndpoint()`（`{backendUrl}/agent` + backend token），生成路径、重试路径、插件宿主三处一起改（重试路径原先虽无门槛，但取的是 Agent 面板 token，未连接时为空会被后端鉴权拒掉）。顺带修掉同一根因的「刷新后恢复轮询」：未连 Agent 面板时，Backend 上跑着的图片 / 视频任务永远不会回写状态，节点一直停在「运行中」；改用既有的 `resolveComfyEndpoint()` 后不再要求 Agent 在线。注意 endpoint 必须带 `/agent` 前缀，实测同一 backend 上 `POST /video-concat/tasks` → 404、`POST /agent/video-concat/tasks` → 任务正常创建，`GET /agent/runtime/tasks/{id}` → 200 且 `executor: video-concat` 正常执行；不能拿 comfy 的情况套用（`/comfy/*` 与 `/agent/comfy/*` 都注册了，两条都通）。
 - [修复] 画布同步改用 Backend revision 作为远端新旧判据，并禁止无用户操作时用本地 H3 运行快照污染 `syncBase`，避免刷新/恢复后的旧时长、提示词和参考图再次覆盖 MCP 回写。
 - [调整] H3 片段更新与前端单段运行统一以稳定 `segmentId` 定位；任务绑定改为节点级与片段级原子操作，避免数组重排或整段快照造成错写和并发冲突。
 - [修复] 画布缩到很小时拖动严重掉帧（5% 倍率只有 26fps）：视口裁剪的补重算阈值与裁剪前瞻原本写成**世界单位**（520 / 700），但拖动的 x/y 本身是屏幕像素，除以缩放比例换算后阈值被放大 1/k 倍——k=0.05 时平移 26 屏幕像素就补一次裁剪重算，而每次重算都要把可见的近 200 个节点 element 树重建一遍（CPU 采样占该场景平移 JS 的 86%，`jsxDEV` 218ms），缩得越小越卡。改为**屏幕像素**语义（补重算 300px、裁剪前瞻 400px；400px 与原设计在常用倍率下的 385px 手感一致），重算频率从此与缩放无关，并抽出 `viewportRenderPadding(k)` 让裁剪外扩随缩放反比放大。同一探针对照（200 节点 / 300 连线，各 3 次取中位数）：平移 @5% **26.3fps → 73.2fps**（JS 2446ms → 680ms，卡顿帧 62 → 34），平移 @15% **122.2fps → 182.9fps**（JS 1225ms → 531ms），@55% 平移与滚轮缩放持平（噪声内）。回归：`canvas-viewport.test.ts` 7 条（新增「同样屏幕距离在任何缩放下行为一致」「padding 随缩放反比」「padding 恒大于 margin」），`tsc --noEmit` 零错误。

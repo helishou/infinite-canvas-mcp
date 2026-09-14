@@ -10,6 +10,11 @@ description: Implemented changes that still need manual verification
 - 让网页保留一个旧 H3 本地快照，再通过 MCP 更新同一项目的 duration / prompt / refs；确认页面收到更高 revision 后直接显示远端值，不会自动把旧快照重新提交。确认远端推进后本地确实新编辑的字段仍能进入冲突/rebase 流程。
 - 重排 Clip 后用 MCP `h3_update_clip(segmentId=...)` 更新指定片段，确认仍命中原片段；前端按钮、MCP 单段运行和 Backend 任务回写均使用同一 `segmentId`，不因数组下标变化而错写，也不提交整段 `metadata.segments`。
 
+## 视频拼接与后台能力端点
+
+- 只启动总后台 backend、**不打开也不连接 Canvas Agent 面板**，在视频节点模型里选「视频拼接」并连接两个及以上本地视频后生成，确认不再报「Canvas Agent 未连接，无法运行视频拼接」，而是按连接顺序正常输出拼接视频；对同一节点重试也应成功。
+- 同一前提下（未连 Agent 面板），在图片 / 视频任务运行中刷新页面，确认恢复轮询仍能把节点收敛到成功 / 失败 / 取消，不再一直停在「运行中」。
+
 ## H3 失败终态与日志收口
 
 - 在 ComfyUI 未启动时运行一个 H3 Clip，确认生成日志显示失败后，H3 节点与对应 Clip 都退出“生成中”、清空任务 ID，并显示同一失败原因。
@@ -268,7 +273,7 @@ The current release needs manual verification in these areas:
 + H3 工作台拖拽辅助线：调整 Assets、预览或时间轴尺寸后，确认辅助拖拽区域与实际边界对齐，默认不显示漂浮灰线，悬停时仍可拖动。
 + H3 Prompt/Clip settings 宽度：拖动当前 Clip 面板中间的分隔条，确认 Prompt 与 Clip settings 可调整宽度，刷新或重新打开节点后宽度仍保留，窄面板下不溢出。
 + 本地 FlashVSR：在视频节点选择本地 `flashvsr-1.1`，不配置 API Key 但配置 ComfyUI 后运行，确认不再提示 API Key 错误，并能提交本地 ComfyUI。
-+ 视频拼接 worker：在视频节点模型中选择“视频拼接”，连接两个及以上本地视频后生成，确认按连接顺序输出拼接视频；取消生成时确认 ffmpeg 进程停止。
++ 视频拼接 worker：在视频节点模型中选择“视频拼接”，连接两个及以上本地视频后生成，确认按连接顺序输出拼接视频；取消生成时确认 ffmpeg 进程停止。**不连 Canvas Agent 面板时也应能生成**（见「视频拼接与后台能力端点」）。
 + 画布本地 ComfyUI 生图：在画布节点模型中选择 `flux2-klein`（本地 ComfyUI），连接参考图后生成，确认提交本地 ComfyUI 并回写图片节点，不再报云端 API 错误；选择 `z-image` 无参考图时也能文生图；flux2-klein 不带任何参考图时提示“至少需要一张参考图”；一次生成 3 张时确认三张结果各不相同（随机种子生效）。
 + Backend 存储替换：刷新页面后确认已安装插件、启用状态和插件私有配置仍能恢复；提示词页刷新后能重新拉取数据；设置页不再出现浏览器数据库统计；Backend 重启后插件数据仍存在。
 + 提示词缓存迁移：拉取提示词源后刷新页面，确认提示词中心能从 Backend 恢复缓存；修改来源地址或超过缓存周期后，确认会重新拉取并覆盖对应缓存。

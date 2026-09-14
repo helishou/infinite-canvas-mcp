@@ -9,7 +9,7 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { defaultConfig, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
-import { getComfyTask, resolveComfyImageSize, runVideoConcatTask } from "@/services/api/comfyui";
+import { getComfyTask, resolveBackendAgentEndpoint, resolveComfyEndpoint, resolveComfyImageSize, runVideoConcatTask } from "@/services/api/comfyui";
 import { uploadImage, type UploadedImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { backendMediaUrl, fetchBackendTask, startCanvasGeneration, type BackendMediaResult } from "@/services/backend-api";
@@ -533,12 +533,12 @@ function InfiniteCanvasPage() {
         if (!projectLoaded) return;
         let disposed = false;
         const poll = async () => {
-            const agent = useAgentStore.getState();
-            if (!agent.connected || !agent.url || !agent.token) return;
+            const { endpoint, token } = resolveComfyEndpoint();
+            if (!endpoint || !token) return;
             const pending = nodesRef.current.filter((node) => (node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Image) && node.metadata?.status === NODE_STATUS_LOADING && node.metadata.runtimeTaskId);
             await Promise.all(pending.map(async (node) => {
                 try {
-                    const task = await getComfyTask(agent.url, agent.token, String(node.metadata?.runtimeTaskId));
+                    const task = await getComfyTask(endpoint, token, String(node.metadata?.runtimeTaskId));
                     if (disposed) return;
                     if (task.status === "succeeded" && task.result?.url) {
                         setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, content: task.result!.url, storageKey: task.result!.storageKey, mimeType: task.result!.mimeType, status: NODE_STATUS_SUCCESS, errorDetails: undefined, runtimeTaskId: undefined, images: item.metadata?.images?.map((image) => image.id === String(item.metadata?.primaryImageId || "") ? { ...image, content: task.result!.url, storageKey: task.result!.storageKey, mimeType: task.result!.mimeType, status: NODE_STATUS_SUCCESS } : image) } } : item));
@@ -3095,12 +3095,9 @@ function InfiniteCanvasPage() {
                     if (!isEmptyVideoNode) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: videoId }]);
                     const controller = startGenerationRequest(videoId, nodeId, nodeId, runController);
                     try {
-                        const video = generationConfig.model === VIDEO_CONCAT_MODEL
-                            ? (() => {
-                                const agent = useAgentStore.getState();
-                                if (!agent.connected || !agent.url || !agent.token) throw new Error("Canvas Agent 未连接，无法运行视频拼接");
-                                return runVideoConcatTask(agent.url, agent.token, generationContext.referenceVideos.map((item) => ({ name: item.name, url: item.url, storageKey: item.storageKey })), controller.signal).then((result) => ({ url: result.url, storageKey: result.storageKey || "", bytes: 0, mimeType: result.mimeType, width: 0, height: 0 }));
-                            })()
+                        const concatEndpoint = generationConfig.model === VIDEO_CONCAT_MODEL ? resolveBackendAgentEndpoint() : null;
+                        const video = concatEndpoint
+                            ? runVideoConcatTask(concatEndpoint.endpoint, concatEndpoint.token, generationContext.referenceVideos.map((item) => ({ name: item.name, url: item.url, storageKey: item.storageKey })), controller.signal).then((result) => ({ url: result.url, storageKey: result.storageKey || "", bytes: 0, mimeType: result.mimeType, width: 0, height: 0 }))
                             : requestVideoGeneration(generationConfig, effectivePrompt, generationContext.referenceImages, { signal: controller.signal, videoReferences: generationContext.referenceVideos, onTaskId: (taskId) => setNodes((prev) => prev.map((item) => item.id === videoId ? { ...item, metadata: { ...item.metadata, runtimeTaskId: taskId } } : item)) }).then(storeGeneratedVideo);
                         const resolvedVideo = await video;
                         const videoSize = fitNodeSize(resolvedVideo.width || spec.width, resolvedVideo.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
@@ -3362,8 +3359,9 @@ function InfiniteCanvasPage() {
                 if (node.type === CanvasNodeType.Video) {
                     const retryVideos = context?.referenceVideos || [];
                     if (generationConfig.model === VIDEO_CONCAT_MODEL && retryVideos.length < 2) throw new Error("视频拼接至少需要连接两个视频");
-                    const video = generationConfig.model === VIDEO_CONCAT_MODEL
-                        ? await runVideoConcatTask(useAgentStore.getState().url, useAgentStore.getState().token, retryVideos.map((item) => ({ name: item.name, url: item.url, storageKey: item.storageKey })), controller.signal).then((result) => ({ url: result.url, storageKey: result.storageKey || "", bytes: 0, mimeType: result.mimeType, width: 0, height: 0 }))
+                    const concatRetry = generationConfig.model === VIDEO_CONCAT_MODEL ? resolveBackendAgentEndpoint() : null;
+                    const video = concatRetry
+                        ? await runVideoConcatTask(concatRetry.endpoint, concatRetry.token, retryVideos.map((item) => ({ name: item.name, url: item.url, storageKey: item.storageKey })), controller.signal).then((result) => ({ url: result.url, storageKey: result.storageKey || "", bytes: 0, mimeType: result.mimeType, width: 0, height: 0 }))
                         : await storeGeneratedVideo(await requestVideoGeneration(generationConfig, prompt, retryImages, { signal: controller.signal, videoReferences: retryVideos, onTaskId: (taskId) => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, runtimeTaskId: taskId } } : item)) }));
                     const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                     setNodes((prev) =>
