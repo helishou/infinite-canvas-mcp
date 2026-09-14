@@ -5,6 +5,12 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Vite Windows 文件监听：运行前端开发服务并执行测试/诊断输出，确认 `web/_test_report.txt`、`web/_diag.txt` 不会触发 `EBUSY`，Vite 进程保持运行，页面仍可访问。
+
+- 画布生图落库时序：通过前端按钮和 Agent/MCP 分别创建新图片结果节点并启动 GPT Image，确认即使 SSE 短暂断开，生成前仍会直接提交 Backend；Backend 先收到源/结果节点与参考连线，再创建图片任务，任务完成后结果节点正常显示、刷新后仍可见，不再出现“任务成功但画布空白”。
+
+- MCP 生图提示词占位清理：通过 MCP 创建带多张参考图的图片生成流程，确认画布文本节点和任务中心的最终 prompt 不再出现「【文本1】」「图片1…图片N」等占位行，真实提示词完整保留，参考图仍按传入顺序进入任务。
+
 + 自定义工作流媒体持久化：用带图片字段的工作流生成一次，检查 `workflow` 子任务的 `input.fields` 和生成日志 `params.fields` 不包含 `data:`、`base64` 或原始图片内容，同时 ComfyUI 执行仍能收到图片；连续生成多段后 SQLite 任务记录大小不应按图片 Base64 线性膨胀。
 + 历史媒体脱敏维护：确认 `runtime.sqlite.before-inline-media-redaction-*.sqlite` 备份存在；检查任务和生成日志中不再出现内联 Base64，画布项目、媒体文件和任务状态保持不变；确认 Backend 重启后仍可正常查询历史任务与生成日志。
 + 画布图片任务幂等与媒体句柄：对同一个配置/源节点连续快速点击生成，确认只创建一个运行中的 `canvas-image` 任务，不会因每次点击新建结果节点而重复调用模型；检查 Backend 任务 `input.references` 与生成日志只包含 `storageKey`/URL 等句柄，不包含 `dataUrl` 或大段 Base64。生成完成后再点击应允许发起新一轮任务；前端按钮、MCP 和页面刷新恢复都应保持同一行为。
@@ -19,6 +25,8 @@ description: Implemented changes that still need manual verification
 + 拖动 / 滚动画布不再被误报冲突：让一个 H3 clip 在跑（rAF tick 在动 playhead），同时用鼠标拖动画布或滚轮缩放；viewport 同步应能正常完成（不弹冲突），playhead 这种 rAF tick 触发的瞬态字段不应触发"节点字段冲突"弹窗。
 + 图像对比游标切图时复位到 50%：打开一张图的 compare 弹窗后，先把游标拖到最左（或最右）后保持 modal 不关，直接 double-click 切到另一张图（换 before/after URL），新图的游标应立刻回到 50%，不能把上一张图的 0% 状态带过去。
 + H3 同 Clip ref 拖动重排：在一个 H3 Clip 的 Refs 行拖动一个 ref 槽到另一个 ref 槽，应走 move 语义（源槽 ref 消失、目标槽收到该 ref，源 Clip 保留该 ref 不变）；拖动跨 Clip 时仍走 copy 语义；拖到 Refs 行空白区域应追加到末尾。拖动过程中目标槽应有蓝边 / 浅蓝底高亮，drop 后立即消失。
++ 切分图片切分线宽度回归：右栏"切分线宽度"输入应限制 1–16px（默认 1）。改宽度后预览里的横/纵线立刻按新宽度渲染（1px 细线，4px 明显加粗，16px 接近拖动命中区一半）；实际切割位置仍按 `line * image_size` 算像素、与宽度无关；拖动命中区仍是 16px，细线时也好抓。确认打开 / 调整行数 / 调整列数 / 拖动 / 删线 / 重置 / 撤回 / 确认生成子节点这些动作都不会让宽度数值跳变或丢失。
++ 切分图片自动识别线宽回归：开切分对话框时自动调后端 `POST /canvas/image-split/detect-line-inset` 拿识别结果作为 `lineWidth` 默认值。合成图：2×2 宫格 + 4px 白线 → 默认 4；3×3 宫格 + 6px 白线 → 默认 6；连续图（无白线）→ 保持 1 不报错。识别结果与用户手动调宽度互不覆盖（用户先改则不替换，识别后到则不覆盖）。后端识别过程不应让对话框打开延迟明显（< 100ms 体感）。
 + 统一生成契约回归：运行 Backend 测试与 canvas-agent 测试，确认共享 `CanvasGenerationCommand` 校验、统一 `/canvas/generation` 入口、H3/图片/视频参数透传，以及取消/重试任务端点护栏持续通过。
 
 + 统一画布生成命令：通过前端 H3 按钮、MCP H3 工具和插件 H3 调用分别提交任务，确认三者都命中 `/canvas/generation` 与 `CanvasGenerationService`；批量 H3 只传 `nodeIds` 也能启动。再通过 MCP 图片生成确认图片入口返回的 taskId、executor 和任务状态与前端入口一致；旧 `/canvas/h3/runs`、`/canvas/image-generation` 应返回 404。
@@ -46,9 +54,15 @@ description: Implemented changes that still need manual verification
 
 + 画布删除节点快捷键：选中节点按 Delete/Backspace 不应删除节点；选中连线按 Delete 仍能删除连线。
 
-+ 整理布局：框选普通节点 + H3 导演台节点后执行整理布局，确认普通节点水平间距紧凑、H3 节点被单独排在最右侧一列且与其它节点不重叠。
++ 整理布局（连通分量聚类 + 力导向紧凑排布）：框选若干节点后执行整理布局，确认①有连线关系的节点聚在同一块，**相连节点在水平与垂直方向都彼此靠近**（重点验证：链整条水平且相邻贴近、菱形 a→b,a→c,b→d,c→d 形成紧凑正交簇而非长条、分叉树根与叶靠近）；②**任意形状节点都不重叠**（重点验证：链、菱形、分叉树、4×4 全连接、混合尺寸簇）；③互不相连的节点群之间用 2.5× 普通间距纵向堆开，无关节点一眼可分；④H3 导演台等 park 节点仍单独排在最右一列且不与其它节点重叠；⑤真实坐标下（minX/minY 非零）整体不再被额外偏移。
 
 - 画布实时同步不闪烁：在画布页面连续拖动节点、修改参数，并同时通过 MCP 写入同一画布；确认页面不再切换到刷新占位层，节点状态保持，MCP 更新仍能实时显示。保持页面运行超过 10 秒，确认 SSE 不会因健康检查被反复重建。
+
+- 画布网页修改持久化：在网页修改提示词、参考图或节点位置后，等待保存完成并刷新页面；确认修改仍在，且 MCP/另一窗口更新不会覆盖尚未提交的网页修改。验证 IndexedDB 快照连续写入不会回退到旧版本。
+
+- MCP 视口隔离：在页面手动平移/缩放后，通过 MCP 新增、移动、连线和生成节点；确认浏览器当前中心与缩放保持不变，MCP `canvas_get_state` 不返回 viewport，刷新后仍恢复页面本地视口。
+
+- 画布差量事件：打开两个画布窗口，在一个窗口通过 MCP 或页面操作新增/移动/连线/生成节点；确认另一窗口只应用事件中的变更操作，节点和连线实时更新，视口与未涉及字段不变化；模拟事件断档后应自动拉取一次完整项目恢复。
 
 - H3 Clip 执行缓存清理：连续运行 Clip1→Clip4，确认每个 Clip 完成后中间执行缓存和 CUDA allocator 被清理，但模型保持加载；下一 Clip 不再卡在模型初始化，内存不随 Clip 累积增长。
 
@@ -436,6 +450,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ## H3 Clip 参数继承
 
+- 运行一个包含缺失或过期 `order` 字段的 H3 Clip，确认生成日志中的输入 refs 顺序与画布槽位从上到下、从左到右完全一致；确认新增参考图不会因旧排序字段插入到最前面。
 - 通过画布 MCP 运行 H3 Clip 1，确认 Clip 的 6 个图片参考项可见且会随请求提交；生成日志应记录 `inputCounts.image=6`、运行任务 ID 和最终视频存储键，视频结果应同时回写 Clip 与 H3 节点。
 - 新建 Clip 会继承当前选中 Clip 的完整生成参数，包括完整 Sigma 序列。
 - 新 Clip 会插入当前选中 Clip 后方，并保持后续 Clip 的顺序。
@@ -447,6 +462,17 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - H3 参考角色与恢复：连接角色节点、四视图、场景和分镜图后，确认运行请求只保留当前片段参考，身份基础图被排除且 `refItems.order` 与提示词编号一致；RunningHub 任务提交后重启 Backend，确认按已保存远端 taskId 继续轮询，不重复创建远端任务。
 
 ### H3 前端与 MCP 统一运行链路
+
+### 本地服务单实例启动
+
+- 运行 `npm run dev:local` 两次，确认第二次会先清理 17370、17371、3001 的旧进程，再只保留一套 Backend、Canvas Agent 和 Web 服务。
+- 在已有 Backend 运行时直接启动另一套 Backend，确认新实例因 `backend.lock` 明确退出，不会打开同一份 SQLite。
+- 保持 MCP stdio 连接调用画布操作，确认多个 MCP 客户端仍统一经由唯一 HTTP Backend 写入，且不会各自创建 SQLite/ComfyUI 业务副本。
+
+### H3 尾帧接续
+
+- 开启 S03 的尾帧接续后，只点击“生成当前 Clip”运行 S04，确认实际提交图片数量比 S04 自有参考图多 1 张，且生成日志提示词包含上一段尾帧首帧锚定说明。
+- 开启尾帧接续但清除上一段成品后运行下一段，确认任务直接报告缺少上一段成品，不创建一个未接续的伪成功任务。
 
 - 分别点击前端「生成当前 Clip」和调用 `h3_run_clip`，确认两者都只创建一个 `canvas-h3-run` 父任务，并由 Backend 创建相同的 H3 子任务、生成日志和 Clip 绑定。
 - 点击「运行当前及后续」及调用 `h3_run_all_clips`，确认后一 Clip 只在前一 Clip 成功并完成画布回写后才提交，上一段结果会作为 Motion Context；任一 Clip 失败后不再提交后续 Clip。

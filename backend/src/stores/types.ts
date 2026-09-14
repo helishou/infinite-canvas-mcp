@@ -30,19 +30,19 @@ export type CanvasProjectStore = {
     upsert(project: CanvasProject): CanvasProject;
     replaceAll(projects: CanvasProject[]): CanvasProject[];
     delete(id: string): number;
-    applyOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[]): { project: CanvasProject; revision: number; operationResults: unknown[] };
+    applyOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[]): { project: CanvasProject; revision: number; operationResults: unknown[]; operations: CanvasOperation[] };
     /** H3 任务终态与 Clip、生成日志在同一数据库事务中回写。 */
     writeBackH3Task(
         task: RuntimeTask,
         binding: { projectId: string; nodeId: string; segmentId: string; generationLogId?: string },
         output: Record<string, unknown> | null,
-    ): { project: CanvasProject; log: GenerationLog | null } | null;
+    ): { project: CanvasProject; log: GenerationLog | null; operations: CanvasOperation[] } | null;
     writeBackCanvasImageTask(
         task: RuntimeTask,
         input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append" },
         media: Array<Record<string, unknown>>,
-    ): CanvasProject | null;
-    markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): CanvasProject | null;
+    ): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;
 };
 
 /** 资产 store：assets + asset_folders 统一入口。 */

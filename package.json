@@ -11,7 +11,8 @@
         "dev:backend": "npm run dev --workspace backend",
         "dev:agent": "set PORT=17371 && npm run dev --workspace canvas-agent",
         "dev:web": "npm run dev --workspace web",
-        "dev:local": "concurrently -n backend,agent,web \"npm:dev:backend\" \"npm:dev:agent\" \"npm:dev:web\"",
+        "dev:services": "concurrently -n backend,agent,web \"npm:dev:backend\" \"npm:dev:agent\" \"npm:dev:web\"",
+        "dev:local": "scripts\\dev-local.bat",
         "build": "npm run build --workspaces --if-present",
         "typecheck": "npm run typecheck --workspaces --if-present"
     },

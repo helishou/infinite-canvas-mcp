@@ -71,8 +71,8 @@ export class CanvasGenerationService {
         const project = this.stores.projects.get(command.projectId);
         if (!project) throw new Error(`画布不存在: ${command.projectId}`);
         const references = resolveCanvasImageReferences(project, sourceNodeId);
-        // 只有源节点已经存在于 Backend 权威画布时才覆盖调用方快照；
-        // 这保留了无 project binding 的外部生成，同时避免前端新节点尚未落库时丢失显式输入。
+        // 无法从画布图谱解析时保留调用方显式参考图；节点落库时序由前端
+        // 生成前的强制同步保证，不在这里把运行请求变成卡控错误。
         return references ? { ...command, references } : command;
     }
 
@@ -121,8 +121,9 @@ function bindCanvasTask(stores: Stores, events: BackendEventBus, binding: Record
             runProgress: 0,
             segments: segments.map((segment) => String(segment.id || "") === segmentId ? { ...segment, runtimeTaskId: taskId, status: "loading", progress: 0, errorDetails: undefined } : segment),
         },
+        metadataDelete: ["errorDetails"],
     }]);
-    events.publish({ type: "canvas.updated", entityId: projectId, revision: result.revision, payload: result.project });
+    events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || "") });
 }
 
 function recordOf(value: unknown): Record<string, unknown> {

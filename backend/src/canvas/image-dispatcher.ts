@@ -419,11 +419,11 @@ export class CanvasImageDispatcher {
                     projectId: input.projectId!, nodeId: input.nodeId!, prompt: input.prompt, model: input.model,
                     references: input.references?.map((reference) => ({ storageKey: reference.storageKey, url: reference.url, name: reference.name })), resultPolicy: input.resultPolicy,
                 }, result.media.map((media) => ({ ...media })));
-                if (saved) this.events?.publish({ type: "canvas.updated", entityId: saved.id, revision: Number(saved.revision || 0), payload: saved });
+                if (saved) this.events?.publishCanvasDelta({ entityId: saved.project.id, revision: Number(saved.project.revision || 0), operations: saved.operations, updatedAt: String(saved.project.updatedAt || "") });
             },
             onFailed: async (error, task) => {
                 const saved = this.stores.projects.markCanvasImageTaskFailed(task, { projectId: input.projectId!, nodeId: input.nodeId! }, error.message);
-                if (saved) this.events?.publish({ type: "canvas.updated", entityId: saved.id, revision: Number(saved.revision || 0), payload: saved });
+                if (saved) this.events?.publishCanvasDelta({ entityId: saved.project.id, revision: Number(saved.project.revision || 0), operations: saved.operations, updatedAt: String(saved.project.updatedAt || "") });
             },
         };
     }

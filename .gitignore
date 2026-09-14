@@ -12,6 +12,8 @@ data/
 .hermes/
 .learnings/
 web/dist
+web/_test_report.txt
+web/_diag.txt
 
 **/dist
 web/public/plugins

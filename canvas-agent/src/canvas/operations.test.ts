@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildCanvasToolRequest } from "./operations.js";
+import { buildCanvasToolRequest, sanitizeCanvasPrompt } from "./operations.js";
+
+test("移除 MCP 引用占位行但保留真实提示词", () => {
+    assert.equal(sanitizeCanvasPrompt("【文本1】\n图片1\n图片2\n\n图生图。生成一张横向电影画面。"), "图生图。生成一张横向电影画面。");
+});
 
 function opsOf(name: Parameters<typeof buildCanvasToolRequest>[0], input: Record<string, unknown>, state: Parameters<typeof buildCanvasToolRequest>[2] = null) {
     const request = buildCanvasToolRequest(name, input, state);

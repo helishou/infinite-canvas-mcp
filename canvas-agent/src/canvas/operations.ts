@@ -6,6 +6,14 @@ import type { CanvasNode, CanvasNodeType, CanvasSnapshot } from "./types.js";
 
 export type CanvasToolRequest = { name: "canvas_apply_ops"; input: Record<string, unknown> };
 
+/** 移除 Agent/MCP 引用选择器误写进 prompt 的占位行，保留其后的真实提示词。 */
+export function sanitizeCanvasPrompt(value: string) {
+    const lines = String(value || "").replace(/\r\n?/g, "\n").split("\n");
+    let index = 0;
+    while (index < lines.length && (!lines[index].trim() || /^【文本\d+】$/.test(lines[index].trim()) || /^图片\d+$/.test(lines[index].trim()))) index += 1;
+    return lines.slice(index).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 /** 将上层画布工具调用转换为前端可执行的批量操作。 */
 export function buildCanvasToolRequest(name: ToolName, input: Record<string, unknown>, state: CanvasSnapshot | null): CanvasToolRequest {
     if (name === "canvas_apply_ops") return { name, input };
@@ -85,7 +93,6 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
         return applyOps(data.connections.map((connection) => ({ type: "connect_nodes", ...connection })));
     }
     if (name === "canvas_select_nodes") return applyOps([{ type: "select_nodes", ids: (input as { ids: string[] }).ids }]);
-    if (name === "canvas_set_viewport") return applyOps([{ type: "set_viewport", viewport: (input as { viewport: unknown }).viewport }]);
     if (name === "canvas_run_generation") {
         const data = input as { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append"; segmentId?: string };
         const referenceNodeIds = [...new Set(data.referenceNodeIds || [])];
@@ -159,7 +166,7 @@ function configNodeOp(id: string, input: Record<string, unknown>, x: number, y: 
 /** 创建包含提示词、配置节点和引用连线的生成流程。 */
 function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot | null) {
     const mode = generationMode(input.mode);
-    const prompt = String(input.prompt || "");
+    const prompt = sanitizeCanvasPrompt(String(input.prompt || ""));
     const referenceNodeIds = Array.isArray(input.referenceNodeIds) ? input.referenceNodeIds.filter((id): id is string => typeof id === "string") : [];
     // 有 reference 时优先把新节点贴到第一个 reference 节点同行右侧（间距 96 + 0 之间 324px 留给 config），
     // 避免 nextCanvasX 把新节点推到画布全局最右、导致连续 MCP 生成的链路散到几屏宽之外。

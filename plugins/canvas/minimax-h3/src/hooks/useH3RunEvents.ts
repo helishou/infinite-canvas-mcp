@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
+import { resetAndRequestH3Run } from "../components/H3WorkbenchPrimitives";
 
 type RunH3 = (runAll?: boolean) => void | Promise<void>;
 
@@ -44,6 +45,18 @@ export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3, update: (patc
         }
         updateRef.current({ cancelRequested: true });
         void ctx.ai.cancelCanvasH3Task(taskId).then(() => updateRef.current({ status: "cancelled", errorDetails: "任务已取消", runProgress: 0, runtimeTaskId: "", runtimeRunId: "" })).catch((error) => updateRef.current({ status: "error", errorDetails: error instanceof Error ? error.message : String(error), runtimeRunId: "" }));
+    }), [ctx.node.id]);
+
+    useEffect(() => ctx.on("minimax-h3:reset-and-run", (payload) => {
+        if (!payload || typeof payload !== "object" || String((payload as Record<string, unknown>).nodeId || "") !== ctx.node.id) return;
+        const all = (payload as Record<string, unknown>).all === true;
+        const current = ctx.getNode(ctx.node.id)?.metadata || {};
+        const taskId = String(current.runtimeTaskId || "");
+        const status = String(current.status || "");
+        const reset = () => resetAndRequestH3Run(ctx, all);
+        if (!taskId || !["queued", "loading"].includes(status)) { reset(); return; }
+        updateRef.current({ cancelRequested: true });
+        void ctx.ai.cancelCanvasH3Task(taskId).then(reset).catch((error) => updateRef.current({ status: "error", errorDetails: error instanceof Error ? error.message : String(error), cancelRequested: false }));
     }), [ctx.node.id]);
 
     useEffect(() => {

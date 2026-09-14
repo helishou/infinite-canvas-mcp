@@ -10,7 +10,6 @@ export type CanvasAgentOp =
     | { type: "delete_node"; id?: string; ids?: string[]; nodeType?: CanvasNodeTypeId }
     | { type: "delete_connections"; id?: string; ids?: string[]; all?: boolean }
     | { type: "connect_nodes"; id?: string; fromNodeId: string; toNodeId: string; role?: string; order?: number }
-    | { type: "set_viewport"; viewport: ViewportTransform }
     | { type: "select_nodes"; ids: string[] }
     | { type: "run_generation"; nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append" };
 
@@ -20,7 +19,7 @@ export type CanvasAgentSnapshot = {
     nodes: CanvasNodeData[];
     connections: CanvasConnection[];
     selectedNodeIds: string[];
-    viewport: ViewportTransform;
+    viewport?: ViewportTransform;
 };
 
 export function summarizeCanvasAgentOps(ops?: CanvasAgentOp[]) {
@@ -109,6 +108,216 @@ function resolveFreePosition(nodes: CanvasNodeData[], desired: { x: number; y: n
     return { x, y };
 }
 
+// 连通分量：把 ids 按无向连线聚成若干块；块内节点彼此相连、块间不相连。
+function computeConnectedComponents(ids: string[], edges: CanvasConnection[]): string[][] {
+    const adj = new Map<string, string[]>();
+    ids.forEach((id) => adj.set(id, []));
+    edges.forEach((conn) => {
+        if (adj.has(conn.fromNodeId)) adj.get(conn.fromNodeId)!.push(conn.toNodeId);
+        if (adj.has(conn.toNodeId)) adj.get(conn.toNodeId)!.push(conn.fromNodeId);
+    });
+    const visited = new Set<string>();
+    const components: string[][] = [];
+    for (const start of ids) {
+        if (visited.has(start)) continue;
+        const comp: string[] = [];
+        const stack = [start];
+        visited.add(start);
+        while (stack.length) {
+            const u = stack.pop()!;
+            comp.push(u);
+            for (const v of adj.get(u) ?? []) if (!visited.has(v)) { visited.add(v); stack.push(v); }
+        }
+        components.push(comp);
+    }
+    return components;
+}
+
+// 块内最小（最靠上、其次最靠左）原坐标，作为块在整图中的排序键，尽量保留用户原本的上下布局。
+function componentTopKey(ids: string[], byId: Map<string, CanvasNodeData>): number {
+    let best = Infinity;
+    ids.forEach((id) => {
+        const p = byId.get(id)?.position;
+        if (!p) return;
+        const key = p.y * 1e7 + p.x;
+        if (key < best) best = key;
+    });
+    return best;
+}
+
+/**
+ * 对单个连通块做力导向紧凑排布，返回【局部坐标】（原点 0,0）下各节点位置与块高度。
+ *
+ * 设计目标（用户诉求）：
+ * 1. 相连节点在水平与垂直方向都彼此靠近 —— 线性弹簧把相连节点拉到目标距 L≈(gap+平均高)，
+ *    再用「网格对齐偏置」把每条边压向较短轴，使边趋于水平/垂直、形成正交紧凑排布。
+ * 2. 节点绝不重叠 —— 力导向收尾后跑「最小穿透轴硬分离」，迭代到零重叠（构造性保证）。
+ * 3. 仍保留可读性：拓扑层仅作种子（源在左、汇在右），并对每条边施加「流向偏置」维持数据流方向。
+ */
+function layoutComponentLocal(ctx: {
+    sizeOf: (id: string) => { width: number; height: number };
+    resized: Map<string, { width: number; height: number }>;
+    gap: number;
+}, comp: string[], compEdges: CanvasConnection[]): { positions: Map<string, FlowLayoutEntry>; height: number } {
+    const { sizeOf, resized, gap } = ctx;
+    const positions = new Map<string, FlowLayoutEntry>();
+    const put = (id: string, x: number, y: number) => {
+        const size = resized.get(id);
+        positions.set(id, size ? { x, y, width: size.width, height: size.height } : { x, y });
+    };
+    const n = comp.length;
+    const size2 = (id: string) => { const s = sizeOf(id); return { w: s.width, h: s.height }; };
+    const heightOf = (id: string) => size2(id).h;
+    const widthOf = (id: string) => size2(id).w;
+
+    // 单点：直接落位。
+    if (n <= 1) {
+        if (n === 1) put(comp[0], 0, 0);
+        return { positions, height: n === 1 ? heightOf(comp[0]) : 0 };
+    }
+
+    const avgH = comp.reduce((s, id) => s + heightOf(id), 0) / n;
+    const avgW = comp.reduce((s, id) => s + widthOf(id), 0) / n;
+    // 相连节点的目标中心距：≈一个节点高 + 间距 → 相连即「近」，且天然不重叠。
+    const L = gap + Math.max(avgH, avgW * 0.6);
+    const k = L; // FR 理想距离
+
+    // 拓扑层（最长路径）仅用于稳定种子：源在左、汇在右；同层内按序铺开避免初始重叠。
+    const indeg = new Map<string, number>();
+    const outAdj = new Map<string, string[]>();
+    comp.forEach((id) => { indeg.set(id, 0); outAdj.set(id, []); });
+    compEdges.forEach((conn) => {
+        outAdj.get(conn.fromNodeId)?.push(conn.toNodeId);
+        indeg.set(conn.toNodeId, (indeg.get(conn.toNodeId) ?? 0) + 1);
+    });
+    const level = new Map<string, number>();
+    const queue: string[] = [];
+    comp.forEach((id) => { if ((indeg.get(id) ?? 0) === 0) { level.set(id, 0); queue.push(id); } });
+    while (queue.length) {
+        const u = queue.shift()!;
+        for (const v of outAdj.get(u) ?? []) {
+            level.set(v, Math.max(level.get(v) ?? 0, (level.get(u) ?? 0) + 1));
+            const d = (indeg.get(v) ?? 0) - 1;
+            indeg.set(v, d);
+            if (d === 0) queue.push(v);
+        }
+    }
+    for (let pass = 0; pass < n; pass++) {
+        let changed = false;
+        for (const conn of compEdges) {
+            const lv = Math.max(level.get(conn.toNodeId) ?? 0, (level.get(conn.fromNodeId) ?? 0) + 1);
+            if (lv !== level.get(conn.toNodeId)) { level.set(conn.toNodeId, lv); changed = true; }
+        }
+        if (!changed) break;
+    }
+    comp.forEach((id) => { if (!level.has(id)) level.set(id, 0); });
+
+    // 种子：x 按层（源左汇右），同层内按序纵向铺开 → 初始已大致不重叠。
+    const byLevel = new Map<number, string[]>();
+    comp.forEach((id) => {
+        const lv = level.get(id) ?? 0;
+        if (!byLevel.has(lv)) byLevel.set(lv, []);
+        byLevel.get(lv)!.push(id);
+    });
+    const maxLevel = Math.max(...level.values());
+    const pos = new Map<string, { x: number; y: number }>();
+    byLevel.forEach((ids, lv) => {
+        ids.forEach((id, i) => pos.set(id, { x: maxLevel === 0 ? 0 : lv * (avgW + gap), y: i * (avgH + gap) }));
+    });
+
+    // 力导向（稳定模型）：斥力 k²/d + 线性弹簧 1.5·(d−k)（Hooke，d>k 吸、d<k 推，平衡不塌缩）
+    // + 强「同 y 偏置」把相连节点垂直压到同一水平线（链必然水平）+ 流向偏置（源左汇右）。
+    let temp = k * 0.6;
+    const initialTemp = temp;
+    const ITER = 600;
+    for (let it = 0; it < ITER; it++) {
+        const disp = new Map<string, { x: number; y: number }>();
+        comp.forEach((id) => disp.set(id, { x: 0, y: 0 }));
+        // 全局斥力：所有节点对互斥，防塌缩/重叠。
+        for (let i = 0; i < n; i++) {
+            for (let j = i + 1; j < n; j++) {
+                const a = comp[i], b = comp[j];
+                const pa = pos.get(a)!, pb = pos.get(b)!;
+                let dx = pa.x - pb.x, dy = pa.y - pb.y;
+                let d2 = dx * dx + dy * dy;
+                if (d2 < 1e-6) { dx = 0.01; dy = 0; d2 = 1e-4; }
+                const d = Math.sqrt(d2);
+                const f = (k * k) / d;
+                const fx = (f * dx) / d, fy = (f * dy) / d;
+                const da = disp.get(a)!, db = disp.get(b)!;
+                da.x += fx; da.y += fy; db.x -= fx; db.y -= fy;
+            }
+        }
+        // 边：线性弹簧 + 同 y 偏置 + 流向偏置。
+        for (const conn of compEdges) {
+            const u = conn.fromNodeId, v = conn.toNodeId;
+            const pu = pos.get(u)!, pv = pos.get(v)!;
+            const dx = pu.x - pv.x, dy = pu.y - pv.y;
+            const d = Math.sqrt(dx * dx + dy * dy) + 0.01;
+            const f = 1.5 * (d - k); // 线性弹簧：稳定平衡，不会把链端吸塌
+            const fx = (f * dx) / d, fy = (f * dy) / d;
+            const du = disp.get(u)!, dv = disp.get(v)!;
+            du.x -= fx; du.y -= fy; dv.x += fx; dv.y += fy;
+            // 网格对齐偏置：把每条边压向它的较短轴（|dy|<=|dx| → 对齐 y，否则对齐 x），
+            // 使相连节点在「水平或垂直」其一上严格对齐、另一方向贴近 → 形成正交紧凑排布（如菱形 2×2）。
+            if (Math.abs(dy) <= Math.abs(dx)) {
+                du.y += dy * 0.5; dv.y -= dy * 0.5;
+            } else {
+                du.x += dx * 0.5; dv.x -= dx * 0.5;
+            }
+            // 流向偏置：源在左、汇在右，维持数据流可读性。
+            if (pu.x > pv.x) { du.x -= 0.8; dv.x += 0.8; }
+        }
+        comp.forEach((id) => {
+            const p = pos.get(id)!, dvec = disp.get(id)!;
+            const len = Math.sqrt(dvec.x * dvec.x + dvec.y * dvec.y) + 0.01;
+            const lim = Math.min(len, temp);
+            p.x += (dvec.x / len) * lim;
+            p.y += (dvec.y / len) * lim;
+        });
+        temp = Math.max(initialTemp * Math.pow(0.98, it + 1), 0.2);
+    }
+
+    // 最终硬分离：反复把重叠的成对边沿最小穿透轴推开（含 gap 间隙），直到零重叠。构造性保证。
+    for (let pass = 0; pass < 3000; pass++) {
+        let any = false;
+        for (let i = 0; i < n; i++) {
+            for (let j = i + 1; j < n; j++) {
+                const a = comp[i], b = comp[j];
+                const pa = pos.get(a)!, pb = pos.get(b)!;
+                const sa = size2(a), sb = size2(b);
+                const ox = sa.w / 2 + sb.w / 2 + gap - Math.abs(pa.x - pb.x);
+                const oy = sa.h / 2 + sb.h / 2 + gap - Math.abs(pa.y - pb.y);
+                if (ox > 0 && oy > 0) {
+                    any = true;
+                    if (ox <= oy) {
+                        const sgn = pa.x >= pb.x ? 1 : -1;
+                        pa.x += (sgn * ox) / 2; pb.x -= (sgn * ox) / 2;
+                    } else {
+                        const sgn = pa.y >= pb.y ? 1 : -1;
+                        pa.y += (sgn * oy) / 2; pb.y -= (sgn * oy) / 2;
+                    }
+                }
+            }
+        }
+        if (!any) break;
+    }
+
+    // 归一到局部原点 (0,0)。
+    let minX = Infinity, minY = Infinity, maxY = -Infinity;
+    comp.forEach((id) => {
+        const p = pos.get(id)!, s = size2(id);
+        minX = Math.min(minX, p.x - s.w / 2);
+        minY = Math.min(minY, p.y - s.h / 2);
+        maxY = Math.max(maxY, p.y + s.h / 2);
+    });
+    comp.forEach((id) => {
+        const p = pos.get(id)!, s = size2(id);
+        put(id, p.x - s.w / 2 - minX, p.y - s.h / 2 - minY);
+    });
+    return { positions, height: maxY - minY };
+}
+
 /**
  * 按连接关系（fromNodeId → toNodeId 表示数据流方向）做拓扑分层排布：
  * 源点（只有出边，输入）在左，汇点（只有入边，输出）在右，同一层纵向堆叠。
@@ -145,8 +354,6 @@ export function computeFlowLayout(opts: {
         const size = resized.get(id);
         result.set(id, size ? { x, y, width: size.width, height: size.height } : { x, y });
     };
-    // 节点原坐标：作为「没有上游可对齐」时的纵向期望值，保留用户手动摆放的相对次序。
-    const originalY = (id: string) => byId.get(id)?.position.y ?? anchorY;
 
     // 没有任何可排布的非停放节点：仅把停放节点纵向堆叠在 anchor 处。
     if (flowIds.length === 0) {
@@ -161,172 +368,24 @@ export function computeFlowLayout(opts: {
     }
 
     const idSet = new Set(flowIds);
-    const edges = connections.filter((conn) => idSet.has(conn.toNodeId) && (scopeEdges ? idSet.has(conn.fromNodeId) : byId.has(conn.fromNodeId)));
+    const scopedEdges = connections.filter((conn) => idSet.has(conn.toNodeId) && (scopeEdges ? idSet.has(conn.fromNodeId) : byId.has(conn.fromNodeId)));
 
-    const indeg = new Map<string, number>();
-    const outAdj = new Map<string, string[]>();
-    // 入边只相邻集内的上游：纵向对齐要用它们的实际坐标，集外节点不参与本次排布、坐标不可参考。
-    const inAdj = new Map<string, string[]>();
-    flowIds.forEach((id) => {
-        indeg.set(id, 0);
-        outAdj.set(id, []);
-        inAdj.set(id, []);
-    });
-    edges.forEach((conn) => {
-        outAdj.get(conn.fromNodeId)?.push(conn.toNodeId);
-        indeg.set(conn.toNodeId, (indeg.get(conn.toNodeId) ?? 0) + 1);
-        if (idSet.has(conn.fromNodeId)) inAdj.get(conn.toNodeId)?.push(conn.fromNodeId);
-    });
+    // 连通分量聚类：把节点按连线拆成若干「连通块」。块内力导向紧凑排布（相连节点在两个方向都靠近、链保持水平），
+    // 块与块之间用更大间距纵向堆开，让不相关的节点明显拉开距离、一眼可分；跨块连线随之被隔离，边交叉大幅下降。
+    const components = computeConnectedComponents(flowIds, scopedEdges);
+    // 块顺序：按块内最靠上的节点原坐标排，尽量保留用户原本的上下布局意图。
+    components.sort((a, b) => componentTopKey(a, byId) - componentTopKey(b, byId));
 
-    // 最长路径分层：Kahn 拓扑 + 松弛兜底环。
-    const level = new Map<string, number>();
-    const queue: string[] = [];
-    flowIds.forEach((id) => {
-        if ((indeg.get(id) ?? 0) === 0) {
-            level.set(id, 0);
-            queue.push(id);
-        }
-    });
-    while (queue.length) {
-        const u = queue.shift()!;
-        for (const v of outAdj.get(u) ?? []) {
-            level.set(v, Math.max(level.get(v) ?? 0, (level.get(u) ?? 0) + 1));
-            const d = (indeg.get(v) ?? 0) - 1;
-            indeg.set(v, d);
-            if (d === 0) queue.push(v);
-        }
-    }
-    for (let pass = 0; pass < flowIds.length; pass++) {
-        let changed = false;
-        for (const conn of edges) {
-            const lv = Math.max(level.get(conn.toNodeId) ?? 0, (level.get(conn.fromNodeId) ?? 0) + 1);
-            if (lv !== level.get(conn.toNodeId)) {
-                level.set(conn.toNodeId, lv);
-                changed = true;
-            }
-        }
-        if (!changed) break;
-    }
-    flowIds.forEach((id) => {
-        if (!level.has(id)) level.set(id, 0);
-    });
-
-    const maxLayer = Math.max(...level.values());
-
-    // 计算每列（层）的实际最大宽度：列间距只取决于该列内最宽节点，
-    // 不再被选集中某个特别宽的节点（如 H3 导演台）把全局列间距撑大 → 解决「水平距离太远」。
-    const colMaxW = new Map<number, number>();
-    flowIds.forEach((id) => {
-        const layer = level.get(id) ?? 0;
-        colMaxW.set(layer, Math.max(colMaxW.get(layer) ?? 0, sizeOf(id).width));
-    });
-
-    // 逐列累加列左缘：第 0 列从 anchorX 起，之后每列 = 上一列左缘 + 上一列最宽 + gap。
-    const colX = new Map<number, number>();
-    let xCursor = anchorX;
-    [...colMaxW.keys()].sort((a, b) => a - b).forEach((layer) => {
-        colX.set(layer, xCursor);
-        xCursor += (colMaxW.get(layer) ?? 0) + gap;
-    });
-
-    // 没有内部连接（全平铺）→ 退回网格，避免单列拉得太长。
-    if (maxLayer === 0) {
-        const cols = Math.max(1, Math.ceil(Math.sqrt(flowIds.length)));
-        // 网格按列切分：每列宽度取该列节点实际最大宽，列间距贴合内容而非全局最宽。
-        const colWidths = new Array(cols).fill(0);
-        flowIds.forEach((id, index) => {
-            const col = index % cols;
-            colWidths[col] = Math.max(colWidths[col], sizeOf(id).width);
-        });
-        const gridColX = new Array(cols).fill(0);
-        let gx = anchorX;
-        for (let c = 0; c < cols; c++) {
-            gridColX[c] = gx;
-            gx += colWidths[c] + gap;
-        }
-        // 行高按该行最高节点算，同行节点顶边对齐（不再用全局行距，缩小后的节点也能贴紧）。
-        const rowCount = Math.ceil(flowIds.length / cols);
-        const rowHeights = new Array(rowCount).fill(0);
-        flowIds.forEach((id, index) => {
-            const row = Math.floor(index / cols);
-            rowHeights[row] = Math.max(rowHeights[row], sizeOf(id).height);
-        });
-        const rowY = new Array(rowCount).fill(0);
-        let ry = anchorY;
-        for (let r = 0; r < rowCount; r++) {
-            rowY[r] = ry;
-            ry += rowHeights[r] + gap;
-        }
-        flowIds.forEach((id, index) => {
-            put(id, gridColX[index % cols], rowY[Math.floor(index / cols)]);
-        });
-    } else {
-        // 分层：层 0（输入）在最左，层越大越靠右。
-        // 纵向不按「层内序号顺排」——那样输入在下方时输出会被拉到顶部，同一条链被拆成两行。
-        // 改为跨层共享的「行带（row）」：同一行在所有层共用同一条水平带，带内节点垂直居中。
-        // 于是链上相邻节点必然落在同一行 → 输入输出精确同水平线；且行高按该行最高节点算，
-        // 不会出现「输入行距 < 输出行距」时逐行累积下漂的问题。
-        const rowOf = new Map<string, number>();
-        const rowLayers = new Map<number, Set<number>>();
-        const rowCountRef = { value: 0 };
-        // 取行：优先最近的、本层尚未占用的行（同层共用一行会重叠）；全被本层占了就新开一行。
-        const takeRow = (preferred: number, layer: number) => {
-            let chosen = -1;
-            for (let row = rowCountRef.value - 1; row >= 0; row--) {
-                if (rowLayers.get(row)?.has(layer)) continue;
-                if (chosen < 0 || Math.abs(row - preferred) < Math.abs(chosen - preferred)) chosen = row;
-            }
-            if (chosen < 0) chosen = rowCountRef.value++;
-            const used = rowLayers.get(chosen) ?? new Set<number>();
-            used.add(layer);
-            rowLayers.set(chosen, used);
-            return chosen;
-        };
-        // 没有可对齐上游时的行估算：按节点原坐标映射成名义行号，保留用户手动摆放的上下次序。
-        const nominalStep = Math.max(1, Math.max(...flowIds.map((id) => sizeOf(id).height)) + gap);
-        const nominalRow = (id: string) => Math.max(0, (originalY(id) + sizeOf(id).height / 2 - anchorY) / nominalStep - 0.5);
-
-        const buckets = new Map<number, string[]>();
-        flowIds.forEach((id) => {
-            const layer = level.get(id) ?? 0;
-            const bucket = buckets.get(layer) ?? [];
-            bucket.push(id);
-            buckets.set(layer, bucket);
-        });
-        [...buckets.keys()].sort((a, b) => a - b).forEach((layer) => {
-            const bucket = buckets.get(layer)!;
-            const preferred = new Map<string, number>();
-            bucket.forEach((id) => {
-                const preds = inAdj.get(id) ?? [];
-                if (!preds.length) {
-                    preferred.set(id, nominalRow(id));
-                    return;
-                }
-                preferred.set(id, preds.reduce((sum, predId) => sum + (rowOf.get(predId) ?? nominalRow(predId)), 0) / preds.length);
-            });
-            bucket
-                .sort((a, b) => (preferred.get(a) ?? 0) - (preferred.get(b) ?? 0) || originalY(a) - originalY(b))
-                .forEach((id) => rowOf.set(id, takeRow(preferred.get(id) ?? 0, layer)));
-        });
-
-        // 行高 = 该行最高节点；行顶逐行累加，带内垂直居中。
-        const rowHeights: number[] = [];
-        flowIds.forEach((id) => {
-            const row = rowOf.get(id) ?? 0;
-            rowHeights[row] = Math.max(rowHeights[row] ?? 0, sizeOf(id).height);
-        });
-        const rowTop: number[] = [];
-        let rowCursor = anchorY;
-        for (let row = 0; row < rowCountRef.value; row++) {
-            rowTop[row] = rowCursor;
-            rowCursor += (rowHeights[row] ?? 0) + gap;
-        }
-        flowIds.forEach((id) => {
-            const row = rowOf.get(id) ?? 0;
-            const size = sizeOf(id);
-            const band = rowHeights[row] ?? size.height;
-            put(id, colX.get(level.get(id) ?? 0) ?? anchorX, (rowTop[row] ?? anchorY) + (band - size.height) / 2);
-        });
+    // 块间间距：明显大于块内行距，使无关节点一眼可辨（也不至于把画布拉得过空）。
+    const CLUSTER_GAP = Math.round(gap * 2.5);
+    let cursorY = anchorY;
+    for (const comp of components) {
+        const compSet = new Set(comp);
+        const compEdges = scopedEdges.filter((conn) => compSet.has(conn.fromNodeId) && compSet.has(conn.toNodeId));
+        // 块内布局在局部坐标（原点 0,0）完成，再整体平移到当前块的堆叠位置。
+        const { positions, height } = layoutComponentLocal({ sizeOf, resized, gap }, comp, compEdges);
+        positions.forEach((pos, id) => put(id, anchorX + pos.x, cursorY + pos.y));
+        cursorY += height + CLUSTER_GAP;
     }
 
     // 停放节点：统一放到排布结果的最右列，纵向堆叠（从 anchorY 起，互不重叠，且避让画布上其它节点）。
@@ -346,7 +405,6 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
     let nodes = snapshot.nodes;
     let connections = snapshot.connections;
     let selectedNodeIds = snapshot.selectedNodeIds;
-    let viewport = snapshot.viewport;
 
     // 自动排布的网格起点：画布现有节点的右边界之外，避免压住既有内容。
     const anchorX = nodes.length ? Math.max(...nodes.map((node) => node.position.x + node.width)) + AUTO_LAYOUT_GAP : 0;
@@ -406,7 +464,6 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
             const hasNodes = nodes.some((node) => node.id === op.fromNodeId) && nodes.some((node) => node.id === op.toNodeId);
             if (!exists && hasNodes) connections = [...connections, { id: op.id || nanoid(), fromNodeId: op.fromNodeId, toNodeId: op.toNodeId, ...(op.role ? { role: op.role } : {}), ...(op.order === undefined ? {} : { order: op.order }) }];
         }
-        if (op.type === "set_viewport" && op.viewport) viewport = op.viewport;
         if (op.type === "select_nodes") selectedNodeIds = (op.ids || []).filter((id) => nodes.some((node) => node.id === id));
     });
 
@@ -420,7 +477,7 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
         });
     }
 
-    return { ...snapshot, nodes, connections, selectedNodeIds, viewport };
+    return { ...snapshot, nodes, connections, selectedNodeIds };
 }
 
 function opLabel(type: string) {

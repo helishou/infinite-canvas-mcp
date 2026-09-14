@@ -59,6 +59,7 @@ test("图片命令按源配置节点统一解析画布参考图", async () => {
                     id: "project-1",
                     nodes: [
                         { id: "config", type: "config" },
+                        { id: "result", type: "image" },
                         { id: "scene", type: "image", title: "场景", metadata: { storageKey: "image:scene" } },
                         { id: "character", type: "image", title: "人物", metadata: { storageKey: "image:character" } },
                     ],

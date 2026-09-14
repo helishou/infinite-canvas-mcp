@@ -8,7 +8,7 @@ import { loadConfig } from "./config.js";
 import { PluginMcpRegistry, buildPluginMcpContext, loadPluginMcpDeclarationsFromBackend, type PluginMcpBackend } from "@basketikun/canvas-agent/plugin-mcp";
 import type { CanvasProject } from "./db.js";
 import { toolDescriptions, toolInputSchemas, toolNames, type ToolName } from "@basketikun/canvas-agent/schemas";
-import { buildCanvasToolRequest } from "@basketikun/canvas-agent/operations";
+import { buildCanvasToolRequest, sanitizeCanvasPrompt } from "@basketikun/canvas-agent/operations";
 import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasImageGenerationInput } from "./canvas/image-dispatcher.js";
@@ -59,7 +59,7 @@ const DIRECT_CANVAS_TOOLS = [
     "canvas_list_projects", "canvas_get_state", "canvas_get_selection", "canvas_export_snapshot", "canvas_apply_ops",
     "canvas_create_node", "canvas_create_text_node", "canvas_create_text_nodes", "canvas_create_config_node",
     "canvas_create_image_prompt_flow", "canvas_create_generation_flow", "canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio",
-    "canvas_update_node", "canvas_update_node_text", "canvas_move_nodes", "canvas_resize_node", "canvas_delete_nodes", "canvas_connect_nodes", "canvas_set_generation_references", "canvas_select_nodes", "canvas_set_viewport", "canvas_run_generation", "generation_get_status",
+    "canvas_update_node", "canvas_update_node_text", "canvas_move_nodes", "canvas_resize_node", "canvas_delete_nodes", "canvas_connect_nodes", "canvas_set_generation_references", "canvas_select_nodes", "canvas_run_generation", "generation_get_status",
 ] as ToolName[];
 const DIRECT_TOOL_NAMES = new Set<ToolName>([...DIRECT_CANVAS_TOOLS, "assets_list", "assets_add", "comfyui_status", "comfyui_list_presets", "comfyui_run", "comfyui_get_task", "comfyui_cancel_task", "generation_get_status"]);
 
@@ -83,7 +83,7 @@ async function executeDirectCanvasTool(config: ReturnType<typeof loadConfig>, ba
         return { nodes: nodesOf(state).filter((node) => ids.has(String(node.id))) };
     }
     const toolInput = name === "canvas_create_node" ? await applyNodeFactoryDefaults(input, backendApi) : input;
-    const request = buildCanvasToolRequest(name, toolInput, { nodes: nodesOf(state), connections: connectionsOf(state), viewport: state.viewport as never } as never);
+    const request = buildCanvasToolRequest(name, toolInput, { nodes: nodesOf(state) as never, connections: connectionsOf(state) as never });
     const rawOps = Array.isArray(request.input.ops) ? request.input.ops as Array<Record<string, unknown>> : [];
     const ops = await Promise.all(rawOps.map(async (op) => op.type === "add_node" && String(op.nodeType || "") === "minimax-h3:video"
         ? await applyNodeFactoryDefaults(op, backendApi)
@@ -344,7 +344,7 @@ function buildCanvasImageRequest(source: Record<string, unknown>, project: Recor
         const content = String(textMetadata.content || "").trim();
         return content ? [content] : [];
     });
-    const rawPrompt = String(op.prompt || connectedTextPrompts.join("\n\n") || metadata.composerContent || metadata.prompt || "");
+    const rawPrompt = sanitizeCanvasPrompt(String(op.prompt || connectedTextPrompts.join("\n\n") || metadata.composerContent || metadata.prompt || ""));
     const referencedIds = new Set<string>();
     for (const match of rawPrompt.matchAll(/@\[node:([^\]]+)\]/g)) referencedIds.add(match[1]);
     for (const connection of incomingConnections) {
@@ -477,7 +477,10 @@ async function fetchCurrentCanvasProject(config: ReturnType<typeof loadConfig>, 
 
 function nodesOf(project: Record<string, unknown>) { return Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : []; }
 function connectionsOf(project: Record<string, unknown>) { return Array.isArray(project.connections) ? project.connections as Array<Record<string, unknown>> : []; }
-function compactProject(project: Record<string, unknown>) { return { ...project, nodes: nodesOf(project), connections: connectionsOf(project) }; }
+function compactProject(project: Record<string, unknown>) {
+    const { viewport: _viewport, ...withoutViewport } = project;
+    return { ...withoutViewport, nodes: nodesOf(project), connections: connectionsOf(project) };
+}
 
 function textResult(value: unknown) { return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] }; }
 

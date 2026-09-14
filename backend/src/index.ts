@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-import { loadConfig, saveConfig, ensureDataDirs } from "./config.js";
+import { DATA_DIR, loadConfig, saveConfig, ensureDataDirs } from "./config.js";
 import { BackendDatabase } from "./db.js";
 import { registerBackendErrorHandler, startServer } from "./server.js";
 import { createLogger } from "./logger.js";
@@ -26,6 +26,7 @@ import { registerCanvasGenerationRoutes } from "./server/canvas-generation-route
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
 import { CanvasH3Runner } from "./canvas/h3-runner.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
+import { acquireBackendInstanceLock } from "./instance-lock.js";
 
 const logger = createLogger("main");
 
@@ -40,6 +41,7 @@ async function startBackendHttpServer() {
 const config = loadConfig(true);
 saveConfig(config);
 ensureDataDirs();
+const releaseInstanceLock = acquireBackendInstanceLock(DATA_DIR);
 
 const db = new BackendDatabase();
 const stores = createStores(db);
@@ -122,6 +124,7 @@ process.on("unhandledRejection", (reason) => logger.error("unhandledRejection", 
 
 const shutdown = (signal: string) => {
     logger.info(`${signal} received, shutting down…`);
+    releaseInstanceLock();
     server.close(() => {
         db.close();
         process.exit(0);

@@ -5,6 +5,7 @@ import { Select } from "antd";
 import type { H3Ref, H3Segment } from "../types";
 import { H3Icon } from "./H3Icon";
 import { refsForSegment } from "../services/h3-data";
+import { segmentsFor } from "../hooks/useH3Segments";
 import baseReference from "../storyboard-assets/references/base-en.txt?raw";
 import refReference from "../storyboard-assets/references/ref-en.txt?raw";
 
@@ -125,7 +126,8 @@ export function H3PromptSection({
   const [mentionQuery, setMentionQuery] = useState("");
   const [mentionPosition, setMentionPosition] = useState({ left: 8, top: 106 });
   const [helpOpen, setHelpOpen] = useState(false);
-  const [enhancing, setEnhancing] = useState(false);
+  const [enhancingSegmentId, setEnhancingSegmentId] = useState<string | null>(null);
+  const enhancing = enhancingSegmentId === selected?.id;
   // 翻译态：缓存最近一次翻译结果（按 prompt 内容做 key），切换时优先复用，prompt 变化自动失效
   type Translation = { prompt: string; text: string };
   const [translation, setTranslation] = useState<Translation | null>(null);
@@ -232,7 +234,10 @@ export function H3PromptSection({
   };
   const enhancePrompt = async () => {
     if (!prompt.trim() || enhancing) return;
-    setEnhancing(true);
+    const targetSegmentId = selected?.id;
+    const promptAtCall = prompt;
+    if (!targetSegmentId) return;
+    setEnhancingSegmentId(targetSegmentId);
     ctx.updateMetadata({ promptEnhancing: true, promptEnhanceError: "" });
     try {
       const model = String(
@@ -242,7 +247,8 @@ export function H3PromptSection({
           "",
       );
       const normalizedMode = mode === "t2v" ? "t2va" : mode === "i2v" ? "i2va" : mode === "fl2v" ? "fl2va" : "ref2va";
-      const references = selected ? refsForSegment(selected) : [];
+      const target = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {}).find((segment) => segment.id === targetSegmentId) || selected;
+      const references = target ? refsForSegment(target) : [];
       const ordinals = { image: 0, video: 0, audio: 0 };
       const manifest = references.map((ref) => {
         const ordinal = ++ordinals[ref.type];
@@ -289,7 +295,7 @@ export function H3PromptSection({
       if (transitionInstruction) systemParts.push(`Storyboard image reference transition instruction:\n${transitionInstruction}`);
       const system = systemParts.join("\n\n");
       const userPromptParts = [
-        prompt.trim(),
+        promptAtCall.trim(),
         String(ctx.node.metadata?.globalPrompt || "").trim(),
         `Reference manifest (fixed numbering; do not reorder):\n${manifest}`,
       ];
@@ -304,7 +310,13 @@ export function H3PromptSection({
       // 这里不能把 prompt 覆写成占位符/空串——保留用户原文，并给出明确失败提示。
       const enhanced = result.text.trim();
       if (enhanced) {
-        setPrompt(enhanced);
+        // 增强请求是异步的，期间用户可能已经切换 Clip。
+        // 必须按发起请求时捕获的 segmentId 写回最新节点，不能调用依赖当前 selected 的 patchSelected。
+        const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        const liveSegments = segmentsFor(liveMetadata);
+        if (liveSegments.some((segment) => segment.id === targetSegmentId)) {
+          ctx.updateMetadata({ segments: liveSegments.map((segment) => segment.id === targetSegmentId ? { ...segment, prompt: enhanced } : segment) });
+        }
       } else {
         ctx.updateMetadata({ promptEnhanceError: "模型未返回内容，增强被跳过（请检查文本模型配置或重试）" });
       }
@@ -314,7 +326,7 @@ export function H3PromptSection({
           error instanceof Error ? error.message : String(error),
       });
     } finally {
-      setEnhancing(false);
+      setEnhancingSegmentId(null);
       ctx.updateMetadata({ promptEnhancing: false });
     }
   };

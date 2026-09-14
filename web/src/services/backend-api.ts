@@ -126,6 +126,25 @@ export function deleteBackendProject(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/projects/${encodeURIComponent(id)}`);
 }
 
+export type DetectImageSplitLineInsetResult = {
+    ok: boolean;
+    lineInset: number;
+    confidence: number;
+    samples: { horizontal: number[]; vertical: number[] };
+    width: number;
+    height: number;
+};
+
+/**
+ * 后端纯 CV 识别"格间分隔线宽度"。
+ * 输入：dataUrl + 当前切分参数。
+ * 返回：lineInset（整数 px，未识别为 0）、confidence（0-1）、samples（每条切分线单独测得的宽度）。
+ * 仅供切分对话框初始化默认值用，与实际 `inset` 是否使用解耦。
+ */
+export function detectImageSplitLineInset(input: { dataUrl: string; rows: number; columns: number; horizontalLines?: number[]; verticalLines?: number[] }, signal?: AbortSignal) {
+    return request<DetectImageSplitLineInsetResult>("POST", "/canvas/image-split/detect-line-inset", input, { signal });
+}
+
 // ── Assets ───────────────────────────────────────────────────────────────
 
 export function fetchBackendAssets(options: { kind?: string; folderId?: string } = {}) {

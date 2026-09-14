@@ -1,3 +1,5 @@
+import type { CanvasOperation } from "./canvas/project-ops.js";
+
 export type BackendEvent = {
     id: string;
     type: string;
@@ -21,6 +23,23 @@ export class BackendEventBus {
         if (this.history.length > 1000) this.history.shift();
         for (const listener of this.listeners) listener(event);
         return event;
+    }
+
+    publishCanvasDelta(input: { entityId: string; revision: number; operations: CanvasOperation[]; updatedAt?: string; operationResults?: unknown[] }) {
+        return this.publish({
+            type: "canvas.updated",
+            entityId: input.entityId,
+            revision: input.revision,
+            payload: {
+                operations: input.operations,
+                ...(input.operationResults ? { operationResults: input.operationResults } : {}),
+                ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+            },
+        });
+    }
+
+    publishCanvasSnapshot(input: { entityId?: string; revision?: number; payload: unknown }) {
+        return this.publish({ type: "canvas.updated", ...input });
     }
 
     since(lastEventId?: string): BackendEvent[] {

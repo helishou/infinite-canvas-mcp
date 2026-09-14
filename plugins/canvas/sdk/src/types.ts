@@ -16,8 +16,6 @@ export type { CanvasGenerationCommand, CanvasGenerationMode, CanvasGenerationTas
 
 export type Position = { x: number; y: number };
 
-export type ViewportTransform = { x: number; y: number; k: number };
-
 // 内置节点类型;插件节点建议用 "<pluginId>:<name>"。放开为字符串以便扩展。
 export type CanvasBuiltinNodeType = "image" | "text" | "config" | "video" | "audio" | "group";
 export type CanvasNodeTypeId = CanvasBuiltinNodeType | (string & {});
@@ -125,7 +123,6 @@ export type CanvasAgentOp =
     | { type: "delete_node"; id?: string; ids?: string[]; nodeType?: CanvasNodeTypeId }
     | { type: "delete_connections"; id?: string; ids?: string[]; all?: boolean }
     | { type: "connect_nodes"; id?: string; fromNodeId: string; toNodeId: string }
-    | { type: "set_viewport"; viewport: ViewportTransform }
     | { type: "select_nodes"; ids: string[] }
     | { type: "run_generation"; nodeId: string; mode?: CanvasGenerationMode; prompt?: string };
 

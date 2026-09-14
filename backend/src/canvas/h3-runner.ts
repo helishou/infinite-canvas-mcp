@@ -201,7 +201,7 @@ export class CanvasH3Runner {
         const metadata = recordOf(node.metadata);
         const segments = metadata.segments as H3Segment[];
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
-        const refs = collectRefs(segment);
+        const refs = collectH3Refs(segment);
         const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const params = extractParams(segment, override, metadata, defaults);
         const taskMode = normalizeTaskMode(params.taskMode || segment.taskMode);
@@ -227,6 +227,7 @@ export class CanvasH3Runner {
         // 注入的视频实际落成了「视频1（参考视频）」——静默改变出片，且 UI 与生成日志都看不出来，故拆成显式开关。
         const chained = parent.input.runFromCurrent === true && plan.segmentIndex > 0;
         const { usePreviousAsReference, useTailFrame, needsPreviousVideo } = resolveClipContinuation(segment, previous, chained, params);
+        if (useTailFrame && !previous?.result) throw new Error(`Clip ${plan.segmentIndex} 已开启尾帧接续，但上一段没有可用成品视频`);
         const previousPath = needsPreviousVideo && previous?.result
             ? await this.resolveRef({ url: previous.result, storageKey: previous.resultStorageKey, name: `clip-${plan.segmentIndex}.mp4`, type: "video" })
             : "";
@@ -318,7 +319,7 @@ export class CanvasH3Runner {
     private updateNode(projectId: string, nodeId: string, metadata: Record<string, unknown>) {
         const project = this.stores.projects.get(projectId)!;
         const result = this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [{ type: "update_node", id: nodeId, metadata }]);
-        this.events.publish({ type: "canvas.updated", entityId: projectId, revision: result.revision, payload: result.project });
+        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || "") });
     }
 
     private async waitForTerminal(parentId: string, childId: string) {
@@ -393,10 +394,9 @@ export class CanvasH3Runner {
 }
 
 /**
- * 决定本段是否消费「上一段成品视频」——链式续跑里唯一允许把上一段视频带进下一段的入口。
- * 两条通道都必须显式声明，且只有链式续跑（runFromCurrent）才生效：
- *  - tailFrameContinuation 标在【上一段】上：抓该段尾帧作为本段首帧参考图；
- *  - previousVideoAsReference 标在【本段】上：把上一段成品整体作为参考视频喂进本段（默认关）。
+ * 决定本段是否消费上一段成品视频。尾帧接续可用于单独生成下一段；整段参考视频仍只在链式续跑中生效。
+ *  - tailFrameContinuation 标在【上一段】上：生成本段时抓该段尾帧作为首帧参考图；
+ *  - previousVideoAsReference 标在【本段】上：链式续跑时把上一段成品整体作为参考视频喂进本段（默认关）。
  * 历史上 motionContextEnabled 会隐式触发后者，而该链路已实证失效（南风 V10 主节点无任何
  * motion/context 输入，活跃预设还跳过 prepareH3MotionContext），注入的视频反而落成了
  * 「视频1（参考视频）」，静默改变出片且 UI/日志都看不出来。不要再引入任何隐式触发。
@@ -408,7 +408,8 @@ export function resolveClipContinuation(
     override: Record<string, unknown>,
 ) {
     const usePreviousAsReference = chained && (segment.previousVideoAsReference === true || override.previousVideoAsReference === true);
-    const useTailFrame = chained && previous?.tailFrameContinuation === true;
+    // 尾帧是上一段到下一段的首帧锚点，生成当前 Clip 时也应生效；整段参考视频仍要求链式续跑。
+    const useTailFrame = previous?.tailFrameContinuation === true;
     return {
         usePreviousAsReference,
         useTailFrame,
@@ -432,14 +433,20 @@ function normalizeInput(input: H3RunInput): H3RunInput {
 
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 
-function collectRefs(segment: H3Segment) {
+/**
+ * refItems is the canonical order produced by the canvas ref slots.
+ * Do not sort by the legacy optional `order` field: older entries may have
+ * stale values or no value at all, while the array position is what the UI
+ * and prompt's Image N numbering represent.
+ */
+export function collectH3Refs(segment: H3Segment) {
     const buckets = recordOf(segment.refs);
     const bucketRefs = ["image", "video", "audio"].flatMap((type) => {
         const value = buckets[type];
         return (Array.isArray(value) ? value : value ? [value] : []).map((item) => ({ ...recordOf(item), type: String(recordOf(item).type || type) } as H3Ref));
     });
     const refs = (segment.refItems?.length ? segment.refItems : bucketRefs).map((ref) => ({ ...ref, type: String(ref.type || ref.kind || inferRefType(String(ref.name || ref.url || ""))) }));
-    return refs.filter((ref) => ref.role !== "character_identity").sort((a, b) => Number(a.order || 0) - Number(b.order || 0)).filter((ref, index, all) => all.findIndex((item) => ref.storageKey && item.storageKey ? item.storageKey === ref.storageKey : item.url === ref.url) === index);
+    return refs.filter((ref) => ref.role !== "character_identity").filter((ref, index, all) => all.findIndex((item) => ref.storageKey && item.storageKey ? item.storageKey === ref.storageKey : item.url === ref.url) === index);
 }
 
 function inferRefType(value: string) { return /\.(mp4|webm|mov)(?:$|\?)/i.test(value) ? "video" : /\.(mp3|wav|m4a|flac)(?:$|\?)/i.test(value) ? "audio" : "image"; }

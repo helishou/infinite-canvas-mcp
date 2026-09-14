@@ -2,11 +2,23 @@
 
 ## Unreleased
 
+- [修复] H3 运行日志与实际提交的图片参考图保持画布 refs 槽位顺序，不再被旧的 `order` 字段重排。
+- [修复] 尾帧接续不再依赖“运行当前及后续”：单独生成下一段 Clip 时也会把上一段尾帧作为首帧参考；上一段缺少成品时改为明确报错，不再静默跳过。
+- [修复] 本地开发服务统一通过单一启动入口清理旧端口并启动；Backend 按数据目录增加单实例锁，避免重复 Backend、旧前端和 SQLite 并发写入互相覆盖画布。
+- [修复] Windows 下 Vite 监听测试/诊断临时文件遇到 `EBUSY` 不再导致前端开发服务崩溃；临时输出文件已从监听和 Git 范围排除。
+- [修复] GPT Image / Comfy 生图启动前强制提交新节点和连线，即使 SSE 短暂断开也不会跳过这次 Backend 同步，避免任务成功但结果媒体无法回写成画布图片节点。
+- [修复] MCP 生图流程会把「【文本1】/图片1…」等引用选择器占位内容写入提示词的问题；现在会自动剥离占位行，保留真实提示词，并与前端参考图分离传递。
+- [修复] 画布网页编辑与 MCP/刷新恢复统一走本地快照队列和 revision 合并：未提交的网页修改不再被远端项目列表覆盖，IndexedDB 快照写入串行化，刷新后会继续提交本地编辑。
+- [调整] MCP 画布协议不再读取或写入浏览器视口；节点、连线和生成操作只同步画布内容，中心与缩放由当前页面本地维护。
+- [调整] 画布实时事件改为广播本次变更操作和 revision，前端按差量应用；仅首次加载、断线或事件断档时读取完整项目快照。
+- [优化] 画布「整理布局」连通块内部改用力导向紧凑排布，让相连节点在水平与垂直方向都彼此靠近：斥力 `k²/d` + 线性弹簧 `1.5·(d−k)`（稳定、不会把链端吸塌）+「网格对齐」偏置（每条边压向较短轴，使边趋于水平/垂直）+ 流向偏置（源左汇右）。收尾再跑「最小穿透轴硬分离」并迭代到零重叠，从构造上保证任意形状都不重叠。实测：链 3–10 全部水平（dy=0）、菱形/分叉形成紧凑正交簇、互不相连的节点群仍按 2.5× 间距纵向堆开。顺带修掉非零锚点（真实用法 minX/minY≠0）重复叠加导致整体偏移的 bug。
 - [修复] 自定义工作流子任务和生成日志不再持久化图片字段的 Base64，仅保留媒体摘要，降低连续生图后的 SQLite 与进程内存增长。
 - [新增] 增加显式历史媒体脱敏维护命令：执行前生成 SQLite 在线备份，只清理任务/日志中的内联 Base64，并通过 VACUUM 回收旧页空间，不删除媒体文件和画布节点。
 - [修复] 画布图片任务进入 Backend 前统一落地参考图媒体句柄，不再把 Base64 写入任务输入；同一项目源节点的运行中图片任务按 `sourceNodeId` 去重，避免双击或重复事件重复调用模型。
 - [修复] 画布图片生成的前端按钮与 MCP 统一由 Backend 按源配置节点解析参考图，结果节点不再因尚未落库或调用方漏传而把参考图提交为空。
 - [新增] H3 同一 Clip 内 ref 支持拖动重排：之前 ref 之间拖动一律走「复制」语义，跨 clip / 外部拖入保留 copy；同 clip 拖到具体 ref 槽时改为「move」语义，从源索引拔出再插入到目标位置，drop 到空白区则追加到末尾。`dataTransfer` 上加 `application/x-infinite-canvas-ref-source-index` 携带源位置信息，`effectAllowed` 改为 `copyMove`；drop 时根据 sourceSegment.id === target.id 走 move / copy 分支。拖动过程中目标槽加 `is-drop-target` 高亮（蓝边 + 浅蓝底），drop / dragend 后清掉。
+- [新增] 切分图片支持自定义切分线宽度：右栏新增「切分线宽度」输入（1–16px，默认 1），预览里的切分线按该宽度渲染（拖动命中区仍 16px，避免细线难抓）。仅影响视觉，不改变实际切割位置；`ImageSplitParams` 新增可选 `lineWidth` 字段，方便高 DPI 屏 / 暗色背景下看清。
+- [新增] 切分图片开 dialog 自动识别格间分隔线宽度作为默认值：后端 `POST /canvas/image-split/detect-line-inset` 用 sharp 抽 RGBA 像素，沿每条切分线 1/4 + 3/4 两个位置扫垂直方向的扫描线，色距阈值找出最长的"分隔带"连续段长度，多条线取中位数，连续图返回 `lineInset=0` + `confidence=0`。前端打开切分对话框时自动调用（~50ms）并把识别结果写到 `lineWidth` 默认值；用户仍可手动覆盖，识别失败 / 无分隔带时 fallback 1px。
 - [修复] 拖动 / 滚动画布时被误报"画布已被其他窗口更新"冲突：H3 导演台 rAF tick 每帧 `onPlayheadTick → updateMetadata({ playhead })` 会把 playhead 当成普通字段塞进主同步流，与此同时用户拖窗口触发 `set_viewport` 同步，远端 playhead 必然跟本地对不上 → 弹"节点字段冲突"。把 `playhead` 加进 `H3_BACKEND_NODE_METADATA_FIELDS` 跳过集（同 `status` / `runProgress` 一类不进 diff 提交）：playhead 属于"看见/听见"的 UI 瞬态字段，不该走主同步；其它 tab 看自己 video.currentTime 即可。
 - [修复] 画布操作被 MCP / 任务回写悄悄回滚的根因：原 `applyBackendCanvasEvent` 在 `pendingOps.length === 0` 时直接拿远端覆盖本地（默认"本地最新=权威"），但 MCP / 任务回写是另一个写者。改为：sync 成功后留一份 path-based 的「用户刚提交的字段值」快照（覆盖 `update_node` / `update_h3_segment` / `add_h3_segment` / `replace_h3_segments`），后续 WebSocket 事件来时不论 `pendingOps` 是否为空都先拿快照跟远端比对；任意字段被覆盖就升级成「保留我的 / 采用远端」冲突弹窗，不会再静默用远端抹掉刚 sync 的内容。
 - [修复] 冲突弹窗「保留我的 N 个操作」按钮实际不生效：原来 `keepPendingOpsOnCanvasConflict` 只把 `syncBase.revision` 推进到远端、清掉 conflict state，没有触发任何同步，必须等用户下一次显式编辑才重提 pendingOps。期间 pendingOps 一直留在本地，下一次远端事件再次算冲突 → 弹窗反复出现。改为在 `set` 之后立刻 `scheduleCanvasSync()`，400ms 内按新 revision 重提 pendingOps，弹窗关闭即生效。

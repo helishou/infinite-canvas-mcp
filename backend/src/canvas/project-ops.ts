@@ -72,6 +72,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
 
         if (operation.type === "add_node") {
             const id = String(operation.id || `${String(operation.nodeType || "node")}-${crypto.randomUUID()}`);
+            operation.id = id;
             if (nodes.some((node) => String(node.id) === id)) throw new Error(`节点已存在：${id}`);
             nodes.push({
                 id,
@@ -235,6 +236,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 result.skipped = true;
             } else {
                 const id = String(operation.id || `connection-${crypto.randomUUID()}`);
+                operation.id = id;
                 connections.push({ id, fromNodeId, toNodeId, ...(role ? { role } : {}), ...(operation.order !== undefined ? { order: Number(operation.order) } : {}) });
                 result.createdConnectionIds = [id];
             }
@@ -243,9 +245,6 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const missingNodeIds = ids.filter((id) => !nodes.some((node) => String(node.id) === id));
             if (missingNodeIds.length) throw new Error(`找不到节点：${missingNodeIds.join(",")}`);
             project.selectedNodeIds = ids;
-        } else if (operation.type === "set_viewport") {
-            if (!operation.viewport || typeof operation.viewport !== "object") throw new Error("set_viewport 缺少 viewport");
-            project.viewport = operation.viewport;
         } else if (operation.type === "run_generation") {
             const id = String(operation.nodeId || "");
             if (!nodes.some((node) => String(node.id) === id)) throw new Error(`找不到生成节点：${id}`);

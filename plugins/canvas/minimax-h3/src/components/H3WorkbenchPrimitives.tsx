@@ -29,6 +29,26 @@ export function requestH3Run(ctx: CanvasNodeContext, all = false) {
     });
 }
 
+export function resetAndRequestH3Run(ctx: CanvasNodeContext, all = false) {
+    const node = ctx.getNode(ctx.node.id) || ctx.node;
+    const metadata = node.metadata || {};
+    const segments = segmentsFor(metadata);
+    const selectedId = String(metadata.selectedSegmentId || segments[0]?.id || "");
+    const selected = segments.find((segment) => segment.id === selectedId) || segments[0];
+    const prompt = String(selected?.prompt || metadata.prompt || "");
+    const runtimeRunId = `h3-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    ctx.updateMetadata({
+        ...(all ? { content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, materials: [] } : {}),
+        selectedSegmentId: selectedId, prompt,
+        segments: segments.map((segment) => all || segment.id === selectedId
+            ? { ...segment, prompt: segment.id === selectedId ? prompt : segment.prompt, result: "", results: [], status: "queued", progress: 0, runtimeTaskId: "" }
+            : segment),
+        status: "queued", errorDetails: "", runRequestId: runtimeRunId, runtimeRunId,
+        runRequestAll: all, runRequestConsumedId: "", cancelRequested: false, runtimeTaskId: "",
+        runProgress: 0, runStartedAt: 0,
+    });
+}
+
 export function resetH3Run(ctx: CanvasNodeContext) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const segments = segmentsFor(node.metadata || {}).map((segment) => ({ ...segment, result: "", results: [], status: "idle", progress: 0, runtimeTaskId: "" }));

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
 import { buildRestoreParamsPatch } from "../services/h3-segment-utils";
+import { segmentsFor } from "../hooks/useH3Segments";
 import { H3Icon } from "./H3Icon";
 import { H3MaterialCard } from "./H3MaterialCard";
 import { H3PreviewLightbox } from "./H3PreviewLightbox";
@@ -57,9 +58,16 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected, patchSelec
         ctx.updateMetadata({ materials: materials.filter((item) => used.has(String((item as Record<string, unknown>)?.url || (item as Record<string, unknown>)?.content || ""))) });
     };
     const removeOutput = (ref: H3Ref) => ctx.updateMetadata({ materials: (Array.isArray(ctx.node.metadata?.materials) ? ctx.node.metadata.materials : []).filter((item) => String((item as Record<string, unknown>)?.url || "") !== ref.url) });
+    const restoreOutput = (ref: H3Ref) => {
+        // 输出卡片的点击可能发生在多个 metadata 更新之后，不能使用渲染时的旧 segments。
+        // 从最新节点重新解析源 Clip，确保 prompt 和生成参数来自当前权威状态。
+        const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        const liveSegments = segmentsFor(liveMetadata);
+        patchSelected({ result: ref.url, resultStorageKey: ref.storageKey, results: [ref], ...buildRestoreParamsPatch(liveSegments, ref) });
+    };
     return <aside className="minimax-library">
         <div key="library-head" className="minimax-library-head"><H3Icon name="output" /> <span>Output</span><span className="minimax-output-actions"><button type="button" aria-label="切换输出筛选" aria-pressed={outputFilter === "current"} title={outputFilter === "all" ? "当前显示全部输出，点击只显示当前 Clip" : "当前只显示当前 Clip，点击显示全部输出"} onClick={() => changeOutputFilter(outputFilter === "all" ? "current" : "all")} className={`minimax-output-filter${outputFilter === "current" ? " active" : ""}`}><H3Icon name={outputFilter === "all" ? "filter-all" : "filter-current"} /></button><button type="button" aria-label="清理未用于 Clip 的输出" title="清理未用于 Clip 的输出" onClick={clearUnused} className="minimax-output-clear"><H3Icon name="trash" /></button></span></div>
-        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} compact removable onRestore={() => patchSelected({ result: ref.url, resultStorageKey: ref.storageKey, results: [ref], ...buildRestoreParamsPatch(segments, ref) })} onRemove={() => removeOutput(ref)} onOpenPreview={() => setPreviewRef(ref)} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>Output</span></div> : null}</div>
+        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} compact removable onRestore={() => restoreOutput(ref)} onRemove={() => removeOutput(ref)} onOpenPreview={() => setPreviewRef(ref)} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>Output</span></div> : null}</div>
         {previewRef ? <H3PreviewLightbox item={previewRef} onClose={() => setPreviewRef(null)} /> : null}
     </aside>;
 }

@@ -49,7 +49,7 @@ import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/a
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { flushCanvasSyncNow, useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildCanvasGraphIndex, buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -259,7 +259,9 @@ function InfiniteCanvasPage() {
     const historyRef = useRef<{ past: CanvasHistoryEntry[]; future: CanvasHistoryEntry[] }>({ past: [], future: [] });
     const lastHistoryRef = useRef<CanvasHistoryEntry | null>(null);
     const suppressNextProjectPersistRef = useRef(false);
+    const suppressNextViewportPersistRef = useRef(false);
     const restoreGenerationRef = useRef(0);
+    const projectUiVersionRef = useRef(0);
     const historyCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const viewportSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const applyingHistoryRef = useRef(false);
@@ -446,7 +448,7 @@ function InfiniteCanvasPage() {
     useEffect(() => {
         if (!hydrated) return;
         const restoreGeneration = ++restoreGenerationRef.current;
-        if (backendRevision > 0) suppressNextProjectPersistRef.current = true;
+        const uiVersion = projectUiVersionRef.current;
         const project = openProject(projectId);
         if (!project) {
             navigate("/canvas", { replace: true });
@@ -456,9 +458,10 @@ function InfiniteCanvasPage() {
         const restore = async () => {
             const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes.map(migrateLegacyH3Node)));
             const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
-            if (restoreGeneration !== restoreGenerationRef.current) return;
+            if (restoreGeneration !== restoreGenerationRef.current || uiVersion !== projectUiVersionRef.current) return;
             // 多个 MCP 更新可能同时触发恢复；只有最后一次恢复完成后，才允许它进入本地持久化链路。
             suppressNextProjectPersistRef.current = true;
+            suppressNextViewportPersistRef.current = true;
             setNodes(restoredNodes);
             setConnections(project.connections);
             setChatSessions(restoredSessions);
@@ -572,6 +575,10 @@ function InfiniteCanvasPage() {
 
     useEffect(() => {
         if (!projectLoaded) return;
+        if (suppressNextViewportPersistRef.current) {
+            suppressNextViewportPersistRef.current = false;
+            return;
+        }
         if (viewportSaveTimerRef.current) clearTimeout(viewportSaveTimerRef.current);
         viewportSaveTimerRef.current = setTimeout(() => {
             updateProject(projectId, { viewport: viewportRef.current });
@@ -591,6 +598,10 @@ function InfiniteCanvasPage() {
         connectionTargetNodeIdRef.current = connectionTargetNodeId;
         pendingConnectionCreateRef.current = pendingConnectionCreate;
     }, [nodes, connections, selectedNodeIds, viewport, connectingParams, connectionTargetNodeId, pendingConnectionCreate]);
+
+    useLayoutEffect(() => {
+        projectUiVersionRef.current += 1;
+    }, [activeChatId, backgroundMode, chatSessions, connections, nodes, showImageInfo]);
 
     useLayoutEffect(() => {
         selectionBoxRef.current = selectionBox;
@@ -874,17 +885,14 @@ function InfiniteCanvasPage() {
         nodes,
         connections,
         selectedNodeIds,
-        viewport,
         nodesRef,
         connectionsRef,
         selectedNodeIdsRef,
-        viewportRef,
         generateNodeRef,
         setNodes,
         setConnections,
         setSelectedNodeIds,
         setSelectedConnectionId,
-        setViewport,
         setContextMenu,
     });
 
@@ -2877,8 +2885,8 @@ function InfiniteCanvasPage() {
                         },
                     };
 
-                    setNodes((prev) => [
-                        ...prev.map((node) =>
+                    const nextImageNodes = [
+                        ...nodesRef.current.map((node) =>
                             node.id === nodeId
                                 ? isConfigNode
                                     ? {
@@ -2910,8 +2918,15 @@ function InfiniteCanvasPage() {
                                 : node,
                         ),
                         ...(isEmptyImageNode ? [] : [rootNode]),
-                    ]);
-                    if (!isEmptyImageNode) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: rootId }]);
+                    ];
+                    const nextImageConnections = isEmptyImageNode ? connectionsRef.current : [...connectionsRef.current, { id: nanoid(), fromNodeId: nodeId, toNodeId: rootId }];
+                    nodesRef.current = nextImageNodes;
+                    connectionsRef.current = nextImageConnections;
+                    setNodes(nextImageNodes);
+                    setConnections(nextImageConnections);
+                    // GPT Image / Comfy 的任务回写依赖 rootId 已存在于 Backend；先提交节点和连线。
+                    updateProject(projectId, { nodes: nextImageNodes, connections: nextImageConnections });
+                    if (useCanvasDispatcher) await flushCanvasSyncNow();
                     setSelectedNodeIds(new Set([nodeId]));
                     setSelectedConnectionId(null);
                     setDialogNodeId(nodeId);

@@ -17,7 +17,7 @@ The service is divided into agent adapters, canvas state and tool handling, HTTP
 
 ## Tool design
 
-Tools should cover state and selection reads, node creation and updates, connections, batch operations, viewport and selection changes, and text, image, or video generation. High-level tools convert to a small set of canvas operations before the browser applies them.
+Tools should cover state and selection reads, node creation and updates, connections, batch operations, selection changes, and text, image, or video generation. The browser owns viewport changes locally. High-level tools convert to a small set of canvas operations before the browser applies them.
 
 ## Side panel
 

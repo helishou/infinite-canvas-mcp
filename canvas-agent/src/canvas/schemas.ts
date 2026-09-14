@@ -3,7 +3,6 @@ import { z } from "zod";
 const recordSchema = z.record(z.unknown());
 const canvasProjectSchema = z.object({ projectId: z.string().optional() });
 const positionSchema = z.object({ x: z.number(), y: z.number() });
-const viewportSchema = z.object({ x: z.number(), y: z.number(), k: z.number() });
 const nodeTypeSchema = z.string().min(1);
 const generationModeSchema = z.enum(["text", "image", "video", "audio"]);
 
@@ -34,7 +33,6 @@ export const toolNames = [
     "canvas_delete_nodes",
     "canvas_connect_nodes",
     "canvas_select_nodes",
-    "canvas_set_viewport",
     "canvas_run_generation",
     "generation_get_status",
     "comfyui_status",
@@ -58,7 +56,6 @@ export const canvasOpSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("delete_node"), id: z.string().optional(), ids: z.array(z.string()).optional() }).passthrough(),
     z.object({ type: z.literal("delete_connections"), id: z.string().optional(), ids: z.array(z.string()).optional(), all: z.boolean().optional() }).passthrough(),
     z.object({ type: z.literal("connect_nodes"), id: z.string().optional(), fromNodeId: z.string(), toNodeId: z.string(), role: z.string().optional(), order: z.number().optional() }).passthrough(),
-    z.object({ type: z.literal("set_viewport"), viewport: viewportSchema }).passthrough(),
     z.object({ type: z.literal("select_nodes"), ids: z.array(z.string()) }).passthrough(),
     z.object({ type: z.literal("run_generation"), nodeId: z.string(), mode: generationModeSchema.optional(), prompt: z.string().optional(), referenceNodeIds: z.array(z.string()).optional(), params: recordSchema.optional(), idempotencyKey: z.string().optional(), resultPolicy: z.enum(["replace-active", "append"]).optional() }).passthrough(),
 ]);
@@ -124,7 +121,6 @@ export const toolInputSchemas = {
     canvas_delete_nodes: canvasProjectSchema.extend({ ids: z.array(z.string()).min(1) }),
     canvas_connect_nodes: canvasProjectSchema.extend({ connections: z.array(z.object({ fromNodeId: z.string(), toNodeId: z.string(), role: z.string().optional(), order: z.number().optional() })).min(1) }),
     canvas_select_nodes: canvasProjectSchema.extend({ ids: z.array(z.string()) }),
-    canvas_set_viewport: canvasProjectSchema.extend({ viewport: viewportSchema }),
     canvas_run_generation: canvasProjectSchema.extend({ nodeId: z.string(), segmentId: z.string().optional(), mode: generationModeSchema.optional(), prompt: z.string().optional(), referenceNodeIds: z.array(z.string()).optional(), params: recordSchema.optional(), idempotencyKey: z.string().optional(), resultPolicy: z.enum(["replace-active", "append"]).optional() }),
     generation_get_status: canvasProjectSchema.extend({ scope: z.enum(["all", "canvas", "image", "video"]).optional(), taskId: z.string().optional(), nodeIds: z.array(z.string()).optional(), segmentIds: z.array(z.string()).optional(), limit: z.number().optional() }),
     comfyui_status: z.object({}).passthrough(),
@@ -144,10 +140,10 @@ export const toolInputSchemas = {
 export const toolDescriptions: Record<ToolName, string> = {
     site_navigate: "跳转网站页面。path 可为 / (首页)、/canvas (我的画布)、/canvas/:id (指定画布)、/image (生图工作台)、/video (视频创作台)、/prompts (提示词库)、/assets (我的素材)、/config (配置)。操作画布前若不在画布页，先用本工具打开画布。",
     canvas_list_projects: "列出用户全部画布（仅标题、创建/更新时间、节点数、连线数，不含完整数据），支持 keyword 搜索和 page/pageSize 分页。返回的 id 可配合 site_navigate 跳转到 /canvas/:id 打开对应画布。",
-    canvas_get_state: "读取当前网页画布的节点、连线、选区和视口。",
+    canvas_get_state: "读取当前画布的节点、连线和选区。浏览器视口中心与缩放属于页面本地状态，不通过 MCP 读取。",
     canvas_get_selection: "读取当前网页画布选中的节点。",
     canvas_export_snapshot: "导出当前画布快照，用于理解布局。",
-    canvas_apply_ops: "批量操作当前网页画布。ops 支持 add_node、update_node、delete_node、delete_connections、connect_nodes、set_viewport、select_nodes、run_generation；需要替换生成节点参考图时使用 canvas_set_generation_references，避免旧媒体输入残留。",
+    canvas_apply_ops: "批量操作当前网页画布。ops 支持 add_node、update_node、delete_node、delete_connections、connect_nodes、select_nodes、run_generation；需要替换生成节点参考图时使用 canvas_set_generation_references，避免旧媒体输入残留。",
     canvas_create_node: "创建任意类型节点：text、image、config、video、audio。适合创建占位图、媒体占位、配置节点或自定义 metadata 节点。",
     canvas_create_attachment_nodes: "把当前对话中用户上传的图片附件创建成真实画布图片节点。attachmentIds 使用本轮附件清单中的 ID；返回的节点 ID 可传给 canvas_create_generation_flow.referenceNodeIds 作为生成参考图。",
     canvas_create_text_node: "在当前画布创建单个文本节点。",
@@ -167,7 +163,6 @@ export const toolDescriptions: Record<ToolName, string> = {
     canvas_delete_nodes: "删除指定节点及相关连线。",
     canvas_connect_nodes: "批量追加连接节点；需要把生成节点的参考图整体换成新清单时使用 canvas_set_generation_references，不要直接追加到旧参考输入上。",
     canvas_select_nodes: "设置当前选中节点。",
-    canvas_set_viewport: "调整画布视口。",
     canvas_run_generation: "触发指定节点生成，通常用于配置节点或文本/图片/视频/音频节点。若本次要换一套参考图，传 referenceNodeIds；它会先替换现有媒体参考连线，再提交生成，避免旧参考图残留。",
     generation_get_status: "查询当前活动网页的生成任务状态。默认返回画布、生图工作台和视频工作台最近任务；可用 scope 过滤来源，用 taskId 查询工作台任务，用 nodeIds 查询画布节点。",
     comfyui_status: "检查本地 ComfyUI 连接和系统状态。",

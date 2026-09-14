@@ -35,11 +35,11 @@ The browser pushes snapshots to:
 POST /canvas/state?token=xxx&clientId=xxx
 ```
 
-Snapshots contain the canvas ID and title, nodes, edges, selected node IDs, and viewport. Canvas Agent keeps the latest snapshot in memory, so tools read structured state rather than the DOM.
+Snapshots contain the canvas ID and title, nodes, edges, and selected node IDs. The browser viewport is local UI state: it is neither included in MCP snapshots nor changed by MCP. Canvas Agent keeps the latest snapshot in memory, so tools read structured state rather than the DOM.
 
 ## Applying operations
 
-For a node creation, Codex calls an MCP tool, Canvas Agent converts it to `canvas_apply_ops`, sends an SSE `tool_call`, and the browser applies operations such as `add_node`, `update_node`, `delete_node`, `connect_nodes`, `set_viewport`, and `select_nodes`. The browser posts the result to `/canvas/result`, which completes the MCP call.
+For a node creation, Codex calls an MCP tool, Canvas Agent converts it to `canvas_apply_ops`, sends an SSE `tool_call`, and the browser applies content operations such as `add_node`, `update_node`, `delete_node`, `connect_nodes`, and `select_nodes`. The browser posts the result to `/canvas/result`, which completes the MCP call. Viewport center and zoom remain browser-local.
 
 Writes are automatically confirmed by default. Switch the side panel to manual confirmation to approve each write. The frontend also stores the snapshot before the latest Agent operation so it can be undone.
 

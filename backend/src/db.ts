@@ -317,7 +317,7 @@ export class BackendDatabase {
             project.updatedAt = new Date().toISOString();
             const saved = this.upsertCanvasProject(project as CanvasProject);
             this.db.exec("COMMIT");
-            return { project: saved, revision, operationResults };
+            return { project: saved, revision, operationResults, operations };
         } catch (error) {
             this.db.exec("ROLLBACK");
             throw error;
@@ -328,7 +328,7 @@ export class BackendDatabase {
         task: RuntimeTask,
         binding: { projectId: string; nodeId: string; segmentId: string; generationLogId?: string },
         output: Record<string, unknown> | null,
-    ): { project: CanvasProject; log: GenerationLog | null } | null {
+    ): { project: CanvasProject; log: GenerationLog | null; operations: CanvasOperation[] } | null {
         // 不在外部再开 BEGIN IMMEDIATE：applyCanvasProjectOperations 内部自管事务，SQLite 不支持嵌套。
         // 先做「被另一条更新的任务接管」检查（runtimeTaskId CAS），命中则放弃回写。
         const project = this.getCanvasProject(binding.projectId);
@@ -400,14 +400,14 @@ export class BackendDatabase {
                 ...(task.error ? { error: task.error } : {}),
             })
             : null;
-        return { project: this.getCanvasProject(binding.projectId)!, log };
+        return { project: this.getCanvasProject(binding.projectId)!, log, operations };
     }
 
     writeBackCanvasImageTask(
         task: RuntimeTask,
         input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append" },
         media: Array<Record<string, unknown>>,
-    ): CanvasProject | null {
+    ): { project: CanvasProject; operations: CanvasOperation[] } | null {
         this.db.exec("BEGIN IMMEDIATE");
         try {
             const project = this.getCanvasProject(input.projectId);
@@ -417,13 +417,20 @@ export class BackendDatabase {
             const source = nodes.find((item) => String(item.id || "") === input.nodeId);
             if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) { this.db.exec("COMMIT"); return null; }
             const sourceMetadata = recordOf(source.metadata);
+            const operations: CanvasOperation[] = [];
             const activeIds = new Set(Array.isArray(sourceMetadata.generatedResultIds)
                 ? sourceMetadata.generatedResultIds.map(String)
                 : [String(sourceMetadata.primaryImageId || "")].filter(Boolean));
             if ((input.resultPolicy || "replace-active") === "replace-active" && activeIds.size) {
-                for (let index = nodes.length - 1; index >= 0; index--) if (activeIds.has(String(nodes[index].id || ""))) nodes.splice(index, 1);
+                for (let index = nodes.length - 1; index >= 0; index--) if (activeIds.has(String(nodes[index].id || ""))) {
+                    operations.push({ type: "delete_node", id: String(nodes[index].id) });
+                    nodes.splice(index, 1);
+                }
                 for (let index = connections.length - 1; index >= 0; index--) {
-                    if (activeIds.has(String(connections[index].fromNodeId || "")) || activeIds.has(String(connections[index].toNodeId || ""))) connections.splice(index, 1);
+                    if (activeIds.has(String(connections[index].fromNodeId || "")) || activeIds.has(String(connections[index].toNodeId || ""))) {
+                        operations.push({ type: "delete_connections", id: String(connections[index].id) });
+                        connections.splice(index, 1);
+                    }
                 }
             }
             const sourcePosition = recordOf(source.position);
@@ -437,7 +444,7 @@ export class BackendDatabase {
                 const id = `image-${crypto.randomUUID()}`;
                 createdIds.push(id);
                 const { width, height } = outputSizes[index];
-                nodes.push({
+                const resultNode = {
                     id,
                     type: "image",
                     title: `${String(source.title || "图片生成")}｜结果${media.length > 1 ? ` ${index + 1}` : ""}`,
@@ -458,26 +465,32 @@ export class BackendDatabase {
                         source: "Backend canvas image dispatcher",
                         status: "success",
                     },
-                });
-                connections.push({ id: `connection-${crypto.randomUUID()}`, fromNodeId: input.nodeId, toNodeId: id });
+                };
+                const connection = { id: `connection-${crypto.randomUUID()}`, fromNodeId: input.nodeId, toNodeId: id };
+                nodes.push(resultNode);
+                connections.push(connection);
+                operations.push({ ...resultNode, nodeType: "image", type: "add_node" });
+                operations.push({ type: "connect_nodes", ...connection });
                 // 多张结果按实际节点宽度依次排开（原先按固定 720 步长，是 680 宽节点的假设）
                 resultX += width + 40;
             });
             if (!createdIds.length) throw new Error("生成完成但没有返回图片");
-            source.metadata = { ...sourceMetadata, status: "success", runtimeTaskId: undefined, errorDetails: undefined, model: input.model, prompt: input.prompt, primaryImageId: createdIds[0], generatedResultIds: createdIds, generationTaskId: task.id };
+            const sourceMetadataPatch = { status: "success", runtimeTaskId: undefined, errorDetails: undefined, model: input.model, prompt: input.prompt, primaryImageId: createdIds[0], generatedResultIds: createdIds, generationTaskId: task.id };
+            source.metadata = { ...sourceMetadata, ...sourceMetadataPatch };
+            operations.push({ type: "update_node", id: input.nodeId, metadata: sourceMetadataPatch, metadataDelete: ["runtimeTaskId", "errorDetails"] });
             const nextProject: CanvasProject = { ...project, nodes, connections, revision: Number(project.revision || 0) + 1, updatedAt: new Date().toISOString() };
             this.db.prepare(
                 "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
             ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
             this.db.exec("COMMIT");
-            return this.getCanvasProject(nextProject.id);
+            return { project: this.getCanvasProject(nextProject.id)!, operations };
         } catch (error) {
             this.db.exec("ROLLBACK");
             throw error;
         }
     }
 
-    markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): CanvasProject | null {
+    markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null {
         this.db.exec("BEGIN IMMEDIATE");
         try {
             const project = this.getCanvasProject(input.projectId);
@@ -485,13 +498,15 @@ export class BackendDatabase {
             const nodes = Array.isArray(project.nodes) ? structuredClone(project.nodes) as Array<Record<string, any>> : [];
             const source = nodes.find((item) => String(item.id || "") === input.nodeId);
             if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) { this.db.exec("COMMIT"); return null; }
-            source.metadata = { ...recordOf(source.metadata), status: task.status === "cancelled" ? "cancelled" : "error", runtimeTaskId: undefined, errorDetails: task.status === "cancelled" ? undefined : error };
+            const metadataPatch = { status: task.status === "cancelled" ? "cancelled" : "error", runtimeTaskId: undefined, errorDetails: task.status === "cancelled" ? undefined : error };
+            source.metadata = { ...recordOf(source.metadata), ...metadataPatch };
+            const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata: metadataPatch, metadataDelete: task.status === "cancelled" ? ["runtimeTaskId", "errorDetails"] : ["runtimeTaskId"] }];
             const nextProject: CanvasProject = { ...project, nodes, revision: Number(project.revision || 0) + 1, updatedAt: new Date().toISOString() };
             this.db.prepare(
                 "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
             ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
             this.db.exec("COMMIT");
-            return this.getCanvasProject(nextProject.id);
+            return { project: this.getCanvasProject(nextProject.id)!, operations };
         } catch (caught) {
             this.db.exec("ROLLBACK");
             throw caught;

@@ -14,6 +14,7 @@ import type { GenerationLogInput, LogDeleteScope, Stores } from "./stores/types.
 import { BackendEventBus } from "./events.js";
 import type { CanvasOperation } from "./canvas/project-ops.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
+import { detectLineInset, type DetectLineInsetParams } from "./canvas/image-split-detect.js";
 import { CANVAS_TASKS_PATH, CANVAS_TASK_ROUTE, canvasTaskActionRoute } from "@basketikun/canvas-agent/generation-api";
 
 const logger = createLogger("backend");
@@ -194,14 +195,14 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
             ? body.projects.filter((p): p is CanvasProject => p && typeof p === "object" && !Array.isArray(p) && !!p.id)
             : [];
         const result = stores.projects.replaceAll(projects);
-        events.publish({ type: "canvas.updated", payload: { projects: result } });
+        events.publishCanvasSnapshot({ payload: { projects: result } });
         res.json({ ok: true, projects: result });
     });
     app.post("/canvas/projects", (req, res) => {
         const project = req.body as CanvasProject;
         if (!project?.id) return void res.status(400).json({ ok: false, error: "project.id 必填" });
         const result = stores.projects.upsert(project);
-        events.publish({ type: "canvas.updated", entityId: result.id, revision: Number(result.revision || 0), payload: result });
+        events.publishCanvasSnapshot({ entityId: result.id, revision: Number(result.revision || 0), payload: result });
         res.status(201).json({ ok: true, project: result });
     });
     app.post("/canvas/projects/:id/ops", (req, res) => {
@@ -210,7 +211,7 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         if (!operations.length) return void res.status(400).json({ ok: false, error: "operations 不能为空" });
         try {
             const result = db.applyCanvasProjectOperations(req.params.id, expectedRevision, operations);
-            events.publish({ type: "canvas.updated", entityId: result.project.id, revision: result.revision, payload: result.project });
+            events.publishCanvasDelta({ entityId: result.project.id, revision: result.revision, operations: result.operations, operationResults: result.operationResults, updatedAt: String(result.project.updatedAt || "") });
             res.json({ ok: true, projectId: result.project.id, revision: result.revision, operationResults: result.operationResults, project: result.project });
         } catch (error) {
             const value = error as Error & { code?: string; project?: CanvasProject; revision?: number };
@@ -221,8 +222,32 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     });
     app.delete("/canvas/projects/:id", (req, res) => {
         const deleted = stores.projects.delete(req.params.id);
-        events.publish({ type: "canvas.updated", entityId: req.params.id, payload: { deleted } });
+        events.publishCanvasSnapshot({ entityId: req.params.id, payload: { deleted } });
         res.json({ ok: true, deleted });
+    });
+    // ── Image split: auto-detect 切分线宽度 ───────────────────────────────
+    app.post("/canvas/image-split/detect-line-inset", async (req, res) => {
+        const body = req.body as { dataUrl?: string; rows?: number; columns?: number; horizontalLines?: number[]; verticalLines?: number[] };
+        if (!body.dataUrl) return void res.status(400).json({ ok: false, error: "需要提供 dataUrl" });
+        if (typeof body.rows !== "number" || typeof body.columns !== "number") {
+            return void res.status(400).json({ ok: false, error: "rows / columns 必填" });
+        }
+        const match = /^data:image\/[a-z0-9.+-]+;base64,(.+)$/i.exec(String(body.dataUrl));
+        if (!match) return void res.status(400).json({ ok: false, error: "dataUrl 必须是 base64 data URL" });
+        const buffer = Buffer.from(match[1], "base64");
+        const params: DetectLineInsetParams = {
+            rows: Math.max(1, Math.floor(body.rows)),
+            columns: Math.max(1, Math.floor(body.columns)),
+            horizontalLines: Array.isArray(body.horizontalLines) ? body.horizontalLines.map((n) => Number(n)).filter((n) => Number.isFinite(n)) : undefined,
+            verticalLines: Array.isArray(body.verticalLines) ? body.verticalLines.map((n) => Number(n)).filter((n) => Number.isFinite(n)) : undefined,
+        };
+        try {
+            const result = await detectLineInset(buffer, params);
+            res.json({ ok: true, ...result });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ ok: false, error: message });
+        }
     });
     app.get("/canvas/projects/:id/diagnostics", (req, res) => {
         const project = stores.projects.get(req.params.id);
