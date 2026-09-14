@@ -5,6 +5,10 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## 渠道配置初始化与同步
+
+- 清空当前浏览器的渠道配置缓存后刷新页面，确认配置窗口会从 Backend 恢复已有渠道，而不是只显示内置「默认渠道」；连接建立期间不得把默认渠道写回覆盖 Backend。另开一个窗口修改渠道后，当前窗口应通过 `settings.updated` 事件重新读取并显示最新配置。
+
 ## 画布首次加载优化
 
 - 首次打开 `/canvas/:id` 时应先显示本地快照并可交互，Backend 项目合并、历史媒体恢复在后台完成；Backend 响应较慢或暂时离线时不应一直停留在刷新占位层。首次进入图片、视频、素材等其它页面时应按需加载对应页面代码，返回画布后功能正常。

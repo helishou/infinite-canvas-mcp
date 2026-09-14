@@ -15,6 +15,7 @@ type BackendStore = {
 
 let backendEvents: EventSource | null = null;
 let backendEventsKey = "";
+let aiConfigHydrated = false;
 const seenBackendEventIds = new Set<string>();
 
 // 本地总后台（127.0.0.1/localhost:17370）在浏览器直连时会经过系统代理，
@@ -56,7 +57,7 @@ function startBackendEvents(url: string, token: string) {
             window.dispatchEvent(new CustomEvent("backend-event", { detail: event }));
         } catch { /* SSE 单条消息损坏时交给下一次快照恢复 */ }
     };
-    for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "asset.updated"]) {
+    for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "asset.updated", "settings.updated"]) {
         source.addEventListener(eventType, handleMessage);
     }
     // EventSource 会自行重连；短暂断流不应把 Backend 标记为离线，
@@ -66,17 +67,6 @@ function startBackendEvents(url: string, token: string) {
 function syncAgentEndpoint(url: string, token: string) {
     if (typeof window === "undefined") return;
     void import("@/stores/use-agent-store").then(({ useAgentStore }) => useAgentStore.getState().setAgentState({ url: `${url.replace(/\/$/, "")}/agent`, token }));
-}
-
-function syncAiConfigToBackend() {
-    if (typeof window === "undefined") return;
-    void Promise.all([
-        import("@/services/backend-api"),
-        import("@/stores/use-config-store"),
-    ]).then(([api, config]) => {
-        if (useBackendStore.getState().connected) return api.syncBackendAiConfig(config.useConfigStore.getState().config);
-        return undefined;
-    }).catch(() => undefined);
 }
 
 /** 总后台连接状态 store。自动在启动时检测连通性。 */
@@ -90,6 +80,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
     setConnection: (url, token) => {
         const cleanUrl = url.replace(/\/$/, "");
         const nextToken = token || get().token;
+        aiConfigHydrated = false;
         // 同步持久化，保证 backend-api.ts 的 getBackendUrl()/getBackendTokenShared() 取到最新值。
         try { localStorage.setItem("backend-url", cleanUrl); } catch { /* storage blocked */ }
         setBackendToken(nextToken);
@@ -104,27 +95,33 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         const health = await backendHealth();
         if (!health.ok) {
             stopBackendEvents();
+            aiConfigHydrated = false;
             set({ connected: false, checking: false, error: `无法连接总后台 ${getBackendUrl()}` });
             return;
         }
         // 后端 /config 是 token 权威来源，连接时以后端为准刷新，避免缓存旧 token 导致 401。
         const discovered = await discoverBackendToken();
         if (discovered.ok && discovered.token && discovered.token !== get().token) {
+            aiConfigHydrated = false;
             setBackendToken(discovered.token);
             set({ token: discovered.token, checking: true });
             syncAgentEndpoint(getBackendUrl(), discovered.token);
             await get().checkConnection();
             return;
         }
-        set({ connected: true, checking: false, error: "" });
+        set({ connected: true, checking: true, error: "" });
+        startBackendEvents(getBackendUrl(), get().token);
+        if (!aiConfigHydrated) {
+            const { hydrateConfigFromBackend } = await import("@/stores/use-config-store");
+            aiConfigHydrated = await hydrateConfigFromBackend();
+        }
+        set({ checking: false });
         if (!wasConnected) {
             window.dispatchEvent(new Event("backend-connected"));
-            syncAiConfigToBackend();
         }
-        startBackendEvents(getBackendUrl(), get().token);
     },
 
-    reset: () => { stopBackendEvents(); set({ connected: false, checking: false, error: "" }); },
+    reset: () => { stopBackendEvents(); aiConfigHydrated = false; set({ connected: false, checking: false, error: "" }); },
 }));
 
 /** 启动时自动检测总后台连接。 */
