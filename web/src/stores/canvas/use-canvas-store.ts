@@ -79,6 +79,7 @@ let deferredBackendEvents: unknown[] = [];
 let deferredBackendEventsWaiter: Promise<void> | null = null;
 let canvasHydrationPromise: Promise<void> | null = null;
 let localCanvasHydrated = false;
+let backendCanvasHydrated = false;
 const canvasDeltaRecovery = new Set<string>();
 
 // H3 节点 metadata 里"不进本地 diff 提交"的字段集合：
@@ -271,6 +272,9 @@ function detectRecentlySyncedOverwrites(remote: CanvasProject): CanvasConflictTa
 
 async function syncCanvasProjects(projects: CanvasProject[], generation: number, forceBackend = false) {
     saveToLocalStorage(projects);
+    // 本地首屏快照可能只有项目索引（节点数组为空），在 Backend 共同基线读取完成前
+    // 禁止把它当成真实画布提交；否则刷新/关闭页面会把远端节点误判为用户删除并清空项目。
+    if (!backendCanvasHydrated) return;
     if (!forceBackend && !useBackendStore.getState().connected) return;
     let currentProjectId = "";
     try {
@@ -395,6 +399,7 @@ async function hydrateCanvasProjectsFromBackend() {
         for (const project of normalizedRemoteProjects) syncBases.set(project.id, project);
         saveToLocalStorage(mergedProjects);
         useCanvasStore.setState({ projects: mergedProjects });
+        backendCanvasHydrated = true;
         if (mergedProjects.some((project) => !remoteById.has(project.id) || isLocalProjectNewer(project, remoteById.get(project.id)!))) scheduleCanvasSync();
         return true;
     } catch {
