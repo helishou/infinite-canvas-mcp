@@ -15,7 +15,8 @@
   "scripts": {
     "dev": "tsx --watch src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "test": "tsx --test src/comfyui/bridge.test.ts src/comfyui/motion-context.test.ts src/comfyui/mt19937.test.ts src/canvas/model-workflow.test.ts src/canvas/h3-runner.test.ts src/canvas/generation-service.test.ts src/canvas/generation-contract.test.ts src/server/canvas-generation-routes.test.ts",
+    "redact-inline-media": "tsx src/maintenance/redact-inline-media.ts",
+    "test": "tsx --test src/comfyui/bridge.test.ts src/comfyui/motion-context.test.ts src/comfyui/mt19937.test.ts src/canvas/model-workflow.test.ts src/canvas/h3-runner.test.ts src/canvas/generation-service.test.ts src/canvas/generation-contract.test.ts src/canvas/image-references.test.ts src/canvas/image-dispatcher.test.ts src/workflows/executor.test.ts src/server/canvas-generation-routes.test.ts",
     "start": "node dist/index.js",
     "prepack": "npm run build"
   },

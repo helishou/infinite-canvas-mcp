@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- [修复] 自定义工作流子任务和生成日志不再持久化图片字段的 Base64，仅保留媒体摘要，降低连续生图后的 SQLite 与进程内存增长。
+- [新增] 增加显式历史媒体脱敏维护命令：执行前生成 SQLite 在线备份，只清理任务/日志中的内联 Base64，并通过 VACUUM 回收旧页空间，不删除媒体文件和画布节点。
+- [修复] 画布图片任务进入 Backend 前统一落地参考图媒体句柄，不再把 Base64 写入任务输入；同一项目源节点的运行中图片任务按 `sourceNodeId` 去重，避免双击或重复事件重复调用模型。
 - [修复] 画布图片生成的前端按钮与 MCP 统一由 Backend 按源配置节点解析参考图，结果节点不再因尚未落库或调用方漏传而把参考图提交为空。
 - [新增] H3 同一 Clip 内 ref 支持拖动重排：之前 ref 之间拖动一律走「复制」语义，跨 clip / 外部拖入保留 copy；同 clip 拖到具体 ref 槽时改为「move」语义，从源索引拔出再插入到目标位置，drop 到空白区则追加到末尾。`dataTransfer` 上加 `application/x-infinite-canvas-ref-source-index` 携带源位置信息，`effectAllowed` 改为 `copyMove`；drop 时根据 sourceSegment.id === target.id 走 move / copy 分支。拖动过程中目标槽加 `is-drop-target` 高亮（蓝边 + 浅蓝底），drop / dragend 后清掉。
 - [修复] 拖动 / 滚动画布时被误报"画布已被其他窗口更新"冲突：H3 导演台 rAF tick 每帧 `onPlayheadTick → updateMetadata({ playhead })` 会把 playhead 当成普通字段塞进主同步流，与此同时用户拖窗口触发 `set_viewport` 同步，远端 playhead 必然跟本地对不上 → 弹"节点字段冲突"。把 `playhead` 加进 `H3_BACKEND_NODE_METADATA_FIELDS` 跳过集（同 `status` / `runProgress` 一类不进 diff 提交）：playhead 属于"看见/听见"的 UI 瞬态字段，不该走主同步；其它 tab 看自己 video.currentTime 即可。

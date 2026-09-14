@@ -53,7 +53,13 @@ export class CanvasGenerationService {
     private startImage(command: CanvasGenerationCommand) {
         if (!command.model || !command.prompt) throw new Error("画布图片生成缺少 model 或 prompt");
         const resolved = this.resolveImageReferences(command);
-        const result = this.image.start(resolved as CanvasImageGenerationInput);
+        // 图片与 H3/视频统一：调用方重试同一个幂等键时复用原任务，
+        // 不允许因为图片执行器内部字段名不同而再次触发模型。
+        const input = {
+            ...resolved,
+            ...(resolved.idempotencyKey && !resolved.clientTaskId ? { clientTaskId: resolved.idempotencyKey } : {}),
+        };
+        const result = this.image.start(input as CanvasImageGenerationInput);
         const task = this.stores.tasks.get(result.taskId);
         return { ...result, task: task || undefined };
     }

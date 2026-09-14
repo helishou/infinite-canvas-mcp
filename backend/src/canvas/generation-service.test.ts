@@ -46,7 +46,7 @@ test("图片执行器结果只采用 Dispatcher 的单次解析", async () => {
 
     assert.equal(result.executor, "comfy-workflow");
     assert.equal(result.task, task);
-    assert.equal(received, command);
+    assert.deepEqual(received, { ...command, clientTaskId: "image-key" });
 });
 
 test("图片命令按源配置节点统一解析画布参考图", async () => {
@@ -75,6 +75,20 @@ test("图片命令按源配置节点统一解析画布参考图", async () => {
     await service.start({ mode: "image", projectId: "project-1", nodeId: "result", sourceNodeId: "config", model: "gpt-image-2", prompt: "test", references: [] });
 
     assert.deepEqual((received?.references as Array<{ id: string }>).map((reference) => reference.id), ["scene", "character"]);
+});
+
+test("图片命令与 H3/视频一样使用 idempotencyKey 复用任务", async () => {
+    let received: Record<string, unknown> | undefined;
+    const task = { id: "image-idempotent", kind: "canvas-image", status: "queued", progress: 0, input: {}, params: {}, createdAt: "", updatedAt: "" };
+    const service = serviceWith({
+        image: { start: (input: Record<string, unknown>) => { received = input; return { taskId: task.id, logId: undefined, executor: "direct-image" }; } },
+        stores: { tasks: { get: () => task } },
+    });
+
+    const result = await service.start({ mode: "image", model: "gpt-image-2", prompt: "test", idempotencyKey: "image-key" });
+
+    assert.equal(result.taskId, task.id);
+    assert.equal(received?.clientTaskId, "image-key");
 });
 
 test("视频命令保留统一 input、params 和幂等键", async () => {

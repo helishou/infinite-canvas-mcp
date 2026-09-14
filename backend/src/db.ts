@@ -5,6 +5,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { applyCanvasProjectOperations, type CanvasOperation } from "./canvas/project-ops.js";
+import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -928,6 +929,44 @@ export class BackendDatabase {
         }).slice(offset, offset + limit);
     }
 
+    /**
+     * 历史维护：把旧任务和生成日志中的内联媒体改成摘要。
+     * 只修改 JSON 字段，不删除媒体文件，也不改变任务状态和业务关联。
+     */
+    redactLegacyInlineMedia() {
+        let tasks = 0;
+        let logs = 0;
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const taskRows = this.db.prepare("SELECT id, input_json, params_json, result_json FROM tasks").all() as Array<Record<string, unknown>>;
+            for (const row of taskRows) {
+                const input = redactJsonColumn(row.input_json);
+                const params = redactJsonColumn(row.params_json);
+                const result = row.result_json == null ? null : redactJsonColumn(row.result_json);
+                if (!input.changed && !params.changed && !result?.changed) continue;
+                this.db.prepare("UPDATE tasks SET input_json = ?, params_json = ?, result_json = ? WHERE id = ?")
+                    .run(input.json, params.json, result?.json ?? null, String(row.id));
+                tasks++;
+            }
+
+            const logRows = this.db.prepare("SELECT id, references_json, params_json, outputs_json FROM generation_logs").all() as Array<Record<string, unknown>>;
+            for (const row of logRows) {
+                const references = redactJsonColumn(row.references_json);
+                const params = redactJsonColumn(row.params_json);
+                const outputs = redactJsonColumn(row.outputs_json);
+                if (!references.changed && !params.changed && !outputs.changed) continue;
+                this.db.prepare("UPDATE generation_logs SET references_json = ?, params_json = ?, outputs_json = ? WHERE id = ?")
+                    .run(references.json, params.json, outputs.json, String(row.id));
+                logs++;
+            }
+            this.db.exec("COMMIT");
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+        return { tasks, logs };
+    }
+
     addTaskEvent(taskId: string, type: string, payload: Record<string, unknown>): RuntimeTaskEvent {
         const createdAt = new Date().toISOString();
         const result = this.db.prepare(
@@ -962,6 +1001,20 @@ export class BackendDatabase {
 
     deleteSetting(key: string) {
         this.db.prepare("DELETE FROM runtime_settings WHERE key = ?").run(key);
+    }
+}
+
+function redactJsonColumn(value: unknown) {
+    const json = String(value ?? "");
+    if (!json) return { json, changed: false };
+    try {
+        const parsed = JSON.parse(json);
+        const redacted = redactInlineMedia(parsed);
+        const next = JSON.stringify(redacted);
+        return { json: next, changed: next !== json };
+    } catch {
+        // 损坏 JSON 不在本次维护范围内，保留原值，避免扩大影响面。
+        return { json, changed: false };
     }
 }
 

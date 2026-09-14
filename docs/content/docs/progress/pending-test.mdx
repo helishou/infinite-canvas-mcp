@@ -5,6 +5,9 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
++ 自定义工作流媒体持久化：用带图片字段的工作流生成一次，检查 `workflow` 子任务的 `input.fields` 和生成日志 `params.fields` 不包含 `data:`、`base64` 或原始图片内容，同时 ComfyUI 执行仍能收到图片；连续生成多段后 SQLite 任务记录大小不应按图片 Base64 线性膨胀。
++ 历史媒体脱敏维护：确认 `runtime.sqlite.before-inline-media-redaction-*.sqlite` 备份存在；检查任务和生成日志中不再出现内联 Base64，画布项目、媒体文件和任务状态保持不变；确认 Backend 重启后仍可正常查询历史任务与生成日志。
++ 画布图片任务幂等与媒体句柄：对同一个配置/源节点连续快速点击生成，确认只创建一个运行中的 `canvas-image` 任务，不会因每次点击新建结果节点而重复调用模型；检查 Backend 任务 `input.references` 与生成日志只包含 `storageKey`/URL 等句柄，不包含 `dataUrl` 或大段 Base64。生成完成后再点击应允许发起新一轮任务；前端按钮、MCP 和页面刷新恢复都应保持同一行为。
 + H3 段粒度写路径回归：H3 节点编辑某一段 prompt 时只产 `update_h3_segment`，不再带整 segments 数组；同节点上另一段被任务回写完成时，本地编辑不应被 409 拦下；MCP `h3_update_clip` 与 `h3_apply_video_plan` 也走细粒度 op。`update_node.metadata.segments` 路径被严格校验，只有「同长同 id 集合」的完整替换才放行。
 + H3 自动播放（React StrictMode 修复后）回归：dev 模式下 StrictMode 会让 useEffect 在 mount 时跑两次，原 `skipFirstPlayRequestRef` 在第二次跑时已失效，导致视频自动起播。新方案用 H3Workbench 本地 `playToken` 作 trigger，metadata 残留值不触发播放。回归路径：①H3 节点无任何点击、双击、刷新后进入画布，视频不应自动播放；②上次播放后 metadata 有 `h3PlayRequest > 0`，重新进入画布也不应自动播放；③点工具栏「连续播放全部 Clip」仍能正常起播，连续播放到下一段时也不应卡住；④换段 / MCP 改 `h3PlayRequest` 不应触发自动播放。
 + H3 「设为当前 Clip」覆盖回归：本地刚同步的 segment 字段（包括 restore / 手动改 prompt / mode 等）被 MCP 再次覆盖时，画布应弹冲突提示让用户「保留我的 / 采用远端」二选一，而不是悄悄被远端值覆盖。同时 `h3_apply_video_plan` replace 路径写回新 plan 后 `selectedSegmentId` 应落在新 plan 的对应段（按旧选中索引/兜底首段），不应跳到 `segments[0]` 看上去"换回之前的 clip"。

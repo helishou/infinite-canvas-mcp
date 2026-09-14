@@ -4,6 +4,7 @@ import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import { collectOutputMedia } from "../comfyui/bridge.js";
 import type { MediaStore, TaskStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
+import { redactInlineMedia } from "../runtime/redact-inline-media.js";
 
 type RunParams = Record<string, unknown>;
 type FieldValues = Record<string, unknown>;
@@ -15,6 +16,7 @@ type RunResult = {
     media: Array<{ url: string; storageKey?: string; mimeType: string; filename: string }>;
     status: { status_str: string; completed: boolean };
 };
+
 
 /**
  * 将用户字段值转换为 {node_id: {input_name: value}} 格式
@@ -437,6 +439,7 @@ export class WorkflowExecutor {
         // 先处理 image 字段：上传 dataURL → 获取文件名
         const processedValues = await processImageFields(config.fields, workflowJson, fieldValues, url, controller.signal);
         const promptText = buildPrompt(config.fields, processedValues) || config.title;
+        const persistedFieldValues = redactInlineMedia(fieldValues);
         // 处理 seed=-1 随机化
         for (const field of config.fields || []) {
             if ((field.id === "seed" || field.id === "noise_seed") && processedValues[field.id] === -1) {
@@ -497,8 +500,8 @@ export class WorkflowExecutor {
             saveImagePresent: Object.values(prepared).some((n) => (n as WfNode)?.class_type === "SaveImage"),
         });
         const task = clientTaskId
-            ? this.tasks.create(clientTaskId, "workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) })
-            : this.tasks.create("workflow", { workflow: "custom", fields: fieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) });
+            ? this.tasks.create(clientTaskId, "workflow", { workflow: "custom", fields: persistedFieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) })
+            : this.tasks.create("workflow", { workflow: "custom", fields: persistedFieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) });
         this.controllers.set(task.id, controller);
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
 
@@ -524,7 +527,7 @@ export class WorkflowExecutor {
                     mimeType: m.mimeType,
                     name: m.filename,
                 })),
-                params: { fields: fieldValues, configTitle: config.title },
+                params: { fields: persistedFieldValues, configTitle: config.title },
             });
             return { taskId: task.id, ...finalResult };
         } catch (error) {
@@ -546,7 +549,7 @@ export class WorkflowExecutor {
                 durationMs: 0,
                 outputs: [],
                 error: message,
-                params: { fields: fieldValues, configTitle: config.title },
+                params: { fields: persistedFieldValues, configTitle: config.title },
             });
             throw error;
         } finally {
