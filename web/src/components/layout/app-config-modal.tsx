@@ -1,4 +1,4 @@
-import { App, Button, Form, Input, Modal, Progress, Select, Tabs } from "antd";
+import { App, Button, Form, Input, Modal, Progress, Select, Spin, Tabs } from "antd";
 import type { TFunction } from "i18next";
 import { Cloud, Download, FolderOpen, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -60,7 +60,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const [webdavDomainProgress, setWebdavDomainProgress] = useState(createWebdavDomainProgress);
     const config = useConfigStore((state) => state.config);
     const webdav = useConfigStore((state) => state.webdav);
+    const hydrated = useConfigStore((state) => state.hydrated);
     const updateConfig = useConfigStore((state) => state.updateConfig);
+    const replaceConfig = useConfigStore((state) => state.replaceConfig);
     const updateWebdavConfig = useConfigStore((state) => state.updateWebdavConfig);
     const shouldPromptContinue = useConfigStore((state) => state.shouldPromptContinue);
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
@@ -70,8 +72,10 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const locale = i18n.resolvedLanguage as AppLocale;
     useEffect(() => setActiveTab(initialTab), [initialTab]);
 
+    if (!hydrated) return <div className="flex min-h-60 items-center justify-center"><Spin /></div>;
+
     const saveConfig = (nextConfig: AiConfig) => {
-        (Object.keys(nextConfig) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, nextConfig[key]));
+        replaceConfig(nextConfig);
     };
 
     const finishConfig = () => {

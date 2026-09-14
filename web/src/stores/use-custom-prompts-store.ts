@@ -3,6 +3,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 
 import type { RawPrompt } from "@/services/api/prompt-source-runtime";
+import { fetchStructuredSetting, saveStructuredSetting } from "@/services/settings-api";
 
 const CUSTOM_PROMPTS_KEY = "custom-prompts-v1";
 let loadPromise: Promise<void> | null = null;
@@ -30,7 +31,20 @@ type CustomPromptsStore = {
 };
 
 async function persist(prompts: RawPrompt[]) {
-    await localforage.setItem(CUSTOM_PROMPTS_KEY, prompts);
+    await saveStructuredSetting("custom-prompts", prompts);
+}
+
+async function hydrateCustomPrompts() {
+    let stored = await fetchStructuredSetting<RawPrompt[]>("custom-prompts");
+    if (!stored) {
+        const legacy = await localforage.getItem<RawPrompt[]>(CUSTOM_PROMPTS_KEY);
+        if (Array.isArray(legacy)) {
+            stored = legacy;
+            await persist(legacy);
+        }
+    }
+    await localforage.removeItem(CUSTOM_PROMPTS_KEY);
+    useCustomPromptsStore.setState({ prompts: Array.isArray(stored) ? stored : [], loaded: true });
 }
 
 function enqueueMutation<T>(mutation: () => Promise<T>): Promise<T> {
@@ -61,9 +75,7 @@ export const useCustomPromptsStore = create<CustomPromptsStore>((set, get) => ({
     load: async () => {
         if (get().loaded) return;
         if (!loadPromise) loadPromise = (async () => {
-            const stored = await localforage.getItem<RawPrompt[]>(CUSTOM_PROMPTS_KEY);
-            if (Array.isArray(stored)) set({ prompts: stored, loaded: true });
-            else set({ loaded: true });
+            await hydrateCustomPrompts();
         })().finally(() => { loadPromise = null; });
         await loadPromise;
     },
@@ -103,3 +115,10 @@ export const useCustomPromptsStore = create<CustomPromptsStore>((set, get) => ({
         return true;
     }),
 }));
+
+if (typeof window !== "undefined") {
+    window.addEventListener("backend-event", (event) => {
+        const detail = (event as CustomEvent).detail as { type?: string; entityId?: string } | undefined;
+        if (detail?.type === "settings.updated" && detail.entityId === "prompts.custom") void hydrateCustomPrompts();
+    });
+}

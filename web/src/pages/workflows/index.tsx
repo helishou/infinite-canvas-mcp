@@ -419,25 +419,12 @@ type ImageFieldUploadProps = {
 
 function ImageFieldUpload({ fieldId, value, onChange }: ImageFieldUploadProps) {
     const inputRef = useRef<HTMLInputElement>(null);
-    const storageKey = `wf_image_${fieldId}`;
-    const [previewUrl, setPreviewUrl] = useState<string>(() => {
-        // 优先使用当前值，否则从 localStorage 恢复
-        if (value) return value;
-        try { return localStorage.getItem(storageKey) || ""; } catch { return ""; }
-    });
+    const [previewUrl, setPreviewUrl] = useState(value);
 
     useEffect(() => {
         if (value) setPreviewUrl(value);
-    }, [value]);
-
-    useEffect(() => {
-        // 持久化到 localStorage
-        if (previewUrl && previewUrl.startsWith("data:")) {
-            try { localStorage.setItem(storageKey, previewUrl); } catch { /* ignore */ }
-        } else if (previewUrl === "") {
-            try { localStorage.removeItem(storageKey); } catch { /* ignore */ }
-        }
-    }, [previewUrl, storageKey]);
+        localStorage.removeItem(`wf_image_${fieldId}`);
+    }, [fieldId, value]);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];

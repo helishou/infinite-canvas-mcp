@@ -1,5 +1,7 @@
-/** 前端配置的读写 API（数据存储在 backend 的 settings.json）。 */
+/** 前端配置的读写 API（结构化数据统一存储在 backend SQLite）。 */
 import { request } from "./backend-api";
+
+export type StructuredSettingScope = "webdav" | "prompt-sources" | "custom-prompts" | "image-workbench-references";
 
 export type FrontendSettings = {
     agentModel?: string;
@@ -23,4 +25,13 @@ export async function fetchSettings(): Promise<FrontendSettings> {
 
 export async function saveSettings(patch: Partial<FrontendSettings>): Promise<void> {
     await request<{ ok: boolean }>("PATCH", "/settings", patch);
+}
+
+export async function fetchStructuredSetting<T>(scope: StructuredSettingScope): Promise<T | null> {
+    const data = await request<{ ok: boolean; value: T | null }>("GET", `/settings/data/${scope}`);
+    return data.value ?? null;
+}
+
+export async function saveStructuredSetting<T>(scope: StructuredSettingScope, value: T): Promise<void> {
+    await request<{ ok: boolean }>("PUT", `/settings/data/${scope}`, { value });
 }

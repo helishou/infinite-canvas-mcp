@@ -5,19 +5,19 @@ description: Run Infinite Canvas in a few steps
 
 # Quick Start
 
-To try the project, deploy or start the `web/` frontend.
+The complete application requires both the Backend and the `web/` frontend.
 
 ## Deploy with Vercel
 
-Import the repository into Vercel. The root `vercel.json` builds `web/`. AI requests are sent directly from the browser to your OpenAI-compatible endpoint, so no additional application server is required.
+The root `vercel.json` builds only `web/`, which is suitable for a frontend preview. Complete persistence for canvases, assets, and structured settings still requires a reachable Backend.
 
 ## Run locally
 
 ```bash
 git clone git@github.com:basketikun/infinite-canvas.git
-cd infinite-canvas/web
-bun install
-bun run dev
+cd infinite-canvas
+npm install
+npm run dev:local
 ```
 
 Open `http://localhost:3000`.
@@ -35,4 +35,4 @@ docker run --rm -p 3000:3000 infinite-canvas
 - Open `/prompts` to fetch prompt repositories directly from the browser and cache them in memory.
 - Configure WebDAV if you want to synchronize canvases, assets, and generation history across devices.
 
-Canvas projects and My Assets are primarily stored in the browser. The API key is also stored locally and used by the browser to call OpenAI-compatible endpoints directly.
+Canvas projects, My Assets, generation records, and structured settings use the local Backend SQLite database as their authority. Media is stored in the Backend media directory. API keys are loaded from Backend channel settings and used by the browser to call the configured OpenAI-compatible endpoints directly.

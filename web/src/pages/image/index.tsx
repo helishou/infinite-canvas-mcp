@@ -26,6 +26,7 @@ import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
 import { deleteWorkbenchLogs, readWorkbenchLogs, saveWorkbenchLog } from "@/services/workbench-logs";
+import { fetchStructuredSetting, saveStructuredSetting } from "@/services/settings-api";
 
 type GeneratedImage = {
     id: string;
@@ -70,6 +71,40 @@ type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
 const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
+const LEGACY_REFERENCES_KEY = "image_workbench_references";
+let referencesHydration: Promise<ReferenceImage[]> | null = null;
+let referencesSaveQueue = Promise.resolve();
+
+function saveWorkbenchReferences(references: ReferenceImage[]) {
+    referencesSaveQueue = referencesSaveQueue
+        .then(() => saveStructuredSetting("image-workbench-references", references))
+        .catch(() => undefined);
+}
+
+function hydrateWorkbenchReferences() {
+    if (referencesHydration) return referencesHydration;
+    referencesHydration = (async () => {
+        let stored = await fetchStructuredSetting<ReferenceImage[]>("image-workbench-references");
+        if (!stored) {
+            const legacy = localStorage.getItem(LEGACY_REFERENCES_KEY);
+            const parsed = legacy ? JSON.parse(legacy) as ReferenceImage[] : null;
+            if (Array.isArray(parsed)) {
+                stored = await Promise.all(parsed.map(async (ref) => {
+                    if (ref.storageKey || !ref.dataUrl.startsWith("data:")) return ref;
+                    const uploaded = await uploadImage(ref.dataUrl, { category: "input" });
+                    return { ...ref, dataUrl: uploaded.url, storageKey: uploaded.storageKey };
+                }));
+                await saveStructuredSetting("image-workbench-references", stored);
+            }
+        }
+        localStorage.removeItem(LEGACY_REFERENCES_KEY);
+        return (stored || []).map((ref) => ({
+            ...ref,
+            dataUrl: ref.storageKey ? backendMediaUrl(ref.storageKey) : ref.dataUrl,
+        }));
+    })().finally(() => { referencesHydration = null; });
+    return referencesHydration;
+}
 
 export default function ImagePage() {
     const { message } = App.useApp();
@@ -83,25 +118,23 @@ export default function ImagePage() {
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
     const [prompt, setPrompt] = useState("");
-    const [references, setReferences] = useState<ReferenceImage[]>(() => {
-        try {
-            const saved = localStorage.getItem("image_workbench_references");
-            if (saved) {
-                const parsed = JSON.parse(saved) as ReferenceImage[];
-                return parsed.map((ref) => ({
-                    ...ref,
-                    dataUrl: ref.storageKey ? backendMediaUrl(ref.storageKey) : ref.dataUrl,
-                }));
-            }
-        } catch { /* ignore */ }
-        return [];
-    });
+    const [references, setReferences] = useState<ReferenceImage[]>([]);
+    const [referencesHydrated, setReferencesHydrated] = useState(false);
 
     useEffect(() => {
-        try {
-            localStorage.setItem("image_workbench_references", JSON.stringify(references));
-        } catch { /* ignore */ }
-    }, [references]);
+        let active = true;
+        void hydrateWorkbenchReferences().then((stored) => {
+            if (!active) return;
+            setReferences(stored);
+            setReferencesHydrated(true);
+        });
+        return () => { active = false; };
+    }, []);
+
+    useEffect(() => {
+        if (!referencesHydrated) return;
+        saveWorkbenchReferences(references);
+    }, [references, referencesHydrated]);
     const [results, setResults] = useState<GenerationResult[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
     const [running, setRunning] = useState(false);

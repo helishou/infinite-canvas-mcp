@@ -15,7 +15,7 @@ type BackendStore = {
 
 let backendEvents: EventSource | null = null;
 let backendEventsKey = "";
-let aiConfigHydrated = false;
+let structuredSettingsHydrated = false;
 const seenBackendEventIds = new Set<string>();
 
 // 本地总后台（127.0.0.1/localhost:17370）在浏览器直连时会经过系统代理，
@@ -80,7 +80,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
     setConnection: (url, token) => {
         const cleanUrl = url.replace(/\/$/, "");
         const nextToken = token || get().token;
-        aiConfigHydrated = false;
+        structuredSettingsHydrated = false;
         // 同步持久化，保证 backend-api.ts 的 getBackendUrl()/getBackendTokenShared() 取到最新值。
         try { localStorage.setItem("backend-url", cleanUrl); } catch { /* storage blocked */ }
         setBackendToken(nextToken);
@@ -95,14 +95,14 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         const health = await backendHealth();
         if (!health.ok) {
             stopBackendEvents();
-            aiConfigHydrated = false;
+            structuredSettingsHydrated = false;
             set({ connected: false, checking: false, error: `无法连接总后台 ${getBackendUrl()}` });
             return;
         }
         // 后端 /config 是 token 权威来源，连接时以后端为准刷新，避免缓存旧 token 导致 401。
         const discovered = await discoverBackendToken();
         if (discovered.ok && discovered.token && discovered.token !== get().token) {
-            aiConfigHydrated = false;
+            structuredSettingsHydrated = false;
             setBackendToken(discovered.token);
             set({ token: discovered.token, checking: true });
             syncAgentEndpoint(getBackendUrl(), discovered.token);
@@ -111,9 +111,13 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         }
         set({ connected: true, checking: true, error: "" });
         startBackendEvents(getBackendUrl(), get().token);
-        if (!aiConfigHydrated) {
-            const { hydrateConfigFromBackend } = await import("@/stores/use-config-store");
-            aiConfigHydrated = await hydrateConfigFromBackend();
+        if (!structuredSettingsHydrated) {
+            const [{ hydrateConfigFromBackend }, { hydratePromptSourcesFromBackend }] = await Promise.all([
+                import("@/stores/use-config-store"),
+                import("@/stores/use-prompt-source-store"),
+            ]);
+            const results = await Promise.all([hydrateConfigFromBackend(), hydratePromptSourcesFromBackend()]);
+            structuredSettingsHydrated = results.every(Boolean);
         }
         set({ checking: false });
         if (!wasConnected) {
@@ -121,7 +125,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         }
     },
 
-    reset: () => { stopBackendEvents(); aiConfigHydrated = false; set({ connected: false, checking: false, error: "" }); },
+    reset: () => { stopBackendEvents(); structuredSettingsHydrated = false; set({ connected: false, checking: false, error: "" }); },
 }));
 
 /** 启动时自动检测总后台连接。 */

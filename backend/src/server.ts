@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response, type Express }
 import fs from "node:fs";
 import path from "node:path";
 
-import { type ResolvedConfig, DATA_DIR, ensureDataDirs, loadRootConfig, saveRootConfig, loadFrontendSettings, saveFrontendSettings, type FrontendSettings } from "./config.js";
+import { type ResolvedConfig, DATA_DIR, ensureDataDirs, loadRootConfig, saveRootConfig, loadFrontendSettings, type FrontendSettings } from "./config.js";
 import type {
     Asset, AssetFolder, CanvasProject,
     GenerationLog, GenerationLogStatus, RuntimeTask, RuntimeTaskStatus,
@@ -33,6 +33,17 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     const stores: Stores = deps.stores ?? createStores(db);
     const events = deps.events ?? new BackendEventBus();
     const app = express();
+    const FRONTEND_SETTINGS_KEY = "frontend.settings";
+    const STRUCTURED_SETTING_KEYS = new Map([
+        ["webdav", "webdav.config"],
+        ["prompt-sources", "prompt.sources"],
+        ["custom-prompts", "prompts.custom"],
+        ["image-workbench-references", "image-workbench.references"],
+    ]);
+    if (stores.settings.get(FRONTEND_SETTINGS_KEY) === undefined) {
+        const legacy = loadFrontendSettings();
+        if (Object.keys(legacy).length) stores.settings.set(FRONTEND_SETTINGS_KEY, legacy);
+    }
     app.disable("x-powered-by");
     app.use(express.json({ limit: "100mb" }));
 
@@ -119,16 +130,31 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     });
     // ── Frontend settings ───────────────────────────────────────────────
     app.get("/settings", (_req, res) => {
-        res.json({ ok: true, settings: loadFrontendSettings() });
+        res.json({ ok: true, settings: stores.settings.get(FRONTEND_SETTINGS_KEY) || {} });
     });
     app.patch("/settings", (req, res) => {
         const patch = req.body as Partial<FrontendSettings>;
         if (!patch || typeof patch !== "object") {
             return void res.status(400).json({ ok: false, error: "请求体必须是对象" });
         }
-        const current = loadFrontendSettings();
-        saveFrontendSettings({ ...current, ...patch });
-        res.json({ ok: true, settings: loadFrontendSettings() });
+        const current = stores.settings.get(FRONTEND_SETTINGS_KEY);
+        const settings = { ...(current && typeof current === "object" && !Array.isArray(current) ? current : {}), ...patch };
+        stores.settings.set(FRONTEND_SETTINGS_KEY, settings);
+        events.publish({ type: "settings.updated", entityId: FRONTEND_SETTINGS_KEY, payload: { synced: true } });
+        res.json({ ok: true, settings });
+    });
+    app.get("/settings/data/:scope", (req, res) => {
+        const key = STRUCTURED_SETTING_KEYS.get(String(req.params.scope || ""));
+        if (!key) return void res.status(404).json({ ok: false, error: "未知设置域" });
+        res.json({ ok: true, value: stores.settings.get(key) ?? null });
+    });
+    app.put("/settings/data/:scope", (req, res) => {
+        const key = STRUCTURED_SETTING_KEYS.get(String(req.params.scope || ""));
+        if (!key) return void res.status(404).json({ ok: false, error: "未知设置域" });
+        if (!Object.prototype.hasOwnProperty.call(req.body || {}, "value")) return void res.status(400).json({ ok: false, error: "value 必填" });
+        stores.settings.set(key, req.body.value);
+        events.publish({ type: "settings.updated", entityId: key, payload: { synced: true } });
+        res.json({ ok: true, value: req.body.value });
     });
     const AI_CONFIG_KEY = "ai.config";
     app.get("/settings/ai-config", (_req, res) => {

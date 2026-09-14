@@ -5,20 +5,19 @@ description: 用最少步骤把无限画布跑起来
 
 # 快速开始
 
-如果你只是想先把项目跑起来，优先部署或启动 `web/` 前端。
+完整运行需要同时启动 Backend 和 `web/` 前端。
 
 ## Vercel 部署
 
-在 Vercel 中导入仓库即可，根目录 `vercel.json` 会构建 `web/`。当前版本的 AI 请求由浏览器前台直连用户自己的 OpenAI 兼容地址，不需要额外配置服务端。
+根目录 `vercel.json` 只构建 `web/`。该方式适合预览前端；画布、素材和结构化配置的完整持久化仍需连接可访问的 Backend。
 
 ## 本地启动
 
 ```bash
 git clone git@github.com:basketikun/infinite-canvas.git
 cd infinite-canvas
-cd web
-bun install
-bun run dev
+npm install
+npm run dev:local
 ```
 
 启动后访问：
@@ -44,5 +43,5 @@ docker run --rm -p 3000:3000 infinite-canvas
 
 ## 说明
 
-- 当前画布项目和“我的素材”主要保存在浏览器本地，WebDAV 同步需要用户自行配置。
-- AI API Key 保存在浏览器本地，并由前端直接请求 OpenAI 兼容接口。
+- 画布项目、“我的素材”、生成记录和结构化配置统一写入本地 Backend SQLite；媒体文件写入 Backend 媒体目录，WebDAV 同步需要用户自行配置。
+- AI API Key 随渠道配置保存在 Backend SQLite，由前端读取后直接请求对应的 OpenAI 兼容接口。

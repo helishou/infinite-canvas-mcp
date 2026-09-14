@@ -30,6 +30,7 @@ export let MEDIA_DIR = resolveMediaDir();
 export function setMediaDir(dir: string) { MEDIA_DIR = path.resolve(dir); }
 export const LOGS_DIR = path.join(DATA_DIR, "logs");
 export const WORKERS_DIR = path.join(DATA_DIR, "workers");
+/** 旧版前端设置文件，仅用于启动时一次性迁入 SQLite。 */
 export const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 export type FrontendSettings = {
@@ -47,10 +48,6 @@ export function loadFrontendSettings(): FrontendSettings {
     try {
         return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
     } catch { return {}; }
-}
-
-export function saveFrontendSettings(settings: FrontendSettings) {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }
 
 export type BackendConfig = {

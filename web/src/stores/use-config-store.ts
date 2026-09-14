@@ -1,6 +1,5 @@
 import { useMemo } from "react";
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 import {
     WORKFLOW_ROUTE_UNSUPPORTED,
@@ -11,6 +10,7 @@ import {
 } from "@basketikun/canvas-agent/model-workflow";
 
 import i18n from "@/i18n";
+import { fetchStructuredSetting, saveStructuredSetting } from "@/services/settings-api";
 
 export { WORKFLOW_ROUTE_UNSUPPORTED, builtinWorkflowName, scenarioFromReferenceCount } from "@basketikun/canvas-agent/model-workflow";
 export type { ModelInputScenario } from "@basketikun/canvas-agent/model-workflow";
@@ -160,12 +160,15 @@ export const defaultWebdavSyncConfig: WebdavSyncConfig = {
 type ConfigStore = {
     config: AiConfig;
     webdav: WebdavSyncConfig;
+    hydrated: boolean;
     isConfigOpen: boolean;
     configTab: ConfigTabKey;
     shouldPromptContinue: boolean;
     updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
+    replaceConfig: (config: AiConfig) => void;
     importChannelCredentials: (input: { baseUrl?: string | null; apiKey?: string | null }) => ChannelCredentialsImportResult;
     updateWebdavConfig: <K extends keyof WebdavSyncConfig>(key: K, value: WebdavSyncConfig[K]) => void;
+    replaceWebdavConfig: (webdav: WebdavSyncConfig) => void;
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
     openConfigDialog: (shouldPromptContinue?: boolean, tab?: ConfigTabKey) => void;
     setConfigDialogOpen: (isOpen: boolean) => void;
@@ -280,127 +283,148 @@ function isAiConfigReady(config: AiConfig, model: string) {
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
 }
 
+let configSyncQueue = Promise.resolve();
+let webdavSyncQueue = Promise.resolve();
+
 function syncConfigToBackend(config: AiConfig) {
     if (typeof window === "undefined") return;
-    void Promise.all([
-        import("@/services/backend-api"),
-        import("@/stores/use-backend-store"),
-    ]).then(([api, backend]) => {
-        if (backend.useBackendStore.getState().connected) return api.syncBackendAiConfig(config);
-        return undefined;
+    configSyncQueue = configSyncQueue.then(async () => {
+        const [api, backend] = await Promise.all([
+            import("@/services/backend-api"),
+            import("@/stores/use-backend-store"),
+        ]);
+        if (backend.useBackendStore.getState().connected) await api.syncBackendAiConfig(config);
     }).catch(() => undefined);
 }
 
-// 从 backend 拉 ai.config：source of truth。拉到就用 backend 的（同时写回 localStorage 当缓存）；
-// 拉取失败时保持当前缓存不动，由 Backend 的既有探活周期再次尝试。
+function syncWebdavToBackend(webdav: WebdavSyncConfig) {
+    if (typeof window === "undefined") return;
+    webdavSyncQueue = webdavSyncQueue.then(() => saveStructuredSetting("webdav", webdav)).catch(() => undefined);
+}
+
+function normalizeConfig(input: Partial<AiConfig>): AiConfig {
+    const config = { ...defaultConfig, ...input };
+    if (!Array.isArray(input.channels)) config.channels = [];
+    const channels = normalizeChannels(config);
+    return {
+        ...config,
+        channelMode: "local",
+        apiFormat: normalizeApiFormat(config.apiFormat),
+        channels,
+        models: modelOptionsFromChannels(channels),
+        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
+        videoModel: normalizeModelOptionValue(config.videoModel, channels),
+        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
+        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
+        audioVoice: config.audioVoice || defaultConfig.audioVoice,
+        audioFormat: config.audioFormat || defaultConfig.audioFormat,
+        audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
+        audioInstructions: config.audioInstructions || "",
+        reasoningEffort: config.reasoningEffort || "auto",
+        videoSeconds: config.videoSeconds || "6",
+        vquality: config.vquality || "720",
+        videoGenerateAudio: config.videoGenerateAudio || "true",
+        videoWatermark: config.videoWatermark || "false",
+        canvasImageCount: config.canvasImageCount || "3",
+        proxyEnabled: Boolean(config.proxyEnabled),
+        proxyUrl: normalizeLocalProxyUrl(config.proxyUrl || DEFAULT_LOCAL_PROXY_URL) || DEFAULT_LOCAL_PROXY_URL,
+    };
+}
+
+function readLegacyConfigState(): { config?: Partial<AiConfig>; webdav?: Partial<WebdavSyncConfig> } | null {
+    try {
+        const stored = JSON.parse(localStorage.getItem(CONFIG_STORE_KEY) || "null") as { state?: { config?: Partial<AiConfig>; webdav?: Partial<WebdavSyncConfig> } } | null;
+        return stored?.state || null;
+    } catch {
+        return null;
+    }
+}
+
+// Backend SQLite 是配置唯一权威；localStorage 只在首次迁移旧渠道与 WebDAV 配置时读取一次。
 export async function hydrateConfigFromBackend(): Promise<boolean> {
     if (typeof window === "undefined") return false;
     try {
-        const [{ fetchBackendAiConfig }, { useBackendStore }] = await Promise.all([
+        const [{ fetchBackendAiConfig, syncBackendAiConfig }, { useBackendStore }] = await Promise.all([
             import("@/services/backend-api"),
             import("@/stores/use-backend-store"),
         ]);
         if (!useBackendStore.getState().connected) return false;
-        const response = await fetchBackendAiConfig();
-        if (!response || response.config === null || response.config === undefined) return true;
-        const next = response.config as Partial<AiConfig>;
-        // 只在 backend 数据与本地不同时写，避免无谓的 persist 触发
-        const current = useConfigStore.getState().config;
-        if (JSON.stringify(current) !== JSON.stringify(next)) {
-            useConfigStore.setState({ config: { ...defaultConfig, ...next, channels: Array.isArray(next.channels) ? next.channels : [] } });
+        const [response, storedWebdav] = await Promise.all([
+            fetchBackendAiConfig(),
+            fetchStructuredSetting<WebdavSyncConfig>("webdav"),
+        ]);
+        const legacy = readLegacyConfigState();
+        let config = response?.config ? normalizeConfig(response.config as Partial<AiConfig>) : null;
+        if (!config && legacy?.config) {
+            config = normalizeConfig(legacy.config);
+            await syncBackendAiConfig(config);
         }
+        let webdav = storedWebdav;
+        if (!webdav && legacy?.webdav) {
+            webdav = { ...defaultWebdavSyncConfig, ...legacy.webdav };
+            await saveStructuredSetting("webdav", webdav);
+        }
+        useConfigStore.setState({
+            config: config || normalizeConfig({}),
+            webdav: { ...defaultWebdavSyncConfig, ...(webdav || {}) },
+            hydrated: true,
+        });
+        localStorage.removeItem(CONFIG_STORE_KEY);
         return true;
     } catch {
         return false;
     }
 }
 
-export const useConfigStore = create<ConfigStore>()(
-    persist(
-        (set, get) => ({
-            config: defaultConfig,
-            webdav: defaultWebdavSyncConfig,
-            isConfigOpen: false,
-            configTab: "channels",
-            shouldPromptContinue: false,
-            updateConfig: (key, value) => {
-                const config = { ...get().config, [key]: value };
-                set({ config });
-                syncConfigToBackend(config);
-            },
-            importChannelCredentials: (input) => {
-                const config = get().config;
-                const result = upsertChannelCredentials(config, input);
-                if (result.config !== config) {
-                    set({ config: result.config });
-                    syncConfigToBackend(result.config);
-                }
-                return { status: result.status, channelName: result.channelName };
-            },
-            updateWebdavConfig: (key, value) =>
-                set((state) => ({
-                    webdav: {
-                        ...state.webdav,
-                        [key]: value,
-                    },
-                })),
-            isAiConfigReady: (config, model) => isAiConfigReady(config, model),
-            openConfigDialog: (shouldPromptContinue = false, configTab = "channels") => set({ isConfigOpen: true, shouldPromptContinue, configTab }),
-            setConfigDialogOpen: (isConfigOpen) => set({ isConfigOpen }),
-            clearPromptContinue: () => set({ shouldPromptContinue: false }),
-        }),
-        {
-            name: CONFIG_STORE_KEY,
-            partialize: (state) => ({ config: state.config, webdav: state.webdav }),
-            merge: (persisted, current) => {
-                const persistedState = (persisted || {}) as Partial<ConfigStore>;
-                const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
-                const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
-                const config = { ...defaultConfig, ...persistedConfig };
-                if (!Array.isArray(persistedConfig.channels)) config.channels = [];
-                const channels = normalizeChannels(config);
-                const models = modelOptionsFromChannels(channels);
-                return {
-                    ...current,
-                    webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
-                    config: {
-                        ...config,
-                        channelMode: "local",
-                        apiFormat: normalizeApiFormat(config.apiFormat),
-                        channels,
-                        models,
-                        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
-                        videoModel: normalizeModelOptionValue(config.videoModel, channels),
-                        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
-                        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
-                        audioVoice: config.audioVoice || defaultConfig.audioVoice,
-                        audioFormat: config.audioFormat || defaultConfig.audioFormat,
-                        audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
-                        audioInstructions: config.audioInstructions || "",
-                        reasoningEffort: config.reasoningEffort || "auto",
-                        videoSeconds: config.videoSeconds || "6",
-                        vquality: config.vquality || "720",
-                        videoGenerateAudio: config.videoGenerateAudio || "true",
-                        videoWatermark: config.videoWatermark || "false",
-                        canvasImageCount: config.canvasImageCount || "3",
-                        proxyEnabled: Boolean(config.proxyEnabled),
-                        proxyUrl: normalizeLocalProxyUrl(config.proxyUrl || DEFAULT_LOCAL_PROXY_URL) || DEFAULT_LOCAL_PROXY_URL,
-                    },
-                };
-            },
-            // 注意：之前这里有 onRehydrateStorage 回调，hydrate 完会把 localStorage 反向写回 backend。
-            // 这会让"清 localStorage → 首次打开"瞬间把 backend 的真实配置覆盖成 defaultConfig，是数据丢失 bug。
-            // 现在的 source of truth 是 backend（见 hydrateConfigFromBackend），localStorage 仅作离线缓存。
-        },
-    ),
-);
+export const useConfigStore = create<ConfigStore>((set, get) => ({
+    config: defaultConfig,
+    webdav: defaultWebdavSyncConfig,
+    hydrated: false,
+    isConfigOpen: false,
+    configTab: "channels",
+    shouldPromptContinue: false,
+    updateConfig: (key, value) => {
+        const config = normalizeConfig({ ...get().config, [key]: value });
+        set({ config });
+        syncConfigToBackend(config);
+    },
+    replaceConfig: (next) => {
+        const config = normalizeConfig(next);
+        set({ config });
+        syncConfigToBackend(config);
+    },
+    importChannelCredentials: (input) => {
+        const config = get().config;
+        const result = upsertChannelCredentials(config, input);
+        if (result.config !== config) {
+            const next = normalizeConfig(result.config);
+            set({ config: next });
+            syncConfigToBackend(next);
+        }
+        return { status: result.status, channelName: result.channelName };
+    },
+    updateWebdavConfig: (key, value) => {
+        const webdav = { ...get().webdav, [key]: value };
+        set({ webdav });
+        syncWebdavToBackend(webdav);
+    },
+    replaceWebdavConfig: (next) => {
+        const webdav = { ...defaultWebdavSyncConfig, ...next };
+        set({ webdav });
+        syncWebdavToBackend(webdav);
+    },
+    isAiConfigReady: (config, model) => isAiConfigReady(config, model),
+    openConfigDialog: (shouldPromptContinue = false, configTab = "channels") => set({ isConfigOpen: true, shouldPromptContinue, configTab }),
+    setConfigDialogOpen: (isConfigOpen) => set({ isConfigOpen }),
+    clearPromptContinue: () => set({ shouldPromptContinue: false }),
+}));
 
 // 订阅 backend 事件，做 source-of-truth 同步：
 // - backend-event 收到 settings.updated：本机或其它 tab 改动了 ai.config
 if (typeof window !== "undefined") {
     window.addEventListener("backend-event", (event) => {
         const detail = (event as CustomEvent).detail as { type?: string; entityId?: string } | undefined;
-        if (detail?.type === "settings.updated" && detail.entityId === "ai.config") {
+        if (detail?.type === "settings.updated" && (detail.entityId === "ai.config" || detail.entityId === "webdav.config")) {
             void hydrateConfigFromBackend();
         }
     });
