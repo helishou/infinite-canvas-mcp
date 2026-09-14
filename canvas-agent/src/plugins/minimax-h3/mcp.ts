@@ -212,9 +212,33 @@ export const pluginMcp: PluginMcpModule = {
                 // 否则前端 H3Runner 会按 segment 缺省值静默回退到错误模型。
                 const inherited = inheritedH3Params(node);
                 const next = rawSegments.map((item) => ({ ...inherited, ...normalizePlannedSegment(item) }));
-                const segments = input.replaceSegments === false ? [...existing, ...next] : next;
-                await context.updateCanvasNode(nodeId, {}, { segments, status: "idle", errorDetails: "", runProgress: 0 });
-                return { ok: true, projectId, nodeId, count: next.length, segments };
+                // selectedSegmentId 一致性：replace 会让旧 selectedSegmentId 指向的段消失，
+                // 留在 metadata 里就会变成"无效选中"——前端 selected = segments.find(...) || segments[0]
+                // 会回退到 segments[0]，看上去"换回到之前的 clip"。所以这里要按"旧选中索引 / 同标题 / 兜底首段"
+                // 在新 plan 里找一个对应段并把 selectedSegmentId 一起写回。
+                const previousSelectedId = String(((node.metadata || {}) as Record<string, unknown>).selectedSegmentId || "");
+                const previousSelectedIndex = Math.max(0, existing.findIndex((segment) => String(segment.id || "") === previousSelectedId));
+                if (input.replaceSegments === false) {
+                    // append 路径：每个新段都走细粒度 add_h3_segment，避免一次写整数组触发冲突。
+                    for (const segment of next) {
+                        if (!segment.id) throw new Error("append 路径要求新段携带 id（add_h3_segment 必填）");
+                        await context.addH3Segment(nodeId, segment as Record<string, unknown>);
+                    }
+                } else {
+                    // replace 路径：走 replace_h3_segments 显式 op，绕过 update_node.metadata.segments 的「同 id 集合」严格校验。
+                    await context.replaceH3Segments(nodeId, next as Array<Record<string, unknown>>);
+                }
+                // 节点级元数据（status/runProgress/errorDetails）走 update_node（不带 segments）。
+                await context.updateCanvasNode(nodeId, {}, { status: "idle", errorDetails: "", runProgress: 0 });
+                if (next.length) {
+                    const remappedSelectedId = next[Math.min(previousSelectedIndex, next.length - 1)]?.id
+                        || next[0]?.id
+                        || "";
+                    if (remappedSelectedId && remappedSelectedId !== previousSelectedId) {
+                        await context.updateCanvasNode(nodeId, {}, { selectedSegmentId: remappedSelectedId });
+                    }
+                }
+                return { ok: true, projectId, nodeId, count: next.length, segments: next, selectedSegmentId: next.length ? (next[Math.min(previousSelectedIndex, next.length - 1)]?.id || next[0]?.id || "") : "" };
             },
             h3_list_models: async () => {
                 const catalog = await context.comfyUi.models();
@@ -270,9 +294,11 @@ export const pluginMcp: PluginMcpModule = {
                 const index = Number(input.segmentIndex);
                 const segments = segmentsOf(node);
                 if (!segments[index]) throw new Error(`片段下标越界:${index}`);
-                const nextSegments = segments.map((segment, i) => (i === index ? { ...segment, ...(input.patch as Record<string, unknown>) } : segment));
-                await context.updateCanvasNode(nodeId, {}, { segments: nextSegments });
-                return { ok: true, nodeId, segmentIndex: index, segment: nextSegments[index] };
+                const target = segments[index];
+                if (!target.id) throw new Error(`片段 ${index} 缺少 id，无法使用细粒度 update_h3_segment`);
+                const patch = (input.patch as Record<string, unknown>) || {};
+                await context.updateH3Segment(nodeId, String(target.id), patch);
+                return { ok: true, nodeId, segmentIndex: index, segmentId: String(target.id), segment: { ...target, ...patch } };
             },
             h3_run_all_clips: async (input) => {
                 const projectId = String(input.projectId || "");

@@ -1,9 +1,20 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { memo, useState } from "react";
 
-import { canvasThemes } from "@/lib/canvas-theme";
+import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasConnection, CanvasNodeData, ConnectionHandle, Position } from "@/types/canvas";
+
+// 连线描边样式的唯一来源：真实连线与 H3 参考图连线都用它，避免两边样式分叉。
+// 强调色用主题蓝色 linkActive，与节点选中边框（activeStroke）区分开。
+export function connectionStrokeStyle(theme: CanvasTheme, active: boolean) {
+    return {
+        stroke: active ? theme.node.linkActive : theme.node.muted,
+        strokeWidth: active ? 3 : 2,
+        strokeOpacity: active ? 1 : 0.82,
+        style: { filter: active ? `drop-shadow(0 0 8px ${theme.node.linkActive}66)` : undefined },
+    };
+}
 
 export const ConnectionPath = memo(function ConnectionPath({
     connection,
@@ -43,6 +54,7 @@ export const ConnectionPath = memo(function ConnectionPath({
     // B(t) = (1-t)³P0 + 3(1-t)²tP1 + 3(1-t)t²P2 + t³P3, at t=0.5:
     const midX = (startX + 3 * (startX + curvature) + 3 * (endX - curvature) + endX) / 8;
     const midY = (startY + 3 * startY + 3 * endY + endY) / 8;
+    const strokeStyle = connectionStrokeStyle(theme, active);
 
     return (
         <g
@@ -68,11 +80,9 @@ export const ConnectionPath = memo(function ConnectionPath({
             />
             <path
                 d={pathD}
-                stroke={active ? theme.node.activeStroke : theme.node.muted}
-                strokeWidth={active ? 3 : 2}
-                strokeOpacity={active ? 1 : 0.82}
                 fill="none"
-                style={{ filter: active ? `drop-shadow(0 0 8px ${theme.node.activeStroke}66)` : undefined, pointerEvents: "none" }}
+                {...strokeStyle}
+                style={{ ...strokeStyle.style, pointerEvents: "none" }}
             />
             {(hovered || active) && onDelete && (
                 <g
@@ -113,5 +123,5 @@ export function ActiveConnectionPath({ node, handle, mouseWorld, target }: { nod
     const distance = Math.abs(snappedEndX - snappedStartX);
     const pathD = `M ${snappedStartX} ${snappedStartY} C ${snappedStartX + distance * 0.5} ${snappedStartY}, ${snappedEndX - distance * 0.5} ${snappedEndY}, ${snappedEndX} ${snappedEndY}`;
 
-    return <path d={pathD} stroke={theme.node.activeStroke} strokeWidth="2" fill="none" strokeDasharray="5,5" />;
+    return <path d={pathD} stroke={theme.node.linkActive} strokeWidth="2" fill="none" strokeDasharray="5,5" />;
 }

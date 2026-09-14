@@ -5,6 +5,17 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
++ H3 段粒度写路径回归：H3 节点编辑某一段 prompt 时只产 `update_h3_segment`，不再带整 segments 数组；同节点上另一段被任务回写完成时，本地编辑不应被 409 拦下；MCP `h3_update_clip` 与 `h3_apply_video_plan` 也走细粒度 op。`update_node.metadata.segments` 路径被严格校验，只有「同长同 id 集合」的完整替换才放行。
++ H3 自动播放（React StrictMode 修复后）回归：dev 模式下 StrictMode 会让 useEffect 在 mount 时跑两次，原 `skipFirstPlayRequestRef` 在第二次跑时已失效，导致视频自动起播。新方案用 H3Workbench 本地 `playToken` 作 trigger，metadata 残留值不触发播放。回归路径：①H3 节点无任何点击、双击、刷新后进入画布，视频不应自动播放；②上次播放后 metadata 有 `h3PlayRequest > 0`，重新进入画布也不应自动播放；③点工具栏「连续播放全部 Clip」仍能正常起播，连续播放到下一段时也不应卡住；④换段 / MCP 改 `h3PlayRequest` 不应触发自动播放。
++ H3 「设为当前 Clip」覆盖回归：本地刚同步的 segment 字段（包括 restore / 手动改 prompt / mode 等）被 MCP 再次覆盖时，画布应弹冲突提示让用户「保留我的 / 采用远端」二选一，而不是悄悄被远端值覆盖。同时 `h3_apply_video_plan` replace 路径写回新 plan 后 `selectedSegmentId` 应落在新 plan 的对应段（按旧选中索引/兜底首段），不应跳到 `segments[0]` 看上去"换回之前的 clip"。
++ 冲突弹窗「保留我的 N 个操作」按钮回归：触发一次真实冲突（让 MCP/任务回写抢在本地前面），冲突弹窗里点「保留我的 N 个操作」后：①弹窗应立即关闭；②400ms 内 `pendingOps` 应按新 revision 自动重提并落到后端；③不再因「用户不再编辑就没人重提」而反复弹窗。
++ 画布操作被 MCP / 任务回写悄悄回滚的根因回归：跨写者（前端 + MCP + 任务回写）并发时，本地刚 sync 完的任意 update_node / update_h3_segment / add_h3_segment / replace_h3_segments 字段被远端覆盖，应弹冲突而不是直接被远端静默盖掉。具体：MCP 一次写多个 clip 时，后续事件不能让前端"先确认一项、其余被悄悄覆盖"；用户在 MCP 跑批期间多次编辑、退出后等所有事件落定，最终应该全部进入 conflict 状态或全部被保留。
++ H3 后台回写与页面快照竞争：在画布页面打开时，连续通过 MCP 或页面按钮运行不同 H3 Clip；确认页面旧快照不会覆盖 `runtimeTaskId`、状态、结果和结果历史，每个 Clip 只产生一条实际 ComfyUI 子任务并稳定写回画布。
++ H3 预览视频切标签不静默播：在 H3 工作台点播放让视频正在播，切到别的浏览器标签/最小化窗口 5–10 秒，再切回来：视频应已停在切走时的位置（不会在后台播完一段），且 `playhead` 不会因为后台 tick 继续推进。
++ H3 预览视频取消静音不再被强制回 true：在 H3 工作台播一个 clip，rAF tick 在跑（playhead 在动），点原生控件的喇叭图标取消静音；后续 1–2 秒内 rAF tick 触发的多次重渲染不应把视频重新静音，播放期间应持续保持取消静音。
++ 拖动 / 滚动画布不再被误报冲突：让一个 H3 clip 在跑（rAF tick 在动 playhead），同时用鼠标拖动画布或滚轮缩放；viewport 同步应能正常完成（不弹冲突），playhead 这种 rAF tick 触发的瞬态字段不应触发"节点字段冲突"弹窗。
++ 图像对比游标切图时复位到 50%：打开一张图的 compare 弹窗后，先把游标拖到最左（或最右）后保持 modal 不关，直接 double-click 切到另一张图（换 before/after URL），新图的游标应立刻回到 50%，不能把上一张图的 0% 状态带过去。
++ H3 同 Clip ref 拖动重排：在一个 H3 Clip 的 Refs 行拖动一个 ref 槽到另一个 ref 槽，应走 move 语义（源槽 ref 消失、目标槽收到该 ref，源 Clip 保留该 ref 不变）；拖动跨 Clip 时仍走 copy 语义；拖到 Refs 行空白区域应追加到末尾。拖动过程中目标槽应有蓝边 / 浅蓝底高亮，drop 后立即消失。
 + 统一生成契约回归：运行 Backend 测试与 canvas-agent 测试，确认共享 `CanvasGenerationCommand` 校验、统一 `/canvas/generation` 入口、H3/图片/视频参数透传，以及取消/重试任务端点护栏持续通过。
 
 + 统一画布生成命令：通过前端 H3 按钮、MCP H3 工具和插件 H3 调用分别提交任务，确认三者都命中 `/canvas/generation` 与 `CanvasGenerationService`；批量 H3 只传 `nodeIds` 也能启动。再通过 MCP 图片生成确认图片入口返回的 taskId、executor 和任务状态与前端入口一致；旧 `/canvas/h3/runs`、`/canvas/image-generation` 应返回 404。
@@ -13,6 +24,8 @@ description: Implemented changes that still need manual verification
 + 大画布媒体与侧栏：在包含大量图片/视频/H3 节点的画布中缩放到 20% 以下，确认视频节点和 H3 素材只显示轻量占位图标、不持续挂载视频预览；侧栏节点列表滚动时确认只渲染可见行，展开/折叠分组和搜索仍正常。
 
 + 场景工作流参数：给一个模型挂两个工作流（各自有不同字段，如步数 / CFG / 降噪），在配置弹窗里点某个场景的「参数」填一组值保存；确认①场景行的按钮上显示已配项数；②切换该场景的工作流后旧参数被清空（不会带到新工作流）；③生成时以这组值为默认：生图工作台里切换参考图数量（0 / 1 / 多）时参数字段随场景切换并显示对应默认值，画布上给节点增减参考图连接后设置面板字段同步切换；④在面板里手改的值优先于渠道配置值，且不会被场景参数覆盖回去。
+
++ H3 「增强提示词」分镜图过渡：选中一个有 ≥2 张图片参考的 Clip，在 Prompt 区点「增强提示词」旁的「分镜图过渡」勾选框（<2 张图片时该框应 disabled 且半透明）；确认①增强前会对相邻图对做一次姿势过渡分析（图片k→图片k+1 的肢体/重心/朝向变化）；②增强结果从图片1 姿势出发、末句落到最后一张分镜姿势（图片1站、图片2蹲 ⇒ 末句写「此人缓缓蹲下」），相邻姿势之间连续无瞬移；③不勾选时仍是原增强行为，不做过渡分析、不强制段尾姿势；④增强按钮旁出现「分镜图过渡」开关且文案/提示正确。
 
 + 渠道模型工作流路由：在 ComfyUI 渠道里点「添加模型」建一个 krea2，勾上「改图」「双图编辑」两个工作流，把文生图 / 单图 / 多图分别指向不同工作流；保存后模型选择器里应出现 krea2。生成时按参考数量路由：不带参考图走文生图工作流、1 张参考走单图、多张参考走多图（画布生图、重试、生图工作台三处口径一致）。只挂一个工作流时三种输入都走它。渠道编辑抽屉里每行的「工作流 N」按钮可再次编辑，「批量添加工作流」仍保持一个工作流一个模型行的老用法。
 
@@ -98,6 +111,8 @@ description: Implemented changes that still need manual verification
 + 图像对比同高：双击同一节点上的不同尺寸/比例的两个图（比如一张 16:9 横向 + 一张 1:1 方形），弹出的 Before/After 对比应保证两张图**同高**——方形图被横向等比放大到与 16:9 同高，或 16:9 被等比缩放到与方形同高，取决于视口约束。拖动滑块时左右两侧的视觉位置应保持稳定，不会因为两图高度不同导致一图多出一截空白。同一高度长宽比相同的两个图（最常见情况）打开即用，无明显加载闪烁。**关键回归项**：不同长宽比下，Before 图的显示高度必须**始终等于 After 图**——之前用 `overflow: hidden` 子容器 + 显式 `width/height` 的写法会被浏览器在子容器变窄时 stretch 内容，看上去高度在随滑块变。修法是两张图都 100% 充满固定容器 + `clip-path: inset(0 X% 0 0)` 按滑块裁切渲染结果。如果发现 Before 的人脸/物体高度在不同滑块位置看起来在变（特别是竖图 vs 横图对比时），说明又回到 stretch bug 了。
 
 The current release needs manual verification in these areas:
+
++ 画布图片参考图统一解析：在一个配置节点上按顺序连接场景图、人物图、站位图，再从配置节点点击一次生图；确认 Backend 任务的 `input.references` 与生成日志的参考数量一致，且结果节点虽然是新建节点，仍收到全部参考图。再用 MCP 对同一配置节点运行一次，确认两次任务的参考图顺序和数量相同；本次验证不应出现重复任务。
 
 + 本地工作流统一管理：确认 `z-image`、`flux2-klein` 和自定义工作流都不显示质量/尺寸/宽高比；节点图不再提供"删除此节点"功能（只允许在"未关联节点的字段"区清理孤立字段）；删除内置工作流后确认列表和文件均移除。
 

@@ -27,6 +27,7 @@ import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-
 import { Alert, App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
+import { CanvasH3RefLinks } from "@/components/canvas/canvas-h3-ref-links";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
@@ -189,7 +190,7 @@ async function runLocalComfyImage(
     // 客户端预生成的 taskId；提前告知后端用同一行创建，跨刷新也能恢复
     clientTaskId?: string,
     // 画布生成日志关联：projectId + 触发的源节点 id
-    logContext?: { projectId: string; nodeId?: string },
+    logContext?: { projectId: string; nodeId?: string; sourceNodeId?: string },
 ): Promise<UploadedImage> {
     const started = await startCanvasGeneration({
         mode: "image",
@@ -203,6 +204,7 @@ async function runLocalComfyImage(
         clientTaskId,
         projectId: logContext?.projectId,
         nodeId: logContext?.nodeId,
+        sourceNodeId: logContext?.sourceNodeId,
     }, signal);
     onTaskId?.(started.taskId);
     for (;;) {
@@ -297,6 +299,8 @@ function InfiniteCanvasPage() {
     const backendRevision = useCanvasStore((state) => state.backendRevisions[projectId] || 0);
     const canvasConflict = useCanvasStore((state) => state.canvasConflicts[projectId]);
     const clearCanvasConflict = useCanvasStore((state) => state.clearCanvasConflict);
+    const keepPendingOpsOnCanvasConflict = useCanvasStore((state) => state.keepPendingOpsOnCanvasConflict);
+    const adoptRemoteOnCanvasConflict = useCanvasStore((state) => state.adoptRemoteOnCanvasConflict);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [nodes, setNodes] = useState<CanvasNodeData[]>([]);
     const [connections, setConnections] = useState<CanvasConnection[]>([]);
@@ -2762,6 +2766,10 @@ function InfiniteCanvasPage() {
 
     const handleGenerateNode = useCallback(
         async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => {
+            // 同一源节点已有生成请求时，重复点击/重复事件只复用当前请求，
+            // 不再新建结果节点，也不向 Backend 再提交一次模型任务。
+            const activeRequest = generationRequestsRef.current.get(nodeId);
+            if (activeRequest && !activeRequest.controller.signal.aborted) return;
             const sourceNode = nodesRef.current.find((node) => node.id === nodeId);
             const generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
             if (generationConfig.model !== VIDEO_CONCAT_MODEL && !isAiConfigReady(generationConfig, generationConfig.model)) {
@@ -2916,7 +2924,7 @@ function InfiniteCanvasPage() {
                         imageIds.map(async (imageId) => {
                             try {
                                 const image = useCanvasDispatcher
-                                    ? await runLocalComfyImage(generationConfig.model, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (_taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, primaryImageId: imageId } } : item)), comfyParams, clientTaskId ? (imageId === imageIds[0] ? clientTaskId : `${clientTaskId}-${imageId}`) : undefined, { projectId, nodeId: rootId })
+                                    ? await runLocalComfyImage(generationConfig.model, effectivePrompt, referenceImages, resolveComfyImageSize(generationConfig.size), controller.signal, (_taskId) => setNodes((prev) => prev.map((item) => item.id === rootId ? { ...item, metadata: { ...item.metadata, primaryImageId: imageId } } : item)), comfyParams, clientTaskId ? (imageId === imageIds[0] ? clientTaskId : `${clientTaskId}-${imageId}`) : undefined, { projectId, nodeId: rootId, sourceNodeId: nodeId })
                                     : referenceImages.length
                                       ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
                                       : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
@@ -3229,6 +3237,8 @@ function InfiniteCanvasPage() {
 
     const handleRetryNode = useCallback(
         async (node: CanvasNodeData, imageId?: string) => {
+            const activeRequest = generationRequestsRef.current.get(node.id);
+            if (activeRequest && !activeRequest.controller.signal.aborted) return;
             const sourceNode = findRetrySourceNode(node.id, nodesRef.current, connectionsRef.current) || node;
             const savedImageMetadata = node.type === CanvasNodeType.Image ? node.metadata : undefined;
             const hasSavedImageMetadata = Boolean(savedImageMetadata?.generationType);
@@ -3331,7 +3341,7 @@ function InfiniteCanvasPage() {
                 const retryUseCanvasDispatcher = retryLocalComfy || /^gpt-image(?:-|$)/i.test(retrySelectedImageModel);
                 const retryComfyParams = sourceNode.metadata?.comfyParams;
                 const image = retryUseCanvasDispatcher
-                    ? await runLocalComfyImage(generationConfig.model, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal, undefined, retryComfyParams, retryClientTaskId)
+                    ? await runLocalComfyImage(generationConfig.model, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal, undefined, retryComfyParams, retryClientTaskId, { projectId, nodeId: node.id, sourceNodeId: sourceNode.id })
                     : useReferenceImages
                       ? await requestEdit(generationConfig, prompt, retryImages, { signal: controller.signal }).then((items) => items[0])
                       : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
@@ -3729,7 +3739,30 @@ function InfiniteCanvasPage() {
                     onGlobalPromptChange={setGlobalPrompt}
                     onOpenGenerationLogs={() => setGenerationLogsOpen(true)}
                 />
-                {canvasConflict ? <div className="pointer-events-auto absolute left-1/2 top-16 z-40 w-[min(680px,calc(100%-32px))] -translate-x-1/2"><Alert type="warning" showIcon closable onClose={() => clearCanvasConflict(projectId)} message={canvasConflict.message} description={`后端当前版本 ${canvasConflict.revision}，保留待同步操作 ${canvasConflict.pendingOperations} 个；继续编辑或重新提交即可按新版本同步。`} /></div> : null}
+                {canvasConflict ? <div className="pointer-events-auto absolute left-1/2 top-16 z-40 w-[min(680px,calc(100%-32px))] -translate-x-1/2"><Alert
+                    type="warning"
+                    showIcon
+                    closable
+                    onClose={() => clearCanvasConflict(projectId)}
+                    message={canvasConflict.message}
+                    description={
+                        <div className="space-y-2">
+                            <div>{`后端当前版本 ${canvasConflict.revision}，本地有 ${canvasConflict.pendingOperations} 个未提交操作；其中 ${canvasConflict.conflictTargets.length} 个与远端改动直接冲突。`}</div>
+                            {canvasConflict.conflictTargets.length ? (
+                                <ul className="m-0 list-disc pl-5 text-xs opacity-80">
+                                    {canvasConflict.conflictTargets.slice(0, 5).map((target) => (
+                                        <li key={`${target.kind}:${target.id}`}>{target.detail}</li>
+                                    ))}
+                                    {canvasConflict.conflictTargets.length > 5 ? <li>{`…还有 ${canvasConflict.conflictTargets.length - 5} 个`}</li> : null}
+                                </ul>
+                            ) : null}
+                            <div className="flex gap-2 pt-1">
+                                <Button size="small" onClick={() => keepPendingOpsOnCanvasConflict(projectId)}>{`保留我的 ${canvasConflict.pendingOperations} 个操作（自动在新版本上重提）`}</Button>
+                                <Button size="small" danger onClick={() => adoptRemoteOnCanvasConflict(projectId)}>{`采用远端（丢弃我的 ${canvasConflict.pendingOperations} 个操作）`}</Button>
+                            </div>
+                        </div>
+                    }
+                /></div> : null}
 
                 <InfiniteCanvas
                     containerRef={containerRef}
@@ -3774,6 +3807,7 @@ function InfiniteCanvasPage() {
                                     />
                                 );
                             })}
+                        <CanvasH3RefLinks nodes={nodes} selectedNodeIds={selectedNodeIds} dragPreviewPositions={dragPreviewPositions} />
                         {connectingParams ? <ActiveConnectionPath node={nodeById.get(connectingParams.nodeId)} handle={connectingParams} mouseWorld={mouseWorld} target={connectionTargetNodeId ? nodeById.get(connectionTargetNodeId) : undefined} /> : null}
                     </svg>
 

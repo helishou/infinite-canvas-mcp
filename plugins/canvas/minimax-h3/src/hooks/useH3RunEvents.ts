@@ -60,6 +60,10 @@ export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3, update: (patc
             consumedRunRequestRef.current = "";
             return;
         }
+        // 终态节点上的历史请求只是审计字段，不是新的运行命令。
+        // 刷新时若旧快照把 runRequestConsumedId 丢掉，也不能因残留 requestId 重跑已完成 Clip。
+        const status = String(ctx.node.metadata?.status || "");
+        if (status !== "queued" && status !== "loading") return;
         if (requestId === consumedRunRequestRef.current) return;
         const current = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
         if (requestId === String(current.runRequestConsumedId || "")) {

@@ -199,6 +199,9 @@
 .minimax-ref-grid.active { z-index:2; }
 .minimax-ref-clip { position:relative; min-width:0; min-height:0; border:1px solid #2a333d; border-radius:6px; background:#20252c; overflow:hidden; cursor:pointer; }
 .minimax-ref-clip.active { border-color:#cbd5e1; background:#29313a; }
+/* ref 拖动到目标槽时的高亮（move 落点）：蓝边 + 浅蓝底，跟"运行中 clip"高亮色一致；empty 槽用虚线 */
+.minimax-ref-clip.is-drop-target { border-color:#38bdf8; background:#263e4d; box-shadow:0 0 0 1px #38bdf8 inset,0 0 12px rgba(56,189,248,.18); }
+.minimax-ref-clip.is-drop-target.is-empty { border-style:solid; opacity:1; background:#1f3344; }
 /* 角色组高亮：与该角色在同一 segment 的所有 outfit 格子共享同色边框 + 浅色背景；声线用另一种高亮色 */
 .minimax-ref-clip.is-character-group { border-color:#a78bfa; box-shadow:inset 0 0 0 1px rgba(167,139,250,0.35); background:#2a2438; }
 .minimax-ref-clip.is-character-group:hover { background:#322b48; }

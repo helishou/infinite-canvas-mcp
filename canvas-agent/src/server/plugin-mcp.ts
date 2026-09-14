@@ -49,6 +49,12 @@ export type PluginMcpContext = {
     getCanvasNodes: () => Promise<AgentCanvasNode[]>;
     getCanvasNode: (id: string) => Promise<AgentCanvasNode | null>;
     updateCanvasNode: (id: string, patch: Partial<AgentCanvasNode>, metadataPatch?: Record<string, unknown>) => Promise<void>;
+    /** H3 单段原子更新：仅 patch 这一段，节点级 metadata（status/materials/...）请用 updateCanvasNode 走 update_node。 */
+    updateH3Segment: (nodeId: string, segmentId: string, patch: Record<string, unknown>) => Promise<void>;
+    addH3Segment: (nodeId: string, segment: Record<string, unknown>) => Promise<void>;
+    deleteH3Segment: (nodeId: string, segmentId: string) => Promise<void>;
+    /** 完全替换 H3 节点的 segments（plan 重排等场景）。 */
+    replaceH3Segments: (nodeId: string, segments: Array<Record<string, unknown>>) => Promise<void>;
     /** 插件需要调用通用画布工具时的入口；Backend MCP 注入原生执行器，Agent MCP 注入浏览器桥接。 */
     callCanvasTool: (name: ToolName, input: Record<string, unknown>) => Promise<unknown>;
 };
@@ -121,11 +127,43 @@ export function buildPluginMcpContext(config: CanvasAgentConfig, backend: Plugin
         getCanvasNode: async (id) => (await readNodes()).find((node) => node.id === id) ?? null,
         callCanvasTool,
         updateCanvasNode: async (id, patch, metadataPatch) => {
+            // updateCanvasNode 只用于普通字段 + 节点级 metadata；H3 的 metadata.segments 走细粒度 op。
+            if (metadataPatch && Object.prototype.hasOwnProperty.call(metadataPatch, "segments")) {
+                throw new Error("updateCanvasNode 不允许传 metadata.segments；H3 节点请用 updateH3Segment / addH3Segment / deleteH3Segment");
+            }
             const projects = await backend.listCanvasProjects() as Array<{ id?: string; nodes?: AgentCanvasNode[] }>;
             const target = projects.find((project) => Array.isArray(project.nodes) && project.nodes.some((node) => node.id === id));
             if (!target) throw new Error(`找不到画布节点：${id}`);
             const operation = { type: "update_node", id, patch: { ...patch }, ...(metadataPatch ? { metadata: metadataPatch } : {}) };
             await backend.applyCanvasOperations(String(target.id), [operation], Number((target as Record<string, unknown>).revision || 0));
+        },
+        updateH3Segment: async (nodeId, segmentId, patch) => {
+            const projects = await backend.listCanvasProjects() as Array<{ id?: string; revision?: number; nodes?: AgentCanvasNode[] }>;
+            const target = projects.find((project) => Array.isArray(project.nodes) && project.nodes.some((node) => node.id === nodeId));
+            if (!target) throw new Error(`找不到画布节点：${nodeId}`);
+            const op = { type: "update_h3_segment", nodeId, segmentId, patch };
+            await backend.applyCanvasOperations(String(target.id), [op], Number(target.revision || 0));
+        },
+        addH3Segment: async (nodeId, segment) => {
+            const projects = await backend.listCanvasProjects() as Array<{ id?: string; revision?: number; nodes?: AgentCanvasNode[] }>;
+            const target = projects.find((project) => Array.isArray(project.nodes) && project.nodes.some((node) => node.id === nodeId));
+            if (!target) throw new Error(`找不到画布节点：${nodeId}`);
+            const op = { type: "add_h3_segment", nodeId, segment };
+            await backend.applyCanvasOperations(String(target.id), [op], Number(target.revision || 0));
+        },
+        deleteH3Segment: async (nodeId, segmentId) => {
+            const projects = await backend.listCanvasProjects() as Array<{ id?: string; revision?: number; nodes?: AgentCanvasNode[] }>;
+            const target = projects.find((project) => Array.isArray(project.nodes) && project.nodes.some((node) => node.id === nodeId));
+            if (!target) throw new Error(`找不到画布节点：${nodeId}`);
+            const op = { type: "delete_h3_segment", nodeId, segmentId };
+            await backend.applyCanvasOperations(String(target.id), [op], Number(target.revision || 0));
+        },
+        replaceH3Segments: async (nodeId, segments) => {
+            const projects = await backend.listCanvasProjects() as Array<{ id?: string; revision?: number; nodes?: AgentCanvasNode[] }>;
+            const target = projects.find((project) => Array.isArray(project.nodes) && project.nodes.some((node) => node.id === nodeId));
+            if (!target) throw new Error(`找不到画布节点：${nodeId}`);
+            const op = { type: "replace_h3_segments", nodeId, segments };
+            await backend.applyCanvasOperations(String(target.id), [op], Number(target.revision || 0));
         },
     };
 }

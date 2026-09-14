@@ -105,9 +105,11 @@ export function ImageCompareModal({ open, beforeUrl, afterUrl, title, onClose }:
         }
     }, [open, handleMouseMove, handleTouchMove, handleEnd]);
 
+    // 默认 50%（左半 before、右半 after）。需要在 open 切换 *和* 切图（beforeUrl/afterUrl 变）时都重置：
+    // 只挂 [open] 的话，同一 modal 没关就换图就不会 reset，旧的滑块位置会"飘"到下一张图上。
     useEffect(() => {
         if (open) setSliderPos(50);
-    }, [open]);
+    }, [open, beforeUrl, afterUrl]);
 
     return (
         <Modal

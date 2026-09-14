@@ -291,6 +291,28 @@ function syncConfigToBackend(config: AiConfig) {
     }).catch(() => undefined);
 }
 
+// 从 backend 拉 ai.config：source of truth。拉到就用 backend 的（同时写回 localStorage 当缓存）；
+// 拉不到（后端没数据 / 离线）就保持当前 zustand 状态（localStorage 里的旧值）不动，绝不反向后端写默认配置。
+async function hydrateConfigFromBackend() {
+    if (typeof window === "undefined") return;
+    try {
+        const [{ fetchBackendAiConfig }, { useBackendStore }] = await Promise.all([
+            import("@/services/backend-api"),
+            import("@/stores/use-backend-store"),
+        ]);
+        if (!useBackendStore.getState().connected) return;
+        const response = await fetchBackendAiConfig();
+        if (!response || response.config === null || response.config === undefined) return;
+        const next = response.config as Partial<AiConfig>;
+        // 只在 backend 数据与本地不同时写，避免无谓的 persist 触发
+        const current = useConfigStore.getState().config;
+        if (JSON.stringify(current) === JSON.stringify(next)) return;
+        useConfigStore.setState({ config: { ...defaultConfig, ...next, channels: Array.isArray(next.channels) ? next.channels : [] } });
+    } catch {
+        // 后端拉取失败不阻塞 UI：保留 localStorage 兜底
+    }
+}
+
 export const useConfigStore = create<ConfigStore>()(
     persist(
         (set, get) => ({
@@ -364,12 +386,25 @@ export const useConfigStore = create<ConfigStore>()(
                     },
                 };
             },
-            onRehydrateStorage: () => (state) => {
-                if (state?.config) syncConfigToBackend(state.config);
-            },
+            // 注意：之前这里有 onRehydrateStorage 回调，hydrate 完会把 localStorage 反向写回 backend。
+            // 这会让"清 localStorage → 首次打开"瞬间把 backend 的真实配置覆盖成 defaultConfig，是数据丢失 bug。
+            // 现在的 source of truth 是 backend（见 hydrateConfigFromBackend），localStorage 仅作离线缓存。
         },
     ),
 );
+
+// 订阅 backend 事件，做 source-of-truth 同步：
+// - backend-connected：连接刚建立时拉一次
+// - backend-event 收到 settings.updated：本机或其它 tab 改动了 ai.config
+if (typeof window !== "undefined") {
+    window.addEventListener("backend-connected", () => { void hydrateConfigFromBackend(); });
+    window.addEventListener("backend-event", (event) => {
+        const detail = (event as CustomEvent).detail as { type?: string; entityId?: string } | undefined;
+        if (detail?.type === "settings.updated" && detail.entityId === "ai.config") {
+            void hydrateConfigFromBackend();
+        }
+    });
+}
 
 export function useEffectiveConfig() {
     const config = useConfigStore((state) => state.config);

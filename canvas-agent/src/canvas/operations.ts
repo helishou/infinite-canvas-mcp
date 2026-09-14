@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 import type { ToolName } from "./schemas.js";
-import { nextCanvasX } from "./tools.js";
+import { nextCanvasAnchor, nextCanvasX } from "./tools.js";
 import type { CanvasNode, CanvasNodeType, CanvasSnapshot } from "./types.js";
 
 export type CanvasToolRequest = { name: "canvas_apply_ops"; input: Record<string, unknown> };
@@ -87,7 +87,7 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
     if (name === "canvas_select_nodes") return applyOps([{ type: "select_nodes", ids: (input as { ids: string[] }).ids }]);
     if (name === "canvas_set_viewport") return applyOps([{ type: "set_viewport", viewport: (input as { viewport: unknown }).viewport }]);
     if (name === "canvas_run_generation") {
-        const data = input as { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append" };
+        const data = input as { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append"; segmentId?: string };
         const referenceNodeIds = [...new Set(data.referenceNodeIds || [])];
         if (!referenceNodeIds.length) return applyOps([runGenerationOp({ ...data, mode: generationMode(data.mode) })]);
         if (!state) throw new Error("替换生成参考图前必须先读取当前画布");
@@ -160,11 +160,15 @@ function configNodeOp(id: string, input: Record<string, unknown>, x: number, y: 
 function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot | null) {
     const mode = generationMode(input.mode);
     const prompt = String(input.prompt || "");
-    const x = Number(input.x ?? nextCanvasX(state));
-    const y = Number(input.y ?? 0);
+    const referenceNodeIds = Array.isArray(input.referenceNodeIds) ? input.referenceNodeIds.filter((id): id is string => typeof id === "string") : [];
+    // 有 reference 时优先把新节点贴到第一个 reference 节点同行右侧（间距 96 + 0 之间 324px 留给 config），
+    // 避免 nextCanvasX 把新节点推到画布全局最右、导致连续 MCP 生成的链路散到几屏宽之外。
+    // 没有 reference 时退回到 nextCanvasX（画布全局最右）+ y=0，保持纯文生的老行为。
+    const anchor = nextCanvasAnchor(state, referenceNodeIds[0]);
+    const x = Number(input.x ?? anchor.x);
+    const y = Number(input.y ?? anchor.y);
     const textId = `text-${crypto.randomUUID()}`;
     const configId = `config-${crypto.randomUUID()}`;
-    const referenceNodeIds = Array.isArray(input.referenceNodeIds) ? input.referenceNodeIds.filter((id): id is string => typeof id === "string") : [];
     // When the prompt only @-mentions nodes already passed as references, reuse them instead of minting a duplicate text node.
     const mentionedIds = [...prompt.matchAll(/@\[node:([\w-]+)\]/g)].map((match) => match[1]);
     const reuseReferences = referenceNodeIds.length > 0 && mentionedIds.length > 0
@@ -189,8 +193,8 @@ function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot
 }
 
 /** 创建触发节点生成的画布操作。 */
-function runGenerationOp(input: { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append" }) {
-    return { type: "run_generation", nodeId: input.nodeId, ...(input.mode ? { mode: input.mode } : {}), prompt: input.prompt, ...cleanRecord({ params: input.params, idempotencyKey: input.idempotencyKey, resultPolicy: input.resultPolicy }) };
+function runGenerationOp(input: { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append"; segmentId?: string }) {
+    return { type: "run_generation", nodeId: input.nodeId, ...(input.mode ? { mode: input.mode } : {}), prompt: input.prompt, ...cleanRecord({ params: input.params, idempotencyKey: input.idempotencyKey, resultPolicy: input.resultPolicy, segmentId: input.segmentId }) };
 }
 
 /** 将未知生成模式归一为画布支持的模式。 */

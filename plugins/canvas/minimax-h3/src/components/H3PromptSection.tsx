@@ -248,6 +248,20 @@ export function H3PromptSection({
         const ordinal = ++ordinals[ref.type];
         return `${ref.type === "image" ? "Picture" : ref.type === "video" ? "Video" : "Audio"} ${ordinal}: ${ref.name || "unnamed reference"}`;
       }).join("\n") || "None";
+      // ---- 分镜图参考过渡：多张参考图按顺序排列成连续姿势帧，把段尾设计成过渡到下一张分镜姿势 ----
+      const storyboardMode = ctx.node.metadata?.promptEnhanceStoryboard === true;
+      let transitionPlan = "";
+      let transitionInstruction = "";
+      if (storyboardMode && imageRefs.length >= 2) {
+        const lastOrd = imageRefs.length;
+        transitionPlan = await analyzeStoryboardTransitions(ctx, imageRefs, model);
+        transitionInstruction = [
+          `这些参考图片是一组连续分镜姿势帧（图1为起始姿势，图${lastOrd}为目标姿势），不是互相独立的风格素材。`,
+          `本段提示词必须：从图1的姿势出发，依次经过每一对相邻图（图k→图k+1）的连续动作，最终收尾于图${lastOrd}的姿势；相邻图之间不得瞬移、重置或硬切。`,
+          `末句必须明确落到图${lastOrd}的目标姿势（例如图1站立、图2蹲下，则末句写“此人缓缓蹲下成蹲姿”）。`,
+          `按下面的「过渡计划」落实每段肢体、重心、朝向的具体变化。`,
+        ].join("\n");
+      }
       const structure = normalizedMode === "ref2va"
         ? "Use exactly the six sections in this order: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music. Use <Subject N>, <Picture N>, <Video N>, and <Audio N> consistently."
         : "Use exactly the three sections in this order: integrated_multimodal_description, overall_soundscape, non_diegetic_music.";
@@ -259,7 +273,7 @@ export function H3PromptSection({
             ? "Do not introduce reference labels or image-alignment instructions."
             : "Treat references as Ref2VA assets; do not force them to be the first frame unless the user explicitly requests it.";
       const officialReference = normalizedMode === "ref2va" ? refReference : baseReference;
-      const system = [
+      const systemParts = [
         "You are the official MiniMax H3 video prompt writer.",
         "Follow the embedded official H3 prompt-writing reference exactly; it is the format authority.",
         officialReference,
@@ -271,12 +285,16 @@ export function H3PromptSection({
         "Use the exact official field names, section order, reference tags, timestamp conventions, dialogue tags, and language rules. Do not replace official tags with @ aliases.",
         "Keep exact user dialogue and visible text unchanged. Do not repeat dialogue in overall_soundscape or non_diegetic_music.",
         "Return only the final prompt, without Markdown fences, explanations, or prefaces.",
-      ].join("\n\n");
-      const userPrompt = [
+      ];
+      if (transitionInstruction) systemParts.push(`Storyboard image reference transition instruction:\n${transitionInstruction}`);
+      const system = systemParts.join("\n\n");
+      const userPromptParts = [
         prompt.trim(),
         String(ctx.node.metadata?.globalPrompt || "").trim(),
         `Reference manifest (fixed numbering; do not reorder):\n${manifest}`,
-      ].filter(Boolean).join("\n\n");
+      ];
+      if (transitionPlan) userPromptParts.push(`Transition plan (fixed image order; do not reorder):\n${transitionPlan}`);
+      const userPrompt = userPromptParts.filter(Boolean).join("\n\n");
       const result = await ctx.ai.generateText(userPrompt, {
         model,
         system,
@@ -486,6 +504,19 @@ export function H3PromptSection({
         >
           {enhancing ? "增强中…" : "增强提示词"}
         </button>
+        <label
+          key="storyboard-toggle"
+          style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, marginLeft: 6, opacity: imageRefs.length >= 2 ? 1 : 0.45, cursor: imageRefs.length >= 2 ? "pointer" : "not-allowed" }}
+        >
+          <input
+            type="checkbox"
+            disabled={imageRefs.length < 2}
+            checked={ctx.node.metadata?.promptEnhanceStoryboard === true}
+            onChange={(event) => ctx.updateMetadata({ promptEnhanceStoryboard: event.target.checked })}
+            title={imageRefs.length < 2 ? "分镜图过渡需要至少 2 张图片参考" : "开启后按分镜图顺序把段尾设计成过渡到下一张分镜姿势"}
+          />
+          分镜图过渡
+        </label>
         {mentionOpen ? (
           <button
             key="cancel-mention"
@@ -668,6 +699,40 @@ export function H3PromptSection({
       ) : null}
     </label>
   );
+}
+
+// 分镜图参考过渡分析：对连续相邻的两张关键帧提取「姿势如何连续过渡」的可执行动作，
+// 供增强提示词把段尾落到下一张分镜姿势（如站→蹲，末句写「此人蹲了下来」）。
+async function analyzeStoryboardTransitions(
+  ctx: CanvasNodeContext,
+  refs: H3Ref[],
+  model: string,
+): Promise<string> {
+  const lines: string[] = [];
+  for (let k = 0; k < refs.length - 1; k++) {
+    const from = refs[k];
+    const to = refs[k + 1];
+    const fromOrd = k + 1;
+    const toOrd = k + 2;
+    try {
+      const res = await ctx.ai.generateText(
+        `下面是连续分镜姿势序列中的两张关键帧：图${fromOrd}（起始姿势）与图${toOrd}（目标姿势）。只提取从图${fromOrd}到图${toOrd}的连续过渡动作：主体肢体如何运动、重心如何转移、身体朝向/视线/姿态如何变化，用若干可执行的自然语言短句描述这段过渡（不重复身份、服装、外观，只写动作与姿态变化）。只返回过渡动作正文，不要追问、不要写英文模板。`,
+        {
+          model,
+          system: "你是 H3 分镜姿势过渡分析器。严格按图序对比两张关键帧，只输出从前者到后者的连续动作描述，不编造图中未出现的变化。",
+          references: [
+            { url: from.url, name: from.name },
+            { url: to.url, name: to.name },
+          ],
+        },
+      );
+      const text = res.text.trim();
+      if (text) lines.push(`图${fromOrd}→图${toOrd}：${text}`);
+    } catch {
+      lines.push(`图${fromOrd}→图${toOrd}：（过渡分析失败，请人工核对姿势变化）`);
+    }
+  }
+  return lines.join("\n\n");
 }
 
 function MentionRow({

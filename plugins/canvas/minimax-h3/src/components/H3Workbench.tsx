@@ -18,8 +18,17 @@ import { H3CharacterRefModal } from "./H3CharacterRefModal";
 export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const metadata = ctx.node.metadata || {};
     const segments = segmentsFor(metadata);
-    const selected = segments.find((item) => item.id === String(metadata.selectedSegmentId || "")) || segments[0];
+    const storedSelectedId = String(metadata.selectedSegmentId || "");
+    const selected = segments.find((item) => item.id === storedSelectedId) || segments[0];
     const selectedIndex = Math.max(0, segments.findIndex((item) => item.id === selected?.id));
+    // 兜底：MCP / 任务回写 / replace_h3_segments 等路径可能没把 selectedSegmentId 同步到新 plan。
+    // 这里检测到"选中的段已经不存在"就主动把 selectedSegmentId 写回成实际选中的段 id，
+    // 避免后续 patch / 引用 / 选段按钮继续打到失效 id 上。
+    useEffect(() => {
+        if (!segments.length) return;
+        if (storedSelectedId && storedSelectedId === selected?.id) return;
+        ctx.updateMetadata({ selectedSegmentId: selected?.id || segments[0].id });
+    }, [ctx, segments, selected?.id, storedSelectedId]);
     const upstream = readH3Refs(ctx);
     const selectedRefs = selected ? refsForSegment(selected) : [];
     const outputSegmentId = (url: string) => segments.find((segment) => resultUrl(segment.result) === url || (segment.results || []).some((item) => item.url === url))?.id;
@@ -80,6 +89,12 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const effTimelineH = solved.t;
     const effRefLaneH = solved.r;
     const playRequest = Number(metadata.h3PlayRequest || 0);
+    // 本地 playToken：仅在用户真正发起播放时（playAll / 续播换段）递增，
+    // 用作 H3PreviewPlayer 实际触发 v.play() 的信号。metadata 里的 h3PlayRequest 只用于
+    // 持久化"我刚才播到哪"，不直接驱动自动播放——避免 React StrictMode dev 模式下
+    // mount 时 useEffect 跑两次让 skipFirstPlayRequestRef 失效、也避免其它路径
+    // （MCP 同步、metadata 写回等）无意间让视频自动起播。
+    const [playToken, setPlayToken] = useState(0);
     const [smartStoryboardOpen, setSmartStoryboardOpen] = useState(false);
     const [smartStoryboardUploads, setSmartStoryboardUploads] = useState<H3Ref[]>([]);
     const [canvasReferenceDragOver, setCanvasReferenceDragOver] = useState(false);
@@ -218,16 +233,21 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         const fromSegment = startSegment;
         // 保留 playhead 在当前 clip 内的相对位置
         const localPlayhead = Math.max(0, playhead - Number(fromSegment.start || 0));
+        setPlayToken((token) => token + 1);
         ctx.updateMetadata({ selectedSegmentId: fromSegment.id, playhead: Number(fromSegment.start || 0) + localPlayhead, h3PlayRequest: Number(metadata.h3PlayRequest || 0) + 1, h3PlaybackAll: true });
     };
     // continuedFromSlot=true 表示播放器的双槽交叉淡入已经自己把下一段起播了（buffer 槽接手）。
-    // 这时**绝不能**再递增 h3PlayRequest：播放器的 playRequest effect 是 toggle 语义，
-    // 会把「已在播放的下一段」当成用户点击而 pause，表现为连续播放播完一段就停住。
+    // 这时**绝不能**再递增 playToken/h3PlayRequest：双槽续播已经把下一段起播了，再触发一次反而会切乱状态。
     const advancePlayback = (continuedFromSlot = false) => {
         if (metadata.h3PlaybackAll !== true) return;
         const next = segments.slice(selectedIndex + 1).find((item) => Boolean(resultUrl(item.result)));
         if (!next) { ctx.updateMetadata({ h3PlaybackAll: false, playhead: total }); return; }
-        ctx.updateMetadata({ selectedSegmentId: next.id, playhead: Number(next.start || 0), ...(continuedFromSlot ? {} : { h3PlayRequest: Number(metadata.h3PlayRequest || 0) + 1 }) });
+        if (continuedFromSlot) {
+            ctx.updateMetadata({ selectedSegmentId: next.id, playhead: Number(next.start || 0) });
+        } else {
+            setPlayToken((token) => token + 1);
+            ctx.updateMetadata({ selectedSegmentId: next.id, playhead: Number(next.start || 0), h3PlayRequest: Number(metadata.h3PlayRequest || 0) + 1 });
+        }
     };
     const nextSegment = segments.slice(selectedIndex + 1).find((item) => Boolean(resultUrl(item.result)));
     const nextUrl = nextSegment ? resultUrl(nextSegment.result) : undefined;
@@ -258,7 +278,7 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         })() : null}
         <style key="workbench-style">{`.minimax-canvas-workbench{--minimax-prompt-w:${promptW}px;--minimax-preview-w:${previewW}px;--minimax-preview-h:${effPreviewH}px;--minimax-timeline-h:${effTimelineH}px;--minimax-ref-h:${effRefLaneH}px}`}</style>
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
-            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
+            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} /></div>
             <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onOpenCharacterGroup={openCharacterGroup} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />

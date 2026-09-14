@@ -75,6 +75,10 @@ export function syncBackendAiConfig(config: unknown) {
     return request<{ ok: boolean }>("PUT", "/settings/ai-config", { config });
 }
 
+export function fetchBackendAiConfig(signal?: AbortSignal) {
+    return request<{ ok: boolean; config: Record<string, unknown> | null }>("GET", "/settings/ai-config", undefined, { signal });
+}
+
 
 export async function backendHealth(): Promise<{ ok: boolean; protocolVersion?: number; node?: string; pid?: number }> {
     try {

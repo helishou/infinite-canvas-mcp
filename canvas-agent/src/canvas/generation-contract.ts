@@ -11,6 +11,8 @@ export const canvasGenerationCommandSchema = z.object({
     operation: z.enum(["generate", "h3-run"]).optional(),
     projectId: z.string().optional(),
     nodeId: z.string().optional(),
+    /** 生成结果节点与参考配置节点分离时，指定本次生成的源节点。 */
+    sourceNodeId: z.string().optional(),
     nodeIds: z.array(z.string()).optional(),
     segmentId: z.string().optional(),
     segmentIndex: z.number().optional(),

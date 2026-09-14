@@ -10,8 +10,56 @@ export type CanvasOperationResult = {
     createdConnectionIds?: string[];
     deletedConnectionIds?: string[];
     deletedCount?: number;
+    createdSegmentIds?: string[];
+    updatedSegmentIds?: string[];
+    deletedSegmentIds?: string[];
     skipped?: boolean;
 };
+
+// H3 节点类型前缀（与前端 isH3Node / node-definition.ts 保持一致）
+const H3_NODE_TYPE_PATTERN = /^minimax|^smart-minimax/;
+
+/** 识别 H3 节点（含历史 smart-minimax 变体）。 */
+export function isH3CanvasNode(node: Record<string, unknown> | null | undefined): boolean {
+    if (!node) return false;
+    return H3_NODE_TYPE_PATTERN.test(String(node.type || ""));
+}
+
+/** 从节点 metadata 中拿到 segments 数组（不修改原对象）。 */
+function segmentsOf(node: Record<string, unknown>): Array<Record<string, unknown>> {
+    const metadata = recordOf(node.metadata);
+    const segments = metadata.segments;
+    return Array.isArray(segments) ? segments.map((item) => (item && typeof item === "object" ? { ...(item as Record<string, unknown>) } : {})) : [];
+}
+
+/** 在 segments 中按 id 查找；找不到返回 -1。 */
+function findSegmentIndex(segments: Array<Record<string, unknown>>, segmentId: string): number {
+    return segments.findIndex((segment) => String(segment.id || "") === segmentId);
+}
+
+/**
+ * 校验 update_node.metadata.segments 是否为「完整替换」：
+ * 长度相同 + id 集合相同。任何不满足都直接抛错，强制所有写路径要么走 update_h3_segment 等细粒度 op，要么用 replace_h3_segments 显式做完整替换。
+ *
+ * 注意：节点首次构造 segments 必须走 add_node 携带完整 metadata，不能先 add_node(metadata:{}) 再 update_node.metadata.segments。
+ */
+function assertFullSegmentsReplacement(node: Record<string, unknown>, incomingSegments: Array<Record<string, unknown>>): void {
+    const previousSegments = segmentsOf(node);
+    const previousIds = new Set(previousSegments.map((segment) => String(segment.id || "")));
+    const incomingIds = new Set(incomingSegments.map((segment) => String(segment.id || "")));
+    if (previousIds.size !== incomingIds.size) {
+        throw new Error(
+            `metadata.segments 必须为完整数组（id 集合不同：旧 ${previousIds.size} 项 vs 新 ${incomingIds.size} 项）；请改用 update_h3_segment / add_h3_segment / delete_h3_segment 细粒度 op`,
+        );
+    }
+    for (const id of previousIds) {
+        if (!incomingIds.has(id)) {
+            throw new Error(
+                `metadata.segments 必须为完整数组（id ${id} 缺失）；请改用 update_h3_segment / add_h3_segment / delete_h3_segment 细粒度 op`,
+            );
+        }
+    }
+}
 
 export function applyCanvasProjectOperations(project: Record<string, unknown>, operations: CanvasOperation[]) {
     const nodes = nodesOf(project);
@@ -41,7 +89,114 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             if (!node) throw new Error(`找不到节点：${id}`);
             Object.assign(node, operation.patch || {});
             if (operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)) {
-                node.metadata = { ...recordOf(node.metadata), ...(operation.metadata as Record<string, unknown>) };
+                const metadata = recordOf(node.metadata);
+                let metadataPatch = operation.metadata as Record<string, unknown>;
+                // metadata.segments 在 update_node 中必须是「完整替换」（同长同 id 集合）。
+                // 部分替换会冲突 MCP / 任务回写等并发写路径，强制改用 update_h3_segment 等细粒度 op。
+                if (Object.prototype.hasOwnProperty.call(metadataPatch, "segments")) {
+                    if (!isH3CanvasNode(node)) {
+                        throw new Error("只有 H3 节点的 metadata.segments 允许在 update_node 中出现");
+                    }
+                    const incomingSegments = Array.isArray(metadataPatch.segments) ? metadataPatch.segments as Array<Record<string, unknown>> : [];
+                    assertFullSegmentsReplacement(node, incomingSegments);
+                    metadataPatch = { ...metadataPatch, segments: incomingSegments };
+                }
+                node.metadata = { ...metadata, ...metadataPatch };
+            }
+            if (Array.isArray(operation.metadataDelete)) {
+                const metadata = recordOf(node.metadata);
+                for (const key of operation.metadataDelete.map(String)) delete metadata[key];
+                node.metadata = metadata;
+            }
+        } else if (operation.type === "update_h3_segment") {
+            const nodeId = String(operation.nodeId || "");
+            const segmentId = String(operation.segmentId || "");
+            const patch = recordOf(operation.patch);
+            if (!nodeId) throw new Error("update_h3_segment 缺少 nodeId");
+            if (!segmentId) throw new Error("update_h3_segment 缺少 segmentId");
+            const node = nodes.find((item) => String(item.id) === nodeId);
+            if (!node) throw new Error(`找不到节点：${nodeId}`);
+            if (!isH3CanvasNode(node)) throw new Error(`节点 ${nodeId} 不是 H3 节点，不能使用 update_h3_segment`);
+            const segments = segmentsOf(node);
+            const index = findSegmentIndex(segments, segmentId);
+            if (index < 0) throw new Error(`节点 ${nodeId} 上找不到 segment ${segmentId}`);
+            // CAS：expectedFields 中的每一个字段都必须与当前值匹配，否则抛错（用于任务回写防止被新任务接管后被覆盖）。
+            if (operation.expectedFields && typeof operation.expectedFields === "object") {
+                for (const [field, expected] of Object.entries(operation.expectedFields as Record<string, unknown>)) {
+                    if (String(segments[index][field] || "") !== String(expected)) {
+                        throw new Error(`update_h3_segment CAS 失败：${nodeId}/${segmentId}.${field} 已不是期望值`);
+                    }
+                }
+            }
+            // id 不可改；其他字段 Object.assign 直接覆盖（patch 已是字段级差异，不传相同值进来）
+            delete (patch as Record<string, unknown>).id;
+            const nextSegment: Record<string, unknown> = { ...segments[index], ...patch };
+            if (Array.isArray(operation.patchDelete)) {
+                for (const key of (operation.patchDelete as unknown[]).map(String)) delete nextSegment[key];
+            }
+            segments[index] = nextSegment;
+            const metadata = recordOf(node.metadata);
+            metadata.segments = segments;
+            node.metadata = metadata;
+            result.updatedSegmentIds = [segmentId];
+        } else if (operation.type === "add_h3_segment") {
+            const nodeId = String(operation.nodeId || "");
+            const incoming = recordOf(operation.segment);
+            if (!nodeId) throw new Error("add_h3_segment 缺少 nodeId");
+            if (!incoming.id) throw new Error("add_h3_segment.segment.id 必填");
+            const node = nodes.find((item) => String(item.id) === nodeId);
+            if (!node) throw new Error(`找不到节点：${nodeId}`);
+            if (!isH3CanvasNode(node)) throw new Error(`节点 ${nodeId} 不是 H3 节点，不能使用 add_h3_segment`);
+            const segments = segmentsOf(node);
+            if (findSegmentIndex(segments, String(incoming.id)) >= 0) {
+                throw new Error(`segment id ${String(incoming.id)} 已存在`);
+            }
+            segments.push(incoming);
+            const metadata = recordOf(node.metadata);
+            metadata.segments = segments;
+            node.metadata = metadata;
+            result.createdSegmentIds = [String(incoming.id)];
+        } else if (operation.type === "replace_h3_segments") {
+            // 完全替换 segments（plan 重排等场景）。显式 op 走细粒度通道，绕过 update_node.metadata.segments 的「同 id 集合」严格校验。
+            const nodeId = String(operation.nodeId || "");
+            const incoming = Array.isArray(operation.segments) ? operation.segments as Array<Record<string, unknown>> : [];
+            if (!nodeId) throw new Error("replace_h3_segments 缺少 nodeId");
+            const node = nodes.find((item) => String(item.id) === nodeId);
+            if (!node) throw new Error(`找不到节点：${nodeId}`);
+            if (!isH3CanvasNode(node)) throw new Error(`节点 ${nodeId} 不是 H3 节点，不能使用 replace_h3_segments`);
+            const seen = new Set<string>();
+            for (const segment of incoming) {
+                if (!segment.id) throw new Error("replace_h3_segments.segments[].id 必填");
+                const id = String(segment.id);
+                if (seen.has(id)) throw new Error(`replace_h3_segments.segments 包含重复 id: ${id}`);
+                seen.add(id);
+            }
+            const previousSegments = segmentsOf(node);
+            const previousIds = previousSegments.map((segment) => String(segment.id || ""));
+            const incomingIds = incoming.map((segment) => String(segment.id || ""));
+            result.deletedSegmentIds = previousIds.filter((id) => !incomingIds.includes(id));
+            result.createdSegmentIds = incomingIds.filter((id) => !previousIds.includes(id));
+            const metadata = recordOf(node.metadata);
+            metadata.segments = incoming.map((segment) => ({ ...segment }));
+            node.metadata = metadata;
+        } else if (operation.type === "delete_h3_segment") {
+            const nodeId = String(operation.nodeId || "");
+            const segmentId = String(operation.segmentId || "");
+            if (!nodeId) throw new Error("delete_h3_segment 缺少 nodeId");
+            if (!segmentId) throw new Error("delete_h3_segment 缺少 segmentId");
+            const node = nodes.find((item) => String(item.id) === nodeId);
+            if (!node) throw new Error(`找不到节点：${nodeId}`);
+            if (!isH3CanvasNode(node)) throw new Error(`节点 ${nodeId} 不是 H3 节点，不能使用 delete_h3_segment`);
+            const segments = segmentsOf(node);
+            const index = findSegmentIndex(segments, segmentId);
+            if (index < 0) {
+                result.skipped = true;
+            } else {
+                segments.splice(index, 1);
+                const metadata = recordOf(node.metadata);
+                metadata.segments = segments;
+                node.metadata = metadata;
+                result.deletedSegmentIds = [segmentId];
             }
         } else if (operation.type === "delete_node") {
             const ids = new Set(Array.isArray(operation.ids) ? operation.ids.map(String) : [String(operation.id || "")]);

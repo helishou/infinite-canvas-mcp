@@ -23,6 +23,7 @@ export type CanvasImageReference = {
 export type CanvasImageGenerationInput = {
     projectId?: string;
     nodeId?: string;
+    sourceNodeId?: string;
     segmentId?: string;
     model: string;
     prompt: string;
@@ -84,12 +85,14 @@ export class CanvasImageDispatcher {
 
     start(input: CanvasImageGenerationInput, hooks?: DispatcherHooks) {
         if (!String(input.prompt || "").trim()) throw new Error("画布图片生成缺少提示词");
-        const plan = this.plan(input);
+        const plan = this.plan(this.prepareReferences(input));
         const normalized = plan.input;
 
         const taskId = normalized.clientTaskId || `canvas-${crypto.randomUUID()}`;
         const existing = this.stores.tasks.get(taskId);
         if (existing) return { taskId: existing.id, logId: undefined, executor: plan.executor };
+        const active = this.findActiveTask(normalized);
+        if (active) return { taskId: active.id, logId: undefined, executor: active.executor || plan.executor };
         const persistedReferences = normalized.references?.map((reference) => ({
             id: reference.id, name: reference.name, dataUrl: reference.dataUrl, storageKey: reference.storageKey,
             url: reference.url, mimeType: reference.mimeType,
@@ -145,6 +148,49 @@ export class CanvasImageDispatcher {
             await effectiveHooks?.onFailed?.(failure, this.stores.tasks.get(task.id) || task);
         });
         return { taskId: task.id, logId, executor: plan.executor };
+    }
+
+    /**
+     * 任务只持有媒体句柄，不持有整张 base64 图片。
+     * 外部调用方若只给 dataUrl，在进入任务队列前一次性落到 Backend 媒体库。
+     */
+    private prepareReferences(input: CanvasImageGenerationInput): CanvasImageGenerationInput {
+        if (!input.references?.length) return input;
+        const references = input.references.map((reference) => {
+            if (reference.storageKey && this.stores.media.meta(reference.storageKey)) {
+                return stripReferencePayload(reference);
+            }
+            // URL 是 Backend 可解析的媒体句柄，也不应再复制成 dataUrl。
+            if (!reference.dataUrl && reference.url) return stripReferencePayload(reference);
+            const match = /^data:([^;,]+);base64,(.+)$/s.exec(String(reference.dataUrl || ""));
+            if (!match) throw new Error(`参考图缺少 Backend 媒体句柄：${reference.name || reference.id || "未命名图片"}`);
+            const stored = this.stores.media.store(Buffer.from(match[2], "base64"), {
+                name: reference.name || "reference.png",
+                mimeType: reference.mimeType || match[1] || "image/png",
+                category: "input",
+            });
+            return stripReferencePayload({
+                ...reference,
+                storageKey: stored.storageKey,
+                url: this.stores.media.url(stored),
+                mimeType: reference.mimeType || stored.mimeType,
+            });
+        });
+        return { ...input, references };
+    }
+
+    private findActiveTask(input: CanvasImageGenerationInput) {
+        if (!input.projectId) return null;
+        const sourceNodeId = input.sourceNodeId || input.nodeId;
+        if (!sourceNodeId) return null;
+        for (const status of ["running", "queued"] as const) {
+            // nodeId 可能是每次点击新建的结果节点，sourceNodeId 才是同一次生成的稳定身份。
+            // 因此这里不能按结果节点过滤，否则双击会各自创建任务。
+            const active = this.stores.tasks.list({ kind: "canvas-image", status, projectId: input.projectId, limit: 500 })
+                .find((task) => String((task.input as CanvasImageGenerationInput).sourceNodeId || (task.input as CanvasImageGenerationInput).nodeId || "") === sourceNodeId);
+            if (active) return active;
+        }
+        return null;
     }
 
     async retry(task: RuntimeTask) {
@@ -419,6 +465,11 @@ function mimeFromName(name?: string) {
 
 function emptyWorkflowConfig(name: string): WorkflowConfig {
     return { title: name, backend: "", operation: "", description: "", fields: [] };
+}
+
+function stripReferencePayload(reference: CanvasImageReference): CanvasImageReference {
+    const { dataUrl: _dataUrl, ...handle } = reference;
+    return handle;
 }
 
 async function waitForTask(tasks: TaskStore, taskId: string): Promise<RuntimeTask> {

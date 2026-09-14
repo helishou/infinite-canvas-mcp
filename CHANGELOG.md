@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- [修复] 画布图片生成的前端按钮与 MCP 统一由 Backend 按源配置节点解析参考图，结果节点不再因尚未落库或调用方漏传而把参考图提交为空。
+- [新增] H3 同一 Clip 内 ref 支持拖动重排：之前 ref 之间拖动一律走「复制」语义，跨 clip / 外部拖入保留 copy；同 clip 拖到具体 ref 槽时改为「move」语义，从源索引拔出再插入到目标位置，drop 到空白区则追加到末尾。`dataTransfer` 上加 `application/x-infinite-canvas-ref-source-index` 携带源位置信息，`effectAllowed` 改为 `copyMove`；drop 时根据 sourceSegment.id === target.id 走 move / copy 分支。拖动过程中目标槽加 `is-drop-target` 高亮（蓝边 + 浅蓝底），drop / dragend 后清掉。
+- [修复] 拖动 / 滚动画布时被误报"画布已被其他窗口更新"冲突：H3 导演台 rAF tick 每帧 `onPlayheadTick → updateMetadata({ playhead })` 会把 playhead 当成普通字段塞进主同步流，与此同时用户拖窗口触发 `set_viewport` 同步，远端 playhead 必然跟本地对不上 → 弹"节点字段冲突"。把 `playhead` 加进 `H3_BACKEND_NODE_METADATA_FIELDS` 跳过集（同 `status` / `runProgress` 一类不进 diff 提交）：playhead 属于"看见/听见"的 UI 瞬态字段，不该走主同步；其它 tab 看自己 video.currentTime 即可。
+- [修复] 画布操作被 MCP / 任务回写悄悄回滚的根因：原 `applyBackendCanvasEvent` 在 `pendingOps.length === 0` 时直接拿远端覆盖本地（默认"本地最新=权威"），但 MCP / 任务回写是另一个写者。改为：sync 成功后留一份 path-based 的「用户刚提交的字段值」快照（覆盖 `update_node` / `update_h3_segment` / `add_h3_segment` / `replace_h3_segments`），后续 WebSocket 事件来时不论 `pendingOps` 是否为空都先拿快照跟远端比对；任意字段被覆盖就升级成「保留我的 / 采用远端」冲突弹窗，不会再静默用远端抹掉刚 sync 的内容。
+- [修复] 冲突弹窗「保留我的 N 个操作」按钮实际不生效：原来 `keepPendingOpsOnCanvasConflict` 只把 `syncBase.revision` 推进到远端、清掉 conflict state，没有触发任何同步，必须等用户下一次显式编辑才重提 pendingOps。期间 pendingOps 一直留在本地，下一次远端事件再次算冲突 → 弹窗反复出现。改为在 `set` 之后立刻 `scheduleCanvasSync()`，400ms 内按新 revision 重提 pendingOps，弹窗关闭即生效。
+- [修复] H3 「设为当前 Clip」后内容被 MCP / 任务回写悄悄覆盖：现在 sync 成功后会在 store 里留一份"刚同步的 segment 字段值"快照，后续 WebSocket 事件到来时若发现该字段被远端改了（即使本地已无 pendingOps 也会触发），会写入 `canvasConflicts` 并弹窗让用户在「保留我的 / 采用远端」二选一。同时 MCP `h3_apply_video_plan` replace 路径会按"旧选中索引 / 兜底首段"在新 plan 里找对应段并把 `selectedSegmentId` 一起写回；H3 工作台前端另加一道 `selectedSegmentId` 失效兜底 useEffect，避免 replace 后跳到 `segments[0]` 看上去"换回之前的 clip"。
+- [修复] 图像双击预览的对比游标切图时不再"飘"到下一张图：原来 `useEffect(() => { if (open) setSliderPos(50); }, [open])` 只挂 `[open]`，同一 modal 没关就换图（beforeUrl / afterUrl 变）就不会 reset，旧的滑块位置会带过去——体感就是"双击进去时游标在最左、只看见改后的图"。把 `beforeUrl` / `afterUrl` 也加进依赖，新图进来立刻回到 50%（左半 before、右半 after）。
+- [修复] H3 导演台预览视频不再"老被静音"：`<video muted />` 静态属性 + rAF tick 每帧触发父组件重渲染，每次渲染 React 都把 `muted` 强制写回 `true`，用户点原生控件取消静音下一帧立刻被覆盖。改为 `useState` 管理静音状态，初始 `true`（保住 autoplay 权限），新增 `onVolumeChange` 同步用户对原生控件的修改。
+- [修复] H3 导演台预览视频在浏览器标签切到后台时不再"静默播一段再被发现"：新增 `visibilitychange` 与 `window.blur` 监听，切到不可见时主动 pause 双槽 video，切回来时不会无声无息已经播过一段。配合上一条「首次 mount 跳过 playRequest effect」后，进画布与切标签都不再自动播。
+- [修复] 进入画布时 H3 导演台预览视频不再自动播放：之前组件挂载时 `h3PlayRequest` effect 也会跑一次，残留的 `h3PlayRequest` 会触发 `v.play()`；改为首次 mount 直接跳过，只有用户点播放 / 续播换段让 `h3PlayRequest` 真正变化时才起播。
+- [修复] H3 导演台自动播放跳过失效的根因（React StrictMode）：原 `skipFirstPlayRequestRef` 在 dev 模式下被 React StrictMode 的 useEffect 双跑破坏——第一次跑把 ref 置为 false，第二次跑时 skip 已失效，加上 metadata 残留的 `h3PlayRequest > 0` 就直接 `v.play()`。改为把"用户真的想播"的信号从 metadata 解耦：H3Workbench 新增本地 `playToken` state，由 `playAll` / 续播换段（`continuedFromSlot=false` 时）显式递增，H3PreviewPlayer 的 play / seek / rAF tick 三个 effect 全部依赖 `playToken`。metadata 里的 `h3PlayRequest` 仍保留做持久化（用于"我刚才播到哪"），但不再驱动自动播放；StrictMode 双跑 / MCP 同步 / 任务回写无意改 `h3PlayRequest` 都不会再触发自动起播。
+- [调整] H3 节点 metadata.segments 收敛为细粒度 op：新增 `update_h3_segment` / `add_h3_segment` / `delete_h3_segment` / `replace_h3_segments` 四个 op；`update_node.metadata.segments` 加严格校验（必须为完整替换、同长同 id 集合），所有「改单段」都走 `update_h3_segment`。`writeBackH3Task`、MCP `h3_update_clip` 与 `h3_apply_video_plan`、前端 `diffCanvasProject` 全部改为细粒度；冲突检测按 `(nodeId, segmentId, field)` 三元组判断。从此 MCP 改 S01 / 任务回写 S02 / 前端编辑 S03 互不阻塞；只有真正改同一段同一字段才报冲突。
+- [修复] H3 任务状态与产出字段改由 Backend 独占，阻止页面旧节点快照覆盖 MCP / 按钮生成结果。
 - [优化] 增加共享生成命令的运行时校验，以及前端、MCP、插件调用方和旧入口的架构回归护栏，防止新增功能再次分叉。
 - [调整] 画布生成收敛为统一 `CanvasGenerationCommand` 与 Backend `CanvasGenerationService`：前端、MCP、插件共用 `/canvas/generation`，移除旧 `/canvas/h3/runs`、`/canvas/image-generation` 及重复执行器分流。
 - [修复] 自定义提示词统一接入提示词数据通道和画布侧栏，所有提示词入口首次打开时都会从浏览器本地加载。
@@ -26,6 +39,7 @@
 - [修复] H3 节点卡在「生成中」无法点击生成：修正忙碌判定与「卡死解锁」守卫互斥导致解锁分支永不生效的问题，轮询增加 120s 兜底自愈，失联时按钮显示「重置并重新生成」。
 - [调整] 移除画布「选中节点后按 Delete/Backspace 直接删除节点」的快捷键（误删后难以恢复），连线删除保留；节点删除仍可通过右键菜单、节点悬浮工具栏、顶部删除按钮完成。
 - [新增] 「整理布局」自动把 H3 导演台节点排除出流程分层，并单独纵向排在最右侧一列，不再撑开其它节点间距。
+- [新增] H3 「增强提示词」新增「分镜图过渡」开关（位于「增强提示词」按钮旁，需当前 Clip 有 ≥2 张图片参考才可用）：开启后把当前 Clip 的多张图片参考视为连续姿势帧，增强前先对相邻图对（图k→图k+1）做姿势过渡分析（肢体/重心/朝向怎么变），再把结果注入增强提示词，强制段尾落到最后一张分镜姿势——如图片1站、图片2蹲，则增强结果末句写「此人缓缓蹲下」，解决分镜参考图之间姿势跳变、首尾不衔接的问题。关闭时仍是原增强行为。
 - [修复] 「整理布局」水平间距不再被选集中最宽节点撑开：列间距按各列自身最宽节点逐列累加，而非统一使用全局最宽宽度。
 - [修复] 画布实时同步不再把远程事件显示成浏览器刷新；SSE 连接复用并延后同步竞态事件，避免画布反复 hydration。
 - [修复] H3 任务结束后只清理 ComfyUI 执行缓存和 CUDA allocator，保留已加载模型，避免连续 Clip 因反复卸载/重载模型卡在初始化阶段。

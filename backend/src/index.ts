@@ -44,7 +44,10 @@ ensureDataDirs();
 const db = new BackendDatabase();
 const stores = createStores(db);
 const events = new BackendEventBus();
-const writeBackStandaloneH3Task = (task: import("./db.js").RuntimeTask) => task.params?.parentTaskId ? undefined : writeBackH3Task(stores, events, task);
+const writeBackStandaloneH3Task = async (task: import("./db.js").RuntimeTask) => {
+    if (task.params?.parentTaskId) return;
+    await writeBackH3Task(stores, events, task);
+};
 const comfy = new ComfyUiBackend({ tasks: stores.tasks, settings: stores.settings, media: stores.media, events, onTaskTerminal: writeBackStandaloneH3Task });
 const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
 const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events, runtime.media, writeBackStandaloneH3Task);
@@ -90,6 +93,9 @@ app.use("/agent", agent.app);
 for (const task of stores.tasks.list()) {
     if (["queued", "running"].includes(task.status) && task.kind === "canvas-image") canvasImageDispatcher.resume(task);
     if (["queued", "running"].includes(task.status) && task.kind === "canvas-h3-run") canvasH3Runner.resume(task);
+    if (["succeeded", "failed", "cancelled"].includes(task.status) && task.kind === "canvas-h3-run") {
+        void canvasH3Runner.reconcileTerminal(task).catch((error) => logger.warn("H3 终态节点回写修复失败", { taskId: task.id, error: error instanceof Error ? error.message : String(error) }));
+    }
     if (["queued", "running"].includes(task.status) && task.kind.startsWith("comfyui:")) runtime.comfy.resume(task.id);
     if (["queued", "running"].includes(task.status) && task.kind === "runninghub:minimax-h3") runningHub.resume(task.id);
 }

@@ -328,81 +328,78 @@ export class BackendDatabase {
         binding: { projectId: string; nodeId: string; segmentId: string; generationLogId?: string },
         output: Record<string, unknown> | null,
     ): { project: CanvasProject; log: GenerationLog | null } | null {
-        this.db.exec("BEGIN IMMEDIATE");
-        try {
-            const project = this.getCanvasProject(binding.projectId);
-            if (!project) { this.db.exec("COMMIT"); return null; }
-            const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
-            const node = nodes.find((item) => String(item.id || "") === binding.nodeId);
-            if (!node) { this.db.exec("COMMIT"); return null; }
-            const metadata = node.metadata || {};
-            const segments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
-            const index = segments.findIndex((segment) => String(segment.id || "") === binding.segmentId);
-            // 只在「被另一条更新的任务接管」时放弃回写（非空且不匹配）。
-            // runtimeTaskId 为空说明没有更新的任务接管本段（例如被 h3_update_clip 清空），
-            // 此时必须照常回写，否则任务成功却静默丢结果。
-            const currentTaskId = index >= 0 ? String(segments[index].runtimeTaskId || "") : "";
-            if (index < 0 || (currentTaskId && currentTaskId !== task.id)) {
-                this.db.exec("COMMIT");
-                return null;
-            }
-            const terminalStatus = task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "error";
-            const nextSegment = {
-                ...segments[index],
-                status: terminalStatus,
-                progress: task.progress,
-                runtimeTaskId: "",
-                ...(output ? {
-                    result: output.url,
-                    resultStorageKey: output.storageKey,
-                    results: [
-                        ...(Array.isArray(segments[index].results) ? segments[index].results as Array<Record<string, unknown>> : []).filter((item) => String(item.url || "") !== String(output.url || "")),
-                        { ...output, name: `Clip ${index + 1}` },
-                    ],
-                } : {}),
-                ...(task.error ? { errorDetails: task.error } : {}),
-            };
-            const materials = output ? [
-                ...(Array.isArray(metadata.materials) ? metadata.materials as Array<Record<string, unknown>> : []).filter((item) => String(item.url || "") !== String(output.url || "")),
+        // 不在外部再开 BEGIN IMMEDIATE：applyCanvasProjectOperations 内部自管事务，SQLite 不支持嵌套。
+        // 先做「被另一条更新的任务接管」检查（runtimeTaskId CAS），命中则放弃回写。
+        const project = this.getCanvasProject(binding.projectId);
+        if (!project) return null;
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+        const node = nodes.find((item) => String(item.id || "") === binding.nodeId);
+        if (!node) return null;
+        const metadata = recordOf(node.metadata);
+        const segments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
+        const index = segments.findIndex((segment) => String(segment.id || "") === binding.segmentId);
+        const currentTaskId = index >= 0 ? String(segments[index].runtimeTaskId || "") : "";
+        if (index < 0 || (currentTaskId && currentTaskId !== task.id)) return null;
+        const terminalStatus = task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "error";
+        const segmentPatch: Record<string, unknown> = {
+            status: terminalStatus,
+            progress: task.progress,
+            runtimeTaskId: "",
+            ...(task.error ? { errorDetails: task.error } : {}),
+        };
+        if (output) {
+            segmentPatch.result = output.url;
+            segmentPatch.resultStorageKey = output.storageKey;
+            const previousResults = Array.isArray(segments[index].results) ? segments[index].results as Array<Record<string, unknown>> : [];
+            segmentPatch.results = [
+                ...previousResults.filter((item) => String(item.url || "") !== String(output.url || "")),
+                { ...output, name: `Clip ${index + 1}` },
+            ];
+        }
+        const operations: CanvasOperation[] = [{
+            type: "update_h3_segment",
+            nodeId: binding.nodeId,
+            segmentId: binding.segmentId,
+            patch: segmentPatch,
+            // CAS：只有当 segment 的 runtimeTaskId 仍指向本任务时才回写，防止新任务接管本段后被旧结果覆盖。
+            expectedFields: { runtimeTaskId: task.id },
+        }];
+        // 节点级元数据（status / runProgress / materials / content / storageKey）走 update_node，不动 segments 字段。
+        const nodeMetadataPatch: Record<string, unknown> = {
+            status: terminalStatus,
+            runProgress: task.progress,
+        };
+        if (output) {
+            const previousMaterials = Array.isArray(metadata.materials) ? metadata.materials as Array<Record<string, unknown>> : [];
+            nodeMetadataPatch.materials = [
+                ...previousMaterials.filter((item) => String(item.url || "") !== String(output.url || "")),
                 { ...output, name: "H3 输出", segmentId: binding.segmentId },
-            ] : metadata.materials;
-            const nextProject: CanvasProject = {
-                ...project,
-                revision: Number(project.revision || 0) + 1,
-                updatedAt: new Date().toISOString(),
-                nodes: nodes.map((item) => item.id !== node.id ? item : {
-                    ...item,
-                    metadata: {
-                        ...(item.metadata || {}),
-                        segments: segments.map((segment, segmentIndex) => segmentIndex === index ? nextSegment : segment),
-                        status: terminalStatus,
-                        runProgress: task.progress,
-                        ...(materials ? { materials } : {}),
-                        ...(output ? { content: output.url, storageKey: output.storageKey } : {}),
-                    },
-                }),
-            };
-            this.db.prepare(
-                "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
-            ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
-            const currentLog = binding.generationLogId ? this.getGenerationLog(binding.generationLogId) : null;
-            const actualSubmission = task.result?.actualSubmission && typeof task.result.actualSubmission === "object" ? task.result.actualSubmission as Record<string, unknown> : null;
-            const log = binding.generationLogId
-                ? this.updateGenerationLog(binding.generationLogId, {
-                    status: task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "failed",
-                    finishedAt: new Date().toISOString(),
-                    durationMs: Math.max(0, Date.now() - new Date(String(currentLog?.startedAt || Date.now())).getTime()),
-                    outputs: output ? [output] : [],
-                    ...(actualSubmission ? { params: { ...(currentLog?.params || {}), actualSubmission }, promptId: String(actualSubmission.promptId || "") || undefined } : {}),
-                    ...(task.error ? { error: task.error } : {}),
-                })
-                : null;
-            this.db.exec("COMMIT");
-            return { project: this.getCanvasProject(nextProject.id)!, log };
+            ];
+            nodeMetadataPatch.content = output.url;
+            nodeMetadataPatch.storageKey = output.storageKey;
+        }
+        operations.push({ type: "update_node", id: binding.nodeId, metadata: nodeMetadataPatch });
+        try {
+            this.applyCanvasProjectOperations(binding.projectId, Number(project.revision || 0), operations);
         } catch (error) {
-            this.db.exec("ROLLBACK");
+            // 409（revision 过期）或 update_h3_segment CAS 失败（runtimeTaskId 已被清空 / 改了）都视为放弃回写。
+            const message = error instanceof Error ? error.message : String(error);
+            if (/CAS 失败|expectedRevision|revision/i.test(message)) return null;
             throw error;
         }
+        const currentLog = binding.generationLogId ? this.getGenerationLog(binding.generationLogId) : null;
+        const actualSubmission = task.result?.actualSubmission && typeof task.result.actualSubmission === "object" ? task.result.actualSubmission as Record<string, unknown> : null;
+        const log = binding.generationLogId
+            ? this.updateGenerationLog(binding.generationLogId, {
+                status: task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "failed",
+                finishedAt: new Date().toISOString(),
+                durationMs: Math.max(0, Date.now() - new Date(String(currentLog?.startedAt || Date.now())).getTime()),
+                outputs: output ? [output] : [],
+                ...(actualSubmission ? { params: { ...(currentLog?.params || {}), actualSubmission }, promptId: String(actualSubmission.promptId || "") || undefined } : {}),
+                ...(task.error ? { error: task.error } : {}),
+            })
+            : null;
+        return { project: this.getCanvasProject(binding.projectId)!, log };
     }
 
     writeBackCanvasImageTask(

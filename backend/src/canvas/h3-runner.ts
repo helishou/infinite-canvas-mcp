@@ -54,6 +54,8 @@ export class CanvasH3Runner {
         if (!this.stores.projects.get(normalized.projectId)) throw new Error(`画布不存在: ${normalized.projectId}`);
         const existing = clientTaskId ? this.stores.tasks.get(clientTaskId) : null;
         if (existing) return existing;
+        const duplicate = this.findActiveDuplicate(normalized);
+        if (duplicate) return duplicate;
         const task = clientTaskId
             ? this.stores.tasks.create(clientTaskId, "canvas-h3-run", normalized, {})
             : this.stores.tasks.create("canvas-h3-run", normalized, {});
@@ -63,10 +65,63 @@ export class CanvasH3Runner {
         return task;
     }
 
+    /**
+     * 幂等边界必须落在 H3 编排器，而不是依赖每个调用方传来的随机 key。
+     * 浏览器刷新、MCP 重试、SSE 重连都可能产生不同的 key；只按 key 去重
+     * 会再次创建父任务，进而再次创建 ComfyUI 子任务。
+     */
+    private findActiveDuplicate(input: H3RunInput) {
+        const project = this.stores.projects.get(input.projectId);
+        if (!project) return null;
+        const requested = new Set(this.targetKeys(project, input));
+        if (!requested.size) return null;
+        return this.stores.tasks.list({ kind: "canvas-h3-run", projectId: input.projectId, limit: 500 })
+            .filter((task) => task.status === "queued" || task.status === "running")
+            .find((task) => this.targetKeys(project, normalizeInput(task.input as H3RunInput)).some((key) => requested.has(key))) || null;
+    }
+
+    private targetKeys(project: Record<string, unknown>, input: H3RunInput) {
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+        const wanted = input.nodeIds?.length ? new Set(input.nodeIds) : input.nodeId ? new Set([input.nodeId]) : null;
+        return nodes
+            .filter((node) => String(node.type || "").includes("minimax") && (!wanted || wanted.has(String(node.id || ""))))
+            .flatMap((node) => this.planNode(node, input).map((plan) => `${plan.nodeId}:${plan.segmentId}`));
+    }
+
     resume(task: RuntimeTask) {
         if (task.kind !== "canvas-h3-run" || !["queued", "running"].includes(task.status)) return task;
         void this.execute(task).catch((error) => this.fail(task.id, error));
         return task;
+    }
+
+    /**
+     * 修复已落库的终态父任务：任务事件是权威结果，节点 metadata 只是投影。
+     * 后端在写回窗口内重启，或旧版本静默吞掉回写失败时，节点可能长期停在 loading；
+     * 启动时重放缺失的 Clip 回写，再按父任务终态收口节点状态。
+     */
+    async reconcileTerminal(task: RuntimeTask) {
+        if (task.kind !== "canvas-h3-run" || !["succeeded", "failed", "cancelled"].includes(task.status)) return;
+        const projectId = String((task.input as H3RunInput)?.projectId || "");
+        if (!projectId) return;
+        const completed = this.stores.tasks.events(task.id).filter((event) => event.type === "clip_completed");
+        for (const event of completed) {
+            const childId = String(event.payload.childTaskId || "");
+            const child = childId ? this.stores.tasks.get(childId) : null;
+            if (!child || !["succeeded", "failed", "cancelled"].includes(child.status)) continue;
+            const nodeId = String(event.payload.nodeId || "");
+            const segmentId = String(event.payload.segmentId || "");
+            const project = this.stores.projects.get(projectId);
+            const node = project && (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === nodeId);
+            const segments = node ? recordOf(node.metadata).segments : undefined;
+            const segment = Array.isArray(segments) ? segments.find((item) => String(recordOf(item).id || "") === segmentId) as Record<string, unknown> | undefined : undefined;
+            const output = resultVideo(child);
+            const expectedStatus = child.status === "succeeded" ? "success" : child.status === "cancelled" ? "cancelled" : "error";
+            const alreadyWritten = segment && String(segment.status || "") === expectedStatus && !String(segment.runtimeTaskId || "")
+                && (!output || String(segment.resultStorageKey || "") === String(output.storageKey || ""));
+            if (alreadyWritten) continue;
+            await writeBackH3Task(this.stores, this.events, child);
+        }
+        this.finishParentNode(task, task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "error", task.error || "");
     }
 
     cancel(id: string) {
@@ -111,7 +166,8 @@ export class CanvasH3Runner {
             task = this.update(task.id, { result: { ...recordOf(task.result), currentChildTaskId: child.id, currentChildKind: child.kind, children, media: outputs } });
             child = await this.waitForTerminal(task.id, child.id);
             this.currentChildren.delete(task.id);
-            await writeBackH3Task(this.stores, this.events, child);
+            const written = await writeBackH3Task(this.stores, this.events, child);
+            if (!written) throw new Error(`Clip ${plan.segmentIndex + 1} 终态回写失败：片段可能已被其他任务接管，父任务未标记成功`);
             if (child.status !== "succeeded") throw new Error(child.error || `Clip ${plan.segmentIndex + 1} 生成${child.status === "cancelled" ? "已取消" : "失败"}`);
             const output = resultVideo(child);
             if (!output) throw new Error(`Clip ${plan.segmentIndex + 1} 生成成功但没有视频结果`);
@@ -255,7 +311,7 @@ export class CanvasH3Runner {
         for (const node of project.nodes as Array<Record<string, unknown>>) {
             if (ids.size && !ids.has(String(node.id || ""))) continue;
             if (String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) continue;
-            this.updateNode(input.projectId, String(node.id), { runtimeTaskId: "", runtimeRunId: "", status, runProgress: task.progress, errorDetails: error, cancelRequested: false });
+            this.updateNode(input.projectId, String(node.id), { runtimeTaskId: "", runtimeRunId: "", runRequestId: "", runRequestConsumedId: "", status, runProgress: task.progress, errorDetails: error, cancelRequested: false });
         }
     }
 

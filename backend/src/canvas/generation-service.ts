@@ -8,6 +8,7 @@ import type { RunningHubBackend } from "../runtime/runninghub.js";
 import { CanvasH3Runner } from "./h3-runner.js";
 import { CanvasImageDispatcher, type CanvasImageGenerationInput } from "./image-dispatcher.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
+import { resolveCanvasImageReferences } from "./image-references.js";
 import type { Stores } from "../stores/types.js";
 
 /**
@@ -51,9 +52,22 @@ export class CanvasGenerationService {
 
     private startImage(command: CanvasGenerationCommand) {
         if (!command.model || !command.prompt) throw new Error("画布图片生成缺少 model 或 prompt");
-        const result = this.image.start(command as CanvasImageGenerationInput);
+        const resolved = this.resolveImageReferences(command);
+        const result = this.image.start(resolved as CanvasImageGenerationInput);
         const task = this.stores.tasks.get(result.taskId);
         return { ...result, task: task || undefined };
+    }
+
+    private resolveImageReferences(command: CanvasGenerationCommand): CanvasGenerationCommand {
+        if (!command.projectId) return command;
+        const sourceNodeId = command.sourceNodeId || command.nodeId;
+        if (!sourceNodeId) return command;
+        const project = this.stores.projects.get(command.projectId);
+        if (!project) throw new Error(`画布不存在: ${command.projectId}`);
+        const references = resolveCanvasImageReferences(project, sourceNodeId);
+        // 只有源节点已经存在于 Backend 权威画布时才覆盖调用方快照；
+        // 这保留了无 project binding 的外部生成，同时避免前端新节点尚未落库时丢失显式输入。
+        return references ? { ...command, references } : command;
     }
 
     private async startVideo(command: CanvasGenerationCommand) {

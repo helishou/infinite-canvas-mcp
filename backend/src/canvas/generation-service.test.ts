@@ -49,6 +49,34 @@ test("图片执行器结果只采用 Dispatcher 的单次解析", async () => {
     assert.equal(received, command);
 });
 
+test("图片命令按源配置节点统一解析画布参考图", async () => {
+    let received: Record<string, unknown> | undefined;
+    const service = serviceWith({
+        image: { start: (input: Record<string, unknown>) => { received = input; return { taskId: "image-2", logId: "log-2", executor: "direct-image" }; } },
+        stores: {
+            projects: {
+                get: () => ({
+                    id: "project-1",
+                    nodes: [
+                        { id: "config", type: "config" },
+                        { id: "scene", type: "image", title: "场景", metadata: { storageKey: "image:scene" } },
+                        { id: "character", type: "image", title: "人物", metadata: { storageKey: "image:character" } },
+                    ],
+                    connections: [
+                        { id: "scene-config", fromNodeId: "scene", toNodeId: "config", order: 0 },
+                        { id: "character-config", fromNodeId: "character", toNodeId: "config", order: 1 },
+                    ],
+                }),
+            },
+            tasks: { get: () => null },
+        },
+    });
+
+    await service.start({ mode: "image", projectId: "project-1", nodeId: "result", sourceNodeId: "config", model: "gpt-image-2", prompt: "test", references: [] });
+
+    assert.deepEqual((received?.references as Array<{ id: string }>).map((reference) => reference.id), ["scene", "character"]);
+});
+
 test("视频命令保留统一 input、params 和幂等键", async () => {
     const calls: unknown[] = [];
     const task = { id: "video-1", kind: "comfy", status: "queued", progress: 0, input: {}, params: {}, createdAt: "", updatedAt: "" };

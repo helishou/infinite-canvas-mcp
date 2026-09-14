@@ -336,7 +336,7 @@ export function H3RulerScrubber({ ctx, total, previewH }: { ctx: CanvasNodeConte
     return <div ref={scrubRef} className="minimax-ruler-scrubber" style={{ top: origin?.top ?? `calc(58px + ${previewH}px + 10px)`, left: origin?.left ?? 62, width: origin?.width ?? "calc(100% - 126px)", height: origin?.height ?? 28 }} title="点击跳转播放指针" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* synthetic/无指针ID 的测试事件无活动指针，忽略 */ } event.currentTarget.setAttribute("data-scrubbing", "1"); apply(event); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) apply(event); }} onPointerUp={(event) => { try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* 同上 */ } event.currentTarget.removeAttribute("data-scrubbing"); ctx.updateMetadata({ h3Scrubbing: false }); }} onPointerCancel={(event) => { event.currentTarget.removeAttribute("data-scrubbing"); ctx.updateMetadata({ h3Scrubbing: false }); }} />;
 }
 
-export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, timelineOffset = 0, clipDuration, playRequest, nextUrl, onEnded, onPlayheadTick }: { ctx: CanvasNodeContext; url: string; kind: H3Ref["type"]; storageKey?: string; name?: string; playhead: number; timelineOffset?: number; clipDuration?: number; playRequest: number; nextUrl?: string; onEnded?: (continuedFromSlot?: boolean) => void; onPlayheadTick?: (absoluteTime: number) => void }) {
+export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, timelineOffset = 0, clipDuration, playToken, playRequest, nextUrl, onEnded, onPlayheadTick }: { ctx: CanvasNodeContext; url: string; kind: H3Ref["type"]; storageKey?: string; name?: string; playhead: number; timelineOffset?: number; clipDuration?: number; playToken: number; playRequest: number; nextUrl?: string; onEnded?: (continuedFromSlot?: boolean) => void; onPlayheadTick?: (absoluteTime: number) => void }) {
     // 双槽交叉淡入续播：当前段在 active 槽播放，下一段提前预载进另一槽；
     // 当前段 ended 时直接切换到已就绪的 buffer 槽播放，消除「换 src 重载」造成的卡顿。
     const videosRef = useRef<[HTMLMediaElement | null, HTMLMediaElement | null]>([null, null]);
@@ -374,11 +374,29 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         media.addEventListener("ended", handler);
         return () => media.removeEventListener("ended", handler);
     }, [active]);
-    // h3PlayRequest 的全部来源（工具栏「连续播放全部 Clip」、自动续播换段）都只表达「请求播放」，
-    // 没有任何路径需要它去暂停。故此处只负责在暂停态下起播，绝不主动 pause——
-    // 否则双槽交叉淡入刚让 buffer 槽接手、正在播放的下一段会被这里的 toggle 误暂停（表现为播完一段停住）。
-    // 暂停由 <video> 原生控件承担（controls 只挂在 active 槽上）。
-    useEffect(() => { const v = videosRef.current[activeRef.current]; if (!v || !playRequest) return; if (v.paused) void v.play().catch(() => undefined); }, [playRequest]);
+    // playToken 由 H3Workbench 在用户真正发起播放时（playAll / 续播换段）显式递增。
+    // 只看 playToken 是否变化，**不**依赖 h3PlayRequest：metadata 里的 h3PlayRequest 残留值、
+    // MCP / 多端同步、StrictMode dev 模式下 useEffect 跑两次都不会触发自动播放。
+    // h3PlayRequest 仍保留在 metadata 里，只用于「我刚才播到哪」的持久化展示。
+    useEffect(() => {
+        const v = videosRef.current[activeRef.current];
+        if (!v) return;
+        if (v.paused) void v.play().catch(() => undefined);
+    }, [playToken]);
+    // Tab / 窗口切到后台时强制 pause 双槽视频：浏览器在隐藏标签里仍会继续跑 video，
+    // 切回来时已经播过一段，看上去像"自动播放"。在不可见时主动 pause 一次，切回来由用户/下一次 playRequest 决定是否续播。
+    useEffect(() => {
+        const pauseBoth = () => {
+            for (const v of videosRef.current) if (v && !v.paused) v.pause();
+        };
+        const onVisibility = () => { if (document.visibilityState === "hidden") pauseBoth(); };
+        document.addEventListener("visibilitychange", onVisibility);
+        window.addEventListener("blur", pauseBoth);
+        return () => {
+            document.removeEventListener("visibilitychange", onVisibility);
+            window.removeEventListener("blur", pauseBoth);
+        };
+    }, []);
     // 拖动刻度 seek / 换段：跳到 active 槽对应本地帧（playhead 为绝对时间，减时间轴偏移得本地帧）
     useEffect(() => {
         const v = videosRef.current[activeRef.current];
@@ -386,20 +404,19 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
         if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.1) v.currentTime = local;
     }, [playhead, timelineOffset]);
-    // 点击播放（playRequest 变化）时：先把当前帧跳到 playhead 再播放。
-    // 依赖只放 [playRequest]，不放 playhead——播放中 playhead 由 rAF 直接驱动 DOM（不回写 metadata），
-    // 若也依赖 playhead，此 effect 会在每次外部 seek 后执行，把已自然前进的 currentTime 拉回上一帧造成卡顿/回跳。
+    // 点击播放（playToken 变化）时：先把当前帧跳到 playhead 再播放。
+    // 依赖只放 [playToken]，playhead/timelineOffset 通过闭包拿最新值但不放进依赖——
+    // 播放中 playhead 由 rAF 直接驱动 DOM（不回写 metadata），若也依赖 playhead，
+    // 此 effect 会在每次外部 seek 后执行，把已自然前进的 currentTime 拉回上一帧造成卡顿/回跳。
     // 拖动刻度/换段导致的 seek 由上方依赖 [playhead] 的 seek effect 处理。
-    // 点击播放时把 active 槽当前帧跳到 playhead（依赖只放 [playRequest]，不放 playhead，避免播放中把自然前进的帧拉回）
     useEffect(() => {
         const v = videosRef.current[activeRef.current];
-        if (!v || !playRequest) return;
+        if (!v) return;
         const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
         if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.05) v.currentTime = local;
-    }, [playRequest]);
+    }, [playToken]);
     // 播放期间用 requestAnimationFrame 平滑驱动时间刻度指针（直接改 DOM，不写 metadata）
     useEffect(() => {
-        if (!playRequest) return;
         let raf = 0;
         const tick = () => {
             // 拖动刻度期间，scrubber 会设 data-scrubbing，rAF 立即让位给拖动 seek，避免指针抖动
@@ -416,7 +433,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         };
         raf = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(raf);
-    }, [playRequest, timelineOffset, clipDuration, onPlayheadTick]);
+    }, [playToken, timelineOffset, clipDuration, onPlayheadTick]);
     // 当前选中 clip：加载进 active 槽（手动选中/拖动/初始）；已在 active 或 buffer 槽则跳过，避免重复重载
     useEffect(() => {
         if (!url) return;
@@ -453,6 +470,11 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio ref={(node) => { videosRef.current[0] = node; }} src={url} controls preload="metadata" draggable={false} onPause={(event) => { const m = event.currentTarget; const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity))); ctx.updateMetadata({ playhead: timelineOffset + localTime }); }} /></div></div>;
     // 视频：双槽交叉淡入续播。两个 video 绝对叠放，active 槽可见且有 controls，另一槽透明且不接收事件；
     // 下一段已在 inactive 槽预载就绪，ended 时切换 active 即可即时续播，无 src 重载间隙。
+    // muted 用 state 而不是 JSX 静态属性：rAF tick 触发 onPlayheadTick → 父组件重渲染，
+    // 如果是 <video muted /> 静态属性，React 会在每次渲染把 muted 重新置为 true，
+    // 用户点原生控件取消静音下一帧又被强制回 true，体感就是"老被静音"。
+    // 初始值 true 是为了保住浏览器 autoplay 权限（muted 视频不需要用户手势即可自动播放）。
+    const [isMuted, setIsMuted] = useState(true);
     return (
         <div className="minimax-player-content">
             {[0, 1].map((slot) => (
@@ -461,7 +483,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                     ref={(node) => { videosRef.current[slot] = node; }}
                     src={slotSrc[slot] ? resultUrl(slotSrc[slot]) : undefined}
                     controls={active === slot}
-                    muted
+                    muted={isMuted}
                     playsInline
                     preload="auto"
                     draggable={false}
@@ -470,6 +492,12 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                         // 仅 active 槽按 playhead 定位；buffer 槽固定在 0，避免被当前 playhead 误 seek 到中段
                         const local = slot === active ? Math.max(0, Math.min(playheadRef.current - timelineOffset, Number(event.currentTarget.duration || Infinity))) : 0;
                         if (Math.abs(event.currentTarget.currentTime - local) > 0.1) event.currentTarget.currentTime = local;
+                    }}
+                    onVolumeChange={(event) => {
+                        // 用户点了原生控件的音量 / 静音：把 React 状态同步过来，
+                        // 下一帧 rAF tick 触发重渲染时不会把 muted 又强制改回去。
+                        const next = Boolean(event.currentTarget.muted);
+                        if (next !== isMuted) setIsMuted(next);
                     }}
                     onPause={(event) => {
                         if (slot !== activeRef.current) return;

@@ -8,6 +8,7 @@ import { sameRef } from "../services/h3-compatibility";
 import { normalizeDroppedH3Ref } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
 import { H3ClipCard } from "./H3ClipCard";
+import { H3PreviewLightbox } from "./H3PreviewLightbox";
 
 type H3TimelineProps = {
     ctx: CanvasNodeContext;
@@ -27,6 +28,16 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
     const pendingScrollIdRef = useRef<string | null>(null);
     const restoredRef = useRef(false);
     const scrollPersistRafRef = useRef<number | null>(null);
+    // ref 区域双击预览：普通图片/视频/音频 ref 双击放大，带 groupId 的格子仍走角色组编辑 modal
+    const [previewRef, setPreviewRef] = useState<H3Ref | null>(null);
+    // ref 拖动时高亮目标槽（move / copy 落点），用 `${segmentId}:${refIndex}` 标识。dragend / drop 后清空。
+    const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
+    useEffect(() => {
+        if (!previewRef) return;
+        const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setPreviewRef(null); };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [previewRef]);
     // 时间轴/参考区：鼠标滚轮转为横向滚动（与 Output 区域一致）
     useEffect(() => {
         const el = trackScrollRef.current;
@@ -141,19 +152,54 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         const ref = segment && refsForSegment(segment)[refIndex];
         if (!segment || !ref) return;
         event.stopPropagation();
-        event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer.effectAllowed = "copyMove";
         event.dataTransfer.setData("application/x-infinite-canvas-ref", JSON.stringify(ref));
         event.dataTransfer.setData("application/x-infinite-canvas-ref-source", segment.id);
+        // 同 clip 内 reorder 走 move 语义；外 clip / 外部拖入走 copy。target 槽只能识别位置，
+        // 拿不到"目标空 / 已占"，所以 move 本身不区分 move/swap，全部在 addRef 里根据目标槽现状判定。
+        event.dataTransfer.setData("application/x-infinite-canvas-ref-source-index", String(refIndex));
+    };
+    const clearDropTarget = useCallback(() => setDropTargetKey(null), []);
+    // 拖动过程中实时高亮目标槽；用 data-* 找 cell，避免依赖 children 索引
+    const onRefRowDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+        if (!event.dataTransfer.types.includes("application/x-infinite-canvas-ref")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const clip = (event.target as HTMLElement).closest<HTMLElement>(".minimax-ref-clip");
+        if (!clip) { setDropTargetKey(null); return; }
+        const grid = clip.parentElement;
+        if (!grid?.dataset.segmentId) return;
+        const refIndex = clip.dataset.refIndex;
+        if (refIndex === undefined) return;
+        setDropTargetKey(`${grid.dataset.segmentId}:${refIndex}`);
     };
     const addRef = (event: React.DragEvent<HTMLDivElement>) => {
         event.preventDefault();
         event.stopPropagation();
+        clearDropTarget();
         const ref = normalizeDroppedH3Ref(event);
         if (!ref) return;
-        // 优先用光标下的元素精确判定落在哪个 clip（比时间换算更准，避免边界/滚动误差）
-        const gridEl = (event.target as HTMLElement).closest<HTMLElement>(".minimax-ref-grid");
+        // 来源信息：判断"同 clip reorder" vs "跨 clip / 外部 copy"
+        const sourceSegmentId = event.dataTransfer.getData("application/x-infinite-canvas-ref-source");
+        const sourceIndexRaw = event.dataTransfer.getData("application/x-infinite-canvas-ref-source-index");
+        const sourceIndex = sourceIndexRaw !== "" ? Number(sourceIndexRaw) : -1;
+        const sourceSegment = sourceSegmentId ? segments.find((item) => item.id === sourceSegmentId) : null;
+        // 优先用光标下的元素精确判定落在哪个 clip / 哪个槽
+        const clipEl = (event.target as HTMLElement).closest<HTMLElement>(".minimax-ref-clip");
+        const gridEl = clipEl?.parentElement?.closest<HTMLElement>(".minimax-ref-grid") || (event.target as HTMLElement).closest<HTMLElement>(".minimax-ref-grid");
         let target: H3Segment | undefined;
-        if (gridEl?.dataset.segmentId) target = segments.find((item) => item.id === gridEl.dataset.segmentId);
+        let targetIndex = -1;
+        if (clipEl) {
+            const grid = clipEl.parentElement;
+            if (grid) {
+                target = segments.find((item) => item.id === grid.dataset.segmentId);
+                targetIndex = Number(clipEl.dataset.refIndex);
+            }
+        }
+        if (!target && gridEl?.dataset.segmentId) {
+            target = segments.find((item) => item.id === gridEl.dataset.segmentId);
+            // 没落到具体 cell，targetIndex 留 -1 表示"追加到末尾"
+        }
         if (!target) {
             const track = event.currentTarget as HTMLDivElement;
             const rect = track.getBoundingClientRect();
@@ -165,16 +211,35 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         if (!target) return;
         const mode = String(target.mode || target.taskMode || "ref2va");
         if (mode === "t2v" || (mode !== "ref2va" && ref.type !== "image")) return;
-        const refs = refsForSegment(target);
+        const targetRefs = [...refsForSegment(target)];
         const maxImages = mode === "i2v" ? 1 : mode === "fl2v" ? 2 : 9;
-        const sameTypeCount = refs.filter((item) => item.type === ref.type).length;
-        if (sameTypeCount >= (ref.type === "image" ? maxImages : 3) || refs.some((item) => item.url === ref.url)) return;
-        // refs 栏之间拖动为「复制」语义：来源 clip 保留该 ref，目标 clip 追加一份，不移除来源
+        // 同 clip 内 reorder：move 语义，drop 到具体槽则插到该位置（无空/已占都能搬），drop 到空白区就追加到末尾
+        if (sourceSegment && sourceSegment.id === target.id && sourceIndex >= 0 && sourceIndex < targetRefs.length) {
+            const [moved] = targetRefs.splice(sourceIndex, 1);
+            const insertAt = targetIndex >= 0 && targetIndex <= targetRefs.length ? targetIndex : targetRefs.length;
+            targetRefs.splice(insertAt, 0, moved);
+            ctx.updateMetadata({
+                segments: segments.map((item) => item.id === target.id ? withSegmentRefs(item, targetRefs) : item),
+            });
+            return;
+        }
+        // 跨 clip / 外部拖入：copy 语义。
+        const sameTypeCount = targetRefs.filter((item) => item.type === ref.type).length;
+        if (sameTypeCount >= (ref.type === "image" ? maxImages : 3) || targetRefs.some((item) => item.url === ref.url)) return;
+        const insertAt = targetIndex >= 0 && targetIndex <= targetRefs.length ? targetIndex : targetRefs.length;
+        targetRefs.splice(insertAt, 0, ref);
         ctx.updateMetadata({
             selectedSegmentId: target.id,
-            segments: segments.map((item) => item.id === target.id ? withSegmentRefs(item, [...refsForSegment(item), ref]) : item),
+            segments: segments.map((item) => item.id === target.id ? withSegmentRefs(item, targetRefs) : item),
         });
     };
+    // 拖动结束 / 取消：清掉高亮（drop 没走到 addRef 的情况，比如拖出 ref-row 范围外松开）
+    useEffect(() => {
+        if (!dropTargetKey) return;
+        const onEnd = () => clearDropTarget();
+        window.addEventListener("dragend", onEnd);
+        return () => window.removeEventListener("dragend", onEnd);
+    }, [dropTargetKey, clearDropTarget]);
     const addSegment = () => {
         const previousIndex = selected ? segments.findIndex((segment) => segment.id === selected.id) : -1;
         const previous = previousIndex >= 0 ? segments[previousIndex] : segments[segments.length - 1];
@@ -217,8 +282,13 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
                 data-ref-index={index}
                 data-group-id={ref?.groupId || undefined}
                 draggable={ref ? true : undefined}
-                onDoubleClick={isGrouped ? (event) => { event.stopPropagation(); onOpenCharacterGroup(segment.id, ref.groupId!); } : undefined}
-                className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""}`}
+                onDoubleClick={(event) => {
+                    event.stopPropagation();
+                    if (isGrouped && ref?.groupId) onOpenCharacterGroup(segment.id, ref.groupId);
+                    else if (ref) setPreviewRef(ref);
+                }}
+                className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""} ${dropTargetKey === `${segment.id}:${index}` ? "is-drop-target" : ""}`}
+                title={ref ? (isGrouped ? "双击编辑角色组" : "双击放大预览") : undefined}
             >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>;
         })}</div>;
     };
@@ -245,7 +315,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
                         {segments.map((segment, index) => <H3ClipCard key={segment.id} ctx={ctx} segment={segment} index={index} segments={segments} selectedId={selected?.id} fmt={fmt} />)}
                     </div>
                 </div>
-                <div className="minimax-ref-row" onDragStart={startRefDrag} onDragOver={(event) => event.preventDefault()} onDrop={addRef}>
+                <div className="minimax-ref-row" onDragStart={startRefDrag} onDragOver={onRefRowDragOver} onDrop={addRef}>
                     <div className="minimax-ref-content" style={{ minWidth: timelineMinWidth, width: "100%" }}>
                         <span className="minimax-playhead" style={{ left: `${playhead * 100}px` }} />
                         {segments.map(renderRefGrid)}
@@ -256,5 +326,6 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         <div className="minimax-track-gutter">
             <button type="button" className="minimax-video-add" onClick={addSegment}><H3Icon name="plus" /></button>
         </div>
+        {previewRef ? <H3PreviewLightbox item={previewRef} onClose={() => setPreviewRef(null)} /> : null}
     </div>;
 }
