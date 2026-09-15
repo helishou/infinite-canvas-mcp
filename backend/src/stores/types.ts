@@ -53,8 +53,8 @@ export type CanvasProjectStore = {
         media: Array<Record<string, unknown>>,
     ): { project: CanvasProject; operations: CanvasOperation[] } | null;
     markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;
-    /** H3 节点历史运行产物（替代老的 metadata.materials 数组）。 */
-    getH3NodeMaterials(projectId: string, nodeId: string, limit?: number): H3NodeMaterial[];
+    /** H3 节点历史运行产物（替代老的 metadata.materials 与 segments[i].results[].params 字段）。 */
+    getH3NodeMaterials(projectId: string, nodeId: string, limit?: number, segmentId?: string): H3NodeMaterial[];
 };
 
 /** 画布库文件夹 store。 */

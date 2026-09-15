@@ -266,6 +266,15 @@ export class BackendDatabase {
             this.stripMaterialsFromCanvasProjects();
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (4, ?)").run(new Date().toISOString());
         }
+        if (currentVersion < 5) {
+            // 历史 H3 segment 还会把"生成时刻输入快照"（params / refItems / characterRefs /
+            // characterPromptBlocks / sourceComfyParams / sourceParameters / sourcePrompt 等）
+            // 复制进 segments[i].results[] 与 segments[i]，单节点 metadata 可达 MB 级。
+            // generation_logs 才是单一来源（prompt + references_json + params_json 已有完整数据），
+            // 写入端停摆，迁移脚本从老 canvas_projects.data_json 中物理剥掉这些字段。
+            this.stripSegmentInputSnapshotsFromCanvasProjects();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (5, ?)").run(new Date().toISOString());
+        }
     }
 
     /**
@@ -302,6 +311,96 @@ export class BackendDatabase {
             touched++;
         }
         if (touched) console.log(`[migrate v4] stripped metadata.materials from ${totalStripped} H3 node(s) across ${touched} canvas project(s)`);
+    }
+
+    /**
+     * 把老 H3 节点的 segments 数组里的"生成时刻输入快照"剥掉：
+     *   - segments[i].results[]：只留 url / storageKey / name / segmentId / kind / mimeType / type / imageIndex
+     *   - segments[i] 上的 refItems / characterRefs / characterPromptBlocks /
+     *     sourceComfyParams / sourceParameters / sourcePrompt / sourceCharacterRefs / comfyParams / comfyWorkflow 字段
+     *   - segments[i].sourceRefs 内每个 ref 元素也只留 url / kind / role / imageIndex / name / segmentId
+     *
+     * generation_logs.prompt + references_json + params_json 已是单一来源（写入端停摆）。
+     */
+    private stripSegmentInputSnapshotsFromCanvasProjects() {
+        const rows = this.db.prepare("SELECT id, data_json FROM canvas_projects").all() as Array<{ id: string; data_json: string }>;
+        let touched = 0;
+        let totalStripped = 0;
+        const resultAllow = new Set(["url", "storageKey", "name", "segmentId", "kind", "mimeType", "type", "imageIndex"]);
+        const segmentStrip = new Set([
+            "refItems", "characterRefs", "characterPromptBlocks",
+            "sourceComfyParams", "sourceParameters", "sourcePrompt",
+            "sourceCharacterRefs", "comfyParams", "comfyWorkflow",
+        ]);
+        const refAllow = new Set(["url", "kind", "role", "imageIndex", "name", "segmentId"]);
+        for (const row of rows) {
+            let project: unknown;
+            try { project = JSON.parse(row.data_json); } catch { continue; }
+            if (!project || typeof project !== "object") continue;
+            const nodes = (project as { nodes?: unknown }).nodes;
+            if (!Array.isArray(nodes)) continue;
+            let projectTouched = false;
+            for (const node of nodes) {
+                if (!node || typeof node !== "object") continue;
+                const n = node as { type?: unknown; metadata?: unknown };
+                if (typeof n.type !== "string" || !/^minimax|^smart-minimax/.test(n.type)) continue;
+                if (!n.metadata || typeof n.metadata !== "object") continue;
+                const meta = n.metadata as Record<string, unknown>;
+                if (!Array.isArray(meta.segments)) continue;
+                for (const segment of meta.segments as Array<Record<string, unknown>>) {
+                    if (!segment || typeof segment !== "object") continue;
+                    // 1) segment.results[] 瘦身
+                    const results = Array.isArray(segment.results) ? segment.results as Array<Record<string, unknown>> : [];
+                    let segTouched = false;
+                    for (const item of results) {
+                        if (!item || typeof item !== "object") continue;
+                        for (const key of Object.keys(item)) {
+                            if (!resultAllow.has(key)) {
+                                delete item[key];
+                                segTouched = true;
+                            }
+                        }
+                    }
+                    // 2) segment 上冗余的输入快照字段
+                    for (const key of segmentStrip) {
+                        if (key in segment) {
+                            delete segment[key];
+                            segTouched = true;
+                        }
+                    }
+                    // 3) segment.sourceRefs 内每个 ref 元素瘦身
+                    const sourceRefs = segment.sourceRefs;
+                    if (sourceRefs && typeof sourceRefs === "object") {
+                        for (const [kind, list] of Object.entries(sourceRefs as Record<string, unknown>)) {
+                            if (!Array.isArray(list)) {
+                                delete (sourceRefs as Record<string, unknown>)[kind];
+                                segTouched = true;
+                                continue;
+                            }
+                            const kept: Array<Record<string, unknown>> = [];
+                            for (const entry of list) {
+                                if (!entry || typeof entry !== "object") continue;
+                                const slim: Record<string, unknown> = {};
+                                for (const k of refAllow) if (k in (entry as Record<string, unknown>)) slim[k] = (entry as Record<string, unknown>)[k];
+                                kept.push(slim);
+                            }
+                            (sourceRefs as Record<string, unknown>)[kind] = kept;
+                            segTouched = true;
+                        }
+                    }
+                    if (segTouched) {
+                        projectTouched = true;
+                        totalStripped++;
+                    }
+                }
+            }
+            if (!projectTouched) continue;
+            const next = JSON.stringify(project);
+            if (next === row.data_json) continue;
+            this.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?").run(next, row.id);
+            touched++;
+        }
+        if (touched) console.log(`[migrate v5] trimmed segment input snapshots from ${totalStripped} segment(s) across ${touched} canvas project(s)`);
     }
 
     /**
@@ -958,18 +1057,24 @@ export class BackendDatabase {
     }
 
     /**
-     * 取一个 H3 节点的全部运行历史产物（按时间倒序、按 url 去重）。
+     * 取一个 H3 节点的运行历史产物（按时间倒序、按 url 去重）。
      * 不返回 sourcePrompt——体积大、用途窄；要看 prompt 用 listGenerationLogs({ nodeId })。
      * 替代老的 metadata.materials 数组（迁移 v4 起停摆）。
+     *
+     * @param segmentId 可选；仅返回该片段的历史。
      */
-    getH3NodeMaterials(projectId: string, nodeId: string, limit = 200): Array<{ url: string; storageKey?: string; mimeType?: string; width?: number | null; height?: number | null; name?: string; segmentId?: string; createdAt: string }> {
+    getH3NodeMaterials(projectId: string, nodeId: string, limit = 200, segmentId?: string): Array<{ url: string; storageKey?: string; mimeType?: string; width?: number | null; height?: number | null; name?: string; segmentId?: string; createdAt: string }> {
+        const clauses = ["project_id = ?", "node_id = ?"];
+        const values: Array<string | number> = [projectId, nodeId];
+        if (segmentId) { clauses.push("segment_id = ?"); values.push(segmentId); }
+        const safeLimit = Math.max(1, Math.min(500, limit));
         const rows = this.db.prepare(
             `SELECT segment_id, outputs_json, created_at
              FROM generation_logs
-             WHERE project_id = ? AND node_id = ?
+             WHERE ${clauses.join(" AND ")}
              ORDER BY created_at DESC
              LIMIT ?`
-        ).all(projectId, nodeId, Math.max(1, Math.min(500, limit))) as Array<{ segment_id: string | null; outputs_json: string; created_at: string }>;
+        ).all(...values, safeLimit) as Array<{ segment_id: string | null; outputs_json: string; created_at: string }>;
         const seen = new Set<string>();
         const out: Array<{ url: string; storageKey?: string; mimeType?: string; width?: number | null; height?: number | null; name?: string; segmentId?: string; createdAt: string }> = [];
         for (const row of rows) {

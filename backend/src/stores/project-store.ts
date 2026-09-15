@@ -13,6 +13,6 @@ export function createProjectStore(db: BackendDatabase): CanvasProjectStore {
         writeBackH3Task: (task, binding, output) => db.writeBackH3Task(task, binding, output),
         writeBackCanvasImageTask: (task, input, media) => db.writeBackCanvasImageTask(task, input, media),
         markCanvasImageTaskFailed: (task, input, error) => db.markCanvasImageTaskFailed(task, input, error),
-        getH3NodeMaterials: (projectId, nodeId, limit): H3NodeMaterial[] => db.getH3NodeMaterials(projectId, nodeId, limit),
+        getH3NodeMaterials: (projectId, nodeId, limit, segmentId): H3NodeMaterial[] => db.getH3NodeMaterials(projectId, nodeId, limit, segmentId),
     };
 }

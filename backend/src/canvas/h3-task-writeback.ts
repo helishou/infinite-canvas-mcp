@@ -29,14 +29,12 @@ function mediaRef(item: Record<string, unknown> | undefined) {
 export async function writeBackH3Task(stores: Stores, events: BackendEventBus, task: RuntimeTask) {
     const binding = bindingOf(task);
     if (!binding?.projectId || !binding.nodeId || !binding.segmentId) return false;
-    const log = binding.generationLogId ? stores.logs.get(binding.generationLogId) : null;
     const output = mediaRef(resultVideo(task));
-    const restoreSnapshot = log ? {
-        ...(log.params || {}),
-        prompt: log.prompt,
-        refs: log.references,
-    } : null;
-    const persistedOutput = output && restoreSnapshot ? { ...output, params: restoreSnapshot } : output;
+    // 注意：segments[i].results[] 不再承载「生成时刻输入快照」（prompt/refs/params），
+    // 否则单节点 metadata 可达 MB 级（MCP canvas_get_state 会被截断）。
+    // 生成时刻的输入快照已持久化在 generation_logs.prompt + references_json + params_json，
+    // 还原 Clip 时按 generationLogId 查回来即可（见 buildRestoreParamsPatch）。
+    const persistedOutput = output;
     const saved = stores.projects.writeBackH3Task(task, {
         projectId: binding.projectId,
         nodeId: binding.nodeId,
@@ -44,7 +42,6 @@ export async function writeBackH3Task(stores: Stores, events: BackendEventBus, t
         ...(binding.generationLogId ? { generationLogId: binding.generationLogId } : {}),
     }, persistedOutput);
     if (!saved) {
-        if (log) events.publish({ type: "generation-log.updated", entityId: log.id, payload: log });
         return false;
     }
     events.publishCanvasDelta({ entityId: saved.project.id, revision: Number(saved.project.revision || 0), operations: saved.operations, updatedAt: String(saved.project.updatedAt || "") });

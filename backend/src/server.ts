@@ -257,7 +257,8 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         const nodeId = req.params.nodeId;
         if (!stores.projects.get(projectId)) return void res.status(404).json({ ok: false, error: `画布不存在: ${projectId}` });
         const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 200));
-        const materials = stores.projects.getH3NodeMaterials(projectId, nodeId, limit);
+        const segmentId = typeof req.query.segmentId === "string" ? req.query.segmentId : undefined;
+        const materials = stores.projects.getH3NodeMaterials(projectId, nodeId, limit, segmentId);
         res.json({ ok: true, projectId, nodeId, materials });
     });
     app.get("/canvas/folders", (_req, res) => {
