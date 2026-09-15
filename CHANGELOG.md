@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- [新增] 短剧剧目支持编辑故事大纲、一句话简介、标签和封面，资料由 Backend SQLite 与媒体库持久化。
+- [新增] 新增「短剧制作」Tab：复用画布库中的文件夹作为剧目、画布作为场景入口，支持从制作台直接回到场景画布。
+- [新增] 画布库支持文件夹管理：可新建、重命名、删除文件夹，并将画布筛选或移动到指定文件夹；文件夹与归属由 Backend SQLite 持久化。
+- [修复] 删除画布时记录待同步的删除意图，避免 Backend 合并或刷新期间把已删除画布从本地旧快照重新提交并复活。
 - [优化] 结构化业务数据统一以 Backend SQLite 为权威：前端设置、渠道/API Key、WebDAV、提示词源、自定义提示词和图片工作台参考图草稿不再长期写入浏览器存储；旧浏览器数据首次读取后迁入 SQLite，并移除工作流图片字段的 Base64 localStorage 持久化。
 - [修复] 渠道配置连接初始化改为先从 Backend 读取权威记录，移除连接时把前端默认渠道反向覆盖 Backend 的竞态，并补齐渠道设置实时同步事件。
 - [修复] 画布首屏本地索引尚未完成 Backend 合并前禁止提交同步，避免刷新或关闭页面时把索引占位的空节点误判为删除并清空其他画布。
@@ -24,6 +28,7 @@
 - [修复] 本地开发服务统一通过单一启动入口清理旧端口并启动；Backend 按数据目录增加单实例锁，避免重复 Backend、旧前端和 SQLite 并发写入互相覆盖画布。
 - [修复] Windows 下 Vite 监听测试/诊断临时文件遇到 `EBUSY` 不再导致前端开发服务崩溃；临时输出文件已从监听和 Git 范围排除。
 - [修复] GPT Image / Comfy 生图启动前强制提交新节点和连线，即使 SSE 短暂断开也不会跳过这次 Backend 同步，避免任务成功但结果媒体无法回写成画布图片节点。
+- [优化] H3 节点的运行历史产物从 `node.metadata.materials` 迁出到独立的 `generation_logs.outputs_json` 表（DB schema v4 migration，老画布会在启动时自动清理），新增 MCP 工具 `h3_get_node_materials` 与 REST `GET /canvas/projects/:id/nodes/:nodeId/materials` 按需返回。原因：旧实现每次写入都会把整段 sourcePrompt（中文 H3 长 prompt，可达 4–20 KB）连同 url/storageKey 等冗余塞进 `metadata.materials`，单节点 metadata 累积可达 MB 级；`canvas_get_state` 把整张画布一次性返回时会被 MCP 截断（约 2 MB 的项目 70% 体积是 H3 历史）。前端 H3 工作台现在直接从 `segments` 派生 outputs，`clearUnused` / `removeOutput` 不再写 metadata。
 - [修复] MCP 生图流程会把「【文本1】/图片1…」等引用选择器占位内容写入提示词的问题；现在会自动剥离占位行，保留真实提示词，并与前端参考图分离传递。
 - [修复] 画布网页编辑与 MCP/刷新恢复统一走本地快照队列和 revision 合并：未提交的网页修改不再被远端项目列表覆盖，IndexedDB 快照写入串行化，刷新后会继续提交本地编辑。
 - [调整] MCP 画布协议不再读取或写入浏览器视口；节点、连线和生成操作只同步画布内容，中心与缩放由当前页面本地维护。

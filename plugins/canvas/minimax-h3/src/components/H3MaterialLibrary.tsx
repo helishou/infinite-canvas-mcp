@@ -53,11 +53,15 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected, patchSelec
     const currentUrls = new Set((selected?.results || []).map((item) => item.url).concat(selected?.result ? [String(selected.result)] : []));
     const visibleOutputs = outputFilter === "current" ? outputs.filter((item) => currentUrls.has(item.url) || item.segmentId === selected?.id) : outputs;
     const clearUnused = () => {
-        const used = new Set(segments.flatMap((segment) => [(typeof segment.result === "string" ? segment.result : ""), ...(segment.results || []).map((item) => item.url)]).filter(Boolean));
-        const materials = Array.isArray(ctx.node.metadata?.materials) ? ctx.node.metadata.materials : [];
-        ctx.updateMetadata({ materials: materials.filter((item) => used.has(String((item as Record<string, unknown>)?.url || (item as Record<string, unknown>)?.content || ""))) });
+        // H3 节点的运行历史已迁出 metadata.materials（v4 起），落到 generation_logs.outputs_json，
+        // 由后端 /canvas/projects/:id/nodes/:nodeId/materials 与 MCP h3_get_node_materials 按需返回。
+        // segments.results 仍是当前活跃片段的 source of truth，无需再操作 materials。
+        console.warn("[H3] clearUnused 已废弃：materials 数组由 generation_logs 承担，前端无需清理。");
     };
-    const removeOutput = (ref: H3Ref) => ctx.updateMetadata({ materials: (Array.isArray(ctx.node.metadata?.materials) ? ctx.node.metadata.materials : []).filter((item) => String((item as Record<string, unknown>)?.url || "") !== ref.url) });
+    const removeOutput = (_ref: H3Ref) => {
+        // 同上 — 历史运行产物不再写回 node.metadata.materials；删除由 generation_logs.deleteGenerationLogs 承担。
+        console.warn("[H3] removeOutput 已废弃：materials 数组由 generation_logs 承担，前端无需在此操作。");
+    };
     const restoreOutput = (ref: H3Ref) => {
         // 输出卡片的点击可能发生在多个 metadata 更新之后，不能使用渲染时的旧 segments。
         // 从最新节点重新解析源 Clip，确保 prompt 和生成参数来自当前权威状态。

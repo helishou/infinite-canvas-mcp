@@ -1,6 +1,6 @@
 import path from "node:path";
 import type {
-    Asset, AssetFolder, CanvasProject,
+    Asset, AssetFolder, CanvasFolder, CanvasProject,
     GenerationLog, GenerationLogStatus, MediaFile,
     RuntimeTask, RuntimeTaskEvent, RuntimeTaskStatus,
 } from "../db.js";
@@ -24,6 +24,16 @@ export type RuntimeMedia = {
 };
 
 /** 画布项目 store：权威来源为总后台 SQLite。 */
+export type H3NodeMaterial = {
+    url: string;
+    storageKey?: string;
+    mimeType?: string;
+    width?: number | null;
+    height?: number | null;
+    name?: string;
+    segmentId?: string;
+    createdAt: string;
+};
 export type CanvasProjectStore = {
     list(): CanvasProject[];
     get(id: string): CanvasProject | null;
@@ -43,6 +53,15 @@ export type CanvasProjectStore = {
         media: Array<Record<string, unknown>>,
     ): { project: CanvasProject; operations: CanvasOperation[] } | null;
     markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    /** H3 节点历史运行产物（替代老的 metadata.materials 数组）。 */
+    getH3NodeMaterials(projectId: string, nodeId: string, limit?: number): H3NodeMaterial[];
+};
+
+/** 画布库文件夹 store。 */
+export type CanvasFolderStore = {
+    list(): CanvasFolder[];
+    upsert(folder: CanvasFolder): CanvasFolder;
+    delete(id: string): number;
 };
 
 /** 资产 store：assets + asset_folders 统一入口。 */
@@ -115,6 +134,7 @@ export type SettingStore = {
 /** 总后台 store 集合：server 路由和业务模块的统一依赖。 */
 export type Stores = {
     projects: CanvasProjectStore;
+    canvasFolders: CanvasFolderStore;
     assets: AssetStore;
     media: MediaStore;
     tasks: TaskStore;

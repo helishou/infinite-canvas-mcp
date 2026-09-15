@@ -162,6 +162,17 @@ export class BackendClient {
         return data.deleted || 0;
     }
 
+    // ── H3 节点历史运行产物（按需取，替代老的 metadata.materials 字段）──
+    async getH3NodeMaterials(projectId: string, nodeId: string, limit?: number): Promise<unknown[]> {
+        const qs = new URLSearchParams();
+        if (limit) qs.set("limit", String(limit));
+        const tail = qs.toString();
+        const data = await this.get<{ ok: boolean; materials?: unknown[] }>(
+            `/canvas/projects/${encodeURIComponent(projectId)}/nodes/${encodeURIComponent(nodeId)}/materials${tail ? `?${tail}` : ""}`
+        );
+        return data.materials || [];
+    }
+
     // ── Tasks ────────────────────────────────────────────────────────────
 
     async getTask(id: string): Promise<{ task: RuntimeTask; events: RuntimeTaskEvent[] }> {

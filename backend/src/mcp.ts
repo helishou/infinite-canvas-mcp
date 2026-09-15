@@ -130,6 +130,19 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
             return textResult(await executeDirectCanvasTool(config, backendApi, name, input));
         });
     }
+    // ── H3 节点历史运行产物（按需取，替代 metadata.materials 字段）──
+    server.registerTool("h3_get_node_materials", {
+        description: toolDescriptions.h3_get_node_materials,
+        inputSchema: toolInputSchemas.h3_get_node_materials.shape,
+    }, async (rawInput: Record<string, unknown>) => {
+        const input = toolInputSchemas.h3_get_node_materials.parse(rawInput) as { projectId?: string; nodeId: string; limit?: number };
+        const projectId = String(input.projectId || activeProjectId || "");
+        if (!projectId) throw new Error("缺少 projectId（先调用 canvas_set_active_project 或显式传入）");
+        const project = await fetchCurrentCanvasProject(config, projectId);
+        if (!project) throw new Error(`画布不存在: ${projectId}`);
+        const materials = await backendApi.getH3NodeMaterials(project.id, String(input.nodeId), Number(input.limit || 200));
+        return textResult({ ok: true, projectId: project.id, nodeId: String(input.nodeId), materials });
+    });
     for (const name of ["assets_list", "assets_add"] as ToolName[]) {
         const schema = toolInputSchemas[name];
         server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput: Record<string, unknown>) => {

@@ -90,13 +90,15 @@ test("H3：编辑两个不同段，拆成两条 update_h3_segment；节点级 me
 });
 
 test("H3：本地旧快照不能覆盖 Backend 的运行状态和产出", () => {
+    // 注意：H3 节点的 metadata.materials 自 v4 起已迁出到 generation_logs.outputs_json，
+    // 不再是 node.metadata 的字段；本测试只覆盖 status / content 字段的 sync 跳过逻辑。
     const baseNode = makeH3Node("h3-1", [
         { id: "s1", prompt: "开场", status: "loading", runtimeTaskId: "child-1", result: "", results: [] },
-    ], { status: "loading", runtimeTaskId: "parent-1", content: "", materials: [] });
+    ], { status: "loading", runtimeTaskId: "parent-1", content: "" });
     const base = makeProject([baseNode]);
     const staleNode = makeH3Node("h3-1", [
         { id: "s1", prompt: "开场", status: "success", runtimeTaskId: "", result: "old-video", results: [{ storageKey: "old-video" }] },
-    ], { status: "success", runtimeTaskId: "", content: "old-video", materials: [{ storageKey: "old-video" }] });
+    ], { status: "success", runtimeTaskId: "", content: "old-video" });
     const stale = makeProject([staleNode]);
     assert.deepEqual(diffCanvasProject(base, stale), []);
 });

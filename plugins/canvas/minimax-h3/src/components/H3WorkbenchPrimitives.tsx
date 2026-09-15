@@ -38,7 +38,7 @@ export function resetAndRequestH3Run(ctx: CanvasNodeContext, all = false) {
     const prompt = String(selected?.prompt || metadata.prompt || "");
     const runtimeRunId = `h3-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     ctx.updateMetadata({
-        ...(all ? { content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, materials: [] } : {}),
+        ...(all ? { content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined } : {}),
         selectedSegmentId: selectedId, prompt,
         segments: segments.map((segment) => all || segment.id === selectedId
             ? { ...segment, prompt: segment.id === selectedId ? prompt : segment.prompt, result: "", results: [], status: "queued", progress: 0, runtimeTaskId: "" }
@@ -52,7 +52,7 @@ export function resetAndRequestH3Run(ctx: CanvasNodeContext, all = false) {
 export function resetH3Run(ctx: CanvasNodeContext) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const segments = segmentsFor(node.metadata || {}).map((segment) => ({ ...segment, result: "", results: [], status: "idle", progress: 0, runtimeTaskId: "" }));
-    ctx.updateMetadata({ content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, materials: [], segments, status: "idle", errorDetails: "", runtimeTaskId: "", runtimeRunId: "", runProgress: 0, runRequestId: "", runRequestConsumedId: "", cancelRequested: false, runFinishedAt: undefined });
+    ctx.updateMetadata({ content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, segments, status: "idle", errorDetails: "", runtimeTaskId: "", runtimeRunId: "", runProgress: 0, runRequestId: "", runRequestConsumedId: "", cancelRequested: false, runFinishedAt: undefined });
 }
 
 export function H3StatusBadge({ status, error, onRetry }: { status: string; error: string; onRetry: () => void }) {

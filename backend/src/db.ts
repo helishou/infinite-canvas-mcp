@@ -45,6 +45,10 @@ export type MediaFile = {
     createdAt: string;
 };
 export type AssetFolder = { id: string; name: string; parentId: string | null; createdAt: string };
+export type CanvasFolder = {
+    id: string; name: string; createdAt: string; updatedAt?: string;
+    outline?: string; description?: string; coverStorageKey?: string | null; tags?: string[];
+};
 export type Asset = {
     id: string; kind: string; title: string; coverUrl: string; tags: string[];
     folderId: string | null; data: Record<string, unknown>; note: string | null;
@@ -122,6 +126,19 @@ export class BackendDatabase {
             CREATE TABLE IF NOT EXISTS canvas_projects (
                 id TEXT PRIMARY KEY,
                 data_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS canvas_folders (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS drama_projects (
+                folder_id TEXT PRIMARY KEY REFERENCES canvas_folders(id) ON DELETE CASCADE,
+                outline TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                cover_storage_key TEXT,
+                tags_json TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS assets (
@@ -240,6 +257,51 @@ export class BackendDatabase {
             this.removeFlux2KleinCompositeFields();
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (3, ?)").run(new Date().toISOString());
         }
+        if (currentVersion < 4) {
+            // 历史 H3 节点会把 segment 运行历史塞进 node.metadata.materials（每个 segment 含完整 sourcePrompt，
+            // 单节点 metadata 累积可达 MB 级；画布 JSON 越大，canvas_get_state 等 MCP tool 返回就越易被截断）。
+            // 现在 generation_logs.outputs_json 才是单一来源（url/storageKey/mimeType/width/height 都有），
+            // node.metadata.materials 在写入端停摆，迁移脚本从老 canvas_projects.data_json 中物理删掉这个字段，
+            // 下次读出来 metadata.materials 就一直是 undefined，前端走 generation_logs 派生路径。
+            this.stripMaterialsFromCanvasProjects();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (4, ?)").run(new Date().toISOString());
+        }
+    }
+
+    /**
+     * 一次性把老 canvas_projects.data_json 里的 metadata.materials 字段删掉。
+     * 解析每个 project 的 data_json → 找 type 以 minimax 开头的节点 → 删 metadata.materials 字段 → 写回。
+     * 解析失败则保留原值。
+     */
+    private stripMaterialsFromCanvasProjects() {
+        const rows = this.db.prepare("SELECT id, data_json FROM canvas_projects").all() as Array<{ id: string; data_json: string }>;
+        let touched = 0;
+        let totalStripped = 0;
+        for (const row of rows) {
+            let project: unknown;
+            try { project = JSON.parse(row.data_json); } catch { continue; }
+            if (!project || typeof project !== "object") continue;
+            const nodes = (project as { nodes?: unknown }).nodes;
+            if (!Array.isArray(nodes)) continue;
+            let projectTouched = false;
+            for (const node of nodes) {
+                if (!node || typeof node !== "object") continue;
+                const n = node as { type?: unknown; metadata?: unknown };
+                if (typeof n.type !== "string" || !/^minimax|^smart-minimax/.test(n.type)) continue;
+                if (!n.metadata || typeof n.metadata !== "object") continue;
+                const meta = n.metadata as Record<string, unknown>;
+                if (!("materials" in meta)) continue;
+                delete meta.materials;
+                projectTouched = true;
+                totalStripped++;
+            }
+            if (!projectTouched) continue;
+            const next = JSON.stringify(project);
+            if (next === row.data_json) continue;
+            this.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?").run(next, row.id);
+            touched++;
+        }
+        if (touched) console.log(`[migrate v4] stripped metadata.materials from ${totalStripped} H3 node(s) across ${touched} canvas project(s)`);
     }
 
     /**
@@ -379,17 +441,14 @@ export class BackendDatabase {
             // CAS：只有当 segment 的 runtimeTaskId 仍指向本任务时才回写，防止新任务接管本段后被旧结果覆盖。
             expectedFields: { runtimeTaskId: task.id },
         }];
-        // 节点级元数据（status / runProgress / materials / content / storageKey）走 update_node，不动 segments 字段。
+        // 节点级元数据（status / runProgress / content / storageKey）走 update_node，不动 segments 字段。
+        // 注意：不再写 metadata.materials（迁移 v4 起停摆）。materials 历史由 generation_logs.outputs_json 承担，
+        // 前端通过 MCP tool h3_get_node_materials / REST /canvas/nodes/:id/materials 按需取，metadata 体积随之下降。
         const nodeMetadataPatch: Record<string, unknown> = {
             status: terminalStatus,
             runProgress: task.progress,
         };
         if (output) {
-            const previousMaterials = Array.isArray(metadata.materials) ? metadata.materials as Array<Record<string, unknown>> : [];
-            nodeMetadataPatch.materials = [
-                ...previousMaterials.filter((item) => String(item.url || "") !== String(output.url || "")),
-                { ...output, name: "H3 输出", segmentId: binding.segmentId },
-            ];
             nodeMetadataPatch.content = output.url;
             nodeMetadataPatch.storageKey = output.storageKey;
         }
@@ -534,6 +593,62 @@ export class BackendDatabase {
 
     deleteCanvasProject(id: string): number {
         return Number(this.db.prepare("DELETE FROM canvas_projects WHERE id = ?").run(id).changes);
+    }
+
+    listCanvasFolders(): CanvasFolder[] {
+        const rows = this.db.prepare(
+            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.updated_at AS drama_updated_at FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id ORDER BY f.created_at ASC"
+        ).all() as Array<Record<string, unknown>>;
+        return rows.map((row) => {
+            const value = JSON.parse(String(row.tags_json || "[]"));
+            const tags = Array.isArray(value) ? value.map(String) : [];
+            return {
+                id: String(row.id), name: String(row.name), createdAt: String(row.created_at),
+                updatedAt: String(row.drama_updated_at || row.created_at),
+                outline: String(row.outline || ""), description: String(row.description || ""),
+                coverStorageKey: row.cover_storage_key ? String(row.cover_storage_key) : null, tags,
+            };
+        });
+    }
+
+    upsertCanvasFolder(folder: CanvasFolder) {
+        const updatedAt = String(folder.updatedAt || new Date().toISOString());
+        const tags = Array.isArray(folder.tags) ? folder.tags.map(String) : [];
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            this.db.prepare(
+                "INSERT INTO canvas_folders (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name"
+            ).run(folder.id, folder.name, folder.createdAt);
+            this.db.prepare(
+                "INSERT INTO drama_projects (folder_id, outline, description, cover_storage_key, tags_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id) DO UPDATE SET outline = excluded.outline, description = excluded.description, cover_storage_key = excluded.cover_storage_key, tags_json = excluded.tags_json, updated_at = excluded.updated_at"
+            ).run(folder.id, String(folder.outline || ""), String(folder.description || ""), folder.coverStorageKey || null, JSON.stringify(tags), updatedAt);
+            this.db.exec("COMMIT");
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+        return { ...folder, updatedAt, outline: String(folder.outline || ""), description: String(folder.description || ""), coverStorageKey: folder.coverStorageKey || null, tags };
+    }
+
+    deleteCanvasFolder(id: string): number {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const projects = this.listCanvasProjects();
+            const update = this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?");
+            const now = new Date().toISOString();
+            for (const project of projects) {
+                if (String(project.folderId || "") !== id) continue;
+                const next = { ...project };
+                delete next.folderId;
+                update.run(JSON.stringify(next), now, project.id);
+            }
+            const deleted = Number(this.db.prepare("DELETE FROM canvas_folders WHERE id = ?").run(id).changes);
+            this.db.exec("COMMIT");
+            return deleted;
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
     }
 
     getCanvasProject(id: string): CanvasProject | null {
@@ -840,6 +955,46 @@ export class BackendDatabase {
         if (options.nodeId) { clauses.push("node_id = ?"); values.push(options.nodeId); }
         if (!clauses.length) throw new Error("Generation log delete requires a scope");
         return Number(this.db.prepare(`DELETE FROM generation_logs WHERE ${clauses.join(" AND ")}`).run(...values).changes);
+    }
+
+    /**
+     * 取一个 H3 节点的全部运行历史产物（按时间倒序、按 url 去重）。
+     * 不返回 sourcePrompt——体积大、用途窄；要看 prompt 用 listGenerationLogs({ nodeId })。
+     * 替代老的 metadata.materials 数组（迁移 v4 起停摆）。
+     */
+    getH3NodeMaterials(projectId: string, nodeId: string, limit = 200): Array<{ url: string; storageKey?: string; mimeType?: string; width?: number | null; height?: number | null; name?: string; segmentId?: string; createdAt: string }> {
+        const rows = this.db.prepare(
+            `SELECT segment_id, outputs_json, created_at
+             FROM generation_logs
+             WHERE project_id = ? AND node_id = ?
+             ORDER BY created_at DESC
+             LIMIT ?`
+        ).all(projectId, nodeId, Math.max(1, Math.min(500, limit))) as Array<{ segment_id: string | null; outputs_json: string; created_at: string }>;
+        const seen = new Set<string>();
+        const out: Array<{ url: string; storageKey?: string; mimeType?: string; width?: number | null; height?: number | null; name?: string; segmentId?: string; createdAt: string }> = [];
+        for (const row of rows) {
+            let outputs: unknown;
+            try { outputs = JSON.parse(row.outputs_json); } catch { continue; }
+            if (!Array.isArray(outputs)) continue;
+            for (const item of outputs) {
+                if (!item || typeof item !== "object") continue;
+                const o = item as Record<string, unknown>;
+                const url = String(o.url || o.video_url || "");
+                if (!url || seen.has(url)) continue;
+                seen.add(url);
+                out.push({
+                    url,
+                    storageKey: o.storageKey ? String(o.storageKey) : undefined,
+                    mimeType: o.mimeType ? String(o.mimeType) : undefined,
+                    width: o.width != null ? Number(o.width) : null,
+                    height: o.height != null ? Number(o.height) : null,
+                    name: o.name ? String(o.name) : undefined,
+                    segmentId: row.segment_id || undefined,
+                    createdAt: row.created_at,
+                });
+            }
+        }
+        return out;
     }
 
     // ── tasks ─────────────────────────────────────────────────────────────

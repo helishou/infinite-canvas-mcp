@@ -84,15 +84,17 @@ const canvasDeltaRecovery = new Set<string>();
 
 // H3 节点 metadata 里"不进本地 diff 提交"的字段集合：
 //   - backend 独占：status / runProgress / runtimeTaskId / runtimeRunId / runRequestId / runRequestConsumedId
-//                  / cancelRequested / errorDetails / content / storageKey / materials
+//                  / cancelRequested / errorDetails / content / storageKey
 //     → 页面只读，绝不能把"页面恢复时的旧快照"重新提交，否则会覆盖任务回写。
+//     → 注意：H3 的"运行历史"已从 node.metadata 迁出（v4），落到 generation_logs.outputs_json。
+//       由 /canvas/projects/:id/nodes/:nodeId/materials 与 MCP h3_get_node_materials 按需返回。
 //   - 页面 UI 瞬态：playhead
 //     → H3 工作台 rAF tick 每帧都在改它（onPlayheadTick → updateMetadata），属于"看见/听见"的本地状态。
 //       不应该走主同步流，否则用户拖一下窗口 / 滚一下视图就会被弹冲突。
 //     → 其它 tab 看自己 video.currentTime 即可，不需要靠 sync 同步这个值。
 const H3_BACKEND_NODE_METADATA_FIELDS = new Set([
     "status", "runProgress", "runtimeTaskId", "runtimeRunId", "runRequestId", "runRequestConsumedId",
-    "cancelRequested", "errorDetails", "content", "storageKey", "materials",
+    "cancelRequested", "errorDetails", "content", "storageKey",
     "playhead",
 ]);
 const H3_BACKEND_SEGMENT_FIELDS = new Set([

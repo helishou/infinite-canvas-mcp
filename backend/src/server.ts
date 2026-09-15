@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { type ResolvedConfig, DATA_DIR, ensureDataDirs, loadRootConfig, saveRootConfig, loadFrontendSettings, type FrontendSettings } from "./config.js";
 import type {
-    Asset, AssetFolder, CanvasProject,
+    Asset, AssetFolder, CanvasFolder, CanvasProject,
     GenerationLog, GenerationLogStatus, RuntimeTask, RuntimeTaskStatus,
 } from "./db.js";
 import type { ComfyUiBackend } from "./comfyui/bridge.js";
@@ -249,6 +249,30 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.delete("/canvas/projects/:id", (req, res) => {
         const deleted = stores.projects.delete(req.params.id);
         events.publishCanvasSnapshot({ entityId: req.params.id, payload: { deleted } });
+        res.json({ ok: true, deleted });
+    });
+    // ── H3 节点历史运行产物（按需取，替代 metadata.materials 字段）──
+    app.get("/canvas/projects/:id/nodes/:nodeId/materials", (req, res) => {
+        const projectId = req.params.id;
+        const nodeId = req.params.nodeId;
+        if (!stores.projects.get(projectId)) return void res.status(404).json({ ok: false, error: `画布不存在: ${projectId}` });
+        const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 200));
+        const materials = stores.projects.getH3NodeMaterials(projectId, nodeId, limit);
+        res.json({ ok: true, projectId, nodeId, materials });
+    });
+    app.get("/canvas/folders", (_req, res) => {
+        res.json({ ok: true, folders: stores.canvasFolders.list() });
+    });
+    app.post("/canvas/folders", (req, res) => {
+        const folder = req.body as CanvasFolder;
+        if (!folder?.id) return void res.status(400).json({ ok: false, error: "folder.id 必填" });
+        const result = stores.canvasFolders.upsert(folder);
+        events.publishCanvasFolder({ entityId: result.id, payload: result });
+        res.status(201).json({ ok: true, folder: result });
+    });
+    app.delete("/canvas/folders/:id", (req, res) => {
+        const deleted = stores.canvasFolders.delete(req.params.id);
+        events.publishCanvasFolder({ entityId: req.params.id, payload: { deleted } });
         res.json({ ok: true, deleted });
     });
     // ── Image split: auto-detect 切分线宽度 ───────────────────────────────
