@@ -65,10 +65,20 @@ const DIRECT_TOOL_NAMES = new Set<ToolName>([...DIRECT_CANVAS_TOOLS, "assets_lis
 
 async function executeDirectCanvasTool(config: ReturnType<typeof loadConfig>, backendApi: ReturnType<typeof createBackendClient>, name: ToolName, input: Record<string, unknown>) {
     if (name === "canvas_list_projects") {
+        // folderId 字符串 → 取该剧目下画布；null（显式传 null）或字符串 "__null__"/"" → 只取未挂剧目的；
+        // 不传 → 不过滤（旧行为）。keyword 在过滤后做模糊匹配（不查全表）。
+        const folderIdParam = input.folderId;
+        let folderFilter: { folderId?: string | null } | undefined;
+        if (typeof folderIdParam === "string") {
+            if (folderIdParam === "__null__" || folderIdParam === "") folderFilter = { folderId: null };
+            else folderFilter = { folderId: folderIdParam };
+        } else if (folderIdParam === null) {
+            folderFilter = { folderId: null };
+        }
         const keyword = String(input.keyword || "").trim().toLowerCase();
-        const all = (await fetchCanvasProjects(config))
+        const all = (await fetchCanvasProjects(config, folderFilter))
             .filter((project) => !keyword || String(project.title || project.name || "").toLowerCase().includes(keyword))
-            .map((project) => ({ id: project.id, title: project.title, updatedAt: project.updatedAt, nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0, connectionCount: Array.isArray(project.connections) ? project.connections.length : 0 }));
+            .map((project) => ({ id: project.id, title: project.title, updatedAt: project.updatedAt, folderId: project.folderId ?? null, nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0, connectionCount: Array.isArray(project.connections) ? project.connections.length : 0 }));
         const pageSize = Math.max(1, Math.min(100, Number(input.pageSize || 20)));
         const page = Math.max(1, Number(input.page || 1));
         return { projects: all.slice((page - 1) * pageSize, page * pageSize), total: all.length, page, pageSize };
@@ -240,22 +250,25 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
         return textResult({ ok: true, sourceNodeId: nodeId, rows, columns, count: created.length, created, revision: applied.revision });
     });
     server.registerTool("canvas_create_project", {
-        description: "创建新画布。返回 id、title、createdAt。可选 title（默认「未命名画布」）。",
-        inputSchema: z.object({ title: z.string().optional() }).shape,
+        description: "创建新画布。返回 id、title、createdAt。可选 title（默认「未命名画布」）、folderId（挂到指定剧目下；不传或 null = 未挂剧目）。先调用 drama_create_project 拿到 folder id 再传进来；不在剧目下时省略。",
+        inputSchema: z.object({ title: z.string().optional(), folderId: z.string().nullable().optional() }).shape,
     }, async (rawInput: Record<string, unknown>) => {
         const title = String(rawInput.title || "未命名画布").trim() || "未命名画布";
+        const folderIdRaw = typeof rawInput.folderId === "string" ? rawInput.folderId.trim() : "";
+        const folderId = folderIdRaw || null;
         const now = new Date().toISOString();
         const id = nanoid();
         const project: CanvasProject = {
             id, title, createdAt: now, updatedAt: now,
             revision: 0,
+            folderId,
             nodes: [], connections: [], chatSessions: [], activeChatId: null,
             backgroundMode: "lines", showImageInfo: false, globalPrompt: "",
             viewport: { x: 0, y: 0, zoom: 1 },
         };
         const saved = await saveCanvasProject(config, project);
         activeProjectId = id;
-        return textResult({ ok: true, id: saved.id, title: saved.title, createdAt: saved.createdAt });
+        return textResult({ ok: true, id: saved.id, title: saved.title, createdAt: saved.createdAt, folderId: saved.folderId ?? null });
     });
     const dramaCreateProjectSchema = z.object({
         name: z.string().trim().min(1).max(200),
@@ -508,8 +521,15 @@ function toCanvasTask(task: { id?: string; kind: string; input?: Record<string, 
     };
 }
 
-async function fetchCanvasProjects(config: ReturnType<typeof loadConfig>): Promise<CanvasProject[]> {
-    const response = await fetch(`${config.url.replace(/\/$/, "")}/canvas/projects?token=${encodeURIComponent(config.token)}`);
+async function fetchCanvasProjects(config: ReturnType<typeof loadConfig>, filter?: { folderId?: string | null }): Promise<CanvasProject[]> {
+    const params = new URLSearchParams();
+    if (filter && "folderId" in filter) {
+        if (filter.folderId === null) params.set("folderId", "__null__");
+        else if (filter.folderId) params.set("folderId", filter.folderId);
+    }
+    const query = params.toString();
+    const url = `${config.url.replace(/\/$/, "")}/canvas/projects${query ? `?${query}` : ""}&token=${encodeURIComponent(config.token)}`;
+    const response = await fetch(url);
     const body = await response.json().catch(() => ({})) as { projects?: CanvasProject[]; error?: string };
     if (!response.ok || !Array.isArray(body.projects)) throw new Error(body.error || `读取画布失败: HTTP ${response.status}`);
     return body.projects;

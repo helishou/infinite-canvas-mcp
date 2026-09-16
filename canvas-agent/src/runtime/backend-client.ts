@@ -56,8 +56,14 @@ export class BackendClient {
 
     // ── Canvas projects ──────────────────────────────────────────────────
 
-    async listCanvasProjects(): Promise<Record<string, unknown>[]> {
-        const data = await this.get<{ ok: boolean; projects?: Record<string, unknown>[] }>("/canvas/projects");
+    async listCanvasProjects(options: { folderId?: string | null } = {}): Promise<Record<string, unknown>[]> {
+        const params = new URLSearchParams();
+        if ("folderId" in options) {
+            if (options.folderId === null) params.set("folderId", "__null__");
+            else if (options.folderId) params.set("folderId", options.folderId);
+        }
+        const qs = params.toString();
+        const data = await this.get<{ ok: boolean; projects?: Record<string, unknown>[] }>(`/canvas/projects${qs ? `?${qs}` : ""}`);
         return Array.isArray(data.projects) ? data.projects : [];
     }
 

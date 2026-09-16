@@ -55,7 +55,7 @@ export type Asset = {
     source: string | null; metadata: Record<string, unknown>;
     createdAt: string; updatedAt: string;
 };
-export type CanvasProject = Record<string, unknown> & { id: string };
+export type CanvasProject = Record<string, unknown> & { id: string; folderId?: string | null };
 export type PluginDeclaration = {
     id: string;
     name: string;
@@ -126,8 +126,10 @@ export class BackendDatabase {
             CREATE TABLE IF NOT EXISTS canvas_projects (
                 id TEXT PRIMARY KEY,
                 data_json TEXT NOT NULL,
+                folder_id TEXT REFERENCES canvas_folders(id) ON DELETE SET NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS canvas_projects_folder_id ON canvas_projects(folder_id);
             CREATE TABLE IF NOT EXISTS canvas_folders (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -275,6 +277,14 @@ export class BackendDatabase {
             this.stripSegmentInputSnapshotsFromCanvasProjects();
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (5, ?)").run(new Date().toISOString());
         }
+        if (currentVersion < 6) {
+            // 短剧制作台 / 剧目（drama_projects）已经存在并挂在外层 canvas_folders 下，
+            // 但画布（canvas_projects）之前没有 folder_id 列，前端 /drama 页面因此永远只能
+            // 看到"全部场景"——"未编排场景"分类永远是空的、新建画布也没法挂剧目。
+            // 这里加一列 + 索引，删除剧目时 ON DELETE SET NULL（画布掉回"未编排场景"分类）。
+            this.attachCanvasProjectsToFolders();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (6, ?)").run(new Date().toISOString());
+        }
     }
 
     /**
@@ -404,6 +414,22 @@ export class BackendDatabase {
     }
 
     /**
+     * v6 migration: 给老 canvas_projects 加 folder_id 列 + 索引。
+     * 列在 CREATE TABLE 里已经预声明（新建库直接生效）；老库用 ALTER TABLE 兜底。
+     * ON DELETE SET NULL：删剧目时画布自动掉到"未编排场景"分类，不级联删画布。
+     */
+    private attachCanvasProjectsToFolders() {
+        const cols = this.db.prepare("PRAGMA table_info(canvas_projects)").all() as Array<{ name: string }>;
+        const hasFolderId = cols.some((c) => c.name === "folder_id");
+        if (!hasFolderId) {
+            this.db.exec("ALTER TABLE canvas_projects ADD COLUMN folder_id TEXT REFERENCES canvas_folders(id) ON DELETE SET NULL");
+        }
+        this.db.exec("CREATE INDEX IF NOT EXISTS canvas_projects_folder_id ON canvas_projects(folder_id)");
+        const projectCount = (this.db.prepare("SELECT COUNT(*) AS n FROM canvas_projects").get() as { n: number }).n;
+        console.log(`[migrate v6] canvas_projects.folder_id ready (${projectCount} project(s))`);
+    }
+
+    /**
      * 删除 Flux2-Klein 内置工作流中 `node: "152,156"` 的 width/height 复合字段。
      * 这两类字段的 node 是「同时注入节点152+156」的复合写法，不是真实节点名，
      * 因此工作流管理面板无法显示/删除它，却又会出现在运行面板；且其 default 被
@@ -431,7 +457,31 @@ export class BackendDatabase {
 
     // ── canvas_projects ───────────────────────────────────────────────────
 
-    listCanvasProjects(): CanvasProject[] {
+    listCanvasProjects(filter?: { folderId?: string | null }): CanvasProject[] {
+        // 按 folderId 过滤时走列上索引（不取 summary，全量 JSON）。
+        // folderId === null → 显式只取未挂剧目的画布；
+        // folderId === undefined → 不过滤；
+        // 字符串则严格相等（caller 负责把空字符串规范成 null 或单值）。
+        if (filter && "folderId" in filter) {
+            if (filter.folderId === null) {
+                const rows = this.db.prepare("SELECT data_json FROM canvas_projects WHERE folder_id IS NULL ORDER BY updated_at DESC").all() as Array<{ data_json: string }>;
+                return rows.flatMap((row) => {
+                    try {
+                        const value = JSON.parse(row.data_json) as CanvasProject;
+                        return value && typeof value === "object" && value.id ? [value] : [];
+                    } catch { return []; }
+                });
+            }
+            const target = String(filter.folderId || "").trim();
+            if (!target) return [];
+            const rows = this.db.prepare("SELECT data_json FROM canvas_projects WHERE folder_id = ? ORDER BY updated_at DESC").all(target) as Array<{ data_json: string }>;
+            return rows.flatMap((row) => {
+                try {
+                    const value = JSON.parse(row.data_json) as CanvasProject;
+                    return value && typeof value === "object" && value.id ? [value] : [];
+                } catch { return []; }
+            });
+        }
         const rows = this.db.prepare("SELECT data_json FROM canvas_projects ORDER BY updated_at DESC").all() as Array<{ data_json: string }>;
         return rows.flatMap((row) => {
             try {
@@ -441,15 +491,32 @@ export class BackendDatabase {
         });
     }
 
-    listCanvasProjectSummaries(id?: string): CanvasProject[] {
-        return this.db.prepare(`SELECT id, updated_at AS updatedAt,
+    listCanvasProjectSummaries(filter?: { folderId?: string | null; id?: string }): CanvasProject[] {
+        // 走 folder_id 列索引，不依赖 data_json 内部字段。
+        // null → 未挂剧目；string → 严格相等；undefined + id? → 仅按 id 过滤。
+        const where: string[] = [];
+        const params: Array<string | null> = [];
+        if (filter && "folderId" in filter) {
+            if (filter.folderId === null) {
+                where.push("folder_id IS NULL");
+            } else {
+                const target = String(filter.folderId || "").trim();
+                if (!target) return [];
+                where.push("folder_id = ?");
+                params.push(target);
+            }
+        }
+        if (filter?.id) {
+            where.push("id = ?");
+            params.push(filter.id);
+        }
+        const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+        return this.db.prepare(`SELECT id, folder_id AS folderId, updated_at AS updatedAt,
             json_extract(data_json, '$.title') AS title,
-            json_extract(data_json, '$.folderId') AS folderId,
-            json_extract(data_json, '$.createdAt') AS createdAt,
             COALESCE(json_extract(data_json, '$.revision'), 0) AS revision,
             COALESCE(json_array_length(data_json, '$.nodes'), 0) AS nodeCount,
             COALESCE(json_array_length(data_json, '$.connections'), 0) AS connectionCount
-            FROM canvas_projects ${id ? "WHERE id = ?" : ""} ORDER BY updated_at DESC`).all(...(id ? [id] : [])) as CanvasProject[];
+            FROM canvas_projects ${whereClause} ORDER BY updated_at DESC`).all(...params) as CanvasProject[];
     }
 
     upsertCanvasProject(project: CanvasProject) {
@@ -463,9 +530,13 @@ export class BackendDatabase {
         // 客户端可能持有旧的全量画布快照；不能让它覆盖 MCP 刚写入的节点状态。
         if (current && Date.parse(String(current.updatedAt || "")) > Date.parse(updatedAt)) return current;
         project.revision = Math.max(currentRevision, incomingRevision);
+        // folderId 双写：data_json 保留冗余字段（前端 /drama 页面与外部 schema 已经在用），
+        // folder_id 列作为权威查询索引（带 ON DELETE SET NULL）。null/空字符串都规范化为 NULL。
+        const folderIdRaw = typeof project.folderId === "string" ? project.folderId.trim() : "";
+        const folderId = folderIdRaw || null;
         this.db.prepare(
-            "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
-        ).run(project.id, JSON.stringify(project), updatedAt);
+            "INSERT INTO canvas_projects (id, data_json, folder_id, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, folder_id = excluded.folder_id, updated_at = excluded.updated_at"
+        ).run(project.id, JSON.stringify(project), folderId, updatedAt);
         return this.getCanvasProject(project.id)!;
     }
 
@@ -690,9 +761,13 @@ export class BackendDatabase {
         this.db.exec("BEGIN IMMEDIATE");
         try {
             this.db.prepare("DELETE FROM canvas_projects").run();
-            const insert = this.db.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)");
+            const insert = this.db.prepare("INSERT INTO canvas_projects (id, data_json, folder_id, updated_at) VALUES (?, ?, ?, ?)");
             for (const project of projects) {
-                if (project.id) insert.run(project.id, JSON.stringify(project), String(project.updatedAt || now));
+                if (project.id) {
+                    const folderIdRaw = typeof project.folderId === "string" ? project.folderId.trim() : "";
+                    const folderId = folderIdRaw || null;
+                    insert.run(project.id, JSON.stringify(project), folderId, String(project.updatedAt || now));
+                }
             }
             this.db.exec("COMMIT");
         } catch (error) {
@@ -744,6 +819,9 @@ export class BackendDatabase {
     deleteCanvasFolder(id: string): number {
         this.db.exec("BEGIN IMMEDIATE");
         try {
+            // folder_id 列由 ON DELETE SET NULL 自动清零；data_json 里的冗余字段也要同步删，
+            // 否则前端再读时还会看到 stale folderId（虽然 list 已经按列过滤了，但 getCanvasProject
+            // 直接反序列化 data_json，没有抹这一步就会泄露）。
             const projects = this.listCanvasProjects();
             const update = this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?");
             const now = new Date().toISOString();

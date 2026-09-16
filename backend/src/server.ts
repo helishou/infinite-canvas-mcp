@@ -58,9 +58,13 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     // 时，比如简单 GET 请求没有预检，Allow-Headers 还是空）。
     const CORS_ALLOWED_HEADERS_DEFAULT = "Content-Type, Authorization, x-media-name, x-media-width, x-media-height, x-media-duration-ms, x-media-category";
     app.use((req: Request, res: Response, next: NextFunction) => {
-        const origins = config.origins ?? ["*"];
+        const origins = config.origins ?? [];
         const origin = req.headers.origin;
-        if (origin && (origins.includes("*") || origins.includes(origin))) {
+        if (origin && !origins.includes(origin)) {
+            res.status(403).json({ ok: false, error: "origin not allowed" });
+            return;
+        }
+        if (origin) {
             res.setHeader("Access-Control-Allow-Origin", origin);
             res.setHeader("Access-Control-Allow-Credentials", "true");
             res.setHeader("Vary", "Origin");
@@ -216,10 +220,22 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
 
     // ── Canvas projects ──────────────────────────────────────────────────
     app.get("/canvas/projects", (req, res) => {
-        res.json({ ok: true, projects: req.query.summary === "true" ? db.listCanvasProjectSummaries() : stores.projects.list() });
+        // ?folderId=xxx 过滤；folderId=__null__ 或空 → 只取未挂剧目的画布；
+        // 不传 folderId → 不过滤（旧行为，向后兼容）。
+        const folderIdParam = req.query.folderId;
+        let filter: { folderId?: string | null } | undefined;
+        if (typeof folderIdParam === "string") {
+            if (folderIdParam === "__null__" || folderIdParam === "") filter = { folderId: null };
+            else filter = { folderId: folderIdParam };
+        }
+        const useSummary = req.query.summary === "true";
+        const projects = useSummary
+            ? (filter ? db.listCanvasProjectSummaries(filter) : db.listCanvasProjectSummaries())
+            : stores.projects.list(filter);
+        res.json({ ok: true, projects });
     });
     app.get("/canvas/projects/:id", (req, res) => {
-        const project = req.query.summary === "true" ? db.listCanvasProjectSummaries(req.params.id)[0] : db.getCanvasProject(req.params.id);
+        const project = req.query.summary === "true" ? db.listCanvasProjectSummaries({ id: req.params.id })[0] : db.getCanvasProject(req.params.id);
         if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
         res.json({ ok: true, project });
     });

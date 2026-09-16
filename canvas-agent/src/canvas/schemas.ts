@@ -159,6 +159,7 @@ export const toolInputSchemas = {
     }),
     canvas_list_projects: canvasProjectSchema.extend({
         keyword: z.string().optional().describe("按标题模糊搜索"),
+        folderId: z.string().nullable().optional().describe("可选剧目文件夹 ID 过滤；不传 = 全部；显式传 null 或空字符串 = 只取未挂剧目的画布；传具体 ID = 只取该剧目下的画布"),
         page: z.number().optional().describe("页码，从 1 开始；默认 1"),
         pageSize: z.number().optional().describe("每页数量，默认 20，最大 100"),
     }),

@@ -1,10 +1,11 @@
 import type { BackendDatabase, CanvasProject } from "../db.js";
-import type { CanvasProjectStore, H3NodeMaterial } from "./types.js";
+import type { CanvasProjectFilter, CanvasProjectStore, H3NodeMaterial } from "./types.js";
 
 /** 画布项目 store。 */
 export function createProjectStore(db: BackendDatabase): CanvasProjectStore {
     return {
-        list: () => db.listCanvasProjects(),
+        list: (filter?: CanvasProjectFilter) => db.listCanvasProjects(filter),
+        listSummaries: (filter?: CanvasProjectFilter) => db.listCanvasProjectSummaries(filter),
         get: (id) => db.getCanvasProject(id),
         upsert: (project) => db.upsertCanvasProject(project),
         replaceAll: (projects) => db.replaceCanvasProjects(projects),
