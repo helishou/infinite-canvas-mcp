@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 export const DEFAULT_PORT = 17370;
+const DEFAULT_ORIGINS = ["http://127.0.0.1:3001", "http://localhost:3001"];
 /** Root config 文件路径（固定在用户目录，与 DATA_DIR 解耦）。 */
 export const ROOT_CONFIG_FILE = path.join(os.homedir(), ".infinite-canvas-root.json");
 export type RootConfig = { dataDir?: string; mediaDir?: string };
@@ -67,7 +68,8 @@ export function loadConfig(create = false): ResolvedConfig {
     const port = Number(process.env.PORT) || raw.port || DEFAULT_PORT;
     const url = raw.url || `http://127.0.0.1:${port}`;
     const token = raw.token || crypto.randomBytes(18).toString("hex");
-    const config: ResolvedConfig = { url, token, port, origins: raw.origins ?? ["*"] };
+    const configuredOrigins = Array.isArray(raw.origins) ? raw.origins.filter((origin) => origin && origin !== "*") : [];
+    const config: ResolvedConfig = { url, token, port, origins: configuredOrigins.length ? configuredOrigins : DEFAULT_ORIGINS };
     if (create) saveConfig(config);
     return config;
 }

@@ -129,7 +129,6 @@ export class BackendDatabase {
                 folder_id TEXT REFERENCES canvas_folders(id) ON DELETE SET NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS canvas_projects_folder_id ON canvas_projects(folder_id);
             CREATE TABLE IF NOT EXISTS canvas_folders (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -424,6 +423,17 @@ export class BackendDatabase {
         if (!hasFolderId) {
             this.db.exec("ALTER TABLE canvas_projects ADD COLUMN folder_id TEXT REFERENCES canvas_folders(id) ON DELETE SET NULL");
         }
+        this.db.exec(`
+            UPDATE canvas_projects
+            SET folder_id = (
+                SELECT id FROM canvas_folders
+                WHERE id = json_extract(canvas_projects.data_json, '$.folderId')
+            )
+            WHERE folder_id IS NULL AND json_extract(data_json, '$.folderId') IS NOT NULL;
+            UPDATE canvas_projects
+            SET data_json = json_remove(data_json, '$.folderId')
+            WHERE folder_id IS NULL AND json_extract(data_json, '$.folderId') IS NOT NULL;
+        `);
         this.db.exec("CREATE INDEX IF NOT EXISTS canvas_projects_folder_id ON canvas_projects(folder_id)");
         const projectCount = (this.db.prepare("SELECT COUNT(*) AS n FROM canvas_projects").get() as { n: number }).n;
         console.log(`[migrate v6] canvas_projects.folder_id ready (${projectCount} project(s))`);
@@ -513,6 +523,7 @@ export class BackendDatabase {
         const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
         return this.db.prepare(`SELECT id, folder_id AS folderId, updated_at AS updatedAt,
             json_extract(data_json, '$.title') AS title,
+            json_extract(data_json, '$.createdAt') AS createdAt,
             COALESCE(json_extract(data_json, '$.revision'), 0) AS revision,
             COALESCE(json_array_length(data_json, '$.nodes'), 0) AS nodeCount,
             COALESCE(json_array_length(data_json, '$.connections'), 0) AS connectionCount

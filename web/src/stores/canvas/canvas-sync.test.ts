@@ -8,7 +8,7 @@ localforage.createInstance = (() => ({
     setItem: async (key: string, value: unknown) => { writes.push(key); cache.set(key, value); return value; },
     removeItem: async (key: string) => { cache.delete(key); },
     iterate: async (visit: (value: unknown) => void) => { cache.forEach(visit); },
-})) as typeof localforage.createInstance;
+})) as unknown as typeof localforage.createInstance;
 const { useCanvasStore, hydrateCanvasProjects, ensureCanvasProjectLoaded, applyBackendCanvasEvent, flushCanvasSyncNow } = await import("./use-canvas-store");
 const { useBackendStore } = await import("../use-backend-store");
 

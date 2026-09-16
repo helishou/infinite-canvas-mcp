@@ -85,7 +85,7 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.use((req: Request, res: Response, next: NextFunction) => {
         const url = req.url!.split("?")[0];
         if (url === "/health" || url === "/config") return next();
-        // 只读媒体端点免 token：本地单用户开发 backend 的 CORS 已 `*`，且媒体 URL 内嵌的
+        // 只读媒体端点免 token：浏览器来源已由上方 CORS 白名单限制，且媒体 URL 内嵌的
         // token 会在 backend 重启后失效，豁免后可避免历史产物在 token 轮换后 401 而“消失”。
         // 仅豁免 GET 读取类端点，写入类（如 POST /runtime/media）仍受 token 保护。
         if (url === "/media" || url.startsWith("/media/") || url.startsWith("/runtime/media-file")) return next();

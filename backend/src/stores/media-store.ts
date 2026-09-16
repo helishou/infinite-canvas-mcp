@@ -107,6 +107,6 @@ function safeCategory(value: MediaCategory | undefined): MediaCategory {
     return value === "output" || value === "library" ? value : "input";
 }
 
-function runtimeMediaUrl(name: string) {
-    return `/media-file?name=${encodeURIComponent(name)}`;
+export function runtimeMediaUrl(name: string) {
+    return `/runtime/media-file?name=${encodeURIComponent(name)}`;
 }

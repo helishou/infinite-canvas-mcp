@@ -5,6 +5,12 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Backend 本地访问边界
+
+- 从 `http://127.0.0.1:3001` 或 `http://localhost:3001` 打开画布，确认能自动发现 Backend token 并正常连接；从未列入 `backend.json` 的网页来源请求 `/config` 应返回 403，且响应不包含 token。
+- 使用 ComfyUI 媒体落地接口后，确认返回的 `/runtime/media-file` 地址可以直接读取成品，不再命中不存在的 `/media-file` 路由。
+- 打开包含大量历史工具事件的 Agent 线程，确认重启后记录仍完整；将补充历史文件改成损坏 JSON 或未知版本后，Agent 应明确报错并保留原文件，不得重建空文件覆盖。
+
 ## 画布生图运行态
 
 - 使用自定义云端图片模型从图片节点点击「生图」，确认右侧新建的输出图片节点在结果返回前持续显示「生成中」，不会退回「空图片节点」。
