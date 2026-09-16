@@ -125,8 +125,9 @@ function guessType(rawValue: unknown, inputName: string): WorkflowField["type"] 
     }
     if (typeof rawValue === "string") {
         if (/prompt|text|description/.test(lc) || (rawValue && rawValue.length > 60)) return "text";
+        if (/audio|voice|sound/.test(lc) || /\.(wav|mp3|flac|m4a|aac|ogg|opus)$/i.test(rawValue)) return "audio";
+        if (/video|movie/.test(lc) || /\.(mp4|webm|mov|m4v|avi|mkv)$/i.test(rawValue)) return "video";
         if (/image|img|mask|filename|file/.test(lc) || /\.(png|jpe?g|webp|gif|bmp)/i.test(rawValue)) return "image";
-        if (/video|movie|mp4/.test(lc)) return "text" as any;
         return "text";
     }
     return "text";
@@ -489,8 +490,8 @@ function InputRow({
                             }}
                             className="w-full rounded border border-stone-200 px-2 py-1 text-xs dark:border-stone-700 dark:bg-stone-900"
                         >
-                            {["text", "number", "slider", "boolean", "dropdown", "image"].map(t => (
-                                <option key={t} value={t}>{t === "text" ? "文本" : t === "number" ? "数字" : t === "slider" ? "滑块" : t === "boolean" ? "布尔" : t === "dropdown" ? "下拉" : "图片"}</option>
+                            {["text", "number", "slider", "boolean", "dropdown", "image", "audio", "video"].map(t => (
+                                <option key={t} value={t}>{t === "text" ? "文本" : t === "number" ? "数字" : t === "slider" ? "滑块" : t === "boolean" ? "布尔" : t === "dropdown" ? "下拉" : t === "image" ? "图片" : t === "audio" ? "音频" : "视频"}</option>
                             ))}
                         </select>
                     </div>

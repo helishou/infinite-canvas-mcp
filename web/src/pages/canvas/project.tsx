@@ -280,7 +280,8 @@ function InfiniteCanvasPage() {
         hasMoved: boolean;
         startX: number;
         startY: number;
-        initialSelectedNodes: { id: string; x: number; y: number }[];
+        initialSelectedNodes: Map<string, Position>;
+        movedIds: Set<string>;
         referenceDrag?: AnyReferenceDrag;
         referenceTargetNodeId?: string;
     }>({
@@ -288,7 +289,8 @@ function InfiniteCanvasPage() {
         hasMoved: false,
         startX: 0,
         startY: 0,
-        initialSelectedNodes: [],
+        initialSelectedNodes: new Map(),
+        movedIds: new Set(),
     });
 
     const config = useConfigStore((state) => state.config);
@@ -854,10 +856,15 @@ function InfiniteCanvasPage() {
             const from = nodeById.get(connection.fromNodeId);
             const to = nodeById.get(connection.toNodeId);
             if (!from || !to) return false;
-            const left = Math.min(from.position.x, to.position.x);
-            const top = Math.min(from.position.y, to.position.y);
-            const right = Math.max(from.position.x + from.width, to.position.x + to.width);
-            const bottom = Math.max(from.position.y + from.height, to.position.y + to.height);
+            const startX = from.position.x + from.width;
+            const startY = from.position.y + from.height / 2;
+            const endX = to.position.x;
+            const endY = to.position.y + to.height / 2;
+            const curvature = Math.max(Math.abs(endX - startX) * 0.5, 50);
+            const left = Math.min(startX, endX - curvature);
+            const top = Math.min(startY, endY);
+            const right = Math.max(startX + curvature, endX);
+            const bottom = Math.max(startY, endY);
             return right > viewLeft && left < viewRight && bottom > viewTop && top < viewBottom;
         });
     }, [connections, nodeById, size.height, size.width, viewport.k, viewport.x, viewport.y]);
@@ -1473,7 +1480,8 @@ function InfiniteCanvasPage() {
             hasMoved: false,
             startX: event.clientX,
             startY: event.clientY,
-            initialSelectedNodes: currentNodes.filter((node) => dragIds.has(node.id)).map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
+            initialSelectedNodes: new Map(currentNodes.filter((node) => dragIds.has(node.id)).map((node) => [node.id, node.position])),
+            movedIds: dragIds,
             referenceDrag: (() => {
                 if (nextSelected.size !== 1) return undefined;
                 const node = currentNodes.find((item) => nextSelected.has(item.id));
@@ -1515,8 +1523,8 @@ function InfiniteCanvasPage() {
         }
         if (!dragRef.current.isDraggingNode) return;
 
-        const wasClick = !dragRef.current.hasMoved && dragRef.current.initialSelectedNodes.length === 1;
-        const clickedNodeId = dragRef.current.initialSelectedNodes[0]?.id;
+        const wasClick = !dragRef.current.hasMoved && dragRef.current.initialSelectedNodes.size === 1;
+        const clickedNodeId = dragRef.current.initialSelectedNodes.keys().next().value as string | undefined;
         const currentViewport = viewportRef.current;
         const dx = clientX == null ? 0 : (clientX - dragRef.current.startX) / currentViewport.k;
         const dy = clientY == null ? 0 : (clientY - dragRef.current.startY) / currentViewport.k;
@@ -1541,10 +1549,10 @@ function InfiniteCanvasPage() {
             dragPreviewPositionsRef.current = EMPTY_DRAG_PREVIEW;
             setDragPreviewPositions(EMPTY_DRAG_PREVIEW);
         } else if (dragRef.current.hasMoved && clientX != null && clientY != null) {
-            const movedIds = new Set(initialPositions.map((item) => item.id));
+            const movedIds = dragRef.current.movedIds;
             setNodes((prev) => {
                 const moved = prev.map((node) => {
-                    const initial = initialPositions.find((item) => item.id === node.id);
+                    const initial = initialPositions.get(node.id);
                     const position = initial ? previewPositions.get(node.id) || { x: initial.x + dx, y: initial.y + dy } : null;
                     return position ? { ...node, position } : node;
                 });
@@ -1566,7 +1574,8 @@ function InfiniteCanvasPage() {
 
         dragRef.current.isDraggingNode = false;
         dragRef.current.hasMoved = false;
-        dragRef.current.initialSelectedNodes = [];
+        dragRef.current.initialSelectedNodes = new Map();
+        dragRef.current.movedIds = new Set();
         dragRef.current.referenceDrag = undefined;
         dragRef.current.referenceTargetNodeId = undefined;
         if (wasClick && clickedNodeId) {
@@ -1593,7 +1602,7 @@ function InfiniteCanvasPage() {
                     dragRef.current.hasMoved = true;
                 }
 
-                const movedIds = new Set(initialPositions.map((item) => item.id));
+                const movedIds = dragRef.current.movedIds;
                 const referenceDrag = dragRef.current.referenceDrag;
                 const h3Target = referenceDrag ? h3DropTargetAt(event.clientX, event.clientY) : null;
                 if (referenceDrag && h3Target) {
@@ -1613,20 +1622,19 @@ function InfiniteCanvasPage() {
                     dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: dragRef.current.referenceTargetNodeId, clientX: event.clientX, clientY: event.clientY });
                     dragRef.current.referenceTargetNodeId = undefined;
                 }
-                const previewPositions = new Map<string, Position>();
-                const previewNodes = nodesRef.current.map((node) => {
-                    const initial = initialPositions.find((item) => item.id === node.id);
-                    if (!initial) return node;
-                    const position = { x: initial.x + dx, y: initial.y + dy };
-                    previewPositions.set(node.id, position);
-                    return { ...node, position };
-                });
-                setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
-
                 if (rafRef.current) cancelAnimationFrame(rafRef.current);
                 rafRef.current = requestAnimationFrame(() => {
+                    const previewPositions = new Map<string, Position>();
+                    const previewNodes = nodesRef.current.map((node) => {
+                        const initial = initialPositions.get(node.id);
+                        if (!initial) return node;
+                        const position = { x: initial.x + dx, y: initial.y + dy };
+                        previewPositions.set(node.id, position);
+                        return { ...node, position };
+                    });
                     dragPreviewPositionsRef.current = previewPositions;
                     setDragPreviewPositions(previewPositions);
+                    setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
                     rafRef.current = null;
                 });
                 return;

@@ -40,6 +40,27 @@ export function registerWorkflowRoutes(
         }
     });
 
+    // POST /api/workflows/import - 导入包含节点图与字段配置的完整工作流包
+    router.post("/api/workflows/import", async (req: Request, res: Response) => {
+        try {
+            const { name, package: workflowPackage } = req.body as { name?: string; package?: unknown };
+            const result = await store.importPackage(name || "workflow.json", workflowPackage);
+            res.status(201).json(result);
+        } catch (error) {
+            res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
+    // GET /api/workflows/:name/export - 导出节点图与字段配置
+    router.get("/api/workflows/:name/export", async (req: Request, res: Response) => {
+        try {
+            const name = decodeURIComponent(req.params.name as string);
+            res.json(await store.exportPackage(name));
+        } catch (error) {
+            res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
     // PUT /api/workflows/:name/config - 保存配置
     router.put("/api/workflows/:name/config", async (req: Request, res: Response) => {
         try {

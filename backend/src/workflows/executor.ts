@@ -30,8 +30,8 @@ function buildParams(fields: WorkflowField[], values: FieldValues, workflow: Rec
         // 跳过多节点字段（在 run() 中单独处理）
         if (field.node.includes(",")) continue;
         let value = values[field.id];
-        if (isImageField(field, workflow)) {
-            // LoadImage 字段即使配置类型被错误保存为 number/text，也必须按图片文件名处理。
+        if (isMediaField(field, workflow)) {
+            // LoadImage / LoadAudio / LoadVideo 字段即使配置类型被错误保存，也必须按媒体文件名处理。
         } else if (field.type === "number" || field.type === "slider") {
             const num = typeof value === "number" ? value : Number(value);
             if (!Number.isNaN(num)) {
@@ -60,6 +60,20 @@ function buildParams(fields: WorkflowField[], values: FieldValues, workflow: Rec
 function isImageField(field: WorkflowField, workflow: Record<string, unknown>) {
     if (field.type === "image") return true;
     return field.node.split(",").some((id) => (workflow[id] as { class_type?: string } | null | undefined)?.class_type === "LoadImage");
+}
+
+function isAudioField(field: WorkflowField, workflow: Record<string, unknown>) {
+    if (field.type === "audio") return true;
+    return field.node.split(",").some((id) => (workflow[id] as { class_type?: string } | null | undefined)?.class_type === "LoadAudio");
+}
+
+function isVideoField(field: WorkflowField, workflow: Record<string, unknown>) {
+    if (field.type === "video") return true;
+    return field.node.split(",").some((id) => /(?:^|_)LoadVideo/.test((workflow[id] as { class_type?: string } | null | undefined)?.class_type || ""));
+}
+
+function isMediaField(field: WorkflowField, workflow: Record<string, unknown>) {
+    return isImageField(field, workflow) || isAudioField(field, workflow) || isVideoField(field, workflow);
 }
 
 /**
@@ -275,7 +289,7 @@ function routeSizeImage(workflow: Record<string, unknown>, presentLoadImages: Se
  * 拿裁剪前的 full 校验会把「已经被清掉的」悬空引用再次当错报上来。
  *
  * 校验内容：
- *   1) 兜底：prepared 至少要有一个 SaveImage / PreviewImage 输出节点，否则
+ *   1) 兜底：prepared 至少要有一个图片、视频或音频输出节点，否则
  *      ComfyUI 会返回 400 "Prompt has no outputs"，提前抛更清晰。
  *   2) 兜底悬空：prepared 里若还存在「input 引用了不在 prepared 中的节点」（说明第 3
  *      步漏掉），按 ComfySwitchNode 选中分支例外放过；其它情况列出。
@@ -283,16 +297,17 @@ function routeSizeImage(workflow: Record<string, unknown>, presentLoadImages: Se
  * @param prepared 裁剪 + 清理后的最终 workflow（即将提交给 ComfyUI）
  */
 function validatePromptGraph(prepared: Record<string, unknown>): void {
-    // 1) 兜底：没有任何 SaveImage / PreviewImage 输出节点
+    // 1) 兜底：没有任何媒体输出节点
     const hasOutput = Object.values(prepared).some(
         (n) =>
             !!n &&
             typeof n === "object" &&
-            ((n as WfNode)!.class_type === "SaveImage" || (n as WfNode)!.class_type === "PreviewImage"),
+            /^(?:Save|Preview)(?:Image|Video|Audio)/.test((n as WfNode)!.class_type || "")
+                || (n as WfNode)!.class_type === "VHS_VideoCombine",
     );
     if (!hasOutput) {
         throw new Error(
-            "工作流裁剪后没有任何 SaveImage / PreviewImage 输出节点，无法提交 ComfyUI。" +
+            "工作流裁剪后没有任何媒体输出节点，无法提交 ComfyUI。" +
                 "（说明：当前传入的参考图不足以覆盖工作流开关/分支依赖——Flux2-Klein 默认开关下「图 B(278)」为必选槽位，请提供该图片，或调整工作流开关后再试）",
         );
     }
@@ -322,7 +337,7 @@ function validatePromptGraph(prepared: Record<string, unknown>): void {
 }
 
 /**
- * 将 dataURL 上传到 ComfyUI，获取文件名
+ * 将媒体 dataURL 上传到 ComfyUI，获取 input 目录文件名。
  */
 async function uploadDataUrlToComfy(
     dataUrl: string,
@@ -332,7 +347,7 @@ async function uploadDataUrlToComfy(
 ): Promise<string> {
     const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
     if (!match) throw new Error(`Invalid dataURL for field ${fieldId}`);
-    const mimeType = match[1] || "image/png";
+    const mimeType = match[1] || "application/octet-stream";
     const base64 = match[2];
     const ext = mimeType.split("/")[1]?.split(";")[0] || "png";
     const filename = `workflow_${fieldId}_${Date.now()}.${ext}`;
@@ -357,9 +372,9 @@ async function uploadDataUrlToComfy(
 }
 
 /**
- * 处理 image 类型的 field：如果是 dataURL 则上传到 ComfyUI 获取文件名，否则保持原值
+ * 处理 image / audio / video 类型字段：dataURL 或媒体 URL 会先上传到 ComfyUI input 目录。
  */
-async function processImageFields(
+async function processMediaFields(
     fields: WorkflowField[],
     workflow: Record<string, unknown>,
     fieldValues: FieldValues,
@@ -368,18 +383,21 @@ async function processImageFields(
 ): Promise<FieldValues> {
     const result: FieldValues = { ...fieldValues };
     for (const field of fields) {
-        if (!isImageField(field, workflow)) continue;
+        if (!isMediaField(field, workflow)) continue;
+        const mediaKind = isAudioField(field, workflow) ? "音频" : isVideoField(field, workflow) ? "视频" : "图片";
         const value = fieldValues[field.id];
-        // 空图片槽位必须显式删除工作流中的原始文件名，否则 ComfyUI 会继续校验
-        // workflow JSON 里预置的 LoadImage 文件；这样一个工作流可以支持 0-N 张图。
+        if ((!value || typeof value !== "string") && field.required === true) {
+            throw new Error(`工作流缺少必选${mediaKind}：${field.name || field.id}`);
+        }
+        // 空媒体槽位必须显式删除工作流中的原始文件名，否则 ComfyUI 会继续校验模板文件。
         if (!value || typeof value !== "string") {
             result[field.id] = null;
             continue;
         }
-        if (value.startsWith("data:image")) {
+        if (value.startsWith("data:image") || value.startsWith("data:audio") || value.startsWith("data:video")) {
             result[field.id] = await uploadDataUrlToComfy(value, field.id, comfyUrl, signal);
         } else if (/^https?:\/\//.test(value) || value.startsWith("/media/")) {
-            // 生图工作站的参考图是 URL 或 /media/ 路径，需要 fetch 后上传到 ComfyUI
+            // 媒体库引用是 URL 或 /media/ 路径，需要 fetch 后上传到 ComfyUI。
             let url = value;
             if (value.startsWith("/media/")) {
                 // /media/ 路径由本 backend 服务（默认 17370），不从 ComfyUI 取
@@ -387,9 +405,9 @@ async function processImageFields(
                 url = `${backendBase}${value}`;
             }
             const resp = await fetch(url, { signal });
-            if (!resp.ok) throw new Error(`为字段 ${field.id} 拉取图片失败: HTTP ${resp.status}`);
+            if (!resp.ok) throw new Error(`为字段 ${field.id} 拉取${mediaKind}失败: HTTP ${resp.status}`);
             const blob = await resp.blob();
-            const ext = blob.type.split("/")[1]?.split(";")[0] || "png";
+            const ext = blob.type.split("/")[1]?.split(";")[0] || (mediaKind === "音频" ? "wav" : mediaKind === "视频" ? "mp4" : "png");
             const filename = `workflow_${field.id}_${Date.now()}.${ext}`;
             const form = new FormData();
             form.set("image", blob, filename);
@@ -436,8 +454,14 @@ export class WorkflowExecutor {
     ): Promise<RunResult> {
         const controller = new AbortController();
         const url = comfyUrl ?? this.bridge.getUrl();
-        // 先处理 image 字段：上传 dataURL → 获取文件名
-        const processedValues = await processImageFields(config.fields, workflowJson, fieldValues, url, controller.signal);
+        for (const field of config.fields || []) {
+            const value = fieldValues[field.id];
+            if (field.required === true && !isMediaField(field, workflowJson) && (value === undefined || value === null || value === "")) {
+                throw new Error(`工作流缺少必填字段：${field.name || field.id}`);
+            }
+        }
+        // 先处理媒体字段：上传 dataURL → 获取 ComfyUI input 文件名
+        const processedValues = await processMediaFields(config.fields, workflowJson, fieldValues, url, controller.signal);
         const promptText = buildPrompt(config.fields, processedValues) || config.title;
         const persistedFieldValues = redactInlineMedia(fieldValues);
         // 处理 seed=-1 随机化

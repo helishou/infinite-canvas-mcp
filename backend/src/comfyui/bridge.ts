@@ -21,7 +21,7 @@ export type ComfyUiDeps = {
     onTaskTerminal?: (task: RuntimeTask) => void | Promise<void>;
 };
 
-export type ComfyPreset = { id: string; name: string; kind: "image" | "video"; inputs: string[]; params: string[] };
+export type ComfyPreset = { id: string; name: string; kind: "image" | "video" | "audio"; inputs: string[]; params: string[] };
 export type ComfyModelCatalog = { models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng?: Record<string, unknown[]>; refreshedAt: string; error?: string };
 
 const NANFENG_H3_CLASS = "NanFengH3MultiReferenceGeneratorV15";
@@ -30,6 +30,7 @@ const PRESETS: ComfyPreset[] = [
     { id: "z-image", name: "Z-Image 文生图", kind: "image", inputs: ["prompt"], params: ["width", "height", "seed"] },
     { id: "flux2-klein", name: "Flux2-Klein 图生图", kind: "image", inputs: ["prompt", "references"], params: ["width", "height", "seed"] },
     { id: "flashvsr-1.1", name: "FlashVSR 视频修复", kind: "video", inputs: ["video"], params: ["scale", "longEdge"] },
+    { id: "indextts-2.5", name: "IndexTTS 2.5 配音", kind: "audio", inputs: ["prompt", "referenceAudio"], params: ["language", "speed", "seed", "filenamePrefix"] },
     { id: "minimax-h3", name: "H3导演台 视频生成", kind: "video", inputs: ["video", "references", "audios", "segments"], params: ["mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sampler", "scheduler", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd", "emptyFiveMinuteTimeline", "taeh3Enabled", "motionContextEnabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise", "constantTriggerWord"] },
 ];
 
@@ -749,7 +750,7 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
     const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
     const packagedRoot = path.join(packageRoot, "workflows");
     const root = path.resolve(process.env.INFINITE_CANVAS_WORKFLOWS || packagedRoot);
-    const files: Record<string, string> = { "z-image": "Z-Image.json", "flux2-klein": "Flux2-Klein.json", "flashvsr-1.1": path.join("custom", "视频修复FlashVSR1.1.json") };
+    const files: Record<string, string> = { "z-image": "Z-Image.json", "flux2-klein": "Flux2-Klein.json", "flashvsr-1.1": path.join("custom", "视频修复FlashVSR1.1.json"), "indextts-2.5": "IndexTTS-2.5.json" };
     const source = JSON.parse(await readFile(path.join(root, files[preset]), "utf8")) as Record<string, any>;
     const promptText = String(input.prompt || "");
     const promptNode = preset === "z-image" ? source["23"] : preset === "flux2-klein" ? source["168"] : null;
@@ -776,6 +777,18 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
     }
     if (preset === "flashvsr-1.1" && source["2"]?.inputs) source["2"].inputs.value = Number(params.scale || 2);
     if (preset === "flashvsr-1.1" && source["40"]?.inputs && params.longEdge !== undefined && params.longEdge !== "auto") source["40"].inputs.longer_edge = Number(params.longEdge);
+    if (preset === "indextts-2.5") {
+        const referenceAudio = String(input.referenceAudio || "");
+        if (!referenceAudio) throw new Error("IndexTTS 2.5 需要 referenceAudio 参考音频");
+        if (!upload) throw new Error("IndexTTS 2.5 缺少音频上传器");
+        source["20"].inputs.audio = await upload(referenceAudio);
+        source["30"].inputs.text = promptText;
+        source["30"].inputs.language = String(params.language || "ZH");
+        const speed = Number(params.speed || 1);
+        source["30"].inputs.duration_factor = speed > 0 ? 1 / speed : 1;
+        source["30"].inputs.seed = Number.isFinite(Number(params.seed)) ? Number(params.seed) : 0;
+        source["40"].inputs.filename_prefix = String(params.filenamePrefix || "tts_audio/IndexTTS_2_5");
+    }
     if (preset === "minimax-h3-deprecated") {
         if (typeof params.modelName === "string" && params.modelName.trim() && source["127"]?.inputs) source["127"].inputs.unet_name = normalizeH3WorkflowModel(params.modelName);
         const duration = Math.max(0.5, Math.min(60, Number(params.duration || 8)));
@@ -1433,7 +1446,13 @@ export async function collectOutputMedia(outputs: Record<string, any>, baseUrl: 
 function mimeForOutput(item: Record<string, any>) {
     const name = String(item.filename || "").toLowerCase();
     if (/\.(mp4|webm|mov|m4v|mkv)$/.test(name)) return "video/mp4";
-    if (/\.(mp3|wav|ogg|opus|flac|aac|m4a)$/.test(name)) return "audio/mpeg";
+    if (/\.wav$/.test(name)) return "audio/wav";
+    if (/\.flac$/.test(name)) return "audio/flac";
+    if (/\.ogg$/.test(name)) return "audio/ogg";
+    if (/\.opus$/.test(name)) return "audio/opus";
+    if (/\.aac$/.test(name)) return "audio/aac";
+    if (/\.m4a$/.test(name)) return "audio/mp4";
+    if (/\.mp3$/.test(name)) return "audio/mpeg";
     if (/\.gif$/.test(name)) return "image/gif";
     return "image/png";
 }

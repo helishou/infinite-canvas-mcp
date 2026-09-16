@@ -1,6 +1,6 @@
 import { defaultConfig, resolveModelForCapability, type AiConfig } from "@/stores/use-config-store";
 import i18n from "@/i18n";
-import { resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
 import { referenceUrl } from "@/lib/canvas/canvas-node-factory";
 import type { NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
@@ -96,6 +96,7 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
                 if (!raw && !image.storageKey) return image;
                 const resolved = await resolveImageUrl(image.storageKey, raw);
                 if (!resolved) return image;
+                if (image.storageKey) void ensureImagePreview(image.storageKey);
                 if (resolved === raw && !raw.startsWith("data:image/")) return image;
                 if (image.storageKey) return { ...image, content: resolved };
 

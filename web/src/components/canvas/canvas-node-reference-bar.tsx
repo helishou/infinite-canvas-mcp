@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { FileText, Image as ImageIcon, Music2, Plus, Puzzle, Video, X } from "lucide-react";
 import { Popover } from "antd";
 import { useTranslation } from "react-i18next";
@@ -9,7 +9,7 @@ import { getGroupResourceNodes, nodeResourceItems } from "@/lib/canvas/canvas-re
 import type { CanvasNodeResource } from "@/types/canvas-plugin";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
-import { resolveImageUrl } from "@/services/image-storage";
+import { ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews } from "@/services/image-storage";
 import { useBackendStore } from "@/stores/use-backend-store";
 
 export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, onDisconnect, onStartSelection }: { nodeId: string; nodes: CanvasNodeData[]; connectedNodes: CanvasNodeData[]; onDisconnect?: (fromNodeId: string, toNodeId: string) => void; onStartSelection?: (nodeId: string) => void }) {
@@ -36,6 +36,7 @@ function ReferenceItem({ node, resource, onRemove }: { node: CanvasNodeData; res
     const storageKey = resource.storageKey || node.metadata?.storageKey;
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     const [content, setContent] = useState(rawContent);
     useEffect(() => {
         let cancelled = false;
@@ -43,6 +44,7 @@ function ReferenceItem({ node, resource, onRemove }: { node: CanvasNodeData; res
             setContent("");
             return;
         }
+        if (resource.kind === "image") void ensureImagePreview(storageKey);
         resolveImageUrl(storageKey, rawContent || "").then((resolved) => {
             if (!cancelled) setContent(resolved);
         }).catch(() => {
@@ -50,12 +52,13 @@ function ReferenceItem({ node, resource, onRemove }: { node: CanvasNodeData; res
         });
         return () => { cancelled = true; };
     }, [backendConnected, backendToken, rawContent, storageKey]);
+    const thumbnail = resource.kind === "image" ? previewUrlFor(storageKey) || content : content;
     const Icon = resource.kind === "image" ? ImageIcon : resource.kind === "video" ? Video : resource.kind === "audio" ? Music2 : resource.kind === "text" ? FileText : Puzzle;
     return (
         <Popover placement="topLeft" mouseEnterDelay={0.15} content={<ReferencePreview node={node} resource={resource} content={content} />}>
             <div className="group relative grid size-12 shrink-0 place-items-center rounded-xl border" style={{ background: theme.toolbar.activeBg, borderColor: theme.toolbar.border }}>
                 <span className="grid size-full place-items-center overflow-hidden rounded-[inherit]">
-                    {(resource?.kind === "image" || node.type === CanvasNodeType.Image) && content ? <img src={content} alt="" className="size-full object-cover" /> : (resource?.kind === "video" || node.type === CanvasNodeType.Video) && content ? <video src={content} className="size-full object-cover" muted /> : <Icon className="size-4 opacity-65" />}
+                    {(resource?.kind === "image" || node.type === CanvasNodeType.Image) && thumbnail ? <img src={thumbnail} alt="" className="size-full object-cover" /> : (resource?.kind === "video" || node.type === CanvasNodeType.Video) && content ? <video src={content} className="size-full object-cover" muted /> : <Icon className="size-4 opacity-65" />}
                 </span>
                 <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
             </div>

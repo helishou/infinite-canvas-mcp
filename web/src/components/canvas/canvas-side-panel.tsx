@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
 import { fetchSourcePrompts, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
-import { resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
 import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
@@ -300,6 +300,7 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     const backendToken = useBackendStore((state) => state.token);
     const content = node.metadata?.content || "";
     const storageKey = node.metadata?.storageKey;
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
 
     useEffect(() => {
         let cancelled = false;
@@ -307,6 +308,7 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
             setUrl("");
             return;
         }
+        void ensureImagePreview(storageKey);
         resolveImageUrl(storageKey, content).then((resolved) => {
             if (!cancelled) setUrl(resolved);
         }).catch(() => {
@@ -315,7 +317,8 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
         return () => { cancelled = true; };
     }, [backendConnected, backendToken, content, storageKey]);
 
-    return url ? <img src={url} alt={node.title} className="size-full object-cover" /> : <ImageIcon className="size-5 opacity-60" />;
+    const source = previewUrlFor(storageKey) || url;
+    return source ? <img src={source} alt={node.title} className="size-full object-cover" /> : <ImageIcon className="size-5 opacity-60" />;
 }
 
 function CheckMark({ checked, theme }: { checked: boolean; theme: CanvasTheme }) {
@@ -525,6 +528,7 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
 function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }> }) {
     const { t } = useTranslation();
     const [covers, setCovers] = useState<string[]>([]);
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     useEffect(() => {
         let cancelled = false;
         const urls: string[] = [];
@@ -535,6 +539,7 @@ function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }
         for (const image of asset.data.images) {
             addUrl(image.url);
             addStorageKey(image.storageKey);
+            void ensureImagePreview(image.storageKey);
         }
         Promise.all(storageKeys.map((key) => resolveImageUrl(key))).then((resolved) => {
             if (!cancelled) setCovers([...urls, ...resolved.filter((url): url is string => Boolean(url) && !urls.includes(url))]);
@@ -542,7 +547,8 @@ function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }
         return () => { cancelled = true; };
     }, [asset.id, asset.coverUrl, asset.data.images]);
     const count = asset.data.images.length;
-    if (covers.length) return <img src={covers[0]} alt="" onError={() => setCovers((current) => current.slice(1))} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+    const preview = asset.data.images.map((image) => previewUrlFor(image.storageKey)).find(Boolean);
+    if (preview || covers.length) return <img src={preview || covers[0]} alt="" onError={() => setCovers((current) => current.slice(1))} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     return (
         <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
             <div className="text-[11px] font-medium text-stone-500 dark:text-stone-400">{t("assets.kinds.character")}</div>
@@ -567,7 +573,15 @@ function AssetCover({ asset }: { asset: Asset }) {
             </div>
         );
     }
-    return <img src={asset.coverUrl || (asset as ImageAsset).data.dataUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+    return <ImageAssetCover asset={asset as ImageAsset} />;
+}
+
+function ImageAssetCover({ asset }: { asset: ImageAsset }) {
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
+    useEffect(() => {
+        void ensureImagePreview(asset.data.storageKey);
+    }, [asset.data.storageKey]);
+    return <img src={previewUrlFor(asset.data.storageKey) || asset.coverUrl || asset.data.dataUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
 }
 
 // ---------------------------------------------------------------------------

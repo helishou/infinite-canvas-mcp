@@ -5,6 +5,32 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## 工作流导入导出
+
+- 在「工作流管理」中导入普通 ComfyUI API JSON，确认仍按自定义工作流创建；导入导出的 `.workflow.json` 完整包，确认节点图、中文标题、字段配置、默认值以及图片/音频/视频字段类型均被保留。
+- 导出内置和自定义工作流，确认两者都能下载；将内置工作流包重新导入时应创建可编辑的 `custom/` 副本，不应覆盖内置文件。
+- 尝试导入普通非 API JSON、缺少字段配置的工作流包和未知版本的工作流包，确认页面显示明确错误且不会创建残缺记录。
+
+## 画布图片与交互性能
+
+- 打开包含多张 2K/4K 图片和角色参考图的大画布，确认节点、参考栏、左侧节点列表和素材卡片会逐步切换为本地 WebP 预览；放大图片超过预览分辨率时应自动使用原图，下载、编辑、模型参考和导出仍必须读取 Backend 原图。
+- 连续拖动单个节点、多选节点和分组，确认位置跟手、分组吸附正常，拖到 H3 参考槽仍可正确投放；快速平移到连线端点都在视口外的区域时，不应继续渲染无关连线，也不能裁掉仍穿过视口的曲线。
+- 图片节点的下载、复制、设为主图等按钮默认隐藏，悬停节点后出现；模拟生图接口超过 10 分钟无响应时，应结束请求并显示明确的超时提示。
+
+## 视频工作流
+
+- 重启 Backend 后打开「工作流管理」，确认自动出现「MiniMax H3 图生视频」与内置的「FlashVSR 1.1 视频修复」；原来已经导入的 `custom/视频修复FlashVSR1.1.json` 应直接显示视频选择器，不再把视频误当图片。
+- 在 MiniMax H3 工作流中选择参考图片，填写提示词并设置画面比例、百万像素、时长和随机种子；确认任务产出可直接播放的视频并归档到 Backend 媒体库。
+- 在 FlashVSR 工作流中选择视频并设置放大倍数、预处理长边；确认输入先通过 Backend 二进制接口上传，再复制到 ComfyUI input，VHS `VHS_VideoCombine` 输出能被工作流运行器识别、归档并播放。
+- 切换图片、音频、视频字段并清除重选，确认预览与实际提交文件一致；超过 Backend 现有 100 MB 二进制上传上限的视频应明确显示上传失败，不得提交残缺工作流。
+
+## IndexTTS 2.5 工作流
+
+- 重启 Backend 后打开「工作流管理」，确认自动出现内置的「IndexTTS 2.5 配音」，且参考音频、配音文本、语言、时长系数、随机种子和输出前缀字段完整显示。
+- 在 ComfyUI 已安装 `comfyui-indextts25-T8` 且 `models/TTS/IndexTTS-2.5` 可用时，选择一段参考音频并生成中文配音；确认结果可直接试听，FLAC/WAV MIME 类型正确，文件已归档到 Backend 媒体库，历史记录不会保存音频 Base64。
+- 调用 `comfyui_list_presets` 应看到 `indextts-2.5`；用 `comfyui_run` 传入 `prompt`、本地 `referenceAudio` 路径与 `language/speed/seed/filenamePrefix` 后应生成同样的音频结果。
+- 未选择参考音频时应在提交 ComfyUI 前提示缺少必选音频；ComfyUI 缺少 T8 节点或 IndexTTS 2.5 模型时应返回对应节点/模型错误，不得误报为图片工作流无输出。
+
 ## MCP 共享进程
 
 - 启动 Backend 后分别运行 `codex mcp list` 与 `hermes mcp test infinite-canvas`，确认两者都显示 HTTP 传输并发现同一组工具；新开多个任务时不应再出现对应数量的 `backend/dist/index.js mcp` 子进程。

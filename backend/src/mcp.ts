@@ -182,7 +182,13 @@ const DIRECT_CANVAS_TOOLS = [
     "canvas_create_image_prompt_flow", "canvas_create_generation_flow", "canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio",
     "canvas_update_node", "canvas_update_node_text", "canvas_move_nodes", "canvas_resize_node", "canvas_delete_nodes", "canvas_connect_nodes", "canvas_set_generation_references", "canvas_select_nodes", "canvas_run_generation", "generation_get_status",
 ] as ToolName[];
-const DIRECT_TOOL_NAMES = new Set<ToolName>([...DIRECT_CANVAS_TOOLS, "assets_list", "assets_add", "comfyui_status", "comfyui_list_presets", "comfyui_run", "comfyui_get_task", "comfyui_cancel_task", "generation_get_status"]);
+const DIRECT_TOOL_NAMES = new Set<string>([
+    ...DIRECT_CANVAS_TOOLS,
+    "assets_list", "assets_add",
+    "canvas_split_image", "canvas_create_project", "canvas_delete_project", "canvas_set_active_project", "canvas_diagnose_project", "canvas_fix_diagnostics",
+    "drama_create_project", "drama_list_episodes", "drama_get_episode", "drama_create_episode", "drama_update_episode", "drama_delete_episode", "drama_delete_project",
+    "comfyui_status", "comfyui_list_presets", "comfyui_run", "comfyui_get_task", "comfyui_cancel_task", "generation_get_status",
+]);
 
 async function executeDirectCanvasTool(config: ResolvedConfig, backendApi: ReturnType<typeof createBackendClient>, state: McpSessionState, name: ToolName, input: Record<string, unknown>) {
     if (name === "canvas_list_projects") {

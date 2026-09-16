@@ -78,7 +78,7 @@ export type PluginDeclaration = {
 
 // ── Workflow Import ──────────────────────────────────────────────────────
 
-export type WorkflowFieldType = 'text' | 'number' | 'slider' | 'boolean' | 'dropdown' | 'image';
+export type WorkflowFieldType = 'text' | 'number' | 'slider' | 'boolean' | 'dropdown' | 'image' | 'audio' | 'video';
 
 export type WorkflowField = {
     id: string;

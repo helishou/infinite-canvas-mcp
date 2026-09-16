@@ -11,7 +11,7 @@ export type WorkflowItem = {
 
 // 跟 backend/src/db.ts 的 WorkflowField / WorkflowConfig 对齐。
 // 配置面板加完后这个类型可以删，本地前端 types 由 workflows 页面那侧维护。
-export type WorkflowFieldType = "text" | "number" | "slider" | "boolean" | "dropdown" | "image";
+export type WorkflowFieldType = "text" | "number" | "slider" | "boolean" | "dropdown" | "image" | "audio" | "video";
 export type WorkflowField = {
     id: string;
     node: string;
@@ -44,9 +44,27 @@ export type WorkflowDetail = {
     config?: WorkflowConfig;
 };
 
+export type WorkflowPackage = {
+    format: "infinite-canvas-workflow";
+    version: 1;
+    name: string;
+    workflow: Record<string, unknown>;
+    config: WorkflowConfig;
+};
+
 export function isWorkflowImageField(field: WorkflowField, workflow?: Record<string, unknown>) {
     if (field.type === "image") return true;
     return field.node.split(",").some((nodeId) => (workflow?.[nodeId] as { class_type?: unknown } | undefined)?.class_type === "LoadImage");
+}
+
+export function isWorkflowAudioField(field: WorkflowField, workflow?: Record<string, unknown>) {
+    if (field.type === "audio") return true;
+    return field.node.split(",").some((nodeId) => (workflow?.[nodeId] as { class_type?: unknown } | undefined)?.class_type === "LoadAudio");
+}
+
+export function isWorkflowVideoField(field: WorkflowField, workflow?: Record<string, unknown>) {
+    if (field.type === "video") return true;
+    return field.node.split(",").some((nodeId) => /(?:^|_)LoadVideo/.test(String((workflow?.[nodeId] as { class_type?: unknown } | undefined)?.class_type || "")));
 }
 
 // 跟 backend/src/workflows/executor.ts 的 RunResult 对齐；
@@ -61,7 +79,7 @@ export type WorkflowRunResult = {
 };
 
 // fields 字典：key = WorkflowField.id，value：
-//   - image 字段：dataURL 字符串
+//   - image / audio / video 字段：Backend 媒体 URL（兼容旧 dataURL）
 //   - text/number/... 字段：原始值
 // 顶层 prompt 字段约定 key = "prompt"（与生图工作台传入对齐）
 export type WorkflowRunFields = {
@@ -75,6 +93,14 @@ export function fetchWorkflows(): Promise<{ workflows: WorkflowItem[] }> {
 
 export function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {
     return request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(name)}`);
+}
+
+export function exportWorkflowPackage(name: string): Promise<WorkflowPackage> {
+    return request<WorkflowPackage>("GET", `/api/workflows/${encodeURIComponent(name)}/export`);
+}
+
+export function importWorkflowPackage(name: string, workflowPackage: WorkflowPackage): Promise<{ name: string }> {
+    return request<{ name: string }>("POST", "/api/workflows/import", { name, package: workflowPackage });
 }
 
 // 仅重命名显示标题（title），不动底层文件名

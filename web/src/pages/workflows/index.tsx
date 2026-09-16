@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { Button, Empty, Input, Spin, Tag, message, Select, Switch } from "antd";
-import { Upload as UploadIcon, Upload, Play, Trash2, Settings2, Workflow, Code, Server, History } from "lucide-react";
-import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs } from "@/services/backend-api";
-import { renameWorkflowTitle } from "@/services/api/workflows";
+import { Upload as UploadIcon, Upload, Download, Play, Trash2, Settings2, Workflow, Code, Server, History } from "lucide-react";
+import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs, uploadBackendMedia, backendMediaUrl } from "@/services/backend-api";
+import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, type WorkflowPackage } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
 import { InstancesModal } from "./instances-modal";
 import "../../styles/workflow-graph.css";
@@ -58,16 +58,39 @@ export default function WorkflowsPage() {
         setLoading(true);
         try {
             const text = await file.text();
-            const workflow = JSON.parse(text);
-            await request("POST", "/api/workflows", { name: file.name.replace(/\.json$/, ""), workflow });
-            message.success("工作流上传成功");
-            fetchWorkflows();
+            const value = JSON.parse(text) as Record<string, unknown>;
+            if (value.format === "infinite-canvas-workflow") {
+                await importWorkflowPackage(file.name, value as WorkflowPackage);
+                message.success("工作流包导入成功");
+            } else {
+                await request("POST", "/api/workflows", { name: file.name.replace(/\.json$/, ""), workflow: value });
+                message.success("ComfyUI 工作流导入成功");
+            }
+            await fetchWorkflows();
         } catch (err) {
-            message.error(err instanceof Error ? err.message : "上传失败");
+            message.error(err instanceof Error ? err.message : "导入失败");
         } finally {
             setLoading(false);
         }
         return false;
+    };
+
+    const handleExport = async () => {
+        if (!selected) return;
+        try {
+            const workflowPackage = await exportWorkflowPackage(selected.name);
+            const title = (selected.config.title || selected.name.replace(/^custom\//, "").replace(/\.json$/, ""))
+                .replace(/[\\/:*?"<>|]+/g, "-");
+            const url = URL.createObjectURL(new Blob([JSON.stringify(workflowPackage, null, 2)], { type: "application/json" }));
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = `${title}.workflow.json`;
+            anchor.click();
+            URL.revokeObjectURL(url);
+            message.success("工作流包已导出");
+        } catch (err) {
+            message.error(err instanceof Error ? err.message : "导出失败");
+        }
     };
 
     const handleDelete = async (name: string) => {
@@ -233,9 +256,14 @@ export default function WorkflowsPage() {
                                     <p className="text-sm text-stone-500">{selected.name.replace(/^custom\//, "")} · {Object.keys(selected.workflow).length} 个节点 · {selected.config.fields.length} 字段</p>
                                 </div>
                                 <div className="flex gap-2">
-                                    <Button danger icon={<Trash2 className="size-4" />} onClick={() => handleDelete(selected.name)}>
-                                        删除
+                                    <Button icon={<Download className="size-4" />} onClick={handleExport}>
+                                        导出
                                     </Button>
+                                    {!selected.builtin && (
+                                        <Button danger icon={<Trash2 className="size-4" />} onClick={() => handleDelete(selected.name)}>
+                                            删除
+                                        </Button>
+                                    )}
                                 </div>
                             </div>
 
@@ -308,7 +336,11 @@ export default function WorkflowsPage() {
                                                                 {log.outputs.length > 0 && (
                                                                     <div className="mt-1 flex gap-1">
                                                                         {log.outputs.slice(0, 4).map((o, i) => (
-                                                                            <img key={i} src={o.url} alt="" className="h-10 w-10 rounded object-cover" />
+                                                                            o.mimeType?.startsWith("audio/")
+                                                                                ? <audio key={i} src={o.url} controls className="h-10 w-56" />
+                                                                                : o.mimeType?.startsWith("video/")
+                                                                                    ? <video key={i} src={o.url} className="h-10 w-16 rounded object-cover" />
+                                                                                    : <img key={i} src={o.url} alt="" className="h-10 w-10 rounded object-cover" />
                                                                         ))}
                                                                         {log.outputs.length > 4 && (
                                                                             <span className="flex h-10 w-10 items-center justify-center rounded bg-stone-100 text-xs text-stone-500">+{log.outputs.length - 4}</span>
@@ -331,11 +363,12 @@ export default function WorkflowsPage() {
 
                 <div className="col-span-4 space-y-4">
                     <div className="relative flex items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-900">
-                        <UploadIcon className="size-4 shrink-0 text-stone-400" />
-                        <span className="text-sm text-stone-600 dark:text-stone-300">点击或拖拽上传 .json</span>
+                        {loading ? <Spin size="small" /> : <UploadIcon className="size-4 shrink-0 text-stone-400" />}
+                        <span className="text-sm text-stone-600 dark:text-stone-300">{loading ? "正在导入…" : "导入 ComfyUI JSON / 工作流包"}</span>
                         <input
                             type="file"
                             accept=".json"
+                            disabled={loading}
                             onChange={async (e) => {
                                 const file = e.target.files?.[0];
                                 if (file) { await handleUpload(file); e.target.value = ""; }
@@ -411,55 +444,70 @@ type RunPanelProps = {
     result: TaskResult | null;
 };
 
-type ImageFieldUploadProps = {
+type MediaFieldUploadProps = {
     fieldId: string;
     value: string;
+    kind: "image" | "audio" | "video";
     onChange: (value: string) => void;
 };
 
-function ImageFieldUpload({ fieldId, value, onChange }: ImageFieldUploadProps) {
+function MediaFieldUpload({ fieldId, value, kind, onChange }: MediaFieldUploadProps) {
     const inputRef = useRef<HTMLInputElement>(null);
     const [previewUrl, setPreviewUrl] = useState(value);
+    const [filename, setFilename] = useState("");
+    const [uploading, setUploading] = useState(false);
+
+    const previewValue = (source: string) => {
+        if (!source.startsWith("/media/")) return source;
+        const storageKey = decodeURIComponent(source.slice("/media/".length).split("?", 1)[0]);
+        return backendMediaUrl(storageKey);
+    };
 
     useEffect(() => {
-        if (value) setPreviewUrl(value);
-        localStorage.removeItem(`wf_image_${fieldId}`);
-    }, [fieldId, value]);
+        setPreviewUrl(previewValue(value));
+        if (!value) setFilename("");
+        if (kind === "image") localStorage.removeItem(`wf_image_${fieldId}`);
+    }, [fieldId, kind, value]);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         e.target.value = "";
         if (!file) return;
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-        });
-        setPreviewUrl(dataUrl);
-        onChange(dataUrl);
+        setUploading(true);
+        try {
+            const media = await uploadBackendMedia({ name: file.name, blob: file, mimeType: file.type || undefined, category: "input" });
+            setPreviewUrl(backendMediaUrl(media.storageKey));
+            setFilename(file.name);
+            onChange(media.url);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "媒体上传失败");
+        } finally {
+            setUploading(false);
+        }
     };
 
     return (
         <div className="space-y-2">
             <div className="flex items-center gap-2">
-                <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
-                <Button size="small" icon={<Upload className="size-3" />} onClick={() => inputRef.current?.click()}>
-                    {previewUrl ? "更换图片" : "选择图片"}
+                <input ref={inputRef} type="file" accept={`${kind}/*`} className="hidden" onChange={handleFileChange} />
+                <Button size="small" loading={uploading} icon={<Upload className="size-3" />} onClick={() => inputRef.current?.click()}>
+                    {previewUrl ? `更换${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}` : `选择${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}`}
                 </Button>
                 {previewUrl && (
                     <>
-                        <Tag color="blue" className="text-xs truncate max-w-32">已选择图片</Tag>
-                        <Button size="small" danger type="text" onClick={() => { setPreviewUrl(""); onChange(""); }}>
+                        <Tag color="blue" className="text-xs truncate max-w-48">{filename || `已选择${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}`}</Tag>
+                        <Button size="small" danger type="text" onClick={() => { setPreviewUrl(""); setFilename(""); onChange(""); }}>
                             <Trash2 className="size-3" />
                         </Button>
                     </>
                 )}
             </div>
             {previewUrl && (
-                <div className="relative inline-block">
-                    <img src={previewUrl} alt="" className="h-24 w-24 rounded object-cover border border-stone-200 dark:border-stone-700" />
-                </div>
+                kind === "audio"
+                    ? <audio src={previewUrl} controls className="w-full" />
+                    : kind === "video"
+                        ? <video src={previewUrl} controls className="max-h-64 w-full rounded border border-stone-200 dark:border-stone-700" />
+                        : <div className="relative inline-block"><img src={previewUrl} alt="" className="h-24 w-24 rounded object-cover border border-stone-200 dark:border-stone-700" /></div>
             )}
         </div>
     );
@@ -494,7 +542,11 @@ function RunPanel({ config, onRun, running, result }: RunPanelProps) {
                             {field.type === "text" ? (
                                 <Input.TextArea value={fields[field.id] || ""} onChange={(e) => setFields((p) => ({ ...p, [field.id]: e.target.value }))} rows={2} placeholder={field.name} />
                             ) : field.type === "image" ? (
-                                <ImageFieldUpload fieldId={field.id} value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
+                                <MediaFieldUpload fieldId={field.id} kind="image" value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
+                            ) : field.type === "audio" ? (
+                                <MediaFieldUpload fieldId={field.id} kind="audio" value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
+                            ) : field.type === "video" ? (
+                                <MediaFieldUpload fieldId={field.id} kind="video" value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
                             ) : field.type === "dropdown" ? (
                                 <Select value={fields[field.id] || undefined} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} options={(field.options ?? []).map((o) => ({ label: o, value: o }))} placeholder={field.name} className="w-full" />
                             ) : field.type === "boolean" ? (

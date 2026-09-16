@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, User, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
+import { pickImageSource } from "@/lib/image-thumbnail";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -12,7 +13,7 @@ import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textare
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
-import { resolveImageUrl } from "@/services/image-storage";
+import { ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews } from "@/services/image-storage";
 import { useTranslation } from "react-i18next";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -310,7 +311,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     return (
         <div
             data-node-id={data.id}
-            className={`node-element absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : ""}`}
+            className={`node-element group/node absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : ""}`}
             style={{
                 transform: `translate(${(previewBounds?.position || previewPosition || data.position).x}px, ${(previewBounds?.position || previewPosition || data.position).y}px)`,
                 width: previewBounds?.width || data.width,
@@ -733,7 +734,7 @@ function ExpandedTextCard({ node, text, index, onSetPrimary }: { node: CanvasNod
                     <div className="thin-scrollbar h-full overflow-y-auto whitespace-pre-wrap break-words px-4 pb-4 pt-14 font-mono text-sm leading-6" style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
                         {text.content}
                     </div>
-                    <button type="button" className="absolute right-2.5 top-2.5 flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={(event) => (event.stopPropagation(), onSetPrimary())}>
+                    <button type="button" className="pointer-events-none absolute right-2.5 top-2.5 flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium opacity-0 transition duration-150 hover:bg-black/5 group-hover/node:pointer-events-auto group-hover/node:opacity-100 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={(event) => (event.stopPropagation(), onSetPrimary())}>
                         <Star className="size-3.5" style={{ color: selectionBlue }} />
                         {t("canvas.node.setPrimaryText")}
                     </button>
@@ -764,6 +765,7 @@ function ImageNodeContent(props: NodeContentRendererProps) {
     return (
         <ImageContent
             node={props.node}
+            scale={props.scale}
             batchExpanded={props.batchExpanded}
             onToggleBatch={props.onToggleBatch}
             onSetBatchPrimary={props.onSetBatchPrimary}
@@ -790,7 +792,7 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
 
 /** 角色节点：主图（大）+ 底部 outfit 缩略图条；多图时像多图片输出节点一样可横向展开，点缩略图或“设为主图”切换主图。 */
 function CharacterNodeContent(props: NodeContentRendererProps) {
-    const { node, theme, batchExpanded, onToggleBatch, onSetBatchPrimary, onDeleteBatchImage, onViewBatchImage } = props;
+    const { node, theme, scale, batchExpanded, onToggleBatch, onSetBatchPrimary, onDeleteBatchImage, onViewBatchImage } = props;
     const { t } = useTranslation();
     const images = node.metadata?.characterImages || [];
     const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
@@ -802,11 +804,13 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
     const urlCache = useRef<Record<string, string>>({});
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
 
     // 解析主图 URL（storageKey → blob URL / dataUrl）
     useEffect(() => {
         let cancelled = false;
         if (!primary) { setPrimaryUrl(null); return; }
+        void ensureImagePreview(primary.storageKey);
         const key = primary.storageKey || primary.url;
         if (!key) { setPrimaryUrl(null); return; }
         if (urlCache.current[key]) { setPrimaryUrl(urlCache.current[key]); return; }
@@ -823,6 +827,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
         let cancelled = false;
         const next: Record<number, string> = {};
         Promise.all(images.map(async (image, idx) => {
+            void ensureImagePreview(image.storageKey);
             const key = image.storageKey || image.url;
             if (!key) return null;
             if (urlCache.current[key]) { next[idx] = urlCache.current[key]; return; }
@@ -859,6 +864,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
                           node={node}
                           image={image}
                           index={index}
+                          scale={scale}
                           primary={index === primaryIndex}
                           onSetPrimary={() => onSetBatchPrimary?.(String(index))}
                           onDelete={() => onDeleteBatchImage?.(String(index))}
@@ -869,7 +875,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
             <div className="flex h-full w-full flex-col">
                 <div className="relative flex-1 min-h-0 overflow-hidden bg-stone-100 dark:bg-stone-900" data-canvas-no-zoom>
                     {primaryUrl ? (
-                        <img src={primaryUrl} alt={primary.outfit || primary.name || node.title} className="size-full object-cover" draggable={false} />
+                        <img src={pickImageSource({ previewUrl: previewUrlFor(primary.storageKey), originalUrl: primaryUrl, naturalWidth: primary.width, naturalHeight: primary.height, renderedWidth: node.width, renderedHeight: node.height, scale })} alt={primary.outfit || primary.name || node.title} className="size-full object-cover" draggable={false} />
                     ) : (
                         <div className="flex size-full items-center justify-center" style={{ color: theme.node.placeholder }}>
                             <User className="size-10 opacity-30" />
@@ -883,7 +889,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5 border-t px-2 py-1.5" style={{ borderColor: theme.node.stroke, background: theme.node.fill }}>
                     {visibleThumbs.map((image, idx) => {
-                        const url = thumbUrls[idx];
+                        const url = previewUrlFor(image.storageKey) || thumbUrls[idx];
                         const active = idx === primaryIndex;
                         return (
                             <button
@@ -941,12 +947,13 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
 }
 
 /** 角色节点横向展开时的单张参考图卡片（排在节点右侧）。点“设为主图”切换主图，可删除。 */
-function ExpandedCharacterImageCard({ node, image, index, primary, onSetPrimary, onDelete, onView }: { node: CanvasNodeData; image: NonNullable<NonNullable<CanvasNodeData["metadata"]>["characterImages"]>[number]; index: number; primary: boolean; onSetPrimary: () => void; onDelete: () => void; onView: () => void }) {
+function ExpandedCharacterImageCard({ node, image, index, scale, primary, onSetPrimary, onDelete, onView }: { node: CanvasNodeData; image: NonNullable<NonNullable<CanvasNodeData["metadata"]>["characterImages"]>[number]; index: number; scale: number; primary: boolean; onSetPrimary: () => void; onDelete: () => void; onView: () => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
     const [imageUrl, setImageUrl] = useState("");
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     const x = (index + 1) * (node.width + 18);
     const y = 0;
 
@@ -956,6 +963,7 @@ function ExpandedCharacterImageCard({ node, image, index, primary, onSetPrimary,
             setImageUrl("");
             return;
         }
+        void ensureImagePreview(image.storageKey);
         resolveImageUrl(image.storageKey, image.url).then((url) => {
             if (!cancelled) setImageUrl(url);
         });
@@ -974,9 +982,9 @@ function ExpandedCharacterImageCard({ node, image, index, primary, onSetPrimary,
                 onView();
             }}
         >
-            {imageUrl ? <img src={imageUrl} alt={image.outfit || image.name} draggable={false} className="pointer-events-none h-full w-full select-none object-cover" /> : <ImageSlotStatus />}
+            {imageUrl ? <img src={pickImageSource({ previewUrl: previewUrlFor(image.storageKey), originalUrl: imageUrl, naturalWidth: image.width, naturalHeight: image.height, renderedWidth: node.width, renderedHeight: node.height, scale })} alt={image.outfit || image.name} draggable={false} className="pointer-events-none h-full w-full select-none object-cover" /> : <ImageSlotStatus />}
             {image.url ? (
-                <div className="absolute inset-x-2 top-2 flex items-center gap-1">
+                <div className="pointer-events-none absolute inset-x-2 top-2 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100">
                     <button type="button" className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("canvas.character.setMain")} onClick={(event) => (event.stopPropagation(), onSetPrimary())}>
                         <Star className="size-3 shrink-0" style={{ color: primary ? selectionBlue : theme.node.muted }} />
                         <span className="truncate">{t("canvas.character.setMain")}</span>
@@ -1032,6 +1040,7 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
 
 function ImageContent({
     node,
+    scale,
     batchExpanded,
     onToggleBatch,
     onSetBatchPrimary,
@@ -1042,6 +1051,7 @@ function ImageContent({
     onViewBatchImage,
 }: {
     node: CanvasNodeData;
+    scale: number;
     batchExpanded: boolean;
     onToggleBatch?: () => void;
     onSetBatchPrimary?: (imageId: string) => void;
@@ -1053,6 +1063,7 @@ function ImageContent({
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     const images = node.metadata?.images || [];
     const batchCount = images.length;
     const isBatchRoot = batchCount > 1;
@@ -1069,23 +1080,35 @@ function ImageContent({
             setPrimaryUrl("");
             return;
         }
+        void ensureImagePreview(primaryImage?.storageKey || node.metadata?.storageKey);
         resolveImageUrl(primaryImage?.storageKey || node.metadata?.storageKey, primaryContent).then((url) => {
             if (!cancelled) setPrimaryUrl(url);
         });
         return () => { cancelled = true; };
     }, [backendConnected, backendToken, node.metadata?.storageKey, primaryContent, primaryImage?.storageKey]);
+    const primarySource = primaryUrl
+        ? pickImageSource({
+              previewUrl: previewUrlFor(primaryImage?.storageKey || node.metadata?.storageKey),
+              originalUrl: primaryUrl,
+              naturalWidth: primaryImage?.naturalWidth || node.metadata?.naturalWidth,
+              naturalHeight: primaryImage?.naturalHeight || node.metadata?.naturalHeight,
+              renderedWidth: node.width,
+              renderedHeight: node.height,
+              scale,
+          })
+        : "";
 
     return (
         <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded}>
             {batchExpanded
                 ? images
                       .filter((image) => image.id !== primaryImageId)
-                      .map((image, index) => <ExpandedImageCard key={image.id} node={node} image={image} index={index} onView={() => onViewBatchImage?.(image.id)} onSetPrimary={() => onSetBatchPrimary?.(image.id)} onDuplicate={() => onDuplicateBatchImage?.(image.id)} onDownload={() => onDownloadBatchImage?.(image.id)} onRetry={() => onRetryBatchImage?.(image.id)} onDelete={() => onDeleteBatchImage?.(image.id)} />)
+                      .map((image, index) => <ExpandedImageCard key={image.id} node={node} image={image} index={index} scale={scale} onView={() => onViewBatchImage?.(image.id)} onSetPrimary={() => onSetBatchPrimary?.(image.id)} onDuplicate={() => onDuplicateBatchImage?.(image.id)} onDownload={() => onDownloadBatchImage?.(image.id)} onRetry={() => onRetryBatchImage?.(image.id)} onDelete={() => onDeleteBatchImage?.(image.id)} />)
                 : null}
             <div className="h-full w-full overflow-hidden rounded-3xl">
-                {primaryUrl ? (
+                {primarySource ? (
                     <img
-                        src={primaryUrl}
+                        src={primarySource}
                         alt={node.title}
                         draggable={false}
                         onDragStart={(event) => event.preventDefault()}
@@ -1097,7 +1120,7 @@ function ImageContent({
             </div>
             {primaryImage?.status === "error" ? <BatchImageFailureActions placement="left" onRetry={() => onRetryBatchImage?.(primaryImage.id)} onDelete={() => onDeleteBatchImage?.(primaryImage.id)} /> : null}
             {primaryImage?.content ? (
-                <div className="absolute left-2.5 top-2.5 z-30 flex items-center gap-1">
+                <div className="pointer-events-none absolute left-2.5 top-2.5 z-30 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100">
                     <button type="button" className="flex h-8 min-w-0 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("common.download")} onClick={(event) => (event.stopPropagation(), onDownloadBatchImage?.(primaryImage.id))}>
                         <Download className="size-3 shrink-0" />
                         <span className="truncate">{t("common.download")}</span>
@@ -1129,9 +1152,10 @@ function ImageContent({
     );
 }
 
-function ExpandedImageCard({ node, image, index, onView, onSetPrimary, onDuplicate, onDownload, onRetry, onDelete }: { node: CanvasNodeData; image: CanvasNodeImage; index: number; onView: () => void; onSetPrimary: () => void; onDuplicate: () => void; onDownload: () => void; onRetry: () => void; onDelete: () => void }) {
+function ExpandedImageCard({ node, image, index, scale, onView, onSetPrimary, onDuplicate, onDownload, onRetry, onDelete }: { node: CanvasNodeData; image: CanvasNodeImage; index: number; scale: number; onView: () => void; onSetPrimary: () => void; onDuplicate: () => void; onDownload: () => void; onRetry: () => void; onDelete: () => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     const [imageUrl, setImageUrl] = useState("");
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
@@ -1151,11 +1175,15 @@ function ExpandedImageCard({ node, image, index, onView, onSetPrimary, onDuplica
             setImageUrl("");
             return;
         }
+        void ensureImagePreview(image.storageKey);
         resolveImageUrl(image.storageKey, image.content).then((url) => {
             if (!cancelled) setImageUrl(url);
         });
         return () => { cancelled = true; };
     }, [backendConnected, backendToken, image.content, image.storageKey]);
+    const source = imageUrl
+        ? pickImageSource({ previewUrl: previewUrlFor(image.storageKey), originalUrl: imageUrl, naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight, renderedWidth: node.width, renderedHeight: node.height, scale })
+        : "";
 
     return (
         <div
@@ -1182,9 +1210,9 @@ function ExpandedImageCard({ node, image, index, onView, onSetPrimary, onDuplica
                 onView();
             }}
         >
-            {imageUrl ? <img src={imageUrl} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
+            {source ? <img src={source} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
             {image.content ? (
-                <div className="absolute inset-x-2 top-2 flex items-center gap-1">
+                <div className="pointer-events-none absolute inset-x-2 top-2 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100">
                     <button type="button" className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("common.download")} onClick={(event) => (event.stopPropagation(), onDownload())}>
                         <Download className="size-3 shrink-0" />
                         <span className="truncate">{t("common.download")}</span>

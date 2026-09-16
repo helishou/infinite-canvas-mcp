@@ -2,7 +2,7 @@ import { Input, Select, Switch } from "antd";
 
 import type { WorkflowField } from "@/services/api/workflows";
 
-// 工作流的非 image / 非 prompt 自定义字段：text / number / slider / boolean / dropdown
+// 工作流的非媒体 / 非 prompt 自定义字段：text / number / slider / boolean / dropdown
 // 生图工作台与画布图片节点共享同一份 UI。
 export function WorkflowCustomFields({
     fields,
@@ -15,7 +15,7 @@ export function WorkflowCustomFields({
 }) {
     return (
         <div className="space-y-3">
-            {fields.filter((field) => field.type !== "image").map((field) => (
+            {fields.filter((field) => !["image", "audio", "video"].includes(field.type)).map((field) => (
                 <CustomFieldInput key={field.id} field={field} value={values[field.id]} onChange={(value) => onChange(field.id, value)} />
             ))}
         </div>
