@@ -9,6 +9,7 @@ data/
 .DS_Store
 .idea
 .codegraph/
+.codex-runtime/
 .hermes/
 .learnings/
 web/dist

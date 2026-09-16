@@ -93,8 +93,6 @@ export type MediaStore = {
     readNamed(name: string): Buffer;
     /** 代理 URL（相对总后台根路径）。 */
     url(m: MediaFile): string;
-    /** 将整个运行媒体根目录迁至新位置，并同步媒体索引路径。 */
-    relocateRoot(targetDir: string): { migrated: number };
     delete(storageKey: string): number;
 };
 

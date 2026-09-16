@@ -26,8 +26,7 @@ function resolveMediaDir(): string {
 export const DATA_DIR = resolveDataDir();
 export const CONFIG_FILE = path.join(DATA_DIR, "backend.json");
 export const DB_FILE = path.join(DATA_DIR, "runtime.sqlite");
-export let MEDIA_DIR = resolveMediaDir();
-export function setMediaDir(dir: string) { MEDIA_DIR = path.resolve(dir); }
+export const MEDIA_DIR = resolveMediaDir();
 export const LOGS_DIR = path.join(DATA_DIR, "logs");
 export const WORKERS_DIR = path.join(DATA_DIR, "workers");
 /** 旧版前端设置文件，仅用于启动时一次性迁入 SQLite。 */

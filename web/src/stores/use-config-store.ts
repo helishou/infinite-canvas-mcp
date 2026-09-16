@@ -81,7 +81,6 @@ export type AiConfig = {
     background: string;
     count: string;
     canvasImageCount: string;
-    comfyuiBasePath: string;
     proxyEnabled: boolean;
     proxyUrl: string;
 };
@@ -144,7 +143,6 @@ export const defaultConfig: AiConfig = {
     background: "",
     count: "1",
     canvasImageCount: "3",
-    comfyuiBasePath: "",
     proxyEnabled: false,
     proxyUrl: DEFAULT_LOCAL_PROXY_URL,
 };

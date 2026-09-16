@@ -194,7 +194,7 @@ export async function generateSmartStoryboard(ctx: CanvasNodeContext, refs: H3Re
             ? { ...selected, ...segmentRefsPatch(inheritedRefs), result: "", resultStorageKey: undefined, results: [], status: "idle", progress: 0, runtimeTaskId: "" }
             : { ...segmentRefsPatch(inheritedRefs), duration, taskMode, status: "idle" as const, result: "", resultStorageKey: undefined, results: [], progress: 0, runtimeTaskId: "" };
         // 连续性由 prompt 里的 continuityIn/continuityOut 文字承担；这里显式关闭「上一段作为参考视频」，
-        // 避免新分段在续跑时被隐式塞进上一段成品（旧代码写的是已失效的 motionContextEnabled）。
+        // 避免新分段在续跑时被额外塞进上一段成品。V15 Motion Context 是独立的潜空间续写能力。
         const created = parsed.map((draft) => ({ ...inherited, ...materializePlanSegment(draft, allowedRefs, taskMode, continuityEnabled), id: draft.id, taskMode, previousVideoAsReference: false }));
         const insertAt = selectedIndex < 0 ? existing.length : selectedIndex + 1;
         const segments = compactSegmentStarts([...existing.slice(0, insertAt), ...created, ...existing.slice(insertAt)]);

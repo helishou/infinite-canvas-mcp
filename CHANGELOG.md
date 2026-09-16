@@ -4,12 +4,19 @@
 
 - [修复] 画布生图按真实 Backend 任务类型恢复运行态，并在自定义工作流未返回宽高时从成品读取尺寸，避免生成成功后输出节点仍显示空白或失败。
 
+- [修复] 画布媒体库与 ComfyUI 安装目录解耦，H3 仅复制任务输入到执行缓存，修改或删除 ComfyUI 不再影响已归档素材。
+
+- [修复] 更新 Radix UI 并修正工作流参数的重复初始化，避免模型选择器和多节点画布触发「Maximum update depth exceeded」。
+- [修复] ComfyUI 目录设置改为读写后台实际配置，支持绘世安装目录，校验目录结构并显示保存失败原因。
 - [修复] Backend 实时事件支持断线补发与重启识别，快照恢复保留本地编辑并展示真实冲突，避免漏更新或覆盖未保存修改。
 - [优化] 画布列表使用摘要、详情按需加载，同步与本地缓存只处理变化项目，操作响应返回增量并保留未变化节点引用。
 - [修复] 画布导出完整分页读取记录并校验媒体是否齐全，缺失或请求失败明确报错，归档改为逐文件流式写入与异步解包。
+- [新增] H3 画布设置增加南风 V15 增强项：TAEH3 彩色预览、DLSS 超分/补帧、TRT 视频 VAE 和南风 ER 采样器参数。
+- [新增] H3 Motion Context 接入 V15 潜空间续写：连续分镜批量运行时生成独立 AV latent 描述符，禁止单段运行误用续写链。
+- [调整] H3 原生提交链适配南风 V15：主节点、潜空间放大器和动态模型选项切换到 V15，并透传 V15 的 TRT、DLSS、TAEH3、ER 采样器与 Motion Context 字段（默认关闭）。
+- [新增] 短剧剧目支持编辑故事大纲、一句话简介、标签和封面，资料由 Backend SQLite 与媒体库持久化。
 - [新增] 增加 `drama_create_project` MCP 工具，可创建短剧制作台中的剧目并同步剧目资料。
 - [新增] 短剧制作台支持删除剧目；删除只移除剧目归档，保留其场景画布并回到待编排场景，同时提供 `drama_delete_project` MCP 工具。
-- [新增] 短剧剧目支持编辑故事大纲、一句话简介、标签和封面，资料由 Backend SQLite 与媒体库持久化。
 - [新增] 新增「短剧制作」Tab：复用画布库中的文件夹作为剧目、画布作为场景入口，支持从制作台直接回到场景画布。
 - [新增] 画布库支持文件夹管理：可新建、重命名、删除文件夹，并将画布筛选或移动到指定文件夹；文件夹与归属由 Backend SQLite 持久化。
 - [修复] 删除画布时记录待同步的删除意图，避免 Backend 合并或刷新期间把已删除画布从本地旧快照重新提交并复活。
@@ -36,6 +43,7 @@
 - [修复] Windows 下 Vite 监听测试/诊断临时文件遇到 `EBUSY` 不再导致前端开发服务崩溃；临时输出文件已从监听和 Git 范围排除。
 - [修复] GPT Image / Comfy 生图启动前强制提交新节点和连线，即使 SSE 短暂断开也不会跳过这次 Backend 同步，避免任务成功但结果媒体无法回写成画布图片节点。
 - [优化] H3 节点的运行历史产物从 `node.metadata.materials` 迁出到独立的 `generation_logs.outputs_json` 表（DB schema v4 migration，老画布会在启动时自动清理），新增 MCP 工具 `h3_get_node_materials` 与 REST `GET /canvas/projects/:id/nodes/:nodeId/materials` 按需返回。原因：旧实现每次写入都会把整段 sourcePrompt（中文 H3 长 prompt，可达 4–20 KB）连同 url/storageKey 等冗余塞进 `metadata.materials`，单节点 metadata 累积可达 MB 级；`canvas_get_state` 把整张画布一次性返回时会被 MCP 截断（约 2 MB 的项目 70% 体积是 H3 历史）。前端 H3 工作台现在直接从 `segments` 派生 outputs，`clearUnused` / `removeOutput` 不再写 metadata。
+- [优化] H3 节点 `segments[i]` 与 `segments[i].results[]` 里的"生成时刻输入快照"（`prompt` / `refItems` / `characterRefs` / `characterPromptBlocks` / `sourceComfyParams` / `sourceParameters` / `sourcePrompt` / `comfyWorkflow`，以及每个 `results[]` 元素上的 `params` / `comfy_*` / `source_prompt` / `outfit_description` / `character_description` 等字段）也迁出到 `generation_logs`（DB schema v5 migration），写入端停摆。`writeBackH3Task` 不再把 `log.params + log.prompt + log.references` spread 到 `segments[i].results[].params`，只 push 当前生成的 url/storageKey。`h3_get_node_materials` MCP tool 增加 `segmentId` 可选过滤，仅返回指定片段的历史。H3 节点的还原 Clip 流程改为从 `generation_logs.prompt + references_json + params_json` 重建（`buildRestoreParamsPatch` 仍按 `generationLogId` 查回）。实测：v4 + v5 联跑后含 9 张角色参考图的 H3 节点 metadata 从 ~20 KB 降到 ~3.4 KB（-82.7%）；「第一集」画布 `canvas_get_state` 从 2 MB 降到几十 KB，不再被 MCP 截断。
 - [修复] MCP 生图流程会把「【文本1】/图片1…」等引用选择器占位内容写入提示词的问题；现在会自动剥离占位行，保留真实提示词，并与前端参考图分离传递。
 - [修复] 画布网页编辑与 MCP/刷新恢复统一走本地快照队列和 revision 合并：未提交的网页修改不再被远端项目列表覆盖，IndexedDB 快照写入串行化，刷新后会继续提交本地编辑。
 - [调整] MCP 画布协议不再读取或写入浏览器视口；节点、连线和生成操作只同步画布内容，中心与缩放由当前页面本地维护。

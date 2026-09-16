@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 
-import { attachH3ActualSubmission, buildNativeNanFengV10Workflow, exactHistoryEntry, localComfyInputName, summarizeH3Workflow } from "./bridge.js";
+import { attachH3ActualSubmission, buildNativeNanFengV15Workflow, exactHistoryEntry, localComfyInputName, summarizeH3Workflow } from "./bridge.js";
 import { MEDIA_DIR } from "../config.js";
 
 const promptA = "5ef69623-4030-4f1b-a00b-09e7355303e4";
@@ -18,25 +18,28 @@ test("history recovery never substitutes another prompt's output", () => {
 });
 
 test("H3 local input only exposes files from runtime-media", () => {
-    assert.match(localComfyInputName(path.join(MEDIA_DIR, "input", "ref.png")), /^infinite-canvas\/input\/ref\.png$/);
+    assert.match(localComfyInputName(path.join(MEDIA_DIR, "input", "ref.png")), /^infinite-canvas-cache\/input\/ref\.png$/);
     assert.throws(() => localComfyInputName(path.join(path.dirname(MEDIA_DIR), "ref.png")), /运行媒体/);
 });
 
 test("H3 audit summary reads the submitted API graph instead of raw UI fields", async () => {
-    const graph = await buildNativeNanFengV10Workflow(
+    const graph = await buildNativeNanFengV15Workflow(
         { prompt: "@图片1 起舞", references: ["reference.png"] },
         {
             mode: "ref2va", duration: 6, aspectRatio: "16:9", megapixels: 0.5, sizeMultiple: 32,
             seed: 272289703718811, realtimePreviewEnabled: false, sageAttention: "H3专用Sage加速",
+            motionContextEnabled: true, continuationTask: "{\"group\":\"test\",\"index\":1}", dlssVideoOutputDetailStrength: 1.5,
             loraSlots: [{ name: "minimax/turbo.safetensors", strength: 1, enabled: true }, { name: "minimax/cinematic.safetensors", strength: 0.7, enabled: true }],
             v81ManualSigma: true, h3FullSigma: "1.0, 0.8, 0.5, 0.0", steps: 20,
         }, upload, "http://comfy.local", new AbortController().signal,
     );
-    assert.equal(graph.nf_v10.class_type, "NanFengH3MultiReferenceGeneratorV10");
-    assert.equal(graph.nf_v10.inputs["图片1"], "uploaded-reference.png");
-    assert.equal(graph.nf_v10.inputs["连续生成模式"], true);
-    assert.equal(graph.nf_v10.inputs.SageAttention, "auto");
-    assert.equal(graph.nf_v10.inputs["H3专用注意力"], "H3专用Sage加速");
+    assert.equal(graph.nf_v15.class_type, "NanFengH3MultiReferenceGeneratorV15");
+    assert.equal(graph.nf_v15.inputs["图片1"], "uploaded-reference.png");
+    assert.equal(graph.nf_v15.inputs["启用潜空间续写"], true);
+    assert.equal(graph.nf_v15.inputs["潜空间续写任务"], "{\"group\":\"test\",\"index\":1}");
+    assert.equal(graph.nf_v15.inputs.DLSS_video_output_detail_strength, 1.5);
+    assert.equal(graph.nf_v15.inputs.SageAttention, "auto");
+    assert.equal(graph.nf_v15.inputs["H3专用注意力"], "H3专用Sage加速");
     const summary = summarizeH3Workflow(graph, promptA);
     assert.deepEqual(summary, {
         promptId: promptA, seed: 272289703718811, frames: 141, width: 960, height: 544,
@@ -50,7 +53,7 @@ test("H3 audit summary reads the submitted API graph instead of raw UI fields", 
 });
 
 test("H3 audit reports scheduler Sigma and 192-frame graph values", async () => {
-    const graph = await buildNativeNanFengV10Workflow(
+    const graph = await buildNativeNanFengV15Workflow(
         { prompt: "@图片1", references: ["reference.png"] },
         { mode: "ref2va", duration: 8, aspectRatio: "16:9", megapixels: 0.5, sizeMultiple: 32, seed: 792393709737869, realtimePreviewEnabled: false, sageAttention: "关闭", scheduler: "simple", steps: 20 },
         upload, "http://comfy.local", new AbortController().signal,
@@ -63,11 +66,11 @@ test("H3 audit reports scheduler Sigma and 192-frame graph values", async () => 
     assert.deepEqual(summary.mediaInputs, { images: ["uploaded-reference.png"], videos: [], audios: [] });
 });
 
-test("H3 native workflow forwards continuous model cache mode", async () => {
-    const graph = await buildNativeNanFengV10Workflow(
+test("H3 V15 native workflow does not submit removed model-cache input", async () => {
+    const graph = await buildNativeNanFengV15Workflow(
         { prompt: "@图片1", references: ["reference.png"] },
         { mode: "ref2va", keepModelCache: true },
         upload, "http://comfy.local", new AbortController().signal,
     );
-    assert.equal(graph.nf_v10.inputs["连续生成模式"], true);
+    assert.equal(Object.prototype.hasOwnProperty.call(graph.nf_v15.inputs, "连续生成模式"), false);
 });

@@ -11,6 +11,21 @@ description: Implemented changes that still need manual verification
 - 使用 `custom/krea2改图` 等只返回媒体地址、不返回宽高的 ComfyUI 工作流，确认 Backend 任务成功后节点显示成品和成功状态，不再提示「全部图片生成失败」。
 - 使用 GPT Image 或本地 ComfyUI 生图，确认输出节点仍能显示运行中，并在刷新页面后继续按 Backend 任务 ID 恢复结果。
 
+## 模型选择器更新循环
+
+- Radix UI 升级至 1.6.7（Select 2.3.7、Slot 1.3.3），采用官方稳定 ref 回调修复；同步 npm 与 Bun 锁文件。
+- 工作流参数只在值变化时回写；刷新、缩放造成的节点重新挂载保留用户参数，实际切换工作流才重置。空默认值、无自定义字段、清除旧字段应收敛到稳定状态。
+- 多节点画布刷新、缩放、定位生成配置节点后，反复展开和关闭模型选择器；Agent 模型与推理强度下拉框也应保持正常，不出现「Maximum update depth exceeded」。
+
+## ComfyUI 目录设置
+
+- 偏好设置中的目录从 Backend `/comfy/config` 读取，点击「应用目录」后由后台校验并保存；不再保存一份未被后台使用的 `comfyuiBasePath`。
+- 支持填写含 `main.py` 与 `input` 的 ComfyUI 根目录，或其上一级绘世安装目录；空路径、只有媒体文件的目录应报错。
+- 浏览器目录选择器不再猜测本机绝对路径；目录标签显示中文。保存失败保持输入并显示原因，重新打开设置显示后台实际生效的根目录。
+- 应用 ComfyUI 目录只更新执行配置，不移动媒体库；偏好设置同时显示独立的画布媒体目录。媒体库与 ComfyUI 目录相互包含时拒绝配置。
+- H3 按需复制参考素材到 `ComfyUI/input/infinite-canvas-cache`，生成结果保存回 Backend 媒体库。清除执行缓存后再次提交应重建副本；在隔离测试目录删除 ComfyUI 后，画布原文件仍可读取。
+- 已有耦合媒体库迁出时先备份 SQLite 与根配置，逐文件校验 SHA-256 后切换媒体索引，保留原目录；检查旧画布预览和新任务输出均从独立目录读取。
+
 ## 同步、缓存与导出优化
 
 - 两个窗口打开同一画布：短暂断开其中一个窗口的 SSE，另一个窗口修改画布后保持静止；恢复连接应补齐修改，无需再次操作。重启 Backend 后新事件应继续生效。
@@ -43,6 +58,12 @@ description: Implemented changes that still need manual verification
 
 - 打开配置页确认已有渠道、API Key、WebDAV 和提示词源均能从 Backend 恢复；刷新、清空站点 localStorage、另开窗口后数据仍一致，浏览器不再生成 `infinite-canvas:ai_config_store` 或 `infinite-canvas:prompt_source_store_v2`。
 - 新增自定义提示词、修改图片工作台参考图后刷新，确认数据从 Backend SQLite 恢复；旧浏览器数据首次迁移成功后应删除对应 localStorage/localforage 记录。自定义工作流选择图片时，确认不再写入 `wf_image_*` Base64。
+
+## 画布删除同步
+
+- 删除单个画布后确认卡片立即消失；等待同步完成后刷新页面，画布不应重新出现，Backend SQLite 中对应记录也应已删除。
+- 在 Backend 合并尚未完成时立即删除画布并刷新，确认删除意图仍能在重新连接后提交，旧本地快照不会把画布重新提交回来。
+- Backend 断开时删除画布，恢复连接后确认对应远端画布被删除；断开期间新建的未同步画布仍能正常保留并上传。
 
 ## 渠道配置初始化与同步
 
@@ -228,23 +249,33 @@ The current release needs manual verification in these areas:
 
 + 画布改图结果布局：选择已有图片节点执行改图，确认生成中的结果节点与原图保持相同显示宽高；默认优先放在原图右侧且留有间距，右侧已有节点时会自动搜索左、下、上或对角空白区域，不与现有节点重叠；生成完成后图片节点仍保持原图显示尺寸且不被遮挡。
 
-+ H3 本地素材直读：重启 ComfyUI 使南风 V10 的递归 input 索引生效后，在应用「偏好设置」填写 ComfyUI 根目录并首次运行 H3，确认 backend `runtime-media` 被整体迁入真实的 `input/infinite-canvas`，已有媒体仍可预览和复用；以多图、视频、音频及自动分段任务分别运行，确认提交前不出现 `/upload/image` 请求，ComfyUI 接收到的素材名以 `infinite-canvas/` 开头，重复运行同一素材不产生副本。
++ H3 本地素材执行副本：在应用「偏好设置」填写 ComfyUI 根目录后首次运行 H3，确认 backend 媒体库保持原位，任务输入按需复制到 `input/infinite-canvas-cache`；清空该缓存后再次生成应自动重建副本，删除 ComfyUI 不应影响画布原素材。
+
++ H3 南风 V15 适配：重启 ComfyUI 后分别执行文生、图生、首尾帧和 Ref2VA，确认 prompt graph 的主节点为 `NanFengH3MultiReferenceGeneratorV15`，输出正常回写；确认模型、参考槽位、LoRA、Sigma、二采、实时预览、显存预留和 RTX 与 Clip 设置一致，潜空间放大模型下拉能从 `NanFengH3LowPeakLatentUpscalerV15` 读取。
+
++ H3 南风 V15 新字段默认行为：确认未配置 TRT、DLSS、TAEH3、Motion Context 和 ER 采样器时任务仍按原流程运行；通过 MCP 透传这些字段时，确认 V15 主节点收到对应值，且未把现有的尾帧接续误当成潜空间续写。
+
++ H3 南风 V15 设置面板：在 Clip settings 的「南风 V15 增强」中分别切换 TAEH3 彩色预览、DLSS 超分模式、DLSS 输出细节强度、DLSS 补帧、TRT 视频 VAE 和「南风采样器」，确认值写回当前 Clip；DLSS/补帧的帧率、引擎、编码和 TRT 的 encoder/decoder 选项应来自 `/comfy/models` 的真实 schema，不应凭空显示本机不存在的引擎。
+
++ H3 南风 V15 Motion Context 提示：确认 Clip 卡片保留唯一的 Motion Context 开关，设置面板不再出现第二个同义开关，并明确说明它就是潜空间续写；在画布单段运行中不会自动把尾帧接续转换成 V15 潜空间续写。
+
++ H3 南风 V15 Motion Context 连续组：在连续分镜首段开启「Motion Context（潜空间续写）」，使用「运行当前及后续分镜」提交；确认描述符的 `node` 固定为 ComfyUI 图节点 `nf_v15`，各段收到同一 workflow/group/run 与递增 index，首段保存 AV latent、后续段加载上一段 latent；直接运行单段时应明确提示必须使用批量入口。
 
 + H3 重复生成隔离：同一 Clip 连续完成两次生成，确认第二次会提交新的 backend task 与 ComfyUI promptId，不能在 taskId 返回前读取或回写上一轮 generation log 的视频；切换 Clip、取消后重跑与页面刷新恢复也只允许匹配本轮 `runtimeRunId` 的日志接管。
 
 + H3 采样与手动 Sigma 设置：在「采样设置」确认一采手动 Sigma、完整 Sigma 序列和预设管理均已移入；开启手动 Sigma 后「采样步数」输入框必须禁用，关闭后恢复可编辑。确认潜空间二采的「潜空间精度」包含 fp16、bf16、fp32，所选值随任务提交。
 
-+ H3 原生 V10 提交：分别以文生、图生、首尾帧和 Ref2VA 提交，确认 ComfyUI prompt 图只有 `NanFengH3MultiReferenceGeneratorV10` 与输出节点；模型、素材槽位、LoRA、手动 Sigma、二采、实时预览和显存预留均与当前 Clip 设置一致，输出正常回写。
++ H3 原生 V15 提交：分别以文生、图生、首尾帧和 Ref2VA 提交，确认 ComfyUI prompt 图只有 `NanFengH3MultiReferenceGeneratorV15` 与输出节点；模型、素材槽位、LoRA、手动 Sigma、二采、实时预览和显存预留均与当前 Clip 设置一致，输出正常回写。
 
-+ H3 V10 实时预览：提交一条启用实时预览的本地 H3 任务，确认生成过程中 H3 节点预览区先显示 KJ 的 JPEG/动画预览帧，并且预览只属于当前 taskId；任务完成后自动替换为正式视频，任务失败或取消后不残留预览，也不新增媒体库文件。
++ H3 V15 实时预览：提交一条启用实时预览的本地 H3 任务，确认生成过程中 H3 节点预览区先显示 KJ 的 JPEG/动画预览帧，并且预览只属于当前 taskId；任务完成后自动替换为正式视频，任务失败或取消后不残留预览，也不新增媒体库文件。
 
 + H3 ComfyUI 结果隔离与提交审计：连续提交两条 H3 任务后，分别打开生成日志，确认每条均展示自身的 ComfyUI promptId、最终 Seed、帧数、分辨率、LoRA 链、注意力模式和 Sigma 来源；人为让其中一条的 `/history/{promptId}` 缺失或 WS 断开，确认该 Clip 显示带 promptId 的可诊断失败、不会填入另一条任务的视频，且可按 promptId 从 ComfyUI output 目录手动恢复。
 
 + H3 任务与 Clip 归属：同时让不同 Clip 运行、运行中切换 Clip、重跑同一 Clip、或在任务未结束时调整 Clip 顺序；每个完成结果只能写回其提交时绑定的 Clip，旧任务回调不得覆盖新任务或其他 Clip。分别确认前端工作台与 Agent 的 `h3_run_clip` / `h3_run_all_clips` 路径。
 
-+ H3 潜空间放大模型自动选择：新建或选中一个 H3 Clip，打开 Setting→「H3 潜空间放大二采」→开启「启用潜空间二采」，确认「放大模型」下拉框自动出现并选中第一个可用模型（而不是看着像选了但实际 segment 状态为空）；此时点生成不应再报「已启用 H3 潜空间放大，但没有选择放大模型」。若 ComfyUI 未安装 NanFengH3LowPeakLatentUpscaler 节点或该节点无模型选项，开启开关后应看到黄色提示「未在 ComfyUI 发现 H3 潜空间放大模型…」。
++ H3 潜空间放大模型自动选择：新建或选中一个 H3 Clip，打开 Setting→「H3 潜空间放大二采」→开启「启用潜空间二采」，确认「放大模型」下拉框自动出现并选中第一个可用模型（而不是看着像选了但实际 segment 状态为空）；此时点生成不应再报「已启用 H3 潜空间放大，但没有选择放大模型」。若 ComfyUI 未安装 `NanFengH3LowPeakLatentUpscalerV15` 节点或该节点无模型选项，开启开关后应看到黄色提示「未在 ComfyUI 发现 H3 潜空间放大模型…」。
 
-+ H3 潜空间放大提交一致性：开启放大并选好模型后点生成，后端不再误报「model_name 选项全为空字符串」；若 ComfyUI 的 NanFengH3LowPeakLatentUpscaler 节点因缺 h3_upscaler_compat 兼容层而 model_name 为空，报错应明确提示「请确认已安装 h3_upscaler_compat 兼容层」。前端「放大模型」下拉框在 segment 未真正选中时应显示「请选择放大模型」占位符，而非拿 choices[0] 伪装成已选。
++ H3 潜空间放大提交一致性：开启放大并选好模型后点生成，后端不再误报「model_name 选项全为空字符串」；若 ComfyUI 的 `NanFengH3LowPeakLatentUpscalerV15` 节点无 model_name 选项，报错应明确提示节点未正确加载。前端「放大模型」下拉框在 segment 未真正选中时应显示「请选择放大模型」占位符，而非拿 choices[0] 伪装成已选。
 
 + 工作流列表双击重命名：在「工作流管理」页面的工作流列表里双击某条标题，应变成输入框，输入新名称回车或点击别处即保存；列表标题与（若已打开）详情页标题更新为新手名字，底层文件名不变；空名称或与原名相同不触发请求。
 + 工作流文本字段标记为提示词：在工作流节点图里展开一个文本输入字段，勾选「作为提示词」并保存；从生图工作台调用该工作流时，输入的提示词应替换该文本节点在 ComfyUI workflow 里的值（实际传到对应节点）。运行后到生成历史/日志里确认 prompt 记录的是工作台输入的提示词；同时 backend 任务 input 里也应带上 prompt 字段。切换字段类型为非文本时「作为提示词」自动取消勾选。
@@ -362,13 +393,13 @@ The current release needs manual verification in these areas:
 + H3 ComfyUI 取消任务：生成期间点击 Reset，确认 ComfyUI 当前任务被中断、排队任务被删除，不会在后台继续生成。
 + H3 生成视频媒体复用：在重建插件产物、重编译 canvas-agent 并重启后端之后，用已在画布中的图片跑一次 r2v/i2v，确认不再出现 400「媒体必须是 base64 data URL」，且已落库的图片不会重新上传。
 + MCP 当前画布上下文：连接 Agent/MCP 后调用读取画布的工具，确认能看到当前打开画布的标题、节点和选中状态；切换画布后确认上下文随之更新。
-+ 南风 H3 V10 底层迁移：检查生成 prompt graph 不包含 `NanFengH3MultiReferenceGeneratorV10` 和 `NanFeng_H3_V10.json`，四种模式分别包含正确的原生条件节点、LoadImage/LoadVideo/LoadAudio、采样、双 VAE 解码和 VHS 输出，并返回 mp4。
-+ 南风 H3 V10 参考填槽：上传多张参考图确认按连续槽位（图片1..N）写入、prompt 中 @编号 与槽位一致；断档或超 9 图时确认给出明确报错。
-+ 南风 H3 V10 分拆链：确认 SamplerCustomAdvanced 使用 ReleaseBeforeSampling 的第三路 AV latent，视频与音频均能正常解码；确认 API prompt 不包含非法的 STRING 到 COMBO Loader 连线。
-+ 南风 H3 V10 续段：开启段间接续后运行后续 Clip，确认前一段尾帧被作为参考视频槽 1 喂入 Ref2VA，输出动作/人物连续；关闭后续段时不带前段视频。
-+ 南风 H3 V10 锁音频联动：在参考生视频模式下勾选「启用锁音频」提交确认音轨锁定；勾选「音频驱动模式」但未勾锁音频时确认提交前即报错提示。
-+ 南风 H3 V10 时长上限：分别在 Clip settings 设置 5s/15s/20s 提交，确认 15s 内正常、超 15s 被 clamp 或拒绝。
-+ 南风 H3 V10 动态选项：读取 `/comfy/models` 返回的真实 NanFeng schema，确认模型、文本编码器、双 VAE、采样器、调度器、Sigma、二采、注意力、RTX、SLA 和 8 个 LoRA 均以对应控件展示。
++ 南风 H3 V15 底层迁移：检查生成 prompt graph 不包含 `NanFengH3MultiReferenceGeneratorV10` 和 `NanFeng_H3_V10.json`，四种模式分别包含 `NanFengH3MultiReferenceGeneratorV15`、正确的原生条件节点、LoadImage/LoadVideo/LoadAudio、采样、双 VAE 解码和 VHS 输出，并返回 mp4。
++ 南风 H3 V15 参考填槽：上传多张参考图确认按连续槽位（图片1..N）写入、prompt 中 @编号 与槽位一致；断档或超 9 图时确认给出明确报错。
++ 南风 H3 V15 分拆链：确认 SamplerCustomAdvanced 使用 ReleaseBeforeSampling 的第三路 AV latent，视频与音频均能正常解码；确认 API prompt 不包含非法的 STRING 到 COMBO Loader 连线。
++ 南风 H3 V15 续段：开启段间接续后运行后续 Clip，确认前一段尾帧被作为参考视频槽 1 喂入 Ref2VA，输出动作/人物连续；关闭后续段时不带前段视频。
++ 南风 H3 V15 锁音频联动：在参考生视频模式下勾选「启用锁音频」提交确认音轨锁定；勾选「音频驱动模式」但未勾锁音频时确认提交前即报错提示。
++ 南风 H3 V15 时长上限：分别在 Clip settings 设置 5s/15s/20s 提交，确认 15s 内正常、超 15s 被 clamp 或拒绝。
++ 南风 H3 V15 动态选项：读取 `/comfy/models` 返回的真实 NanFeng V15 schema，确认模型、文本编码器、双 VAE、采样器、调度器、Sigma、二采、注意力、RTX、SLA、TRT、DLSS 和 8 个 LoRA 均以对应控件展示。
 + 重建产物验证：改动 plugins/canvas/minimax-h3 与 canvas-agent 后重新执行 `node build.mjs` 与 canvas-agent 的 tsc 重建，并重启 backend，确认页面与 MCP 工具加载正常。
 + H3 时间线布局：确认 Video 下方不再显示重复 Refs 横栏，当前 Clip 的 Refs 九宫格仍可查看、添加、删除和排序素材。
 + H3 本地媒体传输：使用已有图片、视频、音频和串 Clip，确认请求复用 `storageKey` 对应的本地文件，不再调用 base64 转换；旧素材缺少 `storageKey` 时显示明确的重新上传提示。

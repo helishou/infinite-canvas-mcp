@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { appendPreviousReference, collectH3Refs, resolveClipContinuation } from "./h3-runner.js";
+import { appendPreviousReference, buildH3ContinuationTask, collectH3Refs, resolveClipContinuation } from "./h3-runner.js";
 
 // 回归防线：链式续跑曾把上一段成品静默塞进下一段的「视频1（参考视频）」——
-// 触发条件藏在已失效的 motionContextEnabled 里，UI 与生成日志都看不出来。
+// 旧实现曾把 motionContextEnabled 误解为上一段成品视频注入开关。
 // 下面这些断言锁死「默认绝不注入、只有显式开关才注入」。
 
 const previousReady = { id: "s1", result: "http://local/media/clip-1", tailFrameContinuation: false };
@@ -17,10 +17,16 @@ test("默认不把上一段成品带进下一段：既不当参考视频也不�
     assert.deepEqual(appendPreviousReference(["own.mp4"], ""), ["own.mp4"]);
 });
 
-test("motionContextEnabled 不再是隐式注入开关", () => {
+test("motionContextEnabled 只控制潜空间续写，不隐式注入参考视频", () => {
     const decision = resolveClipContinuation({ id: "s2", motionContextEnabled: true }, previousReady, true, {});
     assert.equal(decision.usePreviousAsReference, false);
     assert.equal(decision.needsPreviousVideo, false);
+});
+
+test("V15 潜空间续写描述符使用 ComfyUI 主节点 ID，而不是画布节点 ID", () => {
+    assert.deepEqual(JSON.parse(buildH3ContinuationTask("project-1", "group-1", "run-1", 2)), {
+        workflow: "project-1", node: "nf_v15", group: "group-1", run: "run-1", index: 2,
+    });
 });
 
 test("只有本段显式开启 previousVideoAsReference 才注入参考视频", () => {

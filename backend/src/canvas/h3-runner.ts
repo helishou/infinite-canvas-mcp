@@ -19,7 +19,8 @@ type H3RunInput = {
 };
 
 type H3Ref = Record<string, unknown> & { url?: string; storageKey?: string; name?: string; type?: string; role?: string; order?: number };
-type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]> };
+type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; continuationGroupId?: string; motionContextEnabled?: boolean };
+type H3Plan = { nodeId: string; segmentId: string; segmentIndex: number; continuation?: { group: string; index: number } };
 
 const H3_DEFAULTS_KEY = "plugin:minimax-h3:defaults:v1";
 const H3_PARAM_KEYS = [
@@ -35,6 +36,7 @@ const H3_PARAM_KEYS = [
     "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality",
     "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
     "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion",
+    "emptyFiveMinuteTimeline", "taeh3Enabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise",
     "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "teAccel", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
     "referenceVideoPolicy", "trimIn", "trimOut", "motionContextEnabled", "tailFrameContinuation", "previousVideoAsReference", "motionContextNoiseEnabled", "motionContextNoiseAlpha", "motionContextNoiseAlphaEnd", "motionContextNoiseRampFrames", "combatLoraWeight", "cinematicLoraWeight",
 ] as const;
@@ -191,15 +193,21 @@ export class CanvasH3Runner {
             ? segments.findIndex((segment) => String(segment.id || "") === input.segmentId)
             : input.segmentIndex ?? Math.max(0, segments.findIndex((segment) => !segment.result));
         if (selected < 0) throw new Error(`找不到 H3 片段: ${input.segmentId}`);
+        const selectedSegment = segments[selected];
+        const continuationMode = selectedSegment.motionContextEnabled === true;
+        if (continuationMode && !input.runFromCurrent) throw new Error("V15 潜空间续写必须使用「运行当前及后续分镜」，不能单独运行一个 Clip。");
+        if (continuationMode && input.skipCompleted) throw new Error("V15 潜空间续写不能跳过已完成 Clip，请从连续组首段重新运行。");
         const indices = input.runFromCurrent ? segments.map((_, index) => index).filter((index) => index >= selected) : [selected];
+        let continuationIndex = 0;
+        const continuationGroup = String(selectedSegment.continuationGroupId || selectedSegment.id || `segment-${selected}`);
         return indices.filter((index) => segments[index]).filter((index) => !input.skipCompleted || !segments[index].result).map((segmentIndex) => {
             const segment = segments[segmentIndex];
             if (!segment.id) throw new Error(`H3 Clip ${segmentIndex + 1} 缺少身份标识`);
-            return { nodeId: String(node.id || ""), segmentId: String(segment.id), segmentIndex };
+            return { nodeId: String(node.id || ""), segmentId: String(segment.id), segmentIndex, ...(continuationMode ? { continuation: { group: continuationGroup, index: ++continuationIndex } } : {}) };
         });
     }
 
-    private async startChild(parent: RuntimeTask, plan: { nodeId: string; segmentId: string; segmentIndex: number }, override: Record<string, unknown>) {
+    private async startChild(parent: RuntimeTask, plan: H3Plan, override: Record<string, unknown>) {
         const project = this.stores.projects.get(String(parent.input.projectId))!;
         const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId)!;
         const metadata = recordOf(node.metadata);
@@ -208,6 +216,11 @@ export class CanvasH3Runner {
         const refs = collectH3Refs(segment);
         const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const params = extractParams(segment, override, metadata, defaults);
+        if (params.motionContextEnabled === true && !plan.continuation) throw new Error("Motion Context（V15 潜空间续写）必须使用「运行当前及后续分镜」，不能单独运行一个 Clip。");
+        if (plan.continuation) {
+            params.motionContextEnabled = true;
+            params.continuationTask = buildH3ContinuationTask(String(parent.input.projectId), plan.continuation.group, parent.id, plan.continuation.index);
+        }
         const taskMode = normalizeTaskMode(params.taskMode || segment.taskMode);
         const isT2v = taskMode === "t2v";
         const isI2v = taskMode === "i2v";
@@ -224,11 +237,11 @@ export class CanvasH3Runner {
         const audios = await Promise.all(audioRefs.map((ref) => this.resolveRef(ref)));
         const videos = await Promise.all(videoRefs.map((ref) => this.resolveRef(ref)));
         const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
-        // 上一段成品视频有两种用途，必须分开、并且都必须显式声明（规则见 resolveClipContinuation）：
+        // 上一段成品视频有两种显式用途（规则见 resolveClipContinuation）：
         //   1) tailFrameContinuation（标在【上一段】上）= 抓上一段尾帧，当本段首帧参考图（写出提示词，UI 可见）；
         //   2) previousVideoAsReference（标在【本段】上）= 把上一段成品整体当「参考视频」喂进本段（默认关）。
-        // 旧实现用 motionContextEnabled 隐式触发 2)，但南风 V10 主节点没有任何 motion/context 输入，
-        // 注入的视频实际落成了「视频1（参考视频）」——静默改变出片，且 UI 与生成日志都看不出来，故拆成显式开关。
+        // Motion Context 本身走 V15 continuationTask 的 AV latent 链，不消费上一段成品视频，
+        // 更不能隐式触发 2)；完整视频参考仍由 previousVideoAsReference 单独控制。
         const chained = parent.input.runFromCurrent === true && plan.segmentIndex > 0;
         const { usePreviousAsReference, useTailFrame, needsPreviousVideo } = resolveClipContinuation(segment, previous, chained, params);
         if (useTailFrame && !previous?.result) throw new Error(`Clip ${plan.segmentIndex} 已开启尾帧接续，但上一段没有可用成品视频`);
@@ -247,9 +260,8 @@ export class CanvasH3Runner {
         const engine = String(params.minimaxEngine || params.engine || metadata.minimaxEngine || "").toLowerCase();
         Object.assign(params, {
             taskMode,
-            // motion context 链路已实证失效：南风 V10 主节点无任何 motion/context 输入，
-            // 且 preset === "minimax-h3" 时 prepareH3MotionContext 会被跳过。这里显式写 false，
-            // 让生成日志的审计字段如实反映「没有走 motion context」，不再撒谎。
+            // V15 Motion Context 由 motionContextEnabled + continuationTask 驱动；这里关闭的
+            // 是旧版预处理图标记，避免再把上一段视频走旧 motion/context 图。
             motionContext: false,
             motionContextNoise: false,
             previousVideoAsReference: usePreviousAsReference,
@@ -404,9 +416,8 @@ export class CanvasH3Runner {
  * 决定本段是否消费上一段成品视频。尾帧接续可用于单独生成下一段；整段参考视频仍只在链式续跑中生效。
  *  - tailFrameContinuation 标在【上一段】上：生成本段时抓该段尾帧作为首帧参考图；
  *  - previousVideoAsReference 标在【本段】上：链式续跑时把上一段成品整体作为参考视频喂进本段（默认关）。
- * 历史上 motionContextEnabled 会隐式触发后者，而该链路已实证失效（南风 V10 主节点无任何
- * motion/context 输入，活跃预设还跳过 prepareH3MotionContext），注入的视频反而落成了
- * 「视频1（参考视频）」，静默改变出片且 UI/日志都看不出来。不要再引入任何隐式触发。
+ * motionContextEnabled 只控制 V15 AV latent 续写，不属于这里的成品视频消费逻辑；
+ * 不得用它隐式触发 previousVideoAsReference。
  */
 export function resolveClipContinuation(
     segment: Record<string, unknown>,
@@ -429,6 +440,11 @@ export function appendPreviousReference(videos: readonly string[], previousPath:
     if (!previousPath) return [...videos];
     if (videos.length >= 3) throw new Error("参考视频已达 3 段上限，无法再追加上一段成品；请关闭「上一段作为参考视频」或先移除一段参考视频");
     return [...videos, previousPath];
+}
+
+/** V15 会用 ComfyUI unique_id 校验 node；原生提交图中的主节点 ID 固定为 nf_v15。 */
+export function buildH3ContinuationTask(workflow: string, group: string, run: string, index: number): string {
+    return JSON.stringify({ workflow, node: "nf_v15", group, run, index });
 }
 
 function normalizeInput(input: H3RunInput): H3RunInput {

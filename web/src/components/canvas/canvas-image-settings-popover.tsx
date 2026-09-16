@@ -9,6 +9,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, type AiConfig } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField, type WorkflowDetail } from "@/services/api/workflows";
+import { reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
 
 type CanvasImageSettingsPopoverProps = {
     config: AiConfig;
@@ -98,39 +99,16 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     const customFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, workflowDetail?.workflow) && !field.isPrompt);
 
     useEffect(() => {
-        if (!workflowDetail) return;
+        if (!workflowDetail || workflowDetail.name !== workflowName || !onComfyParamsChange) return;
         // 换了模型或换了当前场景的工作流 → 本次以渠道配置（+字段默认值）重新铺一遍，
         // 同名但属于上一个工作流/场景的参数不再沿用。
         const signature = `${config.model}::${workflowName}`;
-        const workflowChanged = appliedWorkflowRef.current !== signature;
+        const workflowChanged = Boolean(appliedWorkflowRef.current && appliedWorkflowRef.current !== signature);
         appliedWorkflowRef.current = signature;
-        if (!onComfyParamsChange) return;
         // 渠道设置里为当前输入场景配的参数优先于工作流字段默认值。
         const routedParams = resolveModelWorkflowParams(config, config.model, referenceCount);
-        const validIds = new Set(customFields.map((field) => field.id));
-        const next: Record<string, unknown> = {};
-        let changed = false;
-        // 输入场景切换后工作流也换了：把不属于当前工作流的旧字段剔掉，避免把上一个工作流的参数注入本次执行。
-        for (const [id, value] of Object.entries(comfyParams || {})) {
-            if (workflowChanged) continue;
-            if (!customFields.length || validIds.has(id)) next[id] = value;
-            else changed = true;
-        }
-        for (const field of customFields) {
-            if (next[field.id] !== undefined && next[field.id] !== null) continue;
-            if (routedParams[field.id] !== undefined) {
-                next[field.id] = routedParams[field.id];
-                changed = true;
-                continue;
-            }
-            const options = field.options || [];
-            const value = field.type === "dropdown"
-                ? (options.includes(String(field.default ?? "")) ? field.default : options[0] ?? "")
-                : field.default ?? (field.type === "boolean" ? false : field.type === "number" || field.type === "slider" ? 0 : "");
-            next[field.id] = value;
-            changed = true;
-        }
-        if (changed) onComfyParamsChange(next);
+        const next = reconcileWorkflowParams(comfyParams, customFields, routedParams, workflowChanged);
+        if (next && next !== comfyParams) onComfyParamsChange(next);
     }, [comfyParams, customFields, onComfyParamsChange, workflowDetail, workflowName, config, referenceCount]);
 
     const panel = open && buttonRect ? (

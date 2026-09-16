@@ -1,7 +1,11 @@
 import { fetchAgentJson, AgentApiError } from "./canvas-agent";
-import { backendMediaUrl, getBackendUrl, uploadBackendMedia } from "@/services/backend-api";
+import { backendMediaUrl, getBackendUrl, uploadBackendMedia, request } from "@/services/backend-api";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { useAgentStore } from "@/stores/use-agent-store";
+
+type ComfyConfig = { localH3Direct: { rootDir: string; inputDir: string; cacheDir: string; mediaDir: string; ready: boolean } };
+export const fetchComfyConfig = () => request<ComfyConfig>("GET", "/comfy/config");
+export const saveComfyRoot = (localH3RootDir: string) => request<ComfyConfig>("PUT", "/comfy/config", { localH3RootDir });
 
 /**
  * 本地 ComfyUI 任务的请求端点解析。

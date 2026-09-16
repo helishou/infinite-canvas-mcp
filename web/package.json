@@ -33,7 +33,7 @@
         "lucide-react": "^1.16.0",
         "motion": "^12.38.0",
         "nanoid": "^5.1.11",
-        "radix-ui": "^1.4.3",
+        "radix-ui": "^1.6.7",
         "react": "19.2.5",
         "react-dom": "19.2.5",
         "react-i18next": "^17.0.11",

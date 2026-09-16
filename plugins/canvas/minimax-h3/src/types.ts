@@ -133,6 +133,52 @@ export type H3Segment = {
     slaBackend?: string;
     slaDisableFp16Accum?: boolean;
     slaStabilizeMotion?: boolean;
+    /** 南风 V15 追加字段；当前默认关闭，供后端/MCP 显式透传。 */
+    emptyFiveMinuteTimeline?: boolean;
+    taeh3Enabled?: boolean;
+    contextLength?: string;
+    audioContextLength?: number;
+    continuationTask?: string;
+    continuationGroupId?: string;
+    continuationAudioRefineEnabled?: boolean;
+    continuationAudioDenoise?: number;
+    continuationAudioSteps?: number;
+    continuationAudioSampler?: string;
+    continuationAudioScheduler?: string;
+    trtVideoVaeEnabled?: boolean;
+    trtDecoderEngine?: string;
+    trtEncoderEngine?: string;
+    dlssUpscaleMode?: string;
+    dlssFrameInterpolationEnabled?: boolean;
+    dlssVideoUpscaleMode?: string;
+    dlssVideoRequireNeuralUpscaling?: boolean;
+    dlssVideoNrPreset?: string;
+    dlssVideoNrStyle?: string;
+    dlssVideoNrIntensity?: number;
+    dlssVideoLocalToneStrength?: number;
+    dlssVideoLocalStructureStrength?: number;
+    dlssVideoSkinStructureStrength?: number;
+    dlssVideoAutomaticMask?: boolean;
+    dlssVideoModelPreset?: string;
+    dlssVideoEncodingQuality?: string;
+    dlssVideoCodec?: string;
+    dlssVideoContainer?: string;
+    dlssVideoRename?: string;
+    dlssVideoCustomSuffix?: string;
+    dlssVideoHdrMode?: boolean;
+    dlssVideoOutputDetailStrength?: number;
+    dlssFgOutputFps?: string;
+    dlssFgEngine?: string;
+    dlssFgEncodingQuality?: string;
+    dlssFgVideoCodec?: string;
+    dlssFgContainer?: string;
+    dlssFgRename?: string;
+    dlssFgCustomSuffix?: string;
+    dlssFgHdrMode?: boolean;
+    erSolverType?: string;
+    erMaxStage?: number;
+    erEta?: number;
+    erSNoise?: number;
     audioDriveMarkers?: string;
     audioDriveSegmentImages?: string;
     audioDriveSegmentStoryboards?: string;
@@ -160,8 +206,7 @@ export type H3Segment = {
     denoise?: number;
     trimIn?: number;
     trimOut?: number;
-    // 已失效的遗留字段：南风 V10 主节点没有任何 motion/context 输入，且活跃预设会跳过
-    // prepareH3MotionContext，因此该开关现在不产生任何效果（保留仅为兼容历史数据）。
+    // Motion Context 是南风 V15 的 AV latent 潜空间续写开关；后端负责生成连续组任务描述符。
     motionContextEnabled?: boolean;
     // 上一段成品视频作为「参考视频」喂进本段：必须显式开启，默认关闭。
     // 只有链式续跑（runFromCurrent）时生效；标在本段上（index > 0 才有意义）。

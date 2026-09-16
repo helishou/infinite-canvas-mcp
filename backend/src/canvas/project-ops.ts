@@ -250,7 +250,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             if (!nodes.some((node) => String(node.id) === id)) throw new Error(`找不到生成节点：${id}`);
         } else if (operation.type === "update_project") {
             const patch = recordOf(operation.patch);
-            const allowed = ["title", "chatSessions", "activeChatId", "backgroundMode", "showImageInfo", "globalPrompt"];
+            const allowed = ["title", "folderId", "chatSessions", "activeChatId", "backgroundMode", "showImageInfo", "globalPrompt"];
             for (const key of allowed) if (key in patch) project[key] = patch[key];
         } else {
             throw new Error(`未知画布操作：${operation.type}`);

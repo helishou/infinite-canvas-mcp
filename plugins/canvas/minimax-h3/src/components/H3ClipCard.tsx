@@ -39,20 +39,18 @@ export function H3ClipCard({ ctx, segment, index, segments, selectedId, fmt }: {
         updateSegments(segments.map((item) => item.id === segment.id ? { ...item, tailFrameContinuation: next } : item));
         showFlash("ok", next ? "已开启尾帧接续：下一段运行将自动用本段尾帧" : "已关闭尾帧接续");
     };
-    // 上一段作为参考视频开关：标在本段上表示「把上一段的成品整体当参考视频喂进本段」。
-    // 默认关闭；只有链式续跑（续跑按钮）时才生效，且运行日志的「实际提交配置」会列出视频槽位。
-    // 之前这个位置是已失效的 motionContextEnabled 开关（南风 V10 主节点无 motion 输入），
-    // 它曾经隐式把上一段成品塞进「视频1」，用户看不出来，故替换为显式开关。
-    const previousRefOn = segment.previousVideoAsReference === true;
-    const togglePreviousRef = (event: React.MouseEvent) => {
+    // Motion Context 是 V15 的 AV latent 潜空间续写。标在本段上表示从本段开始建立连续组，
+    // 运行时必须使用「运行当前及后续分镜」。完整视频参考在 Clip 设置里独立控制。
+    const motionContextOn = segment.motionContextEnabled === true;
+    const toggleMotionContext = (event: React.MouseEvent) => {
         event.stopPropagation();
-        const next = !previousRefOn;
-        updateSegments(segments.map((item) => item.id === segment.id ? { ...item, previousVideoAsReference: next } : item));
-        showFlash("ok", next ? "已开启：续跑时把上一段成品作为参考视频" : "已关闭：续跑时不再注入上一段成品");
+        const next = !motionContextOn;
+        updateSegments(segments.map((item) => item.id === segment.id ? { ...item, motionContextEnabled: next } : item));
+        showFlash("ok", next ? "已开启 Motion Context：请运行当前及后续分镜" : "已关闭 Motion Context");
     };
     return <div key={segment.id} draggable title={segStatus === "error" ? String(segment.errorDetails || "生成失败，点击右侧 Status 区域查看详情或重试") : undefined} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-infinite-canvas-clip", segment.id); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const ref = normalizeDroppedH3Ref(event); if (ref) { if (refs.some((item) => item.url === ref.url)) return; const nextRefs = [...refs, ref]; updateSegments(segments.map((item) => item.id === segment.id ? withSegmentRefs(item, nextRefs) : item)); return; } const id = event.dataTransfer.getData("application/x-infinite-canvas-clip"); if (!id || id === segment.id) return; const from = segments.findIndex((item) => item.id === id); const to = segments.findIndex((item) => item.id === segment.id); if (from < 0 || to < 0) return; const next = [...segments]; const [moved] = next.splice(from, 1); next.splice(to, 0, moved); ctx.updateMetadata({ segments: compactSegmentStarts(next), selectedSegmentId: id }); }} onClick={() => ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0), h3PlaybackAll: false })} className={`minimax-tl-clip ${selected ? "active" : ""} ${statusClass}`} style={{ left: `${left}px`, width: `${width}px` }}>
         <div className="minimax-clip-media">{segment.result && !compactMedia ? <video src={segment.result} muted playsInline preload="metadata" /> : <div className="minimax-clip-empty">{segStatus === "error" ? <H3Icon name="close" /> : <H3Icon name="clapperboard" />}</div>}</div>
-        {index > 0 ? <button type="button" className={`minimax-clip-motion ${previousRefOn ? "on" : "off"}`} title={previousRefOn ? "上一段作为参考视频：已开启（续跑时把上一段成品喂进本段的参考视频槽位，点击关闭）" : "上一段作为参考视频：关闭（点击开启；仅链式续跑时生效）"} onClick={togglePreviousRef}><H3Icon name="link2" /></button> : null}
+        <button type="button" className={`minimax-clip-motion ${motionContextOn ? "on" : "off"}`} title={motionContextOn ? "Motion Context（潜空间续写）：已开启；点击关闭" : "Motion Context（潜空间续写）：关闭；点击开启后请运行当前及后续分镜"} onClick={toggleMotionContext}><H3Icon name="waves" /></button>
         <div className="minimax-clip-meta"><b>Clip {index + 1}</b><span>{fmt(Number(segment.start || 0))} - {fmt(Number(segment.start || 0) + Number(segment.duration || 0))}</span></div>
         {canContinue ? <button type="button" className={`minimax-clip-tailframe ${continuationOn ? "on" : ""}`} title={continuationOn ? "尾帧接续：已开启（下一段运行将自动抓取本段尾帧作为首帧参考）" : "尾帧接续：关闭（点击开启，下一段运行将自动抓取本段尾帧作为首帧参考）"} onClick={toggleContinuation}><H3Icon name="frame" /></button> : null}
         {flash ? <span className={`minimax-clip-flash ${flash.kind}`}>{flash.text}</span> : null}
