@@ -125,7 +125,11 @@ async function executeDirectCanvasTool(config: ReturnType<typeof loadConfig>, ba
 function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof loadConfig>, backendApi: ReturnType<typeof createBackendClient>) {
     for (const name of DIRECT_CANVAS_TOOLS) {
         const schema = toolInputSchemas[name];
-        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (rawInput: Record<string, unknown>) => {
+        // Pass zod schema (not schema.shape) so MCP SDK walks each property and
+        // serializes the .describe() text into JSON Schema "description" fields.
+        // Using .shape bypasses the conversion and drops every field description,
+        // making OpenAI tool-use guess at fields like items/tags/x-vs-dx.
+        server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema }, async (rawInput: Record<string, unknown>) => {
             const input = schema.parse(rawInput) as Record<string, unknown>;
             return textResult(await executeDirectCanvasTool(config, backendApi, name, input));
         });
@@ -133,7 +137,7 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
     // ── H3 节点历史运行产物（按需取，替代 metadata.materials 字段）──
     server.registerTool("h3_get_node_materials", {
         description: toolDescriptions.h3_get_node_materials,
-        inputSchema: toolInputSchemas.h3_get_node_materials.shape,
+        inputSchema: toolInputSchemas.h3_get_node_materials,
     }, async (rawInput: Record<string, unknown>) => {
         const input = toolInputSchemas.h3_get_node_materials.parse(rawInput) as { projectId?: string; nodeId: string; segmentId?: string; limit?: number };
         const projectId = String(input.projectId || activeProjectId || "");
