@@ -1,4 +1,5 @@
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
+import { shallow } from "zustand/vanilla/shallow";
 import i18n from "@/i18n";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -96,6 +97,21 @@ export function getMentionResourceNodes(nodeId: string, nodes: CanvasNodeData[],
     if (ownInputs.length) return ownInputs;
     const node = resolvedIndex.nodeById.get(nodeId);
     return node && isResourceNode(node) ? [node] : [];
+}
+
+/** 相同资源内容保留数组引用，让未受影响节点的 React.memo 生效。 */
+export function createMentionReferenceSelector() {
+    let previous = new Map<string, CanvasResourceReference[]>();
+    return (visibleNodes: CanvasNodeData[], nodes: CanvasNodeData[], connections: CanvasConnection[], index: CanvasGraphIndex) => {
+        const next = new Map<string, CanvasResourceReference[]>();
+        for (const node of visibleNodes) {
+            const references = buildNodeMentionReferences(node, nodes, connections, index);
+            const cached = previous.get(node.id);
+            next.set(node.id, cached && cached.length === references.length && cached.every((item, i) => shallow(item, references[i])) ? cached : references);
+        }
+        previous = next;
+        return next;
+    };
 }
 
 export function getGenerationResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex) {

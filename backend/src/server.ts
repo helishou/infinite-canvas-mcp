@@ -206,14 +206,22 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         };
         const heartbeat = setInterval(() => { try { res.write(": heartbeat\n\n"); } catch { clearInterval(heartbeat); } }, 15_000);
         const unsubscribe = events.subscribe(write);
+        const replay = events.replay(req.get("Last-Event-ID") || (typeof req.query.cursor === "string" ? req.query.cursor : undefined));
+        if (!replay.reset) replay.events.forEach(write);
+        res.write(`id: ${replay.cursor}\nevent: events.sync\ndata: ${JSON.stringify({ cursor: replay.cursor, reset: replay.reset })}\n\n`);
         const cleanup = () => { closed = true; clearInterval(heartbeat); unsubscribe(); };
         req.on("close", cleanup);
         res.on("error", cleanup);
     });
 
     // ── Canvas projects ──────────────────────────────────────────────────
-    app.get("/canvas/projects", (_req, res) => {
-        res.json({ ok: true, projects: stores.projects.list() });
+    app.get("/canvas/projects", (req, res) => {
+        res.json({ ok: true, projects: req.query.summary === "true" ? db.listCanvasProjectSummaries() : stores.projects.list() });
+    });
+    app.get("/canvas/projects/:id", (req, res) => {
+        const project = req.query.summary === "true" ? db.listCanvasProjectSummaries(req.params.id)[0] : db.getCanvasProject(req.params.id);
+        if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
+        res.json({ ok: true, project });
     });
     app.put("/canvas/projects", (req, res) => {
         const body = req.body as { projects?: CanvasProject[] };
@@ -238,7 +246,9 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
         try {
             const result = db.applyCanvasProjectOperations(req.params.id, expectedRevision, operations);
             events.publishCanvasDelta({ entityId: result.project.id, revision: result.revision, operations: result.operations, operationResults: result.operationResults, updatedAt: String(result.project.updatedAt || "") });
-            res.json({ ok: true, projectId: result.project.id, revision: result.revision, operationResults: result.operationResults, project: result.project });
+            res.json({ ok: true, projectId: result.project.id, revision: result.revision, operationResults: result.operationResults,
+                ...(req.query.response === "delta" ? { operations: result.operations, updatedAt: result.project.updatedAt } : { project: result.project }),
+            });
         } catch (error) {
             const value = error as Error & { code?: string; project?: CanvasProject; revision?: number };
             if (value.code === "REVISION_CONFLICT") return void res.status(409).json({ ok: false, error: value.message, projectId: req.params.id, revision: value.revision, project: value.project });

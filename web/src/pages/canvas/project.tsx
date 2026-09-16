@@ -50,10 +50,10 @@ import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/a
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { flushCanvasSyncNow, useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { ensureCanvasProjectLoaded, flushCanvasSyncNow, useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
-import { buildCanvasGraphIndex, buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { buildCanvasGraphIndex, createMentionReferenceSelector, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, findOpenNodePosition, findRightSidePosition, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
@@ -332,6 +332,8 @@ function InfiniteCanvasPage() {
     const [assetPickerAllowedKinds, setAssetPickerAllowedKinds] = useState<string[] | undefined>();
     const assetPickerResolverRef = useRef<((image: { kind: "image"; dataUrl: string; title: string; storageKey?: string } | null) => void) | null>(null);
     const [projectLoaded, setProjectLoaded] = useState(false);
+    const [projectLoadError, setProjectLoadError] = useState("");
+    const [projectLoadAttempt, setProjectLoadAttempt] = useState(0);
     const [toolbarNodeId, setToolbarNodeId] = useState<string | null>(null);
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
     const [dialogNodeId, setDialogNodeId] = useState<string | null>(null);
@@ -488,15 +490,10 @@ function InfiniteCanvasPage() {
 
     useEffect(() => {
         if (!hydrated) return;
+        setProjectLoadError("");
         const restoreGeneration = ++restoreGenerationRef.current;
         const uiVersion = projectUiVersionRef.current;
-        const project = openProject(projectId);
-        if (!project) {
-            navigate("/canvas", { replace: true });
-            return;
-        }
-
-        const restore = () => {
+        const restore = (project: NonNullable<ReturnType<typeof openProject>>) => {
             const rawNodes = resetInterruptedGeneration(project.nodes.map(migrateLegacyH3Node));
             const rawSessions = project.chatSessions || [];
             if (restoreGeneration !== restoreGenerationRef.current || uiVersion !== projectUiVersionRef.current) return;
@@ -534,8 +531,16 @@ function InfiniteCanvasPage() {
                 if (sessionsChanged) startTransition(() => setChatSessions((current) => current === rawSessions ? hydratedSessions : current));
             }).catch((error) => console.warn("画布媒体后台恢复失败", error));
         };
-        restore();
-    }, [backendRevision, hydrated, navigate, openProject, projectId, updateProject]);
+        void ensureCanvasProjectLoaded(projectId).then((project) => {
+            if (restoreGeneration === restoreGenerationRef.current) restore(project);
+        }).catch((error) => {
+            if (restoreGeneration !== restoreGenerationRef.current) return;
+            const detail = error instanceof Error ? error.message : "画布加载失败";
+            setProjectLoadError(detail);
+            void message.error(detail);
+        });
+        return () => { restoreGenerationRef.current += 1; };
+    }, [backendRevision, hydrated, message, navigate, openProject, projectId, projectLoadAttempt, updateProject]);
 
     useEffect(() => {
         if (!projectLoaded) return;
@@ -911,11 +916,8 @@ function InfiniteCanvasPage() {
         });
         return map;
     }, [connections, graphIndex, nodes]);
-    const mentionReferencesByNodeId = useMemo(() => {
-        const map = new Map<string, ReturnType<typeof buildNodeMentionReferences>>();
-        visibleNodes.forEach((node) => map.set(node.id, buildNodeMentionReferences(node, nodes, connections, graphIndex)));
-        return map;
-    }, [connections, graphIndex, nodes, visibleNodes]);
+    const selectMentionReferences = useMemo(() => createMentionReferenceSelector(), []);
+    const mentionReferencesByNodeId = useMemo(() => selectMentionReferences(visibleNodes, nodes, connections, graphIndex), [selectMentionReferences, connections, graphIndex, nodes, visibleNodes]);
     const connectedNodesByNodeId = useMemo(() => {
         const map = new Map<string, CanvasNodeData[]>();
         connections.forEach((connection) => {
@@ -1353,7 +1355,7 @@ function InfiniteCanvasPage() {
             message.success(t("canvas.projectPage.exported"));
         } catch (error) {
             console.error(error);
-            message.error(t("canvas.sidePanel.exportFailed"));
+            message.error(error instanceof Error ? error.message : t("canvas.sidePanel.exportFailed"));
         } finally {
             hide();
         }
@@ -3775,6 +3777,7 @@ function InfiniteCanvasPage() {
         [configInputsById, confirmStopGeneration, handleConfigNodeChange, handleGenerateNode, runningNodeId],
     );
 
+    if (!projectLoaded && projectLoadError) return <div className="flex h-full flex-col items-center justify-center gap-3 p-6"><p role="alert">{projectLoadError}</p><Button type="text" onClick={() => setProjectLoadAttempt((attempt) => attempt + 1)}>重新加载</Button><Button type="text" onClick={() => navigate("/canvas")}>返回画布库</Button></div>;
     if (!projectLoaded) return <CanvasRefreshShell />;
 
     return (

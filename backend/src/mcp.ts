@@ -253,6 +253,40 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
         activeProjectId = id;
         return textResult({ ok: true, id: saved.id, title: saved.title, createdAt: saved.createdAt });
     });
+    const dramaCreateProjectSchema = z.object({
+        name: z.string().trim().min(1).max(200),
+        outline: z.string().optional(),
+        description: z.string().optional(),
+        tags: z.array(z.string()).optional(),
+        coverStorageKey: z.string().nullable().optional(),
+    });
+    server.registerTool("drama_create_project", {
+        description: "在短剧制作台创建新的剧目。返回剧目 id、名称和资料；创建后会同步到短剧制作台。",
+        inputSchema: dramaCreateProjectSchema.shape,
+    }, async (rawInput: Record<string, unknown>) => {
+        const input = dramaCreateProjectSchema.parse(rawInput);
+        const now = new Date().toISOString();
+        const folder = {
+            id: nanoid(),
+            name: input.name,
+            createdAt: now,
+            updatedAt: now,
+            outline: input.outline?.trim() || "",
+            description: input.description?.trim() || "",
+            coverStorageKey: input.coverStorageKey ?? null,
+            tags: (input.tags || []).map((tag) => tag.trim()).filter(Boolean),
+        };
+        const saved = await backendApi.post<{ ok: boolean; folder?: Record<string, unknown> }>("/canvas/folders", folder);
+        return textResult({ ok: true, folder: saved.folder || folder });
+    });
+    server.registerTool("drama_delete_project", {
+        description: "删除短剧制作台中的剧目。只删除剧目归档，剧目下的场景画布会保留并回到待编排场景。",
+        inputSchema: z.object({ id: z.string().trim().min(1) }).shape,
+    }, async (rawInput: Record<string, unknown>) => {
+        const input = z.object({ id: z.string().trim().min(1) }).parse(rawInput);
+        const result = await backendApi.delete<{ ok: boolean; deleted?: number }>(`/canvas/folders/${encodeURIComponent(input.id)}`);
+        return textResult({ ok: true, id: input.id, deleted: Number(result.deleted || 0) > 0 });
+    });
     server.registerTool("canvas_delete_project", {
         description: "按 id 删除画布。删除后 activeProjectId 自动清空（若指向被删画布）。",
         inputSchema: z.object({ id: z.string() }).shape,

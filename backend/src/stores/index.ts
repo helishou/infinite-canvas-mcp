@@ -1,4 +1,4 @@
-import type { BackendDatabase } from "../db.js";
+import type { BackendDatabase, CanvasFolder } from "../db.js";
 import type { Stores } from "./types.js";
 import { createAssetStore } from "./asset-store.js";
 import { createLogStore } from "./log-store.js";
@@ -11,6 +11,11 @@ import { createTaskStore } from "./task-store.js";
 export function createStores(db: BackendDatabase): Stores {
     return {
         projects: createProjectStore(db),
+        canvasFolders: {
+            list: () => db.listCanvasFolders(),
+            upsert: (folder: CanvasFolder) => db.upsertCanvasFolder(folder),
+            delete: (id: string) => db.deleteCanvasFolder(id),
+        },
         assets: createAssetStore(db),
         media: createMediaStore(db),
         tasks: createTaskStore(db),

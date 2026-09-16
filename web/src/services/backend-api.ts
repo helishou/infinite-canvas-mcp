@@ -104,8 +104,24 @@ export async function discoverBackendToken(): Promise<BackendTokenResponse> {
 
 // ── Canvas projects ──────────────────────────────────────────────────────
 
-export function fetchBackendProjects() {
-    return request<{ ok: boolean; projects?: Record<string, unknown>[] }>("GET", "/canvas/projects");
+export function fetchBackendProjects(summary = false) {
+    return request<{ ok: boolean; projects?: Record<string, unknown>[] }>("GET", `/canvas/projects${summary ? "?summary=true" : ""}`);
+}
+
+export function fetchBackendProject(id: string, summary = false) {
+    return request<{ ok: boolean; project: Record<string, unknown> }>("GET", `/canvas/projects/${encodeURIComponent(id)}${summary ? "?summary=true" : ""}`);
+}
+
+export function fetchBackendCanvasFolders() {
+    return request<{ ok: boolean; folders?: Record<string, unknown>[] }>("GET", "/canvas/folders");
+}
+
+export function upsertBackendCanvasFolder(folder: Record<string, unknown>) {
+    return request<{ ok: boolean; folder?: Record<string, unknown> }>("POST", "/canvas/folders", folder);
+}
+
+export function deleteBackendCanvasFolder(id: string) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/folders/${encodeURIComponent(id)}`);
 }
 
 export function saveBackendProjects(projects: Record<string, unknown>[]) {
@@ -117,8 +133,8 @@ export function upsertBackendProject(project: Record<string, unknown>) {
 }
 
 export function applyBackendCanvasOperations(projectId: string, operations: Array<Record<string, unknown>>, expectedRevision?: number) {
-    return request<{ ok: boolean; project?: Record<string, unknown>; revision?: number; operationResults?: unknown[] }>(
-        "POST", `/canvas/projects/${encodeURIComponent(projectId)}/ops`, { expectedRevision, operations },
+    return request<{ ok: boolean; operations: Array<Record<string, unknown>>; revision: number; updatedAt: string; operationResults?: unknown[] }>(
+        "POST", `/canvas/projects/${encodeURIComponent(projectId)}/ops?response=delta`, { expectedRevision, operations },
     );
 }
 

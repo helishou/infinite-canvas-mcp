@@ -6,6 +6,7 @@ import UserLayout from "@/layouts/user-layout";
 const AssetsPage = lazy(() => import("@/pages/assets"));
 const CanvasPage = lazy(() => import("@/pages/canvas"));
 const CanvasProjectPage = lazy(() => import("@/pages/canvas/project"));
+const DramaPage = lazy(() => import("@/pages/drama"));
 const ConfigPage = lazy(() => import("@/pages/config"));
 const HomePage = lazy(() => import("@/pages/home"));
 const ImagePage = lazy(() => import("@/pages/image"));
@@ -36,6 +37,7 @@ export const router = createBrowserRouter([
             { path: "/prompts", element: lazyPage(PromptsPage) },
             { path: "/canvas", element: lazyPage(CanvasPage) },
             { path: "/canvas/:id", element: lazyPage(CanvasProjectPage) },
+            { path: "/drama", element: lazyPage(DramaPage) },
             { path: "/workflows", element: lazyPage(WorkflowsPage) },
             { path: "/config", element: lazyPage(ConfigPage) },
         ],

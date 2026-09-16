@@ -18,6 +18,20 @@ import { test } from "node:test";
 
 import { applyBackendCanvasDelta, diffCanvasProject, detectCanvasConflicts, isLocalProjectNewer, type CanvasProject } from "./use-canvas-store";
 
+test("列表摘要只提交列表字段，不把未加载的空节点解释成删除", () => {
+    const base = makeProject([makeH3Node("h", [])]);
+    const summary = { ...base, summary: { nodeCount: 1, connectionCount: 0 }, nodes: [], title: "新名称" };
+    assert.deepEqual(diffCanvasProject(base, summary), [{ type: "update_project", patch: { title: "新名称" } }]);
+});
+
+test("增量回放保留无关节点对象，不修改原始基线", () => {
+    const base = makeProject([makeH3Node("a", []), makeH3Node("b", [])]);
+    const next = applyBackendCanvasDelta(base, [{ type: "update_node", id: "a", patch: { title: "changed" } }], 2);
+    assert.equal(next.nodes[1], base.nodes[1]);
+    assert.notEqual(next.nodes[0], base.nodes[0]);
+    assert.notEqual(base.nodes[0].title, "changed");
+});
+
 const VIEWPORT = { x: 0, y: 0, k: 1 };
 
 function makeH3Node(id: string, segments: Array<Record<string, unknown>>, extras: Record<string, unknown> = {}): Record<string, unknown> {

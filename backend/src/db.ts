@@ -441,6 +441,17 @@ export class BackendDatabase {
         });
     }
 
+    listCanvasProjectSummaries(id?: string): CanvasProject[] {
+        return this.db.prepare(`SELECT id, updated_at AS updatedAt,
+            json_extract(data_json, '$.title') AS title,
+            json_extract(data_json, '$.folderId') AS folderId,
+            json_extract(data_json, '$.createdAt') AS createdAt,
+            COALESCE(json_extract(data_json, '$.revision'), 0) AS revision,
+            COALESCE(json_array_length(data_json, '$.nodes'), 0) AS nodeCount,
+            COALESCE(json_array_length(data_json, '$.connections'), 0) AS connectionCount
+            FROM canvas_projects ${id ? "WHERE id = ?" : ""} ORDER BY updated_at DESC`).all(...(id ? [id] : [])) as CanvasProject[];
+    }
+
     upsertCanvasProject(project: CanvasProject) {
         const now = new Date().toISOString();
         const updatedAt = String(project.updatedAt || now);
@@ -476,9 +487,10 @@ export class BackendDatabase {
             const revision = currentRevision + 1;
             project.revision = revision;
             project.updatedAt = new Date().toISOString();
-            const saved = this.upsertCanvasProject(project as CanvasProject);
+            this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?")
+                .run(JSON.stringify(project), String(project.updatedAt), id);
             this.db.exec("COMMIT");
-            return { project: saved, revision, operationResults, operations };
+            return { project: project as CanvasProject, revision, operationResults, operations };
         } catch (error) {
             this.db.exec("ROLLBACK");
             throw error;

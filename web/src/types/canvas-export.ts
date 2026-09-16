@@ -1,10 +1,11 @@
-import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
+import type { CanvasFolder, CanvasProject } from "@/stores/canvas/use-canvas-store";
 
 export type CanvasExportFile = {
     app: "infinite-canvas";
     version: 3 | 4;
     exportedAt: string;
     projects: CanvasProjectExportItem[];
+    folders?: CanvasFolder[];
 };
 
 export type CanvasProjectExportItem = {

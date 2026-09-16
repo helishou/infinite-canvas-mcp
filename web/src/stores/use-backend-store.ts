@@ -17,6 +17,8 @@ let backendEvents: EventSource | null = null;
 let backendEventsKey = "";
 let structuredSettingsHydrated = false;
 const seenBackendEventIds = new Set<string>();
+let backendEventCursor = "";
+let backendEventCursorUrl = "";
 
 // 本地总后台（127.0.0.1/localhost:17370）在浏览器直连时会经过系统代理，
 // 而代理会截断长连接 SSE（net::ERR_INCOMPLETE_CHUNKED_ENCODING）。
@@ -45,21 +47,35 @@ function startBackendEvents(url: string, token: string) {
         : `${url.replace(/\/$/, "")}/events?token=${encodeURIComponent(token)}`;
     if (backendEvents && backendEventsKey === eventsUrl) return;
     stopBackendEvents();
-    const source = new EventSource(eventsUrl);
+    if (backendEventCursorUrl !== eventsUrl) {
+        backendEventCursor = "";
+        seenBackendEventIds.clear();
+        backendEventCursorUrl = eventsUrl;
+    }
+    const source = new EventSource(`${eventsUrl}${backendEventCursor ? `&cursor=${encodeURIComponent(backendEventCursor)}` : ""}`);
     backendEvents = source;
     backendEventsKey = eventsUrl;
     const handleMessage = (message: MessageEvent<string>) => {
         try {
             const event = JSON.parse(message.data) as { id?: string; type?: string; entityId?: string; payload?: unknown };
             if (!event.id || seenBackendEventIds.has(event.id)) return;
+            backendEventCursor = event.id;
             seenBackendEventIds.add(event.id);
             if (seenBackendEventIds.size > 500) seenBackendEventIds.delete(seenBackendEventIds.values().next().value as string);
             window.dispatchEvent(new CustomEvent("backend-event", { detail: event }));
         } catch { /* SSE 单条消息损坏时交给下一次快照恢复 */ }
     };
-    for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "asset.updated", "settings.updated"]) {
+    for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "canvas-folder.updated", "asset.updated", "settings.updated"]) {
         source.addEventListener(eventType, handleMessage);
     }
+    source.addEventListener("events.sync", (message) => {
+        const { cursor, reset } = JSON.parse((message as MessageEvent<string>).data) as { cursor: string; reset: boolean };
+        backendEventCursor = cursor;
+        if (reset) {
+            seenBackendEventIds.clear();
+            window.dispatchEvent(new Event("backend-connected"));
+        }
+    });
     // EventSource 会自行重连；短暂断流不应把 Backend 标记为离线，
     // 否则下一次健康检查会广播 backend-connected，导致画布重新 hydration。
 }
