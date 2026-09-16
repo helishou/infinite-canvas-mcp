@@ -5,6 +5,12 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## 画布生图运行态
+
+- 使用自定义云端图片模型从图片节点点击「生图」，确认右侧新建的输出图片节点在结果返回前持续显示「生成中」，不会退回「空图片节点」。
+- 使用 `custom/krea2改图` 等只返回媒体地址、不返回宽高的 ComfyUI 工作流，确认 Backend 任务成功后节点显示成品和成功状态，不再提示「全部图片生成失败」。
+- 使用 GPT Image 或本地 ComfyUI 生图，确认输出节点仍能显示运行中，并在刷新页面后继续按 Backend 任务 ID 恢复结果。
+
 ## 同步、缓存与导出优化
 
 - 两个窗口打开同一画布：短暂断开其中一个窗口的 SSE，另一个窗口修改画布后保持静止；恢复连接应补齐修改，无需再次操作。重启 Backend 后新事件应继续生效。

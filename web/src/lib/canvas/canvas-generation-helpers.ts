@@ -185,15 +185,16 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
     };
 }
 
-export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
+export function resetInterruptedGeneration(nodes: CanvasNodeData[], activeNodeIds?: ReadonlySet<string>) {
     // 之前会把「loading 但前端没拿到 runtimeTaskId」的节点直接判成 error 并提示
     // 「页面刷新后生成已中断」。但生成是后端跑的，刷新瞬间 / 网络抖动 / 用户提前切走
     // 都可能让前端没拿到 ID，**后端任务大概率还在跑**——此时把节点标为 error 会让用户
     // 误以为失败、并误点「重试」触发第二次任务，占用 ComfyUI 队列还可能写出覆盖。现改为
     // 清回 idle，让用户按需手动重新触发；带 runtimeTaskId 的节点交给 project.tsx 的
-    // 轮询恢复逻辑继续等后端结果。
+    // 轮询恢复逻辑继续等后端结果。当前页面仍持有 AbortController 的直连请求也必须保留，
+    // 避免画布同步 revision 刷新时把正在生成的节点误判成刷新前遗留状态。
     return nodes.map((node) => {
-        if (node.metadata?.status !== "loading" || node.metadata.runtimeTaskId || isPersistentH3Node(node)) return node;
+        if (node.metadata?.status !== "loading" || node.metadata.runtimeTaskId || activeNodeIds?.has(node.id) || isPersistentH3Node(node)) return node;
         const { runtimeTaskId: _runtimeTaskId, errorDetails: _errorDetails, ...rest } = node.metadata;
         return {
             ...node,

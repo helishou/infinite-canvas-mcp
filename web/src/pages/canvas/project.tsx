@@ -215,8 +215,13 @@ async function runLocalComfyImage(
         if (task.status === "succeeded") {
             const media = task.result?.media?.[0] || task.result?.images?.[0];
             if (!media?.url) throw new Error("画布图片任务完成但没有返回媒体");
-            if (media.width == null || media.height == null) throw new Error("画布图片任务完成但没有返回图片尺寸");
-            return { url: media.storageKey ? backendMediaUrl(media.storageKey) : media.url, storageKey: media.storageKey, width: media.width, height: media.height, bytes: media.bytes, mimeType: media.mimeType };
+            const url = media.storageKey ? backendMediaUrl(media.storageKey) : media.url;
+            const reportedWidth = Number(media.width || 0);
+            const reportedHeight = Number(media.height || 0);
+            const imageMeta = reportedWidth > 0 && reportedHeight > 0
+                ? { width: reportedWidth, height: reportedHeight, mimeType: media.mimeType || "image/png" }
+                : await readImageMeta(url);
+            return { url, storageKey: media.storageKey, ...imageMeta, bytes: Number(media.bytes || 0), mimeType: media.mimeType || imageMeta.mimeType };
         }
         if (task.status === "failed" || task.status === "cancelled") throw new Error(task.error || `画布图片任务${task.status}`);
         await new Promise<void>((resolve, reject) => {
@@ -494,7 +499,7 @@ function InfiniteCanvasPage() {
         const restoreGeneration = ++restoreGenerationRef.current;
         const uiVersion = projectUiVersionRef.current;
         const restore = (project: NonNullable<ReturnType<typeof openProject>>) => {
-            const rawNodes = resetInterruptedGeneration(project.nodes.map(migrateLegacyH3Node));
+            const rawNodes = resetInterruptedGeneration(project.nodes.map(migrateLegacyH3Node), new Set(generationRequestsRef.current.keys()));
             const rawSessions = project.chatSessions || [];
             if (restoreGeneration !== restoreGenerationRef.current || uiVersion !== projectUiVersionRef.current) return;
             // 先挂载本地快照，让画布立即可交互；媒体 URL 修复和历史媒体迁移放到后台。
@@ -546,17 +551,33 @@ function InfiniteCanvasPage() {
         if (!projectLoaded) return;
         let disposed = false;
         const poll = async () => {
-            const { endpoint, token } = resolveComfyEndpoint();
-            if (!endpoint || !token) return;
             const pending = nodesRef.current.filter((node) => (node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Image) && node.metadata?.status === NODE_STATUS_LOADING && node.metadata.runtimeTaskId);
             await Promise.all(pending.map(async (node) => {
                 try {
-                    const task = await getComfyTask(endpoint, token, String(node.metadata?.runtimeTaskId));
+                    let taskStatus: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+                    let taskError: string | null | undefined;
+                    let taskResult: { url: string; storageKey?: string; mimeType?: string } | null = null;
+                    if (node.type === CanvasNodeType.Image) {
+                        const task = (await fetchBackendTask(String(node.metadata?.runtimeTaskId))).task;
+                        if (!task) throw new Error("画布图片任务查询没有返回任务");
+                        const media = task.result?.media?.[0] || task.result?.images?.[0];
+                        taskStatus = task.status;
+                        taskError = task.error;
+                        taskResult = media?.url ? { url: media.storageKey ? backendMediaUrl(media.storageKey) : media.url, storageKey: media.storageKey, mimeType: media.mimeType } : null;
+                    } else {
+                        const { endpoint, token } = resolveComfyEndpoint();
+                        if (!endpoint || !token) return;
+                        const task = await getComfyTask(endpoint, token, String(node.metadata?.runtimeTaskId));
+                        taskStatus = task.status;
+                        taskError = task.error;
+                        taskResult = task.result;
+                    }
                     if (disposed) return;
-                    if (task.status === "succeeded" && task.result?.url) {
-                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, content: task.result!.url, storageKey: task.result!.storageKey, mimeType: task.result!.mimeType, status: NODE_STATUS_SUCCESS, errorDetails: undefined, runtimeTaskId: undefined, images: item.metadata?.images?.map((image) => image.id === String(item.metadata?.primaryImageId || "") ? { ...image, content: task.result!.url, storageKey: task.result!.storageKey, mimeType: task.result!.mimeType, status: NODE_STATUS_SUCCESS } : image) } } : item));
-                    } else if (["failed", "cancelled"].includes(task.status)) {
-                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: task.error || "本地 ComfyUI 任务失败", runtimeTaskId: undefined, images: item.metadata?.images?.map((image) => image.id === String(item.metadata?.primaryImageId || "") ? { ...image, status: NODE_STATUS_ERROR, errorDetails: task.error || "本地 ComfyUI 任务失败" } : image) } } : item));
+                    const result = taskResult;
+                    if (taskStatus === "succeeded" && result?.url) {
+                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, content: result.url, storageKey: result.storageKey, mimeType: result.mimeType, status: NODE_STATUS_SUCCESS, errorDetails: undefined, runtimeTaskId: undefined, images: item.metadata?.images?.map((image) => image.id === String(item.metadata?.primaryImageId || "") ? { ...image, content: result.url, storageKey: result.storageKey, mimeType: result.mimeType || image.mimeType, status: NODE_STATUS_SUCCESS } : image) } } : item));
+                    } else if (["failed", "cancelled"].includes(taskStatus)) {
+                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: taskError || "Backend 任务失败", runtimeTaskId: undefined, images: item.metadata?.images?.map((image) => image.id === String(item.metadata?.primaryImageId || "") ? { ...image, status: NODE_STATUS_ERROR, errorDetails: taskError || "Backend 任务失败" } : image) } } : item));
                     }
                 } catch (error) {
                     // 404：节点上有 clientTaskId 但后端没有这条任务 → 该次生成从未真正跑过
@@ -2936,7 +2957,8 @@ function InfiniteCanvasPage() {
                         metadata: {
                             prompt: effectivePrompt,
                             status: NODE_STATUS_LOADING,
-                            runtimeTaskId: clientTaskId,
+                            // 只有 Backend 调度的生图才有可恢复任务；直连云端模型只由当前页面的 AbortController 管理。
+                            runtimeTaskId: useCanvasDispatcher ? clientTaskId : undefined,
                             images: imageIds.map((id) => ({ id, status: NODE_STATUS_LOADING, content: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" })),
                             ...generationMetadata,
                         },
@@ -3343,11 +3365,15 @@ function InfiniteCanvasPage() {
                 return;
             }
             const retryImages = retryReferenceImages || [];
-            // 客户端预生成 taskId：先写进节点 metadata，再发请求。中间任何时机刷新都能续上。
+            // 客户端预生成 taskId 只交给 Backend 调度任务；直连请求刷新后无法续跑。
             const retryClientTaskId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            const retryComfyChannel = resolveModelChannel(generationConfig, generationConfig.model);
+            const retryLocalComfy = retryComfyChannel.kind === "comfyui";
+            const retrySelectedImageModel = modelOptionName(generationConfig.model).trim();
+            const retryUseCanvasDispatcher = node.type === CanvasNodeType.Image && (retryLocalComfy || /^gpt-image(?:-|$)/i.test(retrySelectedImageModel));
 
             setRunningNodeId(node.id);
-            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, runtimeTaskId: retryClientTaskId, errorDetails: undefined, images: item.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_LOADING, errorDetails: undefined } : image)) } } : item)));
+            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, runtimeTaskId: retryUseCanvasDispatcher ? retryClientTaskId : undefined, errorDetails: undefined, images: item.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_LOADING, errorDetails: undefined } : image)) } } : item)));
             const controller = startGenerationRequest(node.id, sourceNode.id, node.id);
 
             try {
@@ -3405,10 +3431,6 @@ function InfiniteCanvasPage() {
                     return;
                 }
 
-                const retryComfyChannel = resolveModelChannel(generationConfig, generationConfig.model);
-                const retryLocalComfy = retryComfyChannel.kind === "comfyui";
-                const retrySelectedImageModel = modelOptionName(generationConfig.model).trim();
-                const retryUseCanvasDispatcher = retryLocalComfy || /^gpt-image(?:-|$)/i.test(retrySelectedImageModel);
                 const retryComfyParams = sourceNode.metadata?.comfyParams;
                 const image = retryUseCanvasDispatcher
                     ? await runLocalComfyImage(generationConfig.model, prompt, retryImages, resolveComfyImageSize(generationConfig.size), controller.signal, undefined, retryComfyParams, retryClientTaskId, { projectId, nodeId: node.id, sourceNodeId: sourceNode.id })
