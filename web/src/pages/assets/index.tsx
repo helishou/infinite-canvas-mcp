@@ -1,14 +1,16 @@
-import { Copy, Download, PencilLine, Search, Trash2, Upload } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
+import { Check, Copy, Download, FolderPlus, PencilLine, Search, Trash2, Upload } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { App, Button, Card, Drawer, Dropdown, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
+import { nanoid } from "nanoid";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
-import { uploadImage } from "@/services/image-storage";
+import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { cn } from "@/lib/utils";
-import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
+import { useAssetStore, type Asset, type AssetKind, type CharacterAsset, type CharacterImage, type ImageAsset, type VideoAsset, type AudioAsset } from "@/stores/use-asset-store";
 import { exportAssets, readAssetPackage } from "./asset-transfer";
 
 type AssetFormValues = {
@@ -22,8 +24,9 @@ type AssetFormValues = {
 };
 
 type ImageDraft = ImageAsset["data"] | null;
+type VideoDraft = VideoAsset["data"] | null;
 
-const kindOptions = ["all", "text", "image", "video"] as const;
+const kindOptions = ["all", "text", "image", "video", "audio", "character"] as const;
 
 export default function AssetsPage() {
     const { message } = App.useApp();
@@ -32,13 +35,22 @@ export default function AssetsPage() {
     const [form] = Form.useForm<AssetFormValues>();
     const coverInputRef = useRef<HTMLInputElement>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
+    const videoInputRef = useRef<HTMLInputElement>(null);
+    const audioInputRef = useRef<HTMLInputElement>(null);
     const assetInputRef = useRef<HTMLInputElement>(null);
     const assets = useAssetStore((state) => state.assets);
+    const folders = useAssetStore((state) => state.folders);
     const addAsset = useAssetStore((state) => state.addAsset);
     const updateAsset = useAssetStore((state) => state.updateAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
+    const removeAssets = useAssetStore((state) => state.removeAssets);
+    const addFolder = useAssetStore((state) => state.addFolder);
+    const renameFolder = useAssetStore((state) => state.renameFolder);
+    const removeFolder = useAssetStore((state) => state.removeFolder);
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
+    const [folderFilter, setFolderFilter] = useState<string | null>(null);
+    const [selection, setSelection] = useState<string[]>([]);
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(10);
     const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
@@ -47,25 +59,146 @@ export default function AssetsPage() {
     const [deletingAsset, setDeletingAsset] = useState<Asset | null>(null);
     const [formKind, setFormKind] = useState<AssetKind>("text");
     const [imageDraft, setImageDraft] = useState<ImageDraft>(null);
+    const [videoDraft, setVideoDraft] = useState<VideoDraft>(null);
+    const [audioDraft, setAudioDraft] = useState<AudioAsset["data"] | null>(null);
+    const [characterImages, setCharacterImages] = useState<CharacterImage[]>([]);
     const coverUrl = Form.useWatch("coverUrl", form) || "";
     const title = Form.useWatch("title", form) || "";
     const tags = Form.useWatch("tags", form) || [];
     const content = Form.useWatch("content", form) || "";
-    const validAssets = useMemo(() => assets.filter((asset) => asset.kind === "text" || asset.kind === "image" || asset.kind === "video"), [assets]);
+    const validAssets = useMemo(() => assets.filter((asset) => asset.kind === "text" || asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "character"), [assets]);
 
     const filteredAssets = useMemo(() => {
         const query = keyword.trim().toLowerCase();
         return validAssets.filter((asset) => {
             if (kindFilter !== "all" && asset.kind !== kindFilter) return false;
+            if (folderFilter) {
+                if (folderFilter.startsWith("tag:")) {
+                    if (!(asset.tags || []).includes(folderFilter.slice(4))) return false;
+                } else if ((asset.folderId ?? null) !== folderFilter) return false;
+            }
             if (!query) return true;
             return assetSearchText(asset).includes(query);
         });
-    }, [validAssets, keyword, kindFilter]);
+    }, [validAssets, keyword, kindFilter, folderFilter]);
 
     const visibleAssets = useMemo(() => {
         const start = (page - 1) * pageSize;
         return filteredAssets.slice(start, start + pageSize);
     }, [filteredAssets, page, pageSize]);
+
+    const rootFolders = useMemo(() => folders.filter((folder) => !folder.parentId), [folders]);
+    const childFoldersOf = (id: string) => folders.filter((folder) => folder.parentId === id);
+    const legacyTagFolders = useMemo(() => {
+        const counts = new Map<string, number>();
+        for (const asset of assets) for (const tag of asset.tags || []) counts.set(tag, (counts.get(tag) || 0) + 1);
+        return Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0], "zh-Hans-CN"));
+    }, [assets]);
+    const currentFolderName = useMemo(() => {
+        if (!folderFilter) return t("assets.allAssets");
+        if (folderFilter.startsWith("tag:")) return folderFilter.slice(4);
+        const folder = folders.find((item) => item.id === folderFilter);
+        return folder ? folder.name : t("assets.allAssets");
+    }, [folderFilter, folders, t]);
+    const folderCounts = (id: string | null) => {
+        if (id === null) return assets.filter((asset) => !asset.folderId).length;
+        return assets.filter((asset) => asset.folderId === id).length;
+    };
+
+    useEffect(() => {
+        setSelection((prev) => prev.filter((id) => filteredAssets.some((asset) => asset.id === id)));
+    }, [filteredAssets]);
+    const toggleSelect = (id: string) => setSelection((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    const selectAllFiltered = () => setSelection(filteredAssets.map((asset) => asset.id));
+    const selectNone = () => setSelection([]);
+    const confirmBulkDelete = () => {
+        if (!selection.length) return;
+        removeAssets(selection);
+        setSelection([]);
+        message.success(t("assets.deletedBulk", { count: selection.length }));
+    };
+    const bulkMoveToFolder = (folderId: string | null) => {
+        const now = new Date().toISOString();
+        selection.forEach((id) => {
+            const asset = useAssetStore.getState().assets.find((a) => a.id === id);
+            if (asset) updateAsset(id, { folderId, updatedAt: now });
+        });
+        setSelection([]);
+        message.success(t("assets.movedToFolder", { count: selection.length }));
+    };
+    const bulkAddTag = (tag: string) => {
+        selection.forEach((id) => {
+            const asset = useAssetStore.getState().assets.find((a) => a.id === id);
+            if (asset && !(asset.tags || []).includes(tag)) updateAsset(id, { tags: [...(asset.tags || []), tag] });
+        });
+        message.success(t("assets.tagged", { count: selection.length, tag }));
+    };
+
+    const [isDragging, setIsDragging] = useState(false);
+    const dragDepth = useRef(0);
+    const dropFolderId = folderFilter && !folderFilter.startsWith("tag:") ? folderFilter : null;
+    const addDroppedFiles = useCallback(async (files: File[]) => {
+        const importable = files.filter((file) => file.type.startsWith("image/") || file.type.startsWith("audio/") || file.type.startsWith("video/"));
+        if (!importable.length) {
+            if (files.length) message.warning(t("assets.dropUnsupported"));
+            return;
+        }
+        let added = 0;
+        let failed = 0;
+        for (const file of importable) {
+            const title = file.name.replace(/\.[^.]+$/, "") || file.name;
+            const base = { title, coverUrl: "", tags: [], source: t("assets.droppedSource"), note: "", folderId: dropFolderId };
+            try {
+                if (file.type.startsWith("image/")) {
+                    const image = await uploadImage(file, { category: "library" });
+                    addAsset({ ...base, kind: "image", data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
+                } else if (file.type.startsWith("audio/")) {
+                    const result = await uploadMediaFile(file, "audio", "library");
+                    addAsset({ ...base, kind: "audio", data: { url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, durationMs: result.durationMs } });
+                } else {
+                    const result = await uploadMediaFile(file, "video", "library");
+                    addAsset({ ...base, kind: "video", data: { url: result.url, storageKey: result.storageKey, width: result.width, height: result.height, bytes: result.bytes, mimeType: result.mimeType } });
+                }
+                added += 1;
+            } catch {
+                failed += 1;
+            }
+        }
+        if (added) message.success(t("assets.filesImported", { count: added }));
+        const skipped = files.length - importable.length + failed;
+        if (skipped > 0) message.warning(t("assets.filesSkipped", { count: skipped }));
+    }, [addAsset, dropFolderId, message, t]);
+
+    useEffect(() => {
+        const onPaste = (event: ClipboardEvent) => {
+            const files = event.clipboardData?.files;
+            if (files?.length) {
+                event.preventDefault();
+                void addDroppedFiles(Array.from(files));
+            }
+        };
+        window.addEventListener("paste", onPaste);
+        return () => window.removeEventListener("paste", onPaste);
+    }, [addDroppedFiles]);
+
+    const onDragEnter = (event: ReactDragEvent) => {
+        event.preventDefault();
+        if (!event.dataTransfer.types.includes("Files")) return;
+        dragDepth.current += 1;
+        setIsDragging(true);
+    };
+    const onDragOver = (event: ReactDragEvent) => { event.preventDefault(); };
+    const onDragLeave = (event: ReactDragEvent) => {
+        event.preventDefault();
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (dragDepth.current === 0) setIsDragging(false);
+    };
+    const onDrop = (event: ReactDragEvent) => {
+        event.preventDefault();
+        dragDepth.current = 0;
+        setIsDragging(false);
+        void addDroppedFiles(Array.from(event.dataTransfer.files));
+    };
 
     useEffect(() => {
         const maxPage = Math.max(1, Math.ceil(filteredAssets.length / pageSize));
@@ -73,17 +206,22 @@ export default function AssetsPage() {
     }, [filteredAssets.length, pageSize]);
 
     const openCreate = () => {
-        setEditingAsset(null);
-        setImageDraft(null);
-        setFormKind("text");
-        form.setFieldsValue({ kind: "text", title: "", coverUrl: "", tags: [], source: t("assets.manual"), note: "", content: "" });
+            setEditingAsset(null);
+            setImageDraft(null);
+            setVideoDraft(null);
+            setAudioDraft(null);
+            setCharacterImages([]);
+            setFormKind("text");
+            form.setFieldsValue({ kind: "text", title: "", coverUrl: "", tags: [], source: t("assets.manual"), note: "", content: "" });
         setIsAssetOpen(true);
     };
 
     const openEdit = (asset: Asset) => {
         setEditingAsset(asset);
         setFormKind(asset.kind);
-        setImageDraft(asset.kind === "image" ? asset.data : null);
+        setImageDraft(asset.kind === "image" ? asset.data as ImageAsset["data"] : null);
+        setAudioDraft(asset.kind === "audio" ? asset.data as AudioAsset["data"] : null);
+        setCharacterImages(asset.kind === "character" ? asset.data.images : []);
         form.setFieldsValue({
             kind: asset.kind,
             title: asset.title,
@@ -91,7 +229,7 @@ export default function AssetsPage() {
             tags: asset.tags || [],
             source: asset.source,
             note: asset.note,
-            content: asset.kind === "text" ? asset.data.content : "",
+            content: asset.kind === "text" ? asset.data.content : asset.kind === "character" ? asset.data.description : "",
         });
         setIsAssetOpen(true);
     };
@@ -110,11 +248,27 @@ export default function AssetsPage() {
         if (values.kind === "text") {
             const asset = { ...base, kind: "text" as const, data: { content: (values.content || "").trim() } };
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+        } else if (values.kind === "audio") {
+            if (!audioDraft) { message.error(t("assets.selectAudio")); return; }
+            const asset = { ...base, kind: "audio" as const, data: audioDraft };
+            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+        } else if (values.kind === "character") {
+            if (!characterImages.length) { message.error(t("assets.characterRequireOneImage")); return; }
+            const characterData: CharacterAsset["data"] = {
+                name: values.title.trim(),
+                englishName: "",
+                description: "",
+                voice: "",
+                voiceName: "",
+                voiceAssetId: "",
+                images: characterImages,
+            };
+            // 角色表单的"描述"从 form.content 读取（在表单里复用 content 字段避免再加一项）
+            if (values.content) characterData.description = values.content;
+            const asset = { ...base, kind: "character" as const, data: characterData, coverUrl: characterImages[0]?.url || base.coverUrl };
+            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         } else {
-            if (!imageDraft) {
-                message.error(t("assets.selectImage"));
-                return;
-            }
+            if (!imageDraft) { message.error(t("assets.selectImage")); return; }
             const asset = { ...base, kind: "image" as const, data: imageDraft };
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         }
@@ -131,10 +285,17 @@ export default function AssetsPage() {
 
     const readImageFile = async (file?: File) => {
         if (!file || !file.type.startsWith("image/")) return;
-        const image = await uploadImage(file);
+        const image = await uploadImage(file, { category: "library" });
         const draft = { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType };
         setImageDraft(draft);
         if (!form.getFieldValue("coverUrl")) form.setFieldValue("coverUrl", draft.dataUrl);
+        if (!form.getFieldValue("title")) form.setFieldValue("title", file.name);
+    };
+
+    const readAudioFile = async (file?: File) => {
+        if (!file || !file.type.startsWith("audio/")) return;
+        const result = await uploadMediaFile(file, "audio", "library");
+        setAudioDraft({ url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, durationMs: result.durationMs });
         if (!form.getFieldValue("title")) form.setFieldValue("title", file.name);
     };
 
@@ -143,9 +304,14 @@ export default function AssetsPage() {
         copyText(asset.data.content, t("assets.textCopied"));
     };
 
-    const downloadImage = (asset: Asset) => {
-        if (asset.kind !== "image" && asset.kind !== "video") return;
-        saveAs(asset.kind === "video" ? asset.data.url : asset.data.dataUrl, `${asset.title || "asset"}.${asset.data.mimeType.split("/")[1] || "png"}`);
+    const downloadImage = async (asset: Asset) => {
+        if (asset.kind === "text" || asset.kind === "character") return;
+        try {
+            const blob = await readAssetMediaBlob(asset);
+            if (!blob) throw new Error("媒体不可读取");
+            const extension = asset.data.mimeType.split("/")[1]?.split("+")[0] || (asset.kind === "image" ? "png" : asset.kind === "video" ? "mp4" : "mp3");
+            saveAs(blob, `${asset.title || asset.kind}.${extension}`);
+        } catch { message.error(t("common.downloadFailed")); }
     };
 
     const exportAllAssets = async () => {
@@ -160,9 +326,11 @@ export default function AssetsPage() {
         if (!file) return;
         try {
             const importedAssets = await readAssetPackage(file);
+            // 重新分配 id 并维护 旧→新 映射，保证跨资产引用仍然有效
+            const idMap = new Map<string, string>();
+            importedAssets.forEach((asset) => idMap.set(asset.id, nanoid()));
             importedAssets.forEach((asset) => {
-                const payload = { ...asset } as Record<string, unknown>;
-                delete payload.id;
+                const payload = { ...asset, id: idMap.get(asset.id) } as Record<string, unknown>;
                 delete payload.createdAt;
                 delete payload.updatedAt;
                 addAsset(payload as Parameters<typeof addAsset>[0]);
@@ -182,8 +350,72 @@ export default function AssetsPage() {
         setDeletingAsset(null);
     };
 
+    const renderFolderItem = (folderId: string, depth: number) => {
+        const folder = folders.find((item) => item.id === folderId);
+        if (!folder) return null;
+        const active = folderFilter === folderId;
+        return (
+            <div key={folderId}>
+                <button
+                    type="button"
+                    style={{ paddingLeft: 12 + depth * 14 }}
+                    className={cn("flex w-full items-center justify-between gap-2 rounded-md px-1.5 py-1.5 text-left text-sm transition-colors hover:bg-stone-100 dark:hover:bg-stone-900", active && "bg-stone-100 font-medium text-stone-950 dark:bg-stone-900 dark:text-stone-100")}
+                    onClick={() => { setFolderFilter(folderId); setPage(1); }}
+                >
+                    <span className="min-w-0 truncate">{folder.name}</span>
+                    <span className="flex shrink-0 items-center gap-1 text-xs text-stone-400">
+                        <span>{folderCounts(folderId)}</span>
+                        <Dropdown trigger={["click"]} menu={{
+                            items: [
+                                { key: "new", label: t("assets.folder.newFolder"), onClick: () => addFolder("新文件夹", folderId) },
+                                { key: "rename", label: t("common.edit"), onClick: () => { const name = window.prompt(t("assets.folder.rename"), folder.name); if (name?.trim()) renameFolder(folder.id, name); } },
+                                { key: "delete", label: t("common.delete"), danger: true, onClick: () => { removeFolder(folder.id); if (folderFilter === folderId) setFolderFilter(null); } },
+                            ],
+                        }}>
+                            <span className="px-1 text-stone-400 hover:text-stone-600">⋯</span>
+                        </Dropdown>
+                    </span>
+                </button>
+                {childFoldersOf(folderId).map((child) => renderFolderItem(child.id, depth + 1))}
+            </div>
+        );
+    };
+
     return (
-        <div className="flex h-full flex-col overflow-hidden bg-background text-stone-900 dark:text-stone-100">
+        <div className="relative flex h-full overflow-hidden bg-background text-stone-900 dark:text-stone-100" onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+            {isDragging ? (
+                <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-stone-900/40 p-8 dark:bg-stone-950/60">
+                    <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-white/70 bg-white/10 px-12 py-10 text-white backdrop-blur-sm">
+                        <Upload className="size-8" />
+                        <div className="text-lg font-medium">{t("assets.dropHere")}</div>
+                        <div className="text-sm opacity-80">{t("assets.dropHint")}</div>
+                    </div>
+                </div>
+            ) : null}
+            <aside className="hidden w-56 shrink-0 flex-col border-r border-stone-200 p-3 md:flex dark:border-stone-800">
+                <div className="mb-2 text-xs font-medium text-stone-400">{t("assets.foldersTitle")}</div>
+                <button
+                    type="button"
+                    className={cn("mb-1 flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-stone-100 dark:hover:bg-stone-900", !folderFilter && "bg-stone-100 font-medium text-stone-950 dark:bg-stone-900 dark:text-stone-100")}
+                    onClick={() => { setFolderFilter(null); setPage(1); }}
+                >
+                    <span>{t("assets.allAssets")}</span>
+                    <span className="text-xs text-stone-400">{assets.length}</span>
+                </button>
+                <div className="flex-1 space-y-0.5 overflow-y-auto">
+                    <div>
+                        {rootFolders.map((folder) => renderFolderItem(folder.id, 0))}
+                        <button
+                            type="button"
+                            className="mt-1 flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-800 dark:text-stone-400 dark:hover:bg-stone-900 dark:hover:text-stone-200"
+                            onClick={() => { const id = addFolder("新文件夹", null); setFolderFilter(id); setPage(1); }}
+                        >
+                            <FolderPlus className="size-3.5" />
+                            {t("assets.folder.newFolder")}
+                        </button>
+                    </div>
+                </div>
+            </aside>
             <main className="min-h-0 flex-1 overflow-y-auto bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] px-6 py-8 [background-size:16px_16px] dark:bg-[radial-gradient(rgba(245,245,244,.14)_1px,transparent_1px)]">
                 <div className="pb-8">
                     <div className="mx-auto max-w-5xl text-center">
@@ -211,6 +443,56 @@ export default function AssetsPage() {
                     </div>
 
                     <div className="mx-auto mt-6 grid max-w-6xl gap-3 text-left">
+                        {selection.length > 0 ? (
+                            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-stone-300 bg-white p-3 dark:border-stone-700 dark:bg-stone-950">
+                                <span className="text-sm text-stone-700 dark:text-stone-200">{t("assets.selectedCount", { count: selection.length })}</span>
+                                <Button size="small" type={selection.length === filteredAssets.length ? "primary" : "default"} onClick={selection.length === filteredAssets.length ? selectNone : selectAllFiltered}>
+                                    {selection.length === filteredAssets.length ? t("common.deselectAll") : t("common.selectAll")}
+                                </Button>
+                                <Dropdown
+                                    trigger={["click"]}
+                                    menu={{
+                                        items: [
+                                            ...(folders.length
+                                                ? [
+                                                    { key: "root", label: t("assets.folder.moveRoot"), onClick: () => bulkMoveToFolder(null) },
+                                                    ...rootFolders.map((f) => ({ key: f.id, label: f.name, onClick: () => bulkMoveToFolder(f.id) })),
+                                                ]
+                                                : []),
+                                            { type: "divider" as const },
+                                            { key: "new", label: t("assets.folder.newFolder"), onClick: () => bulkMoveToFolder(addFolder("新文件夹", null)) },
+                                        ],
+                                    }}
+                                >
+                                    <Button size="small" icon={<FolderPlus className="size-3.5" />}>{t("assets.move")}</Button>
+                                </Dropdown>
+                                <Dropdown
+                                    trigger={["click"]}
+                                    menu={{
+                                        items: [
+                                            { type: "divider" as const },
+                                            ...legacyTagFolders.slice(0, 20).map(([tag]) => ({ key: tag, label: tag, onClick: () => bulkAddTag(tag) })),
+                                        ],
+                                    }}
+                                >
+                                    <Button size="small">{t("assets.addTag")}</Button>
+                                </Dropdown>
+                                <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={confirmBulkDelete}>
+                                    {t("assets.deleteBulk")}
+                                </Button>
+                            </div>
+                        ) : null}
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="flex items-center gap-2">
+                                <div className="text-xs font-medium text-stone-500 dark:text-stone-400">{currentFolderName}</div>
+                                <div className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500 dark:bg-stone-900 dark:text-stone-400">{filteredAssets.length}</div>
+                                {folderFilter ? (
+                                    <button type="button" className="cursor-pointer text-xs text-stone-500 underline-offset-2 hover:underline dark:text-stone-400" onClick={() => { setFolderFilter(null); setPage(1); }}>
+                                        {t("assets.allAssets")}
+                                    </button>
+                                ) : null}
+                            </div>
+                        </div>
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <div className="grid gap-2 sm:grid-cols-[56px_minmax(0,1fr)] sm:items-center">
                                 <div className="text-xs font-medium text-stone-500 dark:text-stone-400">{t("assets.type")}</div>
@@ -231,6 +513,14 @@ export default function AssetsPage() {
                                 </div>
                             </div>
                             <div className="flex flex-wrap gap-4">
+                                <button
+                                    type="button"
+                                    className="flex items-center gap-1 cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline dark:text-stone-300"
+                                    onClick={() => { const id = addFolder("新文件夹", folderFilter && !folderFilter.startsWith("tag:") ? folderFilter : null); setFolderFilter(id); setPage(1); }}
+                                >
+                                    <FolderPlus className="size-4" />
+                                    {t("assets.folder.newFolder")}
+                                </button>
                                 <button
                                     type="button"
                                     className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline dark:text-stone-300"
@@ -260,7 +550,17 @@ export default function AssetsPage() {
                 <div className="mx-auto flex max-w-7xl flex-col gap-5">
                     <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                         {visibleAssets.map((asset) => (
-                            <AssetCard key={asset.id} asset={asset} onOpen={() => setPreviewAsset(asset)} onEdit={() => openEdit(asset)} onCopy={copyAssetText} onDownload={downloadImage} onDelete={() => setDeletingAsset(asset)} />
+                            <AssetCard
+                                key={asset.id}
+                                asset={asset}
+                                selected={selection.includes(asset.id)}
+                                onSelect={() => toggleSelect(asset.id)}
+                                onOpen={() => setPreviewAsset(asset)}
+                                onEdit={() => openEdit(asset)}
+                                onCopy={copyAssetText}
+                                onDownload={downloadImage}
+                                onDelete={() => setDeletingAsset(asset)}
+                            />
                         ))}
                     </div>
 
@@ -290,6 +590,9 @@ export default function AssetsPage() {
                                 options={[
                                     { label: t("assets.kinds.text"), value: "text" },
                                     { label: t("assets.kinds.image"), value: "image" },
+                                    { label: t("assets.kinds.video"), value: "video" },
+                                    { label: t("assets.kinds.audio"), value: "audio" },
+                                    { label: t("assets.kinds.character"), value: "character" },
                                 ]}
                                 onChange={(value) => setFormKind(value)}
                             />
@@ -320,6 +623,32 @@ export default function AssetsPage() {
                             <Form.Item name="content" label={t("assets.fields.textContent")} rules={[{ required: true, message: t("assets.fields.textRequired") }]}>
                                 <Input.TextArea rows={8} placeholder={t("assets.fields.textPlaceholder")} />
                             </Form.Item>
+                        ) : formKind === "audio" ? (
+                            <Form.Item label={t("assets.fields.audioContent")} required>
+                                <div className="rounded-lg border border-dashed border-stone-300 p-4 dark:border-stone-700">
+                                    <Button icon={<Upload className="size-4" />} onClick={() => audioInputRef.current?.click()}>
+                                        {t("assets.selectAudioFile")}
+                                    </Button>
+                                    {audioDraft ? (
+                                        <Typography.Text type="secondary" className="ml-3 text-xs">
+                                            {formatBytes(audioDraft.bytes)} {audioDraft.durationMs ? ` · ${Math.round(audioDraft.durationMs / 1000)}s` : ""}
+                                        </Typography.Text>
+                                    ) : (
+                                        <Typography.Text type="secondary" className="ml-3 text-xs">
+                                            {t("assets.noAudioSelected")}
+                                        </Typography.Text>
+                                    )}
+                                </div>
+                            </Form.Item>
+                        ) : formKind === "character" ? (
+                            <>
+                                <Form.Item name="content" label={t("assets.fields.characterDescription")}>
+                                    <Input.TextArea rows={4} placeholder={t("assets.fields.characterDescriptionPlaceholder")} />
+                                </Form.Item>
+                                <Form.Item label={t("assets.fields.characterImages")} required>
+                                    <CharacterEditor images={characterImages} onChange={setCharacterImages} />
+                                </Form.Item>
+                            </>
                         ) : (
                             <Form.Item label={t("assets.fields.imageContent")} required>
                                 <div className="rounded-lg border border-dashed border-stone-300 p-4 dark:border-stone-700">
@@ -386,6 +715,13 @@ export default function AssetsPage() {
                         event.target.value = "";
                     }}
                 />
+                <input
+                    ref={audioInputRef}
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    onChange={(event) => { void readAudioFile(event.target.files?.[0]); event.target.value = ""; }}
+                />
             </Modal>
 
             <AssetDrawer asset={previewAsset} onClose={() => setPreviewAsset(null)} onCopy={copyAssetText} onDownload={downloadImage} />
@@ -399,17 +735,71 @@ export default function AssetsPage() {
     );
 }
 
-function AssetCard({ asset, onOpen, onEdit, onCopy, onDownload, onDelete }: { asset: Asset; onOpen: () => void; onEdit: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void; onDelete: () => void }) {
+function useResolvedCoverUrl(asset: Asset | null) {
+    const [url, setUrl] = useState("");
+    const assets = useAssetStore((state) => state.assets);
+    useEffect(() => {
+        setUrl(asset?.coverUrl || "");
+        if (!asset || asset.coverUrl) return;
+        const lookups: Promise<string | undefined>[] = [];
+        if (asset.kind === "image") {
+            if (asset.data.dataUrl) lookups.push(Promise.resolve(asset.data.dataUrl));
+            if (asset.data.storageKey) lookups.push(resolveImageUrl(asset.data.storageKey));
+        } else if (asset.kind === "character") {
+            for (const image of asset.data.images) {
+                if (lookups.length >= 4) break;
+                if (image.storageKey) lookups.push(resolveImageUrl(image.storageKey));
+                else if (image.url) lookups.push(Promise.resolve(image.url));
+            }
+        }
+        if (!lookups.length) return;
+        let cancelled = false;
+        Promise.all(lookups).then((found) => {
+            const first = found.find(Boolean);
+            if (!cancelled && first) setUrl(first);
+        });
+        return () => { cancelled = true; };
+    }, [asset?.id, asset?.kind, asset?.coverUrl, assets]);
+    return url;
+}
+
+function AudioPlayer({ asset }: { asset: AudioAsset }) {
+    const [src, setSrc] = useState("");
+    useEffect(() => {
+        let cancelled = false;
+        if (asset.data.url && !asset.data.storageKey) { setSrc(asset.data.url); return; }
+        if (asset.data.storageKey) {
+            resolveMediaUrl(asset.data.storageKey).then((u) => { if (!cancelled && u) setSrc(u); });
+        }
+        return () => { cancelled = true; };
+    }, [asset.id]);
+    if (!src) return null;
+    return <audio src={src} controls className="!mt-2 h-9 w-full" />;
+}
+
+function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownload, onDelete }: { asset: Asset; selected: boolean; onSelect: () => void; onOpen: () => void; onEdit: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void; onDelete: () => void }) {
     const { t } = useTranslation();
-    const cover = asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "");
+    const cover = useResolvedCoverUrl(asset);
     const summary = assetSummary(asset);
     return (
         <Card
             hoverable
-            className="overflow-hidden"
+            className={cn("group overflow-hidden transition-shadow", selected && "ring-2 ring-stone-500 dark:ring-stone-400")}
             styles={{ body: { padding: 0 } }}
             cover={
-                <button type="button" className="block w-full text-left" onClick={onOpen}>
+                <button type="button" className="relative block w-full text-left" onClick={onOpen}>
+                    {selected ? (
+                        <span className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-md bg-stone-900/80 text-white shadow backdrop-blur" onClick={(e) => { e.stopPropagation(); onSelect(); }}>
+                            <Check className="size-4" />
+                        </span>
+                    ) : (
+                        <span
+                            className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-md border border-stone-300 bg-white/70 text-stone-400 opacity-0 shadow backdrop-blur transition-opacity hover:opacity-100 group-hover:opacity-100 dark:border-stone-600 dark:bg-stone-900/70"
+                            onClick={(e) => { e.stopPropagation(); onSelect(); }}
+                        >
+                            <Check className="size-4" />
+                        </span>
+                    )}
                     {cover ? (
                         <img src={cover} alt={asset.title} className="aspect-[4/3] w-full object-cover" />
                     ) : (
@@ -446,17 +836,15 @@ function AssetCard({ asset, onOpen, onEdit, onCopy, onDownload, onDelete }: { as
                 <Button size="small" onClick={onOpen}>
                     {t("common.view")}
                 </Button>
-                {asset.kind !== "video" ? (
-                    <Button size="small" icon={<PencilLine className="size-3.5" />} onClick={onEdit}>
-                        {t("common.edit")}
-                    </Button>
-                ) : null}
+                <Button size="small" icon={<PencilLine className="size-3.5" />} onClick={onEdit}>
+                    {t("common.edit")}
+                </Button>
                 {asset.kind === "text" ? (
                     <Button size="small" icon={<Copy className="size-3.5" />} onClick={() => void onCopy(asset)}>
                         {t("common.copy")}
                     </Button>
                 ) : null}
-                {asset.kind === "image" || asset.kind === "video" ? (
+                {asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" ? (
                     <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(asset)}>
                         {t("common.download")}
                     </Button>
@@ -471,7 +859,7 @@ function AssetCard({ asset, onOpen, onEdit, onCopy, onDownload, onDelete }: { as
 
 function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | null; onClose: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void }) {
     const { t } = useTranslation();
-    const cover = asset ? asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "") : "";
+    const cover = useResolvedCoverUrl(asset);
     return (
         <Drawer title={t("assets.details")} open={Boolean(asset)} size="large" onClose={onClose}>
             {asset ? (
@@ -500,6 +888,26 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                             <Typography.Paragraph className="mt-2 whitespace-pre-wrap">{asset.data.content}</Typography.Paragraph>
                         ) : asset.kind === "video" ? (
                             <video src={asset.data.url} controls className="mt-2 aspect-video w-full rounded-lg bg-black" />
+                        ) : asset.kind === "audio" ? (
+                            <div>
+                                <AudioPlayer asset={asset as AudioAsset} />
+                                <Typography.Text type="secondary" className="mt-1 block">
+                                    {formatBytes(asset.data.bytes)}{asset.data.durationMs ? ` · ${Math.round(asset.data.durationMs / 1000)}s` : ""}
+                                </Typography.Text>
+                            </div>
+                        ) : asset.kind === "character" ? (
+                            <div className="mt-2 space-y-3">
+                                {asset.data.description ? (
+                                    <Typography.Paragraph className="!mb-0 whitespace-pre-wrap">{asset.data.description}</Typography.Paragraph>
+                                ) : null}
+                                {asset.data.images.length ? (
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {asset.data.images.map((image, idx) => (
+                                            <Image key={idx} src={image.url} alt={image.outfit || image.name} className="!rounded-md" />
+                                        ))}
+                                    </div>
+                                ) : null}
+                            </div>
                         ) : (
                             <Typography.Text className="mt-2 block">
                                 {asset.data.width}x{asset.data.height} · {formatBytes(asset.data.bytes)} · {asset.data.mimeType}
@@ -518,9 +926,9 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                                 {t("assets.copyText")}
                             </Button>
                         ) : null}
-                        {asset.kind === "image" || asset.kind === "video" ? (
+                        {asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" ? (
                             <Button type="primary" icon={<Download className="size-4" />} onClick={() => onDownload(asset)}>
-                                {asset.kind === "video" ? t("assets.downloadVideo") : t("assets.downloadImage")}
+                                {asset.kind === "video" ? t("assets.downloadVideo") : asset.kind === "audio" ? t("assets.downloadAudio") : t("assets.downloadImage")}
                             </Button>
                         ) : null}
                     </Space>
@@ -530,11 +938,151 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
     );
 }
 
+async function readAssetMediaBlob(asset: Extract<Asset, { kind: "image" | "video" | "audio" }>) {
+    if (asset.data.storageKey) {
+        const stored = asset.kind === "image" ? await getImageBlob(asset.data.storageKey) : await getMediaBlob(asset.data.storageKey);
+        if (stored) return stored;
+    }
+    const url = asset.kind === "image" ? asset.data.dataUrl || asset.coverUrl : asset.data.url;
+    if (!url) return null;
+    const response = await fetch(url);
+    return response.ok ? response.blob() : null;
+}
+
 function assetSummary(asset: Asset) {
     if (asset.kind === "text") return asset.data.content;
+    if (asset.kind === "audio") return `${formatBytes(asset.data.bytes)}${asset.data.durationMs ? ` · ${Math.round(asset.data.durationMs / 1000)}s` : ""}`;
+    if (asset.kind === "character") return asset.data.description || `${asset.data.images.length} images`;
     return `${asset.data.width}x${asset.data.height} · ${formatBytes(asset.data.bytes)} · ${asset.data.mimeType}`;
 }
 
 function assetSearchText(asset: Asset) {
-    return [asset.title, asset.source || "", asset.note || "", (asset.tags || []).join(" "), asset.kind === "text" ? asset.data.content : asset.data.mimeType].join(" ").toLowerCase();
+    const extra = asset.kind === "text" ? asset.data.content
+        : asset.kind === "character" ? `${asset.data.name} ${asset.data.description} ${asset.data.images.length} images`
+        : asset.data.mimeType;
+    return [asset.title, asset.source || "", asset.note || "", (asset.tags || []).join(" "), extra].join(" ").toLowerCase();
+}
+
+function CharacterEditor({ images, onChange }: { images: CharacterImage[]; onChange: (images: CharacterImage[]) => void }) {
+    const { t } = useTranslation();
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const pendingIdxRef = useRef<number | "new" | null>(null);
+    const [previews, setPreviews] = useState<Record<number, string>>({});
+    const urlCache = useRef<Record<string, string>>({});
+
+    const resolveUrl = useCallback(async (image: CharacterImage) => {
+        if (image.storageKey) {
+            if (!urlCache.current[image.storageKey]) urlCache.current[image.storageKey] = await resolveImageUrl(image.storageKey, image.url);
+            return urlCache.current[image.storageKey];
+        }
+        return image.url || "";
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        images.forEach(async (image, idx) => {
+            const url = await resolveUrl(image);
+            if (!cancelled && url) setPreviews((prev) => ({ ...prev, [idx]: url }));
+        });
+        return () => { cancelled = true; };
+    }, [images, resolveUrl]);
+
+    useEffect(() => () => { Object.values(urlCache.current).forEach((url) => URL.revokeObjectURL(url)); }, []);
+
+    const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        e.target.value = "";
+        if (!file || pendingIdxRef.current === null) return;
+        const result = await uploadImage(file, { category: "library" });
+        const nextImage: CharacterImage = {
+            url: result.url,
+            storageKey: result.storageKey,
+            name: file.name,
+            width: result.width,
+            height: result.height,
+            bytes: result.bytes,
+            mimeType: result.mimeType,
+            outfit: "",
+            outfitDescription: "",
+        };
+        const idx = pendingIdxRef.current;
+        pendingIdxRef.current = null;
+        if (idx === "new") {
+            onChange([...images, nextImage]);
+        } else if (typeof idx === "number") {
+            const next = [...images];
+            next[idx] = nextImage;
+            onChange(next);
+        }
+    };
+
+    const updateImage = (idx: number, patch: Partial<CharacterImage>) => {
+        const next = [...images];
+        next[idx] = { ...next[idx], ...patch };
+        onChange(next);
+    };
+    const removeImage = (idx: number) => onChange(images.filter((_, i) => i !== idx));
+    const moveImage = (idx: number, dir: -1 | 1) => {
+        const target = idx + dir;
+        if (target < 0 || target >= images.length) return;
+        const next = [...images];
+        [next[idx], next[target]] = [next[target], next[idx]];
+        onChange(next);
+    };
+
+    return (
+        <div className="space-y-3">
+            {images.map((image, idx) => (
+                <div key={idx} className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
+                    <div className="flex gap-3">
+                        <div className="size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-stone-50 dark:border-stone-700 dark:bg-stone-900">
+                            {previews[idx] ? (
+                                <img src={previews[idx]} alt={image.outfit || image.name} className="size-full object-cover" />
+                            ) : (
+                                <div className="flex size-full items-center justify-center text-xs text-stone-400">无图</div>
+                            )}
+                        </div>
+                        <div className="min-w-0 flex-1 space-y-2">
+                            <div className="grid gap-2 sm:grid-cols-2">
+                                <Input
+                                    size="small"
+                                    value={image.outfit}
+                                    onChange={(e) => updateImage(idx, { outfit: e.target.value })}
+                                    placeholder={t("assets.character.outfitPlaceholder")}
+                                />
+                                <Input
+                                    size="small"
+                                    value={image.name}
+                                    onChange={(e) => updateImage(idx, { name: e.target.value })}
+                                    placeholder={t("assets.character.namePlaceholder")}
+                                />
+                            </div>
+                            <Input.TextArea
+                                size="small"
+                                rows={2}
+                                value={image.outfitDescription}
+                                onChange={(e) => updateImage(idx, { outfitDescription: e.target.value })}
+                                placeholder={t("assets.character.outfitDescriptionPlaceholder")}
+                            />
+                            <div className="flex flex-wrap gap-1.5">
+                                <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => { pendingIdxRef.current = idx; fileInputRef.current?.click(); }}>{t("common.upload")}</Button>
+                                <Button size="small" disabled={idx === 0} onClick={() => moveImage(idx, -1)}>↑</Button>
+                                <Button size="small" disabled={idx === images.length - 1} onClick={() => moveImage(idx, 1)}>↓</Button>
+                                <Button size="small" danger onClick={() => removeImage(idx)}>{t("common.delete")}</Button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            ))}
+            <Button
+                type="dashed"
+                block
+                icon={<Upload className="size-3.5" />}
+                onClick={() => { pendingIdxRef.current = "new"; fileInputRef.current?.click(); }}
+            >
+                {t("assets.character.addImage")}
+            </Button>
+            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleUpload} />
+        </div>
+    );
 }

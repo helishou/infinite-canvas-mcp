@@ -1,7 +1,7 @@
-import localforage from "localforage";
-
 import { runPromptSource, type RawPrompt } from "./prompt-source-runtime";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
+import { CUSTOM_PROMPTS_CATEGORY, CUSTOM_PROMPTS_SOURCE_ID, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
+import { fetchBackendPromptCache, saveBackendPromptCache } from "@/services/backend-api";
 import i18n from "@/i18n";
 import type { PromptSource } from "./prompt-source-presets";
 
@@ -10,6 +10,8 @@ export type Prompt = RawPrompt & {
     category: string;
     githubUrl: string;
 };
+
+export const isCustomPrompt = (prompt: Prompt) => prompt.sourceId === CUSTOM_PROMPTS_SOURCE_ID;
 
 export const ALL_PROMPTS_OPTION = "all";
 
@@ -46,8 +48,9 @@ type SourceCache = PromptSourceStatus & {
 };
 
 const cacheTtlMs = 1000 * 60 * 60;
-const promptCacheStore = localforage.createInstance({ name: "infinite-canvas", storeName: "prompt_cache" });
+const promptCache = new Map<string, SourceCache>();
 const loadingSources = new Map<string, Promise<PromptSourceRefreshResult>>();
+const customPromptSource: PromptSource = { id: CUSTOM_PROMPTS_SOURCE_ID, name: CUSTOM_PROMPTS_CATEGORY, url: "", homepage: "", enabled: true, builtIn: false };
 
 function enabledSources() {
     return usePromptSourceStore.getState().sources.filter((source) => source.enabled);
@@ -75,8 +78,27 @@ function withSourceMeta(source: PromptSource, items: RawPrompt[]): Prompt[] {
     }));
 }
 
+export function withCustomPromptMeta(items: RawPrompt[]): Prompt[] {
+    return withSourceMeta(customPromptSource, items);
+}
+
 async function readSourceCache(sourceId: string) {
-    return promptCacheStore.getItem<SourceCache>(cacheKey(sourceId));
+    const key = cacheKey(sourceId);
+    const memory = promptCache.get(key);
+    if (memory) return memory;
+    try {
+        const cached = (await fetchBackendPromptCache<SourceCache>(sourceId)).cache;
+        if (cached && Array.isArray(cached.items)) {
+            promptCache.set(key, cached);
+            return cached;
+        }
+    } catch { /* Backend 不可用时继续走在线拉取 */ }
+    return null;
+}
+
+async function writeSourceCache(sourceId: string, cache: SourceCache) {
+    promptCache.set(cacheKey(sourceId), cache);
+    try { await saveBackendPromptCache(sourceId, cache); } catch { /* 内存缓存仍可继续使用 */ }
 }
 
 async function refreshSourceRecord(source: PromptSource): Promise<PromptSourceRefreshResult> {
@@ -85,7 +107,7 @@ async function refreshSourceRecord(source: PromptSource): Promise<PromptSourceRe
         const items = withSourceMeta(source, await runPromptSource(source));
         const lastSuccessAt = new Date().toISOString();
         const cache: SourceCache = { sourceId: source.id, items, count: items.length, fetchedAt: Date.now(), lastSuccessAt, lastError: "", signature: sourceSignature(source) };
-        await promptCacheStore.setItem(cacheKey(source.id), cache);
+        await writeSourceCache(source.id, cache);
         return { sourceId: source.id, sourceName: source.name, count: items.length, lastSuccessAt, lastError: "", success: true };
     } catch (error) {
         const lastError = error instanceof Error ? error.message : String(error);
@@ -98,7 +120,7 @@ async function refreshSourceRecord(source: PromptSource): Promise<PromptSourceRe
             lastError,
             signature: previous?.signature || sourceSignature(source),
         };
-        await promptCacheStore.setItem(cacheKey(source.id), cache);
+        await writeSourceCache(source.id, cache);
         return { sourceId: source.id, sourceName: source.name, count: cache.count, lastSuccessAt: cache.lastSuccessAt, lastError, success: false };
     }
 }
@@ -115,7 +137,14 @@ async function getSourcePrompts(source: PromptSource): Promise<Prompt[]> {
     const cached = await readSourceCache(source.id);
     if (cached) {
         const stale = cached.signature !== sourceSignature(source) || Date.now() - cached.fetchedAt >= cacheTtlMs;
-        if (stale) void getOrStartRefresh(source).catch(() => undefined);
+        if (stale) {
+            const refresh = getOrStartRefresh(source);
+            if (!cached.items.length && cached.lastError) {
+                const result = await refresh;
+                return result.success ? (await readSourceCache(source.id))?.items || [] : withSourceMeta(source, cached.items);
+            }
+            void refresh.catch(() => undefined);
+        }
         return withSourceMeta(source, cached.items);
     }
     const result = await getOrStartRefresh(source);
@@ -124,16 +153,23 @@ async function getSourcePrompts(source: PromptSource): Promise<Prompt[]> {
 }
 
 async function getAllPrompts(): Promise<Prompt[]> {
-    const settled = await Promise.all(
-        enabledSources().map(async (source) => {
+    const [custom, settled] = await Promise.all([
+        getCustomPrompts(),
+        Promise.all(enabledSources().map(async (source) => {
             try {
                 return await getSourcePrompts(source);
             } catch {
                 return [];
             }
-        }),
-    );
-    return settled.flat();
+        })),
+    ]);
+    return [...custom, ...settled.flat()];
+}
+
+async function getCustomPrompts(): Promise<Prompt[]> {
+    const store = useCustomPromptsStore.getState();
+    if (!store.loaded) await store.load();
+    return withCustomPromptMeta(useCustomPromptsStore.getState().prompts);
 }
 
 export async function fetchPrompts({ keyword = "", tag = [], category = ALL_PROMPTS_OPTION, page = 1, pageSize = 20 }: { keyword?: string; tag?: string[]; category?: string; page?: number; pageSize?: number } = {}) {
@@ -143,7 +179,7 @@ export async function fetchPrompts({ keyword = "", tag = [], category = ALL_PROM
     const normalizedPageSize = Math.max(1, Math.min(100, pageSize));
     const withoutTagFilter = filterPrompts(items, { keyword: normalizedKeyword, category, tags: [] });
     const filtered = filterPrompts(items, { keyword: normalizedKeyword, category, tags: tag });
-    const categories = enabledSources().map((source) => source.name);
+    const categories = [CUSTOM_PROMPTS_CATEGORY, ...enabledSources().map((source) => source.name)];
 
     return {
         items: filtered.slice((normalizedPage - 1) * normalizedPageSize, normalizedPage * normalizedPageSize),

@@ -1,5 +1,3 @@
-import localforage from "localforage";
-
 import i18n from "@/i18n";
 import { getMediaBlob, resolveMediaUrl, setMediaBlob } from "@/services/file-storage";
 import { getImageBlob, resolveImageUrl, setImageBlob } from "@/services/image-storage";
@@ -7,13 +5,14 @@ import { downloadWebdavFile, uploadWebdavFile, WEBDAV_MANIFEST_FILE_NAME } from 
 import type { Asset } from "@/stores/use-asset-store";
 import { useAssetStore } from "@/stores/use-asset-store";
 import type { WebdavSyncConfig } from "@/stores/use-config-store";
-import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
-import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import type { CanvasFolder, CanvasProject } from "@/stores/canvas/use-canvas-store";
+import { loadAllCanvasProjects, useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { readWorkbenchLogs, saveWorkbenchLog, type WorkbenchLogKind } from "@/services/workbench-logs";
 
 type StoredLog = Record<string, unknown> & { id?: string };
 export type AppSyncDomainKey = "canvas" | "assets" | "image-workbench" | "video-workbench";
 type DomainKey = AppSyncDomainKey;
-type CanvasDomainData = { projects: CanvasProject[] };
+type CanvasDomainData = { projects: CanvasProject[]; folders: CanvasFolder[] };
 type AssetDomainData = { assets: Asset[] };
 type LogDomainData = { logs: StoredLog[] };
 
@@ -76,9 +75,6 @@ export type AppSyncProgressEvent = {
 export type AppSyncProgress = (event: AppSyncProgressEvent) => void;
 
 const FILE_CONCURRENCY = 3;
-const imageLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
-const videoLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
-type LogStore = typeof imageLogStore;
 const storageKeyPattern = /^(image|video|audio|file|video-reference|audio-reference):/;
 
 export async function syncAppDataToWebdav(config: WebdavSyncConfig, onProgress?: AppSyncProgress): Promise<AppSyncResult> {
@@ -89,10 +85,10 @@ export async function syncAppDataToWebdav(config: WebdavSyncConfig, onProgress?:
         syncDomain<CanvasDomainData>(config, onProgress, {
             key: "canvas",
             label: "画布",
-            emptyData: { projects: [] },
-            localData: async () => ({ projects: useCanvasStore.getState().projects }),
-            mergeData: (local, remote) => ({ projects: mergeById(local.projects, remote.projects, "updatedAt") }),
-            applyData: async (data) => useCanvasStore.getState().replaceProjects(data.projects),
+            emptyData: { projects: [], folders: [] },
+            localData: async () => ({ projects: await loadAllCanvasProjects(), folders: useCanvasStore.getState().folders }),
+            mergeData: (local, remote) => ({ projects: mergeById(local.projects, remote.projects, "updatedAt"), folders: mergeById(local.folders, remote.folders, "updatedAt") }),
+            applyData: async (data) => { useCanvasStore.getState().replaceProjects(data.projects); useCanvasStore.getState().replaceFolders(data.folders); },
         }),
         syncDomain<AssetDomainData>(config, onProgress, {
             key: "assets",
@@ -106,17 +102,17 @@ export async function syncAppDataToWebdav(config: WebdavSyncConfig, onProgress?:
             key: "image-workbench",
             label: "生图工作台",
             emptyData: { logs: [] },
-            localData: async () => ({ logs: await readStoredLogs(imageLogStore) }),
+            localData: async () => ({ logs: await readWorkbenchLogs("image") }),
             mergeData: (local, remote) => ({ logs: mergeById(local.logs, remote.logs, "createdAt") }),
-            applyData: async (data) => replaceStoredLogs(imageLogStore, data.logs),
+            applyData: async (data) => replaceWorkbenchLogs("image", data.logs),
         }),
         syncDomain<LogDomainData>(config, onProgress, {
             key: "video-workbench",
             label: "视频创作台",
             emptyData: { logs: [] },
-            localData: async () => ({ logs: await readStoredLogs(videoLogStore) }),
+            localData: async () => ({ logs: await readWorkbenchLogs("video") }),
             mergeData: (local, remote) => ({ logs: mergeById(local.logs, remote.logs, "createdAt") }),
-            applyData: async (data) => replaceStoredLogs(videoLogStore, data.logs),
+            applyData: async (data) => replaceWorkbenchLogs("video", data.logs),
         }),
     ]);
 
@@ -276,19 +272,10 @@ async function hydrateAsset(asset: Asset): Promise<Asset> {
     return asset;
 }
 
-async function readStoredLogs(store: LogStore) {
-    const logs: StoredLog[] = [];
-    await store.iterate<StoredLog, void>((value) => {
-        if (value && typeof value === "object") logs.push(value);
-    });
-    return logs;
-}
-
-async function replaceStoredLogs(store: LogStore, logs: StoredLog[]) {
-    await store.clear();
+async function replaceWorkbenchLogs(kind: WorkbenchLogKind, logs: StoredLog[]) {
     await runWithConcurrency(logs, FILE_CONCURRENCY, async (log) => {
         const id = getStringField(log, "id");
-        if (id) await store.setItem(id, log);
+        if (id) await saveWorkbenchLog(kind, { ...log, id });
     });
 }
 

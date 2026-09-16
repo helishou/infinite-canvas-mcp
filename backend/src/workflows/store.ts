@@ -1,0 +1,273 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { DATA_DIR } from "../config.js";
+import type { BackendDatabase } from "../db.js";
+import type { WorkflowConfig, WorkflowField } from "../db.js";
+import type { ComfyUiBackend } from "../comfyui/bridge.js";
+
+const CUSTOM_SUBDIR = "custom";
+const NAME_RE = /^[a-zA-Z0-9_\u4e00-\u9fff.\-]+\.json$/;
+const MEDIA_INPUT_KEYS = ["image", "video", "audio", "mask", "filename", "file"];
+const MEDIA_EXT_RE = /\.(png|jpe?g|webp|gif|bmp|tiff?|mp4|webm|mov|m4v|avi|mkv|mp3|wav|m4a|aac|ogg|flac)(?:\?|$)/i;
+
+export type WorkflowListItem = {
+    name: string;
+    title: string;
+    builtin: boolean;
+    fieldCount: number;
+};
+
+export type WorkflowDetail = {
+    name: string;
+    workflow: Record<string, unknown>;
+    config: WorkflowConfig;
+    builtin: boolean;
+};
+
+function workflowDir(): string {
+    return path.join(DATA_DIR, "workflows");
+}
+
+function workflowFilePath(name: string): string {
+    // 允许 "custom/filename.json" 格式，但 basename 必须匹配 NAME_RE
+    const parts = name.split('/');
+    const basename = parts[parts.length - 1];
+    if (!NAME_RE.test(basename)) {
+        throw new Error("工作流名称不合法，请使用中文/英文/数字/_-.");
+    }
+    const fullPath = path.resolve(workflowDir(), ...parts);
+    const rootPath = path.resolve(workflowDir());
+    const rel = path.relative(rootPath, fullPath);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+        throw new Error("工作流名称不合法：路径穿越");
+    }
+    return fullPath;
+}
+
+function isBuiltin(name: string): boolean {
+    const basename = path.basename(name);
+    return !name.includes("/") && [
+        "Z-Image.json", "Z-Image-Enhance.json", "2511.json",
+        "klein-enhance.json", "Flux2-Klein.json", "upscale.json",
+    ].includes(basename);
+}
+
+export class WorkflowStore {
+    constructor(private readonly db: BackendDatabase) {}
+
+    async list(): Promise<WorkflowListItem[]> {
+        const dir = workflowDir();
+        try { await fs.access(dir); } catch { return []; }
+        const items: WorkflowListItem[] = [];
+        const seen = new Set<string>();
+
+        // 扫描根目录（内置工作流）
+        try {
+            const rootFiles = await fs.readdir(dir);
+            for (const fn of rootFiles) {
+                if (!fn.endsWith(".json") || fn.endsWith(".config.json")) continue;
+                const name = fn;
+                const config = this.getConfig(name);
+                items.push({
+                    name,
+                    title: config?.title || fn.replace(".json", ""),
+                    builtin: true,
+                    fieldCount: config?.fields?.length ?? 0,
+                });
+                seen.add(fn);
+            }
+        } catch { /* ignore */ }
+
+        // 扫描 custom 子目录（用户上传）
+        const customDir = path.join(dir, CUSTOM_SUBDIR);
+        try {
+            const files = await fs.readdir(customDir);
+            for (const fn of files) {
+                if (!fn.endsWith(".json") || fn.endsWith(".config.json")) continue;
+                if (seen.has(fn)) continue;
+                const name = `${CUSTOM_SUBDIR}/${fn}`;
+                const config = this.getConfig(name);
+                items.push({
+                    name,
+                    title: config?.title || fn.replace(".json", ""),
+                    builtin: false,
+                    fieldCount: config?.fields?.length ?? 0,
+                });
+            }
+        } catch { /* custom dir may not exist */ }
+        items.sort((a, b) => a.title.localeCompare(b.title));
+        return items;
+    }
+
+    async get(name: string): Promise<WorkflowDetail> {
+        const filePath = workflowFilePath(name);
+        let workflow: Record<string, unknown>;
+        try {
+            workflow = JSON.parse(await fs.readFile(filePath, "utf8"));
+        } catch {
+            throw new Error("Workflow not found");
+        }
+        const config = this.getConfig(name) ?? {
+            title: name.split('/').pop()!.replace(/\.json$/, ""),
+            backend: "",
+            operation: "",
+            description: "",
+            fields: [],
+        };
+        return { name, workflow, config, builtin: isBuiltin(name) };
+    }
+
+    async upload(name: string, workflow: Record<string, unknown>): Promise<{ name: string }> {
+        const cleanName = path.basename(name.trim());
+        const finalName = cleanName.endsWith(".json") ? cleanName : `${cleanName}.json`;
+        if (!NAME_RE.test(finalName)) {
+            throw new Error("工作流名称不合法，请使用中文/英文/数字/_-.");
+        }
+        if (typeof workflow !== "object" || workflow === null || Object.keys(workflow).length === 0) {
+            throw new Error("工作流 JSON 为空");
+        }
+        const sample = Object.values(workflow)[0];
+        if (typeof sample !== "object" || sample === null || !("class_type" in sample)) {
+            throw new Error("不是有效的 ComfyUI API 工作流 JSON（需包含 class_type）");
+        }
+        const storedName = `${CUSTOM_SUBDIR}/${finalName}`;
+        const dir = path.join(workflowDir(), CUSTOM_SUBDIR);
+        await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+        await fs.writeFile(workflowFilePath(storedName), JSON.stringify(workflow, null, 2), "utf8");
+        return { name: storedName };
+    }
+
+    async saveConfig(name: string, config: WorkflowConfig): Promise<{ config: WorkflowConfig }> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        this.db.upsertWorkflowConfig(name, {
+            title: config.title,
+            backend: config.backend,
+            operation: config.operation,
+            description: config.description,
+            fieldsJson: JSON.stringify(config.fields),
+            mediaInputsJson: JSON.stringify(config.mediaInputs ?? {}),
+            miniCardsJson: JSON.stringify(config.miniCards ?? {}),
+        });
+        return { config };
+    }
+
+    async saveWorkflow(name: string, workflow: Record<string, unknown>): Promise<{ workflow: Record<string, unknown> }> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        if (!workflow || typeof workflow !== "object" || Object.keys(workflow).length === 0) throw new Error("工作流不能为空");
+        await fs.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+        return { workflow };
+    }
+
+    getConfig(name: string): WorkflowConfig | null {
+        const row = this.db.getWorkflowConfig(name);
+        if (!row) return null;
+        try {
+            return {
+                title: row.title,
+                backend: row.backend,
+                operation: row.operation,
+                description: row.description,
+                fields: JSON.parse(row.fieldsJson) as WorkflowField[],
+                mediaInputs: JSON.parse(row.mediaInputsJson),
+                miniCards: JSON.parse(row.miniCardsJson),
+            };
+        } catch { return null; }
+    }
+
+    async delete(name: string): Promise<{ ok: true }> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        await fs.unlink(filePath);
+        this.db.deleteWorkflowConfig(name);
+        return { ok: true };
+    }
+
+    /** 仅重命名显示标题（title），不动文件名与 config 其他字段 */
+    async renameTitle(name: string, title: string): Promise<{ name: string; title: string }> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        const existing = this.getConfig(name);
+        const config: WorkflowConfig = existing ?? {
+            title: name.split('/').pop()!.replace(/\.json$/, ""),
+            backend: "",
+            operation: "",
+            description: "",
+            fields: [],
+        };
+        config.title = title;
+        this.db.upsertWorkflowConfig(name, {
+            title: config.title,
+            backend: config.backend,
+            operation: config.operation,
+            description: config.description,
+            fieldsJson: JSON.stringify(config.fields),
+            mediaInputsJson: JSON.stringify(config.mediaInputs ?? {}),
+            miniCardsJson: JSON.stringify(config.miniCards ?? {}),
+        });
+        return { name, title: config.title };
+    }
+
+    /** 扫描工作流中所有媒体输入引用 */
+    scanMediaInputs(workflow: Record<string, unknown>): string[] {
+        const required: string[] = [];
+        for (const nodeId of Object.keys(workflow)) {
+            const node = workflow[nodeId];
+            if (typeof node !== "object" || node === null) continue;
+            const inputs = (node as any).inputs;
+            if (typeof inputs !== "object" || inputs === null) continue;
+            for (const [inputName, value] of Object.entries(inputs)) {
+                if (this.isMediaValue(inputName, value)) {
+                    required.push(String(value));
+                }
+            }
+        }
+        return [...new Set(required)];
+    }
+
+    private isMediaValue(inputName: string, value: unknown): boolean {
+        if (typeof value !== "string" || !value.trim()) return false;
+        const key = inputName.toLowerCase();
+        if (MEDIA_INPUT_KEYS.some((token) => key.includes(token))) return true;
+        return MEDIA_EXT_RE.test(value);
+    }
+
+    getWorkflowPath(name: string): string {
+        return workflowFilePath(name);
+    }
+
+    /**
+     * 查询 ComfyUI 获取当前 workflow 中各节点 COMBO 输入的选项列表。
+     * 返回 { node_id: { input_name: [choice, ...] } }；ComfyUI 不可达时返回空对象。
+     */
+    async getComboOptions(name: string, bridge: ComfyUiBackend, signal?: AbortSignal): Promise<Record<string, Record<string, string[]>>> {
+        let workflow: Record<string, unknown>;
+        try {
+            workflow = JSON.parse(await fs.readFile(workflowFilePath(name), "utf8"));
+        } catch { return {}; }
+
+        const classTypes = new Map<string, string>();
+        for (const [nodeId, rawNode] of Object.entries(workflow)) {
+            const node = typeof rawNode === "object" && rawNode !== null ? (rawNode as Record<string, unknown>) : {};
+            const classType = typeof node.class_type === "string" ? node.class_type : "";
+            if (classType) classTypes.set(nodeId, classType);
+        }
+
+        const options: Record<string, Record<string, string[]>> = {};
+        const uniqueClassTypes = [...new Set(classTypes.values())];
+        const classOptionsMap = new Map<string, Record<string, string[]>>();
+        await Promise.all(
+            uniqueClassTypes.map(async (classType) => {
+                const opts = await bridge.getNodeComboOptions(classType, signal);
+                if (Object.keys(opts).length > 0) classOptionsMap.set(classType, opts);
+            }),
+        );
+
+        for (const [nodeId, classType] of classTypes) {
+            const nodeOptions = classOptionsMap.get(classType);
+            if (nodeOptions && Object.keys(nodeOptions).length > 0) options[nodeId] = nodeOptions;
+        }
+        return options;
+    }
+}

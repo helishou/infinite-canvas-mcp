@@ -1,0 +1,789 @@
+import { useEffect, useMemo, useRef, useState } from "@infinite-canvas/plugin-sdk";
+import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
+import type { KeyboardEvent } from "react";
+import { Select } from "antd";
+import type { H3Ref, H3Segment } from "../types";
+import { H3Icon } from "./H3Icon";
+import { refsForSegment } from "../services/h3-data";
+import { segmentsFor } from "../hooks/useH3Segments";
+import baseReference from "../storyboard-assets/references/base-en.txt?raw";
+import refReference from "../storyboard-assets/references/ref-en.txt?raw";
+
+const MIRROR_STYLE_PROPS = ["boxSizing", "width", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "fontStyle", "fontVariant", "fontWeight", "fontStretch", "fontSize", "lineHeight", "fontFamily", "textAlign", "textIndent", "letterSpacing", "wordSpacing", "tabSize", "textTransform"] as const;
+
+function getCaretPoint(textarea: HTMLTextAreaElement, index: number) {
+    const computed = window.getComputedStyle(textarea);
+    const mirror = document.createElement("div");
+    const style = mirror.style;
+    style.position = "absolute";
+    style.top = "0";
+    style.left = "-9999px";
+    style.visibility = "hidden";
+    style.whiteSpace = "pre-wrap";
+    style.overflowWrap = "break-word";
+    for (const prop of MIRROR_STYLE_PROPS) style[prop] = computed[prop];
+    mirror.textContent = textarea.value.slice(0, index);
+    const marker = document.createElement("span");
+    marker.textContent = textarea.value.slice(index) || ".";
+    mirror.appendChild(marker);
+    document.body.appendChild(mirror);
+    const point = { left: marker.offsetLeft, top: marker.offsetTop };
+    document.body.removeChild(mirror);
+    return point;
+}
+
+type Props = {
+  ctx: CanvasNodeContext;
+  selected?: H3Segment;
+  imageRefs: H3Ref[];
+  videoRefs: H3Ref[];
+  audioRefs: H3Ref[];
+  patchSelected: (patch: Partial<H3Segment>) => void;
+  onOpenStoryboard: () => void;
+};
+
+// 南风 H3 官方提示词骨架（nanfeng_prompt_nodes[_v10] web/h3_multiref.js insertPromptBlock 逐字核对）
+const H3_OFFICIAL_BLOCK = [
+  "subject_definitions:",
+  "",
+  "summary:",
+  "",
+  "retention_analysis:",
+  "",
+  "detailed_description:",
+  "",
+  "overall_soundscape:",
+  "",
+  "non_diegetic_music:",
+  "N/A",
+].join("\n");
+
+const H3_SECTION_BLOCKS: Record<string, string> = {
+  模板: H3_OFFICIAL_BLOCK,
+  定义: "subject_definitions:\n",
+  摘要: "summary:\n",
+  保留: "retention_analysis:\n",
+  分镜: "detailed_description:\n",
+  声景: "overall_soundscape:\n",
+  配乐: "non_diegetic_music:\nN/A",
+};
+
+const H3_VIDEO_BLOCK = [
+  "integrated_multimodal_description:",
+  "",
+  "overall_soundscape:",
+  "",
+  "non_diegetic_music:",
+  "N/A",
+].join("\n");
+
+const H3_PROMPT_MODE_CONFIG = {
+  ref2va: {
+    tools: H3_SECTION_BLOCKS,
+    title: "Ref2VA 六段结构",
+    fields: "subject_definitions → summary → retention_analysis → detailed_description → overall_soundscape → non_diegetic_music",
+    refs: "可引用图片、视频和音频；图片使用 <Subject N> / <Picture N>，视频使用 <Video N>，音频使用 <Audio N>。",
+  },
+  t2v: {
+    tools: { 模板: H3_VIDEO_BLOCK, 综合描述: "integrated_multimodal_description:\n", 声景: "overall_soundscape:\n", 配乐: "non_diegetic_music:\nN/A" },
+    title: "T2V 三段结构",
+    fields: "integrated_multimodal_description → overall_soundscape → non_diegetic_music",
+    refs: "文生视频不使用参考素材，也不插入图片、视频或音频引用标签。",
+  },
+  i2v: {
+    tools: { 模板: H3_VIDEO_BLOCK, 综合描述: "integrated_multimodal_description:\n", 声景: "overall_soundscape:\n", 配乐: "non_diegetic_music:\nN/A" },
+    title: "I2V 三段结构",
+    fields: "integrated_multimodal_description → overall_soundscape → non_diegetic_music",
+    refs: "仅允许引用 1 张首帧图片，使用 <Subject 1> / <Picture 1>。",
+  },
+  fl2v: {
+    tools: { 模板: H3_VIDEO_BLOCK, 综合描述: "integrated_multimodal_description:\n", 声景: "overall_soundscape:\n", 配乐: "non_diegetic_music:\nN/A" },
+    title: "FL2V 三段结构",
+    fields: "integrated_multimodal_description → overall_soundscape → non_diegetic_music",
+    refs: "允许引用 2 张图片：<Picture 1> 为首帧，<Picture 2> 为尾帧。",
+  },
+} as const;
+
+type MentionItem = { ref: H3Ref; ordinal: number };
+
+export function H3PromptSection({
+  ctx,
+  selected,
+  imageRefs,
+  videoRefs,
+  audioRefs,
+  patchSelected,
+  onOpenStoryboard,
+}: Props) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const prompt = String(selected?.prompt || "");
+  const mode = String(selected?.mode || selected?.taskMode || "ref2va");
+  const promptMode = mode in H3_PROMPT_MODE_CONFIG ? mode as keyof typeof H3_PROMPT_MODE_CONFIG : "ref2va";
+  const modeConfig = H3_PROMPT_MODE_CONFIG[promptMode];
+  const toolBlocks = modeConfig.tools as Record<string, string>;
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionActive, setMentionActive] = useState(0);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionPosition, setMentionPosition] = useState({ left: 8, top: 106 });
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [enhancingSegmentId, setEnhancingSegmentId] = useState<string | null>(null);
+  const enhancing = enhancingSegmentId === selected?.id;
+  // 翻译态：缓存最近一次翻译结果（按 prompt 内容做 key），切换时优先复用，prompt 变化自动失效
+  type Translation = { prompt: string; text: string };
+  const [translation, setTranslation] = useState<Translation | null>(null);
+  const [translating, setTranslating] = useState(false);
+  const [isTranslated, setIsTranslated] = useState(false);
+  const [translateError, setTranslateError] = useState<string | null>(null);
+  // 用来在异步翻译返回时校验 prompt 是否已被用户改掉，避免显示错配的中文
+  const promptRef = useRef(prompt);
+  useEffect(() => { promptRef.current = prompt; }, [prompt]);
+  const models = ctx.ai.listModels("text");
+  const promptModel = String(
+    ctx.node.metadata?.minimaxLlmModel ||
+      ctx.node.metadata?.llmModel ||
+      ctx.ai.defaultModel("text") ||
+      models[0]?.value ||
+      "",
+  );
+
+  // 按 type 分组的序号（与 H3 工作台的 refsForSegment 语义一致：图片/视频/音频各自从 1 起）
+  const mentionItems = useMemo<MentionItem[]>(
+    () => [
+      ...imageRefs.map((ref, index) => ({ ref, ordinal: index + 1 })),
+      ...videoRefs.map((ref, index) => ({ ref, ordinal: index + 1 })),
+      ...audioRefs.map((ref, index) => ({ ref, ordinal: index + 1 })),
+    ],
+    [imageRefs, videoRefs, audioRefs],
+  );
+  const visibleMentionItems = useMemo(() => {
+    if (promptMode === "t2v") return [];
+    const query = mentionQuery.trim().toLowerCase();
+    if (!query) return mentionItems;
+    return mentionItems.filter(({ ref }) => {
+      const aliases = ref.type === "image" ? ["图片", "picture", "subject"] : ref.type === "video" ? ["视频", "video"] : ["音频", "audio"];
+      return aliases.some((alias) => alias.includes(query) || query.includes(alias)) || String(ref.name || "").toLowerCase().includes(query);
+    });
+  }, [mentionItems, mentionQuery, promptMode]);
+
+  const setPrompt = (value: string) => patchSelected({ prompt: value });
+
+  // ---- 提示词撤销/重做（按 clip 隔离，跨 clip 切换不丢历史）----
+  // 浏览器 textarea 原生撤销栈在受控组件被程序化改写 value（切 clip）时会失效，
+  // 这里自建 per-segment 历史栈，拦截 Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y。
+  const MAX_HISTORY = 200;
+  const undoRef = useRef<Map<string, { past: string[]; future: string[] }>>(new Map());
+  const lastPromptRef = useRef<string | undefined>(undefined);
+  const prevIdRef = useRef<string | undefined>(undefined);
+  const isProgrammaticRef = useRef(false);
+
+  // 统一记录每次 prompt 变更（用户键入、增强、@插入、外部 patch 如「设为当前 Clip」均覆盖）。
+  // 切 clip（segmentId 变化）不记录；undo/redo 自身通过 isProgrammaticRef 防重入。
+  useEffect(() => {
+    const id = selected?.id;
+    const newPrompt = String(selected?.prompt || "");
+    if (
+      id &&
+      prevIdRef.current === id &&
+      lastPromptRef.current !== undefined &&
+      lastPromptRef.current !== newPrompt &&
+      !isProgrammaticRef.current
+    ) {
+      const hist = undoRef.current.get(id) || { past: [], future: [] };
+      hist.past.push(lastPromptRef.current);
+      if (hist.past.length > MAX_HISTORY) hist.past.shift();
+      hist.future = [];
+      undoRef.current.set(id, hist);
+    }
+    prevIdRef.current = id;
+    lastPromptRef.current = newPrompt;
+    isProgrammaticRef.current = false;
+  }, [selected?.id, selected?.prompt]);
+
+  // 外部修改 prompt（用户键入、切 clip、外部 patch）时退出翻译态，
+  // 避免显示错配的中文；缓存的 translation 保留，下次点击同 prompt 仍可复用。
+  useEffect(() => {
+    setIsTranslated(false);
+  }, [prompt]);
+
+  const undo = () => {
+    const id = selected?.id;
+    if (!id) return;
+    const hist = undoRef.current.get(id);
+    if (!hist || hist.past.length === 0) return;
+    const current = String(selected?.prompt || "");
+    const target = hist.past.pop() as string;
+    if (hist.future.length > MAX_HISTORY) hist.future.shift();
+    hist.future.push(current);
+    undoRef.current.set(id, hist);
+    isProgrammaticRef.current = true;
+    setPrompt(target);
+  };
+
+  const redo = () => {
+    const id = selected?.id;
+    if (!id) return;
+    const hist = undoRef.current.get(id);
+    if (!hist || hist.future.length === 0) return;
+    const current = String(selected?.prompt || "");
+    const target = hist.future.pop() as string;
+    if (hist.past.length > MAX_HISTORY) hist.past.shift();
+    hist.past.push(current);
+    undoRef.current.set(id, hist);
+    isProgrammaticRef.current = true;
+    setPrompt(target);
+  };
+  const enhancePrompt = async () => {
+    if (!prompt.trim() || enhancing) return;
+    const targetSegmentId = selected?.id;
+    const promptAtCall = prompt;
+    if (!targetSegmentId) return;
+    setEnhancingSegmentId(targetSegmentId);
+    ctx.updateMetadata({ promptEnhancing: true, promptEnhanceError: "" });
+    try {
+      const model = String(
+        ctx.node.metadata?.minimaxLlmModel ||
+          ctx.node.metadata?.llmModel ||
+          ctx.ai.defaultModel("text") ||
+          "",
+      );
+      const normalizedMode = mode === "t2v" ? "t2va" : mode === "i2v" ? "i2va" : mode === "fl2v" ? "fl2va" : "ref2va";
+      const target = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {}).find((segment) => segment.id === targetSegmentId) || selected;
+      const references = target ? refsForSegment(target) : [];
+      const ordinals = { image: 0, video: 0, audio: 0 };
+      const manifest = references.map((ref) => {
+        const ordinal = ++ordinals[ref.type];
+        return `${ref.type === "image" ? "Picture" : ref.type === "video" ? "Video" : "Audio"} ${ordinal}: ${ref.name || "unnamed reference"}`;
+      }).join("\n") || "None";
+      // ---- 分镜图参考过渡：多张参考图按顺序排列成连续姿势帧，把段尾设计成过渡到下一张分镜姿势 ----
+      const storyboardMode = ctx.node.metadata?.promptEnhanceStoryboard === true;
+      let transitionPlan = "";
+      let transitionInstruction = "";
+      if (storyboardMode && imageRefs.length >= 2) {
+        const lastOrd = imageRefs.length;
+        transitionPlan = await analyzeStoryboardTransitions(ctx, imageRefs, model);
+        transitionInstruction = [
+          `这些参考图片是一组连续分镜姿势帧（图1为起始姿势，图${lastOrd}为目标姿势），不是互相独立的风格素材。`,
+          `本段提示词必须：从图1的姿势出发，依次经过每一对相邻图（图k→图k+1）的连续动作，最终收尾于图${lastOrd}的姿势；相邻图之间不得瞬移、重置或硬切。`,
+          `末句必须明确落到图${lastOrd}的目标姿势（例如图1站立、图2蹲下，则末句写“此人缓缓蹲下成蹲姿”）。`,
+          `按下面的「过渡计划」落实每段肢体、重心、朝向的具体变化。`,
+        ].join("\n");
+      }
+      const structure = normalizedMode === "ref2va"
+        ? "Use exactly the six sections in this order: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music. Use <Subject N>, <Picture N>, <Video N>, and <Audio N> consistently."
+        : "Use exactly the three sections in this order: integrated_multimodal_description, overall_soundscape, non_diegetic_music.";
+      const alignment = normalizedMode === "i2va"
+        ? "Start with the official I2VA instruction aligning Picture 1 to 0.00 seconds."
+        : normalizedMode === "fl2va"
+          ? "Start with the official FL2VA instruction aligning Picture 1 to 0.00 seconds and Picture 2 to the final timestamp."
+          : normalizedMode === "t2va"
+            ? "Do not introduce reference labels or image-alignment instructions."
+            : "Treat references as Ref2VA assets; do not force them to be the first frame unless the user explicitly requests it.";
+      const officialReference = normalizedMode === "ref2va" ? refReference : baseReference;
+      const systemParts = [
+        "You are the official MiniMax H3 video prompt writer.",
+        "Follow the embedded official H3 prompt-writing reference exactly; it is the format authority.",
+        officialReference,
+        `The selected mode is ${normalizedMode.toUpperCase()} and the selected clip duration is ${Number(selected?.duration || 5).toFixed(2)} seconds.`,
+        structure,
+        alignment,
+        "Rewrite the user intent into one production-ready prompt. Preserve characters, actions, dialogue, visible text, reference numbering, and hard constraints; never invent facts.",
+        "Make every requested visual detail explicit: composition, subject appearance, pose, gaze, action phases, camera type/amplitude/speed, lighting, materials, continuity, environment, and sound.",
+        "Use the exact official field names, section order, reference tags, timestamp conventions, dialogue tags, and language rules. Do not replace official tags with @ aliases.",
+        "Keep exact user dialogue and visible text unchanged. Do not repeat dialogue in overall_soundscape or non_diegetic_music.",
+        "Return only the final prompt, without Markdown fences, explanations, or prefaces.",
+      ];
+      if (transitionInstruction) systemParts.push(`Storyboard image reference transition instruction:\n${transitionInstruction}`);
+      const system = systemParts.join("\n\n");
+      const userPromptParts = [
+        promptAtCall.trim(),
+        String(ctx.node.metadata?.globalPrompt || "").trim(),
+        `Reference manifest (fixed numbering; do not reorder):\n${manifest}`,
+      ];
+      if (transitionPlan) userPromptParts.push(`Transition plan (fixed image order; do not reorder):\n${transitionPlan}`);
+      const userPrompt = userPromptParts.filter(Boolean).join("\n\n");
+      const result = await ctx.ai.generateText(userPrompt, {
+        model,
+        system,
+        references: references.map((ref) => ({ url: ref.url, name: ref.name })),
+      });
+      // 模型未返回内容时（如 Ollama 空响应），requestImageQuestion 现在返回空串，
+      // 这里不能把 prompt 覆写成占位符/空串——保留用户原文，并给出明确失败提示。
+      const enhanced = result.text.trim();
+      if (enhanced) {
+        // 增强请求是异步的，期间用户可能已经切换 Clip。
+        // 必须按发起请求时捕获的 segmentId 写回最新节点，不能调用依赖当前 selected 的 patchSelected。
+        const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        const liveSegments = segmentsFor(liveMetadata);
+        if (liveSegments.some((segment) => segment.id === targetSegmentId)) {
+          ctx.updateMetadata({ segments: liveSegments.map((segment) => segment.id === targetSegmentId ? { ...segment, prompt: enhanced } : segment) });
+        }
+      } else {
+        ctx.updateMetadata({ promptEnhanceError: "模型未返回内容，增强被跳过（请检查文本模型配置或重试）" });
+      }
+    } catch (error) {
+      ctx.updateMetadata({
+        promptEnhanceError:
+          error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setEnhancingSegmentId(null);
+      ctx.updateMetadata({ promptEnhancing: false });
+    }
+  };
+
+  // 翻译 system prompt：只翻自然语言，保留南风官方结构标记、引用标签和数值
+  const TRANSLATION_SYSTEM_PROMPT = [
+    "You are a translator for H3 video prompts. Translate the following to Simplified Chinese.",
+    "Rules:",
+    "- Keep section headers ending with ':' (e.g., subject_definitions:, summary:) exactly as in the original; they are official structure markers.",
+    "- Keep reference tags like <Subject 1>, <Picture 1>, <Video 1>, <Audio 1> exactly as in the original.",
+    "- Keep timestamps, numerical values, and proper nouns unchanged.",
+    "- Translate all other natural language to natural Simplified Chinese.",
+    "- Preserve line breaks, indentation, and overall structure.",
+    "- Return only the translated prompt. No explanations, no Markdown fences, no preamble.",
+  ].join("\n");
+
+  const handleTranslateToggle = async () => {
+    if (isTranslated) {
+      setIsTranslated(false);
+      return;
+    }
+    if (!prompt.trim()) return;
+    // 缓存命中：直接切到中文态
+    if (translation && translation.prompt === prompt) {
+      setIsTranslated(true);
+      return;
+    }
+    const promptAtCall = prompt;
+    setTranslating(true);
+    setTranslateError(null);
+    try {
+      const model = String(
+        ctx.node.metadata?.minimaxLlmModel ||
+          ctx.node.metadata?.llmModel ||
+          ctx.ai.defaultModel("text") ||
+          "",
+      );
+      const result = await ctx.ai.generateText(promptAtCall.trim(), {
+        model,
+        system: TRANSLATION_SYSTEM_PROMPT,
+      });
+      const text = result.text.trim();
+      if (text) {
+        setTranslation({ prompt: promptAtCall, text });
+        // 异步期间 prompt 可能已被用户改掉，只在没变时才切到中文态
+        if (promptRef.current === promptAtCall) setIsTranslated(true);
+      } else {
+        setTranslateError("翻译模型未返回内容，请检查文本模型配置或重试");
+      }
+    } catch (error) {
+      setTranslateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTranslating(false);
+    }
+  };
+
+  // 南风 insertPromptBlock:光标处 setRangeText,插入点前一个字符不是换行就补 \n,光标落在插入内容末尾
+  const insertAtCursor = (
+    text: string,
+    opts: { prefixNewline?: boolean; select?: boolean } = {},
+  ) => {
+    const ta = textareaRef.current;
+    if (!ta) {
+      const insert =
+        (opts.prefixNewline !== false && prompt && !prompt.endsWith("\n")
+          ? "\n"
+          : "") + text;
+      setPrompt(prompt + insert);
+      return;
+    }
+    const start = ta.selectionStart ?? prompt.length;
+    const end = ta.selectionEnd ?? start;
+    const before = ta.value.slice(0, start);
+    const insert =
+      (opts.prefixNewline !== false &&
+      before.length > 0 &&
+      !before.endsWith("\n")
+        ? "\n"
+        : "") + text;
+    if (opts.select) {
+      ta.setRangeText(insert, start, end, "select");
+    } else {
+      ta.setRangeText(insert, start, end, "end");
+    }
+    setPrompt(ta.value);
+    requestAnimationFrame(() => ta.focus());
+  };
+
+  // 南风 mention 插入文案:图片 <Subject N>…<Picture N>,视频 <Video N>,音频 <Audio N>（与 nativeMention/多参绑定一致）
+  const mentionText = (item: MentionItem) =>
+    item.ref.type === "image"
+      ? `<Subject ${item.ordinal}> is the visual content referenced from <Picture ${item.ordinal}>`
+      : item.ref.type === "video"
+        ? `<Video ${item.ordinal}>`
+        : `<Audio ${item.ordinal}>`;
+
+  const insertMention = (
+    item: MentionItem,
+    event?: { preventDefault: () => void },
+  ) => {
+    event?.preventDefault();
+    const ta = textareaRef.current;
+    if (ta && ta.isConnected) {
+      const start = ta.selectionStart ?? ta.value.length;
+      const atMatch = ta.value.slice(0, start).match(/@(\S*)$/);
+      if (atMatch) {
+        const insertStart = start - atMatch[0].length;
+        ta.setRangeText(mentionText(item), insertStart, start, "end");
+        setPrompt(ta.value);
+      } else {
+        insertAtCursor(mentionText(item));
+      }
+    } else {
+      insertAtCursor(mentionText(item));
+    }
+    setMentionOpen(false);
+    setMentionActive(0);
+    setMentionPosition({ left: 8, top: 106 });
+  };
+
+  const updateMentionPosition = (ta: HTMLTextAreaElement, caretIndex?: number) => {
+    const field = ta.closest(".minimax-prompt-field") as HTMLElement | null;
+    if (!field) return;
+    const point = getCaretPoint(ta, caretIndex ?? ta.selectionStart ?? 0);
+    const fieldRect = field.getBoundingClientRect();
+    const textareaRect = ta.getBoundingClientRect();
+    const computed = window.getComputedStyle(ta);
+    const lineHeight = Number.parseFloat(computed.lineHeight) || 17;
+    const menuWidth = Math.min(360, Math.max(220, fieldRect.width - 16));
+    const rawLeft = textareaRect.left - fieldRect.left + point.left - ta.scrollLeft;
+    const left = Math.max(8, Math.min(rawLeft, Math.max(8, fieldRect.width - menuWidth - 8)));
+    const top = textareaRect.top - fieldRect.top + point.top - ta.scrollTop + lineHeight + 4;
+    setMentionPosition({ left, top });
+  };
+
+  // 检测游标前的 @ 前缀,更新 mention 下拉(南风 openMentions:键入 @ 即弹)
+  const syncMention = (ta: HTMLTextAreaElement) => {
+    const start = ta.selectionStart ?? 0;
+    const match = ta.value.slice(0, start).match(/@(\S*)$/);
+    setMentionQuery(match?.[1] || "");
+    setMentionOpen(Boolean(match) && promptMode !== "t2v");
+    if (match && promptMode !== "t2v") updateMentionPosition(ta, start);
+    if (mentionActive >= visibleMentionItems.length) setMentionActive(0);
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // 自定义撤销/重做：拦截浏览器原生 Ctrl+Z（原生在受控切换 clip 后会失效）
+    if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z")) {
+      event.preventDefault();
+      if (event.shiftKey) redo();
+      else undo();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === "y" || event.key === "Y")) {
+      event.preventDefault();
+      redo();
+      return;
+    }
+    if (!mentionOpen || !visibleMentionItems.length) return;
+    const active = Math.min(mentionActive, visibleMentionItems.length - 1);
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setMentionActive((current) => (current + 1) % visibleMentionItems.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setMentionActive(
+        (current) => (current + visibleMentionItems.length - 1) % visibleMentionItems.length,
+      );
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      insertMention(visibleMentionItems[active]);
+    } else if (event.key === "Escape") {
+      setMentionOpen(false);
+    }
+  };
+
+  return (
+    <label className="minimax-prompt-field minimax-prompt-field--mention">
+      <span key="prompt-header">
+        <H3Icon key="prompt-icon" name="prompt" /> <span key="prompt-label">Prompt</span>{" "}
+        <button
+          key="enhance"
+          type="button"
+          disabled={enhancing || !prompt.trim()}
+          onClick={() => void enhancePrompt()}
+          title={!prompt.trim() ? "请先输入提示词" : "调用当前文本模型增强提示词"}
+        >
+          {enhancing ? "增强中…" : "增强提示词"}
+        </button>
+        <label
+          key="storyboard-toggle"
+          style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, marginLeft: 6, opacity: imageRefs.length >= 2 ? 1 : 0.45, cursor: imageRefs.length >= 2 ? "pointer" : "not-allowed" }}
+        >
+          <input
+            type="checkbox"
+            disabled={imageRefs.length < 2}
+            checked={ctx.node.metadata?.promptEnhanceStoryboard === true}
+            onChange={(event) => ctx.updateMetadata({ promptEnhanceStoryboard: event.target.checked })}
+            title={imageRefs.length < 2 ? "分镜图过渡需要至少 2 张图片参考" : "开启后按分镜图顺序把段尾设计成过渡到下一张分镜姿势"}
+          />
+          分镜图过渡
+        </label>
+        {mentionOpen ? (
+          <button
+            key="cancel-mention"
+            type="button"
+            onClick={() => setMentionOpen(false)}
+          >
+            取消 @
+          </button>
+        ) : null}
+      </span>
+      <div key="prompt-modes" className="minimax-prompt-modes">
+        <span className="minimax-prompt-mode-tools">
+        {Object.keys(toolBlocks).map((label) => (
+          <button
+            type="button"
+            key={label}
+            onClick={() => insertAtCursor(toolBlocks[label])}
+          >
+            {label}
+          </button>
+        ))}
+        </span>
+        <button
+          type="button"
+          className="minimax-prompt-help"
+          title="提示词结构说明"
+          aria-expanded={helpOpen}
+          onClick={() => setHelpOpen((open) => !open)}
+        >
+          说明
+        </button>
+      </div>
+      {helpOpen ? <div key="prompt-help" className="minimax-prompt-help-panel" role="note">
+        <b>{modeConfig.title}</b>
+        <span>字段：{modeConfig.fields}</span>
+        <span>{modeConfig.refs}</span>
+      </div> : null}
+      <small key="prompt-syntax" className="minimax-prompt-syntax">
+        <code key="subject">&lt;Subject P&gt; 指认第 P 张参考图</code>{" "}
+        <code key="picture">&lt;Picture P&gt; 指认第 P 张参考图</code>{" "}
+        <code key="video">&lt;Video V&gt; 指认第 V 段参考视频</code>{" "}
+        <code key="audio">&lt;Audio A&gt; 指认第 A 段参考音频</code>
+        {ctx.node.metadata?.promptEnhanceError ? (
+          <span key="enhance-error" style={{ color: "#fca5a5" }}>
+            增强失败：{String(ctx.node.metadata.promptEnhanceError)}
+          </span>
+        ) : null}
+      </small>
+      <div key="prompt-actions" className="nfh3-prompt-actions">
+        <Select
+          className="minimax-prompt-model"
+          size="small"
+          value={promptModel || undefined}
+          placeholder="提示词增强模型"
+          options={models.map((model) => ({
+            value: model.value,
+            label: model.label,
+          }))}
+          onChange={(value) => ctx.updateMetadata({ minimaxLlmModel: value })}
+        />
+        <button
+          type="button"
+          className={`minimax-aux-storyboard${String(ctx.node.metadata?.smartStoryboardStatus || "") === "error" ? " is-error" : ""}`}
+          onClick={onOpenStoryboard}
+          disabled={String(ctx.node.metadata?.smartStoryboardStatus || "") === "loading"}
+          title={String(ctx.node.metadata?.smartStoryboardStatus || "") === "error" ? String(ctx.node.metadata?.smartStoryboardError || "") : undefined}
+        >
+          {String(ctx.node.metadata?.smartStoryboardStatus || "") === "loading" ? "智能分镜生成中…" : String(ctx.node.metadata?.smartStoryboardStatus || "") === "error" ? "分镜失败·点击重试" : "智能分镜"}
+        </button>
+      </div>
+      <div key="prompt-options" className="nfh3-prompt-options">
+        <label>
+          <span>恒定触发词</span>
+          <input
+            value={String(selected?.constantTriggerWord || "")}
+            onChange={(event) =>
+              patchSelected({ constantTriggerWord: event.target.value })
+            }
+            placeholder="可选，置于每段提示词前"
+          />
+        </label>
+        <span className="nfh3-prompt-ref-hint">
+          {mode === "ref2va"
+            ? "当前可引用：@图片1 · @视频1 · @视频音频1 · @音频1"
+            : mode === "t2v"
+              ? "当前模式无需引用素材"
+              : "当前可引用：@图片1"}
+        </span>
+      </div>
+      <div key="prompt-textarea-wrap" className="minimax-prompt-translate-wrap">
+        <textarea
+          key="prompt-textarea"
+          ref={textareaRef}
+          value={isTranslated && translation && translation.prompt === prompt ? translation.text : prompt}
+          readOnly={isTranslated}
+          placeholder={isTranslated ? "中文翻译（只读）" : "请输入提示词"}
+          onChange={(event) => {
+            setPrompt(event.target.value);
+            syncMention(event.target);
+          }}
+          onKeyDown={handleKeyDown}
+          onBlur={() => {
+            setMentionOpen(false);
+            setMentionPosition({ left: 8, top: 106 });
+          }}
+          onScroll={() => {
+            if (mentionOpen) updateMentionPosition(textareaRef.current!);
+          }}
+          onMouseUp={() => {
+            const ta = textareaRef.current;
+            if (ta) syncMention(ta);
+          }}
+          onKeyUp={() => {
+            const ta = textareaRef.current;
+            if (ta) syncMention(ta);
+          }}
+        />
+        <button
+          key="prompt-translate"
+          type="button"
+          onClick={() => void handleTranslateToggle()}
+          disabled={translating || (!isTranslated && !prompt.trim())}
+          className={`minimax-prompt-translate${isTranslated ? " is-translated" : ""}`}
+          aria-label={
+            isTranslated
+              ? "切换回原提示词"
+              : translating
+                ? "正在翻译"
+                : "查看中文翻译"
+          }
+          title={
+            isTranslated
+              ? "切换回原提示词"
+              : translating
+                ? "正在翻译…"
+                : !prompt.trim()
+                  ? "请先输入提示词"
+                  : "查看中文翻译"
+          }
+        >
+          {translating ? "…" : isTranslated ? "EN" : "译"}
+        </button>
+        {translateError ? (
+          <div key="prompt-translate-error" className="minimax-prompt-translate-error" role="alert">
+            翻译失败：{translateError}
+          </div>
+        ) : null}
+      </div>
+      {mentionOpen && visibleMentionItems.length ? (
+        <div
+          key="prompt-mentions"
+          className="minimax-prompt-mentions"
+          role="listbox"
+          style={{ left: mentionPosition.left, top: mentionPosition.top }}
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          {visibleMentionItems.map((item, index) => (
+            <MentionRow
+              key={`${item.ref.type}-${item.ref.url}-${index}`}
+              item={item}
+              active={
+                index === Math.min(mentionActive, visibleMentionItems.length - 1)
+              }
+              onHover={() => setMentionActive(index)}
+              onPick={() => insertMention(item)}
+            />
+          ))}
+        </div>
+      ) : null}
+      {mentionOpen && !visibleMentionItems.length ? (
+        <div
+          key="prompt-mentions-empty"
+          className="minimax-prompt-mentions"
+          style={{ left: mentionPosition.left, top: mentionPosition.top }}
+        >
+          <span className="minimax-prompt-mention-empty">
+            请先在下方添加图片、视频或音频
+          </span>
+        </div>
+      ) : null}
+    </label>
+  );
+}
+
+// 分镜图参考过渡分析：对连续相邻的两张关键帧提取「姿势如何连续过渡」的可执行动作，
+// 供增强提示词把段尾落到下一张分镜姿势（如站→蹲，末句写「此人蹲了下来」）。
+async function analyzeStoryboardTransitions(
+  ctx: CanvasNodeContext,
+  refs: H3Ref[],
+  model: string,
+): Promise<string> {
+  const lines: string[] = [];
+  for (let k = 0; k < refs.length - 1; k++) {
+    const from = refs[k];
+    const to = refs[k + 1];
+    const fromOrd = k + 1;
+    const toOrd = k + 2;
+    try {
+      const res = await ctx.ai.generateText(
+        `下面是连续分镜姿势序列中的两张关键帧：图${fromOrd}（起始姿势）与图${toOrd}（目标姿势）。只提取从图${fromOrd}到图${toOrd}的连续过渡动作：主体肢体如何运动、重心如何转移、身体朝向/视线/姿态如何变化，用若干可执行的自然语言短句描述这段过渡（不重复身份、服装、外观，只写动作与姿态变化）。只返回过渡动作正文，不要追问、不要写英文模板。`,
+        {
+          model,
+          system: "你是 H3 分镜姿势过渡分析器。严格按图序对比两张关键帧，只输出从前者到后者的连续动作描述，不编造图中未出现的变化。",
+          references: [
+            { url: from.url, name: from.name },
+            { url: to.url, name: to.name },
+          ],
+        },
+      );
+      const text = res.text.trim();
+      if (text) lines.push(`图${fromOrd}→图${toOrd}：${text}`);
+    } catch {
+      lines.push(`图${fromOrd}→图${toOrd}：（过渡分析失败，请人工核对姿势变化）`);
+    }
+  }
+  return lines.join("\n\n");
+}
+
+function MentionRow({
+  item,
+  active,
+  onHover,
+  onPick,
+}: {
+  item: MentionItem;
+  active: boolean;
+  onHover: () => void;
+  onPick: (item?: MentionItem) => void;
+}) {
+  const text =
+    item.ref.type === "image"
+      ? `<Subject ${item.ordinal}> is the visual content referenced from <Picture ${item.ordinal}>`
+      : item.ref.type === "video"
+        ? `<Video ${item.ordinal}>`
+        : `<Audio ${item.ordinal}>`;
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={active}
+      className={
+        active ? "minimax-prompt-mention is-active" : "minimax-prompt-mention"
+      }
+      onMouseEnter={onHover}
+      onClick={(event) => onPick(item)}
+    >
+      <img src={item.ref.url} alt="" loading="lazy" />
+      {item.ref.type === "video" ? (
+        <H3Icon name="clapperboard" />
+      ) : item.ref.type === "audio" ? (
+        <H3Icon name="output" />
+      ) : null}
+      <span className="minimax-prompt-mention-name">
+        {text} · {item.ref.name}
+      </span>
+    </button>
+  );
+}

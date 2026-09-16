@@ -1,7 +1,8 @@
-import { memo, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -10,11 +11,13 @@ import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
-import { fetchSourcePrompts, type Prompt } from "@/services/api/prompts";
+import { fetchSourcePrompts, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
-import { uploadImage } from "@/services/image-storage";
-import { useAssetStore, type Asset, type AssetKind } from "@/stores/use-asset-store";
+import { resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
+import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
+import { useBackendStore } from "@/stores/use-backend-store";
 import { CANVAS_SIDE_PANEL_MAX_WIDTH, CANVAS_SIDE_PANEL_MIN_WIDTH, CANVAS_SIDE_PANEL_MOTION_MS, useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
@@ -71,7 +74,6 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
             setWidth(nextWidth);
         };
         const onUp = () => {
-            localStorage.setItem("canvas-side-panel-width", String(nextWidth));
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
             setResizing(false);
@@ -148,6 +150,7 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
     const [checked, setChecked] = useState<Set<string>>(new Set());
     const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
     const [exporting, setExporting] = useState(false);
+    const listRef = useRef<HTMLDivElement>(null);
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
@@ -169,6 +172,12 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
             return [{ node, depth: 0, hasChildren: groupChildren.length > 0 }, ...(collapsedGroups.has(node.id) ? [] : groupChildren.map((child) => ({ node: child, depth: 1, hasChildren: false })))];
         });
     }, [collapsedGroups, filtered, nodes]);
+    const rowVirtualizer = useVirtualizer({
+        count: treeRows.length,
+        getScrollElement: () => listRef.current,
+        estimateSize: () => 52,
+        overscan: 8,
+    });
 
     const exitSelect = () => {
         setSelectMode(false);
@@ -220,16 +229,17 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
             <div className="px-3 pb-2.5">
                 <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+            <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 {treeRows.length ? (
-                    <div className="space-y-1.5">
-                        {treeRows.map(({ node, depth, hasChildren }) => {
+                    <div className="relative w-full" style={{ height: rowVirtualizer.getTotalSize() }}>
+                        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                            const { node, depth, hasChildren } = treeRows[virtualRow.index];
                             const Icon = NODE_TYPE_ICON[node.type] || FileText;
                             const isImage = node.type === CanvasNodeType.Image && node.metadata?.content;
                             const isChecked = checked.has(node.id);
                             const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
                             return (
-                                <div key={node.id} className={cn("group relative flex items-center rounded-lg transition", depth && "ml-5", active ? "" : "hover:bg-black/5 dark:hover:bg-white/5")} style={active ? { background: theme.toolbar.activeBg } : undefined}>
+                                <div key={node.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className={cn("group absolute left-0 top-0 flex w-full items-center rounded-lg transition", depth && "ml-5", active ? "" : "hover:bg-black/5 dark:hover:bg-white/5")} style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)`, ...(active ? { background: theme.toolbar.activeBg } : {}) }}>
                                     {depth ? <span className="pointer-events-none absolute -left-3 top-[calc(-50%-0.4rem)] h-[calc(100%+0.4rem)] w-3 rounded-bl-md border-b border-l opacity-45" style={{ borderColor: theme.node.stroke }} /> : null}
                                     {node.type === CanvasNodeType.Group && hasChildren ? (
                                         <button type="button" onClick={() => setCollapsedGroups((prev) => (prev.has(node.id) ? new Set([...prev].filter((id) => id !== node.id)) : new Set(prev).add(node.id)))} className="ml-1 grid size-6 shrink-0 place-items-center opacity-55 transition hover:opacity-100" aria-label={node.title}>
@@ -239,7 +249,7 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
                                     <button type="button" onClick={() => (selectMode ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.sidePanel.focusNode")}>
                                         {selectMode ? <CheckMark checked={isChecked} theme={theme} /> : null}
                                         <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
-                                            {isImage ? <img src={node.metadata!.content} alt={node.title} className="size-full object-cover" /> : <Icon className="size-5 opacity-60" />}
+                                            {isImage ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
                                         </span>
                                         <span className="min-w-0 flex-1 space-y-0.5">
                                             <span className="block truncate text-sm font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
@@ -284,6 +294,30 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
     );
 }
 
+function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
+    const [url, setUrl] = useState("");
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+    const content = node.metadata?.content || "";
+    const storageKey = node.metadata?.storageKey;
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!content && !storageKey) {
+            setUrl("");
+            return;
+        }
+        resolveImageUrl(storageKey, content).then((resolved) => {
+            if (!cancelled) setUrl(resolved);
+        }).catch(() => {
+            if (!cancelled) setUrl("");
+        });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, content, storageKey]);
+
+    return url ? <img src={url} alt={node.title} className="size-full object-cover" /> : <ImageIcon className="size-5 opacity-60" />;
+}
+
 function CheckMark({ checked, theme }: { checked: boolean; theme: CanvasTheme }) {
     return (
         <span className="grid size-4 shrink-0 place-items-center rounded border transition" style={{ borderColor: checked ? theme.toolbar.activeText : theme.node.stroke, background: checked ? theme.toolbar.activeText : "transparent" }}>
@@ -299,13 +333,17 @@ function CheckMark({ checked, theme }: { checked: boolean; theme: CanvasTheme })
 const ASSET_GROUPS: { kind: AssetKind; icon: typeof Square }[] = [
     { kind: "image", icon: ImageIcon },
     { kind: "video", icon: Video },
+    { kind: "audio", icon: Music2 },
     { kind: "text", icon: FileText },
+    { kind: "character", icon: User },
 ];
 
 function buildInsertPayload(asset: Asset): InsertAssetPayload {
     if (asset.kind === "text") return { kind: "text", content: asset.data.content, title: asset.title };
     if (asset.kind === "video") return { kind: "video", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, width: asset.data.width, height: asset.data.height };
-    return { kind: "image", dataUrl: asset.data.dataUrl, storageKey: asset.data.storageKey, title: asset.title };
+    if (asset.kind === "audio") return { kind: "audio", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, bytes: asset.data.bytes, mimeType: asset.data.mimeType, durationMs: asset.data.durationMs };
+    if (asset.kind === "character") return { kind: "character", title: asset.title, images: asset.data.images };
+    return { kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title };
 }
 
 const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onInsert: (payload: InsertAssetPayload) => void; theme: CanvasTheme }) {
@@ -316,7 +354,8 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
     const removeAsset = useAssetStore((state) => state.removeAsset);
     const [keyword, setKeyword] = useState("");
     const [tagFilter, setTagFilter] = useState<string>("all");
-    const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+    // 默认全折叠，避免打开侧栏时被一堆自动展开的内容刷屏；用户手动展开过的会写入 setCollapsed 记录下来
+    const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => Object.fromEntries(ASSET_GROUPS.map((group) => [group.kind, true])));
     const [uploading, setUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -425,8 +464,40 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
 
 function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: CanvasTheme; onInsert: () => void; onRemove: () => void }) {
     const { t } = useTranslation();
+    const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
+        if (asset.kind === "text") return;
+        // 角色资产：拖到画布生成 Character 节点，拖到 H3 ref 槽按角色组拆 outfit + voice。
+        if (asset.kind === "character") {
+            const ref = {
+                type: "character",
+                kind: "character",
+                name: asset.title,
+                characterAssetId: asset.id,
+                characterName: asset.data.name || asset.title,
+                characterDescription: asset.data.description,
+                characterImages: asset.data.images,
+                voice: asset.data.voice,
+                voiceName: asset.data.voiceName,
+                voiceAssetId: asset.data.voiceAssetId,
+            };
+            const payload = JSON.stringify(ref);
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);
+            event.dataTransfer.setData("application/json", payload);
+            event.dataTransfer.setData("text/plain", payload);
+            return;
+        }
+        const ref = asset.kind === "image"
+            ? { url: asset.data.dataUrl, dataUrl: asset.data.dataUrl, type: "image", kind: "image", name: asset.title, storageKey: asset.data.storageKey }
+            : { url: asset.data.url, type: asset.kind, kind: asset.kind, name: asset.title, storageKey: asset.data.storageKey };
+        const payload = JSON.stringify(ref);
+        event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);
+        event.dataTransfer.setData("application/json", payload);
+        event.dataTransfer.setData("text/plain", payload);
+    };
     return (
-        <div className="group relative aspect-square overflow-hidden rounded-xl border transition duration-200 hover:-translate-y-0.5 hover:shadow-lg" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
+        <div draggable={asset.kind !== "text"} onDragStart={handleDragStart} className="group relative aspect-square overflow-hidden rounded-xl border transition duration-200 hover:-translate-y-0.5 hover:shadow-lg" style={{ borderColor: theme.node.stroke, background: theme.node.panel, cursor: asset.kind === "text" ? undefined : "grab" }}>
             <AssetCover asset={asset} />
             <div className="absolute inset-0 flex items-center justify-center gap-2.5 opacity-0 transition duration-200 group-hover:opacity-100">
                 <button
@@ -451,13 +522,52 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
     );
 }
 
+function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }> }) {
+    const { t } = useTranslation();
+    const [covers, setCovers] = useState<string[]>([]);
+    useEffect(() => {
+        let cancelled = false;
+        const urls: string[] = [];
+        const storageKeys: string[] = [];
+        const addUrl = (url?: string) => { if (url && !urls.includes(url)) urls.push(url); };
+        const addStorageKey = (key?: string) => { if (key && !storageKeys.includes(key)) storageKeys.push(key); };
+        addUrl(asset.coverUrl);
+        for (const image of asset.data.images) {
+            addUrl(image.url);
+            addStorageKey(image.storageKey);
+        }
+        Promise.all(storageKeys.map((key) => resolveImageUrl(key))).then((resolved) => {
+            if (!cancelled) setCovers([...urls, ...resolved.filter((url): url is string => Boolean(url) && !urls.includes(url))]);
+        }).catch(() => { if (!cancelled) setCovers(urls); });
+        return () => { cancelled = true; };
+    }, [asset.id, asset.coverUrl, asset.data.images]);
+    const count = asset.data.images.length;
+    if (covers.length) return <img src={covers[0]} alt="" onError={() => setCovers((current) => current.slice(1))} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+    return (
+        <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
+            <div className="text-[11px] font-medium text-stone-500 dark:text-stone-400">{t("assets.kinds.character")}</div>
+            <div className="text-[10px] text-stone-400 dark:text-stone-500">{count} {count === 1 ? "image" : "images"}</div>
+        </div>
+    );
+}
+
 function AssetCover({ asset }: { asset: Asset }) {
+    const { t } = useTranslation();
     if (asset.kind === "text") return <div className="size-full overflow-hidden whitespace-pre-wrap break-words p-2.5 text-[11px] leading-snug opacity-80">{asset.data.content}</div>;
     if (asset.kind === "video") {
         if (asset.coverUrl) return <img src={asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
         return <video src={`${asset.data.url}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     }
-    return <img src={asset.coverUrl || asset.data.dataUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+    if (asset.kind === "character") return <CharacterCover asset={asset} />;
+    if (asset.kind === "audio") {
+        return (
+            <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
+                <div className="text-[11px] font-medium text-stone-500 dark:text-stone-400">{t("assets.kinds.audio")}</div>
+                {asset.data.durationMs ? <div className="text-[10px] text-stone-400 dark:text-stone-500">{Math.round(asset.data.durationMs / 1000)}s</div> : null}
+            </div>
+        );
+    }
+    return <img src={asset.coverUrl || (asset as ImageAsset).data.dataUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
 }
 
 // ---------------------------------------------------------------------------
@@ -469,9 +579,18 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
     const { t } = useTranslation();
     const sources = usePromptSourceStore((state) => state.sources);
     const enabledSources = useMemo(() => sources.filter((source) => source.enabled), [sources]);
+    const customPrompts = useCustomPromptsStore((state) => state.prompts);
+    const customPromptItems = useMemo(() => withCustomPromptMeta(customPrompts), [customPrompts]);
+    const customLoaded = useCustomPromptsStore((state) => state.loaded);
+    const loadCustomPrompts = useCustomPromptsStore((state) => state.load);
     const [keyword, setKeyword] = useState("");
     const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+    const [customOpen, setCustomOpen] = useState(true);
     const [detail, setDetail] = useState<Prompt | null>(null);
+
+    useEffect(() => {
+        if (!customLoaded) void loadCustomPrompts().catch(() => message.error(t("prompts.loadFailed")));
+    }, [customLoaded, loadCustomPrompts, message, t]);
 
     const copyPrompt = async (prompt: string) => {
         try {
@@ -489,6 +608,7 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 <div className="space-y-1">
+                    {customLoaded ? <PromptItemsGroup items={customPromptItems} keyword={keyword} open={customOpen} sourceName={CUSTOM_PROMPTS_CATEGORY} icon={Sparkles} theme={theme} onToggle={() => setCustomOpen((value) => !value)} onInsert={onInsert} onView={setDetail} emptyText={t("canvas.sidePanel.customEmpty")} /> : null}
                     {enabledSources.length ? enabledSources.map((source) => (
                         <PromptSourceGroup
                             key={source.id}
@@ -501,7 +621,8 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
                             onInsert={onInsert}
                             onView={setDetail}
                         />
-                    )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("canvas.sidePanel.noPrompts")} className="pt-12" />}
+                    )) : null}
+                    {!enabledSources.length && customPrompts.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("canvas.sidePanel.noPrompts")} className="pt-12" /> : null}
                 </div>
             </div>
             <PromptDetailDialog prompt={detail} onClose={() => setDetail(null)} onCopy={(prompt) => void copyPrompt(prompt)} />
@@ -533,33 +654,60 @@ function PromptSourceGroup({
     const showResults = open || !!keyword.trim();
     const query = useQuery({ queryKey: ["side-panel-prompts", sourceId], queryFn: () => fetchSourcePrompts(sourceId), enabled: showResults, staleTime: 1000 * 60 * 60 });
 
+    return <PromptItemsGroup items={query.data || []} keyword={keyword} open={open} sourceName={sourceName} icon={BookOpen} theme={theme} onToggle={onToggle} onInsert={onInsert} onView={onView} loading={query.isLoading} error={query.isError} onRetry={() => void query.refetch()} emptyText={t("canvas.sidePanel.sourceEmpty")} />;
+}
+
+function PromptItemsGroup({
+    items,
+    keyword,
+    open,
+    sourceName,
+    icon: Icon,
+    theme,
+    onToggle,
+    onInsert,
+    onView,
+    loading = false,
+    error = false,
+    onRetry,
+    emptyText,
+}: {
+    items: Prompt[];
+    keyword: string;
+    open: boolean;
+    sourceName: string;
+    icon: LucideIcon;
+    theme: CanvasTheme;
+    onToggle: () => void;
+    onInsert: (payload: InsertAssetPayload) => void;
+    onView: (prompt: Prompt) => void;
+    loading?: boolean;
+    error?: boolean;
+    onRetry?: () => void;
+    emptyText: string;
+}) {
+    const { t } = useTranslation();
+    const showResults = open || !!keyword.trim();
     const filtered = useMemo(() => {
-        const items = query.data || [];
         const q = keyword.trim().toLowerCase();
         if (!q) return items;
-        return items.filter((item) => [item.title, item.prompt, ...item.tags].join(" ").toLowerCase().includes(q));
-    }, [query.data, keyword]);
-
+        return items.filter((item) => [item.title, item.prompt, item.description, ...item.tags].join(" ").toLowerCase().includes(q));
+    }, [items, keyword]);
     const insertPrompt = (item: Prompt) => onInsert({ kind: "text", content: item.prompt, title: item.title });
-
     return (
         <div>
             <button type="button" onClick={onToggle} className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-xs font-semibold opacity-75 transition hover:opacity-100">
                 <ChevronRight className={cn("size-3.5 transition-transform", showResults && "rotate-90")} />
-                <BookOpen className="size-3.5" />
+                <Icon className="size-3.5" />
                 <span className="min-w-0 flex-1 truncate">{sourceName}</span>
-                {showResults && query.isSuccess ? <span className="opacity-50">{filtered.length}</span> : null}
+                {!loading && !error && items.length > 0 ? <span className="opacity-50">{filtered.length}</span> : null}
             </button>
             {showResults ? (
                 <div className="px-1 pb-2 pt-1">
-                    {query.isLoading ? (
-                        <div className="flex justify-center py-6">
-                            <Spin size="small" />
-                        </div>
-                    ) : query.isError ? (
-                        <button type="button" onClick={() => void query.refetch()} className="block w-full py-4 text-center text-xs text-red-500 opacity-80 transition hover:opacity-100">
-                            {t("canvas.sidePanel.loadFailedRetry")}
-                        </button>
+                    {loading ? (
+                        <div className="flex justify-center py-6"><Spin size="small" /></div>
+                    ) : error ? (
+                        <button type="button" onClick={onRetry} className="block w-full py-4 text-center text-xs text-red-500 opacity-80 transition hover:opacity-100">{t("canvas.sidePanel.loadFailedRetry")}</button>
                     ) : filtered.length ? (
                         <div className="space-y-1.5">
                             {filtered.map((item) => (
@@ -567,7 +715,7 @@ function PromptSourceGroup({
                             ))}
                         </div>
                     ) : (
-                        <div className="py-4 text-center text-xs opacity-40">{keyword.trim() ? t("canvas.sidePanel.noMatchingPrompts") : t("canvas.sidePanel.sourceEmpty")}</div>
+                        <div className="py-4 text-center text-xs opacity-40">{keyword.trim() ? t("canvas.sidePanel.noMatchingPrompts") : emptyText}</div>
                     )}
                 </div>
             ) : null}

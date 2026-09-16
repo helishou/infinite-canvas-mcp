@@ -2,7 +2,7 @@ import { defaultConfig, resolveModelForCapability, type AiConfig } from "@/store
 import i18n from "@/i18n";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
-import { imageMetadata, referenceUrl } from "@/lib/canvas/canvas-node-factory";
+import { referenceUrl } from "@/lib/canvas/canvas-node-factory";
 import type { NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
@@ -47,12 +47,84 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
         nodes.map(async (node) => {
             const metadata = node.metadata;
             const content = metadata?.content;
+            const hydrateH3Ref = async <T extends { url?: string; dataUrl?: string; storageKey?: string; type?: string }>(ref: T) => {
+                const fallback = ref.url || ref.dataUrl || "";
+                if (!ref.storageKey) {
+                    if (!/^blob:|^data:/i.test(fallback)) return ref;
+                    try {
+                        const stored = await uploadImage(fallback);
+                        return { ...ref, url: stored.url, ...(ref.dataUrl !== undefined ? { dataUrl: stored.url } : {}), storageKey: stored.storageKey };
+                    } catch {
+                        return ref;
+                    }
+                }
+                const url = ref.type?.startsWith("image") || ref.dataUrl !== undefined
+                    ? await resolveImageUrl(ref.storageKey, fallback)
+                    : await resolveMediaUrl(ref.storageKey, fallback);
+                return { ...ref, url, ...(ref.dataUrl !== undefined ? { dataUrl: url } : {}) };
+            };
+            const extendedMetadata = metadata as (CanvasNodeMetadata & Record<string, unknown>) | undefined;
+            const isH3Node = Boolean(extendedMetadata && (node.type === CanvasNodeType.Video || node.type === "minimax-h3:video" || Array.isArray(extendedMetadata.segments) || (extendedMetadata.h3Refs && typeof extendedMetadata.h3Refs === "object")));
+            if (isH3Node && extendedMetadata) {
+                const segments = Array.isArray(extendedMetadata.segments) ? await Promise.all(extendedMetadata.segments.map(async (segment: unknown) => {
+                    if (!segment || typeof segment !== "object") return segment;
+                    const value = segment as Record<string, unknown>;
+                    const refs = Array.isArray(value.refItems) ? await Promise.all(value.refItems.map((ref) => ref && typeof ref === "object" ? hydrateH3Ref(ref as { url?: string; dataUrl?: string; storageKey?: string; type?: string }) : ref)) : value.refItems;
+                    const grouped = value.refs && typeof value.refs === "object" ? Object.fromEntries(await Promise.all(Object.entries(value.refs as Record<string, unknown>).map(async ([kind, list]) => [kind, Array.isArray(list) ? await Promise.all(list.map((ref) => ref && typeof ref === "object" ? hydrateH3Ref({ ...(ref as Record<string, unknown>), type: kind } as { url?: string; dataUrl?: string; storageKey?: string; type?: string }) : ref)) : list]))) : value.refs;
+                    const result = typeof value.result === "string" && value.resultStorageKey
+                        ? await resolveMediaUrl(String(value.resultStorageKey), value.result)
+                        : value.result;
+                    const results = Array.isArray(value.results)
+                        ? await Promise.all(value.results.map((item) => item && typeof item === "object" ? hydrateH3Ref({ ...(item as Record<string, unknown>), type: "video" } as { url?: string; dataUrl?: string; storageKey?: string; type?: string }) : item))
+                        : value.results;
+                    return { ...value, ...(Array.isArray(refs) ? { refItems: refs } : {}), ...(grouped ? { refs: grouped } : {}), ...(result !== undefined ? { result } : {}), ...(Array.isArray(results) ? { results } : {}) };
+                })) : extendedMetadata.segments;
+                const h3Refs = extendedMetadata.h3Refs && typeof extendedMetadata.h3Refs === "object" ? Object.fromEntries(await Promise.all(Object.entries(extendedMetadata.h3Refs as Record<string, unknown>).map(async ([kind, list]) => [kind, Array.isArray(list) ? await Promise.all(list.map((ref) => ref && typeof ref === "object" ? hydrateH3Ref({ ...(ref as Record<string, unknown>), type: kind } as { url?: string; dataUrl?: string; storageKey?: string; type?: string }) : ref)) : list]))) : extendedMetadata.h3Refs;
+                const materials = Array.isArray(extendedMetadata.materials)
+                    ? await Promise.all(extendedMetadata.materials.map((item) => item && typeof item === "object" ? hydrateH3Ref({ ...(item as Record<string, unknown>), type: "video" } as { url?: string; dataUrl?: string; storageKey?: string; type?: string }) : item))
+                    : extendedMetadata.materials;
+                const outputContent = extendedMetadata.storageKey
+                    ? await resolveMediaUrl(String(extendedMetadata.storageKey), content || "")
+                    : content;
+                return { ...node, metadata: { ...metadata, ...(outputContent !== undefined ? { content: outputContent } : {}), ...(Array.isArray(segments) ? { segments } : {}), ...(h3Refs ? { h3Refs } : {}), ...(Array.isArray(materials) ? { materials } : {}) } };
+            }
             if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && metadata?.storageKey) return { ...node, metadata: { ...metadata, content: await resolveMediaUrl(metadata.storageKey, content) } };
-            if (node.type !== CanvasNodeType.Image || !metadata || !content) return node;
-            const images = await Promise.all((metadata.images || []).map(async (image) => (image.content ? { ...image, content: await resolveImageUrl(image.storageKey, image.content) } : image)));
-            if (metadata.storageKey) return { ...node, metadata: { ...metadata, content: await resolveImageUrl(metadata.storageKey, content), images } };
-            if (!content.startsWith("data:image/")) return node;
-            return { ...node, metadata: { ...metadata, ...imageMetadata(await uploadImage(content)) } };
+            if (node.type !== CanvasNodeType.Image || !metadata) return node;
+
+            const hydrateImage = async <T extends { content?: string; storageKey?: string; mimeType?: string; bytes?: number; naturalWidth?: number | null; naturalHeight?: number | null }>(image: T): Promise<T> => {
+                const raw = image.content || "";
+                if (!raw && !image.storageKey) return image;
+                const resolved = await resolveImageUrl(image.storageKey, raw);
+                if (!resolved) return image;
+                if (resolved === raw && !raw.startsWith("data:image/")) return image;
+                if (image.storageKey) return { ...image, content: resolved };
+
+                // 历史 MCP 节点保存过 ComfyUI /view 临时地址。首次打开时把它落到总后台媒体库，
+                // 后续节点只使用稳定的 storageKey，不再依赖 ComfyUI 临时文件。
+                if (resolved !== raw || raw.startsWith("data:image/")) {
+                    try {
+                        const stored = await uploadImage(resolved, { category: "library" });
+                        return { ...image, content: stored.url, storageKey: stored.storageKey, mimeType: stored.mimeType, bytes: stored.bytes, naturalWidth: stored.width, naturalHeight: stored.height };
+                    } catch {
+                        return { ...image, content: resolved };
+                    }
+                }
+                return { ...image, content: resolved };
+            };
+
+            const hydratedRoot = content ? await hydrateImage({ content, storageKey: metadata.storageKey, mimeType: metadata.mimeType, bytes: metadata.bytes, naturalWidth: metadata.naturalWidth, naturalHeight: metadata.naturalHeight }) : null;
+            const images = await Promise.all((metadata.images || []).map((image) => hydrateImage(image)));
+            const rootChanged = Boolean(hydratedRoot && (hydratedRoot.content !== content || hydratedRoot.storageKey !== metadata.storageKey || hydratedRoot.mimeType !== metadata.mimeType || hydratedRoot.bytes !== metadata.bytes || hydratedRoot.naturalWidth !== metadata.naturalWidth || hydratedRoot.naturalHeight !== metadata.naturalHeight));
+            const hasImageChanges = images.some((image, index) => image !== metadata.images?.[index]);
+            if (!rootChanged && !hasImageChanges) return node;
+            return {
+                ...node,
+                metadata: {
+                    ...metadata,
+                    ...(rootChanged && hydratedRoot ? { ...hydratedRoot } : {}),
+                    ...(metadata.images ? { images } : {}),
+                },
+            };
         }),
     );
 }
@@ -109,25 +181,36 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node?.metadata?.audioInstructions || config.audioInstructions || defaultConfig.audioInstructions,
-        count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
+        count: String(node?.metadata?.count || (mode === "image" ? config.count || config.canvasImageCount : config.count) || defaultConfig.count),
     };
 }
 
-export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
-    return nodes.map((node) =>
-        node.metadata?.status === "loading"
-            ? {
-                  ...node,
-                  metadata: {
-                      ...node.metadata,
-                      status: "error" as const,
-                      errorDetails: i18n.t("canvas.generation.interrupted"),
-                      images: node.metadata.images?.map((image) => (image.status === "loading" ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : image)),
-                      texts: node.metadata.texts?.map((text) => (text.status === "loading" ? { ...text, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : text)),
-                  },
-              }
-            : node,
-    );
+export function resetInterruptedGeneration(nodes: CanvasNodeData[], activeNodeIds?: ReadonlySet<string>) {
+    // 之前会把「loading 但前端没拿到 runtimeTaskId」的节点直接判成 error 并提示
+    // 「页面刷新后生成已中断」。但生成是后端跑的，刷新瞬间 / 网络抖动 / 用户提前切走
+    // 都可能让前端没拿到 ID，**后端任务大概率还在跑**——此时把节点标为 error 会让用户
+    // 误以为失败、并误点「重试」触发第二次任务，占用 ComfyUI 队列还可能写出覆盖。现改为
+    // 清回 idle，让用户按需手动重新触发；带 runtimeTaskId 的节点交给 project.tsx 的
+    // 轮询恢复逻辑继续等后端结果。当前页面仍持有 AbortController 的直连请求也必须保留，
+    // 避免画布同步 revision 刷新时把正在生成的节点误判成刷新前遗留状态。
+    return nodes.map((node) => {
+        if (node.metadata?.status !== "loading" || node.metadata.runtimeTaskId || activeNodeIds?.has(node.id) || isPersistentH3Node(node)) return node;
+        const { runtimeTaskId: _runtimeTaskId, errorDetails: _errorDetails, ...rest } = node.metadata;
+        return {
+            ...node,
+            metadata: {
+                ...rest,
+                status: "idle" as const,
+                images: node.metadata.images?.map((image) => (image.status === "loading" ? { ...image, status: "idle" as const, errorDetails: undefined } : image)),
+                texts: node.metadata.texts?.map((text) => (text.status === "loading" ? { ...text, status: "idle" as const, errorDetails: undefined } : text)),
+            },
+        };
+    });
+}
+
+function isPersistentH3Node(node: CanvasNodeData) {
+    const metadata = node.metadata as (CanvasNodeMetadata & Record<string, unknown>) | undefined;
+    return Boolean(metadata && (node.type === "minimax-h3:video" || Array.isArray(metadata.segments) || (metadata.h3Refs && typeof metadata.h3Refs === "object")));
 }
 
 export function isGenerationCanceled(error: unknown) {

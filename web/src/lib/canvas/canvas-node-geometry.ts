@@ -18,7 +18,7 @@ export function findGroupDropTarget(movedIds: Set<string>, nodes: CanvasNodeData
     if (!movingNodes.length) return null;
     return (
         [...nodes].reverse().find((group) => {
-            if (group.type !== CanvasNodeType.Group || movedIds.has(group.id)) return false;
+            if (group.type !== CanvasNodeType.Group || movedIds.has(group.id) || group.metadata?.groupLocked) return false;
             return movingNodes.some((node) => {
                 const centerX = node.position.x + node.width / 2;
                 const centerY = node.position.y + node.height / 2;
@@ -54,6 +54,93 @@ export function findContainingGroupId(node: CanvasNodeData, nodes: CanvasNodeDat
             .find((group) => group.type === CanvasNodeType.Group && group.id !== node.id && centerX >= group.position.x && centerX <= group.position.x + group.width && centerY >= group.position.y && centerY <= group.position.y + group.height)?.id ||
         undefined
     );
+}
+
+/** 在锚点周围按近到远寻找不与现有节点相交的位置，供生成结果节点落点使用。 */
+export function findOpenNodePosition(nodes: CanvasNodeData[], anchor: CanvasNodeData, size: { width: number; height: number }, gap = 96, ignoreIds = new Set<string>()) {
+    const centerX = anchor.position.x + anchor.width / 2;
+    const centerY = anchor.position.y + anchor.height / 2;
+    const stepX = anchor.width / 2 + size.width / 2 + gap;
+    const stepY = anchor.height / 2 + size.height / 2 + gap;
+    const intersects = (position: { x: number; y: number }) => nodes.some((node) => {
+        if (ignoreIds.has(node.id)) return false;
+        return position.x < node.position.x + node.width + gap / 3
+            && position.x + size.width + gap / 3 > node.position.x
+            && position.y < node.position.y + node.height + gap / 3
+            && position.y + size.height + gap / 3 > node.position.y;
+    });
+    for (let ring = 1; ring <= 12; ring += 1) {
+        const checked = new Set<string>();
+        const check = (x: number, y: number) => {
+            const key = `${x}:${y}`;
+            if (checked.has(key)) return null;
+            checked.add(key);
+            const position = { x: centerX + x * stepX - size.width / 2, y: centerY + y * stepY - size.height / 2 };
+            return intersects(position) ? null : position;
+        };
+        // 保持生成流从源节点向右展开；右侧被占用后才依次尝试左、下、上和对角区域。
+        const preferred: Array<[number, number]> = [[ring, 0], [-ring, 0], [0, ring], [0, -ring], [ring, ring], [ring, -ring], [-ring, ring], [-ring, -ring]];
+        for (const [x, y] of preferred) {
+            const position = check(x, y);
+            if (position) return position;
+        }
+        for (let y = -ring; y <= ring; y += 1) {
+            for (let x = -ring; x <= ring; x += 1) {
+                if (Math.max(Math.abs(x), Math.abs(y)) !== ring) continue;
+                const position = check(x, y);
+                if (position) return position;
+            }
+        }
+    }
+    return { x: anchor.position.x + anchor.width + gap, y: centerY - size.height / 2 };
+}
+
+/**
+ * 在锚点右侧固定方向展开：结果节点始终落在锚点右边界 + gap 起，沿垂直方向向下、再向上
+ * 逐行寻找不相交位置。绝不跳到锚点左侧，专用于图片生成输出节点落点（用户要求固定右侧）。
+ */
+export function findRightSidePosition(nodes: CanvasNodeData[], anchor: CanvasNodeData, size: { width: number; height: number }, gap = 96, ignoreIds = new Set<string>()) {
+    const startX = anchor.position.x + anchor.width + gap;
+    const centerY = anchor.position.y + anchor.height / 2;
+    const intersects = (position: { x: number; y: number }) =>
+        nodes.some((node) => {
+            if (ignoreIds.has(node.id)) return false;
+            return position.x < node.position.x + node.width + gap / 3
+                && position.x + size.width + gap / 3 > node.position.x
+                && position.y < node.position.y + node.height + gap / 3
+                && position.y + size.height + gap / 3 > node.position.y;
+        });
+    const rows: number[] = [centerY - size.height / 2];
+    for (let r = 1; r <= 60; r += 1) {
+        rows.push(centerY + r * (size.height + gap) - size.height / 2);
+        rows.push(centerY - r * (size.height + gap) - size.height / 2);
+    }
+    for (const y of rows) {
+        const position = { x: startX, y };
+        if (!intersects(position)) return position;
+    }
+    return { x: startX, y: centerY - size.height / 2 };
+}
+
+export function keepNodesInLockedGroups(movedIds: Set<string>, originalNodes: CanvasNodeData[], nextNodes: CanvasNodeData[]) {
+    const lockedParents = new Map<string, string>();
+    originalNodes.forEach((node) => {
+        const groupId = node.metadata?.groupId;
+        const group = groupId ? originalNodes.find((candidate) => candidate.id === groupId) : undefined;
+        if (groupId && group?.type === CanvasNodeType.Group && group.metadata?.groupLocked) lockedParents.set(node.id, groupId);
+    });
+    return nextNodes.map((node) => {
+        const groupId = lockedParents.get(node.id);
+        if (!movedIds.has(node.id) || !groupId) return node;
+        const group = nextNodes.find((candidate) => candidate.id === groupId);
+        if (!group) return node;
+        const pad = 24;
+        const left = group.position.x + pad;
+        const top = group.position.y + pad;
+        const right = Math.max(left, group.position.x + group.width - pad - node.width);
+        const bottom = Math.max(top, group.position.y + group.height - pad - node.height);
+        return { ...node, position: { x: Math.max(left, Math.min(right, node.position.x)), y: Math.max(top, Math.min(bottom, node.position.y)) }, metadata: { ...node.metadata, groupId } };
+    });
 }
 
 export function getConnectionTargetAnchor(node: CanvasNodeData, current: ConnectionHandle) {

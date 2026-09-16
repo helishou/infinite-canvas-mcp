@@ -1,0 +1,13 @@
+{
+  "name": "@basketikun/canvas-proxy",
+  "version": "0.1.0",
+  "description": "Local forwarding proxy for Infinite Canvas provider requests.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "bin": { "canvas-proxy": "index.js" },
+  "files": ["index.js"],
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=18" },
+  "publishConfig": { "access": "public" }
+}

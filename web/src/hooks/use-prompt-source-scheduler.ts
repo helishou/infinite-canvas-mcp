@@ -9,9 +9,11 @@ const CHECK_INTERVAL_MS = 60_000;
 /** Periodically update only the sources whose last successful refresh is due. */
 export function usePromptSourceScheduler() {
     const queryClient = useQueryClient();
+    const hydrated = usePromptSourceStore((state) => state.hydrated);
     const intervalMinutes = usePromptSourceStore((state) => state.schedule.intervalMinutes);
 
     useEffect(() => {
+        if (!hydrated) return;
         if (!intervalMinutes) return;
         let running = false;
         const tick = async () => {
@@ -36,5 +38,5 @@ export function usePromptSourceScheduler() {
         void tick();
         const timer = window.setInterval(() => void tick(), CHECK_INTERVAL_MS);
         return () => window.clearInterval(timer);
-    }, [intervalMinutes, queryClient]);
+    }, [hydrated, intervalMinutes, queryClient]);
 }

@@ -1,4 +1,4 @@
-import { App, Button, Form, Input, Modal, Progress, Select, Tabs } from "antd";
+import { App, Button, Form, Input, Modal, Progress, Select, Spin, Tabs } from "antd";
 import type { TFunction } from "i18next";
 import { Cloud, Download, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -6,7 +6,9 @@ import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
+import { ConfigLocalProxy } from "@/components/layout/config-local-proxy";
 import { ConfigPromptSources } from "@/components/layout/config-prompt-sources";
+import { ConfigComfyui } from "@/components/layout/config-comfyui";
 import { ConfigLocalStorage } from "@/components/layout/config-local-storage";
 import type { AppLocale } from "@/i18n";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
@@ -58,7 +60,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const [webdavDomainProgress, setWebdavDomainProgress] = useState(createWebdavDomainProgress);
     const config = useConfigStore((state) => state.config);
     const webdav = useConfigStore((state) => state.webdav);
+    const hydrated = useConfigStore((state) => state.hydrated);
     const updateConfig = useConfigStore((state) => state.updateConfig);
+    const replaceConfig = useConfigStore((state) => state.replaceConfig);
     const updateWebdavConfig = useConfigStore((state) => state.updateWebdavConfig);
     const shouldPromptContinue = useConfigStore((state) => state.shouldPromptContinue);
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
@@ -68,12 +72,14 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const locale = i18n.resolvedLanguage as AppLocale;
     useEffect(() => setActiveTab(initialTab), [initialTab]);
 
+    if (!hydrated) return <div className="flex min-h-60 items-center justify-center"><Spin /></div>;
+
     const saveConfig = (nextConfig: AiConfig) => {
-        (Object.keys(nextConfig) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, nextConfig[key]));
+        replaceConfig(nextConfig);
     };
 
     const finishConfig = () => {
-        const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.apiKey.trim() && channel.models.length);
+        const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.models.length && (channel.kind === "comfyui" || channel.apiKey.trim()));
         setConfigDialogOpen(false);
         if (!ready) return;
         message.success(t(shouldPromptContinue ? "config.savedContinue" : "config.saved"));
@@ -95,6 +101,15 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
 
     const addChannel = () => {
         const channel = createModelChannel({ name: t("config.channels.numberedName", { count: config.channels.length + 1 }) });
+        updateChannels([...config.channels, channel]);
+        setEditingChannelId(channel.id);
+    };
+    const addComfyChannel = () => {
+        const channel = createModelChannel({ name: "本地 ComfyUI", kind: "comfyui", baseUrl: "http://127.0.0.1:8188", models: [
+            { name: "z-image", capability: "image" },
+            { name: "flux2-klein", capability: "image" },
+            { name: "flashvsr-1.1", capability: "video" },
+        ] });
         updateChannels([...config.channels, channel]);
         setEditingChannelId(channel.id);
     };
@@ -189,6 +204,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                     <Button type="primary" icon={<Plus className="size-4" />} onClick={addChannel}>
                                         {t("config.channels.add")}
                                     </Button>
+                                    <Button icon={<Wifi className="size-4" />} onClick={addComfyChannel}>添加本地 ComfyUI</Button>
                                 </div>
                                 <div className="space-y-2">
                                     {config.channels.map((channel) => (
@@ -196,7 +212,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                             <div className="min-w-0">
                                                 <div className="truncate text-sm font-semibold">{channel.name || t("config.channels.unnamed")}</div>
                                                 <div className="mt-1 truncate text-xs text-stone-500">
-                                                    {apiFormatLabel(channel.apiFormat)} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.baseUrl || t("config.channels.missingUrl")}
+                                                    {(channel.kind === "comfyui" ? "本地 ComfyUI" : apiFormatLabel(channel.apiFormat))} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.baseUrl || t("config.channels.missingUrl")}
                                                 </div>
                                             </div>
                                             <div className="flex shrink-0 gap-2">
@@ -210,6 +226,11 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 </div>
                             </div>
                         ),
+                    },
+                    {
+                        key: "local-proxy",
+                        label: t("config.tabs.localProxy"),
+                        children: <ConfigLocalProxy />,
                     },
                     {
                         key: "preferences",
@@ -260,6 +281,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 <Form.Item label={t("config.preferences.systemPrompt")} className="mb-0">
                                     <Input.TextArea rows={4} value={config.systemPrompt} placeholder={t("config.preferences.systemPromptPlaceholder")} onChange={(event) => updateConfig("systemPrompt", event.target.value)} />
                                 </Form.Item>
+                                <ConfigComfyui active={activeTab === "preferences"} />
                             </Form>
                         ),
                     },
@@ -386,6 +408,7 @@ function normalizeImageCount(value: string) {
 
 function apiFormatLabel(apiFormat: ApiCallFormat) {
     if (apiFormat === "gemini") return "Gemini";
+    if (apiFormat === "openai-chat") return "OpenAI Chat";
     return "OpenAI";
 }
 

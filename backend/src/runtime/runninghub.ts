@@ -1,0 +1,125 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import type { RuntimeTask } from "../db.js";
+import type { MediaStore, SettingStore, TaskStore } from "../stores/types.js";
+import type { BackendEventBus } from "../events.js";
+
+type RunningHubField = {
+    id?: string; nodeId?: string; fieldName?: string; fieldValue?: unknown; fieldType?: string;
+    label?: string; enabled?: boolean; required?: boolean;
+};
+type RunningHubConfig = {
+    baseUrl: string; apiKey: string; walletApiKey?: string; mode: "workflow" | "app";
+    workflowId?: string; appId?: string; fields?: RunningHubField[]; workflowJson?: unknown;
+    useWallet?: boolean; instanceType?: string;
+};
+const DEFAULT_URL = "https://www.runninghub.ai";
+
+export class RunningHubBackend {
+    private readonly controllers = new Map<string, AbortController>();
+    private readonly resuming = new Set<string>();
+    constructor(private readonly tasks: TaskStore, private readonly settings: SettingStore, private readonly events?: BackendEventBus, private readonly media?: MediaStore, private readonly onTaskTerminal?: (task: RuntimeTask) => void | Promise<void>) {}
+
+    getConfig(): RunningHubConfig {
+        const value = this.settings.get("runninghub.config");
+        const stored = value && typeof value === "object" ? value as Partial<RunningHubConfig> : {};
+        return { baseUrl: normalizeUrl(String(stored.baseUrl || DEFAULT_URL)), apiKey: String(stored.apiKey || ""), walletApiKey: String(stored.walletApiKey || ""), mode: stored.mode === "app" ? "app" : "workflow", workflowId: String(stored.workflowId || ""), appId: String(stored.appId || ""), fields: Array.isArray(stored.fields) ? stored.fields : [], workflowJson: stored.workflowJson, useWallet: stored.useWallet === true, instanceType: String(stored.instanceType || "") };
+    }
+    setConfig(patch: Partial<RunningHubConfig>) { const current = this.getConfig(); const next = { ...current, ...patch, baseUrl: normalizeUrl(String(patch.baseUrl ?? current.baseUrl)) }; this.settings.set("runninghub.config", next); return next; }
+    status() { const config = this.getConfig(); return { configured: Boolean((config.apiKey || config.walletApiKey) && (config.workflowId || config.appId)), url: config.baseUrl, mode: config.mode, hasApiKey: Boolean(config.apiKey || config.walletApiKey), workflowId: config.workflowId || "", appId: config.appId || "" }; }
+    async run(input: Record<string, unknown>, params: Record<string, unknown>, clientTaskId?: string, onCreated?: (task: RuntimeTask) => void | Promise<void>) { const existing = clientTaskId ? this.tasks.get(clientTaskId) : null; if (existing) return existing; const task = clientTaskId ? this.tasks.create(clientTaskId, "runninghub:minimax-h3", input, params) : this.tasks.create("runninghub:minimax-h3", input, params); await onCreated?.(task); const controller = new AbortController(); this.controllers.set(task.id, controller); void this.execute(task, controller).catch((error) => this.fail(task.id, error)); return task; }
+    resume(id: string) {
+        const task = this.tasks.get(id);
+        if (!task || task.kind !== "runninghub:minimax-h3" || !["queued", "running"].includes(task.status) || this.controllers.has(id) || this.resuming.has(id)) return;
+        const submitted = [...this.tasks.events(id)].reverse().find((event) => event.type === "submitted");
+        const remoteId = String(submitted?.payload?.taskId || "").trim();
+        if (!remoteId) {
+            this.fail(id, new Error("RunningHub 任务没有持久化远端 taskId，拒绝重复提交；请重新运行该片段"));
+            return;
+        }
+        const config = this.getConfig();
+        const useWallet = task.params.useWallet === true || config.useWallet === true;
+        const apiKey = useWallet ? config.walletApiKey : config.apiKey;
+        if (!apiKey) {
+            this.fail(id, new Error(useWallet ? "RunningHub 未配置账户余额 API Key" : "RunningHub 未配置 API Key"));
+            return;
+        }
+        const mode = String(submitted?.payload?.mode || task.params.runninghubMode || config.mode) === "app" ? "app" : "workflow";
+        const controller = new AbortController();
+        this.resuming.add(id);
+        this.controllers.set(id, controller);
+        void this.poll(task, controller, remoteId, apiKey, useWallet, mode)
+            .catch((error) => this.fail(id, error))
+            .finally(() => { this.controllers.delete(id); this.resuming.delete(id); });
+    }
+    cancel(id: string) { this.controllers.get(id)?.abort(); this.controllers.delete(id); const task = this.tasks.cancel(id); this.events?.publish({ type: "task.updated", entityId: id, payload: task }); void this.onTaskTerminal?.(task); return task; }
+
+    private async execute(task: RuntimeTask, controller: AbortController) {
+        const config = this.getConfig(); const useWallet = task.params.useWallet === true || config.useWallet === true; const apiKey = useWallet ? config.walletApiKey : config.apiKey;
+        if (!apiKey) throw new Error(useWallet ? "RunningHub 未配置账户余额 API Key" : "RunningHub 未配置 API Key");
+        const mode = String(task.params.runninghubMode || config.mode) === "app" ? "app" : "workflow";
+        const id = String((mode === "app" ? task.params.runninghubAppId || config.appId : task.params.runninghubWorkflowId || config.workflowId) || "").trim();
+        if (!id) throw new Error(mode === "app" ? "未配置 RunningHub AI 应用 ID" : "未配置 RunningHub 工作流 ID");
+        this.update(task.id, { status: "running", progress: 0.05 });
+        const refs = [...(Array.isArray(task.input.references) ? task.input.references : []), ...(Array.isArray(task.input.audios) ? task.input.audios : []), ...(typeof task.input.video === "string" ? [task.input.video] : [])].map(String);
+        const fields = Array.isArray(task.params.runninghubFields) && task.params.runninghubFields.length ? task.params.runninghubFields as RunningHubField[] : config.fields || [];
+        if (!fields.length) throw new Error("RunningHub 未配置参数字段，请先同步工作流参数");
+        const configured = task.params.runninghubParams && typeof task.params.runninghubParams === "object" ? task.params.runninghubParams as Record<string, unknown> : {};
+        const cursors = { image: 0, video: 0, audio: 0 }; const nodeInfoList: Array<Record<string, unknown>> = [];
+        for (const field of fields.filter((item) => item.enabled !== false)) {
+            if (!field.nodeId || !field.fieldName) continue;
+            const kind = fieldKind(field); const key = field.id || `${field.nodeId}::${field.fieldName}`;
+            let value: unknown = configured[key] ?? task.params[key] ?? field.fieldValue ?? "";
+            if (kind === "prompt") value = String(task.input.prompt || value);
+            if (kind === "image" || kind === "video" || kind === "audio") {
+                const candidates = refs.filter((ref) => kindForPath(ref) === kind); const file = candidates[cursors[kind]++];
+                if (!file) { if (field.required) throw new Error(`RunningHub 参数「${field.label || field.fieldName}」需要输入素材`); continue; }
+                value = await this.upload(file, apiKey, useWallet, controller.signal);
+            } else if (kind === "number" && String(value).trim() !== "" && Number.isFinite(Number(value))) value = Number(value);
+            else if (kind === "boolean") value = value === true || String(value).toLowerCase() === "true";
+            nodeInfoList.push({ nodeId: String(field.nodeId), fieldName: String(field.fieldName), fieldValue: value });
+        }
+        const body: Record<string, unknown> = mode === "app" ? { apiKey, webappId: id, nodeInfoList } : { apiKey, workflowId: id, nodeInfoList, addMetadata: true };
+        const workflowJson = task.params.runninghubWorkflowJson ?? config.workflowJson; if (mode === "workflow" && workflowJson) body.workflow = JSON.stringify(workflowJson); if (mode === "app" && config.instanceType) body.instanceType = config.instanceType;
+        const submitted = await this.request(mode === "app" ? "/task/openapi/ai-app/run" : "/task/openapi/create", body, controller.signal); const remoteId = String((submitted.data as Record<string, unknown> | undefined)?.taskId || "");
+        if (!remoteId) throw new Error(`RunningHub 未返回 taskId：${JSON.stringify(submitted).slice(0, 1000)}`);
+        this.tasks.addEvent(task.id, "submitted", { taskId: remoteId, backend: "runninghub", mode });
+        await this.poll(task, controller, remoteId, apiKey, useWallet, mode);
+    }
+
+    private async poll(task: RuntimeTask, controller: AbortController, remoteId: string, apiKey: string, useWallet: boolean, mode: "workflow" | "app") {
+        for (;;) {
+            if (controller.signal.aborted) throw new Error("任务已取消"); await delay(2500, controller.signal);
+            const result = await this.request("/task/openapi/outputs", { apiKey, taskId: remoteId }, controller.signal); const data = result.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {}; const status = String(data.status || "PENDING").toLowerCase();
+            this.tasks.addEvent(task.id, "poll", { taskId: remoteId, status });
+            if (["success", "succeeded", "completed"].includes(status)) { const media = await materializeMedia(extractMedia(data), this.media, controller.signal); if (!media.length) throw new Error("RunningHub 任务完成但没有返回媒体"); const result = { media, taskId: remoteId, backend: "runninghub", mode }; this.update(task.id, { status: "succeeded", progress: 1, result }); this.tasks.addEvent(task.id, "result", result); this.controllers.delete(task.id); return; }
+            if (["failed", "error"].includes(status)) throw new Error(String(data.failReason || data.message || "RunningHub 任务失败"));
+            this.update(task.id, { progress: Math.min(0.95, Number(this.tasks.get(task.id)?.progress || 0.05) + 0.02) });
+        }
+    }
+    private async upload(file: string, apiKey: string, useWallet: boolean, signal: AbortSignal) { const data = await readFile(file); const form = new FormData(); form.set("file", new Blob([data]), path.basename(file)); form.set("apiKey", apiKey); form.set("fileType", "input"); const response = await fetch(`${this.getConfig().baseUrl}/task/openapi/upload`, { method: "POST", body: form, signal, headers: { Authorization: `Bearer ${apiKey}`, ...(useWallet ? { "x-use-wallet": "true" } : {}) } }); const body = await response.json().catch(() => ({})) as Record<string, unknown>; if (!response.ok || body.code !== 0 && body.code !== "0") throw new Error(`RunningHub 上传素材失败（HTTP ${response.status}）：${String(body.msg || body.message || "未知错误")}`); return String((body.data as Record<string, unknown> | undefined)?.fileName || ""); }
+    private async request(endpoint: string, body: Record<string, unknown>, signal: AbortSignal) { const config = this.getConfig(); const response = await fetch(`${config.baseUrl}${endpoint}`, { method: "POST", headers: { "content-type": "application/json", Accept: "application/json", Authorization: `Bearer ${String(body.apiKey || "")}` }, body: JSON.stringify(body), signal }); const raw = await response.json().catch(() => ({})) as Record<string, unknown>; if (!response.ok || raw.code !== 0 && raw.code !== "0") throw new Error(`RunningHub 请求失败（HTTP ${response.status}）：${String(raw.msg || raw.message || JSON.stringify(raw).slice(0, 800))}`); return raw; }
+    private update(id: string, patch: Parameters<TaskStore["update"]>[1]) { const task = this.tasks.update(id, patch); this.events?.publish({ type: task.status === "succeeded" ? "task.completed" : task.status === "failed" ? "task.failed" : "task.updated", entityId: id, payload: task }); if (["succeeded", "failed", "cancelled"].includes(task.status)) void this.onTaskTerminal?.(task); return task; }
+    private fail(id: string, error: unknown) { if (this.tasks.get(id)?.status === "cancelled") return; const message = error instanceof Error ? error.message : String(error); this.update(id, { status: "failed", error: message }); this.tasks.addEvent(id, "error", { error: message }); this.controllers.delete(id); }
+}
+function normalizeUrl(value: string) { const url = new URL(value.trim() || DEFAULT_URL); if (!["http:", "https:"].includes(url.protocol)) throw new Error("RunningHub 地址必须使用 HTTP 或 HTTPS"); return url.toString().replace(/\/$/, ""); }
+function fieldKind(field: RunningHubField) { const text = `${field.fieldType || ""} ${field.fieldName || ""} ${field.label || ""}`.toLowerCase(); if (/image|图片/.test(text)) return "image" as const; if (/video|视频/.test(text)) return "video" as const; if (/audio|音频|sound/.test(text)) return "audio" as const; if (/prompt|text|提示词|正向|负向/.test(text)) return "prompt" as const; if (/bool/.test(text)) return "boolean" as const; if (/int|float|number|slider|seed/.test(text)) return "number" as const; return "text" as const; }
+function kindForPath(value: string) { return /\.(mp4|webm|mov|m4v|avi|mkv)(\?|$)/i.test(value) ? "video" : /\.(mp3|wav|m4a|aac|ogg|flac)(\?|$)/i.test(value) ? "audio" : "image"; }
+function extractMedia(data: Record<string, unknown>) { const values = [...(Array.isArray(data.image_items) ? data.image_items : []), ...(Array.isArray(data.urls) ? data.urls : [])]; return values.map((item) => typeof item === "string" ? { url: item } : item && typeof item === "object" ? { ...(item as Record<string, unknown>), url: String((item as Record<string, unknown>).url || "") } : null).filter((item): item is { url: string } => Boolean(item?.url)); }
+async function materializeMedia(items: Array<{ url: string; [key: string]: unknown }>, store: MediaStore | undefined, signal: AbortSignal) {
+    if (!store) return items;
+    return Promise.all(items.map(async (item) => {
+        const sourceUrl = item.url;
+        try {
+            const response = await fetch(sourceUrl, { signal });
+            if (!response.ok) return item;
+            const mimeType = response.headers.get("content-type")?.split(";", 1)[0] || "application/octet-stream";
+            const name = path.basename(new URL(sourceUrl).pathname) || `runninghub-${Date.now()}`;
+            const media = store.store(Buffer.from(await response.arrayBuffer()), { name, mimeType, category: "output" });
+            return { ...item, url: store.url(media), storageKey: media.storageKey, mimeType: media.mimeType, sourceUrl };
+        } catch {
+            return item;
+        }
+    }));
+}
+function delay(ms: number, signal: AbortSignal) { return new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, ms); signal.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("任务已取消")); }, { once: true }); }); }

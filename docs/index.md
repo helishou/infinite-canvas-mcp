@@ -37,5 +37,5 @@
 
 ## Notes
 
-- Canvas projects and My Assets are primarily stored in the browser. WebDAV can be configured for cross-device synchronization.
-- The AI API key is stored in the browser, which sends requests directly to OpenAI-compatible endpoints.
+- Canvas projects, My Assets, generation records, and structured settings use the local Backend SQLite database as their authority. Media stays in the Backend media directory, while WebDAV is an optional synchronized copy.
+- AI API keys are stored with channel settings in Backend SQLite. The browser loads those settings and still calls the configured OpenAI-compatible endpoints directly.

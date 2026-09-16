@@ -611,7 +611,6 @@ function canvasOpLabel(type: string) {
     if (type === "delete_node") return "删除节点";
     if (type === "delete_connections") return "删除连线";
     if (type === "connect_nodes") return "连接";
-    if (type === "set_viewport") return "调整视图";
     if (type === "select_nodes") return "选择节点";
     if (type === "run_generation") return "触发生成";
     return type;
@@ -719,6 +718,7 @@ function toolName(name: string) {
     if (name === "canvas_generate_image") return "生成图片";
     if (name === "canvas_generate_video") return "生成视频";
     if (name === "canvas_generate_audio") return "生成音频";
+    if (name === "canvas_set_generation_references") return "替换生成参考图";
     if (name === "canvas_update_node") return "更新节点";
     if (name === "canvas_update_node_text") return "更新文本";
     if (name === "canvas_move_nodes") return "移动节点";
@@ -726,7 +726,6 @@ function toolName(name: string) {
     if (name === "canvas_delete_nodes") return "删除节点";
     if (name === "canvas_connect_nodes") return "连接节点";
     if (name === "canvas_select_nodes") return "选择节点";
-    if (name === "canvas_set_viewport") return "调整视口";
     if (name === "canvas_run_generation") return "触发生成";
     if (name === "workbench_image_get_config") return "生图配置";
     if (name === "workbench_image_generate") return "生图工作台生成";

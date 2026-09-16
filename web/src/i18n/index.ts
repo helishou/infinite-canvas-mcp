@@ -6,14 +6,12 @@ import zhCN from "@/i18n/locales/zh-CN";
 
 export type AppLocale = "zh-CN" | "en-US";
 
-const LOCALE_STORAGE_KEY = "infinite-canvas:locale";
-
 i18n.use(initReactI18next).init({
     resources: {
         "zh-CN": { translation: zhCN },
         "en-US": { translation: enUS },
     },
-    lng: (localStorage.getItem(LOCALE_STORAGE_KEY) as AppLocale) || "zh-CN",
+    lng: "zh-CN",
     fallbackLng: "zh-CN",
     supportedLngs: ["zh-CN", "en-US"],
     initAsync: false,
@@ -22,8 +20,17 @@ i18n.use(initReactI18next).init({
 });
 
 export function changeAppLocale(locale: AppLocale) {
-    localStorage.setItem(LOCALE_STORAGE_KEY, locale);
-    return i18n.changeLanguage(locale);
+    void i18n.changeLanguage(locale);
+    void import("@/services/settings-api").then(({ saveSettings }) => saveSettings({ locale }));
+}
+
+if (typeof window !== "undefined") {
+    window.addEventListener("backend-connected", () => {
+        void import("@/services/settings-api").then(async ({ fetchSettings }) => {
+            const settings = await fetchSettings();
+            if (settings.locale) await i18n.changeLanguage(settings.locale);
+        });
+    });
 }
 
 export default i18n;

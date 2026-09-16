@@ -4,7 +4,7 @@ import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
-import { getGenerationResourceNodes, getGroupResourceNodes } from "@/lib/canvas/canvas-resource-references";
+import { getGenerationResourceNodes, getGroupResourceNodes, type CanvasGraphIndex } from "@/lib/canvas/canvas-resource-references";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 
 export type NodeGenerationContext = {
@@ -37,18 +37,16 @@ type NodeGenerationGroupInput = {
 
 export type NodeGenerationInput = NodeGenerationResourceInput | NodeGenerationGroupInput;
 
-export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], prompt: string): NodeGenerationContext {
-    const inputs = buildNodeGenerationInputs(nodeId, nodes, connections);
+export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], prompt: string, index?: CanvasGraphIndex): NodeGenerationContext {
+    const inputs = buildNodeGenerationInputs(nodeId, nodes, connections, index);
     const sourceNode = nodes.find((node) => node.id === nodeId);
     if (sourceNode?.type === CanvasNodeType.Config && Boolean(sourceNode.metadata?.composerContent?.trim())) {
         return buildComposerGenerationContext(inputs, prompt);
     }
 
     const resourceInputs = flattenGenerationInputs(inputs);
-    const upstreamText = resourceInputs
-        .map((input) => input.text)
-        .filter(Boolean)
-        .join("\n\n");
+    let textIndex = 0;
+    const upstreamText = resourceInputs.flatMap((input) => (input.text ? [textBlock(generationLabel("text", textIndex++), input.text)] : [])).join("\n\n");
     const referenceImages = resourceInputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
     const referenceVideos = resourceInputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
     const referenceAudios = resourceInputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
@@ -86,7 +84,7 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
                 if (!label) {
                     label = generationLabel(resource.type, counts[resource.type]++);
                     labelByNodeId.set(resource.nodeId, label);
-                    if (resource.type === "text") textBlocks.push(`【${label}】\n${resource.text || ""}`);
+                    if (resource.type === "text") textBlocks.push(textBlock(label, resource.text || ""));
                     else selectedInputs.push(resource);
                 }
                 return resource.type === "text" ? `【${label}】` : label;
@@ -127,10 +125,10 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
     };
 }
 
-export function buildNodeGenerationInputs(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]): NodeGenerationInput[] {
-    return getGenerationResourceNodes(nodeId, nodes, connections).flatMap((node): NodeGenerationInput[] => {
+export function buildNodeGenerationInputs(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex): NodeGenerationInput[] {
+    return getGenerationResourceNodes(nodeId, nodes, connections, index).flatMap((node): NodeGenerationInput[] => {
         if (node.type === CanvasNodeType.Group) {
-            const children = getGroupResourceNodes(node.id, nodes).flatMap(readNodeGenerationResource);
+            const children = getGroupResourceNodes(node.id, nodes, index).flatMap(readNodeGenerationResource);
             return children.length ? [{ nodeId: node.id, type: "group", title: node.title, children }] : [];
         }
         return readNodeGenerationResource(node);
@@ -139,7 +137,10 @@ export function buildNodeGenerationInputs(nodeId: string, nodes: CanvasNodeData[
 
 function flattenGenerationInputs(inputs: NodeGenerationInput[]) {
     const resources = inputs.flatMap((input) => (input.type === "group" ? input.children : [input]));
-    return [...new Map(resources.map((input) => [input.nodeId, input])).values()];
+    return [...new Map(resources.map((input) => {
+        const media = input.type === "image" ? input.image?.storageKey || input.image?.dataUrl : input.type === "video" ? input.video?.storageKey || input.video?.url : input.type === "audio" ? input.audio?.storageKey || input.audio?.url : input.text;
+        return [`${input.nodeId}:${input.type}:${media || ""}`, input];
+    })).values()];
 }
 
 function readNodeGenerationResource(node: CanvasNodeData): NodeGenerationResourceInput[] {
@@ -150,10 +151,14 @@ function readNodeGenerationResource(node: CanvasNodeData): NodeGenerationResourc
     const audio = readReferenceAudio(node);
     if (audio) return [{ nodeId: node.id, type: "audio", title: node.title, audio }];
     const resource = getNodeDefinition(node.type)?.resource?.(node);
-    if (resource?.kind === "image" && resource.url) return [{ nodeId: node.id, type: "image", title: node.title, image: { id: node.id, name: `${node.title || node.id}.png`, type: node.metadata?.mimeType || "image/png", dataUrl: resource.url, storageKey: node.metadata?.storageKey } }];
-    if (resource?.kind === "video" && resource.url) return [{ nodeId: node.id, type: "video", title: node.title, video: { id: node.id, name: `${node.title || node.id}.mp4`, type: node.metadata?.mimeType || "video/mp4", url: resource.url, storageKey: node.metadata?.storageKey } }];
-    if (resource?.kind === "audio" && resource.url) return [{ nodeId: node.id, type: "audio", title: node.title, audio: { id: node.id, name: `${node.title || node.id}.mp3`, type: node.metadata?.mimeType || "audio/mpeg", url: resource.url, storageKey: node.metadata?.storageKey } }];
-    if (resource?.kind === "text" && resource.text) return [{ nodeId: node.id, type: "text", title: node.title, text: resource.text }];
+    const resources = Array.isArray(resource) ? resource : resource ? [resource] : [];
+    if (resources.length) return resources.flatMap((item): NodeGenerationResourceInput[] => {
+        if (item.kind === "image" && item.url) return [{ nodeId: node.id, type: "image" as const, title: node.title, image: { id: `${node.id}-${item.url}`, name: `${node.title || node.id}.png`, type: node.metadata?.mimeType || "image/png", dataUrl: item.url, storageKey: item.storageKey || node.metadata?.storageKey } }];
+        if (item.kind === "video" && item.url) return [{ nodeId: node.id, type: "video" as const, title: node.title, video: { id: `${node.id}-${item.url}`, name: `${node.title || node.id}.mp4`, type: node.metadata?.mimeType || "video/mp4", url: item.url, storageKey: item.storageKey || node.metadata?.storageKey } }];
+        if (item.kind === "audio" && item.url) return [{ nodeId: node.id, type: "audio" as const, title: node.title, audio: { id: `${node.id}-${item.url}`, name: `${node.title || node.id}.mp3`, type: node.metadata?.mimeType || "audio/mpeg", url: item.url, storageKey: item.storageKey || node.metadata?.storageKey } }];
+        if (item.kind === "text" && item.text) return [{ nodeId: node.id, type: "text" as const, title: node.title, text: item.text }];
+        return [];
+    });
     const text = readNodeTextInput(node);
     return text ? [{ nodeId: node.id, type: "text", title: node.title, text }] : [];
 }
@@ -179,6 +184,10 @@ export async function hydrateNodeGenerationContext(context: NodeGenerationContex
 function readNodeTextInput(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt || "";
     return node.metadata?.prompt || "";
+}
+
+function textBlock(label: string, text: string) {
+    return `【${label}】\n${text}`;
 }
 
 function generationLabel(type: NodeGenerationResourceInput["type"], index: number) {

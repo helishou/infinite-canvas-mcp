@@ -1,7 +1,6 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
-import localforage from "localforage";
+import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Select, Tag, Tooltip, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -11,16 +10,23 @@ import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
-import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionLabel, modelWorkflowMissingMessage, resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { requestEdit, requestGeneration } from "@/services/api/image";
-import { deleteStoredImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { backendMediaUrl } from "@/services/backend-api";
+import { deleteStoredImages, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
+import { resolveComfyImageSize } from "@/services/api/comfyui";
+import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow } from "@/services/api/workflows";
+import type { WorkflowDetail } from "@/services/api/workflows";
+import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
+import { deleteWorkbenchLogs, readWorkbenchLogs, saveWorkbenchLog } from "@/services/workbench-logs";
+import { fetchStructuredSetting, saveStructuredSetting } from "@/services/settings-api";
 
 type GeneratedImage = {
     id: string;
@@ -64,9 +70,41 @@ type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
-const LOG_STORE_KEY = "infinite-canvas:image_generation_logs";
 const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
-const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
+const LEGACY_REFERENCES_KEY = "image_workbench_references";
+let referencesHydration: Promise<ReferenceImage[]> | null = null;
+let referencesSaveQueue = Promise.resolve();
+
+function saveWorkbenchReferences(references: ReferenceImage[]) {
+    referencesSaveQueue = referencesSaveQueue
+        .then(() => saveStructuredSetting("image-workbench-references", references))
+        .catch(() => undefined);
+}
+
+function hydrateWorkbenchReferences() {
+    if (referencesHydration) return referencesHydration;
+    referencesHydration = (async () => {
+        let stored = await fetchStructuredSetting<ReferenceImage[]>("image-workbench-references");
+        if (!stored) {
+            const legacy = localStorage.getItem(LEGACY_REFERENCES_KEY);
+            const parsed = legacy ? JSON.parse(legacy) as ReferenceImage[] : null;
+            if (Array.isArray(parsed)) {
+                stored = await Promise.all(parsed.map(async (ref) => {
+                    if (ref.storageKey || !ref.dataUrl.startsWith("data:")) return ref;
+                    const uploaded = await uploadImage(ref.dataUrl, { category: "input" });
+                    return { ...ref, dataUrl: uploaded.url, storageKey: uploaded.storageKey };
+                }));
+                await saveStructuredSetting("image-workbench-references", stored);
+            }
+        }
+        localStorage.removeItem(LEGACY_REFERENCES_KEY);
+        return (stored || []).map((ref) => ({
+            ...ref,
+            dataUrl: ref.storageKey ? backendMediaUrl(ref.storageKey) : ref.dataUrl,
+        }));
+    })().finally(() => { referencesHydration = null; });
+    return referencesHydration;
+}
 
 export default function ImagePage() {
     const { message } = App.useApp();
@@ -81,6 +119,22 @@ export default function ImagePage() {
     const addAsset = useAssetStore((state) => state.addAsset);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
+    const [referencesHydrated, setReferencesHydrated] = useState(false);
+
+    useEffect(() => {
+        let active = true;
+        void hydrateWorkbenchReferences().then((stored) => {
+            if (!active) return;
+            setReferences(stored);
+            setReferencesHydrated(true);
+        });
+        return () => { active = false; };
+    }, []);
+
+    useEffect(() => {
+        if (!referencesHydrated) return;
+        saveWorkbenchReferences(references);
+    }, [references, referencesHydrated]);
     const [results, setResults] = useState<GenerationResult[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
     const [running, setRunning] = useState(false);
@@ -95,6 +149,8 @@ export default function ImagePage() {
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
     const [autoRunToken, setAutoRunToken] = useState(0);
+    const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
+    const [customFieldValues, setCustomFieldValues] = useState<Record<string, unknown>>({});
     const imageCommand = useWorkbenchAgentStore((state) => state.imageCommand);
     const clearImageCommand = useWorkbenchAgentStore((state) => state.clearImageCommand);
     const updateAgentTask = useWorkbenchAgentStore((state) => state.updateTask);
@@ -114,6 +170,61 @@ export default function ImagePage() {
     useEffect(() => {
         void refreshLogs();
     }, []);
+
+    useEffect(() => {
+        const refresh = (event: Event) => {
+            const type = (event as CustomEvent<{ type?: string }>).detail?.type;
+            if (type === "generation-log.updated" || type === "task.completed" || type === "task.failed") void refreshLogs();
+        };
+        window.addEventListener("backend-event", refresh);
+        return () => window.removeEventListener("backend-event", refresh);
+    }, []);
+
+    // 选中 ComfyUI 渠道模型时，按「本次参考图数量」解析该场景实际会跑的工作流，拉它的详情渲染参数面板，
+    // 并用渠道设置里为该场景配的参数作为初值；参考图数量变化 → 场景变化 → 工作流与参数字段一起切换。
+    useEffect(() => {
+        const channel = resolveModelChannel(config, model);
+        const workflowName = channel.kind === "comfyui" ? resolveModelWorkflow(config, model, references.length) : "";
+        if (!workflowName) {
+            setWorkflowDetail(null);
+            setCustomFieldValues({});
+            return;
+        }
+        let cancelled = false;
+        fetchWorkflowDetail(workflowName)
+            .then((detail) => {
+                if (cancelled) return;
+                setWorkflowDetail(detail);
+                const routedParams = resolveModelWorkflowParams(config, model, references.length);
+                const initial: Record<string, unknown> = {};
+                for (const field of detail.config?.fields || []) {
+                    if (isWorkflowImageField(field, detail.workflow) || field.isPrompt) continue;
+                    // 渠道设置里为当前场景配的参数优先，其余按字段默认值
+                    if (routedParams[field.id] !== undefined) {
+                        initial[field.id] = routedParams[field.id];
+                        continue;
+                    }
+                    if (field.id === "width" || field.id === "height") {
+                        const size = resolveComfyImageSize(config.size);
+                        initial[field.id] = field.id === "width" ? size.width : size.height;
+                    } else if (field.type === "dropdown") {
+                        // 下拉框初值必须命中 options，否则 (例如节点原始值为数字 16)
+                        // ComfyUI 会报 value_not_in_list。缺失/非法时回退到第一项。
+                        const opts = field.options || [];
+                        initial[field.id] = opts.includes(String(field.default ?? "")) ? field.default : (opts[0] ?? "");
+                    } else {
+                        initial[field.id] = field.default ?? (field.type === "boolean" ? false : field.type === "number" || field.type === "slider" ? 0 : "");
+                    }
+                }
+                setCustomFieldValues(initial);
+            })
+            .catch(() => {
+                if (cancelled) return;
+                setWorkflowDetail(null);
+                setCustomFieldValues({});
+            });
+        return () => { cancelled = true; };
+    }, [config, model, references.length]);
 
     const addReferences = async (files?: FileList | null) => {
         const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
@@ -136,7 +247,7 @@ export default function ImagePage() {
             }
             const nextReferences = await Promise.all(
                 blobs.map(async (blob, index) => {
-                    const image = await uploadImage(blob);
+                    const image = await uploadImage(blob, { category: "input" });
                     return { id: nanoid(), name: `clipboard-${index + 1}.png`, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
                 }),
             );
@@ -230,17 +341,17 @@ export default function ImagePage() {
     }, [autoRunToken]);
 
     const downloadImage = (image: GeneratedImage, index: number) => {
-        saveAs(image.dataUrl, `image-${index + 1}.png`);
+        saveAs(image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl, `image-${index + 1}.png`);
     };
 
     const addResultToReferences = async (image: GeneratedImage, index: number) => {
-        const stored = await uploadImage(image.dataUrl);
+        const stored = await uploadImage(image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl, { category: "input" });
         setReferences((value) => [...value, { id: nanoid(), name: `result-${index + 1}.png`, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
         message.success(t("imageWorkbench.addedReference"));
     };
 
     const saveResultToAssets = async (image: GeneratedImage, index: number) => {
-        const stored = await uploadImage(image.dataUrl);
+        const stored = await uploadImage(image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl, { category: "library" });
         addAsset({
             kind: "image",
             title: t("imageWorkbench.resultTitle", { count: index + 1 }),
@@ -277,7 +388,7 @@ export default function ImagePage() {
 
     const deleteSelectedLogs = () => {
         const imageKeys = logs.filter((log) => selectedLogIds.includes(log.id)).flatMap((log) => log.images.map((image) => image.storageKey).filter((key): key is string => Boolean(key)));
-        void Promise.all([deleteStoredImages(imageKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).then(refreshLogs);
+        void Promise.all([deleteStoredImages(imageKeys), deleteWorkbenchLogs("image", selectedLogIds)]).then(refreshLogs);
         if (previewLog && selectedLogIds.includes(previewLog.id)) {
             setPreviewLog(null);
             setResults([]);
@@ -287,7 +398,7 @@ export default function ImagePage() {
     };
 
     const saveLog = (log: GenerationLog) => {
-        void logStore.setItem(log.id, serializeLog(log)).then(refreshLogs);
+        void saveWorkbenchLog("image", log).then(refreshLogs);
     };
 
     const refreshLogs = async () => setLogs(await readStoredLogs());
@@ -321,11 +432,62 @@ export default function ImagePage() {
     const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }) => {
         const itemStartedAt = performance.now();
         try {
-            const result = snapshot.references.length ? await requestEdit(snapshot.config, snapshot.text, snapshot.references) : await requestGeneration(snapshot.config, snapshot.text);
-            const image = result[0];
-            if (!image) throw new Error(t("imageWorkbench.missingResult"));
-            const stored = await uploadImage(image.dataUrl);
-            const nextImage: GeneratedImage = { id: image.id, dataUrl: stored.url, ...(stored.storageKey ? { storageKey: stored.storageKey } : {}), durationMs: performance.now() - itemStartedAt, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
+            const channel = resolveModelChannel(snapshot.config, snapshot.config.model);
+            const local = channel.kind === "comfyui";
+            // ComfyUI 渠道统一走工作流执行器（/api/workflows/:name/run）：工作流名由渠道模型配置的
+            // 输入场景路由（文生 / 单图 / 多图）解析，未配置路由时回退到模型名对应的内置工作流；
+            // 该场景被标记为「不支持」时解析结果为空，直接报错不回退。
+            const workflowName = local ? resolveModelWorkflow(snapshot.config, snapshot.config.model, snapshot.references.length) : "";
+            let result: { url: string } | { dataUrl: string } | undefined;
+            if (local) {
+                if (!workflowName) throw new Error(modelWorkflowMissingMessage(snapshot.config, snapshot.config.model, snapshot.references.length));
+                // 1) 拉 workflow 详情：拿 config.fields 里 type=image 的 input 节点
+                // 2) 把生图工作台写的 prompt 注入到标记为「作为提示词」的文本字段
+                // 3) 把生图工作台选的 references 按 image field 顺序塞到 fields
+                // 4) runWorkflow 传真 config + fields，后端 processImageFields 会把 dataURL 上传到 ComfyUI 转文件名注入 workflow
+                const detail = await fetchWorkflowDetail(workflowName);
+                const imageFields = (detail.config?.fields || []).filter((field) => isWorkflowImageField(field, detail.workflow));
+                const promptFields = (detail.config?.fields || []).filter((field) => field.type === "text" && field.isPrompt);
+                const workflowFields: Record<string, unknown> = { prompt: snapshot.text };
+                for (const field of promptFields) {
+                    workflowFields[field.id] = snapshot.text;
+                }
+                // 注入 width/height（如果 workflow 有这些字段）
+                const size = resolveComfyImageSize(snapshot.config.size);
+                if (size.width > 0 && size.height > 0) {
+                    for (const field of detail.config?.fields || []) {
+                        if (field.id === "width") workflowFields[field.id] = size.width;
+                        if (field.id === "height") workflowFields[field.id] = size.height;
+                    }
+                }
+                for (let index = 0; index < imageFields.length; index += 1) {
+                    const field = imageFields[index];
+                    const ref = snapshot.references[index];
+                    if (!ref) continue;
+                    // dataUrl 优先，storageKey 也带上让后端可选走 media 引用
+                    const dataUrl = ref.dataUrl || ref.url;
+                    if (typeof dataUrl === "string" && dataUrl) workflowFields[field.id] = dataUrl;
+                }
+                // 合并用户在工作台自定义字段面板填写的值（非 image、非提示词）
+                for (const [id, value] of Object.entries(customFieldValues)) {
+                    workflowFields[id] = value;
+                }
+                const run = await runWorkflow(workflowName, workflowFields, detail.config);
+                if (run.error) throw new Error(run.error);
+                const first = run.media?.[0];
+                if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");
+                result = { url: first.url };
+            } else if (snapshot.references.length) {
+                result = await requestEdit(snapshot.config, snapshot.text, snapshot.references).then((items) => items[0]);
+            } else {
+                result = await requestGeneration(snapshot.config, snapshot.text).then((items) => items[0]);
+            }
+            if (!result) throw new Error(t("imageWorkbench.missingResult"));
+            const source = "url" in result
+                ? await fetch((result as { url: string }).url).then((response) => response.blob())
+                : (result as { dataUrl: string }).dataUrl;
+            const stored = await uploadImage(source, { category: "output" });
+            const nextImage: GeneratedImage = { id: nanoid(), dataUrl: stored.url, ...(stored.storageKey ? { storageKey: stored.storageKey } : {}), durationMs: performance.now() - itemStartedAt, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
             setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
             return nextImage;
         } catch (error) {
@@ -479,7 +641,7 @@ export default function ImagePage() {
                             </div>
 
                             <div className="hidden gap-4 sm:grid sm:grid-cols-2">
-                                <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                                <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} workflowDetail={workflowDetail} customFieldValues={customFieldValues} setCustomFieldValues={setCustomFieldValues} />
                             </div>
                         </div>
 
@@ -542,7 +704,7 @@ export default function ImagePage() {
             </Drawer>
             <Drawer title={t("workbench.settings")} placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
-                    <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                    <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} workflowDetail={workflowDetail} customFieldValues={customFieldValues} setCustomFieldValues={setCustomFieldValues} />
                 </div>
             </Drawer>
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
@@ -554,9 +716,28 @@ export default function ImagePage() {
     );
 }
 
-function GenerationSettings({ config, model, updateConfig, openConfigDialog }: { config: AiConfig; model: string; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void }) {
+function GenerationSettings({
+    config,
+    model,
+    updateConfig,
+    openConfigDialog,
+    workflowDetail,
+    customFieldValues,
+    setCustomFieldValues,
+}: {
+    config: AiConfig;
+    model: string;
+    updateConfig: UpdateAiConfig;
+    openConfigDialog: (shouldPromptContinue?: boolean) => void;
+    workflowDetail: WorkflowDetail | null;
+    customFieldValues: Record<string, unknown>;
+    setCustomFieldValues: React.Dispatch<React.SetStateAction<Record<string, unknown>>>;
+}) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
+    const displayFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, workflowDetail?.workflow) && !field.isPrompt);
+    const channel = resolveModelChannel(config, model);
+    const hideStandardImageOptions = channel.kind === "comfyui";
 
     return (
         <>
@@ -564,8 +745,13 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">{t("workbench.model")}</span>
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
+            {displayFields.length > 0 && (
+                <div className="col-span-2">
+                    <WorkflowCustomFields fields={displayFields} values={customFieldValues} onChange={(id, value) => setCustomFieldValues((prev) => ({ ...prev, [id]: value }))} />
+                </div>
+            )}
             <div className="col-span-2">
-                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />
+                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} hideStandardImageOptions={hideStandardImageOptions} />
             </div>
         </>
     );
@@ -587,7 +773,7 @@ function ResultImageCard({
     const { t } = useTranslation();
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            <Image src={image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
+            <Image src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
             <div className="space-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
                 <div className="flex min-w-0 gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
                     <span>
@@ -769,70 +955,7 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
 
 async function readStoredLogs() {
     if (typeof window === "undefined") return [];
-    try {
-        const values: GenerationLog[] = [];
-        await logStore.iterate<GenerationLog, void>((value) => {
-            values.push(value);
-        });
-        const logs = await Promise.all(values.map(normalizeLog));
-        return logs.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    } catch {
-        return [];
-    }
-}
-
-async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog> {
-    const references = await Promise.all(
-        (log.references || []).map(async (item) => ({
-            ...item,
-            dataUrl: await resolveImageUrl(item.storageKey, item.dataUrl),
-        })),
-    );
-    const images = await Promise.all(
-        (log.images || []).map(async (item) => ({
-            ...item,
-            dataUrl: await resolveImageUrl(item.storageKey, item.dataUrl),
-        })),
-    );
-    const config = normalizeLogConfig(log);
-    return {
-        id: log.id || nanoid(),
-        createdAt: log.createdAt || Date.now(),
-        title: log.title || log.model || i18n.t("workbench.untitled"),
-        prompt: log.prompt || log.title || "",
-        time: log.time || new Date().toLocaleString(i18n.resolvedLanguage, { hour12: false }),
-        model: log.model || config.imageModel || "",
-        config,
-        references,
-        durationMs: log.durationMs || 0,
-        successCount: log.successCount ?? log.imageCount ?? 0,
-        failCount: log.failCount || 0,
-        imageCount: log.imageCount || log.successCount || 0,
-        size: log.size || config.size || "",
-        quality: log.quality || config.quality || "",
-        status: log.status || "success",
-        images,
-        thumbnails: images.map((image) => image.dataUrl).filter(Boolean),
-    };
-}
-
-function serializeLog(log: GenerationLog): GenerationLog {
-    return {
-        ...log,
-        references: log.references.map((item) => ({ ...item, dataUrl: item.storageKey ? "" : item.dataUrl })),
-        images: log.images.map((image) => ({ ...image, dataUrl: image.storageKey ? "" : image.dataUrl })),
-        thumbnails: [],
-    };
-}
-
-function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
-    return {
-        model: log.config?.model || log.model || "",
-        imageModel: log.config?.imageModel || log.model || "",
-        quality: log.config?.quality || log.quality || "",
-        size: log.config?.size || log.size || "",
-        count: log.config?.count || String(log.imageCount || log.successCount || 1),
-    };
+    return readWorkbenchLogs("image") as Promise<GenerationLog[]>;
 }
 
 function moveListItem<T>(items: T[], index: number, offset: number) {
@@ -898,6 +1021,6 @@ function buildLog({
         quality: logConfig.quality,
         status,
         images,
-        thumbnails: images.map((image) => image.dataUrl).filter(Boolean),
+        thumbnails: images.map((image) => (image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl)).filter(Boolean),
     };
 }

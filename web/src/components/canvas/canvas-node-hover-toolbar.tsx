@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { App, Modal, Segmented, Tooltip } from "antd";
-import { Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, MessageSquare, Minus, Music2, Plus, RefreshCw, Settings2, Trash2, Upload, Video } from "lucide-react";
+import { Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, Lock, MessageSquare, Minus, Music2, Plus, RefreshCw, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -8,10 +8,11 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useImageQuickToolsStore } from "@/stores/use-image-quick-tools-store";
 import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
 import type { CanvasNodeToolbarItem } from "@/types/canvas-plugin";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
-import { IMAGE_QUICK_TOOLS_STORAGE_KEY, buildImageToolbarTools, defaultImageQuickToolIds, readImageQuickToolsConfig, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
+import { buildImageToolbarTools, defaultImageQuickToolIds, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
 
 type CanvasNodeHoverToolbarProps = {
     node: CanvasNodeData | null;
@@ -35,7 +36,10 @@ type CanvasNodeHoverToolbarProps = {
     onViewImage: (node: CanvasNodeData) => void;
     onReversePrompt: (node: CanvasNodeData) => void;
     onRetry: (node: CanvasNodeData) => void;
+    onConvertToCharacter: (node: CanvasNodeData) => void;
+    onSaveCharacterToAsset: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
+    onToggleGroupLock: (node: CanvasNodeData) => void;
     onDelete: (node: CanvasNodeData) => void;
     extraTools?: CanvasNodeToolbarItem[];
 };
@@ -72,31 +76,21 @@ export function CanvasNodeHoverToolbar({
     onViewImage,
     onReversePrompt,
     onRetry,
+    onConvertToCharacter,
+    onSaveCharacterToAsset,
     onToggleFreeResize,
+    onToggleGroupLock,
     onDelete,
     extraTools = [],
 }: CanvasNodeHoverToolbarProps) {
-    const [quickImageToolIds, setQuickImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
-    const [showImageToolLabels, setShowImageToolLabels] = useState(false);
-    const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
-    const [draftShowImageToolLabels, setDraftShowImageToolLabels] = useState(false);
+    const quickImageToolIds = useImageQuickToolsStore((state) => state.ids);
+    const showImageToolLabels = useImageQuickToolsStore((state) => state.showLabels);
+    const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(quickImageToolIds);
+    const [draftShowImageToolLabels, setDraftShowImageToolLabels] = useState(showImageToolLabels);
     const [imageToolSettingsOpen, setImageToolSettingsOpen] = useState(false);
     const { message } = App.useApp();
     const { t } = useTranslation();
     const copyText = useCopyText();
-
-    useEffect(() => {
-        try {
-            const stored = window.localStorage.getItem(IMAGE_QUICK_TOOLS_STORAGE_KEY);
-            if (!stored) return;
-            const parsed = JSON.parse(stored) as unknown;
-            const config = readImageQuickToolsConfig(parsed);
-            setQuickImageToolIds(config.ids);
-            setShowImageToolLabels(config.showLabels);
-        } catch {
-            window.localStorage.removeItem(IMAGE_QUICK_TOOLS_STORAGE_KEY);
-        }
-    }, []);
 
     useEffect(() => {
         setImageToolSettingsOpen(false);
@@ -110,11 +104,13 @@ export function CanvasNodeHoverToolbar({
     const isImage = node.type === CanvasNodeType.Image;
     const isVideo = node.type === CanvasNodeType.Video;
     const isAudio = node.type === CanvasNodeType.Audio;
+    const isCharacter = node.type === CanvasNodeType.Character;
     const hasImage = isImage && Boolean(node.metadata?.content);
     const hasVideo = isVideo && Boolean(node.metadata?.content);
     const hasAudio = isAudio && Boolean(node.metadata?.content);
     const isText = node.type === CanvasNodeType.Text;
     const isConfig = node.type === CanvasNodeType.Config;
+    const isGroup = node.type === CanvasNodeType.Group;
     const canRetry = node.metadata?.status === "error";
     const quickImageToolIdSet = new Set(quickImageToolIds);
     const copyImagePrompt = (target: CanvasNodeData) => {
@@ -137,6 +133,7 @@ export function CanvasNodeHoverToolbar({
     const baseToolbarTools: ToolbarTool[] = [
         { id: "info", title: t("canvas.nodeToolbar.infoTitle"), label: t("canvas.nodeToolbar.info"), icon: <Info className="size-4" />, onClick: () => onInfo(node) },
         { id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true },
+        ...(isGroup ? [{ id: "groupLock", title: node.metadata?.groupLocked ? "解锁组" : "锁定组", label: node.metadata?.groupLocked ? "解锁组" : "锁定组", icon: node.metadata?.groupLocked ? <Unlock className="size-4" /> : <Lock className="size-4" />, onClick: () => onToggleGroupLock(node), active: Boolean(node.metadata?.groupLocked) }] : []),
     ];
     const nodeToolbarTools: ToolbarTool[] = [
         ...(canRetry ? [{ id: "retry", title: t("canvas.nodeToolbar.retryTitle"), label: t("canvas.node.retry"), icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }] : []),
@@ -150,6 +147,8 @@ export function CanvasNodeHoverToolbar({
         ...(isImage && !hasImage ? [{ id: "uploadImage", title: t("canvas.nodeToolbar.uploadImage"), label: t("canvas.nodeToolbar.uploadImage"), icon: <Upload className="size-4" />, onClick: () => onUpload(node) }] : []),
         ...(isVideo ? [{ id: "uploadVideo", title: t(hasVideo ? "canvas.nodeToolbar.replaceVideo" : "canvas.nodeToolbar.uploadVideo"), label: t(hasVideo ? "canvas.nodeToolbar.replaceVideo" : "canvas.nodeToolbar.uploadVideo"), icon: <Video className="size-4" />, onClick: () => onUpload(node) }] : []),
         ...(isAudio ? [{ id: "uploadAudio", title: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), label: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), icon: <Music2 className="size-4" />, onClick: () => onUpload(node) }] : []),
+        ...(hasImage ? [{ id: "convertToCharacter", title: t("canvas.nodeToolbar.convertToCharacter"), label: t("canvas.nodeToolbar.convertToCharacter"), icon: <User className="size-4" />, onClick: () => onConvertToCharacter(node) }] : []),
+        ...(isCharacter ? [{ id: "saveCharacterToAsset", title: t("canvas.nodeToolbar.saveCharacterToAsset"), label: t("canvas.nodeToolbar.saveCharacterToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveCharacterToAsset(node) }] : []),
         ...(hasImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
     const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools];
@@ -171,9 +170,7 @@ export function CanvasNodeHoverToolbar({
 
     const saveImageToolSettings = () => {
         const config = { ids: draftImageToolIds, showLabels: draftShowImageToolLabels };
-        setQuickImageToolIds(config.ids);
-        setShowImageToolLabels(config.showLabels);
-        window.localStorage.setItem(IMAGE_QUICK_TOOLS_STORAGE_KEY, JSON.stringify(config));
+        useImageQuickToolsStore.getState().setConfig(config);
         closeImageToolSettings();
     };
 
@@ -262,7 +259,7 @@ export function CanvasNodeInfoModal({ node, open, onClose }: { node: CanvasNodeD
                             <InfoRow label={t("canvas.nodeToolbar.position")} value={`${Math.round(node.position.x)}, ${Math.round(node.position.y)}`} />
                             <InfoRow label={t("canvas.nodeToolbar.status")} value={node.metadata?.status || "idle"} />
                             {batchCount > 1 ? <InfoRow label={t("canvas.nodeToolbar.imageGroup")} value={t("canvas.configNode.images", { count: batchCount })} /> : null}
-                            {node.metadata?.prompt ? <InfoRow label={t("canvas.configNode.prompt")} value={node.metadata.prompt} /> : null}
+                            {node.metadata?.prompt && node.type !== "minimax-h3:video" ? <InfoRow label={t("canvas.configNode.prompt")} value={node.metadata.prompt} /> : null}
                             {imageBytes ? <InfoRow label={t("canvas.nodeToolbar.imageSize")} value={formatBytes(imageBytes)} /> : null}
                             {node.metadata?.errorDetails ? (
                                 <div className="rounded-lg border p-3 text-red-400" style={{ borderColor: theme.node.stroke }}>

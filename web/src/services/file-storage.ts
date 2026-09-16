@@ -1,61 +1,50 @@
-import localforage from "localforage";
 import { nanoid } from "nanoid";
+import { uploadBackendMedia, deleteBackendMedia, backendMediaUrl } from "@/services/backend-api";
+import { useBackendStore } from "@/stores/use-backend-store";
+import { withLocalProxy } from "@/stores/use-config-store";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
 
-const store = localforage.createInstance({ name: "infinite-canvas", storeName: "media_files" });
-const objectUrls = new Map<string, string>();
-
-export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
-    const blob = typeof input === "string" ? await (await fetch(input)).blob() : input;
-    const storageKey = `${prefix}:${nanoid()}`;
-    await store.setItem(storageKey, blob);
+export async function uploadMediaFile(input: string | Blob, prefix = "file", category: "input" | "output" | "library" = "input"): Promise<UploadedFile> {
+    const blob = typeof input === "string" ? await (await fetch(withLocalProxy(input))).blob() : input;
+    if (!useBackendStore.getState().connected) throw new Error("总后台未连接，无法上传媒体");
     const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
-    const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : blob.type.startsWith("audio/") ? await readAudioMeta(url) : {};
-    return { url, storageKey, bytes: blob.size, mimeType: blob.type || "application/octet-stream", ...meta };
+    const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : blob.type.startsWith("audio/") ? await readAudioMeta(url) : {} as { width?: number; height?: number; durationMs?: number };
+    const videoMeta = meta as { width?: number; height?: number; durationMs?: number };
+
+    URL.revokeObjectURL(url);
+    const result = await uploadBackendMedia({ name: `${prefix}-${nanoid()}`, blob, mimeType: blob.type || "application/octet-stream", width: videoMeta.width, height: videoMeta.height, durationMs: videoMeta.durationMs, category });
+    return { url: result.url, storageKey: result.storageKey, bytes: blob.size, mimeType: result.mimeType, ...videoMeta };
 }
 
 export async function resolveMediaUrl(storageKey?: string, fallback = "") {
     if (!storageKey) return fallback;
-    const cached = objectUrls.get(storageKey);
-    if (cached) return cached;
-    const blob = await store.getItem<Blob>(storageKey);
-    if (!blob) return fallback;
-    const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
-    return url;
+    if (!useBackendStore.getState().connected) return fallback;
+    return backendMediaUrl(storageKey);
 }
 
 export async function getMediaBlob(storageKey: string) {
-    return store.getItem<Blob>(storageKey);
+    if (!useBackendStore.getState().connected) return null;
+    const response = await fetch(backendMediaUrl(storageKey));
+    return response.ok ? response.blob() : null;
 }
 
 export async function setMediaBlob(storageKey: string, blob: Blob) {
-    await store.setItem(storageKey, blob);
-    const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
-    return url;
+    if (!useBackendStore.getState().connected) throw new Error("总后台未连接，无法写入媒体");
+    const result = await uploadBackendMedia({ name: storageKey, storageKey, blob, mimeType: blob.type || "application/octet-stream" });
+    return backendMediaUrl(result.storageKey);
 }
 
 export async function deleteStoredMedia(keys: Iterable<string>) {
     await Promise.all(
         Array.from(new Set(keys)).map(async (key) => {
-            const url = objectUrls.get(key);
-            if (url) URL.revokeObjectURL(url);
-            objectUrls.delete(key);
-            await store.removeItem(key);
+            await deleteBackendMedia(key);
         }),
     );
 }
 
 export async function cleanupUnusedMedia(usedData: unknown) {
-    const usedKeys = collectMediaStorageKeys(usedData);
-    const unused: string[] = [];
-    await store.iterate((_value, key) => {
-        if (!usedKeys.has(key)) unused.push(key);
-    });
-    await Promise.all(unused.map((key) => store.removeItem(key)));
+    void usedData;
 }
 
 export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()) {

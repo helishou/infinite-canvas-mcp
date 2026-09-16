@@ -2,17 +2,18 @@ import type { NavigateFunction } from "react-router-dom";
 
 import i18n from "@/i18n";
 import { fetchPrompts } from "@/services/api/prompts";
+import { fetchBackendTasks } from "@/services/backend-api";
 import { uploadImage } from "@/services/image-storage";
 import { imageAspectOptions, imageQualityOptions } from "@/components/image-settings-panel";
 import { videoResolutionOptions, videoSecondOptions, videoSizeOptions } from "@/components/video-settings-panel";
-import type { CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { modelOptionLabel, modelOptionName, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore } from "@/stores/use-config-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 
-// Execute site-level Agent tools in the browser, including canvas lists, workbench generation, prompt search, and asset operations.
-// Their data lives locally in the browser through localforage and Zustand, so this module accesses the relevant stores directly.
+// Execute site-level Agent tools in the browser. Canvas generation status is read from
+// the Backend task store; workbench commands remain browser-facing because their pages
+// still own the provider-specific submission lifecycle.
 
 export const SITE_TOOL_NAMES = [
     "canvas_list_projects",
@@ -49,8 +50,8 @@ export const SITE_TOOL_LABELS: Record<SiteToolName, string> = {
 };
 
 type SiteToolInput = Record<string, unknown>;
-type SiteToolContext = { canvasSnapshot?: CanvasAgentSnapshot | null };
-type GenerationStatus = "idle" | "queued" | "running" | "succeeded" | "failed";
+type SiteToolContext = { canvasSnapshot?: unknown };
+type GenerationStatus = "idle" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
 type GenerationStatusItem = { id: string; source: "canvas" | "image" | "video"; status: GenerationStatus; kind?: string; title?: string; prompt?: string; projectId?: string; createdAt?: string; updatedAt?: string; successCount?: number; failCount?: number; error?: string };
 
 export async function runSiteTool(name: SiteToolName, input: SiteToolInput, navigate: NavigateFunction, context: SiteToolContext = {}): Promise<unknown> {
@@ -58,7 +59,7 @@ export async function runSiteTool(name: SiteToolName, input: SiteToolInput, navi
         case "canvas_list_projects":
             return listCanvasProjects(input);
         case "generation_get_status":
-            return getGenerationStatus(input, context.canvasSnapshot);
+            return getGenerationStatus(input);
         case "workbench_image_get_config":
             return getImageConfig();
         case "workbench_image_generate":
@@ -78,49 +79,59 @@ export async function runSiteTool(name: SiteToolName, input: SiteToolInput, navi
     }
 }
 
-function getGenerationStatus(input: SiteToolInput, canvasSnapshot?: CanvasAgentSnapshot | null) {
+async function getGenerationStatus(input: SiteToolInput) {
     const scope = input.scope === "canvas" || input.scope === "image" || input.scope === "video" ? input.scope : "all";
     const taskId = typeof input.taskId === "string" ? input.taskId : "";
     const nodeIds = new Set(Array.isArray(input.nodeIds) ? input.nodeIds.filter((id): id is string => typeof id === "string") : []);
     const limit = Math.max(1, Math.min(100, Math.floor(Number(input.limit)) || 20));
     const tasks: GenerationStatusItem[] = [];
-    const includeCanvas = (scope === "all" || scope === "canvas") && (!taskId || nodeIds.size > 0);
-    const includeWorkbench = !nodeIds.size || Boolean(taskId);
+    const backendTaskIds = new Set<string>();
 
-    if (includeCanvas && canvasSnapshot) {
-        canvasSnapshot.nodes.forEach((node) => {
-            const status = normalizeCanvasGenerationStatus(node.metadata?.status);
-            if (!status || (nodeIds.size && !nodeIds.has(node.id))) return;
-            const metadata = node.metadata || {};
-            if (!nodeIds.size && node.type !== "config" && status !== "running" && status !== "failed" && !metadata.generationMode && !metadata.generationType && !metadata.model) return;
-            tasks.push({ id: node.id, source: "canvas", status, kind: metadata.generationMode || node.type, title: node.title, prompt: compactPrompt(metadata.prompt || metadata.composerContent), projectId: canvasSnapshot.projectId, error: metadata.errorDetails });
+    const backendTasks = await fetchBackendTasks({
+        scope,
+        projectId: typeof input.projectId === "string" ? input.projectId : undefined,
+        nodeIds: nodeIds.size ? [...nodeIds] : undefined,
+        segmentIds: Array.isArray(input.segmentIds) ? input.segmentIds.filter((id): id is string => typeof id === "string") : undefined,
+        taskId: taskId || undefined,
+    });
+    backendTasks.tasks?.forEach((task) => {
+        backendTaskIds.add(task.id);
+        const kind = String(task.kind || task.executor || task.model || "");
+        const isCanvas = Boolean(task.projectId || task.nodeId || task.segmentId);
+        const isImage = /image/i.test(`${kind} ${task.executor || ""} ${task.model || ""}`);
+        const isVideo = /video|h3/i.test(`${kind} ${task.executor || ""} ${task.model || ""}`);
+        if (scope === "canvas" && !isCanvas) return;
+        if (scope === "image" && !isImage) return;
+        if (scope === "video" && !isVideo) return;
+        const source: GenerationStatusItem["source"] = isCanvas ? "canvas" : isVideo ? "video" : "image";
+        tasks.push({
+            id: task.id,
+            source,
+            status: task.status,
+            kind,
+            projectId: task.projectId,
+            prompt: compactPrompt(task.input?.prompt || task.params?.prompt),
+            createdAt: task.createdAt,
+            updatedAt: task.updatedAt,
+            error: task.error || undefined,
         });
-    }
+    });
 
-    if (includeWorkbench) {
+    if (scope !== "canvas" && !nodeIds.size) {
         useWorkbenchAgentStore.getState().tasks.forEach((task) => {
+            if (backendTaskIds.has(task.id)) return;
             if ((scope === "image" || scope === "video") && task.kind !== scope) return;
-            if (scope === "canvas" || (taskId && task.id !== taskId)) return;
+            if (taskId && task.id !== taskId) return;
             tasks.push({ ...task, source: task.kind, prompt: compactPrompt(task.prompt) });
         });
     }
 
     tasks.sort((a, b) => generationStatusOrder(a.status) - generationStatusOrder(b.status) || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
-    const summary: Record<GenerationStatus, number> = { idle: 0, queued: 0, running: 0, succeeded: 0, failed: 0 };
-    tasks.forEach((task) => (summary[task.status] += 1));
-    return { total: tasks.length, summary, tasks: tasks.slice(0, limit) };
+    return { tasks: tasks.slice(0, limit) };
 }
 
 function generationStatusOrder(status: GenerationStatus) {
     return status === "running" ? 0 : status === "queued" ? 1 : 2;
-}
-
-function normalizeCanvasGenerationStatus(status: unknown): GenerationStatus | null {
-    if (status === "idle") return "idle";
-    if (status === "loading") return "running";
-    if (status === "success") return "succeeded";
-    if (status === "error") return "failed";
-    return null;
 }
 
 function compactPrompt(prompt: unknown) {
@@ -157,7 +168,7 @@ function getImageConfig() {
     };
 }
 
-function runImageWorkbench(input: SiteToolInput, navigate: NavigateFunction) {
+async function runImageWorkbench(input: SiteToolInput, navigate: NavigateFunction) {
     const configStore = useConfigStore.getState();
     const applied: Record<string, unknown> = {};
     if (typeof input.model === "string" && input.model.trim()) {
@@ -181,7 +192,7 @@ function runImageWorkbench(input: SiteToolInput, navigate: NavigateFunction) {
     const prompt = typeof input.prompt === "string" ? input.prompt : undefined;
     const run = input.run !== false;
     navigate("/image");
-    const taskId = useWorkbenchAgentStore.getState().dispatchImage({ prompt, run });
+    const taskId = await useWorkbenchAgentStore.getState().dispatchImage({ prompt, run });
     return { ok: true, navigated: "/image", prompt, run, taskId, applied, note: siteText(run ? "imageGenerationStarted" : "imageConfigApplied") };
 }
 
@@ -205,7 +216,7 @@ function getVideoConfig() {
     };
 }
 
-function runVideoWorkbench(input: SiteToolInput, navigate: NavigateFunction) {
+async function runVideoWorkbench(input: SiteToolInput, navigate: NavigateFunction) {
     const configStore = useConfigStore.getState();
     const applied: Record<string, unknown> = {};
     if (typeof input.model === "string" && input.model.trim()) {
@@ -236,7 +247,7 @@ function runVideoWorkbench(input: SiteToolInput, navigate: NavigateFunction) {
     const prompt = typeof input.prompt === "string" ? input.prompt : undefined;
     const run = input.run !== false;
     navigate("/video");
-    const taskId = useWorkbenchAgentStore.getState().dispatchVideo({ prompt, run });
+    const taskId = await useWorkbenchAgentStore.getState().dispatchVideo({ prompt, run });
     return { ok: true, navigated: "/video", prompt, run, taskId, applied, note: siteText(run ? "videoGenerationStarted" : "videoConfigApplied") };
 }
 

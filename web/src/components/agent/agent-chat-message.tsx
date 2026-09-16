@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useState, type ReactNode } from "react";
 import { App, Button, Image, Modal, Popover } from "antd";
 import { Brain, CheckCircle2, ChevronDown, ChevronRight, Circle, CircleAlert, Copy, ExternalLink, FilePenLine, FileText, FolderOpen, ListChecks, LoaderCircle, Search, ShieldAlert, TerminalSquare, Wrench, XCircle } from "lucide-react";
 import { Streamdown, type LinkSafetyModalProps } from "streamdown";
@@ -143,7 +143,7 @@ function AgentUserMessageContent({ text, references, skill, theme }: { text: str
     return (
         <div className="whitespace-pre-wrap break-words">
             {tokens.map((token, index) => token.type === "text"
-                ? token.value
+                ? <Fragment key={`text:${index}`}>{token.value}</Fragment>
                 : token.type === "skill"
                     ? <AgentSkillMention key={`skill:${index}`} skill={token.skill} theme={theme} />
                     : <AgentCanvasMention key={`${token.reference.nodeId}:${index}`} reference={token.reference} theme={theme} />)}

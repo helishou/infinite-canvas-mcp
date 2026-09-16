@@ -1,0 +1,77 @@
+import { useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
+import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
+import type { H3Ref, H3Segment } from "../types";
+import { buildRestoreParamsPatch } from "../services/h3-segment-utils";
+import { segmentsFor } from "../hooks/useH3Segments";
+import { H3Icon } from "./H3Icon";
+import { H3MaterialCard } from "./H3MaterialCard";
+import { H3PreviewLightbox } from "./H3PreviewLightbox";
+
+type Props = { ctx: CanvasNodeContext; outputs: H3Ref[]; segments: H3Segment[]; selected?: H3Segment; patchSelected: (patch: Partial<H3Segment>) => void };
+
+export function H3MaterialLibrary({ ctx, outputs, segments, selected, patchSelected }: Props) {
+    const [outputFilter, setOutputFilter] = useState<"all" | "current">(String(ctx.node.metadata?.minimaxOutputFilter || "") === "current" ? "current" : "all");
+    const [previewRef, setPreviewRef] = useState<H3Ref | null>(null);
+    // Output 固定单行横向滚动：卡片高度实测面板可用高度自适应（78–380px），宽度=高度×2 保持 2:1。
+    const listRef = useRef<HTMLDivElement | null>(null);
+    const [cardH, setCardH] = useState(78);
+    // Output 区域滚轮横向滚动：在滚动条区域滚动时把纵向转为横向
+    useEffect(() => {
+        const el = listRef.current;
+        if (!el) return;
+        const onWheel = (e: WheelEvent) => {
+            if (e.deltaY !== 0) {
+                e.preventDefault();
+                el.scrollLeft += e.deltaY;
+            }
+        };
+        el.addEventListener("wheel", onWheel, { passive: false });
+        return () => el.removeEventListener("wheel", onWheel);
+    }, []);
+    useEffect(() => {
+        // 测量父容器（.minimax-library）的可用高度，而非 listRef 自身：
+        // listRef 是 grid 容器，其高度由 --h3-out-card-h 决定，若测量自身会形成
+        // cardH → CSS → 容器高度 → ResizeObserver → cardH 的死循环，导致卡片尺寸持续跳变。
+        const parent = listRef.current?.parentElement;
+        if (!parent) return;
+        const measure = () => {
+            const style = window.getComputedStyle(parent);
+            // 从 grid-template-rows 解析第一行（header）高度，避免魔法数
+            const gridRows = style.gridTemplateRows.split(" ");
+            const headerRowH = parseFloat(gridRows[0]) || 60;
+            const availH = parent.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom) - headerRowH;
+            if (availH <= 40) return;
+            const next = Math.round(Math.max(78, Math.min(380, availH)));
+            setCardH((prev) => (Math.abs(prev - next) > 1 ? next : prev));
+        };
+        const ro = new ResizeObserver(measure);
+        ro.observe(parent);
+        measure();
+        return () => ro.disconnect();
+    }, []);
+    const changeOutputFilter = (next: "all" | "current") => { setOutputFilter(next); ctx.updateMetadata({ minimaxOutputFilter: next }); };
+    const currentUrls = new Set((selected?.results || []).map((item) => item.url).concat(selected?.result ? [String(selected.result)] : []));
+    const visibleOutputs = outputFilter === "current" ? outputs.filter((item) => currentUrls.has(item.url) || item.segmentId === selected?.id) : outputs;
+    const clearUnused = () => {
+        // H3 节点的运行历史已迁出 metadata.materials（v4 起），落到 generation_logs.outputs_json，
+        // 由后端 /canvas/projects/:id/nodes/:nodeId/materials 与 MCP h3_get_node_materials 按需返回。
+        // segments.results 仍是当前活跃片段的 source of truth，无需再操作 materials。
+        console.warn("[H3] clearUnused 已废弃：materials 数组由 generation_logs 承担，前端无需清理。");
+    };
+    const removeOutput = (_ref: H3Ref) => {
+        // 同上 — 历史运行产物不再写回 node.metadata.materials；删除由 generation_logs.deleteGenerationLogs 承担。
+        console.warn("[H3] removeOutput 已废弃：materials 数组由 generation_logs 承担，前端无需在此操作。");
+    };
+    const restoreOutput = (ref: H3Ref) => {
+        // 输出卡片的点击可能发生在多个 metadata 更新之后，不能使用渲染时的旧 segments。
+        // 从最新节点重新解析源 Clip，确保 prompt 和生成参数来自当前权威状态。
+        const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        const liveSegments = segmentsFor(liveMetadata);
+        patchSelected({ result: ref.url, resultStorageKey: ref.storageKey, results: [ref], ...buildRestoreParamsPatch(liveSegments, ref) });
+    };
+    return <aside className="minimax-library">
+        <div key="library-head" className="minimax-library-head"><H3Icon name="output" /> <span>Output</span><span className="minimax-output-actions"><button type="button" aria-label="切换输出筛选" aria-pressed={outputFilter === "current"} title={outputFilter === "all" ? "当前显示全部输出，点击只显示当前 Clip" : "当前只显示当前 Clip，点击显示全部输出"} onClick={() => changeOutputFilter(outputFilter === "all" ? "current" : "all")} className={`minimax-output-filter${outputFilter === "current" ? " active" : ""}`}><H3Icon name={outputFilter === "all" ? "filter-all" : "filter-current"} /></button><button type="button" aria-label="清理未用于 Clip 的输出" title="清理未用于 Clip 的输出" onClick={clearUnused} className="minimax-output-clear"><H3Icon name="trash" /></button></span></div>
+        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} compact removable onRestore={() => restoreOutput(ref)} onRemove={() => removeOutput(ref)} onOpenPreview={() => setPreviewRef(ref)} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>Output</span></div> : null}</div>
+        {previewRef ? <H3PreviewLightbox item={previewRef} onClose={() => setPreviewRef(null)} /> : null}
+    </aside>;
+}

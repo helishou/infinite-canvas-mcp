@@ -26,6 +26,9 @@ export type ImageSplitParams = {
     columns: number;
     horizontalLines?: number[];
     verticalLines?: number[];
+    // 预览里切分线的视觉宽度（px），不影响实际切割位置；
+    // 仅让用户在高 DPI 屏 / 暗色背景下看得更清楚。
+    lineWidth?: number;
 };
 
 export type ImageSplitPiece = {

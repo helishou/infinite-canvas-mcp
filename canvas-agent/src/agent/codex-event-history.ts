@@ -6,8 +6,7 @@ import type { CodexSupplementalHistory, CodexSupplementalHistoryItem, CodexSuppl
 
 type CodexEventHistoryData = { version: 1; items: CodexSupplementalHistoryItem[]; turns: CodexSupplementalHistoryTurn[] };
 
-const MAX_ITEMS = 5000;
-const MAX_STRING_LENGTH = 100_000;
+const STORAGE_VERSION = 1;
 
 export const CODEX_EVENT_HISTORY_FILE = path.join(CONFIG_DIR, "codex-event-history.json");
 
@@ -32,7 +31,7 @@ export class CodexEventHistory {
             const items = [...data.items];
             if (index >= 0) items[index] = nextEntry;
             else items.push(nextEntry);
-            const nextData = { ...data, items: items.slice(-MAX_ITEMS) };
+            const nextData = { ...data, items };
             await this.save(nextData);
             this.data = nextData;
         });
@@ -48,7 +47,7 @@ export class CodexEventHistory {
             const turns = [...data.turns];
             if (index >= 0) turns[index] = nextEntry;
             else turns.push(nextEntry);
-            const nextData = { ...data, turns: turns.slice(-MAX_ITEMS) };
+            const nextData = { ...data, turns };
             await this.save(nextData);
             this.data = nextData;
         });
@@ -87,11 +86,11 @@ export class CodexEventHistory {
     private async load() {
         if (this.data) return this.data;
         try {
-            const value = JSON.parse(await fs.readFile(this.file, "utf8")) as Partial<CodexEventHistoryData>;
-            this.data = value.version === 1 && Array.isArray(value.items) && Array.isArray(value.turns) ? { version: 1, items: value.items.map(normalizeEntry), turns: value.turns.map(normalizeTurn) } : emptyHistory();
+            this.data = parseHistory(JSON.parse(await fs.readFile(this.file, "utf8")));
         } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
-            this.data = emptyHistory();
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") this.data = emptyHistory();
+            else if (error instanceof SyntaxError) throw new Error(`Codex event history JSON is invalid: ${this.file}. Refusing to overwrite existing data.`);
+            else throw error;
         }
         return this.data;
     }
@@ -111,7 +110,37 @@ export class CodexEventHistory {
 export const codexEventHistory = new CodexEventHistory();
 
 function emptyHistory(): CodexEventHistoryData {
-    return { version: 1, items: [], turns: [] };
+    return { version: STORAGE_VERSION, items: [], turns: [] };
+}
+
+function parseHistory(value: unknown): CodexEventHistoryData {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidHistory();
+    const data = value as Partial<CodexEventHistoryData>;
+    if (data.version !== STORAGE_VERSION) throw new Error(`Unsupported Codex event history version: ${String(data.version ?? "missing")}. Refusing to overwrite existing data.`);
+    if (!Array.isArray(data.items) || !Array.isArray(data.turns)) throw invalidHistory();
+    return {
+        version: STORAGE_VERSION,
+        items: data.items.map((entry) => {
+            if (!validIdentity(entry, true) || !entry.item || typeof entry.item !== "object" || Array.isArray(entry.item)) throw invalidHistory();
+            return normalizeEntry(entry);
+        }),
+        turns: data.turns.map((entry) => {
+            if (!validIdentity(entry, false) || !entry.turn || typeof entry.turn !== "object" || Array.isArray(entry.turn)) throw invalidHistory();
+            return normalizeTurn(entry);
+        }),
+    };
+}
+
+function validIdentity(value: unknown, requireItemId: boolean): value is CodexSupplementalHistoryItem & CodexSupplementalHistoryTurn {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const entry = value as Partial<CodexSupplementalHistoryItem & CodexSupplementalHistoryTurn>;
+    return typeof entry.threadId === "string" && Boolean(entry.threadId)
+        && typeof entry.turnId === "string" && Boolean(entry.turnId)
+        && (!requireItemId || (typeof entry.itemId === "string" && Boolean(entry.itemId)));
+}
+
+function invalidHistory() {
+    return new Error("Codex event history data is invalid. Refusing to overwrite existing data.");
 }
 
 function sameItem(left: CodexSupplementalHistoryItem, right: CodexSupplementalHistoryItem) {
@@ -141,12 +170,12 @@ function normalizeEntry(entry: CodexSupplementalHistoryItem): CodexSupplementalH
     return {
         ...entry,
         ...(entry.sequence === undefined ? {} : { sequence: entry.sequence }),
-        item: truncateRecord(entry.item),
+        item: structuredClone(entry.item),
     };
 }
 
 function normalizeTurn(entry: CodexSupplementalHistoryTurn): CodexSupplementalHistoryTurn {
-    return { ...entry, turn: truncateRecord({ ...entry.turn, id: entry.turnId }) };
+    return { ...entry, turn: structuredClone({ ...entry.turn, id: entry.turnId }) };
 }
 
 function mergeRecord(previous: Record<string, unknown> | undefined, next: Record<string, unknown>) {
@@ -156,15 +185,4 @@ function mergeRecord(previous: Record<string, unknown> | undefined, next: Record
         if (value !== undefined) merged[key] = value;
     });
     return merged;
-}
-
-function truncateRecord(value: Record<string, unknown>) {
-    return truncateValue(value) as Record<string, unknown>;
-}
-
-function truncateValue(value: unknown): unknown {
-    if (typeof value === "string") return value.length > MAX_STRING_LENGTH ? `${value.slice(0, MAX_STRING_LENGTH)}\n[输出已截断]` : value;
-    if (Array.isArray(value)) return value.map(truncateValue);
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, truncateValue(item)]));
-    return value;
 }

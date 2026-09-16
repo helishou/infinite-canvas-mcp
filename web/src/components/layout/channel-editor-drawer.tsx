@@ -3,9 +3,11 @@ import { ListPlus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { defaultBaseUrlForApiFormat, guessCapability, normalizeChannelModels, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { defaultBaseUrlForApiFormat, guessCapability, MODEL_INPUT_SCENARIOS, MODEL_SCENARIO_LABELS, normalizeChannelModels, WORKFLOW_ROUTE_UNSUPPORTED, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
+import { ModelWorkflowEditorModal } from "./model-workflow-editor-modal";
+import { WorkflowSelectModal } from "./workflow-select-modal";
 
 type ScriptTarget = { name: string; capability: ModelCapability; value: string };
 
@@ -14,8 +16,11 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const [draft, setDraft] = useState<ModelChannel | null>(channel);
     const [selectOpen, setSelectOpen] = useState(false);
     const [scriptTarget, setScriptTarget] = useState<ScriptTarget | null>(null);
+    const [workflowTarget, setWorkflowTarget] = useState<ChannelModel | null>(null);
+    const [workflowOpen, setWorkflowOpen] = useState(false);
     const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
         { label: "OpenAI", value: "openai" },
+        { label: "OpenAI Chat", value: "openai-chat" },
         { label: "Gemini", value: "gemini" },
     ];
     const capabilityOptions: Array<{ label: string; value: ModelCapability }> = ["image", "video", "text", "audio"].map((value) => ({ label: t(`config.channelEditor.capabilities.${value}`), value: value as ModelCapability }));
@@ -33,15 +38,33 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
         const baseUrl = !draft.baseUrl.trim() || draft.baseUrl.trim() === defaultBaseUrlForApiFormat(draft.apiFormat) ? defaultBaseUrlForApiFormat(apiFormat) : draft.baseUrl;
         patch({ apiFormat, baseUrl });
     };
+    const isComfy = draft.kind === "comfyui";
 
     const applySelection = (names: string[]) => {
         const map = new Map(draft.models.map((model) => [model.name, model]));
-        setModels(names.map((name) => map.get(name) || { name, capability: guessCapability(name) }));
+        // ComfyUI 渠道里工作流名多是中文，按关键词猜能力不可靠，默认按图片处理，需要时手动切。
+        setModels(names.map((name) => map.get(name) || { name, capability: isComfy ? "image" : guessCapability(name) }));
     };
 
     const setCapability = (name: string, capability: ModelCapability) => setModels(draft.models.map((model) => (model.name === name ? { ...model, capability } : model)));
     const setScript = (name: string, script: string) => setModels(draft.models.map((model) => (model.name === name ? { ...model, script: script || undefined } : model)));
     const removeModel = (name: string) => setModels(draft.models.filter((model) => model.name !== name));
+
+    const openWorkflowEditor = (model: ChannelModel | null) => {
+        setWorkflowTarget(model);
+        setWorkflowOpen(true);
+    };
+
+    // 新建时追加到列表；编辑时保持原位置并合并结果，同时去重同名模型。
+    const saveModelWorkflow = (next: ChannelModel) => {
+        setDraft((current) => {
+            if (!current) return current;
+            const index = current.models.findIndex((model) => model.name === (workflowTarget?.name || ""));
+            const merged = index >= 0 ? current.models.map((model, itemIndex) => (itemIndex === index ? { ...model, ...next } : model)) : current.models;
+            const models = merged.filter((model, itemIndex) => model.name !== next.name || itemIndex === index);
+            return { ...current, models: index >= 0 ? models : [...models, next] };
+        });
+    };
 
     const save = () => {
         onSave({ ...draft, name: draft.name.trim() || t("config.channels.unnamed"), models: normalizeChannelModels(draft.models) });
@@ -71,50 +94,85 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                 </label>
                 <label className="block">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.protocol")}</span>
-                    <Select className="w-full" value={draft.apiFormat} options={apiFormatOptions} onChange={changeApiFormat} />
+                    <Select disabled={isComfy} className="w-full" value={draft.apiFormat} options={apiFormatOptions} onChange={changeApiFormat} />
+                    {isComfy ? <div className="mt-1 text-xs text-stone-500">ComfyUI 渠道不走协议，下方「渠道类型」已选 ComfyUI。</div> : null}
+                </label>
+                <label className="block">
+                    <span className="mb-1 block text-sm font-medium">渠道类型</span>
+                    <Select className="w-full" value={draft.kind || "api"} options={[{ label: "云端 API", value: "api" }, { label: "本地 ComfyUI", value: "comfyui" }]} onChange={(kind) => patch({ kind })} />
                 </label>
                 <label className="block md:col-span-2">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.baseUrl")}</span>
-                    <Input value={draft.baseUrl} onChange={(event) => patch({ baseUrl: event.target.value })} placeholder="https://api.example.com" />
+                    <Input value={draft.baseUrl} onChange={(event) => patch({ baseUrl: event.target.value })} placeholder={isComfy ? "http://127.0.0.1:8188" : "https://api.example.com"} />
                 </label>
                 <label className="block md:col-span-2">
                     <span className="mb-1 block text-sm font-medium">API Key</span>
-                    <Input.Password value={draft.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder="sk-..." />
+                    <Input.Password disabled={isComfy} value={draft.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder={isComfy ? "无需 API Key" : "sk-..."} />
                 </label>
             </div>
 
             <div className="mt-6 mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
-                    <div className="text-sm font-semibold">{t("config.channelEditor.models")}</div>
+                    <div className="text-sm font-semibold">{isComfy ? t("config.channelEditor.workflows") : t("config.channelEditor.models")}</div>
                     <div className="mt-0.5 text-xs text-stone-500">{t("config.channelEditor.modelDescription", { count: draft.models.length })}</div>
                 </div>
-                <Button type="primary" icon={<ListPlus className="size-4" />} onClick={() => setSelectOpen(true)}>
-                    {t("config.channelEditor.selectModels")}
-                </Button>
+                <Space>
+                    {isComfy ? (
+                        <Button type="primary" icon={<ListPlus className="size-4" />} onClick={() => openWorkflowEditor(null)}>
+                            添加模型
+                        </Button>
+                    ) : null}
+                    <Button type={isComfy ? "default" : "primary"} icon={<ListPlus className="size-4" />} onClick={() => setSelectOpen(true)}>
+                        {isComfy ? "批量添加工作流" : t("config.channelEditor.selectModels")}
+                    </Button>
+                </Space>
             </div>
 
             <div className="space-y-2 rounded-lg border border-stone-200 p-2 dark:border-stone-800">
                 {draft.models.length ? (
-                    draft.models.map((model) => (
-                        <div key={model.name} className="flex flex-wrap items-center gap-3 rounded-md px-2 py-1.5 hover:bg-stone-50 dark:hover:bg-stone-900/40">
-                            <span className="min-w-0 flex-1 truncate text-sm" title={model.name}>
-                                {model.name}
-                            </span>
-                            <div className="flex shrink-0 items-center gap-2">
-                                <Segmented size="small" value={model.capability} options={capabilityOptions} onChange={(value) => setCapability(model.name, value as ModelCapability)} />
-                                <Button size="small" type={model.script ? "primary" : "default"} ghost={Boolean(model.script)} onClick={() => setScriptTarget({ name: model.name, capability: model.capability, value: model.script || "" })}>
-                                    {t(model.script ? "config.channelEditor.scriptReady" : "config.channelEditor.script")}
-                                </Button>
-                                <Button size="small" danger type="text" icon={<Trash2 className="size-3.5" />} onClick={() => removeModel(model.name)} />
+                    draft.models.map((model) => {
+                        // 被标记为「不支持」的输入场景，列表里直接标注，避免要靠点开弹窗才知道。
+                        const unsupported = MODEL_INPUT_SCENARIOS.filter((scenario) => model.workflowRouting?.[scenario] === WORKFLOW_ROUTE_UNSUPPORTED);
+                        return (
+                            <div key={model.name} className="flex flex-wrap items-center gap-3 rounded-md px-2 py-1.5 hover:bg-stone-50 dark:hover:bg-stone-900/40">
+                                <span className="min-w-0 flex-1 truncate text-sm" title={model.name}>
+                                    {model.name}
+                                </span>
+                                {unsupported.length ? (
+                                    <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+                                        不支持：{unsupported.map((scenario) => MODEL_SCENARIO_LABELS[model.capability][scenario]).join(" / ")}
+                                    </span>
+                                ) : null}
+                                <div className="flex shrink-0 items-center gap-2">
+                                    {isComfy ? (
+                                        <Button size="small" type={model.workflows?.length ? "primary" : "default"} ghost={Boolean(model.workflows?.length)} onClick={() => openWorkflowEditor(model)}>
+                                            工作流{model.workflows?.length ? ` ${model.workflows.length}` : ""}
+                                        </Button>
+                                    ) : null}
+                                    <Segmented size="small" value={model.capability} options={capabilityOptions} onChange={(value) => setCapability(model.name, value as ModelCapability)} />
+                                    <Button size="small" type={model.script ? "primary" : "default"} ghost={Boolean(model.script)} onClick={() => setScriptTarget({ name: model.name, capability: model.capability, value: model.script || "" })}>
+                                        {t(model.script ? "config.channelEditor.scriptReady" : "config.channelEditor.script")}
+                                    </Button>
+                                    <Button size="small" danger type="text" icon={<Trash2 className="size-3.5" />} onClick={() => removeModel(model.name)} />
+                                </div>
                             </div>
-                        </div>
-                    ))
+                        );
+                    })
                 ) : (
                     <div className="px-2 py-8 text-center text-sm text-stone-500">{t("config.channelEditor.empty")}</div>
                 )}
             </div>
 
-            <ModelSelectModal open={selectOpen} channel={draft} selectedNames={draft.models.map((model) => model.name)} onConfirm={applySelection} onClose={() => setSelectOpen(false)} />
+            {isComfy ? (
+                <WorkflowSelectModal
+                    open={selectOpen}
+                    selectedNames={draft.models.map((model) => model.name)}
+                    onConfirm={applySelection}
+                    onClose={() => setSelectOpen(false)}
+                />
+            ) : (
+                <ModelSelectModal open={selectOpen} channel={draft} selectedNames={draft.models.map((model) => model.name)} onConfirm={applySelection} onClose={() => setSelectOpen(false)} />
+            )}
 
             <ModelScriptEditor
                 open={Boolean(scriptTarget)}
@@ -124,6 +182,8 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                 onSave={(script) => scriptTarget && setScript(scriptTarget.name, script)}
                 onClose={() => setScriptTarget(null)}
             />
+
+            <ModelWorkflowEditorModal open={workflowOpen} model={workflowTarget} onSave={saveModelWorkflow} onClose={() => setWorkflowOpen(false)} />
         </Drawer>
     );
 }

@@ -1,16 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, User, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useBackendStore } from "@/stores/use-backend-store";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { resolveImageUrl } from "@/services/image-storage";
 import { useTranslation } from "react-i18next";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -18,6 +20,8 @@ const selectionBlue = "#2f80ff";
 
 type CanvasNodeProps = {
     data: CanvasNodeData;
+    previewPosition?: Position;
+    previewBounds?: { width: number; height: number; position: Position };
     scale: number;
     isSelected: boolean;
     isRelated: boolean;
@@ -44,6 +48,10 @@ type CanvasNodeProps = {
     onResize: (nodeId: string, width: number, height: number, position?: Position) => void;
     onResizeEnd: (nodeId: string) => void;
     onContentChange: (nodeId: string, content: string) => void;
+    // 角色节点双击标题：打开完整编辑面板（名字/描述/参考图/声线）
+    onEditCharacter?: (node: CanvasNodeData) => void;
+    // 拖入图片/音频到角色节点
+    onCharacterDrop?: (node: CanvasNodeData, ref: { url: string; type: "image" | "audio"; name?: string; storageKey?: string; mimeType?: string }) => void;
     onTitleChange: (nodeId: string, title: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (nodeId: string, itemId: string) => void;
@@ -60,6 +68,7 @@ type CanvasNodeProps = {
 type NodeContentRendererProps = {
     node: CanvasNodeData;
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
+    scale: number;
     isEditingContent: boolean;
     textareaRef: React.RefObject<HTMLTextAreaElement | null>;
     isBatchRoot: boolean;
@@ -83,6 +92,8 @@ type NodeContentRendererProps = {
 
 export const CanvasNode = React.memo(function CanvasNode({
     data,
+    previewPosition,
+    previewBounds,
     scale,
     isSelected,
     isRelated,
@@ -119,6 +130,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     onViewImage,
     onSelectReference,
     onContextMenu,
+    onEditCharacter,
+    onCharacterDrop,
 }: CanvasNodeProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
@@ -131,6 +144,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     const hasImageContent = data.type === CanvasNodeType.Image && Boolean(data.metadata?.content);
     const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content);
     const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
+    const isCharacter = data.type === CanvasNodeType.Character;
+    const hasCharacterContent = isCharacter && (data.metadata?.characterImages?.length || 0) > 0;
     const isGroup = data.type === CanvasNodeType.Group;
     const batchCount = data.type === CanvasNodeType.Image ? data.metadata?.images?.length || 0 : data.type === CanvasNodeType.Text ? data.metadata?.texts?.length || 0 : 0;
     const isBatchRoot = batchCount > 1;
@@ -297,9 +312,9 @@ export const CanvasNode = React.memo(function CanvasNode({
             data-node-id={data.id}
             className={`node-element absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : ""}`}
             style={{
-                transform: `translate(${data.position.x}px, ${data.position.y}px)`,
-                width: data.width,
-                height: data.height,
+                transform: `translate(${(previewBounds?.position || previewPosition || data.position).x}px, ${(previewBounds?.position || previewPosition || data.position).y}px)`,
+                width: previewBounds?.width || data.width,
+                height: previewBounds?.height || data.height,
                 transition: "box-shadow 200ms ease",
                 contain: "layout style",
             }}
@@ -313,6 +328,30 @@ export const CanvasNode = React.memo(function CanvasNode({
             }}
             onMouseDownCapture={(event) => {
                 if (!referenceSelectionState) onSelectCapture?.(event, data.id);
+                if (!referenceSelectionState) {
+                    // H3 节点内容几乎全是交互控件，且其根 div 在冒泡阶段 stopPropagation 挡掉了普通的
+                    // body 拖拽路径，只能走这里。若沿用全量黑名单（button/input/textarea/select/video），
+                    // 节点上几乎任何可见区域都命中被排除，导致“拖不动”。故对 H3 仅屏蔽纯文本编辑控件，
+                    // H3 只允许从自己的标题栏拖动，其他区域全部保留给控件和内容交互。
+                    const target = event.target as HTMLElement;
+                    const isH3 = data.type === "minimax-h3:video";
+                    const interactive = isH3
+                        ? target.closest("button, input, textarea, select, video")
+                        : target.closest("button, input, textarea, select, video");
+                    const isH3DragHandle = target.closest("[data-canvas-node-drag-handle]");
+                    // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
+                    // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
+                    // onMouseDown（冒泡阶段）无法执行，缩放被拖拽彻底劫持。故需显式排除缩放手柄。
+                    const onResizeHandle = target.closest("[data-resize-handle]");
+                    // 连线手柄（ConnectionHandleDot）与缩放手柄同理：纯 div 会命中拖拽分支，
+                    // capture 阶段触发 handleNodeMouseDown 的 stopPropagation 会掐断其自身
+                    // onMouseDown（onConnectStart，冒泡阶段），导致无法连线、反而变成拖拽。需显式排除。
+                    const onConnectionHandle = target.closest("[data-connection-handle]");
+                    // 节点下方的面板（提示词/参考内容等）是纯交互区：面板已在冒泡阶段 stopPropagation，
+                    // 但 capture 先于冒泡执行，会先在这里触发拖拽。命中面板时跳过拖拽，把交互留给面板自身。
+                    const onNodePanel = target.closest("[data-canvas-node-panel]");
+                    if (!interactive && !onResizeHandle && !onConnectionHandle && !onNodePanel && (!isH3 || isH3DragHandle)) onMouseDown(event, data.id);
+                }
             }}
             onContextMenu={(event) => {
                 if (referenceSelectionState) event.preventDefault();
@@ -346,7 +385,11 @@ export const CanvasNode = React.memo(function CanvasNode({
                             title={t("canvas.node.renameHint")}
                             onDoubleClick={(event) => {
                                 event.stopPropagation();
-                                setIsEditingTitle(true);
+                                if (data.type === CanvasNodeType.Character && onEditCharacter) {
+                                    onEditCharacter(data);
+                                } else {
+                                    setIsEditingTitle(true);
+                                }
                             }}
                         >
                             {data.title || t("canvas.node.untitled")}
@@ -356,15 +399,19 @@ export const CanvasNode = React.memo(function CanvasNode({
             )}
 
             <div
-                className="relative h-full w-full overflow-visible rounded-3xl border-2"
+                data-character-drop={data.type === CanvasNodeType.Character ? "true" : undefined}
+                className={`relative h-full w-full overflow-visible ${data.type === "minimax-h3:video" ? "rounded-lg border" : "rounded-3xl border-2"}`}
                 style={{
-                    background: isGroup ? "transparent" : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
-                    borderColor: isGroup ? (isGroupDropTarget || isActive ? selectionBlue : theme.node.stroke) : hasImageContent ? imageBorderColor : isActive ? selectionBlue : isRelated ? theme.node.muted : transparentBg ? "transparent" : theme.node.stroke,
+                    background: isGroup || data.type === "minimax-h3:video" ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || transparentBg ? "transparent" : theme.node.fill,
+                    borderRadius: data.type === "minimax-h3:video" ? 8 : undefined,
+                    borderColor: isGroup ? (isGroupDropTarget || isActive ? selectionBlue : theme.node.stroke) : hasImageContent || hasCharacterContent ? imageBorderColor : isActive ? selectionBlue : isRelated ? theme.node.muted : transparentBg ? "transparent" : theme.node.stroke,
                     borderStyle: isGroup ? "dashed" : "solid",
                     boxShadow: isGroupDropTarget ? `0 0 0 2px ${selectionBlue}66, inset 0 0 0 999px ${selectionBlue}10` : isActive ? `0 0 0 1px ${selectionBlue}55` : isRelated ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
                 }}
                 onMouseDown={(event) => {
-                    if (!referenceSelectionState) onMouseDown(event, data.id);
+                    const target = event.target as HTMLElement;
+                    const isH3 = data.type === "minimax-h3:video";
+                    if (!referenceSelectionState && (!isH3 || target.closest("[data-canvas-node-drag-handle]"))) onMouseDown(event, data.id);
                     else if (event.button === 0 && referenceSelectionState === "available") {
                         event.stopPropagation();
                         onSelectReference?.(data.id);
@@ -384,16 +431,51 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onViewImage?.(data);
                         return;
                     }
+                    if (data.type === CanvasNodeType.Character) {
+                        event.stopPropagation();
+                        onEditCharacter?.(data);
+                        return;
+                    }
                     if (data.type !== CanvasNodeType.Text) return;
                     event.stopPropagation();
                     setIsEditingContent(true);
                 }}
+                onDragOver={(event) => {
+                    if (data.type !== CanvasNodeType.Character) return;
+                    const types = Array.from(event.dataTransfer?.types || []);
+                    if (types.includes("application/x-infinite-canvas-ref")) {
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = "copy";
+                    }
+                }}
+                onDrop={(event) => {
+                    if (data.type !== CanvasNodeType.Character) return;
+                    const raw = event.dataTransfer.getData("application/x-infinite-canvas-ref")
+                        || event.dataTransfer.getData("application/json")
+                        || event.dataTransfer.getData("text/plain");
+                    if (!raw) return;
+                    try {
+                        const ref = JSON.parse(raw) as { url?: string; type?: string; kind?: string; storageKey?: string; name?: string; mimeType?: string };
+                        const kind = ref.kind || ref.type;
+                        if (kind === "image" && ref.url) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            onCharacterDrop?.(data, { url: ref.url, type: "image", name: ref.name, storageKey: ref.storageKey, mimeType: ref.mimeType });
+                        } else if (kind === "audio" && ref.url) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            onCharacterDrop?.(data, { url: ref.url, type: "audio", name: ref.name, storageKey: ref.storageKey, mimeType: ref.mimeType });
+                        }
+                    } catch {
+                        // ignore
+                    }
+                }}
             >
                 <div
-                    className={`relative flex h-full w-full items-center justify-center rounded-[inherit] ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
+                    className={`relative flex h-full w-full items-center justify-center ${data.type === "minimax-h3:video" ? "rounded-lg" : "rounded-[inherit]"} ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
                     style={
                         {
-                            background: isGroup ? "transparent" : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
+                            background: isGroup ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || transparentBg ? "transparent" : theme.node.fill,
                             pointerEvents: contentInteractive ? undefined : "none",
                         } as React.CSSProperties
                     }
@@ -401,6 +483,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     <NodeContent
                         node={data}
                         theme={theme}
+                        scale={scale}
                         isEditingContent={isEditingContent}
                         textareaRef={textareaRef}
                         isBatchRoot={isBatchRoot}
@@ -425,7 +508,7 @@ export const CanvasNode = React.memo(function CanvasNode({
 
                 {showImageInfo && hasImageContent ? <ImageInfoBar node={data} /> : null}
 
-                {!isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
+                {!isGroup && data.type !== "minimax-h3:video" && !hasImageContent && !hasVideoContent && !hasAudioContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
 
                 {referenceSelectionState && (referenceSelectionState !== "available" || hovered) ? (
                     <div className="pointer-events-none absolute inset-0 z-[60] grid place-items-center rounded-[inherit]" style={{ background: `color-mix(in srgb, ${theme.canvas.background} ${referenceSelectionState === "target" ? 78 : referenceSelectionState === "disabled" ? 60 : 34}%, transparent)`, boxShadow: referenceSelectionState === "available" ? `inset 0 0 0 2px ${selectionBlue}` : undefined }}>
@@ -442,7 +525,7 @@ export const CanvasNode = React.memo(function CanvasNode({
             {!referenceSelectionState && !isGroup ? <ConnectionHandleDot side="left" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "target")} /> : null}
             {!referenceSelectionState && (definition?.hasSourceHandle ?? true) && data.type !== CanvasNodeType.Config ? <ConnectionHandleDot side="right" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "source")} /> : null}
 
-            {showPanel && !isGroup && renderPanel ? <div className="absolute left-1/2 top-full z-[70] w-[600px] -translate-x-1/2 pt-4">{renderPanel(data)}</div> : null}
+            {showPanel && !isGroup && renderPanel ? <div data-canvas-node-panel className="absolute left-1/2 top-full z-[70] w-[600px] -translate-x-1/2 pt-4">{renderPanel(data)}</div> : null}
         </div>
     );
 });
@@ -451,6 +534,16 @@ function NodeContent(props: NodeContentRendererProps) {
     if (props.node.type === CanvasNodeType.Config && props.renderNodeContent) return props.renderNodeContent(props.node);
     if (props.isBatchRoot && props.node.type === CanvasNodeType.Image) return <ImageNodeContent {...props} />;
     if (props.node.type === CanvasNodeType.Text && props.node.metadata?.texts?.length && (props.node.metadata.status !== "error" || props.node.metadata.texts.some((text) => text.content))) return <TextContent {...props} />;
+    // The H3 workbench owns its loading/error presentation. Keep the complete
+    // editor visible so a failed generation does not replace it with the
+    // generic canvas error card (the legacy node behaved this way).
+    if (props.node.type === "minimax-h3:video") {
+        const h3Definition = getNodeDefinition(props.node.type);
+        if (h3Definition?.Content && props.pluginContext) {
+            const H3Content = h3Definition.Content;
+            return <H3Content ctx={props.pluginContext} />;
+        }
+    }
     if (props.node.metadata?.status === "loading") return <LoadingContent theme={props.theme} />;
     if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
 
@@ -473,6 +566,7 @@ const nodeContentRenderers = {
     [CanvasNodeType.Video]: VideoNodeContent,
     [CanvasNodeType.Audio]: AudioNodeContent,
     [CanvasNodeType.Group]: GroupNodeContent,
+    [CanvasNodeType.Character]: CharacterNodeContent,
 } satisfies Record<CanvasNodeType, (props: NodeContentRendererProps) => ReactNode>;
 
 function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererProps) {
@@ -694,7 +788,209 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
-function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
+/** 角色节点：主图（大）+ 底部 outfit 缩略图条；多图时像多图片输出节点一样可横向展开，点缩略图或“设为主图”切换主图。 */
+function CharacterNodeContent(props: NodeContentRendererProps) {
+    const { node, theme, batchExpanded, onToggleBatch, onSetBatchPrimary, onDeleteBatchImage, onViewBatchImage } = props;
+    const { t } = useTranslation();
+    const images = node.metadata?.characterImages || [];
+    const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
+    const primary = images[primaryIndex];
+    const voiceUrl = node.metadata?.characterVoiceUrl || "";
+    const voiceName = node.metadata?.characterVoiceName || "";
+    const [primaryUrl, setPrimaryUrl] = useState<string | null>(null);
+    const [thumbUrls, setThumbUrls] = useState<Record<number, string>>({});
+    const urlCache = useRef<Record<string, string>>({});
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+
+    // 解析主图 URL（storageKey → blob URL / dataUrl）
+    useEffect(() => {
+        let cancelled = false;
+        if (!primary) { setPrimaryUrl(null); return; }
+        const key = primary.storageKey || primary.url;
+        if (!key) { setPrimaryUrl(null); return; }
+        if (urlCache.current[key]) { setPrimaryUrl(urlCache.current[key]); return; }
+        resolveImageUrl(key, primary.url).then((url) => {
+            if (cancelled) return;
+            if (url) urlCache.current[key] = url;
+            setPrimaryUrl(url);
+        }).catch(() => { if (!cancelled) setPrimaryUrl(null); });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, primary?.url, primary?.storageKey]);
+
+    // 解析所有缩略图 URL
+    useEffect(() => {
+        let cancelled = false;
+        const next: Record<number, string> = {};
+        Promise.all(images.map(async (image, idx) => {
+            const key = image.storageKey || image.url;
+            if (!key) return null;
+            if (urlCache.current[key]) { next[idx] = urlCache.current[key]; return; }
+            const url = await resolveImageUrl(key, image.url).catch(() => null);
+            if (url) { urlCache.current[key] = url; next[idx] = url; }
+            return null;
+        })).then(() => { if (!cancelled) setThumbUrls(next); });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, images]);
+
+    useEffect(() => () => { Object.values(urlCache.current).forEach((url) => URL.revokeObjectURL(url)); }, []);
+
+    if (!images.length) {
+        return (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-4" style={{ color: theme.node.placeholder }}>
+                <div className="flex size-14 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg }}>
+                    <User className="size-6 opacity-30" />
+                </div>
+                <span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.character.empty")}</span>
+            </div>
+        );
+    }
+
+    const visibleThumbs = images.slice(0, 5);
+    const overflow = images.length - visibleThumbs.length;
+    const isBatchRoot = images.length > 1;
+
+    return (
+        <BatchFrame batchCount={images.length} batchExpanded={batchExpanded}>
+            {batchExpanded
+                ? images.map((image, index) => (
+                      <ExpandedCharacterImageCard
+                          key={index}
+                          node={node}
+                          image={image}
+                          index={index}
+                          primary={index === primaryIndex}
+                          onSetPrimary={() => onSetBatchPrimary?.(String(index))}
+                          onDelete={() => onDeleteBatchImage?.(String(index))}
+                          onView={() => onViewBatchImage?.(String(index))}
+                      />
+                  ))
+                : null}
+            <div className="flex h-full w-full flex-col">
+                <div className="relative flex-1 min-h-0 overflow-hidden bg-stone-100 dark:bg-stone-900" data-canvas-no-zoom>
+                    {primaryUrl ? (
+                        <img src={primaryUrl} alt={primary.outfit || primary.name || node.title} className="size-full object-cover" draggable={false} />
+                    ) : (
+                        <div className="flex size-full items-center justify-center" style={{ color: theme.node.placeholder }}>
+                            <User className="size-10 opacity-30" />
+                        </div>
+                    )}
+                    {primary?.outfit ? (
+                        <div className="absolute left-2 top-2 max-w-[calc(100%-16px)] truncate rounded-md bg-black/55 px-2 py-0.5 text-[11px] font-medium text-white">
+                            {primary.outfit}
+                        </div>
+                    ) : null}
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5 border-t px-2 py-1.5" style={{ borderColor: theme.node.stroke, background: theme.node.fill }}>
+                    {visibleThumbs.map((image, idx) => {
+                        const url = thumbUrls[idx];
+                        const active = idx === primaryIndex;
+                        return (
+                            <button
+                                key={idx}
+                                type="button"
+                                className="size-7 shrink-0 overflow-hidden rounded-md border p-0 transition hover:opacity-100"
+                                style={{ borderColor: active ? selectionBlue : theme.node.stroke, opacity: active ? 1 : 0.7 }}
+                                title={image.outfit || image.name}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    onSetBatchPrimary?.(String(idx));
+                                }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                            >
+                                {url ? <img src={url} alt="" className="size-full object-cover" draggable={false} /> : null}
+                            </button>
+                        );
+                    })}
+                    {overflow > 0 ? (
+                        <div className="grid size-7 shrink-0 place-items-center rounded-md border text-[10px] font-semibold" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            +{overflow}
+                        </div>
+                    ) : null}
+                    {voiceUrl ? (
+                        <span className="flex items-center gap-1 text-[10px] tabular-nums" style={{ color: theme.node.muted }} title={voiceName || t("canvas.character.voice")}>
+                            <Music2 className="size-3" />
+                            <span className="max-w-[60px] truncate">{voiceName || t("canvas.character.voice")}</span>
+                        </span>
+                    ) : null}
+                    <span className="ml-auto text-[10px] tabular-nums" style={{ color: theme.node.muted }}>
+                        {t("canvas.character.imageCount", { count: images.length })}
+                    </span>
+                </div>
+            </div>
+            {isBatchRoot ? (
+                <button
+                    type="button"
+                    className="absolute right-2.5 top-2.5 z-30 flex h-8 items-center justify-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
+                    aria-label={batchExpanded ? t("canvas.character.collapsed") : t("canvas.character.expanded")}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onToggleBatch?.();
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                >
+                    <span className="leading-none">{t("canvas.character.imageCount", { count: images.length })}</span>
+                    <ChevronRight className={`size-3.5 opacity-80 transition-transform ${batchExpanded ? "rotate-90" : ""}`} />
+                </button>
+            ) : null}
+        </BatchFrame>
+    );
+}
+
+/** 角色节点横向展开时的单张参考图卡片（排在节点右侧）。点“设为主图”切换主图，可删除。 */
+function ExpandedCharacterImageCard({ node, image, index, primary, onSetPrimary, onDelete, onView }: { node: CanvasNodeData; image: NonNullable<NonNullable<CanvasNodeData["metadata"]>["characterImages"]>[number]; index: number; primary: boolean; onSetPrimary: () => void; onDelete: () => void; onView: () => void }) {
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const { t } = useTranslation();
+    const [imageUrl, setImageUrl] = useState("");
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+    const x = (index + 1) * (node.width + 18);
+    const y = 0;
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!image.url && !image.storageKey) {
+            setImageUrl("");
+            return;
+        }
+        resolveImageUrl(image.storageKey, image.url).then((url) => {
+            if (!cancelled) setImageUrl(url);
+        });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, image.url, image.storageKey]);
+
+    return (
+        <div
+            className="absolute z-20 overflow-hidden rounded-3xl border shadow-[0_18px_50px_rgba(28,25,23,.14)]"
+            style={{ left: x, top: y, width: node.width, height: node.height, background: "transparent", borderColor: primary ? selectionBlue : theme.node.stroke, animation: `canvas-batch-child-in 320ms ${index * 35}ms cubic-bezier(.2,.85,.18,1) both` }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => {
+                if (!image.url || (event.target instanceof Element && event.target.closest("button"))) return;
+                event.stopPropagation();
+                onView();
+            }}
+        >
+            {imageUrl ? <img src={imageUrl} alt={image.outfit || image.name} draggable={false} className="pointer-events-none h-full w-full select-none object-cover" /> : <ImageSlotStatus />}
+            {image.url ? (
+                <div className="absolute inset-x-2 top-2 flex items-center gap-1">
+                    <button type="button" className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("canvas.character.setMain")} onClick={(event) => (event.stopPropagation(), onSetPrimary())}>
+                        <Star className="size-3 shrink-0" style={{ color: primary ? selectionBlue : theme.node.muted }} />
+                        <span className="truncate">{t("canvas.character.setMain")}</span>
+                    </button>
+                    <button type="button" className="grid size-8 shrink-0 place-items-center rounded-lg border shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }} onClick={(event) => (event.stopPropagation(), onDelete())} aria-label={t("common.delete")} title={t("common.delete")}>
+                        <Trash2 className="size-3.5" />
+                    </button>
+                </div>
+            ) : null}
+        </div>
+    );
+}
+
+function VideoNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     const { t } = useTranslation();
     if (!node.metadata?.content)
         return (
@@ -703,6 +999,14 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
                 <span className="text-sm">{t("canvas.node.emptyVideo")}</span>
             </div>
         );
+    if (scale < 0.2) {
+        return (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2 rounded-[18px] bg-black/10" style={{ color: theme.node.muted }}>
+                <Video className="size-7 opacity-60" />
+                <span className="max-w-[80%] truncate text-[10px]">{node.title || t("canvas.nodeTypes.video")}</span>
+            </div>
+        );
+    }
     return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />;
 }
 
@@ -755,6 +1059,21 @@ function ImageContent({
     const primaryImageId = node.metadata?.primaryImageId || images[0]?.id;
     const primaryImage = images.find((image) => image.id === primaryImageId);
     const primaryContent = primaryImage?.content || node.metadata?.content;
+    const [primaryUrl, setPrimaryUrl] = useState("");
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!primaryContent) {
+            setPrimaryUrl("");
+            return;
+        }
+        resolveImageUrl(primaryImage?.storageKey || node.metadata?.storageKey, primaryContent).then((url) => {
+            if (!cancelled) setPrimaryUrl(url);
+        });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, node.metadata?.storageKey, primaryContent, primaryImage?.storageKey]);
 
     return (
         <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded}>
@@ -764,9 +1083,9 @@ function ImageContent({
                       .map((image, index) => <ExpandedImageCard key={image.id} node={node} image={image} index={index} onView={() => onViewBatchImage?.(image.id)} onSetPrimary={() => onSetBatchPrimary?.(image.id)} onDuplicate={() => onDuplicateBatchImage?.(image.id)} onDownload={() => onDownloadBatchImage?.(image.id)} onRetry={() => onRetryBatchImage?.(image.id)} onDelete={() => onDeleteBatchImage?.(image.id)} />)
                 : null}
             <div className="h-full w-full overflow-hidden rounded-3xl">
-                {primaryContent ? (
+                {primaryUrl ? (
                     <img
-                        src={primaryContent}
+                        src={primaryUrl}
                         alt={node.title}
                         draggable={false}
                         onDragStart={(event) => event.preventDefault()}
@@ -778,10 +1097,16 @@ function ImageContent({
             </div>
             {primaryImage?.status === "error" ? <BatchImageFailureActions placement="left" onRetry={() => onRetryBatchImage?.(primaryImage.id)} onDelete={() => onDeleteBatchImage?.(primaryImage.id)} /> : null}
             {primaryImage?.content ? (
-                <button type="button" className="absolute left-2.5 top-2.5 z-30 flex h-8 items-center gap-1 rounded-lg border px-2 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("common.download")} onClick={(event) => (event.stopPropagation(), onDownloadBatchImage?.(primaryImage.id))}>
-                    <Download className="size-3" />
-                    {t("common.download")}
-                </button>
+                <div className="absolute left-2.5 top-2.5 z-30 flex items-center gap-1">
+                    <button type="button" className="flex h-8 min-w-0 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("common.download")} onClick={(event) => (event.stopPropagation(), onDownloadBatchImage?.(primaryImage.id))}>
+                        <Download className="size-3 shrink-0" />
+                        <span className="truncate">{t("common.download")}</span>
+                    </button>
+                    <button type="button" className="flex h-8 min-w-0 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("canvas.node.createCopy")} onClick={(event) => (event.stopPropagation(), onDuplicateBatchImage?.(primaryImage.id))}>
+                        <Copy className="size-3 shrink-0" />
+                        <span className="truncate">{t("canvas.node.createCopy")}</span>
+                    </button>
+                </div>
             ) : null}
             {isBatchRoot ? (
                 <button
@@ -807,6 +1132,9 @@ function ImageContent({
 function ExpandedImageCard({ node, image, index, onView, onSetPrimary, onDuplicate, onDownload, onRetry, onDelete }: { node: CanvasNodeData; image: CanvasNodeImage; index: number; onView: () => void; onSetPrimary: () => void; onDuplicate: () => void; onDownload: () => void; onRetry: () => void; onDelete: () => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
+    const [imageUrl, setImageUrl] = useState("");
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
     const count = node.metadata?.images?.length || 0;
     const columns = Math.min(count, 4);
     const rows = Math.ceil(count / columns);
@@ -816,6 +1144,18 @@ function ExpandedImageCard({ node, image, index, onView, onSetPrimary, onDuplica
     const row = Math.floor(slot / columns);
     const x = column * (node.width + 18);
     const y = (row - rows + 1) * (node.height + 18);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!image.content) {
+            setImageUrl("");
+            return;
+        }
+        resolveImageUrl(image.storageKey, image.content).then((url) => {
+            if (!cancelled) setImageUrl(url);
+        });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, image.content, image.storageKey]);
 
     return (
         <div
@@ -842,7 +1182,7 @@ function ExpandedImageCard({ node, image, index, onView, onSetPrimary, onDuplica
                 onView();
             }}
         >
-            {image.content ? <img src={image.content} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
+            {imageUrl ? <img src={imageUrl} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
             {image.content ? (
                 <div className="absolute inset-x-2 top-2 flex items-center gap-1">
                     <button type="button" className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("common.download")} onClick={(event) => (event.stopPropagation(), onDownload())}>
@@ -941,7 +1281,7 @@ function ResizeHandle({ corner, onMouseDown }: { corner: ResizeCorner; onMouseDo
         "bottom-right": "-bottom-[14px] -right-[14px] cursor-nwse-resize",
     }[corner];
 
-    return <div className={`absolute z-50 size-7 ${positionClass}`} onMouseDown={(event) => onMouseDown(event, corner)} />;
+    return <div data-resize-handle className={`absolute z-50 size-7 ${positionClass}`} onMouseDown={(event) => onMouseDown(event, corner)} />;
 }
 
 function ConnectionHandleDot({ side, visible, onMouseDown }: { side: "left" | "right"; visible: boolean; onMouseDown: (event: React.MouseEvent) => void }) {
@@ -949,6 +1289,7 @@ function ConnectionHandleDot({ side, visible, onMouseDown }: { side: "left" | "r
 
     return (
         <div
+            data-connection-handle
             className={`absolute top-1/2 z-30 flex size-12 -translate-y-1/2 cursor-crosshair items-center justify-center transition-opacity duration-150 ${
                 side === "left" ? "-left-6" : "-right-6"
             } ${visible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"}`}

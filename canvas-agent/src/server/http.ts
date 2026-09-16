@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
+import fs from "node:fs";
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
 
@@ -9,13 +10,18 @@ import type { CodexReasoningEffort, CodexSkillSelector } from "../agent/codex-pr
 import { messageMetadataStore } from "../agent/message-metadata.js";
 import type { AgentAttachment, AgentPermissionMode } from "../agent/types.js";
 import { AGENT_PROTOCOL_VERSION, CanvasSession } from "../canvas/session.js";
-import { DEFAULT_PORT, ensureSiteWorkspace, loadConfig, saveConfig, updateSiteWorkspace, type CanvasAgentConfig } from "../config.js";
+import { CONFIG_DIR, DEFAULT_PORT, ensureSiteWorkspace, loadConfig, saveConfig, updateSiteWorkspace, type CanvasAgentConfig } from "../config.js";
 import { logger } from "../utils/logger.js";
 import { checkVersions } from "../version-check.js";
 import { SkillStore, SkillStoreError } from "../skills/store.js";
+import { backendComfyUi, createBackendClient, resolveComfyTask, type ComfyUiClient } from "../runtime/comfy-client.js";
+import { loadPluginMcpDeclarationsFromBackend, savePluginMcpDeclarationsToBackend, type PluginMcpDeclaration } from "./plugin-mcp.js";
+import { startStandaloneCompat } from "./standalone-compat.js";
 
-/** 启动仅监听本机的 Canvas Agent HTTP 服务。 */
-export function startHttpServer() {
+export type AgentHttpOptions = { listen?: boolean; backendUrl?: string; backendToken?: string };
+
+/** 创建 Agent Express 应用；嵌入 Backend 时不监听端口。 */
+export function createAgentApp(options: AgentHttpOptions = {}) {
     const config = loadConfig(true);
     const port = Number(process.env.PORT) || Number(new URL(config.url).port) || DEFAULT_PORT;
     config.url = `http://127.0.0.1:${port}`;
@@ -24,6 +30,10 @@ export function startHttpServer() {
     const initialWorkspace = ensureSiteWorkspace(config);
     const session = new CanvasSession(initialWorkspace.activeThreadId || "");
     const skillStore = new SkillStore(initialWorkspace.workspacePath);
+    const backendUrl = options.backendUrl || config.backendUrl || `http://127.0.0.1:17370`;
+    const backend = createBackendClient(backendUrl, { ...process.env, ...(options.backendToken ? { INFINITE_CANVAS_BACKEND_TOKEN: options.backendToken } : {}) });
+    /** ComfyUI 由 Backend 唯一持有，Agent 只保留协议适配。 */
+    const comfyUi: ComfyUiClient = backendComfyUi(backend, () => []);
     /** 将 Agent 事件广播到所属线程或全部网页。 */
     const emit = (type: string, payload: unknown) => {
         const value = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : { value: payload };
@@ -102,8 +112,9 @@ export function startHttpServer() {
         emit("agent_bootstrap", { type: "codex.prepare_failed", threadId, sourceClientId: clientId || undefined, error: text });
     };
     const app = express();
+    const agentRoute = (routePath: string) => options.listen === false ? routePath : `/agent${routePath}`;
     app.disable("x-powered-by");
-    app.use(express.json({ limit: "30mb" }));
+    app.use(express.json({ limit: "100mb" }));
     app.use((req, res, next) => {
         if (!logger.enabled) return next();
         const startedAt = Date.now();
@@ -114,23 +125,30 @@ export function startHttpServer() {
         });
         next();
     });
-    app.use((req, res, next) => {
+    if (options.listen !== false) app.use((req, res, next) => {
         const url = requestUrl(req, config);
         if (!setCors(req, res, url, config)) return void res.status(403).json({ ok: false, error: "origin not allowed" });
-        if (req.method === "OPTIONS") return void res.json({});
+        // OPTIONS 预检请求直接返回，不进入后续 middleware（auth 等会拦截）。
+        if (req.method === "OPTIONS") { res.status(204).end(); return; }
         next();
     });
     app.get("/health", (_req, res) => res.json(session.health()));
     app.get("/config", (_req, res) => res.json({ ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, url: config.url, hasToken: true }));
-    app.use((req, res, next) => {
-        if (validToken(req, requestUrl(req, config), config.token)) return next();
-        res.status(401).json({ ok: false, error: "invalid token" });
-    });
+    if (options.listen !== false && process.env.CANVAS_AGENT_SKIP_AUTH !== "1") {
+        app.use((req, res, next) => {
+            if (validToken(req, requestUrl(req, config), config.token)) return next();
+            res.status(401).json({ ok: false, error: "invalid token" });
+        });
+    }
     app.get("/events", (req, res) => {
         session.openEvents(requestUrl(req, config), res, ensureSiteWorkspace(config).activeThreadId || "");
     });
     app.post("/canvas/state", (req, res) => {
-        session.updateState(req.body, String(req.query.clientId || "") || undefined);
+        const clientId = String(req.query.clientId || "") || undefined;
+        session.updateState(req.body, clientId);
+        const state = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : null;
+        // 这里仅保存 Agent 的会话投影；画布权威写入由 Web Store 直接经 Backend /ops 完成，
+        // 不再把浏览器快照从 Agent 侧全量覆盖回 Backend。
         res.json({ ok: true });
     });
     app.post("/canvas/activate", (req, res) => {
@@ -141,27 +159,96 @@ export function startHttpServer() {
         const ok = session.resolveResult(String(req.query.clientId || ""), req.body);
         res.status(ok ? 200 : 409).json({ ok });
     });
-    app.get("/agent/attachments/:attachmentId", route(async (req, res) => {
+    app.get("/runtime/status", route(async (_req, res) => res.json({ ok: true, sqlite: false, node: process.version, comfyui: await comfyUi.status(), backend: await backend.health() })));
+    app.get("/canvas/projects", route(async (_req, res) => {
+        res.json({ ok: true, projects: await backend.listCanvasProjects() });
+    }));
+    app.put("/canvas/projects", route(async (req, res) => {
+        const projects = Array.isArray(req.body?.projects) ? req.body.projects.filter((item: unknown): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))) : [];
+        res.json({ ok: true, projects: await backend.replaceCanvasProjects(projects) });
+    }));
+    app.get("/runtime/generation-logs", route(async (req, res) => {
+        const status = ["queued", "running", "success", "failed", "cancelled"].includes(String(req.query.status)) ? String(req.query.status) as any : undefined;
+        const options = { projectId: stringQuery(req.query.projectId), nodeId: stringQuery(req.query.nodeId), status, limit: Number(req.query.limit || 500) };
+        res.json({ ok: true, logs: (await backend.listGenerationLogs(options)).slice(0, options.limit) });
+    }));
+    app.post("/runtime/generation-logs", route(async (req, res) => {
+        const body = await generationLogBody(req.body, backend);
+        if (!body.projectId || !body.platform || !body.startedAt) return void res.status(400).json({ ok: false, error: "projectId、platform、startedAt 为必填项" });
+        res.status(201).json({ ok: true, log: await backend.createGenerationLog(body as any) });
+    }));
+    app.patch("/runtime/generation-logs/:id", route(async (req, res) => {
+        const body = await generationLogPatch(req.body, backend);
+        res.json({ ok: true, log: await backend.updateGenerationLog(routeParam(req.params.id), body as any) });
+    }));
+    app.delete("/runtime/generation-logs", route(async (req, res) => {
+        const id = stringQuery(req.query.id);
+        if (!id && !stringQuery(req.query.projectId) && !stringQuery(req.query.nodeId)) return void res.status(400).json({ ok: false, error: "删除日志必须指定范围" });
+        res.json({ ok: true, deleted: await backend.deleteGenerationLogs({ id, projectId: stringQuery(req.query.projectId), nodeId: stringQuery(req.query.nodeId) }) });
+    }));
+    app.post("/runtime/media", route(async (req, res) => {
+        const name = String(req.body?.name || "media.bin");
+        // storageKey 优先：调用方（web/H3 运行器）已把媒体落在总后台 media store 时，
+        // 直接复用而不再 base64 下载→重传。缺失时回退到旧的 dataUrl 上传语义。
+        const rawStorageKey = req.body?.storageKey;
+        const storageKey = typeof rawStorageKey === "string" && rawStorageKey.trim() ? rawStorageKey.trim() : "";
+        const dataUrl = String(req.body?.dataUrl || "");
+        if (!storageKey && !dataUrl) return void res.status(400).json({ ok: false, error: "缺少 dataUrl 或 storageKey" });
+        res.status(201).json({ ok: true, media: await backend.runtimeMediaStore(name, dataUrl, storageKey || undefined) });
+    }));
+    app.get("/runtime/media-file", route(async (req, res) => {
+        const file = String(req.query.file || req.query.name || "");
+        try {
+            // backend media store 按「真实文件名」读（旧 Agent 语义），参数兼容 file/name
+            const buffer = Buffer.from(await backend.runtimeMediaRead(file));
+            res.setHeader("Cache-Control", "private, max-age=3600");
+            res.type(path.extname(file)).send(buffer);
+        } catch { res.status(404).json({ ok: false, error: "媒体文件不存在" }); }
+    }));
+    app.get("/comfy/status", route(async (_req, res) => res.json({ ok: true, ...(await comfyUi.status()) })));
+    app.get("/comfy/models", route(async (_req, res) => res.json({ ok: true, data: await comfyUi.models() })));
+    app.get("/comfy/media", route(async (req, res) => {
+        const filename = String(req.query.filename || "");
+        if (!filename || filename.includes("..") || filename.includes("\\")) return void res.status(400).json({ ok: false, error: "媒体文件名无效" });
+        const query = new URLSearchParams({ filename, subfolder: String(req.query.subfolder || ""), type: String(req.query.type || "output") });
+        const response = await fetch(`${await comfyUi.getUrl()}/view?${query.toString()}`);
+        if (!response.ok) return void res.status(response.status).end();
+        res.type(response.headers.get("content-type") || "application/octet-stream").send(Buffer.from(await response.arrayBuffer()));
+    }));
+    app.get("/comfy/config", route(async (_req, res) => res.json({ ok: true, url: await comfyUi.getUrl() })));
+    app.put("/comfy/config", route(async (req, res) => res.json({ ok: true, url: await comfyUi.setUrl(String(req.body?.url || "")) })));
+    app.get("/comfy/presets", (_req, res) => res.json({ ok: true, data: comfyUi.presets() }));
+    app.post("/comfy/tasks", route(async (req, res) => res.status(202).json({ ok: true, task: await comfyUi.run(String(req.body?.preset || ""), objectBody(req.body?.input), objectBody(req.body?.params), typeof req.body?.comfyUrl === "string" ? req.body.comfyUrl : undefined) })));
+    app.get("/comfy/tasks/:id", route(async (req, res) => {
+        try {
+            const { task, events } = await resolveComfyTask(backend, routeParam(req.params.id), Number(req.query.after || 0));
+            res.json({ ok: true, task, events });
+        } catch {
+            res.status(404).json({ ok: false, error: "task not found" });
+        }
+    }));
+    app.post("/comfy/tasks/:id/cancel", route(async (req, res) => res.json({ ok: true, task: await comfyUi.cancel(routeParam(req.params.id)) })));
+    app.get(agentRoute("/attachments/:attachmentId"), route(async (req, res) => {
         const attachment = session.getTurnAttachment(String(req.query.clientId || ""), routeParam(req.params.attachmentId));
         const data = attachment.dataUrl.split(",", 2)[1];
         if (!data) throw new Error("图片附件内容无效");
         res.setHeader("Cache-Control", "no-store");
         res.type(attachment.type).send(Buffer.from(data, "base64"));
     }));
-    app.get("/agent/message-assets/:messageKey/:assetFile", route(async (req, res) => {
+    app.get(agentRoute("/message-assets/:messageKey/:assetFile"), route(async (req, res) => {
         const asset = await messageMetadataStore.readAsset(routeParam(req.params.messageKey), routeParam(req.params.assetFile));
         if (!asset) return void res.status(404).json({ ok: false, error: "message asset not found" });
         res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
         res.type(asset.contentType).send(asset.data);
     }));
-    app.post("/agent/local-file/reveal", route(async (req, res) => {
+    app.post(agentRoute("/local-file/reveal"), route(async (req, res) => {
         const filePath = String(req.body?.path || "");
         if (!path.isAbsolute(filePath)) return res.status(400).json({ ok: false, error: "文件路径必须是绝对路径" });
         const file = await stat(filePath);
         await revealLocalFile(filePath, file.isDirectory());
         res.json({ ok: true });
     }));
-    app.post("/agent/local-image", route(async (req, res) => {
+    app.post(agentRoute("/local-image"), route(async (req, res) => {
         const filePath = String(req.body?.path || "");
         if (!path.isAbsolute(filePath) || !/\.(?:avif|gif|jpe?g|png|webp)$/i.test(filePath)) return res.status(400).json({ ok: false, error: "图片路径无效" });
         const file = await stat(filePath);
@@ -169,18 +256,42 @@ export function startHttpServer() {
         res.setHeader("Cache-Control", "no-store");
         res.type(path.extname(filePath)).send(await readFile(filePath));
     }));
-    app.post("/api/tools", route(async (req, res) => res.json({ ok: true, result: await session.callTool(req.body?.name, req.body?.input || {}) })));
-    app.get("/agent/codex/workspace", (_req, res) => {
+    app.post("/api/tools", route(async (req, res) => {
+        const name = String(req.body?.name || "");
+        const input = objectBody(req.body?.input);
+        if (name === "comfyui_status") return void res.json({ ok: true, result: await comfyUi.status() });
+        if (name === "comfyui_list_presets") return void res.json({ ok: true, result: comfyUi.presets() });
+        if (name === "comfyui_run") return void res.json({ ok: true, result: await comfyUi.run(String(input.preset || ""), objectBody(input.input), objectBody(input.params)) });
+        if (name === "comfyui_get_task") {
+            try {
+                const { task } = await resolveComfyTask(backend, String(input.taskId || ""));
+                return void res.json({ ok: true, result: task });
+            } catch {
+                return void res.json({ ok: true, result: null });
+            }
+        }
+        if (name === "comfyui_cancel_task") return void res.json({ ok: true, result: await comfyUi.cancel(String(input.taskId || "")) });
+        return void res.json({ ok: true, result: await session.callTool(name, input) });
+    }));
+    app.post("/api/plugins/mcp", route(async (req, res) => {
+        const declarations = Array.isArray(req.body?.plugins) ? (req.body.plugins as PluginMcpDeclaration[]) : [];
+        await savePluginMcpDeclarationsToBackend(backend, declarations);
+        res.json({ ok: true, plugins: declarations.map((declaration) => ({ id: declaration.id, enabled: declaration.mcp?.enabled ?? false })) });
+    }));
+    app.get("/api/plugins/mcp", route(async (_req, res) => {
+        res.json({ ok: true, plugins: await loadPluginMcpDeclarationsFromBackend(backend) });
+    }));
+    app.get(agentRoute("/codex/workspace"), (_req, res) => {
         const workspace = ensureSiteWorkspace(config);
         res.json({ ok: true, workspace, conversation: session.conversationStateSnapshot });
     });
-    app.get("/agent/codex/models", route(async (_req, res) => res.json({ ok: true, ...(await listCodexModels(emit)) })));
-    app.get("/agent/codex/skills", route(async (req, res) => {
+    app.get(agentRoute("/codex/models"), route(async (_req, res) => res.json({ ok: true, ...(await listCodexModels(emit)) })));
+    app.get(agentRoute("/codex/skills"), route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const result = await listCodexSkills(emit, workspace.workspacePath, String(req.query.forceReload || "") === "1");
         res.json({ ok: true, data: result.skills.map((skill) => ({ ...skill, managed: skillStore.isManagedPath(skill.path) })), errors: result.errors });
     }));
-    app.post("/agent/codex/skills/draft", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/skills/draft"), codexMutation(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const source = String(req.body?.source || "");
         if (source !== "conversation" && source !== "canvas") return res.status(400).json({ ok: false, error: "Skill 草稿来源无效" });
@@ -213,15 +324,15 @@ export function startHttpServer() {
             session.setCodexState(previousCodexState, { preserveReplay: true });
         }
     }));
-    app.get("/agent/codex/skills/:name", route(async (req, res) => {
+    app.get(agentRoute("/codex/skills/:name"), route(async (req, res) => {
         res.json({ ok: true, data: await skillStore.get(routeParam(req.params.name)) });
     }));
-    app.post("/agent/codex/skills", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/skills"), codexMutation(async (req, res) => {
         const data = await skillStore.create(req.body);
         session.emitAll("skills_changed", { forceReload: true });
         res.status(201).json({ ok: true, data });
     }));
-    app.post("/agent/codex/skills/:name/enabled", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/skills/:name/enabled"), codexMutation(async (req, res) => {
         if (typeof req.body?.enabled !== "boolean") return res.status(400).json({ ok: false, error: "Skill 启用状态无效" });
         const workspace = ensureSiteWorkspace(config);
         const selector = skillSelector(req.body);
@@ -230,47 +341,47 @@ export function startHttpServer() {
         session.emitAll("skills_changed", { forceReload: true });
         res.json({ ok: true, data });
     }));
-    app.post("/agent/codex/skills/:name/delete", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/skills/:name/delete"), codexMutation(async (req, res) => {
         await skillStore.delete(routeParam(req.params.name), String(req.body?.expectedRevision || ""));
         session.emitAll("skills_changed", { forceReload: true });
         res.json({ ok: true });
     }));
-    app.post("/agent/codex/skills/:name", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/skills/:name"), codexMutation(async (req, res) => {
         const data = await skillStore.update(routeParam(req.params.name), req.body);
         session.emitAll("skills_changed", { forceReload: true });
         res.json({ ok: true, data });
     }));
-    app.get("/agent/codex/threads", route(async (req, res) => {
+    app.get(agentRoute("/codex/threads"), route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const result = await listCodexThreads(emit, { cwd: workspace.workspacePath, searchTerm: String(req.query.searchTerm || "") });
         res.json({ ok: true, workspace, conversation: session.conversationStateSnapshot, ...result });
     }));
-    app.post("/agent/codex/threads/new", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/threads/new"), codexMutation(async (req, res) => {
         const clientId = String(req.body?.clientId || "");
         session.beginConversation({ sourceClientId: clientId });
         setActiveThread("", { emptyThread: true, draftThread: true, sourceClientId: clientId }, true);
         const thread = await prepareDraftThread(clientId, permissionMode(req.body?.permissionMode));
         res.json({ ok: true, workspace: ensureSiteWorkspace(config), conversation: session.conversationStateSnapshot, thread: summarizeCodexThread(thread), messages: [] });
     }));
-    app.post("/agent/codex/threads/reset", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/threads/reset"), codexMutation(async (req, res) => {
         const clientId = String(req.body?.clientId || "");
         session.beginConversation({ sourceClientId: clientId });
         setActiveThread("", { emptyThread: true, draftThread: true, sourceClientId: clientId }, true);
         await prepareDraftThread(clientId, permissionMode(req.body?.permissionMode));
         res.json({ ok: true, workspace: ensureSiteWorkspace(config), conversation: session.conversationStateSnapshot });
     }));
-    app.get("/agent/codex/threads/:threadId", route(async (req, res) => {
+    app.get(agentRoute("/codex/threads/:threadId"), route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const threadId = routeParam(req.params.threadId);
         res.json({ ok: true, workspace, conversation: session.conversationStateSnapshot, ...(await readCodexThread(emit, threadId, workspace.workspacePath)) });
     }));
-    app.post("/agent/codex/history/ack", (req, res) => {
+    app.post(agentRoute("/codex/history/ack"), (req, res) => {
         const threadId = String(req.body?.threadId || "");
         const turnIds = Array.isArray(req.body?.turnIds) ? req.body.turnIds.map(String) : [];
         session.acknowledgeCodexHistory(threadId, turnIds);
         res.json({ ok: true });
     });
-    app.post("/agent/codex/threads/:threadId/resume", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/threads/:threadId/resume"), codexMutation(async (req, res) => {
         const threadId = routeParam(req.params.threadId);
         const clientId = String(req.body?.clientId || "");
         try {
@@ -282,14 +393,14 @@ export function startHttpServer() {
             throw error;
         }
     }));
-    app.post("/agent/codex/threads/:threadId/delete", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/threads/:threadId/delete"), codexMutation(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const threadId = routeParam(req.params.threadId);
         await archiveCodexThread(emit, threadId, workspace.workspacePath);
         const nextWorkspace = setActiveThread(workspace.activeThreadId === threadId ? "" : workspace.activeThreadId || "", { sourceClientId: String(req.body?.clientId || "") });
         res.json({ ok: true, workspace: nextWorkspace, conversation: session.conversationStateSnapshot });
     }));
-    app.post("/agent/codex/turn", codexMutation(async (req, res) => {
+    app.post(agentRoute("/codex/turn"), codexMutation(async (req, res) => {
         const attachments = Array.isArray(req.body?.attachments) ? (req.body.attachments as AgentAttachment[]) : [];
         const workspace = ensureSiteWorkspace(config);
         const prompt = String(req.body?.prompt || "");
@@ -410,17 +521,17 @@ export function startHttpServer() {
             }
         });
     }
-    app.post("/agent/codex/approval", route(async (req, res) => {
+    app.post(agentRoute("/codex/approval"), route(async (req, res) => {
         const decision = String(req.body?.decision || "");
         if (!["accept", "acceptForSession", "decline", "cancel"].includes(decision)) return res.status(400).json({ ok: false, error: "无效的审批决定" });
         const ok = await resolveCodexApproval(String(req.body?.requestId || ""), decision);
         res.status(ok ? 200 : 409).json({ ok, ...(ok ? {} : { error: "审批请求已失效" }) });
     }));
-    app.post("/agent/codex/interrupt", route(async (req, res) => {
+    app.post(agentRoute("/codex/interrupt"), route(async (req, res) => {
         const ok = await interruptCodexTurn(skillDraftRunning ? undefined : String(req.body?.threadId || ""));
         res.status(ok ? 200 : 409).json({ ok, ...(ok ? {} : { error: "当前没有可停止的任务" }) });
     }));
-    app.post("/agent/claude/turn", (req, res) => {
+    app.post(agentRoute("/claude/turn"), (req, res) => {
         runClaudeTurn(String(req.body?.prompt || ""), emit);
         res.json({ ok: true });
     });
@@ -431,26 +542,36 @@ export function startHttpServer() {
         res.status(500).json({ ok: false, error: error.message });
     });
 
-    app.listen(port, "127.0.0.1", () => {
+    const recoverActiveThread = () => {
+        const activeThreadId = initialWorkspace.activeThreadId || "";
+        if (!activeThreadId || !session.beginCodexMutation()) return;
+        void prepareExistingThread(activeThreadId).catch(async (error) => {
+            if (!isRecoverableThreadError(error)) return failPreparedConversation(error, activeThreadId);
+            session.beginConversation();
+            setActiveThread("", { emptyThread: true, draftThread: true }, true);
+            await prepareDraftThread("", "request");
+        }).finally(() => session.endCodexMutation()).catch(() => undefined);
+    };
+
+    if (options.listen !== false) app.listen(port, "127.0.0.1", () => {
         console.log("Infinite Canvas Agent");
         checkVersions();
         console.log(`Local URL: ${config.url}`);
         console.log(`Connect token: ${config.token}`);
         console.log("Codex MCP is not installed by this command.");
-        console.log("Optional MCP add: codex mcp add infinite-canvas -- npx -y @basketikun/canvas-agent mcp");
+        console.log("Optional MCP add: codex mcp add infinite-canvas -- npx -y @basketikun/infinite-canvas-backend mcp");
         console.log("Remove manually added MCP: codex mcp remove infinite-canvas");
         if (logger.enabled) console.log(`Debug log: ${logger.filePath}`);
         logger.info("Canvas Agent started", { url: config.url, workspace: ensureSiteWorkspace(config).workspacePath, debugLog: logger.filePath });
-        const activeThreadId = initialWorkspace.activeThreadId || "";
-        if (activeThreadId && session.beginCodexMutation()) {
-            void prepareExistingThread(activeThreadId).catch(async (error) => {
-                if (!isRecoverableThreadError(error)) return failPreparedConversation(error, activeThreadId);
-                session.beginConversation();
-                setActiveThread("", { emptyThread: true, draftThread: true }, true);
-                await prepareDraftThread("", "request");
-            }).finally(() => session.endCodexMutation()).catch(() => undefined);
-        }
+        recoverActiveThread();
     });
+    else recoverActiveThread();
+    return { app, config, session, skillStore, backend, comfyUi };
+}
+
+/** standalone 兼容入口；新架构由 Backend 持有唯一 HTTP listener。 */
+export function startHttpServer() {
+    return startStandaloneCompat();
 }
 
 /** 将异步 Express 路由异常交给统一错误处理中间件。 */
@@ -461,6 +582,70 @@ function route(handler: (req: Request, res: Response) => Promise<unknown>) {
 /** 从 Express 路由参数中读取单个字符串。 */
 function routeParam(value: string | string[]) {
     return Array.isArray(value) ? value[0] || "" : value;
+}
+
+function objectBody(value: unknown): Record<string, unknown> {
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function stringQuery(value: unknown) { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
+
+async function generationLogBody(value: unknown, backend: ReturnType<typeof createBackendClient>) {
+    const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    return {
+        projectId: String(body.projectId || "").trim(), nodeId: stringQuery(body.nodeId), segmentId: stringQuery(body.segmentId),
+        status: ["queued", "running", "success", "failed", "cancelled"].includes(String(body.status)) ? String(body.status) : "queued",
+        platform: String(body.platform || "Generate"), workflow: stringQuery(body.workflow), model: stringQuery(body.model), taskMode: stringQuery(body.taskMode),
+        prompt: typeof body.prompt === "string" ? body.prompt : "", references: await sanitizeLogMedia(body.references, backend),
+        inputCounts: objectNumberMap(body.inputCounts), runtimeTaskId: stringQuery(body.runtimeTaskId), promptId: stringQuery(body.promptId),
+        startedAt: String(body.startedAt || new Date().toISOString()), finishedAt: stringQuery(body.finishedAt), durationMs: Math.max(0, Number(body.durationMs || 0)),
+        outputs: await sanitizeLogMedia(body.outputs, backend), error: stringQuery(body.error), params: objectRecord(body.params),
+    };
+}
+
+async function generationLogPatch(value: unknown, backend: ReturnType<typeof createBackendClient>) {
+    const body = await generationLogBody({ ...(value && typeof value === "object" ? value : {}), projectId: "x", platform: "x", startedAt: new Date().toISOString() }, backend);
+    const source = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    const result: Record<string, unknown> = {};
+    for (const key of ["nodeId", "segmentId", "status", "platform", "workflow", "model", "taskMode", "prompt", "runtimeTaskId", "promptId", "startedAt", "finishedAt", "durationMs", "error"]) if (key in source) result[key] = (body as any)[key];
+    if ("references" in source) result.references = body.references;
+    if ("inputCounts" in source) result.inputCounts = body.inputCounts;
+    if ("outputs" in source) result.outputs = body.outputs;
+    if ("params" in source) result.params = body.params;
+    return result;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function objectNumberMap(value: unknown): Record<string, number> { return Object.fromEntries(Object.entries(objectRecord(value)).map(([key, item]) => [key, Number(item) || 0])); }
+function dataUrlMimeType(dataUrl: string) {
+    const match = String(dataUrl).match(/^data:([^;]+)/);
+    return match?.[1] || "application/octet-stream";
+}
+async function sanitizeLogMedia(value: unknown, backend: ReturnType<typeof createBackendClient>): Promise<Array<Record<string, unknown>>> {
+    if (!Array.isArray(value)) return [];
+    return (await Promise.all(value.map(async (item) => {
+        if (!item || typeof item !== "object") return null;
+        const copy = { ...(item as Record<string, unknown>) };
+        for (const key of ["dataUrl", "base64"]) if (typeof copy[key] === "string" && String(copy[key]).startsWith("data:")) delete copy[key];
+        const url = typeof copy.url === "string" ? copy.url : "";
+        const name = String(copy.name || "ref");
+        // 将内嵌 dataURL 持久化到总后台 media store，避免日志里只保留 name 而丢失可访问地址
+        if (url.startsWith("data:") && !copy.storageKey) {
+            try {
+                const uploaded = await backend.uploadMedia({ name, dataUrl: url, mimeType: dataUrlMimeType(url) });
+                copy.url = uploaded.url;
+                copy.storageKey = uploaded.storageKey;
+                copy.mimeType = uploaded.mimeType;
+                copy.bytes = uploaded.bytes;
+                copy.width = uploaded.width ?? undefined;
+                copy.height = uploaded.height ?? undefined;
+                copy.durationMs = uploaded.durationMs ?? undefined;
+            } catch (error) {
+                logger.warn("[generation-logs] failed to persist dataURL reference", { name, error: error instanceof Error ? error.message : String(error) });
+            }
+        }
+        return copy;
+    }))).filter((item): item is Record<string, unknown> => Boolean(item));
 }
 
 function permissionMode(value: unknown): AgentPermissionMode {
@@ -522,7 +707,7 @@ function setCors(req: Request, res: Response, url: URL, config: CanvasAgentConfi
     const origin = req.headers.origin;
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Access-Control-Allow-Headers", "content-type,x-canvas-agent-token");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Private-Network", "true");
     if (!origin || req.method === "OPTIONS" || url.pathname === "/health" || url.pathname === "/config") return true;
     config.origins ||= [];

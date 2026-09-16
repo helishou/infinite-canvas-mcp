@@ -1,7 +1,7 @@
 import axios from "axios";
 
 import i18n from "@/i18n";
-import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
@@ -495,10 +495,14 @@ async function requestStreamingResponse(config: AiConfig, body: Record<string, u
     const response = await fetch(aiApiUrl(config, "/responses"), {
         method: "POST",
         headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
-        body: JSON.stringify({ ...body, stream: true }),
+        body: JSON.stringify({ ...body, stream: true, keep_alive: 300 }),
         signal: options?.signal,
     });
-    if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
+    if (!response.ok) {
+        const error = new Error(await readFetchError(response, apiText("requestFailed"))) as Error & { status?: number };
+        error.status = response.status;
+        throw error;
+    }
     if (!response.body) {
         const payload = (await response.json()) as ResponseApiPayload;
         validateResponsePayload(payload);
@@ -520,6 +524,77 @@ async function requestStreamingResponse(config: AiConfig, body: Record<string, u
     validateResponsePayload(state.payload);
     const result = parseToolResponse(state.payload);
     return { ...result, content: state.text || result.content };
+}
+
+/**
+ * 通过 OpenAI Chat Completions 流式端点 `/chat/completions` 调文本模型。
+ * 第三方中转普遍支持这条路径（且 CORS 普遍放开），适合作为
+ * Responses API（`/responses`）不可用或被 CORS 拒绝时的兜底。
+ * 返回的 SSE chunk 形如 `data: {"choices":[{"delta":{"content":"..."}}]}`。
+ */
+async function requestChatCompletionsStreaming(config: AiConfig, body: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
+    const response = await fetch(aiApiUrl(config, "/chat/completions"), {
+        method: "POST",
+        headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
+        // keep_alive: Ollama 扩展参数。本地 Ollama 默认在空闲后卸载模型，
+        // 下次请求要花 20~30s 重新加载（冷启动）。设为 300 秒让模型在首次
+        // 加载后常驻显存，后续请求秒回。OpenAI 官方会忽略此字段，不影响。
+        body: JSON.stringify({ ...body, stream: true, keep_alive: 300 }),
+        signal: options?.signal,
+    });
+    if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
+    if (!response.body) {
+        const payload = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        const text = payload.choices?.[0]?.message?.content || "";
+        return { content: text, toolCalls: [] };
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let text = "";
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx = buffer.indexOf("\n");
+        while (idx >= 0) {
+            const line = buffer.slice(0, idx).replace(/\r$/, "").trim();
+            buffer = buffer.slice(idx + 1);
+            if (line.startsWith("data:")) {
+                const data = line.slice(5).replace(/^ /, "");
+                if (data && data !== "[DONE]") {
+                    try {
+                        const event = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
+                        const delta = event.choices?.[0]?.delta?.content;
+                        if (typeof delta === "string" && delta) {
+                            text += delta;
+                            onDelta?.(text);
+                        }
+                    } catch {
+                        // 忽略不能解析的单行 chunk，继续消费流。
+                    }
+                }
+            }
+            idx = buffer.indexOf("\n");
+        }
+    }
+    if (buffer.trim()) {
+        const line = buffer.trim();
+        if (line.startsWith("data:")) {
+            const data = line.slice(5).replace(/^ /, "");
+            if (data && data !== "[DONE]") {
+                try {
+                    const event = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
+                    const delta = event.choices?.[0]?.delta?.content;
+                    if (typeof delta === "string" && delta) {
+                        text += delta;
+                        onDelta?.(text);
+                    }
+                } catch { /* 忽略 */ }
+            }
+        }
+    }
+    return { content: text, toolCalls: [] };
 }
 
 function toGeminiBody(config: AiConfig, messages: ResponseInputMessage[], extra?: Record<string, unknown>) {
@@ -772,7 +847,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     }
 }
 
-export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
+export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
@@ -798,7 +873,6 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         }
     }
     if (requestConfig.apiFormat === "gemini") {
-        if (mask) throw new Error(apiText("geminiMaskUnsupported"));
         try {
             return await requestGeminiImages(requestConfig, requestPrompt, references, n, options);
         } catch (error) {
@@ -828,8 +902,8 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         formData.set("background", background);
     }
     const files = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
-    files.forEach((file) => formData.append("image", file));
-    if (mask) formData.set("mask", dataUrlToFile(mask));
+    const imageField = files.length > 1 ? "image[]" : "image";
+    files.forEach((file) => formData.append(imageField, file));
 
     try {
         const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: aiHeaders(requestConfig), signal: options?.signal });
@@ -840,8 +914,48 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
 }
 
+/**
+ * 把相对路径的图片（如 /media/image:xxx?token=yyy）在浏览器侧拉取并转成 base64 data URL。
+ * 原因：OpenAI/Ollama 等模型服务收的是绝对 URL 或 data URL；相对路径服务端取不到，
+ * 会报 invalid image input / 400。浏览器同源 fetch 能拿到真实图片字节（图片本就显示在页面上）。
+ */
+async function toDataUrl(url: string): Promise<string> {
+    if (/^(https?:|data:|blob:)/i.test(url)) return url;
+    const absolute = url.startsWith("/")
+        ? `${window.location.origin}${url}`
+        : new URL(url, window.location.origin).href;
+    const res = await fetch(withLocalProxy(absolute));
+    if (!res.ok) throw new Error(`读取参考图失败（HTTP ${res.status}），请确认图片已保存且可访问`);
+    const blob = await res.blob();
+    if (blob.size === 0) throw new Error("参考图内容为空（HTTP 200 但 0 字节），请重新上传或保存该图片");
+    return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error("参考图转 base64 失败"));
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function normalizeMessageImages(message: AiTextMessage): Promise<AiTextMessage> {
+    if (typeof message.content === "string") return message;
+    const content = await Promise.all(
+        message.content.map(async (part) => {
+            if (part.type === "image_url") {
+                return { ...part, image_url: { url: await toDataUrl(part.image_url.url) } };
+            }
+            return part;
+        }),
+    );
+    return { ...message, content };
+}
+
+async function normalizeImageUrls(messages: AiTextMessage[]): Promise<AiTextMessage[]> {
+    return Promise.all(messages.map(normalizeMessageImages));
+}
+
 export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel);
+    const normalizedMessages = await normalizeImageUrls(messages);
     const script = resolveModelScript(config, config.model || config.textModel);
     if (script) {
         try {
@@ -849,12 +963,11 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
                 capability: "text",
                 script,
                 config: requestConfig,
-                messages: withSystemMessage(requestConfig, messages),
+                messages: withSystemMessage(requestConfig, normalizedMessages),
                 signal: options?.signal,
                 onDelta,
             });
-            const text = String(answer ?? "").trim() || apiText("noContent");
-            if (text === apiText("noContent")) onDelta(text);
+            const text = String(answer ?? "").trim() || "";
             return text;
         } catch (error) {
             throw new Error(readAxiosError(error, apiText("requestFailed")));
@@ -862,17 +975,76 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
     }
     try {
         if (requestConfig.apiFormat === "gemini") {
-            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, messages), onDelta, options)).content || apiText("noContent");
-            if (answer === apiText("noContent")) onDelta(answer);
+            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, normalizedMessages), onDelta, options)).content || "";
+            if (answer === "") onDelta(answer);
             return answer;
         }
-        const answer = (await requestStreamingResponse(requestConfig, {
-            model: requestConfig.model,
-            input: toResponseInput(withSystemMessage(requestConfig, messages)),
-            ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
-        }, onDelta, options)).content || apiText("noContent");
-        if (answer === apiText("noContent")) onDelta(answer);
-        return answer;
+        if (requestConfig.apiFormat === "openai-chat") {
+            const chatMessages = (() => {
+                const out: Array<{ role: "system" | "user" | "assistant"; content: unknown }> = [];
+                for (const m of withSystemMessage(requestConfig, normalizedMessages)) {
+                    const record = m as Record<string, unknown>;
+                    const role = record.role;
+                    if (role !== "system" && role !== "user" && role !== "assistant") continue;
+                    out.push({ role: role as "system" | "user" | "assistant", content: record.content ?? "" });
+                }
+                return out;
+            })();
+            const answer = (await requestChatCompletionsStreaming(requestConfig, {
+                model: requestConfig.model,
+                messages: chatMessages,
+            }, onDelta, options)).content || "";
+            if (answer === "") onDelta(answer);
+            return answer;
+        }
+        // 优先用 Responses API（GPT-5+）。如果中转/服务端对 `/responses` 没实现或 CORS
+        // 没放开（典型 "Failed to fetch"），自动回退到 Chat Completions
+        // (`/chat/completions`) — 中转普遍支持且通常 CORS 已开。
+        const chatMessages = (() => {
+            const out: Array<{ role: "system" | "user" | "assistant"; content: unknown }> = [];
+            for (const m of withSystemMessage(requestConfig, normalizedMessages)) {
+                const record = m as Record<string, unknown>;
+                const role = record.role;
+                if (role !== "system" && role !== "user" && role !== "assistant") continue;
+                out.push({ role: role as "system" | "user" | "assistant", content: record.content ?? "" });
+            }
+            return out;
+        })();
+        try {
+            const answer = (await requestStreamingResponse(requestConfig, {
+                model: requestConfig.model,
+                input: toResponseInput(withSystemMessage(requestConfig, normalizedMessages)),
+                ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
+            }, onDelta, options)).content || "";
+            if (answer === "") onDelta(answer);
+            return answer;
+        } catch (responsesError) {
+            const typed = responsesError as Error & { status?: number };
+            const isNetworkOrCors = typed instanceof Error && /Failed to fetch|NetworkError|fetch failed|CORS|Load failed/i.test(typed.message);
+            // `/responses` 是较新的 Responses API，很多 OpenAI 兼容服务（Ollama、部分中转）未实现，
+            // 会返回 4xx/5xx 而非网络错误。这类情况自动回退到普遍支持的 /chat/completions。
+            // 401/403 视为鉴权问题，不再回退（两个端点鉴权一致，回退无意义）。
+            const isResponsesUnavailable = typeof typed.status === "number" && typed.status >= 400 && typed.status !== 401 && typed.status !== 403;
+            if (!isNetworkOrCors && !isResponsesUnavailable) throw typed;
+            console.warn("[/chat-completions fallback]", { status: typed.status, error: typed.message });
+            try {
+                const answer = (await requestChatCompletionsStreaming(requestConfig, {
+                    model: requestConfig.model,
+                    messages: chatMessages,
+                }, onDelta, options)).content || "";
+                if (answer === "") onDelta(answer);
+                return answer;
+            } catch (chatError) {
+                // 两个端点都失败：把模型名与试过的路径带上，方便直接定位（典型：Ollama 里没装该模型）
+                const chatTyped = chatError as Error & { status?: number };
+                const reason = [typed.status, chatTyped.status].filter((s): s is number => typeof s === "number");
+                throw new Error(
+                    `调用文本模型「${requestConfig.model}」失败：已依次尝试 /v1/responses（${typed.status ?? "?"}, 该服务不支持）与 /v1/chat/completions（${chatTyped.status ?? "?"}）。`
+                    + (chatTyped.message ? ` 末次错误：${chatTyped.message}` : "")
+                    + (reason.includes(404) ? " 常见原因：渠道里填的模型名在 Ollama 中不存在，请用 ollama list 核对精确模型名（含 :latest 标签）。" : ""),
+                );
+            }
+        }
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("requestFailed")));
     }

@@ -28,7 +28,6 @@ export function AgentPanel() {
             setAgentState({ width: nextWidth });
         };
         const onUp = () => {
-            localStorage.setItem("canvas-agent-panel-width", String(nextWidth));
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
             setResizing(false);

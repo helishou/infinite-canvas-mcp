@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { createBackendTask, updateBackendTask } from "@/services/backend-api";
 
 // The Agent panel dispatches commands through this store to set workbench prompts and optionally start generation.
 // The panel writes model, quality, size, count, and other options to use-config-store, which workbench pages read directly.
@@ -27,8 +28,8 @@ type WorkbenchAgentStore = {
     imageCommand: WorkbenchCommand | null;
     videoCommand: WorkbenchCommand | null;
     tasks: WorkbenchGenerationTask[];
-    dispatchImage: (command: Omit<WorkbenchCommand, "nonce" | "taskId">) => string | undefined;
-    dispatchVideo: (command: Omit<WorkbenchCommand, "nonce" | "taskId">) => string | undefined;
+    dispatchImage: (command: Omit<WorkbenchCommand, "nonce" | "taskId">) => Promise<string | undefined>;
+    dispatchVideo: (command: Omit<WorkbenchCommand, "nonce" | "taskId">) => Promise<string | undefined>;
     updateTask: (id: string, patch: Partial<Pick<WorkbenchGenerationTask, "status" | "successCount" | "failCount" | "error">>) => void;
     clearImageCommand: () => void;
     clearVideoCommand: () => void;
@@ -41,19 +42,24 @@ export const useWorkbenchAgentStore = create<WorkbenchAgentStore>((set) => ({
     imageCommand: null,
     videoCommand: null,
     tasks: [],
-    dispatchImage: (command) => {
+    dispatchImage: async (command) => {
         const commandNonce = nextNonce();
         const task = command.run ? createTask("image", commandNonce, command.prompt) : undefined;
+        if (task) await createBackendTask("workbench:image", { prompt: command.prompt || "" }, {}, task.id);
         set((state) => ({ imageCommand: { ...command, nonce: commandNonce, taskId: task?.id }, tasks: task ? [task, ...state.tasks].slice(0, 30) : state.tasks }));
         return task?.id;
     },
-    dispatchVideo: (command) => {
+    dispatchVideo: async (command) => {
         const commandNonce = nextNonce();
         const task = command.run ? createTask("video", commandNonce, command.prompt) : undefined;
+        if (task) await createBackendTask("workbench:video", { prompt: command.prompt || "" }, {}, task.id);
         set((state) => ({ videoCommand: { ...command, nonce: commandNonce, taskId: task?.id }, tasks: task ? [task, ...state.tasks].slice(0, 30) : state.tasks }));
         return task?.id;
     },
-    updateTask: (id, patch) => set((state) => ({ tasks: state.tasks.map((task) => (task.id === id ? { ...task, ...patch, updatedAt: new Date().toISOString() } : task)) })),
+    updateTask: (id, patch) => {
+        set((state) => ({ tasks: state.tasks.map((task) => (task.id === id ? { ...task, ...patch, updatedAt: new Date().toISOString() } : task)) }));
+        void updateBackendTask(id, { status: patch.status, error: patch.error }).catch(() => undefined);
+    },
     clearImageCommand: () => set({ imageCommand: null }),
     clearVideoCommand: () => set({ videoCommand: null }),
 }));

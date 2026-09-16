@@ -4,6 +4,19 @@
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./http": "./dist/server/http.js",
+    "./plugin-mcp": "./dist/server/plugin-mcp.js",
+    "./schemas": "./dist/canvas/schemas.js",
+    "./operations": "./dist/canvas/operations.js",
+    "./generation-contract": "./dist/canvas/generation-contract.js",
+    "./generation-api": "./dist/canvas/generation-api.js",
+    "./model-workflow": "./dist/canvas/model-workflow.js",
+    "./runtime/comfy-client": "./dist/runtime/comfy-client.js",
+    "./runtime/agent-runtime": "./dist/runtime/agent-runtime.js",
+    "./plugins/minimax-h3/node-factory": "./dist/plugins/minimax-h3/node-factory.js"
+  },
   "types": "./dist/index.d.ts",
   "bin": {
     "canvas-agent": "dist/index.js"
@@ -16,7 +29,7 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "debug": "tsx src/index.ts --debug",
-    "test": "tsx --test src/config.test.ts src/canvas/operations.test.ts src/canvas/session.test.ts src/agent/codex-client.test.ts src/agent/codex-history.test.ts src/agent/message-metadata.test.ts src/skills/store.test.ts src/utils/agent-runtime.test.ts",
+    "test": "node ../scripts/test.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "prepack": "npm run build"
@@ -38,7 +51,7 @@
     "typescript": "^5.8.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.5"
   },
   "publishConfig": {
     "access": "public"

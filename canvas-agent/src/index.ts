@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-import { startHttpServer } from "./server/http.js";
-import { startMcpServer } from "./server/mcp.js";
+import { startHttpServer, createAgentApp } from "./server/http.js";
+import { startStandaloneCompat } from "./server/standalone-compat.js";
 
-if (process.argv[2] === "mcp") await startMcpServer();
-else startHttpServer();
+export { createAgentApp, startHttpServer };
+export { createAgentRuntime } from "./runtime/agent-runtime.js";
+
+startStandaloneCompat();

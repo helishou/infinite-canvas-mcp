@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Bot, Download, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload } from "lucide-react";
-import { Button, Dropdown, Modal, Tooltip } from "antd";
+import { BookOpen, Bot, Download, FileText, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload } from "lucide-react";
+import { Button, Dropdown, Input, Modal, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { UserStatusActions } from "@/components/layout/user-status-actions";
@@ -31,6 +31,9 @@ export function CanvasTopBar({
     agentOpen,
     compactAgentStatus,
     onToggleAgent,
+    globalPrompt,
+    onGlobalPromptChange,
+    onOpenGenerationLogs,
 }: {
     title: string;
     titleDraft: string;
@@ -53,6 +56,9 @@ export function CanvasTopBar({
     agentOpen: boolean;
     compactAgentStatus: { connected: boolean; enabled: boolean; activity: string };
     onToggleAgent: () => void;
+    globalPrompt: string;
+    onGlobalPromptChange: (value: string) => void;
+    onOpenGenerationLogs: () => void;
 }) {
     const colorTheme = useThemeStore((state) => state.theme);
     const { t } = useTranslation();
@@ -136,10 +142,23 @@ export function CanvasTopBar({
                         )}
                     </div>
                     <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />
+                    <Popover
+                        trigger="click"
+                        placement="bottomLeft"
+                        content={<div className="w-80"><Input.TextArea autoFocus value={globalPrompt} onChange={(event) => onGlobalPromptChange(event.target.value)} placeholder={t("canvas.globalPromptPlaceholder")} autoSize={{ minRows: 3, maxRows: 8 }} /></div>}
+                    >
+                        <Tooltip title={t("canvas.globalPromptHint")}>
+                                <button type="button" aria-label={t("canvas.globalPrompt")} className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: globalPrompt.trim() ? theme.node.text : theme.node.muted }}>
+                                <Sparkles className="size-3.5" />
+                                <span>{t("canvas.globalPrompt")}</span>
+                            </button>
+                        </Tooltip>
+                    </Popover>
                 </div>
 
                 <div className="pointer-events-auto flex items-center gap-1.5">
                     <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />
+                    <Tooltip title="生成日志"><button type="button" aria-label="生成日志" className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip>
                     <span className="h-6 w-px" style={{ background: theme.toolbar.border }} />
                     <Button
                         type="text"

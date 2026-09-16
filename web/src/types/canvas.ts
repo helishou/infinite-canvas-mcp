@@ -1,3 +1,7 @@
+import type { CanvasGenerationMode } from "@basketikun/canvas-agent/generation-contract";
+
+export type { CanvasGenerationMode } from "@basketikun/canvas-agent/generation-contract";
+
 export type Position = {
     x: number;
     y: number;
@@ -16,14 +20,16 @@ export enum CanvasNodeType {
     Video = "video",
     Audio = "audio",
     Group = "group",
+    /** 角色节点：承载一个角色资产（多张参考图 + outfit），可作为下游参考节点。 */
+    Character = "character",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
 export type CanvasNodeTypeId = CanvasNodeType | (string & {});
 
-export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
-export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
+export type CanvasNodeStatus = "idle" | "queued" | "success" | "loading" | "error" | "cancelled";
 export type CanvasImageGenerationType = "generation" | "edit";
+export type CanvasGenerationEngine = "cloud" | "comfyui" | "video-concat";
 
 export type CanvasNodeImage = {
     id: string;
@@ -53,6 +59,10 @@ export type CanvasNodeMetadata = {
     fontSize?: number;
     generationMode?: CanvasGenerationMode;
     generationType?: CanvasImageGenerationType;
+    generationEngine?: CanvasGenerationEngine;
+    comfyPreset?: string;
+    runtimeTaskId?: string;
+    comfyParams?: Record<string, unknown>;
     model?: string;
     reasoningEffort?: "auto" | "low" | "medium" | "high" | "xhigh";
     size?: string;
@@ -81,7 +91,20 @@ export type CanvasNodeMetadata = {
     bytes?: number;
     durationMs?: number;
     groupId?: string;
+    groupLocked?: boolean;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
+    // 角色节点：characterAssetId 关联到资产库里的 CharacterAsset；characterImages 是节点自带的角色图谱快照（来自资产库或本地编辑）。
+    characterAssetId?: string;
+    characterName?: string;
+    characterEnglishName?: string;
+    characterDescription?: string;
+    characterImages?: Array<{ url: string; storageKey?: string; name: string; outfit: string; outfitDescription: string; width: number; height: number; bytes: number; mimeType: string }>;
+    characterPrimaryIndex?: number;
+    // 拖入角色节点的声线（音频）：从音频节点/音频资产/音频文件拖入后记录，存入资产库映射到 CharacterAsset.voice*。
+    characterVoiceName?: string;
+    characterVoiceUrl?: string;
+    characterVoiceStorageKey?: string;
+    characterVoiceAssetId?: string;
 };
 
 export type CanvasNodeData = {
@@ -98,6 +121,8 @@ export type CanvasConnection = {
     id: string;
     fromNodeId: string;
     toNodeId: string;
+    role?: string;
+    order?: number;
 };
 
 export type CanvasAssistantReference = {

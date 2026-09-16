@@ -8,10 +8,22 @@ data/
 *.tsbuildinfo
 .DS_Store
 .idea
+.codegraph/
+.codex-runtime/
+.hermes/
+.learnings/
 web/dist
+web/_test_report.txt
+web/_diag.txt
 
 **/dist
 web/public/plugins
 plugins/canvas/*/dist
 plugins/canvas/*/node_modules
 web/public/plugins
+.workbuddy
+
+# python venvs (backend worker 依赖，隔离安装 Pillow)
+**/venv/
+**/.venv/
+backend/venv

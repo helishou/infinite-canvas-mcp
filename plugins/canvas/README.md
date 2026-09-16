@@ -142,7 +142,6 @@ ctx.applyOps([
     { type: "connect_nodes", fromNodeId, toNodeId },
     { type: "delete_connections", id? | ids? | all? },
     { type: "select_nodes", ids },
-    { type: "set_viewport", viewport },
     { type: "run_generation", nodeId, mode?, prompt? },
 ]);
 ```

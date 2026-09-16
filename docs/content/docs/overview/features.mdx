@@ -8,7 +8,7 @@ description: Major features available in the current project
 ## Canvas projects
 
 - Create, rename, duplicate, delete, import, and export canvas projects.
-- Persist projects in the browser and optionally synchronize them with WebDAV.
+- Use local Backend SQLite as the project authority, with a disposable browser snapshot for fast first paint and offline edits.
 - Keep viewport, background, nodes, connections, and assistant sessions with each project.
 
 ## Infinite canvas
@@ -22,6 +22,7 @@ description: Major features available in the current project
 - Text, image, video, and generation-configuration nodes.
 - Connect text prompts and reference media to generation nodes.
 - Generate or rewrite text, create images, edit images from references, and create videos.
+- Configure custom workflow text, number, slider, boolean, and dropdown fields consistently in canvas nodes and generation workbenches.
 - Preserve original image ratios by default and organize batch results as connected nodes.
 - Record prompts, models, dimensions, quality, and references on generated nodes for retries.
 
@@ -50,18 +51,19 @@ Canvas plugins can contribute node types, rendering, inspectors, serialization, 
 - Use seven built-in prompt sources from the [Image Prompts](https://github.com/yukkcat/image-prompts) registry, with independent enablement, manual refresh, and scheduled refresh.
 - Add, edit, and remove custom standard JSON sources while retaining the last successful cache when refresh fails.
 - Search across enabled sources, filter by tags, inspect prompt details, copy prompts, and insert them into the canvas.
-- Store reusable images, videos, audio, and prompt assets in the browser.
+- Create, edit, and delete custom prompts with tags, cover images, and reference images; use them from the prompt center, canvas sidebar, and generation selectors.
+- Store reusable images, videos, audio, and prompt assets through the local Backend database and media directory.
 
 See [Third-party Prompt Sources](/docs/overview/third-party-prompt-repositories) for the complete built-in list.
 
 ## Configuration and synchronization
 
 - Export and import channel, model, generation, prompt-source, and WebDAV settings.
-- Store application data and API credentials locally in the browser.
+- Store structured application data and API credentials in local Backend SQLite.
 - Use WebDAV for optional cross-device synchronization.
 
 ## Current limitations
 
 - The project is frontend-first and does not provide built-in cloud accounts or cloud storage.
-- API keys remain in browser storage and requests are sent directly to configured providers.
+- API keys remain in local Backend storage; the browser loads them in memory and sends requests directly to configured providers.
 - Production Docker static-resource paths still require broader deployment verification.

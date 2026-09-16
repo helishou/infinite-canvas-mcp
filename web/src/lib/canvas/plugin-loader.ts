@@ -1,10 +1,19 @@
 import { registerNodeDefinitions, unregisterPluginNodes } from "@/lib/canvas/node-registry";
 import { getPluginRuntime } from "@/lib/canvas/plugin-runtime";
 import { usePluginStore, type InstalledPlugin } from "@/stores/canvas/use-plugin-store";
+import { useAgentStore } from "@/stores/use-agent-store";
+import { fetchBackendInstalledPlugins, saveBackendInstalledPlugins } from "@/services/backend-api";
+import { notifyAgentPluginMcp, type AgentPluginMcpDeclaration } from "@/services/api/canvas-agent";
 import type { CanvasPlugin } from "@/types/canvas-plugin";
 import i18n from "@/i18n";
 
 const cleanups = new Map<string, () => void>();
+// 缓存已评估插件的 MCP 声明(用于启用/禁用时通知 Agent 动态注册/注销工具)
+const evaluatedPlugins = new Map<string, CanvasPlugin>();
+// MiniMax H3 is currently developed as a host system node so Vite can HMR its source directly.
+// Keep the plugin package and its Agent/MCP entry available, but do not let the browser plugin
+// loader replace the built-in definition with the stale public bundle.
+const HOST_SYSTEM_PLUGIN_IDS = new Set(["minimax-h3"]);
 
 // A remote plugin may export CanvasPlugin directly or a factory that receives runtime and returns CanvasPlugin.
 // The factory uses runtime.React so the bundle does not need its own React copy.
@@ -29,7 +38,9 @@ function assertPlugin(plugin: unknown): asserts plugin is CanvasPlugin {
 }
 
 export function activatePlugin(plugin: CanvasPlugin) {
+    if (HOST_SYSTEM_PLUGIN_IDS.has(plugin.id)) return;
     registerNodeDefinitions(plugin.nodes, plugin.id);
+    evaluatedPlugins.set(plugin.id, plugin);
     const runtime = getPluginRuntime();
     const disposers: Array<() => void> = [];
     // Inject declared styles when enabled and remove them when disabled or uninstalled.
@@ -40,6 +51,7 @@ export function activatePlugin(plugin: CanvasPlugin) {
 }
 
 export function deactivatePlugin(pluginId: string) {
+    if (HOST_SYSTEM_PLUGIN_IDS.has(pluginId)) return;
     cleanups.get(pluginId)?.();
     cleanups.delete(pluginId);
     unregisterPluginNodes(pluginId);
@@ -63,7 +75,9 @@ export async function installPluginFromUrl(url: string, opts?: { official?: bool
     const plugin = await evaluatePluginSource(source);
     deactivatePlugin(plugin.id); // Replace the previous version.
     usePluginStore.getState().upsert({ id: plugin.id, name: plugin.name || plugin.id, version: plugin.version || "0.0.0", description: plugin.description, url, source, enabled: true, official: opts?.official });
+    await persistInstalledPlugins();
     activatePlugin(plugin);
+    void syncPluginMcpToAgent();
     return plugin;
 }
 
@@ -74,42 +88,83 @@ export async function updatePlugin(record: InstalledPlugin) {
 
 export async function setPluginEnabled(record: InstalledPlugin, enabled: boolean) {
     usePluginStore.getState().setEnabled(record.id, enabled);
+    await persistInstalledPlugins();
     if (!enabled) {
         deactivatePlugin(record.id);
+        void syncPluginMcpToAgent();
         return;
     }
     // Reload local plugins from their URL when enabled because the cached source may be stale.
     const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;
     const plugin = await evaluatePluginSource(source);
     activatePlugin(plugin);
+    void syncPluginMcpToAgent();
 }
 
-export function uninstallPlugin(id: string) {
+export async function uninstallPlugin(id: string) {
     deactivatePlugin(id);
     usePluginStore.getState().remove(id);
+    await persistInstalledPlugins();
+    void syncPluginMcpToAgent();
+}
+
+/**
+ * 将当前已启用插件的 MCP 声明同步给 Agent,驱动其动态注册/注销 MCP 工具。
+ * Agent(MCP stdio 进程)轮询该声明并据此注册;声明持久化在 SQLite,重启后仍生效。
+ */
+async function syncPluginMcpToAgent() {
+    const agent = useAgentStore.getState();
+    if (!agent.url || !agent.token) return;
+    const records = usePluginStore.getState().plugins;
+    const plugins: AgentPluginMcpDeclaration[] = [];
+    for (const record of records) {
+        const plugin = evaluatedPlugins.get(record.id);
+        if (!plugin?.mcp || !record.enabled) continue;
+        plugins.push({ id: record.id, name: record.name, version: record.version, mcp: { tools: plugin.mcp.tools, enabled: true } });
+    }
+    await notifyAgentPluginMcp(agent.url, agent.token, plugins);
 }
 
 let loaded = false;
+let loading: Promise<void> | null = null;
 
 // Load installed and enabled plugins at application startup.
 export async function ensurePluginsLoaded() {
     if (loaded) return;
-    loaded = true;
-    await usePluginStore.persist.rehydrate();
-    await loadLocalPlugins(); // Discover disabled local plugins first, then activate all enabled records.
-    const records = usePluginStore.getState().plugins.filter((record) => record.enabled);
-    await Promise.all(
-        records.map(async (record) => {
+    if (loading) return loading;
+    loading = (async () => {
+        let backendLoadSucceeded = false;
+        try {
             try {
-                // Local plugins use the latest output; other plugins use their cached source.
-                const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;
-                activatePlugin(await evaluatePluginSource(source));
-            } catch (error) {
-                console.error(`[plugin] Failed to load: ${record.id}`, error);
-            }
-        }),
-    );
-    await loadDevPlugins();
+                usePluginStore.getState().setPlugins((await fetchBackendInstalledPlugins()).plugins || []);
+                backendLoadSucceeded = true;
+            } catch (error) { console.warn("[plugin] Failed to load installed plugins", error); }
+            await loadLocalPlugins(); // Discover disabled local plugins first, then activate all enabled records.
+            const records = usePluginStore.getState().plugins.filter((record) => record.enabled);
+            await Promise.all(
+                records.map(async (record) => {
+                    if (HOST_SYSTEM_PLUGIN_IDS.has(record.id)) return;
+                    try {
+                        // Local plugins use the latest output; other plugins use their cached source.
+                        const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;
+                        activatePlugin(await evaluatePluginSource(source));
+                    } catch (error) {
+                        console.warn(`[plugin] Failed to load: ${record.id}`, error);
+                    }
+                }),
+            );
+            await persistInstalledPlugins();
+            await loadDevPlugins();
+            loaded = backendLoadSucceeded;
+        } finally {
+            loading = null;
+        }
+    })();
+    return loading;
+}
+
+async function persistInstalledPlugins() {
+    try { await saveBackendInstalledPlugins(usePluginStore.getState().plugins); } catch (error) { console.warn("[plugin] Failed to persist installed plugins", error); }
 }
 
 // Discover local plugins from web/public/plugins, add them disabled, and expose them in the manager without a URL.
@@ -129,6 +184,8 @@ async function loadLocalPlugins() {
         urls.map(async (url: string) => {
             try {
                 const source = await fetchPluginSource(withCacheBust(url));
+                const localId = url.split("/").pop()?.replace(/\.js(?:\?.*)?$/, "") || "";
+                if (HOST_SYSTEM_PLUGIN_IDS.has(localId)) return;
                 const plugin = await evaluatePluginSource(source);
                 const existing = store.plugins.find((item) => item.id === plugin.id);
                 store.upsert({
@@ -142,7 +199,7 @@ async function loadLocalPlugins() {
                     local: true,
                 });
             } catch (error) {
-                console.error(`[plugin] Failed to discover local plugin: ${url}`, error);
+                console.warn(`[plugin] Failed to discover local plugin: ${url}`, error);
             }
         }),
     );
@@ -163,7 +220,7 @@ async function loadDevPlugins() {
                 activatePlugin(plugin);
                 console.info(`[plugin] Dev plugin loaded: ${plugin.id} (${url})`);
             } catch (error) {
-                console.error(`[plugin] Failed to load dev plugin: ${url}`, error);
+                console.warn(`[plugin] Failed to load dev plugin: ${url}`, error);
             }
         }),
     );

@@ -34,6 +34,10 @@ Connect token: xxxxxx
 
 在画布右上角点击 `Agent`，填入地址和 token 后连接。
 
+### 本地 ComfyUI 与 MiniMax H3
+
+Canvas Agent 的本地 ComfyUI 地址在 `GET/PUT /comfy/config` 配置，H3 插件通过 Agent 的 `/comfy/tasks` 调用内置 `minimax-h3` 预设。开启 Motion Context 递进增噪时，Agent 会调用 `workers/motion_context.py` 生成上一段的尾帧上下文视频；需要本机安装 `ffmpeg`、`ffprobe` 和 Python Pillow（可通过 `PYTHON_PATH` 指定 Python）。Python 依赖可执行 `python -m pip install -r workers/requirements.txt`。
+
 Codex app 插件会读取启动输出里的 Local URL 和 Connect token，并直接打开画布网页地址；Canvas Agent 不负责生成画布打开 URL。
 
 Canvas Agent 默认只监听 `127.0.0.1`。网页第一次带正确 token 连接后，Canvas Agent 会记录该网页 Origin；之后其他 Origin 不能复用这个本地 Agent，除非用户清理 `~/.infinite-canvas/canvas-agent.json` 里的 `origins`。
@@ -77,16 +81,20 @@ codex plugin add infinite-canvas@infinite-canvas-local
 插件默认通过 npm 启动 MCP；这个命令只提供 MCP 工具，不会把 MCP 写入全局配置，也不会在退出时自动卸载：
 
 ```bash
-npx -y @basketikun/canvas-agent mcp
+npx -y @basketikun/infinite-canvas-backend mcp
 ```
 
-使用时可以直接在 Codex 里说“打开 Infinite Canvas”，插件会启动本地 Agent，读取 Local URL 和 Connect token，然后在右侧打开 `https://canvas.best/` 并自动新建、连接画布；只有明确要求使用本地项目时才会启动本地前端。
+使用时可以直接在 Codex 里说“打开 Infinite Canvas”。网页只连接 Backend 的一个地址和 Token；旧版需要 `17371` 的客户端仍可启动 `canvas-agent`，它现在只是转发到 Backend，不再创建独立业务数据库。
 
-Canvas Agent 启动后，给 Codex 添加 MCP：
+画布 MCP 的读写和生成统一经由 Backend 原生执行层，复用统一的画布操作、任务、媒体落库、日志和结果回写；调用画布生成工具不需要打开目标画布页面，页面打开后会通过 Backend 事件同步结果。
+
+使用 Backend MCP：
 
 ```bash
-codex mcp add infinite-canvas -- npx -y @basketikun/canvas-agent mcp
+codex mcp add infinite-canvas -- npx -y @basketikun/infinite-canvas-backend mcp
 ```
+
+`npx -y @basketikun/canvas-agent` 仅作为旧版 `17371` HTTP 地址的兼容代理；新安装不需要单独启动它。
 
 本仓库开发时可以改成，实际使用建议替换为本机绝对路径：
 
@@ -101,7 +109,7 @@ Canvas Agent 源码使用 TypeScript 编写，MCP 协议层使用官方 `@modelc
 ```toml
 [mcp_servers.infinite-canvas]
 command = "npx"
-args = ["-y", "@basketikun/canvas-agent", "mcp"]
+args = ["-y", "@basketikun/infinite-canvas-backend", "mcp"]
 default_tools_approval_mode = "approve"
 ```
 
@@ -145,7 +153,7 @@ Claude Code Adapter 代码暂时保留，但当前网页侧边栏只开放 Codex
 如果希望 Claude Code 也能操作画布，需要给 Claude Code 添加同一个 MCP。建议用 user scope，避免 Canvas Agent 从不同目录启动时找不到配置：
 
 ```bash
-claude mcp add --scope user --transport stdio infinite-canvas -- npx -y @basketikun/canvas-agent mcp
+claude mcp add --scope user --transport stdio infinite-canvas -- npx -y @basketikun/infinite-canvas-backend mcp
 ```
 
 本仓库开发时可以改成：

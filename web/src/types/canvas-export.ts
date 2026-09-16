@@ -1,15 +1,18 @@
-import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
+import type { CanvasFolder, CanvasProject } from "@/stores/canvas/use-canvas-store";
 
 export type CanvasExportFile = {
     app: "infinite-canvas";
-    version: 3;
+    version: 3 | 4;
     exportedAt: string;
     projects: CanvasProjectExportItem[];
+    folders?: CanvasFolder[];
 };
 
 export type CanvasProjectExportItem = {
     project: CanvasProject;
     files: CanvasExportAsset[];
+    logs?: Array<Record<string, unknown>>;
+    taskSummaries?: Array<Record<string, unknown>>;
 };
 
 export type CanvasExportAsset = {
@@ -17,4 +20,5 @@ export type CanvasExportAsset = {
     path: string;
     mimeType: string;
     bytes: number;
+    sha256?: string;
 };

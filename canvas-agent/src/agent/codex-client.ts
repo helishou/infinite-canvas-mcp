@@ -4,9 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createAgentLogWriter } from "../utils/agent-runtime.js";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { VERSION } from "../config.js";
 import { logger } from "../utils/logger.js";
-import { field, type JsonRecord } from "../utils/value.js";
+import { field, type JsonRecord, errorMessage } from "../utils/value.js";
 import { codexEventHistory, type CodexEventHistory } from "./codex-event-history.js";
 import type { CodexNotificationParams, CodexPlanUpdate, CodexReasoningEffort, CodexRequestMethod, CodexRequestParams, CodexRequestResult, CodexSkillSelector, CodexTurnInput } from "./codex-protocol.js";
 import type { AgentEmit, AgentPermissionMode } from "./types.js";
@@ -68,6 +70,7 @@ export class CodexAppClient {
     /** 启动并初始化 Codex app-server。 */
     static async start(emit: AgentEmit, onExit: () => void) {
         logger.info("Starting Codex app-server", { executable: process.execPath, codex: codexBin() });
+        fixCcSwitchModelCatalog();
         const child = spawn(process.execPath, [codexBin(), "app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         const client = new CodexAppClient(child, emit);
         let stopped = false;
@@ -897,4 +900,55 @@ function parseMaybeJson(value: unknown) {
 /** 定位当前依赖中 Codex CLI 的执行文件。 */
 function codexBin() {
     return path.join(path.dirname(require.resolve("@openai/codex/package.json")), "bin", "codex.js");
+}
+
+/** 检查并修复 ccswitch 代理生成的模型目录文件，补全 Codex 必填字段。 */
+function fixCcSwitchModelCatalog() {
+    try {
+        const catalogPath = path.join(homedir(), ".codex", "cc-switch-model-catalog.json");
+        if (!existsSync(catalogPath)) return;
+        const raw = readFileSync(catalogPath, "utf8");
+        // 修复 JSON 字符串内的裸换行（PowerShell 或外部工具可能把 \n 转义序列变成真实换行）
+        let fixed = "";
+        let inString = false;
+        let prevEscape = false;
+        for (let i = 0; i < raw.length; i++) {
+            const ch = raw[i];
+            if (prevEscape) { fixed += ch; prevEscape = false; continue; }
+            if (ch === "\\") { fixed += ch; prevEscape = true; continue; }
+            if (ch === '"') { inString = !inString; fixed += ch; continue; }
+            if (inString && (ch === "\n" || ch === "\r")) { fixed += "\\n"; continue; }
+            fixed += ch;
+        }
+        const data = JSON.parse(fixed) as { models?: Array<Record<string, unknown>> };
+        if (!Array.isArray(data.models)) return;
+        // 从 model.json 读取模板，用于补全 ccswitch 缺失的必填字段
+        let template: Record<string, unknown> | null = null;
+        try {
+            const modelPath = path.join(homedir(), ".codex", "model.json");
+            if (existsSync(modelPath)) {
+                const modelData = JSON.parse(readFileSync(modelPath, "utf8")) as { models?: Array<Record<string, unknown>> };
+                if (Array.isArray(modelData.models) && modelData.models.length > 0) template = modelData.models[0];
+            }
+        } catch { /* 模板不可用时仅补全已知字段 */ }
+        const knownDefaults: Record<string, unknown> = { base_instructions: "", supports_parallel_tool_calls: false };
+        let changed = false;
+        for (const model of data.models) {
+            const sources = template ? [template, knownDefaults] : [knownDefaults];
+            for (const source of sources) {
+                for (const [key, defaultValue] of Object.entries(source)) {
+                    if (!(key in model)) {
+                        (model as Record<string, unknown>)[key] = defaultValue;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (changed) {
+            writeFileSync(catalogPath, `${JSON.stringify(data, null, 2)}\n`);
+            logger.info("Fixed cc-switch-model-catalog.json: added missing fields from model.json template");
+        }
+    } catch (error) {
+        logger.warn("Failed to fix cc-switch-model-catalog.json", { error: errorMessage(error) });
+    }
 }

@@ -5,6 +5,8 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import type { AiConfig } from "@/stores/use-config-store";
+import type { WorkflowField } from "@/services/api/workflows";
+import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
 
 const qualityOptions = [
     { value: "auto", labelKey: "auto" },
@@ -41,9 +43,13 @@ type ImageSettingsPanelProps = {
     className?: string;
     maxCount?: number;
     quickCount?: number;
+    customFields?: WorkflowField[];
+    customFieldValues?: Record<string, unknown>;
+    onCustomFieldChange?: (id: string, value: unknown) => void;
+    hideStandardImageOptions?: boolean;
 };
 
-export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10 }: ImageSettingsPanelProps) {
+export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10, customFields, customFieldValues, onCustomFieldChange, hideStandardImageOptions = false }: ImageSettingsPanelProps) {
     const { t } = useTranslation();
     const [snapDimensionToStep, setSnapDimensionToStep] = useState(true);
     const quality = config.quality || "auto";
@@ -75,7 +81,13 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 }}
             >
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.image.title")}</div> : null}
-                <div className="space-y-2.5">
+                {customFields && customFields.length > 0 && onCustomFieldChange ? (
+                    <div className="space-y-2.5">
+                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
+                        <WorkflowCustomFields fields={customFields} values={customFieldValues || {}} onChange={onCustomFieldChange} />
+                    </div>
+                ) : null}
+                {!hideStandardImageOptions && <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.quality")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
                         {qualityOptions.map((item) => (
@@ -84,8 +96,8 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             </OptionPill>
                         ))}
                     </div>
-                </div>
-                <div className="space-y-2.5">
+                </div>}
+                {!hideStandardImageOptions && <div className="space-y-2.5">
                     <div className="flex items-center justify-between gap-3">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.size")}</SettingTitle>
                         <div className="flex items-center gap-2">
@@ -102,8 +114,8 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <span className="text-lg opacity-45">↔</span>
                         <DimensionInput prefix="H" value={dimensions.height} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("height", value)} />
                     </div>
-                </div>
-                <div className="space-y-2.5">
+                </div>}
+                {!hideStandardImageOptions && <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.aspectRatio")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
                         {aspectOptions.map((item) => (
@@ -120,7 +132,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             </button>
                         ))}
                     </div>
-                </div>
+                </div>}
                 <div className="flex items-center justify-between gap-3">
                     <div className="space-y-0.5">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.transparent")}</SettingTitle>

@@ -98,9 +98,7 @@ POST /canvas/state?token=xxx&clientId=xxx
 - 节点列表；
 - 连线列表；
 - 当前选中的节点 ID；
-- 当前视口位置和缩放。
-
-`Canvas Agent` 把最近一次快照保存在内存里。Codex 调用 `canvas_get_state` 时，读取的是这份由浏览器同步过来的最新快照，而不是直接读取浏览器 DOM。
+`Canvas Agent` 把最近一次快照保存在内存里。Codex 调用 `canvas_get_state` 时，读取的是这份由浏览器同步过来的最新快照，而不是直接读取浏览器 DOM。浏览器视口中心与缩放是页面本地状态，不进入 MCP 快照，也不由 MCP 修改。
 
 ## Codex 如何操作画布
 
@@ -133,7 +131,7 @@ Codex 调 canvas_create_text_node
 }
 ```
 
-浏览器收到 `tool_call` 后，调用前端的 `applyCanvasAgentOps`，在 React 状态中执行 `add_node`、`update_node`、`delete_node`、`connect_nodes`、`set_viewport`、`select_nodes` 等操作。执行完成后再把结果通过 `/canvas/result` 回传给 `Canvas Agent`。
+浏览器收到 `tool_call` 后，调用前端的 `applyCanvasAgentOps`，在 React 状态中执行 `add_node`、`update_node`、`delete_node`、`connect_nodes`、`select_nodes` 等内容操作。执行完成后再把结果通过 `/canvas/result` 回传给 `Canvas Agent`；视口中心与缩放始终由浏览器本地交互维护。
 
 ## 工具确认和撤销
 

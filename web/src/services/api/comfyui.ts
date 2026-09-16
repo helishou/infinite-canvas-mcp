@@ -1,0 +1,260 @@
+import { fetchAgentJson, AgentApiError } from "./canvas-agent";
+import { backendMediaUrl, getBackendUrl, uploadBackendMedia, request } from "@/services/backend-api";
+import { getBackendTokenShared } from "@/lib/backend-token";
+import { useAgentStore } from "@/stores/use-agent-store";
+
+type ComfyConfig = { localH3Direct: { rootDir: string; inputDir: string; cacheDir: string; mediaDir: string; ready: boolean } };
+export const fetchComfyConfig = () => request<ComfyConfig>("GET", "/comfy/config");
+export const saveComfyRoot = (localH3RootDir: string) => request<ComfyConfig>("PUT", "/comfy/config", { localH3RootDir });
+
+/**
+ * 本地 ComfyUI 任务的请求端点解析。
+ * 优先走已连接的本地 Agent（Canvas Agent）；若未连接（用户只启动了总后台 backend），
+ * 则回退到总后台自身——总后台已有完整的 /comfy/tasks 路由（与 H3 节点同一条链路），
+ * 无需强制要求本地 Agent 在线。
+ */
+export function resolveComfyEndpoint(): { endpoint: string; token: string } {
+    const agent = useAgentStore.getState();
+    const agentToken = agent.token.trim();
+    if (agentToken) return { endpoint: agent.url.trim().replace(/\/$/, ""), token: agentToken };
+    return { endpoint: getBackendUrl().replace(/\/$/, ""), token: getBackendTokenShared() };
+}
+
+/**
+ * 总后台 `/agent/*` 能力的请求端点解析（视频拼接 `/agent/video-concat/tasks` 等）。
+ *
+ * 这些路由由总后台提供，**与 Canvas Agent 面板是否连接无关**：曾经用
+ * `useAgentStore.connected/token` 做前置判定，导致用户只启动 backend、没开 Agent 面板时
+ * 直接报「Canvas Agent 未连接，无法运行视频拼接」，而 backend 其实一直可用。
+ *
+ * endpoint 必须带 `/agent` 前缀——实测同一个 backend 上：
+ * `GET /ffmpeg/status` → 404、`GET /agent/ffmpeg/status` → 200；
+ * `POST /video-concat/tasks` → 404、`POST /agent/video-concat/tasks` → 500（路由存在、业务校验生效）。
+ * 注意不要拿 comfy 的情况套用：`/comfy/*` 与 `/agent/comfy/*` 都注册了，两条都能通。
+ */
+export function resolveBackendAgentEndpoint(): { endpoint: string; token: string } {
+    return { endpoint: `${getBackendUrl().replace(/\/$/, "")}/agent`, token: getBackendTokenShared() };
+}
+
+export type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
+type ComfyMedia = { url: string; mimeType: string; storageKey?: string };
+type ComfyPreview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
+export type H3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
+export type LocalH3TaskResult = { url: string; storageKey?: string; mimeType: string; taskId: string; width?: number; height?: number; durationMs?: number; actualSubmission?: H3ActualSubmission; segments?: Array<{ media?: ComfyMedia[] }> };
+type ComfyTask = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: ComfyPreview | null; result?: { media?: ComfyMedia[]; actualSubmission?: H3ActualSubmission; segments?: Array<{ media?: ComfyMedia[] }> } | null; error?: string | null };
+type VideoConcatTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia } | null; error?: string | null };
+
+export function resolveComfyImageSize(value: string) {
+    const size = value.trim();
+    // `auto` means preserve the source workflow's natural dimensions. The
+    // Flux workflow uses the first reference image for this case; returning
+    // zeroes keeps the request shape stable while preventing the backend from
+    // treating auto as an explicit 1024x1024 override.
+    if (!size || size.toLowerCase() === "auto") return { width: 0, height: 0 };
+    const dimensions = size.match(/^(\d+)x(\d+)$/i);
+    if (dimensions) return { width: Number(dimensions[1]), height: Number(dimensions[2]) };
+    const ratio = size.match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
+    if (!ratio) return { width: 1024, height: 1024 };
+    const ratioWidth = Number(ratio[1]);
+    const ratioHeight = Number(ratio[2]);
+    const shortSide = 1024;
+    const landscape = ratioWidth >= ratioHeight;
+    const longSide = Math.round((shortSide * Math.max(ratioWidth, ratioHeight) / Math.min(ratioWidth, ratioHeight)) / 16) * 16;
+    return landscape ? { width: longSide, height: shortSide } : { width: shortSide, height: longSide };
+}
+
+/**
+ * 把 ComfyUI 返回的裸媒体地址改写成前端可播放的地址。
+ * 后端在本地模式下可能返回相对路径（/media/...）或 Windows 风格路径，
+ * 直接 `new URL(item.url)` 会抛 “Failed to construct 'URL'”。这里容错处理：
+ * - /media/:storageKey 走总后台 /media 路由（backendMediaUrl，开发模式走 Vite 代理）
+ * - runtime-file: 走总后台 /runtime/media-file
+ * - 合法绝对地址（ComfyUI /view 直链）走 /agent/comfy/media 代理
+ * - 其他相对/异常地址用总后台兜底，绝不抛错
+ */
+function proxyComfyMedia(item: ComfyMedia, endpoint: string, token: string): ComfyMedia {
+    const raw = item.url;
+    if (raw.startsWith("/media/")) {
+        const storageKey = decodeURIComponent(raw.slice("/media/".length).split("?")[0]);
+        return { ...item, url: backendMediaUrl(storageKey) };
+    }
+    if (raw.startsWith("runtime-file:")) {
+        const backendUrl = getBackendUrl().replace(/\/$/, "");
+        const file = encodeURIComponent(raw.slice("runtime-file:".length));
+        return { ...item, url: `${backendUrl}/runtime/media-file?file=${file}&token=${encodeURIComponent(getBackendTokenShared())}` };
+    }
+    try {
+        const parsed = new URL(raw);
+        return { ...item, url: `${endpoint}/comfy/media${parsed.search}${parsed.search ? "&" : "?"}token=${encodeURIComponent(token)}` };
+    } catch {
+        // 兜底：Windows 风格路径或其他相对路径，用总后台地址拼接
+        const backendUrl = getBackendUrl().replace(/\/$/, "");
+        const needsSlash = !raw.startsWith("/");
+        const sep = raw.includes("?") ? "&" : "?";
+        return { ...item, url: `${backendUrl}${needsSlash ? "/" : ""}${raw}${sep}token=${encodeURIComponent(getBackendTokenShared())}` };
+    }
+}
+
+/**
+ * 轮询任务状态时容忍网络层瞬时失败（backend dev 是 tsx --watch，源码变更会让 backend 重启
+ * 几秒；ComfyUI 任务本身不受影响）。此前一次 fetch 失败就把还在跑的任务判死为
+ * "Failed to fetch"。HTTP 4xx/5xx 是确定性错误（token/404 等），不重试直接抛。
+ */
+async function pollTaskWithRetry<T>(fetchOnce: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    let failures = 0;
+    for (;;) {
+        try {
+            return await fetchOnce();
+        } catch (error) {
+            if (error instanceof AgentApiError) throw error;
+            failures += 1;
+            if (failures > 15) throw error;
+            await new Promise((resolve) => setTimeout(resolve, Math.min(1200 * failures, 5000)));
+            if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        }
+    }
+}
+
+export async function runComfyTask(endpoint: string, token: string, comfyUrl: string, preset: string, prompt: string, references: LocalReference[], params: Record<string, unknown>, signal?: AbortSignal, onTaskId?: (taskId: string) => void, clientTaskId?: string) {
+    const synced = await Promise.all(references.map((reference) => syncReference(endpoint, token, reference, signal, true)));
+    const input: Record<string, unknown> = { prompt };
+    if (preset === "flux2-klein") input.references = synced.filter(Boolean);
+    if (preset === "flashvsr-1.1" && synced[0]) input.video = synced[0];
+    // 客户端预生成 taskId → 后端用同一行；这样 onTaskId 还没写盘用户就刷新，
+    // 节点 metadata 上也已经存了 ID，恢复轮询能直接对到后端任务。
+    const created = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, "/comfy/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ preset, input, params, comfyUrl, ...(clientTaskId ? { clientTaskId } : {}) }) });
+    onTaskId?.(created.task.id);
+    for (;;) {
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const response = await pollTaskWithRetry(() => fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${created.task.id}`), signal);
+        if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
+            if (response.task.status !== "succeeded") throw new Error(response.task.error || "ComfyUI 任务失败");
+            const media = response.task.result?.media?.[0];
+            if (!media) throw new Error("ComfyUI 任务完成但没有返回媒体");
+            return proxyComfyMedia(media, endpoint, token);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+}
+
+export async function getComfyTask(endpoint: string, token: string, taskId: string) {
+    const response = await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/comfy/tasks/${encodeURIComponent(taskId)}`);
+    const task = response.task;
+    const media = task.result?.media || [];
+    const output = media.find((item) => item.mimeType.startsWith("video/")) || media[0];
+    return { ...task, result: output ? { url: proxyComfyMedia(output, endpoint, token).url, storageKey: output.storageKey, mimeType: output.mimeType } : null };
+}
+
+export async function getLocalH3Task(endpoint: string, token: string, taskId: string): Promise<Omit<ComfyTask, "result"> & { result: LocalH3TaskResult | null }> {
+    const response = await fetchAgentJson<{ task: ComfyTask; preview?: ComfyPreview | null }>(endpoint, token, `/comfy/tasks/${encodeURIComponent(taskId)}`);
+    const proxy = (item: ComfyMedia) => proxyComfyMedia(item, endpoint, token);
+    const preview = response.preview || response.task.preview || null;
+    if (!response.task.result) return { ...response.task, preview, result: null };
+    const media = (response.task.result.media || []).map(proxy);
+    const output = media.find((item) => item.mimeType.startsWith("video/")) || media[0];
+    return { ...response.task, preview, result: { url: output?.url || "", storageKey: output?.storageKey, mimeType: output?.mimeType || "video/mp4", taskId: response.task.id, actualSubmission: response.task.result.actualSubmission, segments: (response.task.result.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })) } };
+}
+
+export async function runVideoConcatTask(endpoint: string, token: string, videos: LocalReference[], signal?: AbortSignal) {
+    const inputs = videos.map((video) => video.storageKey || video.url || "").filter(Boolean);
+    if (!inputs.length) throw new Error("视频拼接至少需要两个视频输入");
+    const created = await fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, "/video-concat/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ videos: inputs }) });
+    const cancel = () => { void fetchAgentJson(endpoint, token, `/video-concat/tasks/${created.task.id}/cancel`, { method: "POST" }).catch(() => undefined); };
+    signal?.addEventListener("abort", cancel, { once: true });
+    for (;;) {
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const response = await pollTaskWithRetry(() => fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, `/runtime/tasks/${created.task.id}`), signal);
+        if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
+            if (response.task.status !== "succeeded") throw new Error(response.task.error || "视频拼接失败");
+            const media = response.task.result?.media;
+            if (!media) throw new Error("视频拼接完成但没有返回媒体");
+            signal?.removeEventListener("abort", cancel);
+            return { url: media.url.startsWith("/media/") ? backendMediaUrl(media.storageKey || decodeURIComponent(media.url.slice(7))) : media.url, storageKey: media.storageKey, mimeType: media.mimeType || "video/mp4", taskId: created.task.id };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+}
+
+export async function getRunningHubH3Task(endpoint: string, token: string, taskId: string) {
+    const task = (await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/agent/runtime/tasks/${encodeURIComponent(taskId)}`)).task;
+    if (!task.result) return { ...task, result: null };
+    const media = task.result.media || [];
+    const output = media.find((item) => String(item.mimeType || "video/mp4").startsWith("video/")) || media[0];
+    return { ...task, result: output ? { url: output.url, storageKey: output.storageKey, mimeType: output.mimeType || "video/mp4", taskId: task.id } : null };
+}
+
+async function fetchAsBlob(url: string, signal?: AbortSignal) {
+    if (!url) throw new Error("本地媒体缺少可读取地址");
+    let response: Response;
+    try {
+        response = await fetch(url, { signal });
+    } catch (error) {
+        throw new Error(`读取本地媒体失败（${url}）：${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!response.ok) throw new Error(`读取本地媒体失败：HTTP ${response.status}`);
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html")) throw new Error(`媒体地址返回了 HTML 而不是文件：${url}`);
+    const blob = await response.blob();
+    if (blob.type && !/^(image|video|audio)\//.test(blob.type)) throw new Error(`媒体类型无效：${blob.type}（${url}）`);
+    return blob;
+}
+
+function sourceUrl(reference: LocalReference) {
+    if (reference.storageKey) return backendMediaUrl(reference.storageKey);
+    const source = reference.dataUrl || reference.url || "";
+    if (!source || source.startsWith("data:")) return source;
+    try {
+        const parsed = new URL(source, window.location.origin);
+        if (parsed.pathname.startsWith("/media/")) {
+            return backendMediaUrl(decodeURIComponent(parsed.pathname.slice("/media/".length)));
+        }
+        if (source.startsWith("/")) return `${getBackendUrl().replace(/\/$/, "")}${source}`;
+    } catch {
+        // Keep the original value so the fetch error includes the source address.
+    }
+    return source;
+}
+
+/**
+ * 从后端媒体 URL 中提取 storageKey。
+ * 仅匹配后端自有媒体 `/media/:storageKey` 形式（由 backendMediaUrl 生成），
+ * 排除 `/runtime/media*` 与 `/media-file`（它们是不同端点，并非 storageKey 媒体）。
+ */
+function extractStorageKey(url: string): string | null {
+    const idx = url.indexOf("/media/");
+    if (idx === -1) return null;
+    const prefix = url.slice(0, idx);
+    if (prefix.endsWith("/runtime")) return null;   // /runtime/media/* 不是 storageKey 媒体
+    if (url.includes("/media-file")) return null;   // /runtime/media-file?file=... 是另一种读取端点
+    const key = url.slice(idx + "/media/".length).split(/[?#]/)[0];
+    return key && !key.includes("/") ? key : null;
+}
+
+/**
+ * 把一个参考媒体落地到后端 runtime media，返回其本地路径。
+ * 若媒体本就在后端（已有 storageKey，或 URL 指向后端 /media/:storageKey），
+ * 直接复用；历史数据只有 URL 时再读取并落库，避免旧画布素材无法继续生成。
+ */
+async function syncReference(endpoint: string, token: string, reference: LocalReference, signal?: AbortSignal, allowDataUrl = false): Promise<string | undefined> {
+    const source = sourceUrl(reference);
+    const storageKey = reference.storageKey || extractStorageKey(source);
+    if (storageKey) {
+        const res = await fetchAgentJson<{ ok?: boolean; media?: { path?: string } }>(
+            endpoint, token, "/runtime/media",
+            { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: reference.name, storageKey }) },
+        );
+        return res.media?.path;
+    }
+    if (source.startsWith("data:") && !/^data:([^;,]+);base64,(.+)$/s.test(source)) {
+        throw new Error(`参考「${reference.name}」携带的 data URL 非法（缺少 ;base64, 负载或格式错误），无法上传。请重新添加该素材。`);
+    }
+    if (allowDataUrl) {
+        const blob = await fetchAsBlob(source, signal);
+        const media = await uploadBackendMedia({ name: reference.name, blob, mimeType: blob.type || undefined });
+        const runtime = await fetchAgentJson<{ media?: { path?: string } }>(endpoint, token, "/runtime/media", {
+            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: reference.name, storageKey: media.storageKey }),
+        });
+        return runtime.media?.path;
+    }
+    throw new Error(`参考「${reference.name}」没有可读取的本地媒体地址，请重新上传或重新连接该素材。`);
+}

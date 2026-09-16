@@ -1,11 +1,11 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Cpu } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { modelOptionLabel, modelOptionName, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { modelOptionLabel, modelOptionName, selectableModelsByCapability, VIDEO_CONCAT_MODEL, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -38,7 +38,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
         <Select
             open={open}
             value={current}
-            onOpenChange={(nextOpen) => {
+            onOpenChange={(nextOpen: boolean) => {
                 if (nextOpen && !options.length && config.channelMode === "local") onMissingConfig?.();
                 if (nextOpen) window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
                 setOpen(nextOpen);
@@ -52,9 +52,9 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                     "data-[state=open]:border-ring data-[state=open]:ring-2 data-[state=open]:ring-ring/20",
                     className,
                 )}
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                title={current ? modelOptionLabel(config, current) : pickerPlaceholder}
+                onMouseDown={(event: ReactMouseEvent) => event.stopPropagation()}
+                onPointerDown={(event: ReactPointerEvent) => event.stopPropagation()}
+                title={current ? current === VIDEO_CONCAT_MODEL ? "视频拼接" : modelOptionLabel(config, current) : pickerPlaceholder}
             >
                 <ModelIcon model={current} />
                 <span className="canvas-model-picker-text min-w-0 flex-1 truncate text-left">{current ? modelOptionLabel(config, current) : pickerPlaceholder}</span>
@@ -66,8 +66,8 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 align="start"
                 side="bottom"
                 sideOffset={6}
-                onPointerDown={(event) => event.stopPropagation()}
-                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event: ReactPointerEvent) => event.stopPropagation()}
+                onMouseDown={(event: ReactMouseEvent) => event.stopPropagation()}
             >
                 {options.length ? (
                     options.map((model) => (
@@ -95,7 +95,7 @@ function ModelLabel({ config, model }: { config: AiConfig; model: string }) {
     return (
         <span className="flex min-w-0 items-center gap-2">
             <ModelIcon model={model} />
-            <span className="truncate">{modelOptionLabel(config, model)}</span>
+            <span className="truncate">{model === VIDEO_CONCAT_MODEL ? "视频拼接" : modelOptionLabel(config, model)}</span>
         </span>
     );
 }

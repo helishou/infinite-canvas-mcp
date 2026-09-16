@@ -1,18 +1,21 @@
-import { Check, Download, Pencil, Trash2, X } from "lucide-react";
+import { Check, Download, FolderInput, Pencil, Trash2, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Button, Input } from "antd";
+import { Button, Dropdown, Input } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
-import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
+import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { hasAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
 
 export function CanvasProjectCard({ project }: { project: CanvasProject }) {
+    const exportCanvasProjects = useExportCanvas();
     const { i18n, t } = useTranslation();
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const renameProject = useCanvasStore((state) => state.renameProject);
+    const folders = useCanvasStore((state) => state.folders);
+    const moveProjectsToFolder = useCanvasStore((state) => state.moveProjectsToFolder);
     const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
     const editingId = useCanvasUiStore((state) => state.editingProjectId);
     const editingTitle = useCanvasUiStore((state) => state.editingProjectTitle);
@@ -23,6 +26,7 @@ export function CanvasProjectCard({ project }: { project: CanvasProject }) {
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
     const editing = editingId === project.id;
     const selected = selectedIds.includes(project.id);
+    const folderName = project.folderId ? folders.find((folder) => folder.id === project.folderId)?.name : undefined;
     const open = () => {
         const agentHash = hasAgentUrlBootstrap(window.location.hash) ? window.location.hash : "";
         navigate(`/canvas/${project.id}${searchParams.toString() ? `?${searchParams.toString()}` : ""}${agentHash}`, { replace: Boolean(agentHash) });
@@ -56,8 +60,9 @@ export function CanvasProjectCard({ project }: { project: CanvasProject }) {
                     >
                         <h2 className="truncate text-xl font-semibold">{project.title}</h2>
                         <p className="mt-3 text-sm leading-6 text-stone-600 dark:text-stone-400">
-                            {t("canvas.project.stats", { nodes: project.nodes.length, connections: project.connections.length })}
+                            {t("canvas.project.stats", { nodes: (project.summary?.nodeCount ?? project.nodes.length), connections: (project.summary?.connectionCount ?? project.connections.length) })}
                         </p>
+                        {folderName ? <p className="mt-1 text-xs text-stone-500">{folderName}</p> : null}
                     </button>
                 )}
             </div>
@@ -72,6 +77,17 @@ export function CanvasProjectCard({ project }: { project: CanvasProject }) {
                     ) : (
                         <>
                             <Button type="text" size="small" shape="circle" icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects([project], project.title || t("canvas.title"))} aria-label={t("canvas.project.export")} />
+                            {folders.length ? (
+                                <Dropdown
+                                    trigger={["click"]}
+                                    menu={{ items: [
+                                        { key: "root", label: t("canvas.folder.moveRoot"), onClick: () => moveProjectsToFolder([project.id], null) },
+                                        ...folders.map((folder) => ({ key: folder.id, label: folder.name, onClick: () => moveProjectsToFolder([project.id], folder.id) })),
+                                    ] }}
+                                >
+                                    <Button type="text" size="small" shape="circle" icon={<FolderInput className="size-4" />} aria-label={t("canvas.project.moveFolder")} />
+                                </Dropdown>
+                            ) : null}
                             <Button type="text" size="small" shape="circle" icon={<Pencil className="size-4" />} onClick={() => startEditing(project.id, project.title)} aria-label={t("canvas.project.rename")} />
                             <Button type="text" size="small" shape="circle" icon={<Trash2 className="size-4" />} onClick={() => setDeleteIds([project.id])} aria-label={t("canvas.project.delete")} />
                         </>

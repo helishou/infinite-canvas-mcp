@@ -56,6 +56,11 @@
 - 画布内的操作按钮（如面板里的「添加」「导出」「选择」等）默认用扁平无底色样式：透明背景、仅 `hover:bg-black/5 dark:hover:bg-white/10` 轻微反馈，靠图标+文字表达，不要用 `theme.toolbar.activeBg`（`#e7e5df`/`#3a3631`）或 `theme.node.fill` 之类的灰色作为按钮填充底色。灰色 `activeBg` 只允许用于「选中态」等需要表达状态的高亮，不要当普通装饰底色。
 - 图片节点尺寸逻辑要尊重原始比例，除非功能明确要求自由变形。
 - 批量生成、多图展示、助手面板等画布交互要尽量简洁，不要占用过多画布空间。
+- H3 节点行高手柄交互规则（用户多次强调，任何行高/拖动逻辑改动都必须遵守）：
+  - 拖 Output 和 VideoRefs 的分界线时：上面的 preview 高度不变，只有 Output 和 VideoRefs（时间轴）高度变化。
+  - 拖 VideoRefs 和 preview 的分界线时：下面的 Output 高度不变，只调 VideoRefs（时间轴）和 preview。
+  - 空间不足时由节点自动长高/缩回兜底，不允许出现「拖 A 时 B/C 跟着变」的联动串扰。
+- 画布视口（平移/缩放）性能红线：**高频视口变化不得走 React state**。拖动与滚轮期间只能命令式写容器 `transform`（`writeViewport`），仅当**屏幕位移**超过 `VIEWPORT_CULL_SCREEN_MARGIN`(300px) 或缩放幅度超过 `VIEWPORT_CULL_ZOOM_RATIO`(0.35) 时才用 `startTransition` 补一次裁剪重算；松手 / 聚焦动画 / 缩放控件 / 小地图 / 重置视图这类低频入口必须走 `commitViewport`，保证命令式实时值与 React state 一致。禁止把平移改回逐帧 `setViewport`（实测 33fps → 回退即掉回 30 档），也禁止给 `applyViewportLive` 加节流/防抖（用户会直接感知为「不跟手」）。`web/src/lib/canvas/canvas-viewport.ts` 里的两条硬约束：①**补重算阈值与裁剪前瞻都必须按屏幕像素定义，绝不能按世界单位**——拖动的 x/y 是屏幕像素，按世界单位算会被放大 1/k 倍，缩小看全图时（k=0.05）退化成"平移 26px 就重算一次"，而每次重算都要重建全部可见节点的 element 树，直接把 5% 倍率平移压到 26fps；②**`VIEWPORT_RENDER_SCREEN_PADDING` 必须大于 `VIEWPORT_CULL_SCREEN_MARGIN`**（400 > 300，差值即补渲染提前量），改小会导致拖动时露出空白；裁剪外扩用 `viewportRenderPadding(k) = 400 / k` 随缩放反比放大，所以低倍率下会多渲染一圈节点，这是不反复重算的代价。新增任何改变视口的入口时，必须同时接上这两条路径，并跑 `probe.mjs`（平移 FPS）与 `verify.mjs`（缩放锚点漂移应为 0.0）；方法见 skill `canvas-perf-measure`。
 
 ## 文档规范
 
@@ -89,10 +94,23 @@
 
 ## 项目注意事项
 
+- 画布媒体库必须独立于 ComfyUI 安装目录。设置 ComfyUI 路径只影响任务执行缓存，不得迁移或改写 `MEDIA_DIR`；输入按需复制到 ComfyUI，输出归档回 Backend 媒体库。迁出已有耦合目录时先备份数据库、复制并校验文件，再切换索引，保留原文件。
 - 新增或调整超时、重试次数、大小限制、并发上限等会改变实际行为的边界值前，必须先向用户说明适用环节、默认值和失败后的处理方式，并取得确认；不要把经验值当成纯内部实现静默加入。
-- 当前画布项目和“我的素材”主要保存在浏览器本地，不要在文档中误写成已支持云同步。
-- 当前 AI API Key 存在浏览器本地，并由前端直接请求 OpenAI 兼容接口；涉及安全说明时要写清楚。
+- 画布项目、“我的素材”、生成记录和结构化用户配置统一以 Backend SQLite 为权威；媒体保存在 Backend 媒体目录，浏览器只允许保留可丢弃缓存、纯视图状态和连接引导信息。WebDAV 是可选同步副本，不要误写成账号云同步。
+- AI API Key 随渠道配置保存在 Backend SQLite，前端读取后直接请求 OpenAI 兼容接口；涉及安全说明时要写清楚本地 Backend 数据目录同样需要妥善保护。
 - Docker 静态资源路径目前仍是待办项，文档中不要过度承诺生产部署已经完全验证。
 - Agent 对话消息必须同时按 `threadId`、`turnId` 和 `itemId` 归属；实时事件只用于补充未物化的 turn，历史快照成为权威后不得重复合并同一条消息。
 - Agent 通信协议版本与消息存储版本必须独立管理；消息存储格式升级时必须先备份再迁移，遇到未知版本、损坏清单或冲突备份时拒绝覆盖原文件，不得按记录数量或文件大小静默裁剪历史元数据。
 - 本地启动或浏览器验收时不要关闭用户已经打开的浏览器窗口或标签页；需要自动化验证时使用独立测试页面，避免打断用户当前页面和对话状态。
+- 改了构建产物的源码就必须重建产物，否则修复不会生效：
+  - 改 `plugins/canvas/*/src` 后，在该插件目录执行 `node build.mjs`，重新生成 `web/public/plugins/*.js`。
+  - 改 `canvas-agent/src` 后，在 `canvas-agent` 目录执行 `node node_modules/typescript/bin/tsc -p tsconfig.json`，重新生成 `dist/`（backend 通过 `node_modules/@basketikun/canvas-agent` 软链加载的是 `dist`，不是源码）。
+  - 这两类产物目录都在 `.gitignore` 中，不随提交分发，**只提交源码等于没改**。
+  - `backend` 用 `tsx src/index.ts` 启动且未开启 watch，改 `backend/src` 或重建 `canvas-agent/dist` 后都要重启 backend 才生效。
+  - `web/dist` 是 vite build 的产物快照（构建时把 `public/` 拷走）：之后只重建插件只更新 `public/`，**不会更新 `web/dist`**——页面若加载 dist 里的插件就会一直跑旧代码。minimax-h3 的 `build.mjs` 已在构建后自动同步一份到 `web/dist/plugins/`；其他插件如遇同样问题，排查时先比对 `web/public/plugins/` 与 `web/dist/plugins/` 里同名文件的修改时间和大小。
+- 排查「改了代码但问题依旧」时，先做两件事再往下查：比对源码与产物的修改时间确认产物已更新；确认请求实际命中的进程与端点，不要假定同名路由是同一个实现（例如插件的媒体上传走 `/agent/runtime/media`，由 canvas-agent 处理，与 backend 的 `/runtime/media` 是两套独立实现）。
+- 画布能力分两类端点，**不要把 Canvas Agent 面板的连接状态当成 backend 可用性的前置条件**：视频拼接（`/agent/video-concat/tasks` + `/agent/runtime/tasks/:id`）这类能力由总后台提供，前端必须用 `resolveBackendAgentEndpoint()`（`{backendUrl}/agent` + `getBackendTokenShared()`）或 `resolveComfyEndpoint()` 解析端点，**禁止写 `if (!useAgentStore.getState().connected || !token) throw ...`**——`connected` 是 LLM 对话面板的 SSE 状态，用户不开面板时恒为 false，会把本来可用的能力挡下（曾导致「Canvas Agent 未连接，无法运行视频拼接」，以及刷新后任务永远停在「运行中」）。新增这类调用前先实测端点前缀：`/agent/*` **只**在带前缀时存在（`POST /video-concat/tasks` → 404，`POST /agent/video-concat/tasks` → 通），而 `/comfy/*` 与 `/agent/comfy/*` 都注册了、两条都通，不要互相套用。
+- canvas-agent 的 MCP 工具新建节点（`generationFlowOps` / `canvas_create_node` 等）默认位置逻辑在 `src/canvas/tools.ts:nextCanvasX` 与 `nextCanvasAnchor`：有 reference 时必须贴在 firstReference 同行右侧（间距 96、y 与 reference 对齐），无 reference 时退回画布全局最右 + y=0。**禁止把"画布全局最右"作为生成流的有 reference 情况的默认值**，否则多次连续 MCP 调用会让同一组上下游散到几屏宽之外、连线横穿整张画布。
+- 画布多窗口/多设备同步：在 `web/src/stores/canvas/use-canvas-store.ts` 的 `applyBackendCanvasEvent` / `syncCanvasProjects` 两条路径上，**禁止在本地有未提交 ops 时用远端项目直接覆盖本地**（会吞掉用户的合法操作）。先算 `diffCanvasProject(syncBase, local)` 拿到 pendingOps，调 `detectCanvasConflicts` 看这些 ops 在远端是否仍然合法（add/update/connect 命中冲突、delete/disconnect/set_viewport 算 no-op），有冲突必须写入 `canvasConflicts`、弹窗让用户在「保留我的 / 采用远端」二选一，无冲突才推进 syncBase + 静默接受远端。409 分支必须保留提交前的 `syncBase` 直到冲突检测完成，禁止先把 remote 写入 `syncBases` 再计算 pendingOps；否则会变成 remote 与自身比较，并把本地旧 `segments` 静默重提覆盖 MCP 写入。`canvasConflicts` 记录必须含 `conflictTargets`（具体冲突点供弹窗展示）和 `remoteProject`（供「采用远端」按钮直接覆盖）。
+- H3 任务状态与媒体产出由 Backend 独占：前端 `diffCanvasProject` 不得提交 H3 节点/片段的 `runtimeTaskId`、运行状态、进度、结果、结果历史等字段；页面本地旧快照只能提交提示词、参考图和布局等用户编辑字段，避免后台回写被覆盖。
+- React StrictMode dev 模式会用 useEffect 双跑 / 模拟 unmount-remount，**useRef 形式的"首次跳过"防自动播放 / 自动副作用机制在 dev 模式下会被破坏**（第一次跑把 ref 置为 false，第二次跑 skip 已失效，加上 metadata 残留值就触发了）。需要"用户真正发起才触发"的副作用（自动播放、自动提交、自动跳转等），必须用 **useState 计数器 / 本地 trigger**（如 H3 的 `playToken`），由用户交互路径显式递增，effect 依赖本地 trigger 而非 metadata 字段。metadata 只用于持久化"上一次状态"，不能兼任 trigger 角色。

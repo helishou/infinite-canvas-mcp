@@ -6,16 +6,19 @@ import { useTranslation } from "react-i18next";
 import { readImageMeta } from "@/lib/image-utils";
 import type { ImageSplitParams } from "@/lib/canvas/canvas-image-data";
 import { useImageEditorViewport } from "@/components/canvas/use-image-editor-viewport";
+import { detectImageSplitLineInset } from "@/services/backend-api";
 
 export type CanvasImageSplitParams = ImageSplitParams;
 
-const defaultParams: CanvasImageSplitParams = { rows: 2, columns: 2, horizontalLines: [0.5], verticalLines: [0.5] };
+const fallbackParams: CanvasImageSplitParams = { rows: 2, columns: 2, horizontalLines: [0.5], verticalLines: [0.5], lineWidth: 1 };
 const maxGridSize = 12;
+const minLineWidth = 1;
+const maxLineWidth = 16;
 type ActiveLine = { axis: "horizontal" | "vertical"; index: number } | null;
 
 export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { dataUrl: string; open: boolean; onClose: () => void; onConfirm: (params: CanvasImageSplitParams) => void }) {
     const { t } = useTranslation();
-    const [params, setParams] = useState(defaultParams);
+    const [params, setParams] = useState(fallbackParams);
     const [image, setImage] = useState<{ width: number; height: number } | null>(null);
     const [active, setActive] = useState<ActiveLine>(null);
     const historyRef = useRef<CanvasImageSplitParams[]>([]);
@@ -34,7 +37,7 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
 
     useEffect(() => {
         if (!open) return;
-        setParams(defaultParams);
+        setParams(fallbackParams);
         setActive(null);
         setImage(null);
         historyRef.current = [];
@@ -48,6 +51,30 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
         void readImageMeta(dataUrl).then(setImage);
     }, [dataUrl, open]);
 
+    // 开 dialog 时自动识别格间分隔线宽度作为默认值。失败 / 无分隔带时用 1px。
+    // 这个识别不是用户操作，不入 history 栈。
+    useEffect(() => {
+        if (!open) return;
+        const controller = new AbortController();
+        const start = Date.now();
+        void detectImageSplitLineInset({
+            dataUrl,
+            rows: fallbackParams.rows,
+            columns: fallbackParams.columns,
+            horizontalLines: fallbackParams.horizontalLines,
+            verticalLines: fallbackParams.verticalLines,
+        }, controller.signal).then((result) => {
+            if (controller.signal.aborted) return;
+            // 后端识别很快（~50ms），但 dataUrl 解码 + sharp 也要点时间；
+            // 若用户已经手动改过 lineWidth（识别比交互慢），跳过回写避免覆盖。
+            if (Date.now() - start < 1500) {
+                const width = clampLineWidth(result.lineInset > 0 ? result.lineInset : fallbackParams.lineWidth ?? 1);
+                setParams((current) => current === fallbackParams ? { ...current, lineWidth: width } : current);
+            }
+        }).catch(() => { /* 静默失败，保持默认 1px */ });
+        return () => controller.abort();
+    }, [dataUrl, open]);
+
     useEffect(() => {
         if (!open) dragAbortRef.current?.abort();
         return () => dragAbortRef.current?.abort();
@@ -58,6 +85,11 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
         pushHistory(historyRef, redoRef, params, setHistorySize, setRedoSize);
         setActive(null);
         setParams((current) => ({ ...current, [key]: count, [key === "rows" ? "horizontalLines" : "verticalLines"]: buildGridLines(count) }));
+    };
+    const updateLineWidth = (value: string | number | null) => {
+        const width = clampLineWidth(value ?? params.lineWidth ?? 1);
+        pushHistory(historyRef, redoRef, params, setHistorySize, setRedoSize);
+        setParams((current) => ({ ...current, lineWidth: width }));
     };
     const addLine = (axis: "horizontal" | "vertical") => {
         pushHistory(historyRef, redoRef, params, setHistorySize, setRedoSize);
@@ -167,7 +199,7 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
                                     <div className="absolute left-0 top-0 [backface-visibility:hidden]" style={viewport.mediaStyle}>
                                         <img src={dataUrl} alt="" className="block h-full w-full object-contain" draggable={false} />
                                     </div>
-                                    <SplitGrid horizontalLines={horizontalLines} verticalLines={verticalLines} active={active} onPointerDown={startDrag} />
+                                    <SplitGrid horizontalLines={horizontalLines} verticalLines={verticalLines} active={active} lineWidth={params.lineWidth ?? 1} onPointerDown={startDrag} />
                                 </div>
                             </div>
                         </div>
@@ -195,6 +227,9 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
                     <div className="space-y-5 py-2">
                         <NumberField label={t("canvas.editors.rows")} value={rows} onChange={(value) => update("rows", value)} />
                         <NumberField label={t("canvas.editors.columns")} value={columns} onChange={(value) => update("columns", value)} />
+                        <div title={t("canvas.editors.lineWidthHint")}>
+                            <NumberField label={t("canvas.editors.lineWidth")} value={params.lineWidth ?? 1} min={minLineWidth} max={maxLineWidth} onChange={(value) => updateLineWidth(value)} />
+                        </div>
                         <div className="grid grid-cols-2 gap-2">
                             <Button icon={<Rows3 className="size-4" />} onClick={() => addLine("horizontal")}>
                                 {t("canvas.editors.horizontalLine")}
@@ -229,26 +264,38 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
     );
 }
 
-function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (value: string | number | null) => void }) {
+function NumberField({ label, value, onChange, min = 1, max = maxGridSize }: { label: string; value: number; onChange: (value: string | number | null) => void; min?: number; max?: number }) {
     return (
         <label className="block space-y-2">
             <span className="font-medium opacity-75">{label}</span>
-            <InputNumber className="w-full" min={1} max={maxGridSize} precision={0} value={value} onChange={onChange} />
+            <InputNumber className="w-full" min={min} max={max} precision={0} value={value} onChange={onChange} />
         </label>
     );
 }
 
-function SplitGrid({ horizontalLines, verticalLines, active, onPointerDown }: { horizontalLines: number[]; verticalLines: number[]; active: ActiveLine; onPointerDown: (axis: "horizontal" | "vertical", index: number, event: ReactPointerEvent) => void }) {
+function SplitGrid({ horizontalLines, verticalLines, active, lineWidth, onPointerDown }: { horizontalLines: number[]; verticalLines: number[]; active: ActiveLine; lineWidth: number; onPointerDown: (axis: "horizontal" | "vertical", index: number, event: ReactPointerEvent) => void }) {
+    // lineWidth 是预览里可见切分线的视觉宽度（px），不影响切割位置；
+    // 拖动命中区仍用 w-4 / h-4，避免细线时难抓。
+    // 内部可见 div 必须用 left-1/2 + -translate-x-1/2（top-1/2 + -translate-y-1/2）居中：
+    // wrapper 是 16px 命中区、left 设在切分线位置上，inner div 若只写 -translate-x-1/2
+    // 会落在 wrapper 左边再左移半个自身宽，整根线向左偏 8px（半 wrapper）。
+    const widthStyle = Math.max(1, Math.round(lineWidth));
     return (
         <div className="pointer-events-none absolute inset-0">
             {verticalLines.map((line, index) => (
                 <div key={`column-${index}`} className="pointer-events-auto absolute inset-y-0 -ml-2 w-4 cursor-ew-resize" style={{ left: `${line * 100}%` }} onPointerDown={(event) => onPointerDown("vertical", index, event)}>
-                    <div className={`absolute left-1/2 top-0 h-full border-l shadow-[0_0_0_1px_rgba(0,0,0,.35)] ${active?.axis === "vertical" && active.index === index ? "border-amber-300" : "border-white/90"}`} />
+                    <div
+                        className={`absolute left-1/2 top-0 h-full -translate-x-1/2 shadow-[0_0_0_1px_rgba(0,0,0,.35)] ${active?.axis === "vertical" && active.index === index ? "bg-amber-300" : "bg-white/90"}`}
+                        style={{ width: `${widthStyle}px` }}
+                    />
                 </div>
             ))}
             {horizontalLines.map((line, index) => (
                 <div key={`row-${index}`} className="pointer-events-auto absolute inset-x-0 -mt-2 h-4 cursor-ns-resize" style={{ top: `${line * 100}%` }} onPointerDown={(event) => onPointerDown("horizontal", index, event)}>
-                    <div className={`absolute left-0 top-1/2 w-full border-t shadow-[0_0_0_1px_rgba(0,0,0,.35)] ${active?.axis === "horizontal" && active.index === index ? "border-amber-300" : "border-white/90"}`} />
+                    <div
+                        className={`absolute left-0 top-1/2 w-full -translate-y-1/2 shadow-[0_0_0_1px_rgba(0,0,0,.35)] ${active?.axis === "horizontal" && active.index === index ? "bg-amber-300" : "bg-white/90"}`}
+                        style={{ height: `${widthStyle}px` }}
+                    />
                 </div>
             ))}
         </div>
@@ -280,6 +327,11 @@ function clampLine(value: number, min: number, max: number) {
 function clampGrid(value: string | number) {
     const numberValue = Number(value);
     return Math.min(maxGridSize, Math.max(1, Math.round(Number.isFinite(numberValue) ? numberValue : 1)));
+}
+
+function clampLineWidth(value: string | number) {
+    const numberValue = Number(value);
+    return Math.min(maxLineWidth, Math.max(minLineWidth, Math.round(Number.isFinite(numberValue) ? numberValue : minLineWidth)));
 }
 
 function cloneSplitParams(params: CanvasImageSplitParams) {

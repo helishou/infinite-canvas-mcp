@@ -298,7 +298,7 @@ function clamp(value: number, min: number, max: number) {
 // Mirror the textarea layout in a div to measure the caret at index in unscaled layout coordinates.
 const MIRROR_STYLE_PROPS = ["boxSizing", "width", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "fontStyle", "fontVariant", "fontWeight", "fontStretch", "fontSize", "lineHeight", "fontFamily", "textAlign", "textIndent", "letterSpacing", "wordSpacing", "tabSize", "textTransform"] as const;
 
-function getCaretPoint(textarea: HTMLTextAreaElement, index: number) {
+export function getCaretPoint(textarea: HTMLTextAreaElement, index: number) {
     const computed = window.getComputedStyle(textarea);
     const mirror = document.createElement("div");
     const style = mirror.style;

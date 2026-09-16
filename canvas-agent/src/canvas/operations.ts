@@ -1,10 +1,18 @@
 import crypto from "node:crypto";
 
 import type { ToolName } from "./schemas.js";
-import { nextCanvasX } from "./tools.js";
+import { nextCanvasAnchor, nextCanvasX } from "./tools.js";
 import type { CanvasNode, CanvasNodeType, CanvasSnapshot } from "./types.js";
 
 export type CanvasToolRequest = { name: "canvas_apply_ops"; input: Record<string, unknown> };
+
+/** 移除 Agent/MCP 引用选择器误写进 prompt 的占位行，保留其后的真实提示词。 */
+export function sanitizeCanvasPrompt(value: string) {
+    const lines = String(value || "").replace(/\r\n?/g, "\n").split("\n");
+    let index = 0;
+    while (index < lines.length && (!lines[index].trim() || /^【文本\d+】$/.test(lines[index].trim()) || /^图片\d+$/.test(lines[index].trim()))) index += 1;
+    return lines.slice(index).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
 
 /** 将上层画布工具调用转换为前端可执行的批量操作。 */
 export function buildCanvasToolRequest(name: ToolName, input: Record<string, unknown>, state: CanvasSnapshot | null): CanvasToolRequest {
@@ -31,11 +39,34 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
         const configId = `config-${crypto.randomUUID()}`;
         const mode = generationMode(input.mode);
         const prompt = String(input.prompt || "");
-        return applyOps([configNodeOp(configId, input, x, y), ...(input.autoRun ? [runGenerationOp(configId, mode, prompt)] : [])]);
+        return applyOps([configNodeOp(configId, input, x, y), ...(input.autoRun ? [runGenerationOp({
+            nodeId: configId,
+            mode,
+            prompt,
+            params: input.params as Record<string, unknown> | undefined,
+            idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined,
+            resultPolicy: input.resultPolicy as "replace-active" | "append" | undefined,
+        })] : [])]);
     }
     if (name === "canvas_create_generation_flow") return applyOps(generationFlowOps(input, state));
     if (name === "canvas_generate_text" || name === "canvas_generate_image" || name === "canvas_generate_video" || name === "canvas_generate_audio") {
         return applyOps(generationFlowOps({ ...input, mode: name.replace("canvas_generate_", ""), autoRun: true }, state));
+    }
+    if (name === "canvas_set_generation_references") {
+        const data = input as { nodeId: string; referenceNodeIds: string[] };
+        const targetNodeId = String(data.nodeId || "");
+        const referenceNodeIds = [...new Set(data.referenceNodeIds || [])];
+        if (!state) throw new Error("替换生成参考图前必须先读取当前画布");
+        const nodeById = new Map((state.nodes || []).map((node) => [node.id, node]));
+        if (!nodeById.has(targetNodeId)) throw new Error(`找不到生成节点：${targetNodeId}`);
+        const oldReferenceConnectionIds = (state.connections || [])
+            .filter((connection) => connection.toNodeId === targetNodeId)
+            .filter((connection) => nodeById.get(connection.fromNodeId)?.type !== "text")
+            .map((connection) => connection.id);
+        return applyOps([
+            ...(oldReferenceConnectionIds.length ? [{ type: "delete_connections", ids: oldReferenceConnectionIds }] : []),
+            ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: targetNodeId, role: "reference", order })),
+        ]);
     }
     if (name === "canvas_update_node") {
         const data = input as { id: string; patch?: Record<string, unknown>; metadata?: Record<string, unknown> };
@@ -58,14 +89,26 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
     }
     if (name === "canvas_delete_nodes") return applyOps([{ type: "delete_node", ids: (input as { ids: string[] }).ids }]);
     if (name === "canvas_connect_nodes") {
-        const data = input as { connections: Array<{ fromNodeId: string; toNodeId: string }> };
+        const data = input as { connections: Array<{ fromNodeId: string; toNodeId: string; role?: string; order?: number }> };
         return applyOps(data.connections.map((connection) => ({ type: "connect_nodes", ...connection })));
     }
     if (name === "canvas_select_nodes") return applyOps([{ type: "select_nodes", ids: (input as { ids: string[] }).ids }]);
-    if (name === "canvas_set_viewport") return applyOps([{ type: "set_viewport", viewport: (input as { viewport: unknown }).viewport }]);
     if (name === "canvas_run_generation") {
-        const data = input as { nodeId: string; mode?: string; prompt?: string };
-        return applyOps([runGenerationOp(data.nodeId, generationMode(data.mode), data.prompt)]);
+        const data = input as { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append"; segmentId?: string };
+        const referenceNodeIds = [...new Set(data.referenceNodeIds || [])];
+        if (!referenceNodeIds.length) return applyOps([runGenerationOp({ ...data, mode: generationMode(data.mode) })]);
+        if (!state) throw new Error("替换生成参考图前必须先读取当前画布");
+        const nodeById = new Map((state.nodes || []).map((node) => [node.id, node]));
+        if (!nodeById.has(data.nodeId)) throw new Error(`找不到生成节点：${data.nodeId}`);
+        const oldReferenceConnectionIds = (state.connections || [])
+            .filter((connection) => connection.toNodeId === data.nodeId)
+            .filter((connection) => nodeById.get(connection.fromNodeId)?.type !== "text")
+            .map((connection) => connection.id);
+        return applyOps([
+            ...(oldReferenceConnectionIds.length ? [{ type: "delete_connections", ids: oldReferenceConnectionIds }] : []),
+            ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: data.nodeId, role: "reference", order })),
+            runGenerationOp({ ...data, mode: generationMode(data.mode), referenceNodeIds: undefined }),
+        ]);
     }
     throw new Error(`未知工具：${name}`);
 }
@@ -115,6 +158,7 @@ function configNodeOp(id: string, input: Record<string, unknown>, x: number, y: 
             audioFormat: input.audioFormat,
             audioSpeed: input.audioSpeed,
             audioInstructions: input.audioInstructions,
+            params: input.params,
         }),
     };
 }
@@ -122,12 +166,16 @@ function configNodeOp(id: string, input: Record<string, unknown>, x: number, y: 
 /** 创建包含提示词、配置节点和引用连线的生成流程。 */
 function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot | null) {
     const mode = generationMode(input.mode);
-    const prompt = String(input.prompt || "");
-    const x = Number(input.x ?? nextCanvasX(state));
-    const y = Number(input.y ?? 0);
+    const prompt = sanitizeCanvasPrompt(String(input.prompt || ""));
+    const referenceNodeIds = Array.isArray(input.referenceNodeIds) ? input.referenceNodeIds.filter((id): id is string => typeof id === "string") : [];
+    // 有 reference 时优先把新节点贴到第一个 reference 节点同行右侧（间距 96 + 0 之间 324px 留给 config），
+    // 避免 nextCanvasX 把新节点推到画布全局最右、导致连续 MCP 生成的链路散到几屏宽之外。
+    // 没有 reference 时退回到 nextCanvasX（画布全局最右）+ y=0，保持纯文生的老行为。
+    const anchor = nextCanvasAnchor(state, referenceNodeIds[0]);
+    const x = Number(input.x ?? anchor.x);
+    const y = Number(input.y ?? anchor.y);
     const textId = `text-${crypto.randomUUID()}`;
     const configId = `config-${crypto.randomUUID()}`;
-    const referenceNodeIds = Array.isArray(input.referenceNodeIds) ? input.referenceNodeIds.filter((id): id is string => typeof id === "string") : [];
     // When the prompt only @-mentions nodes already passed as references, reuse them instead of minting a duplicate text node.
     const mentionedIds = [...prompt.matchAll(/@\[node:([\w-]+)\]/g)].map((match) => match[1]);
     const reuseReferences = referenceNodeIds.length > 0 && mentionedIds.length > 0
@@ -138,15 +186,22 @@ function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot
         ...(reuseReferences ? [] : [textNodeOp({ id: textId, text: prompt, title: String(input.title || "提示词") }, x, y)]),
         configNodeOp(configId, { ...input, prompt: tokens.join("\n") }, x + 420, y),
         ...(reuseReferences ? [] : [{ type: "connect_nodes", fromNodeId: textId, toNodeId: configId }]),
-        ...referenceNodeIds.map((fromNodeId) => ({ type: "connect_nodes", fromNodeId, toNodeId: configId })),
+        ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: configId, role: "reference", order })),
         { type: "select_nodes", ids: [configId] },
-        ...(input.autoRun ? [runGenerationOp(configId, mode, tokens.join("\n"))] : []),
+        ...(input.autoRun ? [runGenerationOp({
+            nodeId: configId,
+            mode,
+            prompt: tokens.join("\n"),
+            params: input.params as Record<string, unknown> | undefined,
+            idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined,
+            resultPolicy: input.resultPolicy as "replace-active" | "append" | undefined,
+        })] : []),
     ];
 }
 
 /** 创建触发节点生成的画布操作。 */
-function runGenerationOp(nodeId: string, mode: "text" | "image" | "video" | "audio", prompt?: string) {
-    return { type: "run_generation", nodeId, mode, prompt };
+function runGenerationOp(input: { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append"; segmentId?: string }) {
+    return { type: "run_generation", nodeId: input.nodeId, ...(input.mode ? { mode: input.mode } : {}), prompt: input.prompt, ...cleanRecord({ params: input.params, idempotencyKey: input.idempotencyKey, resultPolicy: input.resultPolicy, segmentId: input.segmentId }) };
 }
 
 /** 将未知生成模式归一为画布支持的模式。 */

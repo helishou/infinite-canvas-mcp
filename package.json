@@ -1,0 +1,23 @@
+{
+    "name": "infinite-canvas-mcp",
+    "version": "0.1.0",
+    "private": true,
+    "workspaces": [
+        "backend",
+        "canvas-agent",
+        "web"
+    ],
+    "scripts": {
+        "test": "npm run test --workspaces --if-present",
+        "dev:backend": "npm run dev --workspace backend",
+        "dev:agent": "set PORT=17371 && npm run dev --workspace canvas-agent",
+        "dev:web": "npm run dev --workspace web",
+        "dev:services": "concurrently -n backend,agent,web \"npm:dev:backend\" \"npm:dev:agent\" \"npm:dev:web\"",
+        "dev:local": "scripts\\dev-local.bat",
+        "build": "npm run build --workspaces --if-present",
+        "typecheck": "npm run typecheck --workspaces --if-present"
+    },
+    "devDependencies": {
+        "concurrently": "^9.1.0"
+    }
+}

@@ -67,7 +67,7 @@
 - Codex App 插件：提供 Codex app 插件，安装后会自动注册 MCP 并尝试拉起本地 Agent。
 - 插件系统：支持通过 URL 动态安装 / 启用 / 更新 / 卸载远程节点插件，并提供 TypeScript SDK 自行开发画布节点插件。
 - 自定义接口调用：可自定义生图 / 视频接口的调用方式，灵活适配各类中转站与自建服务。
-- 提示词库：内置 7 个开源提示词来源并支持自定义标准 JSON 来源，由浏览器前端直连并缓存到 IndexedDB。
+- 提示词库：内置 7 个开源提示词来源并支持自定义标准 JSON 来源，由浏览器前端直连并使用内存缓存。
 
 完整功能说明见 [功能介绍](docs/content/docs/overview/features.mdx)。
 
@@ -75,7 +75,7 @@
 
 ## 快速开始
 
-AI API Key、Base URL、画布、素材和生成记录默认保存在浏览器本地。
+画布、素材、生成记录、渠道配置和用户配置统一以本地 Backend SQLite 为权威存储；媒体文件保存在 Backend 媒体目录，浏览器只保留可丢弃缓存、界面状态和连接引导信息。
 
 ### 本地开发
 
@@ -138,7 +138,7 @@ docker compose up -d
 
 学 AI，上 L 站：[LinuxDO](https://linux.do/)
 
-点击链接加入群聊【AI开源交流】：https://qm.qq.com/q/DFnKzZ807u
+点击链接加入群聊【开源无限画布(2群)】：https://qm.qq.com/q/HRt2kUnYiG
 
 ## 开源协议
 
