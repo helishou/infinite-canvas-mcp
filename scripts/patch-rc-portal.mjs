@@ -33,7 +33,7 @@ for (const file of files) {
     if (/\}, \[getContainer\]\);\s*$/.test(block)) continue;
     const close = block.lastIndexOf("});");
     if (close < 0) throw new Error(`Cannot find rc-component Portal container effect close in ${file}`);
-    const nextBlock = `${block.slice(0, close)}}), [getContainer]);${block.slice(close + 3)}`;
+    const nextBlock = `${block.slice(0, close)}}, [getContainer]);${block.slice(close + 3)}`;
     writeFileSync(file, `${source.slice(0, start)}${nextBlock}${source.slice(end)}`);
     patched += 1;
 }

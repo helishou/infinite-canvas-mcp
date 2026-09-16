@@ -9,6 +9,7 @@
     ],
     "scripts": {
         "test": "npm run test --workspaces --if-present",
+        "postinstall": "node scripts/patch-rc-portal.mjs",
         "dev:backend": "npm run dev --workspace backend",
         "dev:agent": "set PORT=17371 && npm run dev --workspace canvas-agent",
         "dev:web": "npm run dev --workspace web",
