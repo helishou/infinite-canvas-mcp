@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 
 import type { RuntimeTask, RuntimeTaskEvent } from "./types.js";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult } from "../canvas/generation-contract.js";
@@ -95,10 +96,10 @@ export class BackendClient {
         return this.delete<{ ok: boolean; deleted?: number }>(`/drama/episodes/${encodeURIComponent(episodeId)}`);
     }
 
-    async applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number) {
+    async applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number, operationId = crypto.randomUUID()) {
         const data = await this.post<{ ok: boolean; project?: Record<string, unknown>; revision?: number; operationResults?: unknown[] }>(
             `/canvas/projects/${encodeURIComponent(projectId)}/ops`,
-            { expectedRevision, operations },
+            { expectedRevision, operations, operationId, source: { clientId: `agent:${process.pid}`, kind: "agent", label: "Canvas Agent" } },
         );
         if (!data.project) throw new Error(`Backend canvas ops returned no project: ${projectId}`);
         return { project: data.project, revision: Number(data.revision ?? data.project.revision ?? 0), operationResults: data.operationResults || [] };

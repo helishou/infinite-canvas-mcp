@@ -29,6 +29,7 @@ import { CanvasGenerationService } from "./canvas/generation-service.js";
 import { acquireBackendInstanceLock } from "./instance-lock.js";
 import { CanvasReferenceService } from "./canvas/reference-service.js";
 import { registerCanvasReferenceRoutes } from "./server/canvas-reference-routes.js";
+import { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
 
 const logger = createLogger("main");
 
@@ -118,6 +119,8 @@ registerBackendErrorHandler(app);
 const server = app.listen(config.port, "127.0.0.1", () => {
     logger.info(`总后台已启动 http://127.0.0.1:${config.port}`, { pid: process.pid, version: readVersion() });
 });
+const canvasRealtime = new CanvasRealtimeHub(config);
+canvasRealtime.attach(server);
 
 // ── 连接泄漏/僵尸连接防护 ────────────────────────────────────────────
 // 浏览器（Edge 等）频繁开关连接时，若 server 不主动释放半关闭 socket，
@@ -137,6 +140,7 @@ process.on("unhandledRejection", (reason) => logger.error("unhandledRejection", 
 const shutdown = (signal: string) => {
     logger.info(`${signal} received, shutting down…`);
     releaseInstanceLock();
+    canvasRealtime.close();
     void mcpHttp.closeAll().finally(() => server.close(() => {
         db.close();
         process.exit(0);

@@ -354,7 +354,7 @@ export class CanvasH3Runner {
             { type: "update_node", id: plan.nodeId, metadata: { runtimeTaskId: parentId, status: "loading" } },
             { type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch: { runtimeTaskId: childId, status: "loading", progress: 0 }, patchDelete: ["errorDetails"] },
         ]);
-        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || "") });
+        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || ""), source: { clientId: `task:${childId}`, kind: "task", label: "H3 任务" } });
         const log = this.stores.logs.update(generationLogId, { status: "running", runtimeTaskId: childId });
         this.events.publish({ type: "generation-log.updated", entityId: log.id, payload: log });
     }
@@ -374,7 +374,7 @@ export class CanvasH3Runner {
     private updateNode(projectId: string, nodeId: string, metadata: Record<string, unknown>) {
         const project = this.stores.projects.get(projectId)!;
         const result = this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [{ type: "update_node", id: nodeId, metadata }]);
-        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || "") });
+        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || ""), source: { clientId: "task:h3", kind: "task", label: "H3 任务" } });
     }
 
     private async waitForTerminal(parentId: string, childId: string) {

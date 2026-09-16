@@ -44,7 +44,7 @@ export async function writeBackH3Task(stores: Stores, events: BackendEventBus, t
     if (!saved) {
         return false;
     }
-    events.publishCanvasDelta({ entityId: saved.project.id, revision: Number(saved.project.revision || 0), operations: saved.operations, updatedAt: String(saved.project.updatedAt || "") });
+    events.publishCanvasDelta({ entityId: saved.project.id, revision: Number(saved.project.revision || 0), operations: saved.operations, updatedAt: String(saved.project.updatedAt || ""), source: { clientId: `task:${task.id}`, kind: "task", label: "H3 任务" } });
     if (saved.log) events.publish({ type: "generation-log.updated", entityId: saved.log.id, payload: saved.log });
     return true;
 }

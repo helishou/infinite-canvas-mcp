@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { backendHealth, discoverBackendToken, getBackendUrl } from "@/services/backend-api";
+import { backendHealth, discoverBackendToken, getBackendUrl, getCanvasCollaborationClient } from "@/services/backend-api";
 import { getBackendTokenShared, setBackendToken } from "@/lib/backend-token";
 
 type BackendStore = {
@@ -19,6 +19,7 @@ let structuredSettingsHydrated = false;
 const seenBackendEventIds = new Set<string>();
 let backendEventCursor = "";
 let backendEventCursorUrl = "";
+let activeCanvasProjectId = "";
 
 // 本地总后台（127.0.0.1/localhost:17370）在浏览器直连时会经过系统代理，
 // 而代理会截断长连接 SSE（net::ERR_INCOMPLETE_CHUNKED_ENCODING）。
@@ -42,15 +43,19 @@ function stopBackendEvents() {
 
 function startBackendEvents(url: string, token: string) {
     if (typeof window === "undefined" || !token) return;
-    const eventsUrl = isLocalBackendUrl(url)
+    const baseEventsUrl = isLocalBackendUrl(url)
         ? `/events?token=${encodeURIComponent(token)}`
         : `${url.replace(/\/$/, "")}/events?token=${encodeURIComponent(token)}`;
+    const canvasClient = getCanvasCollaborationClient();
+    const eventsUrl = activeCanvasProjectId
+        ? `${baseEventsUrl}&canvasProjectId=${encodeURIComponent(activeCanvasProjectId)}&canvasClientId=${encodeURIComponent(canvasClient.clientId)}&canvasLabel=${encodeURIComponent(canvasClient.label)}`
+        : baseEventsUrl;
     if (backendEvents && backendEventsKey === eventsUrl) return;
     stopBackendEvents();
-    if (backendEventCursorUrl !== eventsUrl) {
+    if (backendEventCursorUrl !== baseEventsUrl) {
         backendEventCursor = "";
         seenBackendEventIds.clear();
-        backendEventCursorUrl = eventsUrl;
+        backendEventCursorUrl = baseEventsUrl;
     }
     const source = new EventSource(`${eventsUrl}${backendEventCursor ? `&cursor=${encodeURIComponent(backendEventCursor)}` : ""}`);
     backendEvents = source;
@@ -65,7 +70,7 @@ function startBackendEvents(url: string, token: string) {
             window.dispatchEvent(new CustomEvent("backend-event", { detail: event }));
         } catch { /* SSE 单条消息损坏时交给下一次快照恢复 */ }
     };
-    for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "canvas-folder.updated", "asset.updated", "settings.updated"]) {
+    for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "canvas.presence", "canvas-folder.updated", "asset.updated", "settings.updated"]) {
         source.addEventListener(eventType, handleMessage);
     }
     source.addEventListener("events.sync", (message) => {
@@ -152,4 +157,13 @@ export function initBackendConnection() {
     setInterval(() => {
         void useBackendStore.getState().checkConnection();
     }, 10_000);
+}
+
+/** 把当前打开的画布绑定到 Backend SSE；连接生命周期即在线状态，不写项目快照。 */
+export function setBackendCanvasPresence(projectId: string) {
+    const next = projectId.trim();
+    if (next === activeCanvasProjectId) return;
+    activeCanvasProjectId = next;
+    const state = useBackendStore.getState();
+    if (state.connected) startBackendEvents(state.url, state.token);
 }

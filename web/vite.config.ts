@@ -56,6 +56,7 @@ export default defineConfig({
             "/media": { target: "http://127.0.0.1:17370", changeOrigin: true },
             "/events": { target: "http://127.0.0.1:17370", changeOrigin: true },
             "/agent": { target: "http://127.0.0.1:17370", changeOrigin: true },
+            "/canvas/realtime": { target: "ws://127.0.0.1:17370", ws: true, changeOrigin: true },
         },
     },
     resolve: {

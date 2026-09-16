@@ -20,7 +20,7 @@ import { deleteStoredImages, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import { resolveComfyImageSize } from "@/services/api/comfyui";
-import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow } from "@/services/api/workflows";
+import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow, workflowRequiresPrompt } from "@/services/api/workflows";
 import type { WorkflowDetail } from "@/services/api/workflows";
 import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
 import type { ReferenceImage } from "@/types/image";
@@ -158,7 +158,9 @@ export default function ImagePage() {
     const agentTaskIdRef = useRef<string | undefined>(undefined);
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
-    const canGenerate = Boolean(prompt.trim());
+    const activeWorkflowName = resolveModelChannel(config, model).kind === "comfyui" ? resolveModelWorkflow(config, model, references.length) : "";
+    const promptRequired = workflowDetail?.name === activeWorkflowName && workflowRequiresPrompt(workflowDetail);
+    const canGenerate = !promptRequired || Boolean(prompt.trim());
     const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
 
     useEffect(() => {
@@ -183,8 +185,7 @@ export default function ImagePage() {
     // 选中 ComfyUI 渠道模型时，按「本次参考图数量」解析该场景实际会跑的工作流，拉它的详情渲染参数面板，
     // 并用渠道设置里为该场景配的参数作为初值；参考图数量变化 → 场景变化 → 工作流与参数字段一起切换。
     useEffect(() => {
-        const channel = resolveModelChannel(config, model);
-        const workflowName = channel.kind === "comfyui" ? resolveModelWorkflow(config, model, references.length) : "";
+        const workflowName = activeWorkflowName;
         if (!workflowName) {
             setWorkflowDetail(null);
             setCustomFieldValues({});
@@ -224,7 +225,7 @@ export default function ImagePage() {
                 setCustomFieldValues({});
             });
         return () => { cancelled = true; };
-    }, [config, model, references.length]);
+    }, [activeWorkflowName, config, model, references.length]);
 
     const addReferences = async (files?: FileList | null) => {
         const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
@@ -262,7 +263,7 @@ export default function ImagePage() {
         const agentTaskId = agentTaskIdRef.current;
         agentTaskIdRef.current = undefined;
         const text = prompt.trim();
-        if (!text) {
+        if (promptRequired && !text) {
             message.error(t("imageWorkbench.promptRequired"));
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", error: t("imageWorkbench.promptRequired") });
             return;
@@ -417,7 +418,7 @@ export default function ImagePage() {
 
     const buildRequestSnapshot = () => {
         const text = prompt.trim();
-        if (!text) {
+        if (promptRequired && !text) {
             message.error(t("imageWorkbench.promptRequired"));
             return null;
         }

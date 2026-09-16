@@ -159,7 +159,7 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                         ))}
                     </div>
                 ) : (
-                    <div className="py-8 text-center text-sm text-stone-500">{loading ? "加载中…" : "暂无工作流，请先到「工作流」页面上传"}</div>
+                    <div className="py-8 text-center text-sm text-stone-500">{loading ? "加载中…" : "暂无工作流，请先到「ComfyUI → 工作流库」导入"}</div>
                 )}
             </div>
 

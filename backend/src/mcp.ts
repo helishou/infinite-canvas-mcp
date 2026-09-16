@@ -738,7 +738,7 @@ async function applyBackendCanvasOperations(config: ReturnType<typeof loadConfig
     const response = await fetch(`${config.url.replace(/\/$/, "")}/canvas/projects/${encodeURIComponent(projectId)}/ops?token=${encodeURIComponent(config.token)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ expectedRevision, operations }),
+        body: JSON.stringify({ expectedRevision, operations, operationId: crypto.randomUUID(), source: { clientId: `mcp:${process.pid}`, kind: "mcp", label: "MCP" } }),
     });
     const body = await response.json().catch(() => ({})) as { project?: CanvasProject; operationResults?: unknown[]; revision?: number; error?: string };
     if (!response.ok || !body.project) throw new Error(body.error || `画布操作失败: HTTP ${response.status}`);

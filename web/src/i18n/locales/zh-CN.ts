@@ -455,6 +455,7 @@ export default {
         video: "视频创作台",
         prompts: "提示词库",
         assets: "我的资产",
+        workflows: "ComfyUI",
         config: "配置",
     },
     topNav: {
@@ -598,7 +599,7 @@ export default {
         saved: "配置已保存",
         savedContinue: "配置已保存，请继续刚才的请求",
         channels: {
-            description: "每个渠道选择一个协议并拉取模型，为每个模型指定能力（生图/视频/文本/音频），并可自定义调用脚本。",
+            description: "管理云端 API 渠道、模型能力和调用脚本；本地 ComfyUI 模型与工作流请到顶部 ComfyUI 页面配置。",
             add: "新增渠道",
             unnamed: "未命名渠道",
             numberedName: "渠道 {{count}}",
@@ -610,6 +611,8 @@ export default {
             indexedName: "渠道 {{index}}",
         },
         preferences: {
+            localComfyui: "启用本地 ComfyUI 入口",
+            localComfyuiDescription: "关闭后隐藏顶部 ComfyUI 入口；已有渠道、模型和工作流配置不会删除。",
             interface: "界面偏好",
             language: "界面语言",
             languageDescription: "切换应用界面及组件语言。",

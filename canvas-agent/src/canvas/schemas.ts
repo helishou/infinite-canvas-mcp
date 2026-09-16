@@ -216,17 +216,23 @@ export const toolInputSchemas = {
         autoRun: z.boolean().optional().describe("true=创建后立即触发一次生成；false=仅创建占位"),
     }).merge(generationOptionsSchema),
     canvas_create_image_prompt_flow: canvasProjectSchema.extend({
-        prompt: z.string().describe("生图提示词，必填"),
+        prompt: z.string().optional().describe("生图提示词；仅当前工作流要求提示词时必填"),
         x: z.number().optional(),
         y: z.number().optional(),
         autoRun: z.boolean().optional(),
     }).merge(generationOptionsSchema),
-    canvas_create_generation_flow: canvasProjectSchema.extend(generationFlowSchema.shape).extend({
+    canvas_create_generation_flow: canvasProjectSchema.extend({
+        ...generationFlowSchema.shape,
+        prompt: z.string().optional().describe("生成提示词；image 模式仅当前工作流要求提示词时必填"),
+    }).extend({
         mode: generationModeSchema.optional(),
         autoRun: z.boolean().optional(),
     }).merge(generationOptionsSchema),
     canvas_generate_text: canvasProjectSchema.extend(generationFlowSchema.shape).merge(generationOptionsSchema),
-    canvas_generate_image: canvasProjectSchema.extend(generationFlowSchema.shape).merge(generationOptionsSchema),
+    canvas_generate_image: canvasProjectSchema.extend({
+        ...generationFlowSchema.shape,
+        prompt: z.string().optional().describe("生图提示词；仅当前工作流要求提示词时必填"),
+    }).merge(generationOptionsSchema),
     canvas_generate_video: canvasProjectSchema.extend(generationFlowSchema.shape).merge(generationOptionsSchema),
     canvas_generate_audio: canvasProjectSchema.extend(generationFlowSchema.shape).merge(generationOptionsSchema),
     canvas_set_generation_references: canvasProjectSchema.extend({
@@ -309,7 +315,7 @@ export const toolInputSchemas = {
     }),
     workbench_image_get_config: z.object({}).passthrough(),
     workbench_image_generate: z.object({
-        prompt: z.string().describe("生图提示词，必填"),
+        prompt: z.string().optional().describe("生图提示词；仅当前工作流要求提示词时必填"),
         model: z.string().optional().describe("模型 ID，例如 'krea2'、'qwen-image'；不传用工作台当前默认"),
         quality: z.string().optional().describe("质量档位，例如 'standard'、'high'"),
         size: z.string().optional().describe("尺寸/比例，例如 '1024x1024'、'1:1'、'16:9'；具体可选值先调 workbench_image_get_config"),
@@ -386,10 +392,10 @@ export const toolDescriptions: Record<ToolName, string> = {
     canvas_create_text_node: "创建单个文本节点：text 必填，可选 title/x/y/width/height。例：{ projectId: 'abc', text: '沈昭宁小传：侯府代笔...', title: '人物小传·沈昭宁', x: 200, y: 100 }",
     canvas_create_text_nodes: "批量创建文本节点。items 是数组，每项含 text 必填，可选 title/x/y/width/height。例：{ projectId: 'abc', items: [{ text: '第1集大纲' }, { text: '第2集大纲' }], gap: 32 }",
     canvas_create_config_node: "创建生成配置节点：mode + prompt + 生成参数；可选 autoRun=true 创建后立即触发一次。例：{ mode: 'image', prompt: '古风女主立绘', size: '1024x1024', autoRun: false }",
-    canvas_create_image_prompt_flow: "创建提示词文本节点和图片生成配置节点，并自动连线；可选 autoRun=true 立即触发生图。例：{ prompt: '古风女主立绘，白衣', size: '1024x1024', autoRun: true }",
-    canvas_create_generation_flow: "创建通用生成流程（提示词文本节点 + 生成配置节点 + 参考连线）。mode 不传则用默认；autoRun=true 立即触发。",
+    canvas_create_image_prompt_flow: "创建提示词文本节点和图片生成配置节点，并自动连线；生图提示词默认可省略，当前工作流声明必填提示词时仍需传入。可选 autoRun=true 立即触发生图。",
+    canvas_create_generation_flow: "创建通用生成流程（提示词文本节点 + 生成配置节点 + 参考连线）。mode 不传则默认生图；生图提示词可省略，当前工作流声明必填时除外；autoRun=true 立即触发。",
     canvas_generate_text: "创建文本生成流程并立即触发（autoRun=true 强制）。例：{ prompt: '为《婚书未烬》写一段 30 秒短剧开场独白，120 字以内' }",
-    canvas_generate_image: "创建图片生成流程并立即触发。例：{ prompt: '古风女主立绘，白衣', size: '1:1', referenceNodeIds: ['n-char-1', 'n-outfit-1'] }",
+    canvas_generate_image: "创建图片生成流程并立即触发。提示词默认可省略，当前工作流声明必填提示词时仍需传入。",
     canvas_generate_video: "创建视频生成流程并立即触发。例：{ prompt: '...', size: '16:9', seconds: '6', referenceNodeIds: [...] }",
     canvas_generate_audio: "创建音频生成流程并立即触发。可传 audioVoice/audioInstructions 控制声线与情感。",
     canvas_set_generation_references: "替换指定生成节点的参考资源。会删除该节点现有的图片、视频、音频等参考输入，保留文本提示词输入，再按 referenceNodeIds 的顺序重新连接；适合第二次生成或重做分镜时清理旧参考图。例：{ nodeId: 'n-h3-1', referenceNodeIds: ['n-char-1', 'n-outfit-2', 'n-scene-1'] }",
@@ -409,7 +415,7 @@ export const toolDescriptions: Record<ToolName, string> = {
     comfyui_get_task: "读取本地 ComfyUI 任务状态、事件和结果。",
     comfyui_cancel_task: "取消本地 ComfyUI 任务。",
     workbench_image_get_config: "读取生图工作台的当前参数和可选项（可用模型、质量、尺寸/宽高比、张数范围），在调用 workbench_image_generate 前先了解可选值。",
-    workbench_image_generate: "在生图工作台填入提示词并按需设置 model、quality、size（如 1:1 或 1024x1024）、count，run 默认 true 会自动点击生成按钮。会自动跳转到生图工作台。生成为异步过程，提交后返回 taskId，可用 generation_get_status 查询状态。",
+    workbench_image_generate: "在生图工作台按需填入提示词并设置 model、quality、size（如 1:1 或 1024x1024）、count；提示词仅在当前工作流声明必填时必需。run 默认 true 会自动点击生成按钮。会自动跳转到生图工作台。生成为异步过程，提交后返回 taskId，可用 generation_get_status 查询状态。",
     workbench_video_get_config: "读取视频创作台的当前参数和可选项（可用模型、尺寸/比例、时长、清晰度/分辨率、是否生成声音与水印）。",
     workbench_video_generate: "在视频创作台填入提示词并按需设置 model、size、seconds、resolution、generateAudio、watermark，run 默认 true 会自动点击生成按钮。会自动跳转到视频创作台。生成为异步过程，提交后返回 taskId，可用 generation_get_status 查询状态。",
     prompts_search: "搜索提示词库（第三方提示词合集），支持 keyword、category、tags 过滤和 page/pageSize 分页，返回标题、提示词、分类、标签、封面等。tags 传 string 数组，例如 ['古风','人物']。",

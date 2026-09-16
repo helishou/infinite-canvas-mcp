@@ -84,7 +84,6 @@ export class CanvasImageDispatcher {
     private get logs(): GenerationLogStore { return this.stores.logs; }
 
     start(input: CanvasImageGenerationInput, hooks?: DispatcherHooks) {
-        if (!String(input.prompt || "").trim()) throw new Error("画布图片生成缺少提示词");
         const plan = this.plan(this.prepareReferences(input));
         const normalized = plan.input;
 
@@ -419,11 +418,11 @@ export class CanvasImageDispatcher {
                     projectId: input.projectId!, nodeId: input.nodeId!, prompt: input.prompt, model: input.model,
                     references: input.references?.map((reference) => ({ storageKey: reference.storageKey, url: reference.url, name: reference.name })), resultPolicy: input.resultPolicy,
                 }, result.media.map((media) => ({ ...media })));
-                if (saved) this.events?.publishCanvasDelta({ entityId: saved.project.id, revision: Number(saved.project.revision || 0), operations: saved.operations, updatedAt: String(saved.project.updatedAt || "") });
+                if (saved) this.events?.publishCanvasDelta({ entityId: saved.project.id, revision: Number(saved.project.revision || 0), operations: saved.operations, updatedAt: String(saved.project.updatedAt || ""), source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
             },
             onFailed: async (error, task) => {
                 const saved = this.stores.projects.markCanvasImageTaskFailed(task, { projectId: input.projectId!, nodeId: input.nodeId! }, error.message);
-                if (saved) this.events?.publishCanvasDelta({ entityId: saved.project.id, revision: Number(saved.project.revision || 0), operations: saved.operations, updatedAt: String(saved.project.updatedAt || "") });
+                if (saved) this.events?.publishCanvasDelta({ entityId: saved.project.id, revision: Number(saved.project.revision || 0), operations: saved.operations, updatedAt: String(saved.project.updatedAt || ""), source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
             },
         };
     }

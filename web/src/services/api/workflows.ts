@@ -67,6 +67,10 @@ export function isWorkflowVideoField(field: WorkflowField, workflow?: Record<str
     return field.node.split(",").some((nodeId) => /(?:^|_)LoadVideo/.test(String((workflow?.[nodeId] as { class_type?: unknown } | undefined)?.class_type || "")));
 }
 
+export function workflowRequiresPrompt(detail?: WorkflowDetail | null) {
+    return Boolean(detail?.config?.fields.some((field) => field.type === "text" && field.required === true && (field.isPrompt || field.id.toLowerCase() === "prompt")));
+}
+
 // 跟 backend/src/workflows/executor.ts 的 RunResult 对齐；
 // fields 走 builder prompt 模式（workflow 顶层 prompt 节点），config 里的 fields 定义 UI 渲染。
 export type WorkflowRunResult = {

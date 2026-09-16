@@ -55,6 +55,7 @@ export type ModelChannel = {
 };
 
 export type AiConfig = {
+    localComfyuiEnabled: boolean;
     channelMode: "remote" | "local";
     baseUrl: string;
     apiKey: string;
@@ -103,6 +104,7 @@ export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
 export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
 export const defaultConfig: AiConfig = {
+    localComfyuiEnabled: true,
     channelMode: "local",
     baseUrl: OPENAI_BASE_URL,
     apiKey: "",
@@ -306,6 +308,7 @@ function normalizeConfig(input: Partial<AiConfig>): AiConfig {
     const channels = normalizeChannels(config);
     return {
         ...config,
+        localComfyuiEnabled: config.localComfyuiEnabled !== false,
         channelMode: "local",
         apiFormat: normalizeApiFormat(config.apiFormat),
         channels,

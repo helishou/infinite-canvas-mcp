@@ -33,9 +33,10 @@ test("摘要不包含节点内容，详情单独读取；SSE 断线补发和实�
         const detail = await (await request("/canvas/projects/p")).json() as { project: { nodes: unknown[] } };
         assert.equal(detail.project.nodes.length, 1);
         assert.equal((await request("/canvas/projects/missing")).status, 404);
+        const operationBody = { expectedRevision: 3, operationId: "browser-1:op-1", source: { clientId: "browser-1", kind: "browser", label: "测试浏览器" }, operations: [{ type: "update_node", id: "n", patch: { title: "新标题" } }] };
         const updated = await fetch(`${url}/canvas/projects/p/ops?response=delta`, {
             method: "POST", headers: { Authorization: "Bearer test", "Content-Type": "application/json" },
-            body: JSON.stringify({ expectedRevision: 3, operations: [{ type: "update_node", id: "n", patch: { title: "新标题" } }] }),
+            body: JSON.stringify(operationBody),
         });
         const delta = await updated.json() as Record<string, unknown>;
         assert.equal(updated.status, 200);
@@ -43,6 +44,14 @@ test("摘要不包含节点内容，详情单独读取；SSE 断线补发和实�
         assert.equal("project" in delta, false);
         assert.equal((delta.operations as unknown[]).length, 1);
         assert.equal((db.getCanvasProject("p")!.nodes as Array<Record<string, unknown>>)[0].title, "新标题");
+        const duplicate = await fetch(`${url}/canvas/projects/p/ops?response=delta`, {
+            method: "POST", headers: { Authorization: "Bearer test", "Content-Type": "application/json" }, body: JSON.stringify(operationBody),
+        });
+        const duplicateDelta = await duplicate.json() as Record<string, unknown>;
+        assert.equal(duplicate.status, 200);
+        assert.equal(duplicateDelta.duplicated, true);
+        assert.equal(duplicateDelta.revision, 4);
+        assert.equal(Number(db.getCanvasProject("p")!.revision), 4);
         const first = events.publish({ type: "task.created", payload: "first" });
         const second = events.publish({ type: "task.completed", payload: "second" });
         const replay = await readHandshake(first.id);

@@ -42,7 +42,7 @@ export type CanvasProjectStore = {
     upsert(project: CanvasProject): CanvasProject;
     replaceAll(projects: CanvasProject[]): CanvasProject[];
     delete(id: string): number;
-    applyOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[]): { project: CanvasProject; revision: number; operationResults: unknown[]; operations: CanvasOperation[] };
+    applyOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[], context?: { operationId?: string; source?: Record<string, unknown> }): { project: CanvasProject; revision: number; operationResults: unknown[]; operations: CanvasOperation[]; duplicated?: boolean };
     /** H3 任务终态与 Clip、生成日志在同一数据库事务中回写。 */
     writeBackH3Task(
         task: RuntimeTask,

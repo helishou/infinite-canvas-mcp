@@ -8,7 +8,7 @@ import { ImageSettingsPanel, imageQualityLabel, imageSizeLabel } from "@/compone
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, type AiConfig } from "@/stores/use-config-store";
-import { fetchWorkflowDetail, isWorkflowImageField, type WorkflowDetail } from "@/services/api/workflows";
+import { fetchWorkflowDetail, isWorkflowImageField, workflowRequiresPrompt, type WorkflowDetail } from "@/services/api/workflows";
 import { reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
 
 type CanvasImageSettingsPopoverProps = {
@@ -24,11 +24,12 @@ type CanvasImageSettingsPopoverProps = {
     // comfyParams 存在 node.metadata，运行时由 runLocalComfyImage 合并进 workflow fields。
     comfyParams?: Record<string, unknown>;
     onComfyParamsChange?: (value: Record<string, unknown>) => void;
+    onPromptRequiredChange?: (required: boolean) => void;
     // 本次将带上的参考图数量：决定输入场景（0 = 文生 / 1 = 单图 / ≥2 = 多图），从而决定读哪个工作流的参数。
     referenceCount?: number;
 };
 
-export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, referenceCount = 0 }: CanvasImageSettingsPopoverProps) {
+export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, onPromptRequiredChange, referenceCount = 0 }: CanvasImageSettingsPopoverProps) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
@@ -54,6 +55,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
             const target = event.target;
             if (!(target instanceof Node)) return;
             if (buttonRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+            if (target instanceof Element && target.closest(".ant-select-dropdown")) return;
             if (document.activeElement instanceof HTMLElement && panelRef.current?.contains(document.activeElement)) document.activeElement.blur();
             setOpen(false);
             onOpenChange?.(false);
@@ -95,6 +97,10 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
             cancelled = true;
         };
     }, [workflowName]);
+
+    useEffect(() => {
+        onPromptRequiredChange?.(workflowDetail?.name === workflowName && workflowRequiresPrompt(workflowDetail));
+    }, [onPromptRequiredChange, workflowDetail, workflowName]);
 
     const customFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, workflowDetail?.workflow) && !field.isPrompt);
 

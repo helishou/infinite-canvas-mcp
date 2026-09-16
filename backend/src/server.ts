@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Request, type Response, type Express } from "express";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -11,7 +12,7 @@ import type { ComfyUiBackend } from "./comfyui/bridge.js";
 import { createLogger } from "./logger.js";
 import { createStores } from "./stores/index.js";
 import type { GenerationLogInput, LogDeleteScope, Stores } from "./stores/types.js";
-import { BackendEventBus } from "./events.js";
+import { BackendEventBus, type CanvasEventSource } from "./events.js";
 import type { CanvasOperation } from "./canvas/project-ops.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
 import { detectLineInset, type DetectLineInsetParams } from "./canvas/image-split-detect.js";
@@ -201,19 +202,33 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.get("/events", (req, res) => {
         res.status(200).set({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
         res.flushHeaders();
+        const canvasProjectId = typeof req.query.canvasProjectId === "string" ? req.query.canvasProjectId : "";
+        const canvasClientId = typeof req.query.canvasClientId === "string" ? req.query.canvasClientId : "";
         let closed = false;
         const write = (event: import("./events.js").BackendEvent) => {
             if (closed) return;
             // 客户端（浏览器）断连后写已关闭的 socket 会抛 EPIPE，吞掉以免崩进程。
             try { res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`); }
-            catch { closed = true; clearInterval(heartbeat); unsubscribe(); }
+            catch {
+                closed = true;
+                clearInterval(heartbeat);
+                unsubscribe();
+                if (canvasProjectId && canvasClientId) events.leaveCanvas(canvasProjectId, canvasClientId);
+            }
         };
         const heartbeat = setInterval(() => { try { res.write(": heartbeat\n\n"); } catch { clearInterval(heartbeat); } }, 15_000);
         const unsubscribe = events.subscribe(write);
         const replay = events.replay(req.get("Last-Event-ID") || (typeof req.query.cursor === "string" ? req.query.cursor : undefined));
         if (!replay.reset) replay.events.forEach(write);
         res.write(`id: ${replay.cursor}\nevent: events.sync\ndata: ${JSON.stringify({ cursor: replay.cursor, reset: replay.reset })}\n\n`);
-        const cleanup = () => { closed = true; clearInterval(heartbeat); unsubscribe(); };
+        if (canvasProjectId && canvasClientId) events.joinCanvas(canvasProjectId, canvasEventSource({ clientId: canvasClientId, kind: "browser", label: typeof req.query.canvasLabel === "string" ? req.query.canvasLabel : "浏览器画布" }));
+        const cleanup = () => {
+            if (closed) return;
+            closed = true;
+            clearInterval(heartbeat);
+            unsubscribe();
+            if (canvasProjectId && canvasClientId) events.leaveCanvas(canvasProjectId, canvasClientId);
+        };
         req.on("close", cleanup);
         res.on("error", cleanup);
     });
@@ -259,11 +274,13 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.post("/canvas/projects/:id/ops", (req, res) => {
         const expectedRevision = req.body?.expectedRevision === undefined ? undefined : Number(req.body.expectedRevision);
         const operations = Array.isArray(req.body?.operations) ? req.body.operations as CanvasOperation[] : [];
+        const operationId = String(req.body?.operationId || crypto.randomUUID());
+        const source = canvasEventSource(req.body?.source);
         if (!operations.length) return void res.status(400).json({ ok: false, error: "operations 不能为空" });
         try {
-            const result = db.applyCanvasProjectOperations(req.params.id, expectedRevision, operations);
-            events.publishCanvasDelta({ entityId: result.project.id, revision: result.revision, operations: result.operations, operationResults: result.operationResults, updatedAt: String(result.project.updatedAt || "") });
-            res.json({ ok: true, projectId: result.project.id, revision: result.revision, operationResults: result.operationResults,
+            const result = db.applyCanvasProjectOperations(req.params.id, expectedRevision, operations, { operationId, source });
+            if (!result.duplicated) events.publishCanvasDelta({ entityId: result.project.id, revision: result.revision, operations: result.operations, operationResults: result.operationResults, updatedAt: String(result.project.updatedAt || ""), source, operationId });
+            res.json({ ok: true, projectId: result.project.id, revision: result.revision, operationId, duplicated: result.duplicated, operationResults: result.operationResults,
                 ...(req.query.response === "delta" ? { operations: result.operations, updatedAt: result.project.updatedAt } : { project: result.project }),
             });
         } catch (error) {
@@ -777,6 +794,17 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     registerBackendErrorHandler(app);
 
     return { app: app as Express, stores, events };
+}
+
+function canvasEventSource(value: unknown): CanvasEventSource {
+    const source = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    const allowedKinds = new Set<CanvasEventSource["kind"]>(["browser", "mcp", "agent", "task", "system"]);
+    const kind = allowedKinds.has(source.kind as CanvasEventSource["kind"]) ? source.kind as CanvasEventSource["kind"] : "system";
+    return {
+        clientId: String(source.clientId || `${kind}:anonymous`).slice(0, 128),
+        kind,
+        ...(source.label ? { label: String(source.label).slice(0, 80) } : {}),
+    };
 }
 
 /** 在调用方挂载额外路由后再次安装，确保挂载路由也返回统一 JSON 错误。 */

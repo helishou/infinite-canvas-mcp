@@ -139,6 +139,17 @@ export class BackendDatabase {
                 data_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS canvas_operation_batches (
+                operation_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                base_revision INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                source_json TEXT NOT NULL DEFAULT '{}',
+                operations_json TEXT NOT NULL,
+                results_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS canvas_operation_batches_project_revision ON canvas_operation_batches(project_id, revision);
             CREATE TABLE IF NOT EXISTS canvas_folders (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -743,12 +754,21 @@ export class BackendDatabase {
         return this.getCanvasProject(project.id)!;
     }
 
-    applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[]) {
+    applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[], context?: { operationId?: string; source?: Record<string, unknown> }) {
         this.db.exec("BEGIN IMMEDIATE");
         try {
             const current = this.getCanvasProject(id);
             if (!current) throw new Error(`画布不存在: ${id}`);
             const currentRevision = Number(current.revision || 0);
+            const operationId = String(context?.operationId || "");
+            if (operationId) {
+                const existing = this.db.prepare("SELECT project_id AS projectId, revision, operations_json AS operationsJson, results_json AS resultsJson FROM canvas_operation_batches WHERE operation_id = ?").get(operationId) as { projectId: string; revision: number; operationsJson: string; resultsJson: string } | undefined;
+                if (existing) {
+                    if (existing.projectId !== id) throw new Error(`operationId 已用于其他画布：${operationId}`);
+                    this.db.exec("COMMIT");
+                    return { project: current, revision: Number(existing.revision), operationResults: JSON.parse(existing.resultsJson), operations: JSON.parse(existing.operationsJson), duplicated: true };
+                }
+            }
             if (expectedRevision !== undefined && expectedRevision !== currentRevision) {
                 const error = new Error("画布版本冲突");
                 (error as Error & { code?: string; project?: CanvasProject; revision?: number }).code = "REVISION_CONFLICT";
@@ -763,8 +783,12 @@ export class BackendDatabase {
             project.updatedAt = new Date().toISOString();
             this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?")
                 .run(JSON.stringify(project), String(project.updatedAt), id);
+            if (operationId) {
+                this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+                    .run(operationId, id, currentRevision, revision, JSON.stringify(context?.source || {}), JSON.stringify(operations), JSON.stringify(operationResults), String(project.updatedAt));
+            }
             this.db.exec("COMMIT");
-            return { project: project as CanvasProject, revision, operationResults, operations };
+            return { project: project as CanvasProject, revision, operationResults, operations, duplicated: false };
         } catch (error) {
             this.db.exec("ROLLBACK");
             throw error;

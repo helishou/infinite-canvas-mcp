@@ -455,6 +455,7 @@ export default {
         video: "Video Studio",
         prompts: "Prompt Library",
         assets: "My Assets",
+        workflows: "ComfyUI",
         config: "Settings",
     },
     topNav: {
@@ -598,7 +599,7 @@ export default {
         saved: "Settings saved",
         savedContinue: "Settings saved. Continue with your previous request.",
         channels: {
-            description: "Choose a protocol for each provider, fetch its models, assign capabilities, and optionally customize request scripts.",
+            description: "Manage cloud API providers, model capabilities, and request scripts. Configure local ComfyUI models and workflows from the ComfyUI page.",
             add: "Add provider",
             unnamed: "Unnamed provider",
             numberedName: "Provider {{count}}",
@@ -610,6 +611,8 @@ export default {
             indexedName: "Provider {{index}}",
         },
         preferences: {
+            localComfyui: "Enable local ComfyUI tab",
+            localComfyuiDescription: "Turn this off to hide the ComfyUI tab. Existing providers, models, and workflows are kept.",
             interface: "Interface",
             language: "Display language",
             languageDescription: "Change the language used by the interface and components.",

@@ -1,10 +1,10 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Button, Empty, Input, Spin, Tag, message, Select, Switch } from "antd";
-import { Upload as UploadIcon, Upload, Download, Play, Trash2, Settings2, Workflow, Code, Server, History } from "lucide-react";
+import { Button, Empty, Input, Spin, Tabs, Tag, message, Select, Switch } from "antd";
+import { Upload as UploadIcon, Upload, Download, Play, Trash2, Settings2, Workflow, Code, History } from "lucide-react";
 import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs, uploadBackendMedia, backendMediaUrl } from "@/services/backend-api";
 import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, type WorkflowPackage } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
-import { InstancesModal } from "./instances-modal";
+import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
 import "../../styles/workflow-graph.css";
 import type { WorkflowConfig, WorkflowField } from "@/types/workflow";
 
@@ -36,8 +36,8 @@ export default function WorkflowsPage() {
     const [selected, setSelected] = useState<WorkflowDetail | null>(null);
     const [running, setRunning] = useState(false);
     const [taskResult, setTaskResult] = useState<TaskResult | null>(null);
+    const [section, setSection] = useState("workflows");
     const [activeTab, setActiveTab] = useState("structure");
-    const [instancesOpen, setInstancesOpen] = useState(false);
     const [historyLogs, setHistoryLogs] = useState<Array<{ id: string; workflow: string; prompt: string; status: string; createdAt: string; outputs: Array<{ url: string; mimeType: string }>; error?: string }>>([]);
     const [loadingHistory, setLoadingHistory] = useState(false);
     const [editingName, setEditingName] = useState<string | null>(null);
@@ -208,16 +208,23 @@ export default function WorkflowsPage() {
 
     return (
         <div className="mx-auto max-w-7xl p-6">
-            <div className="flex items-center justify-between">
-                <h1 className="flex items-center gap-2 text-2xl font-semibold">
-                    <Workflow className="size-6" /> 工作流管理
-                </h1>
-                <Button icon={<Server className="size-4" />} onClick={() => setInstancesOpen(true)}>
-                    管理后端
-                </Button>
+            <div>
+                <h1 className="flex items-center gap-2 text-2xl font-semibold"><Workflow className="size-6" /> ComfyUI</h1>
+                <p className="mt-1 text-sm text-stone-500">集中管理工作流、模型路由和本地运行环境。</p>
             </div>
 
-            <div className="mt-6 grid grid-cols-12 gap-6">
+            <Tabs
+                className="mt-4"
+                activeKey={section}
+                onChange={setSection}
+                items={[
+                    { key: "workflows", label: "工作流库" },
+                    { key: "models", label: "模型与路由" },
+                    { key: "runtime", label: "运行环境" },
+                ]}
+            />
+
+            {section === "workflows" ? <div className="grid grid-cols-12 gap-6">
                 <div className="col-span-8">
                     {!selected ? (
                         <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
@@ -428,9 +435,7 @@ export default function WorkflowsPage() {
                         )}
                     </div>
                 </div>
-            </div>
-
-            <InstancesModal open={instancesOpen} onClose={() => setInstancesOpen(false)} />
+            </div> : section === "models" ? <ComfyChannelsPanel /> : <ComfyRuntimePanel />}
         </div>
     );
 }

@@ -52,12 +52,13 @@ export class CanvasGenerationService {
     }
 
     private startImage(command: CanvasGenerationCommand) {
-        if (!command.model || !command.prompt) throw new Error("画布图片生成缺少 model 或 prompt");
+        if (!command.model) throw new Error("画布图片生成缺少 model");
         const resolved = this.resolveImageReferences(command);
         // 图片与 H3/视频统一：调用方重试同一个幂等键时复用原任务，
         // 不允许因为图片执行器内部字段名不同而再次触发模型。
         const input = {
             ...resolved,
+            prompt: String(resolved.prompt || ""),
             ...(resolved.idempotencyKey && !resolved.clientTaskId ? { clientTaskId: resolved.idempotencyKey } : {}),
         };
         const result = this.image.start(input as CanvasImageGenerationInput);
@@ -128,7 +129,7 @@ function bindCanvasTask(stores: Stores, events: BackendEventBus, binding: Record
             patchDelete: ["errorDetails"],
         },
     ]);
-    events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || "") });
+    events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || ""), source: { clientId: "task:generation", kind: "task", label: "生成任务" } });
 }
 
 function recordOf(value: unknown): Record<string, unknown> {

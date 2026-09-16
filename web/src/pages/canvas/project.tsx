@@ -50,7 +50,8 @@ import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/a
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { ensureCanvasProjectLoaded, flushCanvasSyncNow, useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { ensureCanvasProjectLoaded, flushCanvasSyncNow, useCanvasStore, type CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
+import { setBackendCanvasPresence } from "@/stores/use-backend-store";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildCanvasGraphIndex, createMentionReferenceSelector, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -81,6 +82,7 @@ import { CanvasPluginManagerModal } from "@/components/canvas/canvas-plugin-mana
 import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
 import { CanvasTopBar } from "@/components/canvas/canvas-top-bar";
 import { CanvasGenerationLogDialog } from "@/components/canvas/canvas-generation-log-dialog";
+import { CanvasRealtimePresenceLayer, useCanvasRealtimePresence } from "@/components/canvas/canvas-realtime-presence";
 import { ConnectionCreateMenu, NodeCreateMenu, type PendingConnectionCreate } from "@/components/canvas/canvas-create-menus";
 import {
     CanvasNodeType,
@@ -113,6 +115,8 @@ type ConnectionDropTarget = {
     nodeId: string | null;
     isNearNode: boolean;
 };
+
+const EMPTY_CANVAS_COLLABORATORS: CanvasCollaborator[] = [];
 
 type CanvasHistoryEntry = Pick<CanvasClipboard, "nodes" | "connections"> & {
     chatSessions: CanvasAssistantSession[];
@@ -307,6 +311,7 @@ function InfiniteCanvasPage() {
     const deleteProjects = useCanvasStore((state) => state.deleteProjects);
     const currentProject = useCanvasStore((state) => state.projects.find((project) => project.id === projectId));
     const backendRevision = useCanvasStore((state) => state.backendRevisions[projectId] || 0);
+    const collaborators = useCanvasStore((state) => state.collaborators[projectId] || EMPTY_CANVAS_COLLABORATORS);
     const canvasConflict = useCanvasStore((state) => state.canvasConflicts[projectId]);
     const clearCanvasConflict = useCanvasStore((state) => state.clearCanvasConflict);
     const keepPendingOpsOnCanvasConflict = useCanvasStore((state) => state.keepPendingOpsOnCanvasConflict);
@@ -320,6 +325,7 @@ function InfiniteCanvasPage() {
     const [canvasTool, setCanvasTool] = useState<"select" | "pan">("pan");
     const [size, setSize] = useState({ width: 1200, height: 720 });
     const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+    const { peers: realtimePeers, publishCursor: publishRealtimeCursor } = useCanvasRealtimePresence(projectId, selectedNodeIds);
     const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
     const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
     const [connectingParams, setConnectingParams] = useState<ConnectionHandle | null>(null);
@@ -504,6 +510,12 @@ function InfiniteCanvasPage() {
     );
 
     useEffect(() => {
+        if (!projectId) return;
+        setBackendCanvasPresence(projectId);
+        return () => setBackendCanvasPresence("");
+    }, [projectId]);
+
+    useEffect(() => {
         if (!hydrated) return;
         setProjectLoadError("");
         const restoreGeneration = ++restoreGenerationRef.current;
@@ -546,7 +558,13 @@ function InfiniteCanvasPage() {
                 if (sessionsChanged) startTransition(() => setChatSessions((current) => current === rawSessions ? hydratedSessions : current));
             }).catch((error) => console.warn("画布媒体后台恢复失败", error));
         };
-        void ensureCanvasProjectLoaded(projectId).then((project) => {
+        // Backend/MCP 增量已先合并进 Zustand；打开中的画布必须同步采用该内存快照。
+        // 若仍绕一层 Promise，期间任何本地 UI 变化都会触发 uiVersion 防护并丢弃恢复结果，
+        // 表现为 Store 已更新、画布却要刷新页面后才能看见。
+        const loadedProject = openProject(projectId);
+        if (loadedProject && !loadedProject.summary) {
+            restore(loadedProject);
+        } else void ensureCanvasProjectLoaded(projectId).then((project) => {
             if (restoreGeneration === restoreGenerationRef.current) restore(project);
         }).catch((error) => {
             if (restoreGeneration !== restoreGenerationRef.current) return;
@@ -561,7 +579,15 @@ function InfiniteCanvasPage() {
         if (!projectLoaded) return;
         let disposed = false;
         const poll = async () => {
-            const pending = nodesRef.current.filter((node) => (node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Image) && node.metadata?.status === NODE_STATUS_LOADING && node.metadata.runtimeTaskId);
+            // 当前标签页的提交链会自行等待任务结果。输出节点会先写入预生成 taskId，
+            // 再同步画布并提交 Backend；恢复轮询若在这段窗口抢跑，会把尚未创建的任务误判为 404。
+            const activeRequestIds = new Set(generationRequestsRef.current.keys());
+            const activeOutputIds = new Set(connectionsRef.current.filter((connection) => activeRequestIds.has(connection.fromNodeId)).map((connection) => connection.toNodeId));
+            const pending = nodesRef.current.filter((node) => (node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Image)
+                && node.metadata?.status === NODE_STATUS_LOADING
+                && node.metadata.runtimeTaskId
+                && !activeRequestIds.has(node.id)
+                && !activeOutputIds.has(node.id));
             await Promise.all(pending.map(async (node) => {
                 try {
                     let taskStatus: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -1593,6 +1619,7 @@ function InfiniteCanvasPage() {
     const handleGlobalMouseMove = useCallback(
         (event: MouseEvent) => {
             const currentViewport = viewportRef.current;
+            publishRealtimeCursor(screenToCanvas(event.clientX, event.clientY));
 
             if (dragRef.current.isDraggingNode) {
                 const dx = (event.clientX - dragRef.current.startX) / currentViewport.k;
@@ -1647,7 +1674,7 @@ function InfiniteCanvasPage() {
                 setMouseWorld(screenToCanvas(event.clientX, event.clientY));
             }
         },
-        [finishNodeDrag, getConnectionDropTarget, screenToCanvas],
+        [finishNodeDrag, getConnectionDropTarget, publishRealtimeCursor, screenToCanvas],
     );
 
     const handleGlobalPointerMove = useCallback(
@@ -3847,6 +3874,7 @@ function InfiniteCanvasPage() {
                     globalPrompt={globalPrompt}
                     onGlobalPromptChange={setGlobalPrompt}
                     onOpenGenerationLogs={() => setGenerationLogsOpen(true)}
+                    collaborators={collaborators}
                 />
                 {canvasConflict ? <div className="pointer-events-auto absolute left-1/2 top-16 z-40 w-[min(680px,calc(100%-32px))] -translate-x-1/2"><Alert
                     type="warning"
@@ -3994,6 +4022,7 @@ function InfiniteCanvasPage() {
                         />
                     ) : null}
                 </InfiniteCanvas>
+                <CanvasRealtimePresenceLayer peers={realtimePeers} nodes={nodes} viewport={viewport} />
 
                 <CanvasNodeHoverToolbar
                     node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}

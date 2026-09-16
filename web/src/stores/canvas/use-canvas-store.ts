@@ -49,11 +49,19 @@ type CanvasConflictRecord = {
     remoteProject: CanvasProject;
 };
 
+export type CanvasCollaborator = {
+    clientId: string;
+    kind: "browser" | "mcp" | "agent" | "task" | "system";
+    label: string;
+    lastActivityAt: string;
+};
+
 type CanvasStore = {
     hydrated: boolean;
     projects: CanvasProject[];
     folders: CanvasFolder[];
     backendRevisions: Record<string, number>;
+    collaborators: Record<string, CanvasCollaborator[]>;
     canvasConflicts: Record<string, CanvasConflictRecord>;
     clearCanvasConflict: (id: string) => void;
     /** 弹窗"保留我的 N 个操作"：syncBase 推进到远端 revision，本地不动，
@@ -103,6 +111,7 @@ const syncBases = new Map<string, CanvasProject>();
 // Backend 已明确拒绝的同一批操作不再自动重试。签名包含基线 revision 与完整 op
 // 内容的短哈希，因此无关的 store/SSE 对象重建不会解除熔断，用户真正修改内容后会。
 const rejectedSyncSignatures = new Map<string, string>();
+const pendingOperationIds = new Map<string, { signature: string; operationId: string }>();
 let deferredBackendEvents: unknown[] = [];
 let deferredBackendEventsWaiter: Promise<void> | null = null;
 let canvasHydrationPromise: Promise<void> | null = null;
@@ -394,7 +403,9 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
                 }
                 currentOperationSignature = canvasOperationSignature(Number(remote.revision || 0), operations);
                 if (rejectedSyncSignatures.get(project.id) === currentOperationSignature) continue;
-                const response = await applyBackendCanvasOperations(project.id, operations, Number(remote.revision || 0));
+                const operationId = canvasOperationId(project.id, currentOperationSignature);
+                const response = await applyBackendCanvasOperations(project.id, operations, Number(remote.revision || 0), operationId);
+                pendingOperationIds.delete(project.id);
                 rejectedSyncSignatures.delete(project.id);
                 const saved = applyBackendCanvasDelta(remote, response.operations, response.revision, response.updatedAt);
                 if (saved) {
@@ -419,7 +430,9 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
             recordSyncedChanges(project.id, operations);
             currentOperationSignature = canvasOperationSignature(Number(base.revision || 0), operations);
             if (rejectedSyncSignatures.get(project.id) === currentOperationSignature) continue;
-            const response = await applyBackendCanvasOperations(project.id, operations, Number(base.revision || 0));
+            const operationId = canvasOperationId(project.id, currentOperationSignature);
+            const response = await applyBackendCanvasOperations(project.id, operations, Number(base.revision || 0), operationId);
+            pendingOperationIds.delete(project.id);
             rejectedSyncSignatures.delete(project.id);
             const saved = applyBackendCanvasDelta(base, response.operations, response.revision, response.updatedAt);
             if (saved) {
@@ -499,6 +512,14 @@ function canvasOperationSignature(revision: number, operations: Array<Record<str
         hash = Math.imul(hash, 16777619);
     }
     return `${revision}:${value.length}:${hash >>> 0}`;
+}
+
+function canvasOperationId(projectId: string, signature: string) {
+    const pending = pendingOperationIds.get(projectId);
+    if (pending?.signature === signature) return pending.operationId;
+    const operationId = crypto.randomUUID();
+    pendingOperationIds.set(projectId, { signature, operationId });
+    return operationId;
 }
 
 function fromProjectSummary(value: Record<string, unknown>): CanvasProject {
@@ -609,6 +630,7 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
     projects: loadFromLocalStorage().map(normalizeProjectMediaUrls),
     folders: [],
     backendRevisions: {},
+    collaborators: {},
     canvasConflicts: {},
     clearCanvasConflict: (id) => set((state) => { const next = { ...state.canvasConflicts }; delete next[id]; return { canvasConflicts: next }; }),
     keepPendingOpsOnCanvasConflict: (id) => {
@@ -1111,7 +1133,7 @@ async function recoverCanvasProjectSnapshot(projectId: string) {
 
 export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChanges = false) {
     if (!event || typeof event !== "object") return;
-    const value = event as { type?: unknown; entityId?: unknown; revision?: unknown; payload?: unknown };
+    const value = event as { type?: unknown; entityId?: unknown; revision?: unknown; payload?: unknown; source?: unknown; createdAt?: unknown };
     if (value.type === "canvas-folder.updated") {
         const entityId = typeof value.entityId === "string" ? value.entityId : "";
         const payload = value.payload && typeof value.payload === "object" ? value.payload as Record<string, unknown> : {};
@@ -1131,7 +1153,40 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
         }
         return;
     }
+    if (value.type === "canvas.presence") {
+        const entityId = typeof value.entityId === "string" ? value.entityId : "";
+        const payload = value.payload && typeof value.payload === "object" ? value.payload as Record<string, unknown> : {};
+        const participants = Array.isArray(payload.participants) ? payload.participants : [];
+        const collaborators = participants.flatMap((item): CanvasCollaborator[] => {
+            if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+            const participant = item as Record<string, unknown>;
+            if (!participant.clientId) return [];
+            return [{
+                clientId: String(participant.clientId),
+                kind: ["browser", "mcp", "agent", "task", "system"].includes(String(participant.kind)) ? String(participant.kind) as CanvasCollaborator["kind"] : "system",
+                label: String(participant.label || participant.kind || "协作者"),
+                lastActivityAt: String(participant.joinedAt || value.createdAt || new Date().toISOString()),
+            }];
+        });
+        if (entityId) useCanvasStore.setState((state) => ({ collaborators: { ...state.collaborators, [entityId]: collaborators } }));
+        return;
+    }
     if (value.type !== "canvas.updated") return;
+    const eventEntityId = typeof value.entityId === "string" ? value.entityId : "";
+    const eventSource = value.source && typeof value.source === "object" && !Array.isArray(value.source) ? value.source as Record<string, unknown> : null;
+    if (eventEntityId && eventSource?.clientId) {
+        const collaborator: CanvasCollaborator = {
+            clientId: String(eventSource.clientId),
+            kind: ["browser", "mcp", "agent", "task", "system"].includes(String(eventSource.kind)) ? String(eventSource.kind) as CanvasCollaborator["kind"] : "system",
+            label: String(eventSource.label || eventSource.kind || "协作者"),
+            lastActivityAt: typeof value.createdAt === "string" ? value.createdAt : new Date().toISOString(),
+        };
+        useCanvasStore.setState((state) => {
+            const previous = state.collaborators[eventEntityId] || [];
+            const collaborators = [collaborator, ...previous.filter((item) => item.clientId !== collaborator.clientId)].slice(0, 8);
+            return { collaborators: { ...state.collaborators, [eventEntityId]: collaborators } };
+        });
+    }
     if (syncPromise) {
         deferredBackendEvents.push(event);
         if (!deferredBackendEventsWaiter) {

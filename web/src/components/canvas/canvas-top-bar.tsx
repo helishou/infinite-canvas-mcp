@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Bot, Download, FileText, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload } from "lucide-react";
+import { BookOpen, Bot, Download, FileText, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
 import { Button, Dropdown, Input, Modal, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -8,6 +8,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { DOCS_URL } from "@/constant/env";
+import type { CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
 
 export function CanvasTopBar({
     title,
@@ -34,6 +35,7 @@ export function CanvasTopBar({
     globalPrompt,
     onGlobalPromptChange,
     onOpenGenerationLogs,
+    collaborators,
 }: {
     title: string;
     titleDraft: string;
@@ -59,6 +61,7 @@ export function CanvasTopBar({
     globalPrompt: string;
     onGlobalPromptChange: (value: string) => void;
     onOpenGenerationLogs: () => void;
+    collaborators: CanvasCollaborator[];
 }) {
     const colorTheme = useThemeStore((state) => state.theme);
     const { t } = useTranslation();
@@ -142,6 +145,7 @@ export function CanvasTopBar({
                         )}
                     </div>
                     <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />
+                    <CanvasCollaborators collaborators={collaborators} />
                     <Popover
                         trigger="click"
                         placement="bottomLeft"
@@ -190,6 +194,34 @@ export function CanvasTopBar({
             </Modal>
         </>
     );
+}
+
+function CanvasCollaborators({ collaborators }: { collaborators: CanvasCollaborator[] }) {
+    const colorTheme = useThemeStore((state) => state.theme);
+    const theme = canvasThemes[colorTheme];
+    if (!collaborators.length) return null;
+    const label = collaborators.map((item) => `${item.label} · ${item.kind === "mcp" ? "MCP" : item.kind === "agent" ? "Agent" : item.kind === "browser" ? "浏览器" : "后台"}`).join("\n");
+    return (
+        <Tooltip title={<span className="whitespace-pre-line">最近参与画布操作<br />{label}</span>}>
+            <div className="flex h-8 items-center gap-1.5 px-1 text-xs" style={{ color: theme.node.muted }} aria-label={`最近协作者 ${collaborators.length} 个`}>
+                <UsersRound className="size-3.5" />
+                <span className="flex -space-x-1.5">
+                    {collaborators.slice(0, 4).map((item) => (
+                        <span key={item.clientId} className="grid size-5 place-items-center rounded-full border text-[9px] font-semibold" style={{ borderColor: theme.toolbar.panel, background: collaboratorColor(item.clientId), color: "#fff" }}>
+                            {(item.label || item.kind).slice(0, 1).toUpperCase()}
+                        </span>
+                    ))}
+                </span>
+            </div>
+        </Tooltip>
+    );
+}
+
+function collaboratorColor(clientId: string) {
+    const colors = ["#0f766e", "#b45309", "#be123c", "#1d4ed8", "#6d28d9", "#3f6212"];
+    let hash = 0;
+    for (let index = 0; index < clientId.length; index += 1) hash = (hash * 31 + clientId.charCodeAt(index)) | 0;
+    return colors[Math.abs(hash) % colors.length];
 }
 
 function MenuLabel({ text, shortcut }: { text: string; shortcut: string }) {

@@ -129,28 +129,19 @@ export function ImageCompareModal({ open, beforeUrl, afterUrl, title, onClose }:
                         onMouseDown={handleMouseDown}
                         onTouchStart={handleTouchStart}
                     >
-                        <img src={afterUrl} alt={title} style={{ display: "block", width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none" }} />
-                        <img
-                            src={beforeUrl}
-                            alt={`${title} (before)`}
-                            style={{
-                                display: "block",
-                                position: "absolute",
-                                top: 0,
-                                left: 0,
-                                width: "100%",
-                                height: "100%",
-                                objectFit: "contain",
-                                clipPath: `inset(0 ${100 - sliderPos}% 0 0)`,
-                                pointerEvents: "none",
-                            }}
-                        />
+                        {/* 标签与对应图片共用裁切层，位置始终相对完整画幅固定。 */}
+                        <div style={{ position: "absolute", inset: 0, clipPath: `inset(0 0 0 ${sliderPos}%)`, pointerEvents: "none" }}>
+                            <img src={afterUrl} alt={title} style={{ display: "block", width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none" }} />
+                            <div style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,0.6)", color: "#fff", padding: "2px 8px", borderRadius: 4, fontSize: 12, pointerEvents: "none" }}>After</div>
+                        </div>
+                        <div style={{ position: "absolute", inset: 0, clipPath: `inset(0 ${100 - sliderPos}% 0 0)`, pointerEvents: "none" }}>
+                            <img src={beforeUrl} alt={`${title} (before)`} style={{ display: "block", width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none" }} />
+                            <div style={{ position: "absolute", top: 12, left: 12, background: "rgba(0,0,0,0.6)", color: "#fff", padding: "2px 8px", borderRadius: 4, fontSize: 12, pointerEvents: "none" }}>Before</div>
+                        </div>
                         <div style={{ position: "absolute", top: 0, bottom: 0, left: `${sliderPos}%`, width: 2, background: "#fff", boxShadow: "0 0 6px rgba(0,0,0,0.5)", transform: "translateX(-50%)", pointerEvents: "none" }} />
                         <div style={{ position: "absolute", top: "50%", left: `${sliderPos}%`, width: 28, height: 28, borderRadius: "50%", background: "#fff", boxShadow: "0 0 6px rgba(0,0,0,0.5)", transform: "translate(-50%, -50%)", pointerEvents: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
                             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5 3L2 8L5 13" stroke="#333" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /><path d="M11 3L14 8L11 13" stroke="#333" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
                         </div>
-                        <div style={{ position: "absolute", top: 12, left: 12, background: "rgba(0,0,0,0.6)", color: "#fff", padding: "2px 8px", borderRadius: 4, fontSize: 12, pointerEvents: "none" }}>Before</div>
-                        <div style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,0.6)", color: "#fff", padding: "2px 8px", borderRadius: 4, fontSize: 12, pointerEvents: "none" }}>After</div>
                     </div>
                 ) : (
                     <div style={{ width: 480, height: 320, display: "flex", alignItems: "center", justifyContent: "center", color: "#94a3b8" }}>加载中…</div>

@@ -47,6 +47,8 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const [prompt, setPrompt] = useState(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
     const [expanded, setExpanded] = useState(false);
+    const [imagePromptRequired, setImagePromptRequired] = useState(false);
+    const promptRequired = mode !== "image" || imagePromptRequired;
     // 本次会带上的参考图数量（连接来的图片节点 + 提示词里 @ 到的图片）：
     // 决定输入场景（0 = 文生 / 1 = 单图 / ≥2 = 多图），进而决定参数字段读哪个工作流。
     const referenceCount = connectedNodes.filter((item) => item.type === CanvasNodeType.Image).length + mentionReferences.filter((item) => item.kind === "image").length;
@@ -65,7 +67,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
 
     const submit = () => {
         const text = prompt.trim();
-        if (!text || isRunning) return;
+        if (isRunning || (promptRequired && !text)) return;
         onGenerate(node.id, mode, text);
     };
 
@@ -111,6 +113,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                                 onOpenChange={onImageSettingsOpenChange}
                                 comfyParams={node.metadata?.comfyParams}
                                 onComfyParamsChange={(value) => onConfigChange(node.id, { comfyParams: value })}
+                                onPromptRequiredChange={setImagePromptRequired}
                                 referenceCount={referenceCount}
                             />
                         </>
@@ -135,7 +138,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                     type="primary"
                     className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
                     danger={isRunning}
-                    disabled={!isRunning && !prompt.trim()}
+                    disabled={!isRunning && promptRequired && !prompt.trim()}
                     onClick={() => (isRunning ? onStop(node.id) : submit())}
                     aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
                 >

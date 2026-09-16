@@ -58,7 +58,7 @@ export class CanvasReferenceService {
     }
 
     private publish(projectId: string, result: ReturnType<Stores["projects"]["applyOperations"]>) {
-        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || "") });
+        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || ""), source: { clientId: "system:references", kind: "system", label: "参考资产" } });
     }
 }
 

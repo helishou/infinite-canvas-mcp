@@ -17,6 +17,11 @@ export type BackendMediaResult = {
 export type BackendTokenResponse = { ok: boolean; token: string };
 
 const DEFAULT_URL = "http://127.0.0.1:17370";
+const canvasClientId = `browser:${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+
+export function getCanvasCollaborationClient() {
+    return { clientId: canvasClientId, kind: "browser" as const, label: "浏览器画布" };
+}
 
 export function getBackendUrl(): string {
     if (typeof window === "undefined") return DEFAULT_URL;
@@ -163,9 +168,9 @@ export function upsertBackendProject(project: Record<string, unknown>) {
     return request<{ ok: boolean; project?: Record<string, unknown> }>("POST", "/canvas/projects", project);
 }
 
-export function applyBackendCanvasOperations(projectId: string, operations: Array<Record<string, unknown>>, expectedRevision?: number) {
-    return request<{ ok: boolean; operations: Array<Record<string, unknown>>; revision: number; updatedAt: string; operationResults?: unknown[] }>(
-        "POST", `/canvas/projects/${encodeURIComponent(projectId)}/ops?response=delta`, { expectedRevision, operations },
+export function applyBackendCanvasOperations(projectId: string, operations: Array<Record<string, unknown>>, expectedRevision?: number, operationId = crypto.randomUUID()) {
+    return request<{ ok: boolean; operations: Array<Record<string, unknown>>; revision: number; updatedAt: string; operationId: string; operationResults?: unknown[] }>(
+        "POST", `/canvas/projects/${encodeURIComponent(projectId)}/ops?response=delta`, { expectedRevision, operations, operationId, source: getCanvasCollaborationClient() },
     );
 }
 

@@ -1,4 +1,4 @@
-import { App, Button, Form, Input, Modal, Progress, Select, Spin, Tabs } from "antd";
+import { App, Button, Form, Input, Modal, Progress, Select, Spin, Switch, Tabs } from "antd";
 import type { TFunction } from "i18next";
 import { Cloud, Download, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -8,7 +8,6 @@ import { ModelPicker } from "@/components/model-picker";
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
 import { ConfigLocalProxy } from "@/components/layout/config-local-proxy";
 import { ConfigPromptSources } from "@/components/layout/config-prompt-sources";
-import { ConfigComfyui } from "@/components/layout/config-comfyui";
 import { ConfigLocalStorage } from "@/components/layout/config-local-storage";
 import type { AppLocale } from "@/i18n";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
@@ -104,16 +103,6 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         updateChannels([...config.channels, channel]);
         setEditingChannelId(channel.id);
     };
-    const addComfyChannel = () => {
-        const channel = createModelChannel({ name: "本地 ComfyUI", kind: "comfyui", baseUrl: "http://127.0.0.1:8188", models: [
-            { name: "z-image", capability: "image" },
-            { name: "flux2-klein", capability: "image" },
-            { name: "flashvsr-1.1", capability: "video" },
-        ] });
-        updateChannels([...config.channels, channel]);
-        setEditingChannelId(channel.id);
-    };
-
     const deleteChannel = (id: string) => {
         if (config.channels.length <= 1) {
             message.warning(t("config.channels.keepOne"));
@@ -204,10 +193,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                     <Button type="primary" icon={<Plus className="size-4" />} onClick={addChannel}>
                                         {t("config.channels.add")}
                                     </Button>
-                                    <Button icon={<Wifi className="size-4" />} onClick={addComfyChannel}>添加本地 ComfyUI</Button>
                                 </div>
                                 <div className="space-y-2">
-                                    {config.channels.map((channel) => (
+                                    {config.channels.filter((channel) => channel.kind !== "comfyui").map((channel) => (
                                         <div key={channel.id} className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 px-4 py-3 dark:border-stone-800">
                                             <div className="min-w-0">
                                                 <div className="truncate text-sm font-semibold">{channel.name || t("config.channels.unnamed")}</div>
@@ -237,6 +225,13 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                         label: t("config.tabs.preferences"),
                         children: (
                             <Form layout="vertical" requiredMark={false}>
+                                <section className="mb-5 flex items-center justify-between gap-4 rounded-lg border border-stone-200 px-4 py-3 dark:border-stone-800">
+                                    <div>
+                                        <div className="text-sm font-semibold">{t("config.preferences.localComfyui")}</div>
+                                        <div className="mt-1 text-xs text-stone-500">{t("config.preferences.localComfyuiDescription")}</div>
+                                    </div>
+                                    <Switch checked={config.localComfyuiEnabled} onChange={(checked) => updateConfig("localComfyuiEnabled", checked)} />
+                                </section>
                                 <div className="mb-2 text-sm font-semibold">{t("config.preferences.defaultModels")}</div>
                                 <div className="mb-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                                     {modelGroups.map((group) => (
@@ -281,7 +276,6 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 <Form.Item label={t("config.preferences.systemPrompt")} className="mb-0">
                                     <Input.TextArea rows={4} value={config.systemPrompt} placeholder={t("config.preferences.systemPromptPlaceholder")} onChange={(event) => updateConfig("systemPrompt", event.target.value)} />
                                 </Form.Item>
-                                <ConfigComfyui active={activeTab === "preferences"} />
                             </Form>
                         ),
                     },
