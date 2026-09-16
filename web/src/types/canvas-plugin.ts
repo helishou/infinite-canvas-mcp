@@ -75,6 +75,14 @@ export type CanvasNodeToolbarItem = {
 };
 
 export type CanvasAssetPickerImage = { kind: "image"; dataUrl: string; title: string; storageKey?: string };
+export type CanvasReferenceAsset = { id: string; label: string; mediaType: "image" | "video" | "audio"; role: string; tags: string[]; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string; subjectId?: string; analysis?: Record<string, unknown> };
+export type CanvasReferenceValidation = { semanticPrompt: string; compiledPrompt: string; bindings: Array<Record<string, unknown>>; references: Array<Record<string, unknown>>; issues: Array<{ severity: "error" | "warning"; code: string; message: string; bindingId?: string }>; migratedLegacyRefs: boolean };
+export type CanvasReferenceService = {
+    list: () => Promise<CanvasReferenceAsset[]>;
+    upsert: (asset: Partial<CanvasReferenceAsset> & { label: string }) => Promise<CanvasReferenceAsset>;
+    remove: (assetId: string) => Promise<void>;
+    validate: (nodeId: string, segmentId: string) => Promise<CanvasReferenceValidation>;
+};
 
 // Context injected while rendering each node; the primary interface between plugins and the canvas.
 export type CanvasNodeContext = {
@@ -94,12 +102,14 @@ export type CanvasNodeContext = {
     getDownstream: () => CanvasNodeData[];
     // Canvas operations using the Agent instruction set for nodes, connections, selection, viewport, and generation.
     applyOps: (ops: CanvasAgentOp[]) => void;
+    flush: () => Promise<void>;
     // Inter-node and inter-plugin communication.
     emit: (event: string, payload?: unknown) => void;
     on: (event: string, handler: (payload: unknown) => void) => () => void;
     // AI image, video, and text generation using the host model configuration.
     ai: CanvasPluginAi;
     h3Defaults: CanvasH3Defaults;
+    references: CanvasReferenceService;
     // Opens or closes the custom panel below this node; the definition must provide a Panel.
     openPanel: () => void;
     closePanel: () => void;
@@ -126,9 +136,11 @@ export type CanvasPluginHost = {
     updateNode: (nodeId: string, patch: Partial<Pick<CanvasNodeData, "title" | "width" | "height">>) => void;
     updateMetadata: (nodeId: string, patch: CanvasNodeMetadata) => void;
     applyOps: (ops: CanvasAgentOp[]) => void;
+    flush: () => Promise<void>;
     // AI generation using the current canvas model and credential configuration.
     ai: CanvasPluginAi;
     h3Defaults: CanvasH3Defaults;
+    references: CanvasReferenceService;
     // Opens or closes the custom panel below a specified node.
     openPanel: (nodeId: string) => void;
     closePanel: () => void;

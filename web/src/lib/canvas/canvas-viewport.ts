@@ -23,6 +23,25 @@ export const VIEWPORT_CULL_ZOOM_RATIO = 0.35;
 /** 裁剪时在视口外多渲染的屏幕像素距离，必须大于 VIEWPORT_CULL_SCREEN_MARGIN。 */
 export const VIEWPORT_RENDER_SCREEN_PADDING = 400;
 
+/**
+ * 统一清洗持久化/导入的视口。旧画布使用 zoom，新版使用 k；两者未在边界处归一化时，
+ * 一次缩放就会把 x/y 计算成 NaN，导致全部节点不可见且 Backend 保存 400。
+ */
+export function normalizeViewportTransform(value: unknown): ViewportTransform {
+    const viewport = value && typeof value === "object" ? value as Record<string, unknown> : {};
+    const numberOr = (candidate: unknown, fallback: number) => {
+        const parsed = typeof candidate === "number" ? candidate : Number(candidate);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const rawScale = viewport.k ?? viewport.zoom;
+    const scale = numberOr(rawScale, 1);
+    return {
+        x: numberOr(viewport.x, 0),
+        y: numberOr(viewport.y, 0),
+        k: scale > 0 ? Math.min(Math.max(scale, 0.05), 5) : 1,
+    };
+}
+
 /** 裁剪用的世界单位外扩距离 = 屏幕像素 / 缩放比例。 */
 export function viewportRenderPadding(scale: number) {
     if (!(scale > 0)) return VIEWPORT_RENDER_SCREEN_PADDING;

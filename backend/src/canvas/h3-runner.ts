@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
 
 import type { RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
@@ -18,8 +19,8 @@ type H3RunInput = {
     params?: Record<string, unknown>;
 };
 
-type H3Ref = Record<string, unknown> & { url?: string; storageKey?: string; name?: string; type?: string; role?: string; order?: number };
-type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; continuationGroupId?: string; motionContextEnabled?: boolean };
+type H3Ref = Record<string, unknown> & { url?: string; storageKey?: string; name?: string; label?: string; type?: string; mediaType?: string; role?: string; order?: number };
+type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; referenceBindings?: Record<string, unknown>[]; continuationGroupId?: string; motionContextEnabled?: boolean };
 type H3Plan = { nodeId: string; segmentId: string; segmentIndex: number; continuation?: { group: string; index: number } };
 
 const H3_DEFAULTS_KEY = "plugin:minimax-h3:defaults:v1";
@@ -54,7 +55,9 @@ export class CanvasH3Runner {
 
     start(input: H3RunInput, clientTaskId?: string) {
         const normalized = normalizeInput(input);
-        if (!this.stores.projects.get(normalized.projectId)) throw new Error(`画布不存在: ${normalized.projectId}`);
+        const project = this.stores.projects.get(normalized.projectId);
+        if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
+        this.validatePlannedReferences(project, normalized);
         const existing = clientTaskId ? this.stores.tasks.get(clientTaskId) : null;
         if (existing) return existing;
         const duplicate = this.findActiveDuplicate(normalized);
@@ -66,6 +69,18 @@ export class CanvasH3Runner {
         this.bindParent(task);
         void this.execute(task).catch((error) => this.fail(task.id, error));
         return task;
+    }
+
+    private validatePlannedReferences(project: Record<string, unknown>, input: H3RunInput) {
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+        const wanted = input.nodeIds?.length ? new Set(input.nodeIds) : input.nodeId ? new Set([input.nodeId]) : null;
+        for (const node of nodes.filter((item) => String(item.type || "").includes("minimax") && (!wanted || wanted.has(String(item.id || ""))))) {
+            const segments = Array.isArray(recordOf(node.metadata).segments) ? recordOf(node.metadata).segments as H3Segment[] : [];
+            for (const plan of this.planNode(node, input)) {
+                const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
+                if (segment) assertReferenceCompilation(compileReferenceSubmission(project, segment));
+            }
+        }
     }
 
     /**
@@ -213,15 +228,17 @@ export class CanvasH3Runner {
         const metadata = recordOf(node.metadata);
         const segments = metadata.segments as H3Segment[];
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
-        const refs = collectH3Refs(segment);
         const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const params = extractParams(segment, override, metadata, defaults);
+        const taskMode = normalizeTaskMode(params.taskMode || segment.taskMode);
+        const compilation = compileReferenceSubmission(project, { ...segment, taskMode });
+        assertReferenceCompilation(compilation);
+        const refs = compilation.references.map((reference) => ({ ...reference, type: reference.mediaType, name: reference.label } as H3Ref));
         if (params.motionContextEnabled === true && !plan.continuation) throw new Error("Motion Context（V15 潜空间续写）必须使用「运行当前及后续分镜」，不能单独运行一个 Clip。");
         if (plan.continuation) {
             params.motionContextEnabled = true;
             params.continuationTask = buildH3ContinuationTask(String(parent.input.projectId), plan.continuation.group, parent.id, plan.continuation.index);
         }
-        const taskMode = normalizeTaskMode(params.taskMode || segment.taskMode);
         const isT2v = taskMode === "t2v";
         const isI2v = taskMode === "i2v";
         const isFl2v = taskMode === "fl2v";
@@ -248,15 +265,26 @@ export class CanvasH3Runner {
         const previousPath = needsPreviousVideo && previous?.result
             ? await this.resolveRef({ url: previous.result, storageKey: previous.resultStorageKey, name: `clip-${plan.segmentIndex}.mp4`, type: "video" })
             : "";
-        let prompt = String(segment.prompt || "");
+        let prompt = compilation.compiledPrompt;
+        const actualReferences: Array<Record<string, unknown>> = [
+            ...imageRefs,
+            ...videoRefs,
+            ...audioRefs,
+        ];
         if (previousPath && useTailFrame) {
             const tail = await this.captureTailFrame(previousPath, `h3-tail-${parent.id}-${plan.segmentIndex}.png`);
-            if (!isT2v && !isI2v && !isFl2v) images.unshift(tail);
+            if (!isT2v && !isI2v && !isFl2v) {
+                images.unshift(tail);
+                actualReferences.unshift({ id: `runtime-tail-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 尾帧`, type: "image", role: "keyframe", usage: "first_frame", runtime: true, sourceSegmentId: previous?.id, resolved: tail });
+            }
             if (images.length > 9) throw new Error("尾帧续接后参考图片超过 MiniMax H3 的 9 张上限");
             prompt = appendTailFramePrompt(prompt, `Clip ${plan.segmentIndex}`);
         }
         // 组装最终送入工作流的参考视频列表：本段自有参考视频（最多 3 段）+ 显式开启时才追加的上一段成品。
         const referenceVideos = appendPreviousReference(videos, usePreviousAsReference && !isT2v && !isI2v && !isFl2v ? previousPath : "");
+        if (usePreviousAsReference && previousPath && !isT2v && !isI2v && !isFl2v) {
+            actualReferences.push({ id: `runtime-previous-video-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 成品视频`, type: "video", role: "motion_reference", runtime: true, sourceSegmentId: previous?.id, url: previous?.result, storageKey: previous?.resultStorageKey, resolved: previousPath });
+        }
         const engine = String(params.minimaxEngine || params.engine || metadata.minimaxEngine || "").toLowerCase();
         Object.assign(params, {
             taskMode,
@@ -273,10 +301,18 @@ export class CanvasH3Runner {
             runninghubWorkflowJson: metadata.minimaxRunningHubWorkflowJson,
             useWallet: metadata.minimaxRunningHubUseWallet === true,
         });
+        const submission = {
+            semanticPrompt: compilation.semanticPrompt,
+            compiledPrompt: prompt,
+            bindingMap: compilation.references.map((reference) => ({ id: reference.id, assetId: reference.assetId, label: reference.label, role: reference.role, mediaType: reference.mediaType, ordinal: reference.ordinal, token: reference.token, usage: reference.usage })),
+            actualReferences,
+            warnings: compilation.issues.filter((issue) => issue.severity === "warning"),
+            continuation: { tailFrame: useTailFrame, previousVideo: usePreviousAsReference, motionContext: Boolean(plan.continuation) },
+        };
         const log = this.stores.logs.create({
             projectId: String(parent.input.projectId), nodeId: plan.nodeId, segmentId: plan.segmentId,
             status: "queued", platform: engine || "comfyui", workflow: "MiniMax H3", model: String(params.modelName || ""), taskMode: String(params.taskMode || segment.taskMode || "r2v"),
-            prompt, references: refs, inputCounts: { image: images.length, video: referenceVideos.length, audio: audios.length }, startedAt: new Date().toISOString(), durationMs: 0, outputs: [], params,
+            prompt, references: actualReferences, inputCounts: { image: images.length, video: referenceVideos.length, audio: audios.length }, startedAt: new Date().toISOString(), durationMs: 0, outputs: [], params: { ...params, submission },
         });
         this.events.publish({ type: "generation-log.created", entityId: log.id, payload: log });
         const childParams = { ...params, parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id, bindOnStart: false } };
@@ -462,17 +498,9 @@ function recordOf(value: unknown): Record<string, unknown> { return value && typ
  * stale values or no value at all, while the array position is what the UI
  * and prompt's Image N numbering represent.
  */
-export function collectH3Refs(segment: H3Segment) {
-    const buckets = recordOf(segment.refs);
-    const bucketRefs = ["image", "video", "audio"].flatMap((type) => {
-        const value = buckets[type];
-        return (Array.isArray(value) ? value : value ? [value] : []).map((item) => ({ ...recordOf(item), type: String(recordOf(item).type || type) } as H3Ref));
-    });
-    const refs = (segment.refItems?.length ? segment.refItems : bucketRefs).map((ref) => ({ ...ref, type: String(ref.type || ref.kind || inferRefType(String(ref.name || ref.url || ""))) }));
-    return refs.filter((ref) => ref.role !== "character_identity").filter((ref, index, all) => all.findIndex((item) => ref.storageKey && item.storageKey ? item.storageKey === ref.storageKey : item.url === ref.url) === index);
+export function collectH3Refs(segment: H3Segment, project: Record<string, unknown> = {}) {
+    return compileReferenceSubmission(project, segment).references.map((reference) => ({ ...reference, type: reference.mediaType, name: reference.label } as H3Ref));
 }
-
-function inferRefType(value: string) { return /\.(mp4|webm|mov)(?:$|\?)/i.test(value) ? "video" : /\.(mp3|wav|m4a|flac)(?:$|\?)/i.test(value) ? "audio" : "image"; }
 
 function normalizeTaskMode(value: unknown) {
     const mode = String(value || "").toLowerCase();

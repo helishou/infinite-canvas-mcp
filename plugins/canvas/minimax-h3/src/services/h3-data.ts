@@ -1,26 +1,71 @@
-import type { H3CharacterGroup, H3CharacterOutfit, H3CharacterVoice, H3Ref, H3Segment } from "../types";
+import type { H3CharacterGroup, H3CharacterOutfit, H3CharacterVoice, H3Ref, H3ReferenceBinding, H3ReferenceRole, H3Segment } from "../types";
 import { sameRef } from "./h3-compatibility";
 
 export function refsForSegment(segment: H3Segment) {
+    if (segment.referenceBindings?.length) {
+        return segment.referenceBindings.filter((binding) => binding.enabled !== false && (binding.url || binding.storageKey)).map((binding) => ({
+            url: binding.url || "", type: binding.mediaType || inferRefType(binding.mimeType || binding.url || binding.label), name: binding.label,
+            storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId, role: binding.role,
+            subjectId: binding.subjectId, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, enabled: binding.enabled, usage: binding.usage,
+        } as H3Ref));
+    }
     const buckets = segment.refs;
     const bucketItems = [ ...(buckets?.image || []), ...(buckets?.video || []), ...(buckets?.audio || []) ];
     // Older MCP-written nodes may keep the canonical refs in buckets while
     // persisting an empty refItems array. Treat that empty array as absent;
     // once refItems contains entries it is the canonical ordered list.
     const items = segment.refItems?.length ? segment.refItems : bucketItems;
-    const refs = items.filter((item) => (item?.url || item?.storageKey) && String(item.role || "") !== "character_identity").map((item) => ({ ...item, type: item.type || (item as H3Ref & { kind?: H3Ref["type"] }).kind || "image" as const }));
+    const refs = items.filter((item) => item?.url || item?.storageKey).map((item) => ({ ...item, type: item.type || (item as H3Ref & { kind?: H3Ref["type"] }).kind || "image" as const }));
     return refs.filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
 }
 
-export function segmentRefsPatch(refs: H3Ref[]): Pick<H3Segment, "refItems" | "refs"> {
+export function segmentRefsPatch(refs: H3Ref[]): Pick<H3Segment, "referenceBindings" | "refItems" | "refs"> {
+    const normalized = refs.map((ref, index) => ensureReferenceIdentity(ref, index));
     return {
-        refItems: refs,
+        referenceBindings: normalized.map(refToBinding),
+        refItems: normalized,
         refs: {
-            image: refs.filter((item) => item.type === "image"),
-            video: refs.filter((item) => item.type === "video"),
-            audio: refs.filter((item) => item.type === "audio"),
+            image: normalized.filter((item) => item.type === "image"),
+            video: normalized.filter((item) => item.type === "video"),
+            audio: normalized.filter((item) => item.type === "audio"),
         },
     };
+}
+
+export function inferReferenceRole(ref: Pick<H3Ref, "name" | "role" | "type">): H3ReferenceRole {
+    if (ref.role) return ref.role;
+    const text = `${ref.name || ""} ${ref.type || ""}`.toLowerCase();
+    if (/色卡|调色|palette|color card/.test(text)) return "palette";
+    if (/站位|轴线|blocking|position/.test(text)) return "blocking";
+    if (/四视图|三视图|turnaround|character sheet/.test(text)) return "character_turnaround";
+    if (/人物|角色|定妆|形象|identity|portrait/.test(text)) return "character_identity";
+    if (/分镜|关键帧|storyboard|shot|frame/.test(text)) return "storyboard";
+    if (/场景|环境|scene|room/.test(text)) return "scene";
+    if (/动作|运动|motion/.test(text)) return "motion_reference";
+    if (/声线|配音|voice/.test(text)) return "character_voice";
+    if (/音频|音乐|audio|music|sound/.test(text)) return "audio_reference";
+    if (/风格|style|look/.test(text)) return "style";
+    if (/道具|prop|ticket|phone/.test(text)) return "prop";
+    return "other";
+}
+
+function refToBinding(ref: H3Ref): H3ReferenceBinding {
+    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], enabled: ref.enabled !== false, usage: ref.usage || "reference", subjectId: ref.subjectId, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId };
+}
+
+function ensureReferenceIdentity(ref: H3Ref, index: number): H3Ref {
+    const identity = ref.storageKey || ref.url || ref.nodeId || `${ref.name}-${index}`;
+    return { ...ref, bindingId: ref.bindingId || stableId("binding", `${identity}:${index}`), assetId: ref.assetId || stableId("asset", identity), role: inferReferenceRole(ref), tags: ref.tags || [], enabled: ref.enabled !== false, usage: ref.usage || "reference" };
+}
+
+function stableId(prefix: string, value: string) {
+    let hash = 2166136261;
+    for (const char of value) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+    return `${prefix}-${(hash >>> 0).toString(36)}`;
+}
+
+function inferRefType(value: string): H3Ref["type"] {
+    return /video|\.(mp4|webm|mov)(?:$|\?)/i.test(value) ? "video" : /audio|\.(mp3|wav|m4a|flac)(?:$|\?)/i.test(value) ? "audio" : "image";
 }
 
 export function withSegmentRefs(segment: H3Segment, refs: H3Ref[]): H3Segment {

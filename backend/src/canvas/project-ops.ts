@@ -124,7 +124,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             // CAS：expectedFields 中的每一个字段都必须与当前值匹配，否则抛错（用于任务回写防止被新任务接管后被覆盖）。
             if (operation.expectedFields && typeof operation.expectedFields === "object") {
                 for (const [field, expected] of Object.entries(operation.expectedFields as Record<string, unknown>)) {
-                    if (String(segments[index][field] || "") !== String(expected)) {
+                    if (!sameValue(segments[index][field], expected)) {
                         throw new Error(`update_h3_segment CAS 失败：${nodeId}/${segmentId}.${field} 已不是期望值`);
                     }
                 }
@@ -201,28 +201,24 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             }
         } else if (operation.type === "delete_node") {
             const ids = new Set(Array.isArray(operation.ids) ? operation.ids.map(String) : [String(operation.id || "")]);
+            if (!ids.size || ids.has("")) throw new Error("delete_node 需要提供 id 或 ids");
             const deletedNodeIds = nodes.filter((node) => ids.has(String(node.id))).map((node) => String(node.id));
-            const missingNodeIds = [...ids].filter((id) => id && !deletedNodeIds.includes(id));
-            if (!ids.size || ids.has("") || missingNodeIds.length) throw new Error(`找不到节点：${missingNodeIds.join(",") || ""}`);
             for (let index = nodes.length - 1; index >= 0; index--) if (ids.has(String(nodes[index].id))) nodes.splice(index, 1);
             for (let index = connections.length - 1; index >= 0; index--) {
                 if (ids.has(String(connections[index].fromNodeId)) || ids.has(String(connections[index].toNodeId))) connections.splice(index, 1);
             }
             result.deletedNodeIds = deletedNodeIds;
+            if (!deletedNodeIds.length) result.skipped = true;
         } else if (operation.type === "delete_connections") {
             const ids = new Set(Array.isArray(operation.ids) ? operation.ids.map(String) : operation.id ? [String(operation.id)] : []);
             if (!operation.all && !ids.size) throw new Error("delete_connections 需要提供 id、ids 或 all=true");
-            if (!operation.all) {
-                const knownIds = new Set(connections.map((connection) => String(connection.id)));
-                const missingConnectionIds = [...ids].filter((id) => !knownIds.has(id));
-                if (missingConnectionIds.length) throw new Error(`找不到连线：${missingConnectionIds.join(",")}`);
-            }
             const deleted = operation.all
                 ? connections.splice(0, connections.length)
                 : connections.filter((connection) => ids.has(String(connection.id)));
             if (!operation.all) for (let index = connections.length - 1; index >= 0; index--) if (ids.has(String(connections[index].id))) connections.splice(index, 1);
             result.deletedConnectionIds = deleted.map((connection) => String(connection.id));
             result.deletedCount = result.deletedConnectionIds.length;
+            if (!result.deletedCount) result.skipped = true;
         } else if (operation.type === "connect_nodes") {
             const fromNodeId = String(operation.fromNodeId || "");
             const toNodeId = String(operation.toNodeId || "");
@@ -248,9 +244,27 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
         } else if (operation.type === "run_generation") {
             const id = String(operation.nodeId || "");
             if (!nodes.some((node) => String(node.id) === id)) throw new Error(`找不到生成节点：${id}`);
+        } else if (operation.type === "upsert_reference_asset") {
+            const asset = recordOf(operation.asset);
+            const id = String(asset.id || "");
+            if (!id) throw new Error("upsert_reference_asset.asset.id 必填");
+            const catalog = Array.isArray(project.referenceCatalog) ? project.referenceCatalog as Array<Record<string, unknown>> : [];
+            const index = catalog.findIndex((item) => String(item.id || "") === id);
+            const next = { ...(index >= 0 ? catalog[index] : {}), ...asset, id };
+            if (index >= 0) catalog[index] = next;
+            else catalog.push(next);
+            project.referenceCatalog = catalog;
+        } else if (operation.type === "delete_reference_asset") {
+            const id = String(operation.assetId || "");
+            if (!id) throw new Error("delete_reference_asset.assetId 必填");
+            const catalog = Array.isArray(project.referenceCatalog) ? project.referenceCatalog as Array<Record<string, unknown>> : [];
+            const index = catalog.findIndex((item) => String(item.id || "") === id);
+            if (index < 0) result.skipped = true;
+            else catalog.splice(index, 1);
+            project.referenceCatalog = catalog;
         } else if (operation.type === "update_project") {
             const patch = recordOf(operation.patch);
-            const allowed = ["title", "folderId", "chatSessions", "activeChatId", "backgroundMode", "showImageInfo", "globalPrompt"];
+            const allowed = ["title", "chatSessions", "activeChatId", "backgroundMode", "showImageInfo", "globalPrompt"];
             for (const key of allowed) if (key in patch) project[key] = patch[key];
         } else {
             throw new Error(`未知画布操作：${operation.type}`);
@@ -275,4 +289,12 @@ function connectionsOf(project: Record<string, unknown>) {
 
 function recordOf(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function sameValue(left: unknown, right: unknown) {
+    if (Object.is(left, right)) return true;
+    if ((left && typeof left === "object") || (right && typeof right === "object")) {
+        try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
+    }
+    return String(left ?? "") === String(right ?? "");
 }

@@ -5,6 +5,31 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## MCP 共享进程
+
+- 启动 Backend 后分别运行 `codex mcp list` 与 `hermes mcp test infinite-canvas`，确认两者都显示 HTTP 传输并发现同一组工具；新开多个任务时不应再出现对应数量的 `backend/dist/index.js mcp` 子进程。
+- 同时建立两个 MCP 会话，在两个会话中设置不同的活动画布，再省略 `projectId` 读取画布状态；两个会话应各自返回自己的画布，不能互相串改。
+- 连续两次运行 `npm run dev:local`，第二次应提示已有本地开发栈并退出；关闭首个启动器后应可正常重新启动 Backend、Agent 与 Web。
+
+## H3 参考素材统一链路
+
+- 在 H3 Clip 中加入场景、人物形象、人物四视图、站位、分镜、关键帧、动作、音频、声线、风格、色卡和道具等素材，点击职责标签修改分类、用途与标签；刷新页面后分类与槽位顺序应保持，项目参考库也应保留对应资产。
+- 在提示词中通过参考素材菜单插入稳定引用，随后拖动重排 refs；生成前应把稳定 binding 自动编译成新的 `Picture / Video / Audio / Subject` 编号，模型收到的顺序、日志中的 `bindingMap` 与画布槽位保持一致。
+- 前端点击生成前应立即提交尚未落库的提示词与参考绑定，再由 Backend 做统一预检；缺失媒体、禁用 binding、I2V/FL2V 数量错误或 T2V 引用参考素材时应阻断，色卡仅给出警告。MCP `canvas_validate_generation` 应得到相同结果。
+- 使用 MCP `canvas_list_reference_assets`、`canvas_update_reference_asset`、`h3_set_reference_bindings` 修改素材和 Clip 绑定，确认前端实时显示且不改节点 position；网页与 MCP 同时修改不同字段不应冲突，同一 binding 被并发修改时才触发 CAS 冲突。
+- 不连接右侧 Agent 面板直接刷新画布，确认 H3 显示 v1.3，Backend `/plugins/mcp` 中仍保存 12 个工具；重启 Backend 和网页后不得回退到旧版 1.2 声明。
+- 生成成功后检查运行日志：`semanticPrompt`、`compiledPrompt`、`bindingMap`、`actualReferences` 与续接状态应完整记录，且只包含实际提交给 H3 的素材；人物形象图不得被旧过滤规则丢弃。
+
+## 画布旧视口自愈
+
+- 打开一张 viewport 仍为 `{ x, y, zoom }` 的旧画布，确认自动迁移为 `{ x, y, k }`，节点立即可见；再缩放、点击侧栏聚焦节点并刷新，不得出现 `left: NaN`、全画布空白或 `/canvas/projects/*` 保存 400。
+
+## 画布增量同步 400 熔断
+
+- 在一个窗口删除节点或连线，同时由另一个窗口 / MCP 重复删除同一目标；Backend 应把第二次删除视为 `skipped` 并正常推进 revision，不得返回 400。
+- 人为提交一条非法增量操作后，同一份前端项目快照只允许请求一次；控制台与 Backend 日志不得持续刷相同 `/canvas/projects/:id/ops` 400。再次编辑画布生成新快照后应允许重新提交。
+- Backend 的「画布增量操作被拒绝」日志应包含 projectId、revision、操作类型与目标 ID，但不得记录提示词、参考图 URL 或其它 metadata 内容。
+
 ## Backend 本地访问边界
 
 - 从 `http://127.0.0.1:3001` 或 `http://localhost:3001` 打开画布，确认能自动发现 Backend token 并正常连接；从未列入 `backend.json` 的网页来源请求 `/config` 应返回 403，且响应不包含 token。

@@ -23,7 +23,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
-import { needsViewportCull, viewportRenderPadding } from "@/lib/canvas/canvas-viewport";
+import { needsViewportCull, normalizeViewportTransform, viewportRenderPadding } from "@/lib/canvas/canvas-viewport";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
 import { Alert, App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
@@ -384,6 +384,7 @@ function InfiniteCanvasPage() {
      * 阈值与裁剪 padding 都按屏幕像素定义（见 canvas-viewport.ts），保证补渲染总发生在空白露出来之前。
      */
     const applyViewportLive = useCallback((next: ViewportTransform) => {
+        next = normalizeViewportTransform(next);
         liveViewportRef.current = next;
         viewportRef.current = next;
         viewportWriterRef.current?.(next);
@@ -394,12 +395,19 @@ function InfiniteCanvasPage() {
     }, []);
     /** 显式视口变更（聚焦、缩放按钮、小地图、初始化）：同步 state 并重算裁剪。 */
     const commitViewport = useCallback((next: ViewportTransform) => {
+        next = normalizeViewportTransform(next);
         liveViewportRef.current = next;
         viewportRef.current = next;
         cullViewportRef.current = next;
         viewportWriterRef.current?.(next);
         setViewport(next);
     }, []);
+    // 热更时也主动修复已在内存中的旧 zoom / NaN 视口，用户无需手动清缓存。
+    useEffect(() => {
+        const current = liveViewportRef.current;
+        const normalized = normalizeViewportTransform(current);
+        if (current.x !== normalized.x || current.y !== normalized.y || current.k !== normalized.k) commitViewport(normalized);
+    }, [commitViewport]);
     /** 画布容器回传的视口变更：拖动/滚轮走 live（零 React 渲染），其余走 commit。 */
     const handleViewportChange = useCallback(
         (next: ViewportTransform, options?: ViewportChangeOptions) => {
@@ -1281,7 +1289,7 @@ function InfiniteCanvasPage() {
             setContextMenu(null);
 
             if (focusAnimRef.current) cancelAnimationFrame(focusAnimRef.current);
-            const start = { ...viewportRef.current };
+            const start = normalizeViewportTransform(viewportRef.current);
             const duration = 450;
             const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
             let startTime: number | null = null;
@@ -1307,7 +1315,7 @@ function InfiniteCanvasPage() {
     const setZoomScale = useCallback(
         (scale: number) => {
             const nextScale = Math.min(Math.max(scale, 0.05), 5);
-            const prev = liveViewportRef.current;
+            const prev = normalizeViewportTransform(liveViewportRef.current);
             commitViewport({
                 x: size.width / 2 - ((size.width / 2 - prev.x) / prev.k) * nextScale,
                 y: size.height / 2 - ((size.height / 2 - prev.y) / prev.k) * nextScale,

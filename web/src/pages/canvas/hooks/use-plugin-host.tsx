@@ -6,7 +6,7 @@ import { imageToDataUrl } from "@/services/image-storage";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { getLocalH3Task, getRunningHubH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
-import { createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
+import { createBackendGenerationLog, deleteBackendGenerationLogs, deleteProjectReferenceAsset, fetchBackendGenerationLogs, fetchProjectReferenceAssets, getBackendUrl, startCanvasGeneration, updateBackendGenerationLog, upsertProjectReferenceAsset, validateProjectReferences } from "@/services/backend-api";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
 import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
@@ -15,10 +15,11 @@ import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
-import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost } from "@/types/canvas-plugin";
+import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost, CanvasReferenceService } from "@/types/canvas-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
+import { flushCanvasSyncNow } from "@/stores/canvas/use-canvas-store";
 
 type CanvasTheme = (typeof canvasThemes)[keyof typeof canvasThemes];
 
@@ -87,6 +88,13 @@ export function usePluginHost(params: PluginHostParams) {
             window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: {} }));
         },
     }), []);
+
+    const references = useMemo<CanvasReferenceService>(() => ({
+        list: async () => (await fetchProjectReferenceAssets(projectId)).assets || [],
+        upsert: async (asset) => (await upsertProjectReferenceAsset(projectId, asset)).asset,
+        remove: async (assetId) => { await deleteProjectReferenceAsset(projectId, assetId); },
+        validate: async (nodeId, segmentId) => (await validateProjectReferences(projectId, nodeId, segmentId)).validation,
+    }), [projectId]);
 
     // Host capabilities available to plugin nodes; methods receive nodeId and are not bound to a specific node.
     const pluginAi = useMemo<CanvasPluginAi>(() => {
@@ -211,14 +219,16 @@ export function usePluginHost(params: PluginHostParams) {
                 updateProject(projectId, { nodes: nextNodes });
             },
             applyOps: (ops) => applyAgentOps(ops),
+            flush: flushCanvasSyncNow,
             ai: pluginAi,
             h3Defaults,
+            references,
             openPanel: (nodeId) => setDialogNodeId(nodeId),
             closePanel: () => setDialogNodeId(null),
             openAssetPicker,
             generationLogs,
         }),
-        [applyAgentOps, generationLogs, h3Defaults, openAssetPicker, pluginAi, projectId, updateProject],
+        [applyAgentOps, generationLogs, h3Defaults, openAssetPicker, pluginAi, projectId, references, updateProject],
     );
 
     const renderPluginPanel = useCallback(

@@ -1,9 +1,13 @@
-export type H3ReferenceRole = "character_turnaround" | "storyboard" | "scene" | "motion_reference" | "audio_reference";
+import { REFERENCE_ROLES, stableReferenceId, type ReferenceRole } from "../../canvas/reference-contract.js";
+
+export type H3ReferenceRole = ReferenceRole;
 
 /** H3 领域参数的统一载体；执行器提交 ComfyUI 时将 videoSteps 映射为 steps。 */
 export type H3GenerationSettings = Record<string, unknown> & { videoSteps?: number; steps?: number };
 
 export type PlannedReference = {
+    id?: string;
+    assetId?: string;
     nodeId: string;
     role: H3ReferenceRole;
     subjectId?: string;
@@ -61,7 +65,7 @@ export function validateVideoPlan(segments: H3PlannedSegment[]) {
         const subjects = new Set((segment.subjects || []).map((subject) => subject.subjectId));
         for (const ref of refs) {
             if (!ref.storageKey || !ref.nodeId) throw new Error(`片段 ${segment.id} 存在无 storageKey 的参考图`);
-            if (!["character_turnaround", "storyboard", "scene", "motion_reference", "audio_reference"].includes(ref.role)) throw new Error(`片段 ${segment.id} 存在未知参考角色:${String(ref.role)}`);
+            if (!REFERENCE_ROLES.includes(ref.role)) throw new Error(`片段 ${segment.id} 存在未知参考角色:${String(ref.role)}`);
             if (!Number.isInteger(ref.order) || ref.order < 0 || orders.has(ref.order)) throw new Error(`片段 ${segment.id} 的参考顺序必须唯一且为非负整数`);
             orders.add(ref.order);
             if (ref.role === "character_turnaround" && (!ref.subjectId || !subjects.has(ref.subjectId))) throw new Error(`片段 ${segment.id} 的角色四视图缺少对应 subjectId`);
@@ -102,6 +106,10 @@ export function normalizePlannedSegment(segment: H3PlannedSegment) {
     const images = refs.filter((ref) => ref.type === "image");
     const videos = refs.filter((ref) => ref.type === "video");
     const audios = refs.filter((ref) => ref.type === "audio");
+    const referenceBindings = refs.map((ref, index) => {
+        const identity = ref.storageKey || ref.url || ref.nodeId || `${ref.name}-${index}`;
+        return { id: ref.id || stableReferenceId("binding", identity, index), assetId: ref.assetId || stableReferenceId("asset", identity), label: ref.name, role: ref.role, tags: [], enabled: true, usage: "reference", subjectId: ref.subjectId, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId };
+    });
     return {
         ...normalizeH3GenerationSettings(segment.settings || {}),
         id: segment.id,
@@ -118,6 +126,7 @@ export function normalizePlannedSegment(segment: H3PlannedSegment) {
         subjects: segment.subjects || [],
         refs: { image: images, video: videos, audio: audios },
         refItems: refs,
+        referenceBindings,
         status: "idle",
     };
 }

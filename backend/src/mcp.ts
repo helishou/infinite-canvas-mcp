@@ -1,10 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
+import type { Express, Request, Response } from "express";
 
-import { loadConfig } from "./config.js";
+import { loadConfig, type ResolvedConfig } from "./config.js";
 import { PluginMcpRegistry, buildPluginMcpContext, loadPluginMcpDeclarationsFromBackend, type PluginMcpBackend } from "@basketikun/canvas-agent/plugin-mcp";
 import type { CanvasProject } from "./db.js";
 import { toolDescriptions, toolInputSchemas, toolNames, type ToolName } from "@basketikun/canvas-agent/schemas";
@@ -14,13 +17,27 @@ import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generatio
 import type { CanvasImageGenerationInput } from "./canvas/image-dispatcher.js";
 import { splitImageBuffer } from "./canvas/image-split.js";
 import { backendComfyUi, createBackendClient } from "@basketikun/canvas-agent/runtime/comfy-client";
+import { createLogger } from "./logger.js";
 
-/** 当前活动画布 ID（MCP 进程内状态，用于多画布路由）。 */
-let activeProjectId: string | null = null;
+type McpSessionState = { activeProjectId: string | null };
+type BackendMcpInstance = { server: McpServer; registry: PluginMcpRegistry };
+const logger = createLogger("mcp-http");
 
 /** Backend 进程外的 MCP stdio 入口：所有业务写入都经由常驻 Backend API。 */
 export async function startBackendMcpServer() {
     const config = loadConfig(true);
+    const instance = await createBackendMcpInstance(config);
+    const declarationSync = setInterval(() => {
+        void refreshPluginDeclarations(config, [instance.registry]).catch((error) => console.error("plugin MCP sync failed", error));
+    }, 3000);
+    declarationSync.unref();
+    const transport = new StdioServerTransport();
+    transport.onclose = () => clearInterval(declarationSync);
+    await instance.server.connect(transport);
+}
+
+async function createBackendMcpInstance(config: ResolvedConfig): Promise<BackendMcpInstance> {
+    const state: McpSessionState = { activeProjectId: null };
     // 插件 MCP（尤其 H3）只通过常驻 Backend API 访问画布、任务、媒体和设置，
     // 不再在 MCP 进程内创建自己的 ComfyUI/SQLite 业务副本。
     const backendApi = createBackendClient(config.url);
@@ -37,22 +54,126 @@ export async function startBackendMcpServer() {
         resetH3Defaults: () => backendApi.resetH3Defaults(),
     };
     const server = new McpServer({ name: "infinite-canvas-backend", version: "0.1.0" });
-    registerDirectCanvasTools(server, config, backendApi);
+    registerDirectCanvasTools(server, config, backendApi, state);
     registerDirectComfyTools(server, backendApi);
     registerBrowserCompatibilityTools(server, config);
     const context = buildPluginMcpContext(
         { url: config.url, token: config.token, backendUrl: config.url },
         directBackend,
         backendComfy,
-        (name, input) => executeDirectCanvasTool(config, backendApi, name, input),
+        (name, input) => executeDirectCanvasTool(config, backendApi, state, name, input),
     );
     const registry = new PluginMcpRegistry(server, context);
     await registry.apply(await loadPluginMcpDeclarationsFromBackend(backendApi));
-    const declarationSync = setInterval(() => {
-        void loadPluginMcpDeclarationsFromBackend(backendApi).then((declarations) => registry.apply(declarations)).catch((error) => console.error("plugin MCP sync failed", error));
-    }, 3000);
-    declarationSync.unref();
-    await server.connect(new StdioServerTransport());
+    return { server, registry };
+}
+
+async function refreshPluginDeclarations(config: ResolvedConfig, registries: PluginMcpRegistry[]) {
+    if (!registries.length) return;
+    const backend = createBackendClient(config.url);
+    const declarations = await loadPluginMcpDeclarationsFromBackend(backend);
+    await Promise.all(registries.map((registry) => registry.apply(declarations)));
+}
+
+type HttpMcpSession = {
+    instance: BackendMcpInstance;
+    transport: StreamableHTTPServerTransport;
+};
+
+/**
+ * 在常驻 Backend 进程内提供共享 Streamable HTTP MCP。
+ * 客户端各自拥有 MCP 会话和 activeProjectId，但复用同一个 Node 进程、模块缓存与 Backend 生命周期。
+ */
+export function registerBackendMcpHttpRoutes(app: Express, config: ResolvedConfig) {
+    const sessions = new Map<string, HttpMcpSession>();
+    let declarationSync: ReturnType<typeof setInterval> | null = null;
+
+    const stopDeclarationSyncIfIdle = () => {
+        if (sessions.size || !declarationSync) return;
+        clearInterval(declarationSync);
+        declarationSync = null;
+    };
+    const ensureDeclarationSync = () => {
+        if (declarationSync) return;
+        declarationSync = setInterval(() => {
+            const registries = [...sessions.values()].map(({ instance }) => instance.registry);
+            void refreshPluginDeclarations(config, registries).catch((error) => logger.error("插件 MCP 声明同步失败", { error: error instanceof Error ? error.message : String(error) }));
+        }, 3000);
+        declarationSync.unref();
+    };
+    const sessionIdOf = (req: Request) => {
+        const value = req.headers["mcp-session-id"];
+        return typeof value === "string" ? value : "";
+    };
+    const invalidSession = (res: Response) => res.status(400).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Bad Request: No valid MCP session ID provided" },
+        id: null,
+    });
+    const fail = (res: Response, error: unknown) => {
+        logger.error("MCP HTTP 请求失败", { error: error instanceof Error ? error.message : String(error) });
+        if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
+    };
+
+    app.post("/mcp", async (req, res) => {
+        const sessionId = sessionIdOf(req);
+        const existing = sessionId ? sessions.get(sessionId) : undefined;
+        if (existing) {
+            try { await existing.transport.handleRequest(req, res, req.body); } catch (error) { fail(res, error); }
+            return;
+        }
+        if (sessionId || !isInitializeRequest(req.body)) {
+            invalidSession(res);
+            return;
+        }
+
+        let instance: BackendMcpInstance | null = null;
+        try {
+            instance = await createBackendMcpInstance(config);
+            const transport = new StreamableHTTPServerTransport({
+                sessionIdGenerator: () => crypto.randomUUID(),
+                onsessioninitialized: (initializedSessionId) => {
+                    sessions.set(initializedSessionId, { instance: instance!, transport });
+                    ensureDeclarationSync();
+                    logger.info("MCP HTTP 会话已连接", { sessionId: initializedSessionId, sessionCount: sessions.size });
+                },
+            });
+            transport.onclose = () => {
+                const closedSessionId = transport.sessionId;
+                if (closedSessionId) sessions.delete(closedSessionId);
+                stopDeclarationSyncIfIdle();
+                logger.info("MCP HTTP 会话已断开", { sessionId: closedSessionId || null, sessionCount: sessions.size });
+            };
+            transport.onerror = (error) => logger.warn("MCP HTTP 传输异常", { error: error.message });
+            await instance.server.connect(transport);
+            await transport.handleRequest(req, res, req.body);
+        } catch (error) {
+            if (instance) await instance.server.close().catch(() => undefined);
+            fail(res, error);
+        }
+    });
+
+    const handleSessionRequest = async (req: Request, res: Response) => {
+        const session = sessions.get(sessionIdOf(req));
+        if (!session) {
+            invalidSession(res);
+            return;
+        }
+        try { await session.transport.handleRequest(req, res); } catch (error) { fail(res, error); }
+    };
+    app.get("/mcp", handleSessionRequest);
+    app.delete("/mcp", handleSessionRequest);
+
+    return {
+        sessionCount: () => sessions.size,
+        closeAll: async () => {
+            if (declarationSync) clearInterval(declarationSync);
+            declarationSync = null;
+            const active = [...sessions.values()];
+            sessions.clear();
+            await Promise.allSettled(active.map(({ instance }) => instance.server.close()));
+        },
+    };
 }
 
 const DIRECT_CANVAS_TOOLS = [
@@ -63,37 +184,29 @@ const DIRECT_CANVAS_TOOLS = [
 ] as ToolName[];
 const DIRECT_TOOL_NAMES = new Set<ToolName>([...DIRECT_CANVAS_TOOLS, "assets_list", "assets_add", "comfyui_status", "comfyui_list_presets", "comfyui_run", "comfyui_get_task", "comfyui_cancel_task", "generation_get_status"]);
 
-async function executeDirectCanvasTool(config: ReturnType<typeof loadConfig>, backendApi: ReturnType<typeof createBackendClient>, name: ToolName, input: Record<string, unknown>) {
+async function executeDirectCanvasTool(config: ResolvedConfig, backendApi: ReturnType<typeof createBackendClient>, state: McpSessionState, name: ToolName, input: Record<string, unknown>) {
     if (name === "canvas_list_projects") {
-        // folderId 字符串 → 取该剧目下画布；null（显式传 null）或字符串 "__null__"/"" → 只取未挂剧目的；
-        // 不传 → 不过滤（旧行为）。keyword 在过滤后做模糊匹配（不查全表）。
-        const folderIdParam = input.folderId;
-        let folderFilter: { folderId?: string | null } | undefined;
-        if (typeof folderIdParam === "string") {
-            if (folderIdParam === "__null__" || folderIdParam === "") folderFilter = { folderId: null };
-            else folderFilter = { folderId: folderIdParam };
-        } else if (folderIdParam === null) {
-            folderFilter = { folderId: null };
-        }
+        // v7: 画布不再直接归属剧目；按分集过滤用 episodeId。
+        const episodeId = typeof input.episodeId === "string" && input.episodeId.trim() ? input.episodeId.trim() : undefined;
         const keyword = String(input.keyword || "").trim().toLowerCase();
-        const all = (await fetchCanvasProjects(config, folderFilter))
+        const all = (await fetchCanvasProjects(config, episodeId ? { episodeId } : undefined))
             .filter((project) => !keyword || String(project.title || project.name || "").toLowerCase().includes(keyword))
-            .map((project) => ({ id: project.id, title: project.title, updatedAt: project.updatedAt, folderId: project.folderId ?? null, nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0, connectionCount: Array.isArray(project.connections) ? project.connections.length : 0 }));
+            .map((project) => ({ id: project.id, title: project.title, updatedAt: project.updatedAt, nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0, connectionCount: Array.isArray(project.connections) ? project.connections.length : 0 }));
         const pageSize = Math.max(1, Math.min(100, Number(input.pageSize || 20)));
         const page = Math.max(1, Number(input.page || 1));
         return { projects: all.slice((page - 1) * pageSize, page * pageSize), total: all.length, page, pageSize };
     }
     if (name === "generation_get_status") return listTasksFromBackend(backendApi, input);
-    const projectId = String(input.projectId || activeProjectId || "");
+    const projectId = String(input.projectId || state.activeProjectId || "");
     const project = await fetchCurrentCanvasProject(config, projectId);
-    const state = project as Record<string, unknown>;
-    if (name === "canvas_get_state" || name === "canvas_export_snapshot") return compactProject(state);
+    const projectState = project as Record<string, unknown>;
+    if (name === "canvas_get_state" || name === "canvas_export_snapshot") return compactProject(projectState);
     if (name === "canvas_get_selection") {
-        const ids = new Set(Array.isArray(state.selectedNodeIds) ? state.selectedNodeIds.map(String) : []);
-        return { nodes: nodesOf(state).filter((node) => ids.has(String(node.id))) };
+        const ids = new Set(Array.isArray(projectState.selectedNodeIds) ? projectState.selectedNodeIds.map(String) : []);
+        return { nodes: nodesOf(projectState).filter((node) => ids.has(String(node.id))) };
     }
     const toolInput = name === "canvas_create_node" ? await applyNodeFactoryDefaults(input, backendApi) : input;
-    const request = buildCanvasToolRequest(name, toolInput, { nodes: nodesOf(state) as never, connections: connectionsOf(state) as never });
+    const request = buildCanvasToolRequest(name, toolInput, { nodes: nodesOf(projectState) as never, connections: connectionsOf(projectState) as never });
     const rawOps = Array.isArray(request.input.ops) ? request.input.ops as Array<Record<string, unknown>> : [];
     const ops = await Promise.all(rawOps.map(async (op) => op.type === "add_node" && String(op.nodeType || "") === "minimax-h3:video"
         ? await applyNodeFactoryDefaults(op, backendApi)
@@ -132,7 +245,7 @@ async function executeDirectCanvasTool(config: ReturnType<typeof loadConfig>, ba
     return { ok: true, projectId: withLoadingState.id, operationResults, directTasks, state: compactProject(withLoadingState as Record<string, unknown>) };
 }
 
-function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof loadConfig>, backendApi: ReturnType<typeof createBackendClient>) {
+function registerDirectCanvasTools(server: McpServer, config: ResolvedConfig, backendApi: ReturnType<typeof createBackendClient>, state: McpSessionState) {
     for (const name of DIRECT_CANVAS_TOOLS) {
         const schema = toolInputSchemas[name];
         // Pass zod schema (not schema.shape) so MCP SDK walks each property and
@@ -141,7 +254,7 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
         // making OpenAI tool-use guess at fields like items/tags/x-vs-dx.
         server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema }, async (rawInput: Record<string, unknown>) => {
             const input = schema.parse(rawInput) as Record<string, unknown>;
-            return textResult(await executeDirectCanvasTool(config, backendApi, name, input));
+            return textResult(await executeDirectCanvasTool(config, backendApi, state, name, input));
         });
     }
     // ── H3 节点历史运行产物（按需取，替代 metadata.materials 字段）──
@@ -150,7 +263,7 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
         inputSchema: toolInputSchemas.h3_get_node_materials,
     }, async (rawInput: Record<string, unknown>) => {
         const input = toolInputSchemas.h3_get_node_materials.parse(rawInput) as { projectId?: string; nodeId: string; segmentId?: string; limit?: number };
-        const projectId = String(input.projectId || activeProjectId || "");
+        const projectId = String(input.projectId || state.activeProjectId || "");
         if (!projectId) throw new Error("缺少 projectId（先调用 canvas_set_active_project 或显式传入）");
         const project = await fetchCurrentCanvasProject(config, projectId);
         if (!project) throw new Error(`画布不存在: ${projectId}`);
@@ -250,25 +363,22 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
         return textResult({ ok: true, sourceNodeId: nodeId, rows, columns, count: created.length, created, revision: applied.revision });
     });
     server.registerTool("canvas_create_project", {
-        description: "创建新画布。返回 id、title、createdAt。可选 title（默认「未命名画布」）、folderId（挂到指定剧目下；不传或 null = 未挂剧目）。先调用 drama_create_project 拿到 folder id 再传进来；不在剧目下时省略。",
-        inputSchema: z.object({ title: z.string().optional(), folderId: z.string().nullable().optional() }).shape,
+        description: "创建独立画布。画布是生产资产容器，不直接挂在剧目下；要归属某一集，请在 drama_create_episode 或 drama_update_episode 中传 canvasId。",
+        inputSchema: z.object({ title: z.string().optional().describe("画布标题；不传时为「未命名画布」") }),
     }, async (rawInput: Record<string, unknown>) => {
         const title = String(rawInput.title || "未命名画布").trim() || "未命名画布";
-        const folderIdRaw = typeof rawInput.folderId === "string" ? rawInput.folderId.trim() : "";
-        const folderId = folderIdRaw || null;
         const now = new Date().toISOString();
         const id = nanoid();
         const project: CanvasProject = {
             id, title, createdAt: now, updatedAt: now,
             revision: 0,
-            folderId,
             nodes: [], connections: [], chatSessions: [], activeChatId: null,
             backgroundMode: "lines", showImageInfo: false, globalPrompt: "",
             viewport: { x: 0, y: 0, zoom: 1 },
         };
         const saved = await saveCanvasProject(config, project);
-        activeProjectId = id;
-        return textResult({ ok: true, id: saved.id, title: saved.title, createdAt: saved.createdAt, folderId: saved.folderId ?? null });
+        state.activeProjectId = id;
+        return textResult({ ok: true, id: saved.id, title: saved.title, createdAt: saved.createdAt });
     });
     const dramaCreateProjectSchema = z.object({
         name: z.string().trim().min(1).max(200),
@@ -279,7 +389,7 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
     });
     server.registerTool("drama_create_project", {
         description: "在短剧制作台创建新的剧目。返回剧目 id、名称和资料；创建后会同步到短剧制作台。",
-        inputSchema: dramaCreateProjectSchema.shape,
+        inputSchema: dramaCreateProjectSchema,
     }, async (rawInput: Record<string, unknown>) => {
         const input = dramaCreateProjectSchema.parse(rawInput);
         const now = new Date().toISOString();
@@ -296,6 +406,61 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
         const saved = await backendApi.post<{ ok: boolean; folder?: Record<string, unknown> }>("/canvas/folders", folder);
         return textResult({ ok: true, folder: saved.folder || folder });
     });
+    const dramaCreateEpisodeSchema = z.object({
+        dramaId: z.string().trim().min(1).describe("剧目 ID；来自 drama_create_project 返回的 folder.id"),
+        episodeNumber: z.number().int().min(1).describe("分集编号，从 1 开始；同一剧目不可重复"),
+        title: z.string().optional().describe("分集标题；不传时默认「第 N 集」"),
+        synopsis: z.string().optional().describe("分集剧情/梗概，独立存储在分集实体，不要只写进画布文本节点"),
+        canvasId: z.string().nullable().optional().describe("绑定的画布 ID；不传或 null 表示暂不绑定。画布只能绑定一集"),
+    });
+    const dramaUpdateEpisodeSchema = z.object({
+        episodeId: z.string().trim().min(1).describe("分集 ID"),
+        episodeNumber: z.number().int().min(1).optional().describe("新的分集编号；同一剧目不可重复"),
+        title: z.string().optional().describe("新的分集标题"),
+        synopsis: z.string().optional().describe("新的分集剧情/梗概"),
+        canvasId: z.string().nullable().optional().describe("新的画布 ID；传 null 解除绑定"),
+    });
+    server.registerTool("drama_list_episodes", {
+        description: "列出一个剧目的全部分集，按 episodeNumber 升序返回；每项含标题、剧情和绑定画布 ID。",
+        inputSchema: z.object({ dramaId: z.string().trim().min(1).describe("剧目 ID") }),
+    }, async (rawInput: Record<string, unknown>) => {
+        const dramaId = String(rawInput.dramaId).trim();
+        return textResult(await backendApi.listDramaEpisodes(dramaId));
+    });
+    server.registerTool("drama_get_episode", {
+        description: "读取单个分集的完整字段，并返回其绑定画布的完整数据；未绑定画布时 canvas 为 null。",
+        inputSchema: z.object({ episodeId: z.string().trim().min(1).describe("分集 ID") }),
+    }, async (rawInput: Record<string, unknown>) => {
+        return textResult(await backendApi.getDramaEpisode(String(rawInput.episodeId).trim()));
+    });
+    server.registerTool("drama_create_episode", {
+        description: "创建剧目下的一集。分集是剧目与画布之间的实体，剧情字段独立保存；可选绑定一个已有画布。",
+        inputSchema: dramaCreateEpisodeSchema,
+    }, async (rawInput: Record<string, unknown>) => {
+        const input = dramaCreateEpisodeSchema.parse(rawInput);
+        const result = await backendApi.createDramaEpisode(input.dramaId, {
+            episodeNumber: input.episodeNumber,
+            title: input.title,
+            synopsis: input.synopsis,
+            canvasId: input.canvasId,
+        });
+        return textResult(result);
+    });
+    server.registerTool("drama_update_episode", {
+        description: "更新分集字段或更换绑定画布。传 canvasId=null 可解除绑定，不会删除画布或分集剧情。",
+        inputSchema: dramaUpdateEpisodeSchema,
+    }, async (rawInput: Record<string, unknown>) => {
+        const input = dramaUpdateEpisodeSchema.parse(rawInput);
+        const { episodeId, ...patch } = input;
+        return textResult(await backendApi.updateDramaEpisode(episodeId, patch));
+    });
+    server.registerTool("drama_delete_episode", {
+        description: "删除分集记录；不会删除其绑定的画布，画布会变成独立资产。",
+        inputSchema: z.object({ episodeId: z.string().trim().min(1).describe("分集 ID") }),
+    }, async (rawInput: Record<string, unknown>) => {
+        const episodeId = String(rawInput.episodeId).trim();
+        return textResult({ episodeId, ...(await backendApi.deleteDramaEpisode(episodeId)) });
+    });
     server.registerTool("drama_delete_project", {
         description: "删除短剧制作台中的剧目。只删除剧目归档，剧目下的场景画布会保留并回到待编排场景。",
         inputSchema: z.object({ id: z.string().trim().min(1) }).shape,
@@ -310,7 +475,7 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
     }, async (rawInput: Record<string, unknown>) => {
         const id = String(rawInput.id);
         const deleted = await deleteCanvasProject(config, id);
-        if (activeProjectId === id) activeProjectId = null;
+        if (state.activeProjectId === id) state.activeProjectId = null;
         return textResult({ ok: true, deleted: deleted > 0 });
     });
     server.registerTool("canvas_set_active_project", {
@@ -321,11 +486,11 @@ function registerDirectCanvasTools(server: McpServer, config: ReturnType<typeof 
         if (id) {
             const project = (await fetchCanvasProjects(config)).find((item) => item.id === id);
             if (!project) throw new Error(`画布不存在: ${id}`);
-            activeProjectId = id;
+            state.activeProjectId = id;
         } else {
-            activeProjectId = null;
+            state.activeProjectId = null;
         }
-        return textResult({ ok: true, activeProjectId: activeProjectId || null });
+        return textResult({ ok: true, activeProjectId: state.activeProjectId || null });
     });
     server.registerTool("canvas_diagnose_project", {
         description: "只读诊断指定画布，检查悬空连线、重复连线、二次生成残留参考、丢失媒体和孤立结果节点。",
@@ -521,14 +686,11 @@ function toCanvasTask(task: { id?: string; kind: string; input?: Record<string, 
     };
 }
 
-async function fetchCanvasProjects(config: ReturnType<typeof loadConfig>, filter?: { folderId?: string | null }): Promise<CanvasProject[]> {
+async function fetchCanvasProjects(config: ReturnType<typeof loadConfig>, filter?: { episodeId?: string }): Promise<CanvasProject[]> {
     const params = new URLSearchParams();
-    if (filter && "folderId" in filter) {
-        if (filter.folderId === null) params.set("folderId", "__null__");
-        else if (filter.folderId) params.set("folderId", filter.folderId);
-    }
-    const query = params.toString();
-    const url = `${config.url.replace(/\/$/, "")}/canvas/projects${query ? `?${query}` : ""}&token=${encodeURIComponent(config.token)}`;
+    if (filter?.episodeId) params.set("episodeId", filter.episodeId);
+    params.set("token", config.token);
+    const url = `${config.url.replace(/\/$/, "")}/canvas/projects?${params.toString()}`;
     const response = await fetch(url);
     const body = await response.json().catch(() => ({})) as { projects?: CanvasProject[]; error?: string };
     if (!response.ok || !Array.isArray(body.projects)) throw new Error(body.error || `读取画布失败: HTTP ${response.status}`);
@@ -627,7 +789,9 @@ function registerDirectComfyTools(server: McpServer, backend: ReturnType<typeof 
 
 /** 工作台、网页导航和对话工具仍需要当前浏览器会话，保留旧协议兼容入口。 */
 function registerBrowserCompatibilityTools(server: McpServer, config: ReturnType<typeof loadConfig>) {
+    const registeredTools = (server as unknown as { _registeredTools?: Record<string, unknown> })._registeredTools || {};
     for (const name of toolNames.filter((item) => !DIRECT_TOOL_NAMES.has(item) && !item.startsWith("h3_"))) {
+        if (registeredTools[name]) continue;
         const schema = toolInputSchemas[name];
         server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema.shape }, async (input: Record<string, unknown>) => {
             const response = await fetch(`${config.url.replace(/\/$/, "")}/agent/api/tools`, {

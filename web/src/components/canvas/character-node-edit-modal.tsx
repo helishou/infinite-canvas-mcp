@@ -129,7 +129,7 @@ export function CharacterNodeEditModal({ open, node, onClose, onSave }: Props) {
         .map((asset) => ({ label: asset.title || "声音", value: asset.id }));
 
     return (
-        <Modal open={open} onCancel={onClose} footer={null} width={720} destroyOnClose title={t("canvas.character.editTitle")}>
+        <Modal open={open} onCancel={onClose} footer={null} width={720} destroyOnHidden title={t("canvas.character.editTitle")}>
             <div className="space-y-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <label className="space-y-1">

@@ -271,6 +271,17 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             }
         }
         if (name === "comfyui_cancel_task") return void res.json({ ok: true, result: await comfyUi.cancel(String(input.taskId || "")) });
+        if (name === "drama_list_episodes") return void res.json({ ok: true, result: await backend.listDramaEpisodes(String(input.dramaId || "")) });
+        if (name === "drama_get_episode") return void res.json({ ok: true, result: await backend.getDramaEpisode(String(input.episodeId || "")) });
+        if (name === "drama_create_episode") {
+            const { dramaId, ...episode } = input;
+            return void res.json({ ok: true, result: await backend.createDramaEpisode(String(dramaId || ""), episode) });
+        }
+        if (name === "drama_update_episode") {
+            const { episodeId, ...patch } = input;
+            return void res.json({ ok: true, result: await backend.updateDramaEpisode(String(episodeId || ""), patch) });
+        }
+        if (name === "drama_delete_episode") return void res.json({ ok: true, result: await backend.deleteDramaEpisode(String(input.episodeId || "")) });
         return void res.json({ ok: true, result: await session.callTool(name, input) });
     }));
     app.post("/api/plugins/mcp", route(async (req, res) => {

@@ -220,18 +220,19 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
 
     // ── Canvas projects ──────────────────────────────────────────────────
     app.get("/canvas/projects", (req, res) => {
-        // ?folderId=xxx 过滤；folderId=__null__ 或空 → 只取未挂剧目的画布；
-        // 不传 folderId → 不过滤（旧行为，向后兼容）。
-        const folderIdParam = req.query.folderId;
-        let filter: { folderId?: string | null } | undefined;
-        if (typeof folderIdParam === "string") {
-            if (folderIdParam === "__null__" || folderIdParam === "") filter = { folderId: null };
-            else filter = { folderId: folderIdParam };
+        // v7: 画布表无 folder_id 列，过滤改用 ?episodeId=xxx；不传 = 返回全部。
+        // 旧的 ?folderId=xxx 参数已废弃，前端通过 /drama 页面用 episodeId 过滤即可。
+        const episodeIdParam = req.query.episodeId;
+        let filter: { episodeId?: string; id?: string } | undefined;
+        if (typeof episodeIdParam === "string" && episodeIdParam) {
+            filter = { episodeId: episodeIdParam };
+        } else if (typeof req.query.id === "string" && req.query.id) {
+            filter = { id: req.query.id };
         }
         const useSummary = req.query.summary === "true";
         const projects = useSummary
             ? (filter ? db.listCanvasProjectSummaries(filter) : db.listCanvasProjectSummaries())
-            : stores.projects.list(filter);
+            : (filter?.episodeId ? db.listCanvasProjectsByEpisode(filter.episodeId) : stores.projects.list());
         res.json({ ok: true, projects });
     });
     app.get("/canvas/projects/:id", (req, res) => {
@@ -269,6 +270,16 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
             const value = error as Error & { code?: string; project?: CanvasProject; revision?: number };
             if (value.code === "REVISION_CONFLICT") return void res.status(409).json({ ok: false, error: value.message, projectId: req.params.id, revision: value.revision, project: value.project });
             if (value.message.startsWith("画布不存在:")) return void res.status(404).json({ ok: false, error: value.message });
+            logger.warn("画布增量操作被拒绝", {
+                projectId: req.params.id,
+                expectedRevision,
+                error: value.message || String(error),
+                operations: operations.map((operation) => ({
+                    type: String(operation.type || ""),
+                    id: String(operation.id || operation.nodeId || operation.assetId || ""),
+                    segmentId: String(operation.segmentId || ""),
+                })),
+            });
             res.status(400).json({ ok: false, error: value.message || String(error) });
         }
     });
@@ -300,6 +311,67 @@ export function startServer(db: Parameters<typeof createStores>[0], config: Reso
     app.delete("/canvas/folders/:id", (req, res) => {
         const deleted = stores.canvasFolders.delete(req.params.id);
         events.publishCanvasFolder({ entityId: req.params.id, payload: { deleted } });
+        res.json({ ok: true, deleted });
+    });
+    // ── Drama episodes：剧目 → 分集 → 画布 ───────────────────────────────
+    app.get("/drama/projects/:dramaId/episodes", (req, res) => {
+        const dramaId = String(req.params.dramaId || "");
+        const drama = stores.canvasFolders.list().find((item) => item.id === dramaId);
+        if (!drama) return void res.status(404).json({ ok: false, error: "剧目不存在" });
+        const episodes = db.listDramaEpisodes(dramaId);
+        res.json({ ok: true, dramaId, episodes });
+    });
+    app.post("/drama/projects/:dramaId/episodes", (req, res) => {
+        const dramaId = String(req.params.dramaId || "");
+        const drama = stores.canvasFolders.list().find((item) => item.id === dramaId);
+        if (!drama) return void res.status(404).json({ ok: false, error: "剧目不存在" });
+        const body = req.body as { id?: unknown; episodeNumber?: unknown; title?: unknown; synopsis?: unknown; canvasId?: unknown };
+        const episodeNumber = Number(body.episodeNumber);
+        if (!Number.isInteger(episodeNumber) || episodeNumber < 1) return void res.status(400).json({ ok: false, error: "episodeNumber 必须是大于等于 1 的整数" });
+        const title = String(body.title ?? `第 ${episodeNumber} 集`).trim();
+        const synopsis = String(body.synopsis ?? "");
+        const canvasId = body.canvasId === undefined || body.canvasId === null || body.canvasId === "" ? null : String(body.canvasId);
+        if (canvasId && !db.getCanvasProject(canvasId)) return void res.status(404).json({ ok: false, error: "绑定的画布不存在" });
+        const canvasOwner = canvasId ? db.getDramaEpisodeByCanvasId(canvasId) : null;
+        if (canvasOwner) return void res.status(409).json({ ok: false, error: `画布已绑定到分集: ${canvasOwner.id}` });
+        if (db.getDramaEpisodeByNumber(dramaId, episodeNumber)) return void res.status(409).json({ ok: false, error: `分集编号已存在: ${dramaId}/${episodeNumber}` });
+        try {
+            const episode = db.upsertDramaEpisode({ id: typeof body.id === "string" ? body.id : undefined, dramaId, episodeNumber, title, synopsis, canvasId });
+            events.publish({ type: "drama-episode.updated", entityId: episode.id, payload: episode });
+            res.status(201).json({ ok: true, episode });
+        } catch (error) {
+            res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+    app.get("/drama/episodes/:episodeId", (req, res) => {
+        const episode = db.getDramaEpisode(req.params.episodeId);
+        if (!episode) return void res.status(404).json({ ok: false, error: "分集不存在" });
+        res.json({ ok: true, episode, canvas: episode.canvasId ? db.getCanvasProject(episode.canvasId) : null });
+    });
+    app.patch("/drama/episodes/:episodeId", (req, res) => {
+        const body = req.body as { episodeNumber?: unknown; title?: unknown; synopsis?: unknown; canvasId?: unknown };
+        const patch: { episodeNumber?: number; title?: string; synopsis?: string; canvasId?: string | null } = {};
+        if (body.episodeNumber !== undefined) {
+            const value = Number(body.episodeNumber);
+            if (!Number.isInteger(value) || value < 1) return void res.status(400).json({ ok: false, error: "episodeNumber 必须是大于等于 1 的整数" });
+            patch.episodeNumber = value;
+        }
+        if (body.title !== undefined) patch.title = String(body.title).trim();
+        if (body.synopsis !== undefined) patch.synopsis = String(body.synopsis);
+        if (body.canvasId !== undefined) patch.canvasId = body.canvasId === null || body.canvasId === "" ? null : String(body.canvasId);
+        if (patch.canvasId && !db.getCanvasProject(patch.canvasId)) return void res.status(404).json({ ok: false, error: "绑定的画布不存在" });
+        try {
+            const episode = db.updateDramaEpisode(req.params.episodeId, patch);
+            if (!episode) return void res.status(404).json({ ok: false, error: "分集不存在" });
+            events.publish({ type: "drama-episode.updated", entityId: episode.id, payload: episode });
+            res.json({ ok: true, episode, canvas: episode.canvasId ? db.getCanvasProject(episode.canvasId) : null });
+        } catch (error) {
+            res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+    app.delete("/drama/episodes/:episodeId", (req, res) => {
+        const deleted = db.deleteDramaEpisode(req.params.episodeId);
+        if (deleted) events.publish({ type: "drama-episode.updated", entityId: req.params.episodeId, payload: { deleted } });
         res.json({ ok: true, deleted });
     });
     // ── Image split: auto-detect 切分线宽度 ───────────────────────────────

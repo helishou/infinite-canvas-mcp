@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
-import { App, Button, Input, Modal, Tag } from "antd";
+import { App, Button, Input, Modal, Select, Tag } from "antd";
 import { ArrowUpRight, Clapperboard, Folder, ImagePlus, Inbox, LayoutDashboard, PencilLine, Plus, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
 import { cn } from "@/lib/utils";
+import { fetchBackendDramaEpisodes, createBackendDramaEpisode, deleteBackendDramaEpisode, updateBackendDramaEpisode, type DramaEpisode } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 
@@ -19,6 +20,14 @@ type DramaDraft = {
     tags: string;
     coverStorageKey: string | null;
     coverUrl: string;
+};
+
+type EpisodeDraft = {
+    id?: string;
+    episodeNumber: number;
+    title: string;
+    synopsis: string;
+    canvasId: string | null;
 };
 
 export default function DramaPage() {
@@ -36,6 +45,10 @@ export default function DramaPage() {
     const [draft, setDraft] = useState<DramaDraft | null>(null);
     const [activeCoverUrl, setActiveCoverUrl] = useState("");
     const [uploadingCover, setUploadingCover] = useState(false);
+    const [episodesByDrama, setEpisodesByDrama] = useState<Record<string, DramaEpisode[]>>({});
+    const [episodeEditorOpen, setEpisodeEditorOpen] = useState(false);
+    const [episodeDraft, setEpisodeDraft] = useState<EpisodeDraft | null>(null);
+    const [episodeSaving, setEpisodeSaving] = useState(false);
     const coverInputRef = useRef<HTMLInputElement>(null);
 
     const activeFolder = folders.find((folder) => folder.id === activeView);
@@ -49,18 +62,101 @@ export default function DramaPage() {
         void resolveImageUrl(activeFolder.coverStorageKey).then((url) => { if (!disposed) setActiveCoverUrl(url); });
         return () => { disposed = true; };
     }, [activeFolder?.coverStorageKey]);
+    useEffect(() => {
+        if (!hydrated || !folders.length) {
+            setEpisodesByDrama({});
+            return;
+        }
+        let disposed = false;
+        void Promise.all(folders.map(async (folder) => {
+            try {
+                const result = await fetchBackendDramaEpisodes(folder.id);
+                return [folder.id, result.episodes || []] as const;
+            } catch {
+                // 普通画布文件夹可能不是剧目；它没有分集时按空列表处理。
+                return [folder.id, []] as const;
+            }
+        })).then((entries) => {
+            if (!disposed) setEpisodesByDrama(Object.fromEntries(entries));
+        });
+        return () => { disposed = true; };
+    }, [folders, hydrated]);
+    const allEpisodes = useMemo(() => Object.values(episodesByDrama).flat().sort((a, b) => a.episodeNumber - b.episodeNumber), [episodesByDrama]);
+    const boundCanvasIds = useMemo(() => new Set(allEpisodes.flatMap((episode) => episode.canvasId ? [episode.canvasId] : [])), [allEpisodes]);
     const visibleProjects = useMemo(() => {
         const sorted = [...projects].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-        if (activeView === UNFILED_SCENES) return sorted.filter((project) => !project.folderId);
-        if (activeView === ALL_SCENES) return sorted;
-        return sorted.filter((project) => project.folderId === activeView);
-    }, [activeView, projects]);
-    const contentProjects = projects.filter((project) => (project.summary?.nodeCount ?? project.nodes.length) > 0).length;
-    const unfiledCount = projects.filter((project) => !project.folderId).length;
+        return activeView === UNFILED_SCENES ? sorted.filter((project) => !boundCanvasIds.has(project.id)) : sorted;
+    }, [activeView, boundCanvasIds, projects]);
+    const visibleEpisodes = activeFolder ? (episodesByDrama[activeFolder.id] || []) : [];
+    const contentProjects = allEpisodes.filter((episode) => episode.canvasId).length;
+    const unfiledCount = projects.filter((project) => !boundCanvasIds.has(project.id)).length;
 
     const createDrama = () => {
         const name = window.prompt(t("drama.createProjectPrompt"), t("drama.defaultProjectName"));
         if (name?.trim()) setActiveView(createFolder(name.trim()));
+    };
+    const openEpisodeEditor = (episode?: DramaEpisode) => {
+        if (!activeFolder) return;
+        const current = episodesByDrama[activeFolder.id] || [];
+        setEpisodeDraft(episode ? {
+            id: episode.id,
+            episodeNumber: episode.episodeNumber,
+            title: episode.title,
+            synopsis: episode.synopsis,
+            canvasId: episode.canvasId,
+        } : {
+            episodeNumber: Math.max(0, ...current.map((item) => item.episodeNumber)) + 1,
+            title: `第 ${Math.max(0, ...current.map((item) => item.episodeNumber)) + 1} 集`,
+            synopsis: "",
+            canvasId: null,
+        });
+        setEpisodeEditorOpen(true);
+    };
+    const saveEpisode = async () => {
+        if (!activeFolder || !episodeDraft) return;
+        const episodeNumber = Math.max(1, Math.trunc(episodeDraft.episodeNumber));
+        const title = episodeDraft.title.trim() || `第 ${episodeNumber} 集`;
+        try {
+            setEpisodeSaving(true);
+            const result = episodeDraft.id
+                ? await updateBackendDramaEpisode(episodeDraft.id, { episodeNumber, title, synopsis: episodeDraft.synopsis, canvasId: episodeDraft.canvasId })
+                : await createBackendDramaEpisode(activeFolder.id, { episodeNumber, title, synopsis: episodeDraft.synopsis, canvasId: episodeDraft.canvasId });
+            if (!result.episode) throw new Error("后端没有返回分集");
+            setEpisodesByDrama((current) => ({
+                ...current,
+                [activeFolder.id]: [...(current[activeFolder.id] || []).filter((item) => item.id !== result.episode!.id), result.episode!].sort((a, b) => a.episodeNumber - b.episodeNumber),
+            }));
+            setEpisodeEditorOpen(false);
+            setEpisodeDraft(null);
+            message.success(episodeDraft.id ? t("drama.episodeSaved") : t("drama.episodeCreated"));
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : t("drama.episodeSaveFailed"));
+        } finally {
+            setEpisodeSaving(false);
+        }
+    };
+    const removeEpisode = (episode: DramaEpisode) => {
+        modal.confirm({
+            title: t("drama.deleteEpisodeTitle"),
+            content: t("drama.deleteEpisodeDescription", { name: episode.title || `第 ${episode.episodeNumber} 集` }),
+            okType: "danger",
+            okText: t("drama.deleteProjectConfirm"),
+            cancelText: t("common.cancel"),
+            onOk: async () => {
+                try {
+                    await deleteBackendDramaEpisode(episode.id);
+                    if (activeFolder) setEpisodesByDrama((current) => ({ ...current, [activeFolder.id]: (current[activeFolder.id] || []).filter((item) => item.id !== episode.id) }));
+                    if (episodeDraft?.id === episode.id) {
+                        setEpisodeEditorOpen(false);
+                        setEpisodeDraft(null);
+                    }
+                    message.success(t("drama.episodeDeleted"));
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : t("drama.episodeDeleteFailed"));
+                    throw error;
+                }
+            },
+        });
     };
     const openFolderEditor = () => {
         if (!activeFolder) return;
@@ -145,7 +241,7 @@ export default function DramaPage() {
 
                 <section className="grid gap-px overflow-hidden border-x border-b border-stone-200 bg-stone-200 sm:grid-cols-3 dark:border-stone-800 dark:bg-stone-800">
                     <Stat label={t("drama.stats.dramas")} value={folders.length} detail={t("drama.folderHint")} />
-                    <Stat label={t("drama.stats.scenes")} value={projects.length} detail={t("drama.unfiled")} />
+                    <Stat label={t("drama.stats.scenes")} value={allEpisodes.length} detail={t("drama.scenes")} />
                     <Stat label={t("drama.stats.drafted")} value={contentProjects} detail={t("drama.scenes")} />
                 </section>
 
@@ -162,7 +258,7 @@ export default function DramaPage() {
                         </div>
                         <nav className="space-y-1">
                             {folders.map((folder) => (
-                                <NavItem key={folder.id} active={activeView === folder.id} icon={<Folder className="size-4" />} label={folder.name} count={projects.filter((project) => project.folderId === folder.id).length} onClick={() => setActiveView(folder.id)} />
+                                <NavItem key={folder.id} active={activeView === folder.id} icon={<Folder className="size-4" />} label={folder.name} count={(episodesByDrama[folder.id] || []).length} onClick={() => setActiveView(folder.id)} />
                             ))}
                         </nav>
                         {!folders.length ? <p className="mt-4 px-2 text-xs leading-5 text-stone-400">{t("drama.folderHint")}</p> : null}
@@ -189,14 +285,19 @@ export default function DramaPage() {
                                 <p className="text-xs font-medium uppercase tracking-[0.16em] text-orange-600 dark:text-orange-400">{t("drama.scenes")}</p>
                                 <h2 className="mt-2 text-2xl font-semibold tracking-tight">{viewTitle}</h2>
                             </div>
-                            <span className="text-sm text-stone-400">{visibleProjects.length} / {projects.length}</span>
+                            <div className="flex items-center gap-3">
+                                <span className="text-sm text-stone-400">{activeFolder ? visibleEpisodes.length : visibleProjects.length} / {activeFolder ? allEpisodes.length : projects.length}</span>
+                                {activeFolder ? <Button type="primary" size="small" icon={<Plus className="size-4" />} onClick={() => openEpisodeEditor()}>{t("drama.newEpisode")}</Button> : null}
+                            </div>
                         </div>
 
                         {!hydrated ? (
                             <div className="flex min-h-72 items-center justify-center border-y border-stone-200 text-sm text-stone-500 dark:border-stone-800">{t("canvas.loading")}</div>
-                        ) : visibleProjects.length ? (
+                        ) : (activeFolder ? visibleEpisodes.length > 0 : visibleProjects.length > 0) ? (
                             <div className="grid gap-4 sm:grid-cols-2">
-                                {visibleProjects.map((project, index) => <SceneCard key={project.id} project={project} index={index} folderName={folders.find((folder) => folder.id === project.folderId)?.name} onOpen={() => openProject(project)} t={t} />)}
+                                {activeFolder
+                                    ? visibleEpisodes.map((episode, index) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} index={index} onOpen={openProject} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)
+                                    : visibleProjects.map((project, index) => <SceneCard key={project.id} project={project} index={index} folderName={t("drama.unfiled")} onOpen={() => openProject(project)} t={t} />)}
                             </div>
                         ) : (
                             <div className="flex min-h-72 flex-col items-center justify-center border-y border-stone-200 px-6 text-center dark:border-stone-800">
@@ -209,6 +310,16 @@ export default function DramaPage() {
                     </section>
                 </div>
             </div>
+            <Modal title={episodeDraft?.id ? t("drama.editEpisode") : t("drama.newEpisode")} open={episodeEditorOpen} onCancel={() => { if (!episodeSaving) { setEpisodeEditorOpen(false); setEpisodeDraft(null); } }} onOk={() => void saveEpisode()} okText={t("drama.saveEpisode")} cancelText={t("common.cancel")} confirmLoading={episodeSaving}>
+                {episodeDraft ? <div className="space-y-5">
+                    <div className="grid gap-5 sm:grid-cols-[140px_minmax(0,1fr)]">
+                        <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.episodeNumber")}</span><Input type="number" min={1} value={episodeDraft.episodeNumber} onChange={(event) => setEpisodeDraft({ ...episodeDraft, episodeNumber: Number(event.target.value) || 1 })} /></label>
+                        <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.episodeTitle")}</span><Input value={episodeDraft.title} onChange={(event) => setEpisodeDraft({ ...episodeDraft, title: event.target.value })} placeholder={t("drama.episodeTitlePlaceholder")} /></label>
+                    </div>
+                    <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.episodeSynopsis")}</span><Input.TextArea rows={8} value={episodeDraft.synopsis} onChange={(event) => setEpisodeDraft({ ...episodeDraft, synopsis: event.target.value })} placeholder={t("drama.episodeSynopsisPlaceholder")} /></label>
+                    <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.bindCanvas")}</span><Select allowClear className="w-full" placeholder={t("drama.unboundCanvas")} value={episodeDraft.canvasId || undefined} onChange={(value) => setEpisodeDraft({ ...episodeDraft, canvasId: value || null })} options={projects.map((project) => ({ label: project.title, value: project.id }))} showSearch optionFilterProp="label" /></label>
+                </div> : null}
+            </Modal>
             <Modal title={t("drama.editProject")} open={editorOpen} onCancel={() => setEditorOpen(false)} onOk={saveFolder} okText={t("drama.saveProject")} cancelText={t("common.cancel")} confirmLoading={uploadingCover} width={680} footer={(originNode) => <div className="flex w-full items-center justify-between"><Button danger type="text" icon={<Trash2 className="size-4" />} onClick={deleteDrama}>{t("drama.deleteProject")}</Button><div className="flex gap-2">{originNode}</div></div>}>
                 {draft ? (
                     <div className="space-y-5">
@@ -256,4 +367,26 @@ function SceneCard({ project, index, folderName, onOpen, t }: { project: CanvasP
             <span className="shrink-0">{t("drama.updated", { date: new Date(project.updatedAt).toLocaleDateString() })}</span>
         </div>
     </button>;
+}
+
+function EpisodeCard({ episode, project, index, onOpen, onEdit, onDelete, t }: { episode: DramaEpisode; project?: CanvasProject; index: number; onOpen: (project: CanvasProject) => void; onEdit: () => void; onDelete: () => void; t: TFunction }) {
+    const canOpen = Boolean(project);
+    return <article className={cn("group relative flex min-h-48 flex-col justify-between overflow-hidden rounded-2xl border border-stone-200 bg-background p-5 text-left transition dark:border-stone-800", canOpen ? "hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:hover:border-orange-900" : "opacity-70")}>
+        <div className="absolute right-0 top-0 h-24 w-24 translate-x-8 -translate-y-8 rounded-full border border-orange-200/70 transition group-hover:scale-125 dark:border-orange-950/60" />
+        <div className="relative flex items-start justify-between gap-3">
+            <button type="button" className="text-left text-xs font-medium uppercase tracking-[0.14em] text-orange-600 dark:text-orange-400" onClick={() => { if (project) onOpen(project); }} disabled={!canOpen}>{t("drama.scene")} {String(index + 1).padStart(2, "0")} · {t("drama.episodeLabel", { number: episode.episodeNumber })}</button>
+            <div className="flex items-center gap-1">
+                <Button type="text" size="small" className="!px-1.5 !text-stone-400 hover:!text-stone-900 dark:hover:!text-stone-100" onClick={onEdit} aria-label={t("drama.editEpisode")}><PencilLine className="size-4" /></Button>
+                <Button type="text" size="small" danger className="!px-1.5" onClick={onDelete} aria-label={t("drama.deleteEpisodeTitle")}><Trash2 className="size-4" /></Button>
+            </div>
+        </div>
+        <button type="button" className="relative mt-6 min-w-0 text-left" onClick={() => { if (project) onOpen(project); }} disabled={!canOpen}>
+            <h3 className="truncate text-lg font-semibold">{episode.title || t("drama.episodeLabel", { number: episode.episodeNumber })}</h3>
+            <p className="mt-2 line-clamp-3 whitespace-pre-line text-sm leading-6 text-stone-500 dark:text-stone-400">{episode.synopsis || t("drama.noEpisodeSynopsis")}</p>
+        </button>
+        <div className="relative mt-5 flex items-center justify-between gap-3 text-xs text-stone-400">
+            <span className="truncate">{project?.title || t("drama.unboundCanvas")}</span>
+            <span className="shrink-0">{project ? `${project.summary?.nodeCount ?? project.nodes.length} ${t("drama.nodes")}` : ""}</span>
+        </div>
+    </article>;
 }

@@ -34,9 +34,9 @@ export type H3NodeMaterial = {
     segmentId?: string;
     createdAt: string;
 };
-export type CanvasProjectFilter = { folderId?: string | null };
+export type CanvasProjectFilter = { episodeId?: string; id?: string };
 export type CanvasProjectStore = {
-    list(filter?: CanvasProjectFilter): CanvasProject[];
+    list(): CanvasProject[];
     listSummaries(filter?: CanvasProjectFilter): CanvasProject[];
     get(id: string): CanvasProject | null;
     upsert(project: CanvasProject): CanvasProject;

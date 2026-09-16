@@ -14,6 +14,7 @@ import { H3MaterialLibrary } from "./H3MaterialLibrary";
 import { H3Runner } from "./H3Runner";
 import { H3WorkbenchToolbar } from "./H3WorkbenchToolbar";
 import { H3CharacterRefModal } from "./H3CharacterRefModal";
+import { H3ReferenceModal } from "./H3ReferenceModal";
 
 export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const metadata = ctx.node.metadata || {};
@@ -108,6 +109,16 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         root.querySelectorAll<HTMLElement>(".minimax-playhead").forEach((el) => { el.style.left = `${px}px`; });
     }, []);
     const [editingGroup, setEditingGroup] = useState<{ segmentId: string; groupId: string } | null>(null);
+    const [editingRef, setEditingRef] = useState<{ segmentId: string; ref: H3Ref } | null>(null);
+    const catalogSyncedRef = useRef(new Set<string>());
+    useEffect(() => {
+        const bindings = segments.flatMap((segment) => segment.referenceBindings || []);
+        for (const binding of bindings) {
+            if (catalogSyncedRef.current.has(binding.assetId)) continue;
+            catalogSyncedRef.current.add(binding.assetId);
+            void ctx.references.upsert({ id: binding.assetId, label: binding.label, mediaType: binding.mediaType || "image", role: binding.role, tags: binding.tags || [], url: binding.url, storageKey: binding.storageKey, mimeType: binding.mimeType, sourceNodeId: binding.sourceNodeId, subjectId: binding.subjectId }).catch(() => catalogSyncedRef.current.delete(binding.assetId));
+        }
+    }, [ctx.references, segments]);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => selected && patchSelectedSegment(ctx, { ...metadata, selectedSegmentId: selected.id }, patch), [ctx, metadata, selected]);
     const removeTimelineRef = (segmentId: string, ref: H3Ref) => {
         const segment = segments.find((item) => item.id === segmentId);
@@ -124,9 +135,13 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
                 return;
             }
         }
-        ctx.updateMetadata({ segments: segments.map((item) => item.id === segmentId ? { ...item, refItems: refsForSegment(item).filter((entry) => entry.url !== ref.url), refs: { image: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "image"), video: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "video"), audio: refsForSegment(item).filter((entry) => entry.url !== ref.url && entry.type === "audio") } } : item) });
+        ctx.updateMetadata({ segments: segments.map((item) => item.id === segmentId ? withSegmentRefs(item, refsForSegment(item).filter((entry) => ref.bindingId ? entry.bindingId !== ref.bindingId : entry.url !== ref.url)) : item) });
     };
     const openCharacterGroup = (segmentId: string, groupId: string) => setEditingGroup({ segmentId, groupId });
+    const applyReferenceEdit = (nextRef: H3Ref) => {
+        if (!editingRef) return;
+        ctx.updateMetadata({ segments: segments.map((segment) => segment.id === editingRef.segmentId ? withSegmentRefs(segment, refsForSegment(segment).map((item) => (editingRef.ref.bindingId ? item.bindingId === editingRef.ref.bindingId : item.url === editingRef.ref.url) ? nextRef : item)) : segment) });
+    };
     const applyCharacterGroupEditsAndClose = (groupId: string, patch: { outfitEnabled?: Record<string, boolean>; voiceEnabled?: boolean }) => {
         if (!editingGroup) return;
         ctx.updateMetadata({ segments: segments.map((item) => item.id === editingGroup.segmentId ? applyCharacterGroupEdits(item, groupId, patch) : item) });
@@ -203,7 +218,7 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
         }
         const url = String(detail.url || "").trim();
         if (!url) return;
-        const allowedRoles = new Set<H3Ref["role"]>(["character_turnaround", "storyboard", "scene", "motion_reference", "audio_reference"]);
+        const allowedRoles = new Set<H3Ref["role"]>(["character_identity", "character_turnaround", "storyboard", "scene", "blocking", "keyframe", "motion_reference", "audio_reference", "character_voice", "style", "palette", "prop", "other"]);
         const role = typeof detail.role === "string" && allowedRoles.has(detail.role as H3Ref["role"]) ? detail.role as H3Ref["role"] : undefined;
         const ref: H3Ref = { url, type: "image", name: String(detail.name || "图片"), storageKey: typeof detail.storageKey === "string" ? detail.storageKey : undefined, mimeType: typeof detail.mimeType === "string" ? detail.mimeType : undefined, ...(role ? { role } : {}), ...(detail.subjectId ? { subjectId: String(detail.subjectId) } : {}) };
         const max = targetMode === "i2v" ? 1 : targetMode === "fl2v" ? 2 : 9;
@@ -276,11 +291,12 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
             if (!segment || !group) return null;
             return <H3CharacterRefModal key="character-ref-modal" ctx={ctx} group={group} onApply={(patch) => applyCharacterGroupEditsAndClose(group.id, patch)} onDelete={() => deleteCharacterGroupAndClose(group.id)} onClose={() => setEditingGroup(null)} />;
         })() : null}
+        {editingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={editingRef.ref} onApply={applyReferenceEdit} onClose={() => setEditingRef(null)} /> : null}
         <style key="workbench-style">{`.minimax-canvas-workbench{--minimax-prompt-w:${promptW}px;--minimax-preview-w:${previewW}px;--minimax-preview-h:${effPreviewH}px;--minimax-timeline-h:${effTimelineH}px;--minimax-ref-h:${effRefLaneH}px}`}</style>
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
             <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} /></div>
-            <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onOpenCharacterGroup={openCharacterGroup} onPlayAll={playAll} fmt={fmt} />
+            <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onOpenCharacterGroup={openCharacterGroup} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         </div>

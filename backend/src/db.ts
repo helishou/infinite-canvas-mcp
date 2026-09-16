@@ -55,7 +55,18 @@ export type Asset = {
     source: string | null; metadata: Record<string, unknown>;
     createdAt: string; updatedAt: string;
 };
-export type CanvasProject = Record<string, unknown> & { id: string; folderId?: string | null };
+export type DramaEpisode = {
+    id: string;
+    dramaId: string;
+    episodeNumber: number;
+    title: string;
+    synopsis: string;
+    canvasId: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+export type CanvasProject = Record<string, unknown> & { id: string };
+
 export type PluginDeclaration = {
     id: string;
     name: string;
@@ -126,7 +137,6 @@ export class BackendDatabase {
             CREATE TABLE IF NOT EXISTS canvas_projects (
                 id TEXT PRIMARY KEY,
                 data_json TEXT NOT NULL,
-                folder_id TEXT REFERENCES canvas_folders(id) ON DELETE SET NULL,
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS canvas_folders (
@@ -142,6 +152,20 @@ export class BackendDatabase {
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS drama_episodes (
+                id TEXT PRIMARY KEY,
+                drama_id TEXT NOT NULL REFERENCES drama_projects(folder_id) ON DELETE CASCADE,
+                episode_number INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                synopsis TEXT NOT NULL DEFAULT '',
+                canvas_id TEXT REFERENCES canvas_projects(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(drama_id, episode_number),
+                UNIQUE(canvas_id)
+            );
+            CREATE INDEX IF NOT EXISTS drama_episodes_drama_id ON drama_episodes(drama_id);
+            CREATE INDEX IF NOT EXISTS drama_episodes_canvas_id ON drama_episodes(canvas_id);
             CREATE TABLE IF NOT EXISTS assets (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -284,6 +308,25 @@ export class BackendDatabase {
             this.attachCanvasProjectsToFolders();
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (6, ?)").run(new Date().toISOString());
         }
+        if (currentVersion < 7) {
+            // v6 的 folder_id 列假设是「画布 → 剧目」方向，但实际叙事模型是
+            // 「剧目 → 分集 → 画布」三层：drama_projects 是根，每个 drama 下多个 episode，
+            // 每个 episode 1:1 绑一个画布（asset 也算画布）。v6 抹平了 episode 这一层，导致
+            // 「分集剧情」无处放、前端假设了 folder_id 但语义错位。
+            // v7 改造：
+            //   1. 新表 drama_episodes（episode_number + title + synopsis + canvas_id 1:1 可空）
+            //   2. 删 canvas_projects.folder_id 列（关系由 drama_episodes.canvas_id 承接）
+            //   3. 把既存 canvas_projects.folder_id 数据搬到 drama_episodes（自动建空 episode 1）
+            //   4. drama_projects.outline 保留作「项目总纲」字段（与 episodes.synopsis 区分粒度）
+            this.createDramaEpisodesTable();
+            this.migrateV6FolderIdToV7Episodes();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (7, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 8) {
+            // v7 已可能在旧服务进程中执行：补清 data_json.folderId，并把 episode 外键/唯一约束统一到最终模型。
+            this.migrateV7ToV8EpisodeConstraints();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (8, ?)").run(new Date().toISOString());
+        }
     }
 
     /**
@@ -413,6 +456,157 @@ export class BackendDatabase {
     }
 
     /**
+     * v7 migration: 新表 drama_episodes（episode_number / title / synopsis / canvas_id 1:1 可空）。
+     * 列在 CREATE TABLE 里已预声明（新建库直接生效）；老库由 v7 migration 兜底。
+     * UNIQUE(drama_id, episode_number) 防重；两个索引加速按剧目/按画布反查。
+     */
+    private createDramaEpisodesTable() {
+        const epExists = (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='drama_episodes'").get() as { name?: string } | undefined)?.name;
+        if (!epExists) {
+            this.db.exec(`CREATE TABLE drama_episodes (
+                id TEXT PRIMARY KEY,
+                drama_id TEXT NOT NULL REFERENCES drama_projects(folder_id) ON DELETE CASCADE,
+                episode_number INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                synopsis TEXT NOT NULL DEFAULT '',
+                canvas_id TEXT REFERENCES canvas_projects(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(drama_id, episode_number),
+                UNIQUE(canvas_id)
+            )`);
+        }
+        this.db.exec("CREATE INDEX IF NOT EXISTS drama_episodes_drama_id ON drama_episodes(drama_id)");
+        this.db.exec("CREATE INDEX IF NOT EXISTS drama_episodes_canvas_id ON drama_episodes(canvas_id)");
+        const epCount = (this.db.prepare("SELECT COUNT(*) AS n FROM drama_episodes").get() as { n: number }).n;
+        console.log(`[migrate v7] drama_episodes ready (${epCount} episode(s))`);
+    }
+
+    /**
+     * v7 migration: 把 v6 时代 canvas_projects.folder_id 的存量关系搬到 drama_episodes。
+     * 规则：
+     // 每对（drama, canvas）自动建一个空 episode 1（占位，待用户填标题/分集剧情）。
+     // 同一 drama 下若已有 episode 1 且 canvas_id 未占，则新挂 canvas；
+     // 已有 canvas_id 重复则跳过（防冲突）。
+     // 每个 drama 即使没有任何 canvas，也建一个空 episode 1 占位。
+     */
+    private migrateV6FolderIdToV7Episodes() {
+        // 列是否存在
+        const cols = this.db.prepare("PRAGMA table_info(canvas_projects)").all() as Array<{ name: string }>;
+        const hasFolderId = cols.some((c) => c.name === "folder_id");
+        let migrated = 0;
+        if (hasFolderId) {
+            // 读 v6 时代所有 folder_id → canvas 映射
+            const rows = this.db.prepare("SELECT p.id, p.folder_id FROM canvas_projects p INNER JOIN drama_projects d ON d.folder_id = p.folder_id WHERE p.folder_id IS NOT NULL").all() as Array<{ id: string; folder_id: string }>;
+            for (const row of rows) {
+                this.upsertDramaEpisode({
+                    dramaId: row.folder_id,
+                    episodeNumber: 1,
+                    title: "",
+                    synopsis: "",
+                    canvasId: row.id,
+                });
+                migrated++;
+            }
+            // 同步清理 v6 写入 data_json 的冗余 folderId，避免画布读接口继续泄露旧直属关系。
+            const projects = this.db.prepare("SELECT id, data_json FROM canvas_projects").all() as Array<{ id: string; data_json: string }>;
+            const updateProject = this.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?");
+            for (const row of projects) {
+                let project: unknown;
+                try { project = JSON.parse(row.data_json); } catch { continue; }
+                if (!project || typeof project !== "object" || !("folderId" in project)) continue;
+                delete (project as Record<string, unknown>).folderId;
+                updateProject.run(JSON.stringify(project), row.id);
+            }
+            // 删列（ALTER TABLE DROP COLUMN 是 SQLite 3.35+ 才有；走重建表最稳）
+            this.db.exec("PRAGMA foreign_keys=OFF");
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE canvas_projects_new (
+                    id TEXT PRIMARY KEY,
+                    data_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )`);
+                this.db.exec("INSERT INTO canvas_projects_new (id, data_json, updated_at) SELECT id, data_json, updated_at FROM canvas_projects");
+                this.db.exec("DROP TABLE canvas_projects");
+                this.db.exec("ALTER TABLE canvas_projects_new RENAME TO canvas_projects");
+                this.db.exec("COMMIT");
+            } catch (error) {
+                this.db.exec("ROLLBACK");
+                throw error;
+            } finally {
+                this.db.exec("PRAGMA foreign_keys=ON");
+            }
+        }
+        // 给所有没建过 episode 的 drama 也建一个空 episode 1 占位
+        const dramasWithoutEpisode = this.db.prepare(
+            "SELECT d.folder_id AS id FROM drama_projects d LEFT JOIN drama_episodes e ON e.drama_id = d.folder_id WHERE e.id IS NULL"
+        ).all() as Array<{ id: string }>;
+        for (const d of dramasWithoutEpisode) {
+            this.upsertDramaEpisode({
+                dramaId: d.id,
+                episodeNumber: 1,
+                title: "",
+                synopsis: "",
+                canvasId: null,
+            });
+            migrated++;
+        }
+        console.log(`[migrate v7] migrated ${migrated} episode(s)`);
+    }
+
+    /** v8：修复已执行 v7 的旧进程留下的关系残留，保持迁移可重复执行。 */
+    private migrateV7ToV8EpisodeConstraints() {
+        const invalid = this.db.prepare(
+            "SELECT e.id, e.drama_id FROM drama_episodes e LEFT JOIN drama_projects d ON d.folder_id = e.drama_id WHERE d.folder_id IS NULL"
+        ).all() as Array<{ id: string; drama_id: string }>;
+        if (invalid.length) throw new Error(`drama_episodes 存在不属于剧目的记录: ${invalid.map((row) => row.id).join(", ")}`);
+        const duplicateCanvas = this.db.prepare(
+            "SELECT canvas_id FROM drama_episodes WHERE canvas_id IS NOT NULL GROUP BY canvas_id HAVING COUNT(*) > 1"
+        ).all() as Array<{ canvas_id: string }>;
+        if (duplicateCanvas.length) throw new Error(`同一画布被多个分集绑定: ${duplicateCanvas.map((row) => row.canvas_id).join(", ")}`);
+
+        this.db.exec("PRAGMA foreign_keys=OFF");
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const projects = this.db.prepare("SELECT id, data_json FROM canvas_projects").all() as Array<{ id: string; data_json: string }>;
+            const updateProject = this.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?");
+            for (const row of projects) {
+                let project: unknown;
+                try { project = JSON.parse(row.data_json); } catch { continue; }
+                if (!project || typeof project !== "object" || !("folderId" in project)) continue;
+                delete (project as Record<string, unknown>).folderId;
+                updateProject.run(JSON.stringify(project), row.id);
+            }
+
+            this.db.exec(`CREATE TABLE drama_episodes_v8 (
+                id TEXT PRIMARY KEY,
+                drama_id TEXT NOT NULL REFERENCES drama_projects(folder_id) ON DELETE CASCADE,
+                episode_number INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                synopsis TEXT NOT NULL DEFAULT '',
+                canvas_id TEXT REFERENCES canvas_projects(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(drama_id, episode_number),
+                UNIQUE(canvas_id)
+            )`);
+            this.db.exec("INSERT INTO drama_episodes_v8 SELECT id, drama_id, episode_number, title, synopsis, canvas_id, created_at, updated_at FROM drama_episodes");
+            this.db.exec("DROP TABLE drama_episodes");
+            this.db.exec("ALTER TABLE drama_episodes_v8 RENAME TO drama_episodes");
+            this.db.exec("CREATE INDEX drama_episodes_drama_id ON drama_episodes(drama_id)");
+            this.db.exec("CREATE INDEX drama_episodes_canvas_id ON drama_episodes(canvas_id)");
+            this.db.exec("COMMIT");
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        } finally {
+            this.db.exec("PRAGMA foreign_keys=ON");
+        }
+        console.log("[migrate v8] cleaned legacy canvas folder fields and normalized episode constraints");
+    }
+
+    /**
      * v6 migration: 给老 canvas_projects 加 folder_id 列 + 索引。
      * 列在 CREATE TABLE 里已经预声明（新建库直接生效）；老库用 ALTER TABLE 兜底。
      * ON DELETE SET NULL：删剧目时画布自动掉到"未编排场景"分类，不级联删画布。
@@ -467,31 +661,9 @@ export class BackendDatabase {
 
     // ── canvas_projects ───────────────────────────────────────────────────
 
-    listCanvasProjects(filter?: { folderId?: string | null }): CanvasProject[] {
-        // 按 folderId 过滤时走列上索引（不取 summary，全量 JSON）。
-        // folderId === null → 显式只取未挂剧目的画布；
-        // folderId === undefined → 不过滤；
-        // 字符串则严格相等（caller 负责把空字符串规范成 null 或单值）。
-        if (filter && "folderId" in filter) {
-            if (filter.folderId === null) {
-                const rows = this.db.prepare("SELECT data_json FROM canvas_projects WHERE folder_id IS NULL ORDER BY updated_at DESC").all() as Array<{ data_json: string }>;
-                return rows.flatMap((row) => {
-                    try {
-                        const value = JSON.parse(row.data_json) as CanvasProject;
-                        return value && typeof value === "object" && value.id ? [value] : [];
-                    } catch { return []; }
-                });
-            }
-            const target = String(filter.folderId || "").trim();
-            if (!target) return [];
-            const rows = this.db.prepare("SELECT data_json FROM canvas_projects WHERE folder_id = ? ORDER BY updated_at DESC").all(target) as Array<{ data_json: string }>;
-            return rows.flatMap((row) => {
-                try {
-                    const value = JSON.parse(row.data_json) as CanvasProject;
-                    return value && typeof value === "object" && value.id ? [value] : [];
-                } catch { return []; }
-            });
-        }
+    listCanvasProjects(): CanvasProject[] {
+        // v7 后画布不再有 folder_id 列；关系由 drama_episodes.canvas_id 承接。
+        // 按 episode 过滤用 listCanvasProjectsByEpisode（canvas-agent / REST 那边）。
         const rows = this.db.prepare("SELECT data_json FROM canvas_projects ORDER BY updated_at DESC").all() as Array<{ data_json: string }>;
         return rows.flatMap((row) => {
             try {
@@ -501,27 +673,48 @@ export class BackendDatabase {
         });
     }
 
-    listCanvasProjectSummaries(filter?: { folderId?: string | null; id?: string }): CanvasProject[] {
-        // 走 folder_id 列索引，不依赖 data_json 内部字段。
-        // null → 未挂剧目；string → 严格相等；undefined + id? → 仅按 id 过滤。
-        const where: string[] = [];
-        const params: Array<string | null> = [];
-        if (filter && "folderId" in filter) {
-            if (filter.folderId === null) {
-                where.push("folder_id IS NULL");
-            } else {
-                const target = String(filter.folderId || "").trim();
-                if (!target) return [];
-                where.push("folder_id = ?");
-                params.push(target);
-            }
+    listCanvasProjectsByEpisode(episodeId: string): CanvasProject[] {
+        const ep = this.getDramaEpisode(episodeId);
+        if (!ep || !ep.canvasId) return [];
+        const proj = this.getCanvasProject(ep.canvasId);
+        return proj ? [proj] : [];
+    }
+
+    listCanvasProjectsByDrama(dramaId: string): Array<{ episode: DramaEpisode; canvas: CanvasProject | null }> {
+        const episodes = this.listDramaEpisodes(dramaId);
+        return episodes.map((episode) => ({
+            episode,
+            canvas: episode.canvasId ? this.getCanvasProject(episode.canvasId) : null,
+        }));
+    }
+
+    listCanvasProjectSummaries(filter?: { episodeId?: string; id?: string }): CanvasProject[] {
+        // v7: 画布表无 folder_id 列，按 episode 过滤走 listCanvasProjectsByEpisode 路径。
+        // 这里保留纯 id 过滤（web /drama 页按画布 ID 查摘要时用）。
+        if (filter?.episodeId) {
+            const ep = this.getDramaEpisode(filter.episodeId);
+            if (!ep?.canvasId) return [];
+            const proj = this.getCanvasProject(ep.canvasId);
+            if (!proj) return [];
+            return [{
+                id: proj.id,
+                title: String((proj as Record<string, unknown>).title || ""),
+                episodeId: ep.id,
+                dramaId: ep.dramaId,
+                updatedAt: String((proj as Record<string, unknown>).updatedAt || ""),
+                revision: Number((proj as Record<string, unknown>).revision || 0),
+                nodeCount: Array.isArray((proj as Record<string, unknown>).nodes) ? ((proj as unknown as { nodes: unknown[] }).nodes.length) : 0,
+                connectionCount: Array.isArray((proj as Record<string, unknown>).connections) ? ((proj as unknown as { connections: unknown[] }).connections.length) : 0,
+            } as unknown as CanvasProject];
         }
+        const where: string[] = [];
+        const params: Array<string> = [];
         if (filter?.id) {
             where.push("id = ?");
             params.push(filter.id);
         }
         const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-        return this.db.prepare(`SELECT id, folder_id AS folderId, updated_at AS updatedAt,
+        return this.db.prepare(`SELECT id, updated_at AS updatedAt,
             json_extract(data_json, '$.title') AS title,
             json_extract(data_json, '$.createdAt') AS createdAt,
             COALESCE(json_extract(data_json, '$.revision'), 0) AS revision,
@@ -541,13 +734,12 @@ export class BackendDatabase {
         // 客户端可能持有旧的全量画布快照；不能让它覆盖 MCP 刚写入的节点状态。
         if (current && Date.parse(String(current.updatedAt || "")) > Date.parse(updatedAt)) return current;
         project.revision = Math.max(currentRevision, incomingRevision);
-        // folderId 双写：data_json 保留冗余字段（前端 /drama 页面与外部 schema 已经在用），
-        // folder_id 列作为权威查询索引（带 ON DELETE SET NULL）。null/空字符串都规范化为 NULL。
-        const folderIdRaw = typeof project.folderId === "string" ? project.folderId.trim() : "";
-        const folderId = folderIdRaw || null;
+        // v7: 画布表已删 folder_id 列；画布与剧目/分集的关系由 drama_episodes.canvas_id 承载。
+        const persistedProject = structuredClone(project) as Record<string, unknown>;
+        delete persistedProject.folderId;
         this.db.prepare(
-            "INSERT INTO canvas_projects (id, data_json, folder_id, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, folder_id = excluded.folder_id, updated_at = excluded.updated_at"
-        ).run(project.id, JSON.stringify(project), folderId, updatedAt);
+            "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
+        ).run(project.id, JSON.stringify(persistedProject), updatedAt);
         return this.getCanvasProject(project.id)!;
     }
 
@@ -772,13 +964,9 @@ export class BackendDatabase {
         this.db.exec("BEGIN IMMEDIATE");
         try {
             this.db.prepare("DELETE FROM canvas_projects").run();
-            const insert = this.db.prepare("INSERT INTO canvas_projects (id, data_json, folder_id, updated_at) VALUES (?, ?, ?, ?)");
+            const insert = this.db.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)");
             for (const project of projects) {
-                if (project.id) {
-                    const folderIdRaw = typeof project.folderId === "string" ? project.folderId.trim() : "";
-                    const folderId = folderIdRaw || null;
-                    insert.run(project.id, JSON.stringify(project), folderId, String(project.updatedAt || now));
-                }
+                if (project.id) insert.run(project.id, JSON.stringify(project), String(project.updatedAt || now));
             }
             this.db.exec("COMMIT");
         } catch (error) {
@@ -827,21 +1015,89 @@ export class BackendDatabase {
         return { ...folder, updatedAt, outline: String(folder.outline || ""), description: String(folder.description || ""), coverStorageKey: folder.coverStorageKey || null, tags };
     }
 
+    // ── drama_episodes ───────────────────────────────────────────
+    // episode 主键是 id（nanoid），drama_id + episode_number 唯一。
+    // upsertDramaEpisode 接受传入的 episode 对象，若 id 未填则随机生成；
+    // 同 (drama_id, episode_number) 已存在时按 id 替换（保留原 id）。
+    upsertDramaEpisode(input: { id?: string; dramaId: string; episodeNumber: number; title: string; synopsis: string; canvasId?: string | null }): DramaEpisode {
+        const now = new Date().toISOString();
+        const id = input.id || `episode-${input.dramaId}-${input.episodeNumber}-${Math.random().toString(36).slice(2, 8)}`;
+        const existing = this.getDramaEpisodeByNumber(input.dramaId, input.episodeNumber);
+        const createdAt = existing?.createdAt || now;
+        const canvasId = input.canvasId ?? null;
+        if (existing) {
+            this.db.prepare(
+                "UPDATE drama_episodes SET title=?, synopsis=?, canvas_id=?, updated_at=? WHERE id=?"
+            ).run(input.title, input.synopsis, canvasId, now, existing.id);
+            return this.getDramaEpisode(existing.id)!;
+        }
+        this.db.prepare(
+            "INSERT INTO drama_episodes (id, drama_id, episode_number, title, synopsis, canvas_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        ).run(id, input.dramaId, input.episodeNumber, input.title, input.synopsis, canvasId, createdAt, now);
+        return this.getDramaEpisode(id)!;
+    }
+
+    updateDramaEpisode(id: string, patch: { episodeNumber?: number; title?: string; synopsis?: string; canvasId?: string | null }): DramaEpisode | null {
+        const existing = this.getDramaEpisode(id);
+        if (!existing) return null;
+        const nextNumber = patch.episodeNumber ?? existing.episodeNumber;
+        const nextTitle = patch.title ?? existing.title;
+        const nextSynopsis = patch.synopsis ?? existing.synopsis;
+        const nextCanvasId = patch.canvasId === undefined ? existing.canvasId : patch.canvasId;
+        const conflict = this.getDramaEpisodeByNumber(existing.dramaId, nextNumber);
+        if (conflict && conflict.id !== id) throw new Error(`分集编号已存在: ${existing.dramaId}/${nextNumber}`);
+        if (nextCanvasId) {
+            const canvasConflict = this.getDramaEpisodeByCanvasId(nextCanvasId);
+            if (canvasConflict && canvasConflict.id !== id) throw new Error(`画布已绑定到分集: ${canvasConflict.id}`);
+        }
+        this.db.prepare(
+            "UPDATE drama_episodes SET episode_number=?, title=?, synopsis=?, canvas_id=?, updated_at=? WHERE id=?"
+        ).run(nextNumber, nextTitle, nextSynopsis, nextCanvasId, new Date().toISOString(), id);
+        return this.getDramaEpisode(id);
+    }
+
+    getDramaEpisode(id: string): DramaEpisode | null {
+        const row = this.db.prepare("SELECT * FROM drama_episodes WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+        return row ? this.mapDramaEpisodeRow(row) : null;
+    }
+
+    getDramaEpisodeByNumber(dramaId: string, episodeNumber: number): DramaEpisode | null {
+        const row = this.db.prepare("SELECT * FROM drama_episodes WHERE drama_id = ? AND episode_number = ?").get(dramaId, episodeNumber) as Record<string, unknown> | undefined;
+        return row ? this.mapDramaEpisodeRow(row) : null;
+    }
+
+    getDramaEpisodeByCanvasId(canvasId: string): DramaEpisode | null {
+        const row = this.db.prepare("SELECT * FROM drama_episodes WHERE canvas_id = ?").get(canvasId) as Record<string, unknown> | undefined;
+        return row ? this.mapDramaEpisodeRow(row) : null;
+    }
+
+    listDramaEpisodes(dramaId: string): DramaEpisode[] {
+        const rows = this.db.prepare("SELECT * FROM drama_episodes WHERE drama_id = ? ORDER BY episode_number ASC").all(dramaId) as Array<Record<string, unknown>>;
+        return rows.map((row) => this.mapDramaEpisodeRow(row));
+    }
+
+    deleteDramaEpisode(id: string): number {
+        return Number(this.db.prepare("DELETE FROM drama_episodes WHERE id = ?").run(id).changes);
+    }
+
+    private mapDramaEpisodeRow(row: Record<string, unknown>): DramaEpisode {
+        return {
+            id: String(row.id),
+            dramaId: String(row.drama_id),
+            episodeNumber: Number(row.episode_number),
+            title: String(row.title || ""),
+            synopsis: String(row.synopsis || ""),
+            canvasId: row.canvas_id ? String(row.canvas_id) : null,
+            createdAt: String(row.created_at),
+            updatedAt: String(row.updated_at),
+        };
+    }
+
     deleteCanvasFolder(id: string): number {
+        // v7: ON DELETE CASCADE 由 drama_episodes（drama_id）和 drama_projects（folder_id）链式删除；
+        // canvas_projects 表无 folder_id 列，删除画布关联由 caller 决定（drama_episodes.canvas_id 是 SET NULL）。
         this.db.exec("BEGIN IMMEDIATE");
         try {
-            // folder_id 列由 ON DELETE SET NULL 自动清零；data_json 里的冗余字段也要同步删，
-            // 否则前端再读时还会看到 stale folderId（虽然 list 已经按列过滤了，但 getCanvasProject
-            // 直接反序列化 data_json，没有抹这一步就会泄露）。
-            const projects = this.listCanvasProjects();
-            const update = this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?");
-            const now = new Date().toISOString();
-            for (const project of projects) {
-                if (String(project.folderId || "") !== id) continue;
-                const next = { ...project };
-                delete next.folderId;
-                update.run(JSON.stringify(next), now, project.id);
-            }
             const deleted = Number(this.db.prepare("DELETE FROM canvas_folders WHERE id = ?").run(id).changes);
             this.db.exec("COMMIT");
             return deleted;

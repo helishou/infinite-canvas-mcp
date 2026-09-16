@@ -235,6 +235,14 @@ export type PluginStorage = {
 };
 
 export type CanvasAssetPickerImage = { kind: "image"; dataUrl: string; title: string; storageKey?: string };
+export type CanvasReferenceAsset = { id: string; label: string; mediaType: "image" | "video" | "audio"; role: string; tags: string[]; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string; subjectId?: string; analysis?: Record<string, unknown> };
+export type CanvasReferenceValidation = { semanticPrompt: string; compiledPrompt: string; bindings: Array<Record<string, unknown>>; references: Array<Record<string, unknown>>; issues: Array<{ severity: "error" | "warning"; code: string; message: string; bindingId?: string }>; migratedLegacyRefs: boolean };
+export type CanvasReferenceService = {
+    list: () => Promise<CanvasReferenceAsset[]>;
+    upsert: (asset: Partial<CanvasReferenceAsset> & { label: string }) => Promise<CanvasReferenceAsset>;
+    remove: (assetId: string) => Promise<void>;
+    validate: (nodeId: string, segmentId: string) => Promise<CanvasReferenceValidation>;
+};
 
 export type CanvasGenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 export type CanvasGenerationLog = {
@@ -269,12 +277,14 @@ export type CanvasNodeContext = {
     getDownstream: () => CanvasNodeData[];
     // 画布操作(复用 Agent 指令集)
     applyOps: (ops: CanvasAgentOp[]) => void;
+    flush: () => Promise<void>;
     // 节点间/插件间通信
     emit: (event: string, payload?: unknown) => void;
     on: (event: string, handler: (payload: unknown) => void) => () => void;
     // AI 生成能力(生图/生视频/生文本),复用宿主模型配置
     ai: CanvasPluginAi;
     h3Defaults: CanvasH3Defaults;
+    references: CanvasReferenceService;
     // 打开/关闭本节点下方的自定义 Panel(需在节点定义里提供 Panel)
     openPanel: () => void;
     closePanel: () => void;

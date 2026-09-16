@@ -5,7 +5,7 @@ const recordSchema = z.record(z.unknown()).describe(
 );
 const canvasProjectSchema = z.object({
     projectId: z.string().optional().describe(
-        "画布 ID（folder id），不传则作用于当前 activeProject。若当前无活动画布且不传此参数，工具会报错。"
+        "画布 ID，不传则作用于当前 activeProject。若当前无活动画布且不传此参数，工具会报错。"
     ),
 });
 const positionSchema = z.object({
@@ -61,6 +61,11 @@ export const toolNames = [
     "prompts_search",
     "assets_list",
     "assets_add",
+    "drama_list_episodes",
+    "drama_get_episode",
+    "drama_create_episode",
+    "drama_update_episode",
+    "drama_delete_episode",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 
@@ -159,7 +164,7 @@ export const toolInputSchemas = {
     }),
     canvas_list_projects: canvasProjectSchema.extend({
         keyword: z.string().optional().describe("按标题模糊搜索"),
-        folderId: z.string().nullable().optional().describe("可选剧目文件夹 ID 过滤；不传 = 全部；显式传 null 或空字符串 = 只取未挂剧目的画布；传具体 ID = 只取该剧目下的画布"),
+        episodeId: z.string().optional().describe("可选分集 ID 过滤；不传 = 全部。画布通过分集绑定，不再直接传剧目 ID"),
         page: z.number().optional().describe("页码，从 1 开始；默认 1"),
         pageSize: z.number().optional().describe("每页数量，默认 20，最大 100"),
     }),
@@ -344,6 +349,29 @@ export const toolInputSchemas = {
         source: z.string().optional().describe("素材来源说明"),
         note: z.string().optional().describe("备注"),
     }),
+    drama_list_episodes: z.object({
+        dramaId: z.string().min(1).describe("剧目 ID；来自 drama_create_project 返回的 folder.id"),
+    }),
+    drama_get_episode: z.object({
+        episodeId: z.string().min(1).describe("分集 ID"),
+    }),
+    drama_create_episode: z.object({
+        dramaId: z.string().min(1).describe("剧目 ID；来自 drama_create_project 返回的 folder.id"),
+        episodeNumber: z.number().int().min(1).describe("分集编号，从 1 开始；同一剧目不可重复"),
+        title: z.string().optional().describe("分集标题；不传时默认「第 N 集」"),
+        synopsis: z.string().optional().describe("分集剧情/梗概，独立保存于分集实体"),
+        canvasId: z.string().nullable().optional().describe("绑定的画布 ID；不传或 null 表示暂不绑定；一画布只能绑定一集"),
+    }),
+    drama_update_episode: z.object({
+        episodeId: z.string().min(1).describe("分集 ID"),
+        episodeNumber: z.number().int().min(1).optional().describe("新的分集编号"),
+        title: z.string().optional().describe("新的分集标题"),
+        synopsis: z.string().optional().describe("新的分集剧情/梗概"),
+        canvasId: z.string().nullable().optional().describe("新的画布 ID；传 null 解除绑定"),
+    }),
+    drama_delete_episode: z.object({
+        episodeId: z.string().min(1).describe("分集 ID；删除分集不会删除绑定画布"),
+    }),
 } satisfies Record<ToolName, z.AnyZodObject>;
 
 export const toolDescriptions: Record<ToolName, string> = {
@@ -387,4 +415,9 @@ export const toolDescriptions: Record<ToolName, string> = {
     prompts_search: "搜索提示词库（第三方提示词合集），支持 keyword、category、tags 过滤和 page/pageSize 分页，返回标题、提示词、分类、标签、封面等。tags 传 string 数组，例如 ['古风','人物']。",
     assets_list: "列出用户「我的素材」，支持 kind（text/image/video）过滤、keyword 搜索和 page/pageSize 分页。为控制体积不返回图片/视频原始 data，仅返回封面与元信息。",
     assets_add: "向「我的素材」新增素材。kind=text 时用 content 传文本内容；kind=image 时用 imageUrl 传图片地址或 dataURL。可附带 title、tags、source、note。例：{ kind: 'text', title: '婚书未烬·人物小传', content: '沈昭宁...', tags: ['角色','短剧'] }",
+    drama_list_episodes: "列出一个剧目的全部分集，按 episodeNumber 升序返回；每项含标题、剧情和绑定画布 ID。",
+    drama_get_episode: "读取单个分集的完整字段，并返回其绑定画布；未绑定画布时 canvas 为 null。",
+    drama_create_episode: "创建剧目下的一集。分集是剧目与画布之间的实体，剧情独立保存；可选绑定一个已有画布。",
+    drama_update_episode: "更新分集字段或更换绑定画布。传 canvasId=null 可解除绑定，不会删除画布或分集剧情。",
+    drama_delete_episode: "删除分集记录；不会删除其绑定的画布，画布会变成独立资产。",
 };

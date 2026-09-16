@@ -38,7 +38,7 @@ export function H3CharacterRefModal({
         okText="应用到当前 Clip"
         cancelText="取消"
         width={520}
-        destroyOnClose
+        destroyOnHidden
     >
         <div style={{ display: "flex", flexDirection: "column", gap: 16, paddingTop: 8 }}>
             <div>

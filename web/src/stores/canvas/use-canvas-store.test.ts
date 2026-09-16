@@ -280,3 +280,17 @@ test("Backend 差量事件支持 metadata 删除和 H3 单段回放", () => {
     assert.equal(baseMetadata.status, "loading");
     assert.equal(baseMetadata.segments?.[0]?.prompt, "原文");
 });
+
+test("Backend 差量事件增删项目参考资产时不改节点布局", () => {
+    const base = makeProject([{ id: "node-1", type: "image", title: "人物", position: { x: 120, y: 80 }, width: 320, height: 240, metadata: {} } as any], { revision: 2 });
+    const added = applyBackendCanvasDelta(base, [{
+        type: "upsert_reference_asset",
+        asset: { id: "asset-1", label: "苏晚形象", mediaType: "image", role: "character_identity", tags: ["苏晚"], storageKey: "image:asset-1" },
+    }], 3);
+    const removed = applyBackendCanvasDelta(added, [{ type: "delete_reference_asset", assetId: "asset-1" }], 4);
+
+    assert.equal(added.nodes[0].position.x, 120);
+    assert.equal(added.nodes[0].position.y, 80);
+    assert.equal(added.referenceCatalog?.[0]?.id, "asset-1");
+    assert.deepEqual(removed.referenceCatalog, []);
+});

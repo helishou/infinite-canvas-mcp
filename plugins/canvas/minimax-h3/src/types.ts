@@ -1,4 +1,6 @@
-export type H3ReferenceRole = "character_turnaround" | "storyboard" | "scene" | "motion_reference" | "audio_reference" | "character_voice";
+export type H3ReferenceRole = "character_identity" | "character_turnaround" | "storyboard" | "scene" | "blocking" | "keyframe" | "motion_reference" | "audio_reference" | "character_voice" | "style" | "palette" | "prop" | "other";
+export type H3ReferenceUsage = "reference" | "first_frame" | "last_frame";
+export type H3ReferenceBinding = { id: string; assetId: string; label: string; role: H3ReferenceRole; tags: string[]; enabled: boolean; usage: H3ReferenceUsage; subjectId?: string; mediaType?: "image" | "video" | "audio"; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string };
 
 export type H3CharacterOutfit = {
     id: string;
@@ -26,7 +28,7 @@ export type H3CharacterGroup = {
     voiceEnabled: boolean;
 };
 
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; order?: number; groupId?: string; outfitId?: string };
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; enabled?: boolean; usage?: H3ReferenceUsage };
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
@@ -199,6 +201,7 @@ export type H3Segment = {
     referenceLongEdge?: number;
     refs?: { image?: H3Ref[]; video?: H3Ref[]; audio?: H3Ref[] };
     refItems?: H3Ref[];
+    referenceBindings?: H3ReferenceBinding[];
     h3CharacterGroups?: Record<string, H3CharacterGroup>;
     aspectRatio?: string;
     megapixels?: number;

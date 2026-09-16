@@ -124,6 +124,37 @@ export function deleteBackendCanvasFolder(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/folders/${encodeURIComponent(id)}`);
 }
 
+export type DramaEpisode = {
+    id: string;
+    dramaId: string;
+    episodeNumber: number;
+    title: string;
+    synopsis: string;
+    canvasId: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+
+export function fetchBackendDramaEpisodes(dramaId: string) {
+    return request<{ ok: boolean; dramaId: string; episodes?: DramaEpisode[] }>("GET", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`);
+}
+
+export function fetchBackendDramaEpisode(episodeId: string) {
+    return request<{ ok: boolean; episode?: DramaEpisode; canvas?: Record<string, unknown> | null }>("GET", `/drama/episodes/${encodeURIComponent(episodeId)}`);
+}
+
+export function createBackendDramaEpisode(dramaId: string, input: { episodeNumber: number; title?: string; synopsis?: string; canvasId?: string | null }) {
+    return request<{ ok: boolean; episode?: DramaEpisode }>("POST", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`, input);
+}
+
+export function updateBackendDramaEpisode(episodeId: string, patch: Partial<Pick<DramaEpisode, "episodeNumber" | "title" | "synopsis" | "canvasId">>) {
+    return request<{ ok: boolean; episode?: DramaEpisode; canvas?: Record<string, unknown> | null }>("PATCH", `/drama/episodes/${encodeURIComponent(episodeId)}`, patch);
+}
+
+export function deleteBackendDramaEpisode(episodeId: string) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/episodes/${encodeURIComponent(episodeId)}`);
+}
+
 export function saveBackendProjects(projects: Record<string, unknown>[]) {
     return request<{ ok: boolean; projects?: Record<string, unknown>[] }>("PUT", "/canvas/projects", { projects });
 }
@@ -140,6 +171,22 @@ export function applyBackendCanvasOperations(projectId: string, operations: Arra
 
 export function deleteBackendProject(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/projects/${encodeURIComponent(id)}`);
+}
+
+export function fetchProjectReferenceAssets(projectId: string) {
+    return request<{ ok: boolean; assets: import("@/types/canvas-plugin").CanvasReferenceAsset[] }>("GET", `/canvas/projects/${encodeURIComponent(projectId)}/reference-assets`);
+}
+
+export function upsertProjectReferenceAsset(projectId: string, asset: Record<string, unknown>) {
+    return request<{ ok: boolean; asset: import("@/types/canvas-plugin").CanvasReferenceAsset }>("POST", `/canvas/projects/${encodeURIComponent(projectId)}/reference-assets`, asset);
+}
+
+export function deleteProjectReferenceAsset(projectId: string, assetId: string) {
+    return request<{ ok: boolean; deleted: number }>("DELETE", `/canvas/projects/${encodeURIComponent(projectId)}/reference-assets/${encodeURIComponent(assetId)}`);
+}
+
+export function validateProjectReferences(projectId: string, nodeId: string, segmentId: string) {
+    return request<{ ok: boolean; validation: import("@/types/canvas-plugin").CanvasReferenceValidation }>("POST", `/canvas/projects/${encodeURIComponent(projectId)}/reference-validation`, { nodeId, segmentId });
 }
 
 export type DetectImageSplitLineInsetResult = {
@@ -202,6 +249,10 @@ export function fetchBackendInstalledPlugins() {
 
 export function saveBackendInstalledPlugins(plugins: InstalledPluginRecord[]) {
     return request<{ ok: boolean; plugins?: InstalledPluginRecord[] }>("PUT", "/plugins/installed", { plugins });
+}
+
+export function saveBackendPluginMcpDeclarations(declarations: Array<Record<string, unknown>>) {
+    return request<{ ok: boolean; declarations?: Array<Record<string, unknown>> }>("PUT", "/plugins/mcp", { declarations });
 }
 
 export function getBackendPluginStorage<T = unknown>(pluginId: string, key: string) {

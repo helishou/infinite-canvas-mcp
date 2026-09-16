@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { needsViewportCull, VIEWPORT_CULL_SCREEN_MARGIN, VIEWPORT_CULL_ZOOM_RATIO, VIEWPORT_RENDER_SCREEN_PADDING, viewportRenderPadding } from "./canvas-viewport";
+import { needsViewportCull, normalizeViewportTransform, VIEWPORT_CULL_SCREEN_MARGIN, VIEWPORT_CULL_ZOOM_RATIO, VIEWPORT_RENDER_SCREEN_PADDING, viewportRenderPadding } from "./canvas-viewport";
 
 const at = (x: number, y: number, k = 1) => ({ x, y, k });
+
+test("旧 zoom 视口自动迁移为 k，非法坐标不得进入渲染与持久化", () => {
+    assert.deepEqual(normalizeViewportTransform({ x: 120, y: -40, zoom: 0.9 }), { x: 120, y: -40, k: 0.9 });
+    assert.deepEqual(normalizeViewportTransform({ x: Number.NaN, y: Number.POSITIVE_INFINITY, k: 0.9 }), { x: 0, y: 0, k: 0.9 });
+    assert.deepEqual(normalizeViewportTransform({ x: null, y: undefined, k: 0 }), { x: 0, y: 0, k: 1 });
+});
 
 test("小幅移动不触发重算：拖动期间绝大多数帧应该零 React 渲染", () => {
     assert.equal(needsViewportCull(at(0, 0), at(40, 30)), false);

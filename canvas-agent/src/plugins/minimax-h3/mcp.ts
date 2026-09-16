@@ -1,5 +1,6 @@
 import type { AgentCanvasNode, McpToolHandler, PluginMcpContext, PluginMcpModule, PluginMcpToolWire } from "../../server/plugin-mcp.js";
 import { normalizeH3GenerationSettings, normalizePlannedSegment, validateVideoPlan, type H3PlannedSegment } from "./video-plan.js";
+import { compileReferenceSubmission, inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf } from "../../canvas/reference-contract.js";
 
 // H3 片段(节点 metadata.segments 中的元素)
 type H3Segment = Record<string, unknown>;
@@ -150,6 +151,11 @@ const TOOLS: PluginMcpToolWire[] = [
             required: ["projectId"],
         },
     },
+    { id: "canvas_list_reference_assets", version: "1.0.0", name: "列出项目参考资产", description: "列出项目级参考资产库及其主要职责、标签和媒体句柄。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" } }, required: ["projectId"] } },
+    { id: "canvas_update_reference_asset", version: "1.0.0", name: "更新项目参考资产", description: "新增或更新项目参考资产；职责只保存一个 primary role，补充语义放 tags。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, asset: { type: "object" } }, required: ["projectId", "asset"] } },
+    { id: "canvas_analyze_reference_asset", version: "1.0.0", name: "记录参考资产分析", description: "把模型对参考素材的职责、标签和摘要写入项目资产；调用方应先实际查看素材再提交分析。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, assetId: { type: "string" }, role: { type: "string" }, tags: { type: "array", items: { type: "string" } }, summary: { type: "string" }, model: { type: "string" } }, required: ["projectId", "assetId", "role", "tags", "summary"] } },
+    { id: "h3_set_reference_bindings", version: "1.0.0", name: "设置 Clip 参考绑定", description: "按稳定 binding id 原子替换指定 Clip 的参考绑定，不修改节点位置或运行状态。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, bindings: { type: "array", items: { type: "object" } }, expectedBindings: { type: "array", items: { type: "object" } } }, required: ["projectId", "nodeId", "segmentId", "bindings"] } },
+    { id: "canvas_validate_generation", version: "1.0.0", name: "生成预检", description: "使用与 Backend 实际提交相同的编译器预检语义提示词、参考顺序、模式上限和缺失媒体。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] } },
 ];
 
 function segmentsOf(node: AgentCanvasNode): H3Segment[] {
@@ -218,6 +224,73 @@ export const pluginMcp: PluginMcpModule = {
                 return { defaults: await context.backend.setH3Defaults(normalizeH3GenerationSettings(settings)) };
             },
             h3_reset_defaults: async () => { await context.backend.resetH3Defaults(); return { ok: true, defaults: null }; },
+            canvas_list_reference_assets: async (input) => {
+                const projectId = String(input.projectId || "");
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                if (!project) throw new Error(`画布不存在:${projectId}`);
+                return { ok: true, projectId, assets: referenceCatalogOf(project) };
+            },
+            canvas_update_reference_asset: async (input) => {
+                const projectId = String(input.projectId || "");
+                const patch = input.asset && typeof input.asset === "object" && !Array.isArray(input.asset) ? { ...(input.asset as Record<string, unknown>) } : {};
+                if (!projectId || !patch.id) throw new Error("projectId 和 asset.id 必填");
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                if (!project) throw new Error(`画布不存在:${projectId}`);
+                const existing = referenceCatalogOf(project).find((item) => item.id === String(patch.id || ""));
+                const asset = { ...existing, ...patch } as Record<string, unknown>;
+                asset.label = String(asset.label || asset.name || asset.id);
+                asset.mediaType = inferReferenceMediaType(asset);
+                asset.role = inferReferenceRole(asset);
+                asset.tags = Array.isArray(asset.tags) ? asset.tags.map(String) : [];
+                asset.createdAt = existing?.createdAt || new Date().toISOString();
+                asset.updatedAt = new Date().toISOString();
+                const result = await context.backend.applyCanvasOperations(projectId, [{ type: "upsert_reference_asset", asset }]);
+                return { ok: true, projectId, asset, revision: result.revision };
+            },
+            canvas_analyze_reference_asset: async (input) => {
+                const projectId = String(input.projectId || "");
+                const assetId = String(input.assetId || "");
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                if (!project) throw new Error(`画布不存在:${projectId}`);
+                const asset = referenceCatalogOf(project).find((item) => item.id === assetId);
+                if (!asset) throw new Error(`参考资产不存在:${assetId}`);
+                const role = inferReferenceRole({ ...asset, role: input.role });
+                const tags = Array.isArray(input.tags) ? input.tags.map(String) : [];
+                const next = { ...asset, role, tags, analysis: { summary: String(input.summary || ""), suggestedRole: role, suggestedTags: tags, model: String(input.model || "MCP caller"), updatedAt: new Date().toISOString() }, updatedAt: new Date().toISOString() };
+                const result = await context.backend.applyCanvasOperations(projectId, [{ type: "upsert_reference_asset", asset: next }]);
+                return { ok: true, projectId, asset: next, revision: result.revision };
+            },
+            h3_set_reference_bindings: async (input) => {
+                const projectId = String(input.projectId || "");
+                const nodeId = String(input.nodeId || "");
+                const segmentId = String(input.segmentId || "");
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                if (!project) throw new Error(`画布不存在:${projectId}`);
+                const node = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === nodeId) as AgentCanvasNode | undefined;
+                if (!node) throw new Error(`找不到画布节点:${nodeId}`);
+                const segment = segmentsOf(node).find((item) => String(item.id || "") === segmentId);
+                if (!segment) throw new Error(`找不到片段:${segmentId}`);
+                const rawBindings = Array.isArray(input.bindings) ? input.bindings as Array<Record<string, unknown>> : [];
+                const bindings = referenceBindingsOf({ referenceBindings: rawBindings }).bindings;
+                if (bindings.length !== rawBindings.length) throw new Error("每个参考绑定都必须包含稳定的 id 和 assetId");
+                const expectedBindings = Array.isArray(input.expectedBindings) ? input.expectedBindings : segment.referenceBindings;
+                const operation: Record<string, unknown> = { type: "update_h3_segment", nodeId, segmentId, patch: { referenceBindings: bindings } };
+                if (expectedBindings !== undefined) operation.expectedFields = { referenceBindings: expectedBindings };
+                const result = await context.backend.applyCanvasOperations(projectId, [operation]);
+                return { ok: true, projectId, nodeId, segmentId, bindings, revision: result.revision };
+            },
+            canvas_validate_generation: async (input) => {
+                const projectId = String(input.projectId || "");
+                const nodeId = String(input.nodeId || "");
+                const segmentId = String(input.segmentId || "");
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                if (!project) throw new Error(`画布不存在:${projectId}`);
+                const node = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === nodeId) as AgentCanvasNode | undefined;
+                if (!node) throw new Error(`找不到画布节点:${nodeId}`);
+                const segment = segmentsOf(node).find((item) => String(item.id || "") === segmentId);
+                if (!segment) throw new Error(`找不到片段:${segmentId}`);
+                return { ok: true, projectId, nodeId, segmentId, validation: compileReferenceSubmission(project, segment) };
+            },
             h3_apply_video_plan: async (input) => {
                 const projectId = String(input.projectId || "");
                 const nodeId = String(input.nodeId || "");

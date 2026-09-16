@@ -1,7 +1,7 @@
 {
   "id": "minimax-h3",
   "name": "MiniMax H3",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "trust": "first-party",
   "entries": {
     "browser": "/plugins/minimax-h3.js",
@@ -15,7 +15,12 @@
       "h3_get_task",
       "h3_cancel_task",
       "h3_update_clip",
-      "h3_run_all_clips"
+      "h3_run_all_clips",
+      "canvas_list_reference_assets",
+      "canvas_update_reference_asset",
+      "canvas_analyze_reference_asset",
+      "h3_set_reference_bindings",
+      "canvas_validate_generation"
     ]
   },
   "description": "MiniMax H3 视频生成/人物替换节点。其 MCP 能力由 Canvas Agent 内建的 MCP 模块提供,经官方白名单(KNOWN_FIRST_PARTY)加载,复用 ComfyUiBridge 与任务库;不直连 ComfyUI,也不执行任意网页脚本。"

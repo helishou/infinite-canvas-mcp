@@ -4,6 +4,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
+import { normalizeViewportTransform } from "@/lib/canvas/canvas-viewport";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, deleteBackendCanvasFolder, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder, upsertBackendProject } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -24,6 +25,7 @@ export type CanvasProject = {
     backgroundMode: CanvasBackgroundMode;
     showImageInfo: boolean;
     globalPrompt: string;
+    referenceCatalog?: Array<Record<string, unknown>>;
     viewport: ViewportTransform;
 };
 
@@ -98,6 +100,9 @@ let knownProjectIds = new Set<string>();
 let knownCanvasFolderIds = new Set<string>();
 let folderSaveTimer: ReturnType<typeof setTimeout> | null = null;
 const syncBases = new Map<string, CanvasProject>();
+// Backend 已明确拒绝的同一批操作不再自动重试。签名包含基线 revision 与完整 op
+// 内容的短哈希，因此无关的 store/SSE 对象重建不会解除熔断，用户真正修改内容后会。
+const rejectedSyncSignatures = new Map<string, string>();
 let deferredBackendEvents: unknown[] = [];
 let deferredBackendEventsWaiter: Promise<void> | null = null;
 let canvasHydrationPromise: Promise<void> | null = null;
@@ -176,7 +181,7 @@ function loadFromLocalStorage(): CanvasProject[] {
             backgroundMode: "lines" as const,
             showImageInfo: false,
             globalPrompt: "",
-            viewport: item.viewport || initialViewport,
+            viewport: normalizeViewportTransform(item.viewport),
         })) as CanvasProject[] : [];
     } catch { return []; }
 }
@@ -359,6 +364,7 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
     if (!backendCanvasHydrated) return;
     if (!forceBackend && !useBackendStore.getState().connected) return;
     let currentProjectId = "";
+    let currentOperationSignature = "";
     try {
         const ids = new Set(projects.map((project) => project.id));
         for (const project of projects) {
@@ -386,7 +392,10 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
                     useCanvasStore.setState((state) => ({ projects: state.projects.map((item) => item.id === project.id ? { ...remote, viewport: item.viewport } : item) }));
                     continue;
                 }
+                currentOperationSignature = canvasOperationSignature(Number(remote.revision || 0), operations);
+                if (rejectedSyncSignatures.get(project.id) === currentOperationSignature) continue;
                 const response = await applyBackendCanvasOperations(project.id, operations, Number(remote.revision || 0));
+                rejectedSyncSignatures.delete(project.id);
                 const saved = applyBackendCanvasDelta(remote, response.operations, response.revision, response.updatedAt);
                 if (saved) {
                     syncBases.set(project.id, saved);
@@ -408,7 +417,10 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
                 continue;
             }
             recordSyncedChanges(project.id, operations);
+            currentOperationSignature = canvasOperationSignature(Number(base.revision || 0), operations);
+            if (rejectedSyncSignatures.get(project.id) === currentOperationSignature) continue;
             const response = await applyBackendCanvasOperations(project.id, operations, Number(base.revision || 0));
+            rejectedSyncSignatures.delete(project.id);
             const saved = applyBackendCanvasDelta(base, response.operations, response.revision, response.updatedAt);
             if (saved) {
                 syncBases.set(project.id, saved);
@@ -471,9 +483,22 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
                 },
             }));
             window.dispatchEvent(new CustomEvent("canvas-sync-conflict", { detail: { projectId: currentProjectId, revision } }));
+        } else if (error instanceof BackendApiError && error.status === 400 && currentProjectId) {
+            if (currentOperationSignature) rejectedSyncSignatures.set(currentProjectId, currentOperationSignature);
+            console.error(`画布 ${currentProjectId} 的增量同步被 Backend 拒绝，已停止自动重试；下一次编辑后会重新提交。`, error);
         }
         // 保留本地投影和 syncBases，下一次显式修改会按新 revision 重试待提交操作。
     }
+}
+
+function canvasOperationSignature(revision: number, operations: Array<Record<string, unknown>>): string {
+    const value = JSON.stringify([revision, operations]);
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return `${revision}:${value.length}:${hash >>> 0}`;
 }
 
 function fromProjectSummary(value: Record<string, unknown>): CanvasProject {
@@ -664,7 +689,7 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
             backgroundMode: source.backgroundMode || "lines",
             showImageInfo: source.showImageInfo || false,
             globalPrompt: source.globalPrompt || "",
-            viewport: source.viewport || initialViewport,
+            viewport: normalizeViewportTransform(source.viewport),
         };
         set((state) => ({ projects: [project, ...state.projects] }));
         persistCurrentCanvasSnapshot();
@@ -732,10 +757,11 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         // 重连后 syncCanvasProjects 仍会兜底补删。
         if (useBackendStore.getState().connected) void flushCanvasSyncNow();
     },
-    replaceProjects: (projects) => { set({ projects }); persistCurrentCanvasSnapshot(); scheduleCanvasSync(); },
+    replaceProjects: (projects) => { set({ projects: projects.map((project) => ({ ...project, viewport: normalizeViewportTransform(project.viewport) })) }); persistCurrentCanvasSnapshot(); scheduleCanvasSync(); },
     updateProject: (id, patch) => {
+        const normalizedPatch = patch.viewport ? { ...patch, viewport: normalizeViewportTransform(patch.viewport) } : patch;
         set((state) => ({
-            projects: state.projects.map((project) => (project.id === id ? { ...project, ...patch, updatedAt: new Date().toISOString() } : project)),
+            projects: state.projects.map((project) => (project.id === id ? { ...project, ...normalizedPatch, updatedAt: new Date().toISOString() } : project)),
         }));
         persistCurrentCanvasSnapshot();
         scheduleCanvasSync();
@@ -1056,6 +1082,15 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
             node.metadata = metadata as CanvasNodeData["metadata"];
         } else if (type === "update_project" && operation.patch && typeof operation.patch === "object") {
             Object.assign(projectPatch, operation.patch);
+        } else if (type === "upsert_reference_asset" && operation.asset && typeof operation.asset === "object") {
+            const catalog = Array.isArray(projectPatch.referenceCatalog) ? [...projectPatch.referenceCatalog as Array<Record<string, unknown>>] : [...(base.referenceCatalog || [])];
+            const asset = operation.asset as Record<string, unknown>;
+            const index = catalog.findIndex((item) => String(item.id || "") === String(asset.id || ""));
+            if (index >= 0) catalog[index] = { ...catalog[index], ...asset };
+            else catalog.push({ ...asset });
+            projectPatch.referenceCatalog = catalog;
+        } else if (type === "delete_reference_asset") {
+            projectPatch.referenceCatalog = (Array.isArray(projectPatch.referenceCatalog) ? projectPatch.referenceCatalog as Array<Record<string, unknown>> : base.referenceCatalog || []).filter((item) => String(item.id || "") !== String(operation.assetId || ""));
         }
     }
     return { ...base, ...projectPatch, nodes, connections, revision, ...(updatedAt ? { updatedAt } : {}) };
@@ -1339,6 +1374,7 @@ function normalizeProjectMediaUrls(project: CanvasProject): CanvasProject {
     };
     return {
         ...project,
+        viewport: normalizeViewportTransform(project.viewport),
         nodes: project.nodes.map((node) => ({ ...node, metadata: normalizeMetadata(node.metadata) })),
     };
 }

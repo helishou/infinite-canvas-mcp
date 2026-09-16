@@ -3,6 +3,22 @@ import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { useH3RunEvents } from "../hooks/useH3RunEvents";
 import { segmentsFor } from "../hooks/useH3Segments";
 
+function bindingSignature(value: unknown) {
+    if (!Array.isArray(value)) return "[]";
+    return JSON.stringify(value.map((raw) => {
+        const binding = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+        return [
+            String(binding.id || binding.bindingId || ""),
+            String(binding.assetId || ""),
+            String(binding.role || "other"),
+            binding.enabled !== false,
+            String(binding.usage || "reference"),
+            String(binding.url || ""),
+            String(binding.storageKey || ""),
+        ];
+    }));
+}
+
 export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
     const runInFlight = useRef(false);
     const update = (patch: Record<string, unknown>) => ctx.updateMetadata(patch);
@@ -61,6 +77,13 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             if (!segments.length) throw new Error("当前节点没有可生成的 Clip");
             const selectedId = String(metadata.selectedSegmentId || segments[0].id || "");
             if (!selectedId) throw new Error("当前节点没有可定位的 Clip");
+            await ctx.flush();
+            const validation = await ctx.references.validate(ctx.node.id, selectedId);
+            const localBindings = segments.find((segment) => segment.id === selectedId)?.referenceBindings;
+            if (localBindings && bindingSignature(localBindings) !== bindingSignature(validation.bindings)) throw new Error("参考绑定尚未同步到 Backend；请先处理画布同步冲突后再生成");
+            const errors = validation.issues.filter((issue) => issue.severity === "error");
+            if (errors.length) throw new Error(errors.map((issue) => issue.message).join("；"));
+            update({ referenceWarnings: validation.issues.filter((issue) => issue.severity === "warning") });
             await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent });
         } catch (error) {
             update({ runtimeTaskId: "", runtimeRunId: "", status: "error", runProgress: 0, errorDetails: error instanceof Error ? error.message : String(error), cancelRequested: false });

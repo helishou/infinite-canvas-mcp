@@ -94,6 +94,7 @@
 
 ## 项目注意事项
 
+- Codex、Hermes 等外部 MCP 客户端默认必须连接常驻 Backend 的 `/mcp` Streamable HTTP 端点，禁止恢复成每个会话执行 `backend/dist/index.js mcp` 的 stdio 配置；stdio 入口只保留兼容用途。共享端点中的 `activeProjectId` 等客户端上下文必须按 MCP session 隔离，插件声明轮询只能由 Backend 统一维护一份。
 - 画布媒体库必须独立于 ComfyUI 安装目录。设置 ComfyUI 路径只影响任务执行缓存，不得迁移或改写 `MEDIA_DIR`；输入按需复制到 ComfyUI，输出归档回 Backend 媒体库。迁出已有耦合目录时先备份数据库、复制并校验文件，再切换索引，保留原文件。
 - 新增或调整超时、重试次数、大小限制、并发上限等会改变实际行为的边界值前，必须先向用户说明适用环节、默认值和失败后的处理方式，并取得确认；不要把经验值当成纯内部实现静默加入。
 - 画布项目、“我的素材”、生成记录和结构化用户配置统一以 Backend SQLite 为权威；媒体保存在 Backend 媒体目录，浏览器只允许保留可丢弃缓存、纯视图状态和连接引导信息。WebDAV 是可选同步副本，不要误写成账号云同步。
@@ -112,5 +113,6 @@
 - 画布能力分两类端点，**不要把 Canvas Agent 面板的连接状态当成 backend 可用性的前置条件**：视频拼接（`/agent/video-concat/tasks` + `/agent/runtime/tasks/:id`）这类能力由总后台提供，前端必须用 `resolveBackendAgentEndpoint()`（`{backendUrl}/agent` + `getBackendTokenShared()`）或 `resolveComfyEndpoint()` 解析端点，**禁止写 `if (!useAgentStore.getState().connected || !token) throw ...`**——`connected` 是 LLM 对话面板的 SSE 状态，用户不开面板时恒为 false，会把本来可用的能力挡下（曾导致「Canvas Agent 未连接，无法运行视频拼接」，以及刷新后任务永远停在「运行中」）。新增这类调用前先实测端点前缀：`/agent/*` **只**在带前缀时存在（`POST /video-concat/tasks` → 404，`POST /agent/video-concat/tasks` → 通），而 `/comfy/*` 与 `/agent/comfy/*` 都注册了、两条都通，不要互相套用。
 - canvas-agent 的 MCP 工具新建节点（`generationFlowOps` / `canvas_create_node` 等）默认位置逻辑在 `src/canvas/tools.ts:nextCanvasX` 与 `nextCanvasAnchor`：有 reference 时必须贴在 firstReference 同行右侧（间距 96、y 与 reference 对齐），无 reference 时退回画布全局最右 + y=0。**禁止把"画布全局最右"作为生成流的有 reference 情况的默认值**，否则多次连续 MCP 调用会让同一组上下游散到几屏宽之外、连线横穿整张画布。
 - 画布多窗口/多设备同步：在 `web/src/stores/canvas/use-canvas-store.ts` 的 `applyBackendCanvasEvent` / `syncCanvasProjects` 两条路径上，**禁止在本地有未提交 ops 时用远端项目直接覆盖本地**（会吞掉用户的合法操作）。先算 `diffCanvasProject(syncBase, local)` 拿到 pendingOps，调 `detectCanvasConflicts` 看这些 ops 在远端是否仍然合法（add/update/connect 命中冲突、delete/disconnect/set_viewport 算 no-op），有冲突必须写入 `canvasConflicts`、弹窗让用户在「保留我的 / 采用远端」二选一，无冲突才推进 syncBase + 静默接受远端。409 分支必须保留提交前的 `syncBase` 直到冲突检测完成，禁止先把 remote 写入 `syncBases` 再计算 pendingOps；否则会变成 remote 与自身比较，并把本地旧 `segments` 静默重提覆盖 MCP 写入。`canvasConflicts` 记录必须含 `conflictTargets`（具体冲突点供弹窗展示）和 `remoteProject`（供「采用远端」按钮直接覆盖）。
+- 画布增量同步里的 `delete_node`、`delete_connections` 和 `delete_h3_segment` 必须保持幂等：目标已不存在时返回 `skipped`，不能用 400 表示竞态后的正常 no-op。其余确定性 400 对同一个不可变项目快照只能提交一次，必须熔断自动重试并记录脱敏的操作类型、目标 ID 和拒绝原因；禁止在 SSE/store 更新后无限重放同一请求。
 - H3 任务状态与媒体产出由 Backend 独占：前端 `diffCanvasProject` 不得提交 H3 节点/片段的 `runtimeTaskId`、运行状态、进度、结果、结果历史等字段；页面本地旧快照只能提交提示词、参考图和布局等用户编辑字段，避免后台回写被覆盖。
 - React StrictMode dev 模式会用 useEffect 双跑 / 模拟 unmount-remount，**useRef 形式的"首次跳过"防自动播放 / 自动副作用机制在 dev 模式下会被破坏**（第一次跑把 ref 置为 false，第二次跑 skip 已失效，加上 metadata 残留值就触发了）。需要"用户真正发起才触发"的副作用（自动播放、自动提交、自动跳转等），必须用 **useState 计数器 / 本地 trigger**（如 H3 的 `playToken`），由用户交互路径显式递增，effect 依赖本地 trigger 而非 metadata 字段。metadata 只用于持久化"上一次状态"，不能兼任 trigger 角色。

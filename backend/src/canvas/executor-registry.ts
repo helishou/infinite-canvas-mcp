@@ -21,7 +21,7 @@ const modelRegistry: CanvasModelDeclaration[] = [
     { id: "z-image", modes: ["image"], inputRoles: ["prompt", "image"], executor: "builtin-comfy", matches: (model) => /^z-image$/i.test(model) },
     { id: "flux2-klein", modes: ["image"], inputRoles: ["prompt", "image"], executor: "builtin-comfy", matches: (model) => /^flux2-klein$/i.test(model) },
     { id: "custom/*.json", modes: ["image"], inputRoles: ["prompt", "image"], executor: "comfy-workflow", matches: (model) => /\.json$/i.test(model) || /^custom\//i.test(model) },
-    { id: "minimax-h3:video", modes: ["video"], inputRoles: ["prompt", "character_turnaround", "storyboard", "scene"], executor: "h3", matches: (model, preset) => /^minimax-h3(?::|$)/i.test(model) || preset === "minimax-h3" },
+    { id: "minimax-h3:video", modes: ["video"], inputRoles: ["prompt", "character_identity", "character_turnaround", "scene", "blocking", "storyboard", "keyframe", "motion_reference", "audio_reference", "character_voice", "style", "palette", "prop"], executor: "h3", matches: (model, preset) => /^minimax-h3(?::|$)/i.test(model) || preset === "minimax-h3" },
 ];
 
 export function registerCanvasModel(declaration: CanvasModelDeclaration) {

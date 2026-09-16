@@ -1,6 +1,22 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
+
+const REFERENCE_ROLE_LABELS: Record<string, string> = {
+    character_identity: "人物形象",
+    character_turnaround: "人物四视图",
+    scene: "场景",
+    blocking: "站位",
+    storyboard: "分镜",
+    keyframe: "关键帧",
+    motion_reference: "动作参考",
+    audio_reference: "音频参考",
+    character_voice: "人物声线",
+    style: "风格",
+    palette: "色卡",
+    prop: "道具",
+    other: "未分类",
+};
 import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
 import { refsForSegment, withSegmentRefs } from "../services/h3-data";
@@ -17,11 +33,12 @@ type H3TimelineProps = {
     total: number;
     onRemoveRef: (segmentId: string, ref: H3Ref) => void;
     onOpenCharacterGroup: (segmentId: string, groupId: string) => void;
+    onEditRef: (segmentId: string, ref: H3Ref) => void;
     onPlayAll: () => void;
     fmt: (value: number) => string;
 };
 
-export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpenCharacterGroup, onPlayAll, fmt }: H3TimelineProps) {
+export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpenCharacterGroup, onEditRef, onPlayAll, fmt }: H3TimelineProps) {
     const compactMedia = ctx.scale < 0.2;
     const trackScrollRef = useRef<HTMLDivElement | null>(null);
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
@@ -244,7 +261,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         const previousIndex = selected ? segments.findIndex((segment) => segment.id === selected.id) : -1;
         const previous = previousIndex >= 0 ? segments[previousIndex] : segments[segments.length - 1];
         const inherited = previous ? (() => {
-            const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, ...settings } = previous;
+            const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, referenceBindings, ...settings } = previous;
             return settings;
         })() : {};
         const nextSegment = {
@@ -258,6 +275,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
             results: [],
             refs: { image: [], video: [], audio: [] },
             refItems: [],
+            referenceBindings: [],
             runtimeTaskId: "",
         };
         const insertAt = previousIndex >= 0 ? previousIndex + 1 : segments.length;
@@ -289,7 +307,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
                 }}
                 className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""} ${dropTargetKey === `${segment.id}:${index}` ? "is-drop-target" : ""}`}
                 title={ref ? (isGrouped ? "双击编辑角色组" : "双击放大预览") : undefined}
-            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>;
+            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-role" title="编辑参考职责" onClick={(event) => { event.stopPropagation(); onEditRef(segment.id, ref); }}>{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name="paperclip" /><span>{label}</span></>}</div>;
         })}</div>;
     };
     return <div className="minimax-edit-timeline">

@@ -19,7 +19,7 @@ import { createAgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runti
 import { WorkflowStore } from "./workflows/store.js";
 import { WorkflowExecutor } from "./workflows/executor.js";
 import { registerWorkflowRoutes } from "./workflows/routes.js";
-import { startBackendMcpServer } from "./mcp.js";
+import { registerBackendMcpHttpRoutes, startBackendMcpServer } from "./mcp.js";
 import { DirectImageBackend } from "./runtime/chatgpt-image.js";
 import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
 import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
@@ -27,6 +27,8 @@ import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
 import { CanvasH3Runner } from "./canvas/h3-runner.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
 import { acquireBackendInstanceLock } from "./instance-lock.js";
+import { CanvasReferenceService } from "./canvas/reference-service.js";
+import { registerCanvasReferenceRoutes } from "./server/canvas-reference-routes.js";
 
 const logger = createLogger("main");
 
@@ -62,6 +64,7 @@ const workflowExecutor = new WorkflowExecutor(runtime.comfy, runtime.stores.task
 const directImage = new DirectImageBackend(runtime.stores.tasks, runtime.stores.media);
 const canvasImageDispatcher = new CanvasImageDispatcher(config, runtime.stores, runtime.comfy, directImage, workflowStore, workflowExecutor, runtime.events);
 const canvasGeneration = new CanvasGenerationService(canvasImageDispatcher, canvasH3Runner, runtime.stores, runtime.events, runtime.comfy, runningHub);
+const canvasReferences = new CanvasReferenceService(runtime.stores, runtime.events);
 const { app } = startServer(runtime.db, config, {
     comfy: runtime.comfy, events: runtime.events, stores: runtime.stores,
     cancelTask: (task) => {
@@ -86,11 +89,13 @@ const { app } = startServer(runtime.db, config, {
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events }, runtime.comfy);
 registerWorkflowRoutes(app, workflowStore, workflowExecutor, runtime.comfy);
 registerCanvasGenerationRoutes(app, canvasGeneration);
+registerCanvasReferenceRoutes(app, canvasReferences);
 registerAgentRuntimeRoutes(app, runtime.stores, runningHub, videoConcat, runtime.events);
 registerComfyRoutes({ app, stores: runtime.stores, config, events: runtime.events, basePath: "/agent" }, runtime.comfy);
 const agent = createAgentRuntime({ backendUrl: config.url, backendToken: config.token });
 runtime.agent = agent;
 app.use("/agent", agent.app);
+const mcpHttp = registerBackendMcpHttpRoutes(app, config);
 // Backend 重启后继续观察已提交但尚未结束的 ComfyUI 任务；绑定信息在 SQLite 中。
 for (const task of stores.tasks.list()) {
     if (["queued", "running"].includes(task.status) && task.kind === "canvas-image") canvasImageDispatcher.resume(task);
@@ -132,10 +137,10 @@ process.on("unhandledRejection", (reason) => logger.error("unhandledRejection", 
 const shutdown = (signal: string) => {
     logger.info(`${signal} received, shutting down…`);
     releaseInstanceLock();
-    server.close(() => {
+    void mcpHttp.closeAll().finally(() => server.close(() => {
         db.close();
         process.exit(0);
-    });
+    }));
     setTimeout(() => process.exit(1), 10_000).unref();
 };
 process.on("SIGINT", () => shutdown("SIGINT"));

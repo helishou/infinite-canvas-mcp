@@ -56,12 +56,9 @@ export class BackendClient {
 
     // ── Canvas projects ──────────────────────────────────────────────────
 
-    async listCanvasProjects(options: { folderId?: string | null } = {}): Promise<Record<string, unknown>[]> {
+    async listCanvasProjects(options: { episodeId?: string } = {}): Promise<Record<string, unknown>[]> {
         const params = new URLSearchParams();
-        if ("folderId" in options) {
-            if (options.folderId === null) params.set("folderId", "__null__");
-            else if (options.folderId) params.set("folderId", options.folderId);
-        }
+        if (options.episodeId) params.set("episodeId", options.episodeId);
         const qs = params.toString();
         const data = await this.get<{ ok: boolean; projects?: Record<string, unknown>[] }>(`/canvas/projects${qs ? `?${qs}` : ""}`);
         return Array.isArray(data.projects) ? data.projects : [];
@@ -75,6 +72,27 @@ export class BackendClient {
     async upsertCanvasProject(project: Record<string, unknown>): Promise<Record<string, unknown>> {
         const data = await this.post<{ ok: boolean; project?: Record<string, unknown> }>("/canvas/projects", project);
         return data.project || project;
+    }
+
+    async listDramaEpisodes(dramaId: string) {
+        const data = await this.get<{ ok: boolean; dramaId: string; episodes?: Record<string, unknown>[] }>(`/drama/projects/${encodeURIComponent(dramaId)}/episodes`);
+        return Array.isArray(data.episodes) ? data.episodes : [];
+    }
+
+    async getDramaEpisode(episodeId: string) {
+        return this.get<{ ok: boolean; episode?: Record<string, unknown>; canvas?: Record<string, unknown> | null }>(`/drama/episodes/${encodeURIComponent(episodeId)}`);
+    }
+
+    async createDramaEpisode(dramaId: string, input: Record<string, unknown>) {
+        return this.post<{ ok: boolean; episode?: Record<string, unknown> }>(`/drama/projects/${encodeURIComponent(dramaId)}/episodes`, input);
+    }
+
+    async updateDramaEpisode(episodeId: string, patch: Record<string, unknown>) {
+        return this.patch<{ ok: boolean; episode?: Record<string, unknown>; canvas?: Record<string, unknown> | null }>(`/drama/episodes/${encodeURIComponent(episodeId)}`, patch);
+    }
+
+    async deleteDramaEpisode(episodeId: string) {
+        return this.delete<{ ok: boolean; deleted?: number }>(`/drama/episodes/${encodeURIComponent(episodeId)}`);
     }
 
     async applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number) {

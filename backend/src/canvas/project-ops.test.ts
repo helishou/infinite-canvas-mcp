@@ -94,6 +94,23 @@ test("delete_h3_segment：按 id 删除；远端已无该段视为 skipped", () 
     assert.equal(second[0].skipped, true);
 });
 
+test("delete_node 后同批 delete_connections：连线已级联删除时幂等跳过", () => {
+    const project = makeProject([
+        { id: "node-1", type: "text", metadata: {} },
+        { id: "node-2", type: "text", metadata: {} },
+    ]);
+    project.connections = [{ id: "edge-1", fromNodeId: "node-1", toNodeId: "node-2" }];
+    const results = applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "delete_node", id: "node-1" },
+        { type: "delete_connections", ids: ["edge-1"] },
+    ]);
+    assert.deepEqual(results[0].deletedNodeIds, ["node-1"]);
+    assert.equal(results[1].skipped, true);
+    assert.deepEqual(results[1].deletedConnectionIds, []);
+    assert.equal(project.nodes.length, 1);
+    assert.equal(project.connections.length, 0);
+});
+
 test("replace_h3_segments：完全替换；id 集合变化是允许的", () => {
     const project = makeProject([makeH3Node()]);
     const results = applyCanvasProjectOperations(project as Record<string, unknown>, [
@@ -163,4 +180,17 @@ test("混合：H3 节点级 metadata + 单段 patch 共存，revision 一次 +1"
     assert.equal(segments[1].status, "idle");
     assert.equal((node.metadata as Record<string, unknown>).status, "running");
     assert.equal((node.metadata as Record<string, unknown>).runProgress, 0.5);
+});
+
+test("referenceBindings CAS 使用结构比较，且项目参考资产不会改节点位置", () => {
+    const project = makeProject([makeH3Node()]) as Project & Record<string, unknown>;
+    const originalPosition = structuredClone((project.nodes as Array<Record<string, unknown>>)[0].position);
+    const bindings = [{ id: "binding-1", assetId: "asset-1", label: "人物", role: "character_identity", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:1" }];
+    applyCanvasProjectOperations(project, [
+        { type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { referenceBindings: bindings }, expectedFields: { referenceBindings: undefined } },
+        { type: "upsert_reference_asset", asset: { id: "asset-1", label: "人物", mediaType: "image", role: "character_identity", tags: [], storageKey: "image:1" } },
+    ]);
+    assert.deepEqual((project.nodes as Array<Record<string, unknown>>)[0].position, originalPosition);
+    assert.deepEqual(project.referenceCatalog, [{ id: "asset-1", label: "人物", mediaType: "image", role: "character_identity", tags: [], storageKey: "image:1" }]);
+    assert.throws(() => applyCanvasProjectOperations(project, [{ type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { referenceBindings: [] }, expectedFields: { referenceBindings: [{ ...bindings[0], label: "旧人物" }] } }]));
 });

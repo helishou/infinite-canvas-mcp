@@ -4,7 +4,8 @@ import type { CanvasProjectFilter, CanvasProjectStore, H3NodeMaterial } from "./
 /** 画布项目 store。 */
 export function createProjectStore(db: BackendDatabase): CanvasProjectStore {
     return {
-        list: (filter?: CanvasProjectFilter) => db.listCanvasProjects(filter),
+        // v7: 画布表无 folder_id 列；list 直接返全集；过滤由 caller 走 episodes 查询（listCanvasProjectsByDrama）。
+        list: () => db.listCanvasProjects(),
         listSummaries: (filter?: CanvasProjectFilter) => db.listCanvasProjectSummaries(filter),
         get: (id) => db.getCanvasProject(id),
         upsert: (project) => db.upsertCanvasProject(project),

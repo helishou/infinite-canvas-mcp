@@ -288,7 +288,7 @@ export function H3PromptSection({
         alignment,
         "Rewrite the user intent into one production-ready prompt. Preserve characters, actions, dialogue, visible text, reference numbering, and hard constraints; never invent facts.",
         "Make every requested visual detail explicit: composition, subject appearance, pose, gaze, action phases, camera type/amplitude/speed, lighting, materials, continuity, environment, and sound.",
-        "Use the exact official field names, section order, reference tags, timestamp conventions, dialogue tags, and language rules. Do not replace official tags with @ aliases.",
+        "Use the exact official field names, section order, reference tags, timestamp conventions, dialogue tags, and language rules. Preserve every {{ref:...}} and {{subject:...}} marker byte-for-byte; do not renumber or replace semantic markers.",
         "Keep exact user dialogue and visible text unchanged. Do not repeat dialogue in overall_soundscape or non_diegetic_music.",
         "Return only the final prompt, without Markdown fences, explanations, or prefaces.",
       ];
@@ -417,7 +417,11 @@ export function H3PromptSection({
 
   // 南风 mention 插入文案:图片 <Subject N>…<Picture N>,视频 <Video N>,音频 <Audio N>（与 nativeMention/多参绑定一致）
   const mentionText = (item: MentionItem) =>
-    item.ref.type === "image"
+    item.ref.bindingId
+      ? item.ref.type === "image"
+        ? `{{subject:${item.ref.bindingId}}} is the visual content referenced from {{ref:${item.ref.bindingId}}}`
+        : `{{ref:${item.ref.bindingId}}}`
+      : item.ref.type === "image"
       ? `<Subject ${item.ordinal}> is the visual content referenced from <Picture ${item.ordinal}>`
       : item.ref.type === "video"
         ? `<Video ${item.ordinal}>`
@@ -758,12 +762,7 @@ function MentionRow({
   onHover: () => void;
   onPick: (item?: MentionItem) => void;
 }) {
-  const text =
-    item.ref.type === "image"
-      ? `<Subject ${item.ordinal}> is the visual content referenced from <Picture ${item.ordinal}>`
-      : item.ref.type === "video"
-        ? `<Video ${item.ordinal}>`
-        : `<Audio ${item.ordinal}>`;
+  const text = item.ref.bindingId ? `@${item.ref.name} · 稳定引用` : item.ref.type === "image" ? `<Picture ${item.ordinal}>` : item.ref.type === "video" ? `<Video ${item.ordinal}>` : `<Audio ${item.ordinal}>`;
   return (
     <button
       type="button"
