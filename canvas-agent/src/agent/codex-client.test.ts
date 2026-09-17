@@ -160,6 +160,9 @@ test("MCP 启动状态区分空对话预热与正常 turn 运行", async () => {
     const starting = client.startThread("D:\\site", "request", true);
     const request = writes.find((item) => item.method === "thread/start");
     assert.ok(request);
+    const mcp = (((request.params as { config?: { mcp_servers?: Record<string, Record<string, unknown>> } }).config?.mcp_servers || {})["infinite-canvas"] || {});
+    assert.match(String(mcp.url || ""), /^http:\/\/127\.0\.0\.1:17370\/mcp(?:\?|$)/);
+    assert.equal("command" in mcp, false);
     testClient.handleNotification("mcpServer/startupStatus/updated", { threadId: "thread-1", name: "notion", status: "starting" });
     testClient.handle({ id: request.id, result: { thread: { id: "thread-1" } } });
     await new Promise((resolve) => setImmediate(resolve));

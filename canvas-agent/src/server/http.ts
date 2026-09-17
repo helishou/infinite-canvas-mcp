@@ -90,6 +90,9 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       ? { INFINITE_CANVAS_BACKEND_TOKEN: options.backendToken }
       : {}),
   });
+  // Codex 会话与 Agent 共用当前已解析的 Backend 连接，不再从用户全局配置猜测端点或密钥。
+  process.env.INFINITE_CANVAS_BACKEND_URL = backend.backendUrl;
+  process.env.INFINITE_CANVAS_BACKEND_TOKEN = backend.backendToken;
   /** ComfyUI 由 Backend 唯一持有，Agent 只保留协议适配。 */
   const comfyUi: ComfyUiClient = backendComfyUi(backend, () => []);
   /** 将 Agent 事件广播到所属线程或全部网页。 */

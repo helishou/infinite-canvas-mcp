@@ -5,6 +5,11 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Canvas Agent Codex 对话初始化
+
+- Canvas Agent 启动 Codex 对话时不再注入同名 stdio MCP，改为直接连接常驻 Backend 的 `/mcp` Streamable HTTP 端点，避免与用户全局 `infinite-canvas` URL 配置合并后同时出现 `command` 与 `url`。
+- 待验收：保留 Codex 全局 `infinite-canvas` HTTP MCP 配置，在画布 Agent 面板新建和恢复对话，确认不再出现 `url is not supported for stdio`，且 MCP 工具清单正常就绪。
+
 ## 分集完整剧情与画布创建
 
 - 短剧制作台首屏采用紧凑页头并直接显示剧目封面卡片，不再用大幅宣传标题、装饰图形和三栏统计抢占首屏；点击剧目时卡片封面、名称与简介移动到详情页最终位置，返回时反向移动；详情资料卡不再重复名称与简介，只保留故事大纲、标签和编辑入口。
