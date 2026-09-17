@@ -33,10 +33,12 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 const parent = await ctx.ai.getCanvasH3Task(taskId);
                 if (stopped) return;
                 if (["succeeded", "failed", "cancelled"].includes(parent.status)) {
-                    const terminalStatus = parent.status === "succeeded" ? "success" : parent.status === "cancelled" ? "cancelled" : "error";
                     const current = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+                    const currentSegments = segmentsFor(current);
+                    const hasAwaitingFirstPass = parent.status === "succeeded" && currentSegments.some((segment) => segment.firstPassReady === true && String(segment.status || "") === "awaiting_confirmation");
+                    const terminalStatus = hasAwaitingFirstPass ? "awaiting_confirmation" : parent.status === "succeeded" ? "success" : parent.status === "cancelled" ? "cancelled" : "error";
                     const errorDetails = parent.error || "";
-                    const segments = segmentsFor(current).map((segment) => ["queued", "loading"].includes(String(segment.status || ""))
+                    const segments = currentSegments.map((segment) => ["queued", "loading"].includes(String(segment.status || ""))
                         ? { ...segment, status: terminalStatus, progress: parent.progress, runtimeTaskId: "", errorDetails }
                         : segment);
                     update({
@@ -68,7 +70,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         return () => { stopped = true; if (timer) clearTimeout(timer); };
     }, [ctx.node.id, ctx.node.metadata?.runtimeTaskId, ctx.node.metadata?.status]);
 
-    const run = async (runFromCurrent = false) => {
+    const run = async (runFromCurrent = false, confirmSecondPass = false) => {
         if (runInFlight.current) return;
         runInFlight.current = true;
         try {
@@ -84,7 +86,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             const errors = validation.issues.filter((issue) => issue.severity === "error");
             if (errors.length) throw new Error(errors.map((issue) => issue.message).join("；"));
             update({ referenceWarnings: validation.issues.filter((issue) => issue.severity === "warning") });
-            await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent });
+            await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent, ...(confirmSecondPass ? { params: { confirmSecondPass: true } } : {}) });
         } catch (error) {
             update({ runtimeTaskId: "", runtimeRunId: "", status: "error", runProgress: 0, errorDetails: error instanceof Error ? error.message : String(error), cancelRequested: false });
         } finally {

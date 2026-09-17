@@ -31,7 +31,7 @@ const PRESETS: ComfyPreset[] = [
     { id: "flux2-klein", name: "Flux2-Klein 图生图", kind: "image", inputs: ["prompt", "references"], params: ["width", "height", "seed"] },
     { id: "flashvsr-1.1", name: "FlashVSR 视频修复", kind: "video", inputs: ["video"], params: ["scale", "longEdge"] },
     { id: "indextts-2.5", name: "IndexTTS 2.5 配音", kind: "audio", inputs: ["prompt", "referenceAudio"], params: ["language", "speed", "seed", "filenamePrefix"] },
-    { id: "minimax-h3", name: "H3导演台 视频生成", kind: "video", inputs: ["video", "references", "audios", "segments"], params: ["mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sampler", "scheduler", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd", "emptyFiveMinuteTimeline", "taeh3Enabled", "motionContextEnabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise", "constantTriggerWord"] },
+    { id: "minimax-h3", name: "H3导演台 视频生成", kind: "video", inputs: ["video", "references", "audios", "segments"], params: ["mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sampler", "scheduler", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd", "emptyFiveMinuteTimeline", "taeh3Enabled", "motionContextEnabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise", "constantTriggerWord"] },
 ];
 
 /** 从 ComfyUI 任务历史的状态对象中抽取可读的错误信息。
@@ -969,6 +969,7 @@ function withNoTextConstraint(prompt: string): string {
 /** 正常路径：交给南风 V15 主节点内部 GraphBuilder 展开，保留其原生释放/加载依赖。 */
 export async function buildNativeNanFengV15Workflow(input: Record<string, unknown>, params: Record<string, unknown>, upload: (file: string) => Promise<string>, _comfyUrl: string, signal: AbortSignal): Promise<Record<string, any>> {
     if (signal.aborted) throw new Error("任务已取消");
+    if (params.postGenerationOnly === true) return buildDecodedH3SecondPassWorkflow(input, params, upload, signal);
     const mode = normalizeNanFengMode(params.mode ?? params.taskMode ?? (typeof input.video === "string" ? "ref2va" : "t2v"));
     const refs = Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : [];
     const videos = (Array.isArray(input.videos) ? input.videos.map(String).filter(Boolean) : typeof input.video === "string" ? [input.video] : []).slice(0, 3);
@@ -978,6 +979,7 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     const uploadedRefs = await Promise.all(refs.map(upload));
     const uploadedVideos = await Promise.all(videos.map(upload));
     const uploadedAudios = await Promise.all(referenceAudios.map(upload));
+    const previousVideo = typeof input.previousVideo === "string" && input.previousVideo ? await upload(input.previousVideo) : "";
     validateNanFengMode(mode, uploadedRefs.length, uploadedVideos.length, uploadedAudios.length, params);
     const slots = Array.isArray(params.loraSlots) ? params.loraSlots : [{ name: params.loraName, strength: params.loraStrength, enabled: Boolean(params.loraName) }];
     const value = (key: string, fallback: unknown) => params[key] ?? fallback;
@@ -1017,7 +1019,77 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     for (const [target, source, fallback] of [
         ["DLSS_video_upscale_mode", "dlssVideoUpscaleMode", "1.5× (Quality)"], ["DLSS_video_require_neural_upscaling", "dlssVideoRequireNeuralUpscaling", false], ["DLSS_video_nr_preset", "dlssVideoNrPreset", "Default"], ["DLSS_video_nr_style", "dlssVideoNrStyle", "Default"], ["DLSS_video_nr_intensity", "dlssVideoNrIntensity", 1], ["DLSS_video_local_tone_strength", "dlssVideoLocalToneStrength", 1], ["DLSS_video_local_structure_strength", "dlssVideoLocalStructureStrength", 1], ["DLSS_video_skin_structure_strength", "dlssVideoSkinStructureStrength", -1], ["DLSS_video_automatic_mask", "dlssVideoAutomaticMask", false], ["DLSS_video_dlss_model_preset", "dlssVideoModelPreset", "Default"], ["DLSS_video_encoding_quality", "dlssVideoEncodingQuality", "Max"], ["DLSS_video_video_codec", "dlssVideoCodec", "H.264"], ["DLSS_video_container", "dlssVideoContainer", "MP4"], ["DLSS_video_rename", "dlssVideoRename", "Auto"], ["DLSS_video_custom_suffix", "dlssVideoCustomSuffix", "_DLSS5"], ["DLSS_video_hdr_mode", "dlssVideoHdrMode", false], ["DLSS_video_output_detail_strength", "dlssVideoOutputDetailStrength", 1], ["DLSS_fg_output_fps", "dlssFgOutputFps", "60"], ["DLSS_fg_dlss_engine", "dlssFgEngine", "Auto"], ["DLSS_fg_encoding_quality", "dlssFgEncodingQuality", "Max"], ["DLSS_fg_video_codec", "dlssFgVideoCodec", "H.264"], ["DLSS_fg_container", "dlssFgContainer", "MP4"], ["DLSS_fg_rename", "dlssFgRename", "Auto"], ["DLSS_fg_custom_suffix", "dlssFgCustomSuffix", "_DLSSFG"], ["DLSS_fg_hdr_mode", "dlssFgHdrMode", false]] as Array<[string, string, unknown]>) inputs[target] = value(source, fallback);
     for (const [target, source, fallback] of [["南风ER_solver_type", "erSolverType", "ER-SDE"], ["南风ER_max_stage", "erMaxStage", 3], ["南风ER_eta", "erEta", 1], ["南风ER_s_noise", "erSNoise", 1]] as Array<[string, string, unknown]>) inputs[target] = value(source, fallback);
-    return { nf_v15: { class_type: NANFENG_H3_CLASS, inputs }, nf_output: { class_type: NANFENG_VHS_CLASS, inputs: { images: ["nf_v15", 0], audio: ["nf_v15", 1], filename_prefix: "NanFeng_H3", frame_rate: 24, format: "video/h264-mp4", loop_count: 0, pingpong: false, save_output: true } } };
+    const graph: Record<string, any> = { nf_v15: { class_type: NANFENG_H3_CLASS, inputs } };
+    let outputImages: [string, number] = ["nf_v15", 0];
+    let outputAudio: [string, number] = ["nf_v15", 1];
+    if (params.faceRefineEnabled === true) {
+        const modelName = String(inputs["模型"]);
+        graph.face_model = { class_type: "UNETLoader", inputs: { unet_name: modelName, weight_dtype: String(inputs["模型权重精度"]) } };
+        let faceModel: [string, number] = ["face_model", 0];
+        slots.slice(0, 8).forEach((slot: any, index: number) => {
+            if (slot?.enabled === false || !String(slot?.name || "").trim()) return;
+            const id = `face_lora_${index + 1}`;
+            graph[id] = { class_type: "LoraLoaderModelOnly", inputs: { model: faceModel, lora_name: String(slot.name).trim(), strength_model: Number(slot.strength ?? 1) } };
+            faceModel = [id, 0];
+        });
+        graph.face_clip = { class_type: "CLIPLoader", inputs: { clip_name: String(inputs["文本编码器"]), type: String(inputs["文本编码器类型"]), device: String(inputs["文本编码器设备"]) } };
+        graph.face_video_vae = { class_type: "VAELoader", inputs: { vae_name: String(inputs["视频VAE"]) } };
+        graph.face_audio_vae = { class_type: "VAELoader", inputs: { vae_name: String(inputs["音频VAE"]) } };
+        graph.face_refine = { class_type: "MiniMaxH3PostGenerationFaceRefine", inputs: {
+            images: ["nf_v15", 0], audio: ["nf_v15", 1], model: faceModel, vae: ["face_video_vae", 0], audio_vae: ["face_audio_vae", 0], clip: ["face_clip", 0],
+            prompt: String(inputs["提示词"]), seed: Number(inputs["随机种子"]), detector: String(value("faceRefineDetector", "face_yolov8m.pt")), confidence: Number(value("faceRefineConfidence", 0.35)), crop_factor: Number(value("faceRefineCropFactor", 2.5)), canvas_size: Number(value("faceRefineCanvasSize", 768)), denoise: Number(value("faceRefineDenoise", 0.4)), steps: Number(value("faceRefineSteps", 8)), sampler: String(value("faceRefineSampler", "euler")), scheduler: String(value("faceRefineScheduler", "simple")), paste_region: String(value("faceRefinePasteRegion", "face_only")), mask_dilation: Number(value("faceRefineMaskDilation", 16)), feather: Number(value("faceRefineFeather", 24)), colour_match: Number(value("faceRefineColourMatch", 1)), blend: Number(value("faceRefineBlend", 1)), seam_fade_frames: Number(value("seamFaceFadeFrames", 0)), seam_colour_match: Number(value("seamColourMatch", 0)), audio_crossfade_ms: Number(value("seamAudioCrossfadeMs", 0)),
+        } };
+        if (previousVideo && (Number(value("seamFaceFadeFrames", 0)) > 0 || Number(value("seamColourMatch", 0)) > 0 || Number(value("seamAudioCrossfadeMs", 0)) > 0)) {
+            graph.seam_previous_video = { class_type: "LoadVideo", inputs: { file: previousVideo } };
+            graph.seam_previous_parts = { class_type: "GetVideoComponents", inputs: { video: ["seam_previous_video", 0] } };
+            graph.face_refine.inputs.previous_images = ["seam_previous_parts", 0];
+            graph.face_refine.inputs.previous_audio = ["seam_previous_parts", 1];
+        }
+        outputImages = ["face_refine", 0];
+        outputAudio = ["face_refine", 1];
+    }
+    graph.nf_output = { class_type: NANFENG_VHS_CLASS, inputs: { images: outputImages, audio: outputAudio, filename_prefix: "NanFeng_H3", frame_rate: 24, format: "video/h264-mp4", loop_count: 0, pingpong: false, save_output: true } };
+    return graph;
+}
+
+/** Phase B: decode the durable first-pass MP4 and run a real full-frame H3 resample. */
+export async function buildDecodedH3SecondPassWorkflow(input: Record<string, unknown>, params: Record<string, unknown>, upload: (file: string) => Promise<string>, signal: AbortSignal): Promise<Record<string, any>> {
+    if (signal.aborted) throw new Error("任务已取消");
+    const source = String(input.video || "").trim();
+    if (!source) throw new Error("确认精修缺少已缓存的一采视频");
+    const uploaded = await upload(source);
+    const modelName = String(params.modelName || "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors");
+    const graph: Record<string, any> = {
+        cached_first_pass: { class_type: "LoadVideo", inputs: { file: uploaded } },
+        cached_parts: { class_type: "GetVideoComponents", inputs: { video: ["cached_first_pass", 0] } },
+        refine_model: { class_type: "UNETLoader", inputs: { unet_name: modelName, weight_dtype: String(params.precision || "default") } },
+        refine_clip: { class_type: "CLIPLoader", inputs: { clip_name: String(params.textEncoder || "qwen3vl_32b_minimax_h3_fp8.safetensors"), type: String(params.textEncoderType || "minimax"), device: String(params.textEncoderDevice || "default") } },
+        refine_video_vae: { class_type: "VAELoader", inputs: { vae_name: String(params.videoVae || "minimax_h3_video_vae_fp16.safetensors") } },
+        refine_audio_vae: { class_type: "VAELoader", inputs: { vae_name: String(params.audioVae || "minimax_h3_audio_vae_fp32.safetensors") } },
+    };
+    let model: [string, number] = ["refine_model", 0];
+    const slots = Array.isArray(params.loraSlots) ? params.loraSlots as any[] : [];
+    slots.slice(0, 8).forEach((slot, index) => {
+        if (slot?.enabled === false || !String(slot?.name || "").trim()) return;
+        const id = `refine_lora_${index + 1}`;
+        graph[id] = { class_type: "LoraLoaderModelOnly", inputs: { model, lora_name: String(slot.name).trim(), strength_model: Number(slot.strength ?? 1) } };
+        model = [id, 0];
+    });
+    graph.full_frame_refine = { class_type: "MiniMaxH3PostGenerationFullFrameRefine", inputs: {
+        images: ["cached_parts", 0], audio: ["cached_parts", 1], model, vae: ["refine_video_vae", 0], audio_vae: ["refine_audio_vae", 0], clip: ["refine_clip", 0],
+        prompt: withNoTextConstraint(String(input.prompt || "")), seed: Number.isFinite(Number(params.seed)) ? Number(params.seed) : 0,
+        steps: Number(params.h3SecondSteps ?? params.secondPassSteps ?? 4), denoise: Number(params.secondPassDenoise ?? params.denoise ?? 0.28), sampler: String(params.secondPassSampler || params.sampler || "res_multistep"), scheduler: String(params.secondPassScheduler || params.scheduler || "simple"), target_megapixels: Number(params.latentUpscaleMegapixels ?? params.secondPassMegapixels ?? params.megapixels ?? 0.4),
+    } };
+    let images: [string, number] = ["full_frame_refine", 0];
+    let audio: [string, number] = ["full_frame_refine", 1];
+    if (params.faceRefineEnabled === true) {
+        graph.face_refine = { class_type: "MiniMaxH3PostGenerationFaceRefine", inputs: {
+            images, audio, model, vae: ["refine_video_vae", 0], audio_vae: ["refine_audio_vae", 0], clip: ["refine_clip", 0], prompt: String(input.prompt || ""), seed: Number(params.seed || 0), detector: String(params.faceRefineDetector || "face_yolov8m.pt"), confidence: Number(params.faceRefineConfidence ?? 0.35), crop_factor: Number(params.faceRefineCropFactor ?? 2.5), canvas_size: Number(params.faceRefineCanvasSize ?? 768), denoise: Number(params.faceRefineDenoise ?? 0.4), steps: Number(params.faceRefineSteps ?? 8), sampler: String(params.faceRefineSampler || "euler"), scheduler: String(params.faceRefineScheduler || "simple"), paste_region: String(params.faceRefinePasteRegion || "face_only"), mask_dilation: Number(params.faceRefineMaskDilation ?? 16), feather: Number(params.faceRefineFeather ?? 24), colour_match: Number(params.faceRefineColourMatch ?? 1), blend: Number(params.faceRefineBlend ?? 1), seam_fade_frames: Number(params.seamFaceFadeFrames ?? 0), seam_colour_match: Number(params.seamColourMatch ?? 0), audio_crossfade_ms: 0,
+        } };
+        images = ["face_refine", 0]; audio = ["face_refine", 1];
+    }
+    graph.nf_output = { class_type: NANFENG_VHS_CLASS, inputs: { images, audio, filename_prefix: "NanFeng_H3_Confirmed", frame_rate: 24, format: "video/h264-mp4", loop_count: 0, pingpong: false, save_output: true } };
+    return graph;
 }
 
 /** 备用：此前的分拆 API 图，保留用于定位原生 V10 节点异常。 */

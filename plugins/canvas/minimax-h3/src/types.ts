@@ -98,6 +98,30 @@ export type H3Segment = {
     faceRepairSingle?: boolean;
     faceRepairMulti?: boolean;
     globalRepair?: boolean;
+    /** Director track -> crop -> H3 r2v resample -> stitch post-pass. */
+    faceRefineEnabled?: boolean;
+    faceRefineDetector?: string;
+    faceRefineConfidence?: number;
+    faceRefineCropFactor?: number;
+    faceRefineCanvasSize?: number;
+    faceRefineDenoise?: number;
+    faceRefineSteps?: number;
+    faceRefineSampler?: string;
+    faceRefineScheduler?: string;
+    faceRefinePasteRegion?: string;
+    faceRefineMaskDilation?: number;
+    faceRefineFeather?: number;
+    faceRefineColourMatch?: number;
+    faceRefineBlend?: number;
+    /** Two-phase mode uses a durable decoded first-pass video; it does not reuse V15 latent. */
+    confirmationMode?: boolean;
+    firstPassResult?: string;
+    firstPassStorageKey?: string;
+    firstPassFingerprint?: string;
+    firstPassReady?: boolean;
+    seamFaceFadeFrames?: number;
+    seamColourMatch?: number;
+    seamAudioCrossfadeMs?: number;
     lowMemoryAttentionHeads?: number;
     reservedVramGb?: number;
     runtimeReserveEnabled?: boolean;

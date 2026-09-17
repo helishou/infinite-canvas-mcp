@@ -73,4 +73,61 @@ test("H3 V15 native workflow does not submit removed model-cache input", async (
         upload, "http://comfy.local", new AbortController().signal,
     );
     assert.equal(Object.prototype.hasOwnProperty.call(graph.nf_v15.inputs, "连续生成模式"), false);
+    assert.equal(graph.face_refine, undefined);
+    assert.deepEqual(graph.nf_output.inputs.images, ["nf_v15", 0]);
+    assert.deepEqual(graph.nf_output.inputs.audio, ["nf_v15", 1]);
+});
+
+test("opt-in H3 face refine runs after V15 and preserves generated audio", async () => {
+    const graph = await buildNativeNanFengV15Workflow(
+        { prompt: "portrait close-up" },
+        {
+            mode: "t2v", faceRefineEnabled: true, faceRefineDetector: "face_yolov8m.pt",
+            faceRefineConfidence: 0.25, faceRefineCropFactor: 3, faceRefineCanvasSize: 640,
+            faceRefineDenoise: 0.35, faceRefineSteps: 6, faceRefineSampler: "euler",
+            faceRefineScheduler: "simple", faceRefinePasteRegion: "face_ellipse",
+            faceRefineMaskDilation: 12, faceRefineFeather: 20, faceRefineColourMatch: 0.9,
+            faceRefineBlend: 0.8, seed: 123,
+        },
+        upload, "http://comfy.local", new AbortController().signal,
+    );
+    assert.equal(graph.face_refine.class_type, "MiniMaxH3PostGenerationFaceRefine");
+    assert.deepEqual(graph.face_refine.inputs.images, ["nf_v15", 0]);
+    assert.deepEqual(graph.face_refine.inputs.audio, ["nf_v15", 1]);
+    assert.equal(graph.face_refine.inputs.detector, "face_yolov8m.pt");
+    assert.equal(graph.face_refine.inputs.canvas_size, 640);
+    assert.equal(graph.face_refine.inputs.paste_region, "face_ellipse");
+    assert.deepEqual(graph.nf_output.inputs.images, ["face_refine", 0]);
+    assert.deepEqual(graph.nf_output.inputs.audio, ["face_refine", 1]);
+});
+
+test("seam transition wires previous picture/audio into face refine", async () => {
+    const graph = await buildNativeNanFengV15Workflow(
+        { prompt: "next shot", previousVideo: "previous.mp4" },
+        { mode: "t2v", faceRefineEnabled: true, seamFaceFadeFrames: 8, seamColourMatch: 0.7, seamAudioCrossfadeMs: 250 },
+        upload, "http://comfy.local", new AbortController().signal,
+    );
+    assert.equal(graph.face_refine.inputs.seam_fade_frames, 8);
+    assert.equal(graph.face_refine.inputs.seam_colour_match, 0.7);
+    assert.equal(graph.face_refine.inputs.audio_crossfade_ms, 250);
+    assert.deepEqual(graph.face_refine.inputs.previous_images, ["seam_previous_parts", 0]);
+    assert.deepEqual(graph.face_refine.inputs.previous_audio, ["seam_previous_parts", 1]);
+    assert.equal(graph.seam_previous_video.inputs.file, "uploaded-previous.mp4");
+});
+
+test("decoded-video confirmation phase reads cached video and never contains V15 generation", async () => {
+    const graph = await buildNativeNanFengV15Workflow(
+        { prompt: "confirmed shot", video: "cached-first-pass.mp4" },
+        { postGenerationOnly: true, h3SecondSteps: 5, secondPassDenoise: 0.3, latentUpscaleMegapixels: 1.2, faceRefineEnabled: true },
+        upload, "http://comfy.local", new AbortController().signal,
+    );
+    assert.equal(graph.nf_v15, undefined);
+    assert.equal(graph.cached_first_pass.class_type, "LoadVideo");
+    assert.equal(graph.cached_first_pass.inputs.file, "uploaded-cached-first-pass.mp4");
+    assert.equal(graph.full_frame_refine.class_type, "MiniMaxH3PostGenerationFullFrameRefine");
+    assert.deepEqual(graph.full_frame_refine.inputs.audio, ["cached_parts", 1]);
+    assert.equal(graph.full_frame_refine.inputs.steps, 5);
+    assert.equal(graph.full_frame_refine.inputs.target_megapixels, 1.2);
+    assert.deepEqual(graph.face_refine.inputs.images, ["full_frame_refine", 0]);
+    assert.deepEqual(graph.nf_output.inputs.audio, ["face_refine", 1]);
 });

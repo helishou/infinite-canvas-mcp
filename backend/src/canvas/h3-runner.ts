@@ -7,6 +7,7 @@ import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { RunningHubBackend } from "../runtime/runninghub.js";
 import type { Stores } from "../stores/types.js";
 import { writeBackH3Task } from "./h3-task-writeback.js";
+import { h3ClipCacheFingerprint, h3ConfirmationPhaseParams } from "./h3-cache.js";
 
 type H3RunInput = {
     projectId: string;
@@ -32,7 +33,7 @@ const H3_PARAM_KEYS = [
     "t8Enabled", "t8ResidualThreshold", "t8StartPercent", "t8EndPercent", "t8MaxConsecutiveHits", "t8CacheDevice", "t8MetricStride", "t8Verbose",
     "sigmaEnabled", "videoSigmaShift", "audioSigmaShift", "sigmaMode", "lowSigmaStart", "lowSigmaEnd", "sigmaRefineSteps", "sigmaCurve", "manualSigma", "dualSampling", "dualSamplingRatio", "dualSampler",
     "secondPassEnabled", "firstPassSteps", "secondPassSteps", "secondPassMegapixels", "secondPassUpscaleMethod", "secondPassDenoise", "secondPassSampler", "secondPassScheduler", "secondPassModel", "secondPassSigma",
-    "dedicatedAttention", "startupMode", "faceRepairSingle", "faceRepairMulti", "globalRepair", "lowMemoryAttentionHeads", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "keepModelCache",
+    "dedicatedAttention", "startupMode", "faceRepairSingle", "faceRepairMulti", "globalRepair", "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "confirmationMode", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs", "lowMemoryAttentionHeads", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "keepModelCache",
     "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
     "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality",
     "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
@@ -170,12 +171,23 @@ export class CanvasH3Runner {
         const completed = new Set(completedEvents.map((event) => `${event.payload.nodeId}:${event.payload.segmentId}`));
         const outputs = completedEvents.map((event) => recordOf(event.payload.output)).filter((output) => output.url);
         const children = completedEvents.map((event) => String(event.payload.childTaskId || "")).filter(Boolean);
+        const effectiveFingerprints = new Map<string, string>();
 
         for (let planIndex = 0; planIndex < plans.length; planIndex++) {
             this.assertActive(task.id);
             const plan = plans[planIndex];
             const key = `${plan.nodeId}:${plan.segmentId}`;
             if (completed.has(key)) continue;
+            const cache = this.clipCacheState(input.projectId, plan, input.params || {}, effectiveFingerprints);
+            effectiveFingerprints.set(key, cache.fingerprint);
+            if (input.params?.confirmSecondPass === true && cache.segment.firstPassFingerprint !== cache.fingerprint) throw new Error(`Clip ${plan.segmentIndex + 1} 的生成参数或上游已变化，请重新生成一采后再确认精修`);
+            if (cache.output) {
+                outputs.push(cache.output);
+                completed.add(key);
+                this.stores.tasks.addEvent(task.id, "clip_reused", { nodeId: plan.nodeId, segmentId: plan.segmentId, fingerprint: cache.fingerprint, output: cache.output });
+                task = this.update(task.id, { progress: (planIndex + 1) / plans.length, result: { children, media: outputs, ...cache.output } });
+                continue;
+            }
             const priorEvent = [...this.stores.tasks.events(task.id)].reverse().find((event) => event.type === "child_started" && `${event.payload.nodeId}:${event.payload.segmentId}` === key);
             let child = priorEvent ? this.stores.tasks.get(String(priorEvent.payload.childTaskId || "")) : null;
             if (!child || child.status === "failed" || child.status === "cancelled") child = await this.startChild(task, plan, input.params || {});
@@ -190,14 +202,59 @@ export class CanvasH3Runner {
             const output = resultVideo(child);
             if (!output) throw new Error(`Clip ${plan.segmentIndex + 1} 生成成功但没有视频结果`);
             outputs.push(output);
-            this.stores.tasks.addEvent(task.id, "clip_completed", { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, output });
+            const confirmationMode = cache.segment.confirmationMode === true;
+            const confirming = input.params?.confirmSecondPass === true;
+            if (confirmationMode && !confirming) {
+                this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, {
+                    firstPassResult: output.url,
+                    firstPassStorageKey: output.storageKey,
+                    firstPassFingerprint: cache.fingerprint,
+                    firstPassReady: true,
+                    status: "awaiting_confirmation",
+                    runtimeTaskId: "",
+                });
+                this.stores.tasks.addEvent(task.id, "first_pass_ready", { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, fingerprint: cache.fingerprint, output });
+            } else {
+                this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { cacheFingerprint: cache.fingerprint, firstPassReady: false, status: "success" });
+                this.stores.tasks.addEvent(task.id, "clip_completed", { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, output });
+            }
             task = this.update(task.id, { progress: (planIndex + 1) / plans.length, result: { children, media: outputs, ...output } });
             this.updateNode(input.projectId, plan.nodeId, { runtimeTaskId: task.id, status: "loading", runProgress: task.progress });
         }
         task = this.update(task.id, { status: "succeeded", progress: 1, result: { children, media: outputs, ...(outputs.at(-1) || {}) } });
-        this.finishParentNode(task, "success");
+        const awaitingConfirmation = this.stores.tasks.events(task.id).some((event) => event.type === "first_pass_ready");
+        this.finishParentNode(task, awaitingConfirmation ? "awaiting_confirmation" : "success");
         this.currentChildren.delete(task.id);
         this.cancelled.delete(task.id);
+    }
+
+    private clipCacheState(projectId: string, plan: H3Plan, override: Record<string, unknown>, fingerprints: Map<string, string>) {
+        const project = this.stores.projects.get(projectId)!;
+        const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId)!;
+        const metadata = recordOf(node.metadata);
+        const segments = metadata.segments as H3Segment[];
+        const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
+        const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const params = extractParams(segment, override, metadata, defaults);
+        const compilation = compileReferenceSubmission(project, { ...segment, taskMode: normalizeTaskMode(params.taskMode || segment.taskMode) });
+        const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
+        const previousFingerprint = previous ? fingerprints.get(`${plan.nodeId}:${String(previous.id || "")}`) || String(previous.cacheFingerprint || "") : "";
+        const fingerprint = h3ClipCacheFingerprint({ segment: { ...segment, previousTailFrameContinuation: previous?.tailFrameContinuation === true }, params, references: compilation.references, compiledPrompt: compilation.compiledPrompt, previousFingerprint });
+        const confirming = override.confirmSecondPass === true;
+        const output = !confirming && segment.result && segment.cacheFingerprint === fingerprint ? {
+            url: String(segment.result),
+            ...(segment.resultStorageKey ? { storageKey: String(segment.resultStorageKey) } : {}),
+            mimeType: "video/mp4",
+            cacheFingerprint: fingerprint,
+        } : null;
+        return { fingerprint, output, segment };
+    }
+
+    private patchSegment(projectId: string, nodeId: string, segmentId: string, patch: Record<string, unknown>) {
+        const project = this.stores.projects.get(projectId)!;
+        this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [
+            { type: "update_h3_segment", nodeId, segmentId, patch },
+        ], { runtimeWrite: true, source: { clientId: "task:h3-cache", kind: "task", label: "H3 Clip 缓存" } });
     }
 
     private planNode(node: Record<string, unknown>, input: H3RunInput) {
@@ -229,7 +286,14 @@ export class CanvasH3Runner {
         const segments = metadata.segments as H3Segment[];
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
         const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
-        const params = extractParams(segment, override, metadata, defaults);
+        let params = extractParams(segment, override, metadata, defaults);
+        const confirmingSecondPass = override.confirmSecondPass === true;
+        let cachedFirstPassPath = "";
+        if (confirmingSecondPass) {
+            if (segment.confirmationMode !== true || segment.firstPassReady !== true || !segment.firstPassResult) throw new Error("当前 Clip 没有可确认的一采缓存");
+            cachedFirstPassPath = await this.resolveRef({ url: String(segment.firstPassResult), storageKey: segment.firstPassStorageKey ? String(segment.firstPassStorageKey) : undefined, name: `first-pass-${plan.segmentId}.mp4`, type: "video" });
+        }
+        params = h3ConfirmationPhaseParams(segment, params, confirmingSecondPass);
         const taskMode = normalizeTaskMode(params.taskMode || segment.taskMode);
         const compilation = compileReferenceSubmission(project, { ...segment, taskMode });
         assertReferenceCompilation(compilation);
@@ -261,8 +325,9 @@ export class CanvasH3Runner {
         // 更不能隐式触发 2)；完整视频参考仍由 previousVideoAsReference 单独控制。
         const chained = parent.input.runFromCurrent === true && plan.segmentIndex > 0;
         const { usePreviousAsReference, useTailFrame, needsPreviousVideo } = resolveClipContinuation(segment, previous, chained, params);
+        const seamNeedsPrevious = params.faceRefineEnabled === true && (Number(params.seamFaceFadeFrames || 0) > 0 || Number(params.seamColourMatch || 0) > 0 || Number(params.seamAudioCrossfadeMs || 0) > 0);
         if (useTailFrame && !previous?.result) throw new Error(`Clip ${plan.segmentIndex} 已开启尾帧接续，但上一段没有可用成品视频`);
-        const previousPath = needsPreviousVideo && previous?.result
+        const previousPath = (needsPreviousVideo || seamNeedsPrevious) && previous?.result
             ? await this.resolveRef({ url: previous.result, storageKey: previous.resultStorageKey, name: `clip-${plan.segmentIndex}.mp4`, type: "video" })
             : "";
         let prompt = compilation.compiledPrompt;
@@ -316,13 +381,16 @@ export class CanvasH3Runner {
         });
         this.events.publish({ type: "generation-log.created", entityId: log.id, payload: log });
         const childParams = { ...params, parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id, bindOnStart: false } };
-        const childInput = {
+        const childInput = confirmingSecondPass ? {
+            prompt,
+            video: cachedFirstPassPath,
+        } : {
             prompt, references: images, audios,
             // video（单数）保留给 RunningHub / 旧分拆图读取；videos（复数）给南风 V10 原生构造器，
             // 后者优先读数组——这样第 2/3 段参考视频不会被静默丢弃。
             video: referenceVideos[0],
             ...(referenceVideos.length ? { videos: referenceVideos } : {}),
-            ...(previousPath && usePreviousAsReference ? { previousVideo: previousPath } : {}),
+            ...(previousPath && (usePreviousAsReference || seamNeedsPrevious) ? { previousVideo: previousPath } : {}),
         };
         const bind = (created: RuntimeTask) => this.bindChild(parent.id, plan, created.id, log.id);
         const child = engine === "runninghub"
@@ -350,11 +418,10 @@ export class CanvasH3Runner {
         const project = this.stores.projects.get(projectId)!;
         const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId)!;
         if (!node) throw new Error(`找不到 H3 节点: ${plan.nodeId}`);
-        const result = this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [
+        this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [
             { type: "update_node", id: plan.nodeId, metadata: { runtimeTaskId: parentId, status: "loading" } },
             { type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch: { runtimeTaskId: childId, status: "loading", progress: 0 }, patchDelete: ["errorDetails"] },
-        ]);
-        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || ""), source: { clientId: `task:${childId}`, kind: "task", label: "H3 任务" } });
+        ], { runtimeWrite: true, source: { clientId: `task:${childId}`, kind: "task", label: "H3 任务" } });
         const log = this.stores.logs.update(generationLogId, { status: "running", runtimeTaskId: childId });
         this.events.publish({ type: "generation-log.updated", entityId: log.id, payload: log });
     }
@@ -373,8 +440,7 @@ export class CanvasH3Runner {
 
     private updateNode(projectId: string, nodeId: string, metadata: Record<string, unknown>) {
         const project = this.stores.projects.get(projectId)!;
-        const result = this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [{ type: "update_node", id: nodeId, metadata }]);
-        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || ""), source: { clientId: "task:h3", kind: "task", label: "H3 任务" } });
+        this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [{ type: "update_node", id: nodeId, metadata }], { runtimeWrite: true, source: { clientId: "task:h3", kind: "task", label: "H3 任务" } });
     }
 
     private async waitForTerminal(parentId: string, childId: string) {

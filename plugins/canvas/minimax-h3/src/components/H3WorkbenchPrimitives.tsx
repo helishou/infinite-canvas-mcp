@@ -4,7 +4,7 @@ import type { H3Ref } from "../types";
 import { resultUrl } from "../services/h3-data";
 import { segmentsFor } from "../hooks/useH3Segments";
 
-export function requestH3Run(ctx: CanvasNodeContext, all = false) {
+export function requestH3Run(ctx: CanvasNodeContext, all = false, confirmSecondPass = false) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const metadata = node.metadata || {};
     if (["queued", "loading"].includes(String(metadata.status || ""))) return;
@@ -27,6 +27,7 @@ export function requestH3Run(ctx: CanvasNodeContext, all = false) {
         runProgress: 0,
         runStartedAt: 0,
     });
+    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, requestId: runtimeRunId, all, confirmSecondPass });
 }
 
 export function resetAndRequestH3Run(ctx: CanvasNodeContext, all = false) {
@@ -47,6 +48,7 @@ export function resetAndRequestH3Run(ctx: CanvasNodeContext, all = false) {
         runRequestAll: all, runRequestConsumedId: "", cancelRequested: false, runtimeTaskId: "",
         runProgress: 0, runStartedAt: 0,
     });
+    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, requestId: runtimeRunId, all });
 }
 
 export function resetH3Run(ctx: CanvasNodeContext) {
@@ -397,7 +399,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     // playToken 由 H3Workbench 在用户真正发起播放时（playAll / 续播换段）显式递增。
     // 只看 playToken 是否变化，**不**依赖 h3PlayRequest：metadata 里的 h3PlayRequest 残留值、
     // MCP / 多端同步、StrictMode dev 模式下 useEffect 跑两次都不会触发自动播放。
-    // h3PlayRequest 仍保留在 metadata 里，只用于「我刚才播到哪」的持久化展示。
+    // h3PlayRequest 由本窗口 view 持有，不能用共享 metadata 触发播放。
     useEffect(() => {
         const v = videosRef.current[activeRef.current];
         if (!v) return;

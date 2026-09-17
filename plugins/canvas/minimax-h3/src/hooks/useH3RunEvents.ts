@@ -2,15 +2,11 @@ import { useEffect, useRef } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { resetAndRequestH3Run } from "../components/H3WorkbenchPrimitives";
 
-type RunH3 = (runAll?: boolean) => void | Promise<void>;
+type RunH3 = (runAll?: boolean, confirmSecondPass?: boolean) => void | Promise<void>;
 
 export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3, update: (patch: Record<string, unknown>) => void) {
     const runRef = useRef(run);
     const updateRef = useRef(update);
-    // 已消费的 runRequestId：用 ref 而非 getNode() 快照判定，避免刷新后恢复运行时
-    // 形成「updateMetadata → 重渲染 → effect 再触发 updateMetadata」的无限同步循环
-    // （详见下方 :46 处 effect 的注释）。keyed by requestId，新的一次运行会拿到新 id。
-    const consumedRunRequestRef = useRef<string>("");
     useEffect(() => {
         runRef.current = run;
         updateRef.current = update;
@@ -22,7 +18,7 @@ export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3, update: (patc
         const current = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
         if (!requestId && ["queued", "loading"].includes(String(current.status || ""))) return;
         if (requestId) updateRef.current({ runRequestConsumedId: requestId, status: "loading", errorDetails: "", runProgress: 0 });
-        void runRef.current(Boolean((payload as Record<string, unknown>).all));
+        void runRef.current(Boolean((payload as Record<string, unknown>).all), (payload as Record<string, unknown>).confirmSecondPass === true);
     }), [ctx.node.id]);
 
     useEffect(() => ctx.on("minimax-h3:run-all", (payload) => {
@@ -59,32 +55,6 @@ export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3, update: (patc
         void ctx.ai.cancelCanvasH3Task(taskId).then(reset).catch((error) => updateRef.current({ status: "error", errorDetails: error instanceof Error ? error.message : String(error), cancelRequested: false }));
     }), [ctx.node.id]);
 
-    useEffect(() => {
-        // 刷新后恢复运行：节点 metadata 残留 runRequestId（点击「运行当前及后续」后刷新），
-        // 挂载时自动续跑。此处必须用 ref 守卫「同一 runRequestId 只消费一次」。
-        // 原因：effect 依赖读取 ctx.node.metadata?.runRequestConsumedId（渲染快照），
-        // 但消费判定历史上用 ctx.getNode().metadata（store 快照，滞后于渲染快照）。
-        // update({runRequestConsumedId}) 触发 SDK 内部 store setState → 重渲染 → effect 再次挂载，
-        // 而 getNode 此时仍返回更新前的旧 node → 守卫永远不成立 → 再次 update+run →
-        // 无限同步循环 → React 抛 Maximum update depth exceeded。
-        // consumedRunRequestRef 直接记录已发的 requestId，彻底断开「重渲染→再触发」链条。
-        const requestId = String(ctx.node.metadata?.runRequestId || "");
-        if (!requestId) {
-            consumedRunRequestRef.current = "";
-            return;
-        }
-        // 终态节点上的历史请求只是审计字段，不是新的运行命令。
-        // 刷新时若旧快照把 runRequestConsumedId 丢掉，也不能因残留 requestId 重跑已完成 Clip。
-        const status = String(ctx.node.metadata?.status || "");
-        if (status !== "queued" && status !== "loading") return;
-        if (requestId === consumedRunRequestRef.current) return;
-        const current = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
-        if (requestId === String(current.runRequestConsumedId || "")) {
-            consumedRunRequestRef.current = requestId;
-            return;
-        }
-        consumedRunRequestRef.current = requestId;
-        updateRef.current({ runRequestConsumedId: requestId, status: "loading", errorDetails: "", runProgress: 0 });
-        void runRef.current(current.runRequestAll === true);
-    }, [ctx.node.id, ctx.node.metadata?.runRequestId, ctx.node.metadata?.runRequestConsumedId, ctx.node.metadata?.runRequestAll]);
+    // 文档中的运行字段只是 Backend 投影，不是浏览器命令。
+    // 刷新/加入房间只恢复任务查询；仅本窗口用户事件允许提交新任务。
 }
