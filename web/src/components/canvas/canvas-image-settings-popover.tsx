@@ -111,31 +111,39 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
         const signature = `${config.model}::${workflowName}`;
         const workflowChanged = Boolean(appliedWorkflowRef.current && appliedWorkflowRef.current !== signature);
         appliedWorkflowRef.current = signature;
-        // 渠道设置里为当前输入场景配的参数优先于工作流字段默认值。
+        // 模型设置里为当前输入场景配的参数优先于内部实现字段默认值。
         const routedParams = resolveModelWorkflowParams(config, config.model, referenceCount);
         const next = reconcileWorkflowParams(comfyParams, customFields, routedParams, workflowChanged);
         if (next && next !== comfyParams) onComfyParamsChange(next);
     }, [comfyParams, customFields, onComfyParamsChange, workflowDetail, workflowName, config, referenceCount]);
 
-    const panel = open && buttonRect ? (
-        <ImageSettingsPortal
-            buttonRect={buttonRect}
-            panelRef={panelRef}
-            placement={placement}
-            theme={theme}
-            config={config}
-            onConfigChange={onConfigChange}
-            customFields={customFields}
-            customFieldValues={comfyParams}
-            onCustomFieldChange={onComfyParamsChange ? (id, value) => onComfyParamsChange({ ...(comfyParams || {}), [id]: value }) : undefined}
-            hideStandardImageOptions={isLocalCustomWorkflow}
-        />
-    ) : null;
+    const panel =
+        open && buttonRect ? (
+            <ImageSettingsPortal
+                buttonRect={buttonRect}
+                panelRef={panelRef}
+                placement={placement}
+                theme={theme}
+                config={config}
+                onConfigChange={onConfigChange}
+                customFields={customFields}
+                customFieldValues={comfyParams}
+                onCustomFieldChange={onComfyParamsChange ? (id, value) => onComfyParamsChange({ ...(comfyParams || {}), [id]: value }) : undefined}
+                hideStandardImageOptions={isLocalCustomWorkflow}
+            />
+        ) : null;
 
     return (
         <>
             <span ref={buttonRef} className="inline-flex min-w-0">
-                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[180px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => updateOpen(!open)}>
+                <Button
+                    size="small"
+                    type="text"
+                    className={buttonClassName || "!h-8 !max-w-[180px] !justify-start !rounded-full !px-2.5"}
+                    style={{ background: theme.node.fill, color: theme.node.text }}
+                    icon={<Settings2 className="size-3.5" />}
+                    onClick={() => updateOpen(!open)}
+                >
                     <span className="truncate">
                         {imageQualityLabel(quality)} · {imageSizeLabel(activeSize)} · {t("canvas.controls.images", { count })}
                     </span>
@@ -191,14 +199,7 @@ function ImageSettingsPortal({
     } as const;
 
     return createPortal(
-        <div
-            ref={panelRef}
-            className="canvas-image-settings-popover"
-            style={style}
-            onPointerDown={(event) => event.stopPropagation()}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => event.stopPropagation()}
-        >
+        <div ref={panelRef} className="canvas-image-settings-popover" style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
             <ImageSettingsPanel
                 config={config}
                 onConfigChange={(key, value) => onConfigChange(key, value)}

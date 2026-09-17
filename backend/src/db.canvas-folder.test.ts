@@ -84,15 +84,16 @@ test("v7 迁移：把 v6 的 folder_id 搬到 drama_episodes，并给所有 dram
         assert.equal(db.getDramaEpisode(eps1[0].id)?.canvasId, null);
 
         // 6. drama_episodes CRUD
-        const newEp = db.upsertDramaEpisode({ dramaId: "folder-1", episodeNumber: 2, title: "第二集", synopsis: "她离开", canvasId: null });
+        const newEp = db.upsertDramaEpisode({ dramaId: "folder-1", episodeNumber: 2, title: "第二集", synopsis: "她离开", fullPlot: "她离开王府后查明旧案。", canvasId: null });
         assert.equal(newEp.title, "第二集");
+        assert.equal(newEp.fullPlot, "她离开王府后查明旧案。");
         assert.equal(db.listDramaEpisodes("folder-1").length, 2);
         assert.equal(db.deleteDramaEpisode(newEp.id), 1);
         assert.equal(db.listDramaEpisodes("folder-1").length, 1);
 
-        // 7. schema version 已升到 7
+        // 7. 后续迁移同样完整执行
         const versions = db["db"].prepare("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: number }>;
-        assert.deepEqual(versions.map((v) => v.version), [6, 7, 8]);
+        assert.deepEqual(versions.map((v) => v.version), [6, 7, 8, 9, 10]);
     } finally {
         db.close();
     }

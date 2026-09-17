@@ -7,6 +7,7 @@ try {
 }
 if (-not $hasLock) {
     Write-Host "[dev-local] Another local development stack is already running."
+    Write-Host "[dev-local] If its terminal is unavailable, run: npm run dev:stop"
     $mutex.Dispose()
     exit 0
 }

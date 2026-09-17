@@ -1,113 +1,91 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { create } from "zustand";
 import { MousePointer2 } from "lucide-react";
-
-import { getBackendUrl, getCanvasCollaborationClient } from "@/services/backend-api";
-import { getBackendTokenShared } from "@/lib/backend-token";
+import { connectCanvasRealtime, type CanvasPeer } from "@/services/api/canvas-realtime";
+import { getCanvasCollaborationClient } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
+import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import type { CanvasNodeData, Position, ViewportTransform } from "@/types/canvas";
 
-export type CanvasRealtimePeer = {
-    clientId: string;
-    label: string;
-    color: string;
-    cursor?: Position;
-    selectedNodeIds: string[];
-};
+const emptyPeers: CanvasPeer[] = [];
+const usePresence = create<{ peers: Record<string, CanvasPeer[]>; errors: Record<string, string> }>(() => ({ peers: {}, errors: {} }));
+const viewportWriters = new Map<string, (viewport: ViewportTransform) => void>();
 
+export function writeCanvasPresenceViewport(projectId: string, viewport: ViewportTransform) {
+    viewportWriters.get(projectId)?.(viewport);
+}
+
+/** 父画布只持有发送句柄，不订阅高频远端光标。 */
 export function useCanvasRealtimePresence(projectId: string, selectedNodeIds: Set<string>) {
-    const connected = useBackendStore((state) => state.connected);
-    const [peers, setPeers] = useState<CanvasRealtimePeer[]>([]);
-    const socketRef = useRef<WebSocket | null>(null);
-    const frameRef = useRef<number | null>(null);
-    const cursorRef = useRef<Position | undefined>(undefined);
+    const url = useBackendStore((state) => state.url);
+    const token = useBackendStore((state) => state.token);
+    const connection = useRef<ReturnType<typeof connectCanvasRealtime> | null>(null);
     const selectedRef = useRef<string[]>([]);
-    const client = getCanvasCollaborationClient();
-    const color = peerColor(client.clientId);
-
-    const flushPresence = useCallback(() => {
-        frameRef.current = null;
-        const socket = socketRef.current;
-        if (socket?.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({ type: "presence", cursor: cursorRef.current, selectedNodeIds: selectedRef.current }));
-    }, []);
-
-    const publishCursor = useCallback((cursor: Position) => {
-        cursorRef.current = cursor;
-        if (frameRef.current == null) frameRef.current = requestAnimationFrame(flushPresence);
-    }, [flushPresence]);
-
+    useEffect(() => {
+        if (!projectId || !token) return;
+        let membership = "";
+        const session = connectCanvasRealtime(projectId, (peers) => {
+            usePresence.setState((state) => ({ peers: { ...state.peers, [projectId]: peers } }));
+            const next = peers.map((peer) => `${peer.connectionId}:${peer.label}`).sort().join("|");
+            if (membership === next) return;
+            membership = next;
+            const participants = [...new Map(peers.map((peer) => [peer.clientId, peer])).values()];
+            useCanvasStore.setState((state) => ({ collaborators: { ...state.collaborators, [projectId]: participants.map((peer) => ({ clientId: peer.clientId, label: peer.label, kind: "browser" as const, lastActivityAt: new Date().toISOString() })) } }));
+        }, (error) => usePresence.setState((state) => ({ errors: { ...state.errors, [projectId]: error } })));
+        connection.current = session;
+        session.update({ selectedNodeIds: selectedRef.current });
+        return () => {
+            if (connection.current === session) connection.current = null;
+            session.close();
+        };
+    }, [projectId, url, token]);
     useEffect(() => {
         selectedRef.current = [...selectedNodeIds];
-        if (frameRef.current == null) frameRef.current = requestAnimationFrame(flushPresence);
-    }, [flushPresence, selectedNodeIds]);
-
-    useEffect(() => {
-        if (!connected || !projectId) {
-            setPeers([]);
-            return;
-        }
-        const url = realtimeUrl(projectId, client.clientId, client.label, color);
-        const socket = new WebSocket(url);
-        let disposed = false;
-        socketRef.current = socket;
-        socket.addEventListener("open", flushPresence);
-        socket.addEventListener("message", (event) => {
-            if (disposed) return;
-            try {
-                const value = JSON.parse(String(event.data)) as { type?: string; projectId?: string; participants?: CanvasRealtimePeer[] };
-                if (value.type === "presence" && value.projectId === projectId && Array.isArray(value.participants)) {
-                    setPeers(value.participants.filter((peer) => peer.clientId !== client.clientId));
-                }
-            } catch { /* 丢弃损坏的瞬时 presence；持久化画布不受影响 */ }
-        });
-        socket.addEventListener("close", () => { if (!disposed) setPeers([]); });
-        return () => {
-            disposed = true;
-            if (socketRef.current === socket) socketRef.current = null;
-            socket.close();
-            setPeers([]);
-        };
-    }, [client.clientId, client.label, color, connected, flushPresence, projectId]);
-
-    useEffect(() => () => { if (frameRef.current != null) cancelAnimationFrame(frameRef.current); }, []);
-    return { peers, publishCursor };
+        connection.current?.update({ selectedNodeIds: selectedRef.current });
+    }, [selectedNodeIds]);
+    const publishCursor = useCallback((cursor?: Position) => connection.current?.update({ cursor }), []);
+    const publishDrag = useCallback((positions: Map<string, Position>) => connection.current?.update({ drag: [...positions].map(([nodeId, position]) => ({ nodeId, position })) }), []);
+    return { publishCursor, publishDrag };
 }
 
-export function CanvasRealtimePresenceLayer({ peers, nodes, viewport }: { peers: CanvasRealtimePeer[]; nodes: CanvasNodeData[]; viewport: ViewportTransform }) {
-    if (!peers.length) return null;
-    const nodesById = new Map(nodes.map((node) => [node.id, node]));
+export function CanvasRealtimePresenceLayer({ projectId, nodes, viewport }: { projectId: string; nodes: CanvasNodeData[]; viewport: ViewportTransform }) {
+    const peers = usePresence((state) => state.peers[projectId] || emptyPeers);
+    const error = usePresence((state) => state.errors[projectId] || "");
+    const layer = useRef<HTMLDivElement>(null);
+    const latestViewport = useRef(viewport);
+    latestViewport.current = viewport;
+    useEffect(() => {
+        const write = (next: ViewportTransform) => {
+            if (!layer.current) return;
+            layer.current.style.transform = `translate3d(${next.x}px, ${next.y}px, 0) scale(${next.k})`;
+            layer.current.style.setProperty("--inverse-scale", String(1 / next.k));
+        };
+        viewportWriters.set(projectId, write);
+        write(latestViewport.current);
+        return () => { if (viewportWriters.get(projectId) === write) viewportWriters.delete(projectId); };
+    }, [projectId]);
+    useEffect(() => { writeCanvasPresenceViewport(projectId, viewport); }, [projectId, viewport]);
+    const ownId = getCanvasCollaborationClient().clientId;
+    const nodesById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
     return (
-        <div className="pointer-events-none absolute inset-0 z-40 overflow-hidden" aria-hidden>
-            {peers.flatMap((peer) => peer.selectedNodeIds.flatMap((id) => {
-                const node = nodesById.get(id);
-                if (!node) return [];
-                return [<div key={`${peer.clientId}:${id}`} className="absolute rounded-lg border-2" style={{ left: viewport.x + node.position.x * viewport.k, top: viewport.y + node.position.y * viewport.k, width: node.width * viewport.k, height: node.height * viewport.k, borderColor: peer.color, boxShadow: `0 0 0 2px ${peer.color}22` }} />];
-            }))}
-            {peers.map((peer) => peer.cursor ? (
-                <div key={peer.clientId} className="absolute flex items-start" style={{ transform: `translate3d(${viewport.x + peer.cursor.x * viewport.k}px, ${viewport.y + peer.cursor.y * viewport.k}px, 0)`, color: peer.color }}>
-                    <MousePointer2 className="size-5 fill-current" />
-                    <span className="ml-0.5 mt-4 rounded px-1.5 py-0.5 text-[10px] font-medium text-white" style={{ background: peer.color }}>{peer.label}</span>
-                </div>
-            ) : null)}
+        <div className="pointer-events-none absolute inset-0 z-40 overflow-hidden">
+            {error ? <div className="absolute bottom-24 left-4 text-xs text-amber-600 dark:text-amber-400" role="status">{error}</div> : null}
+            <div ref={layer} className="absolute inset-0 origin-top-left" aria-hidden>
+                {peers.filter((peer) => peer.clientId !== ownId).map((peer) => (
+                    <div key={peer.connectionId}>
+                        {peer.selectedNodeIds.map((id) => {
+                            const node = nodesById.get(id);
+                            if (!node) return null;
+                            const position = peer.drag?.find((item) => item.nodeId === id)?.position || node.position;
+                            return <div key={id} className="absolute rounded-lg border-solid" style={{ left: position.x, top: position.y, width: node.width, height: node.height, borderWidth: "calc(2px * var(--inverse-scale))", borderColor: peer.color }} />;
+                        })}
+                        {peer.cursor ? <div className="absolute flex origin-top-left items-start" style={{ left: peer.cursor.x, top: peer.cursor.y, transform: "scale(var(--inverse-scale))", color: peer.color }}>
+                            <MousePointer2 className="size-5 fill-current" />
+                            <span className="ml-0.5 mt-4 rounded px-1.5 py-0.5 text-[10px] font-medium text-white" style={{ background: peer.color }}>{peer.label}</span>
+                        </div> : null}
+                    </div>
+                ))}
+            </div>
         </div>
     );
-}
-
-function realtimeUrl(projectId: string, clientId: string, label: string, color: string) {
-    const backend = new URL(getBackendUrl());
-    const local = (backend.hostname === "127.0.0.1" || backend.hostname === "localhost") && backend.port === "17370";
-    const base = local ? new URL(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/canvas/realtime`) : new URL(`${backend.protocol === "https:" ? "wss" : "ws"}://${backend.host}/canvas/realtime`);
-    base.searchParams.set("token", getBackendTokenShared());
-    base.searchParams.set("projectId", projectId);
-    base.searchParams.set("clientId", clientId);
-    base.searchParams.set("label", label);
-    base.searchParams.set("color", color);
-    return base.toString();
-}
-
-function peerColor(clientId: string) {
-    const colors = ["#0f766e", "#b45309", "#be123c", "#1d4ed8", "#6d28d9", "#3f6212"];
-    let hash = 0;
-    for (let index = 0; index < clientId.length; index += 1) hash = (hash * 31 + clientId.charCodeAt(index)) | 0;
-    return colors[Math.abs(hash) % colors.length];
 }

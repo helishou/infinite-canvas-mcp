@@ -91,7 +91,7 @@ export function WorkflowSelectModal({ open, selectedNames, onConfirm, onClose }:
             <div className="flex flex-wrap items-center gap-3">
                 <Input className="min-w-[200px] flex-1" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("config.modelSelect.search")} prefix={<Search className="size-4 text-stone-400" />} allowClear />
             </div>
-            <div className="mt-2 text-xs text-stone-500">从「ComfyUI → 工作流库」管理的内置与自定义工作流（来源：后端 /api/workflows）</div>
+            <div className="mt-2 text-xs text-stone-500">选择模型的本地内部实现（来源：Backend 内部目录）</div>
 
             <Tabs
                 className="mt-3"

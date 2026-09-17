@@ -1,11 +1,10 @@
 import crypto from "node:crypto";
 
 import { compileReferenceSubmission, inferReferenceMediaType, inferReferenceRole, referenceCatalogOf, type ProjectReferenceAsset } from "@basketikun/canvas-agent/reference-contract";
-import type { BackendEventBus } from "../events.js";
 import type { Stores } from "../stores/types.js";
 
 export class CanvasReferenceService {
-    constructor(private readonly stores: Stores, private readonly events: BackendEventBus) {}
+    constructor(private readonly stores: Stores) {}
 
     list(projectId: string) {
         const project = this.project(projectId);
@@ -28,15 +27,13 @@ export class CanvasReferenceService {
             createdAt: existing?.createdAt || now,
             updatedAt: now,
         } as ProjectReferenceAsset;
-        const result = this.stores.projects.applyOperations(projectId, undefined, [{ type: "upsert_reference_asset", asset }]);
-        this.publish(projectId, result);
+        this.stores.projects.applyOperations(projectId, undefined, [{ type: "upsert_reference_asset", asset }], { source: { clientId: "system:references", kind: "system", label: "参考资产" } });
         return asset;
     }
 
     remove(projectId: string, assetId: string) {
         this.project(projectId);
-        const result = this.stores.projects.applyOperations(projectId, undefined, [{ type: "delete_reference_asset", assetId }]);
-        this.publish(projectId, result);
+        const result = this.stores.projects.applyOperations(projectId, undefined, [{ type: "delete_reference_asset", assetId }], { source: { clientId: "system:references", kind: "system", label: "参考资产" } });
         return !Boolean((result.operationResults[0] as { skipped?: boolean } | undefined)?.skipped);
     }
 
@@ -57,9 +54,6 @@ export class CanvasReferenceService {
         return project;
     }
 
-    private publish(projectId: string, result: ReturnType<Stores["projects"]["applyOperations"]>) {
-        this.events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || ""), source: { clientId: "system:references", kind: "system", label: "参考资产" } });
-    }
 }
 
 function recordOf(value: unknown): Record<string, unknown> {

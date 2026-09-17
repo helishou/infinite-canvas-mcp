@@ -29,7 +29,7 @@ export type CanvasNodeTypeId = CanvasNodeType | (string & {});
 
 export type CanvasNodeStatus = "idle" | "queued" | "success" | "loading" | "error" | "cancelled";
 export type CanvasImageGenerationType = "generation" | "edit";
-export type CanvasGenerationEngine = "cloud" | "comfyui" | "video-concat";
+export type CanvasGenerationEngine = "cloud" | "comfyui" | "video-concat" | "backend";
 
 export type CanvasNodeImage = {
     id: string;
@@ -62,6 +62,9 @@ export type CanvasNodeMetadata = {
     generationEngine?: CanvasGenerationEngine;
     comfyPreset?: string;
     runtimeTaskId?: string;
+    generationTaskId?: string;
+    generatedTextResultIds?: string[];
+    primaryTextNodeId?: string;
     comfyParams?: Record<string, unknown>;
     model?: string;
     reasoningEffort?: "auto" | "low" | "medium" | "high" | "xhigh";

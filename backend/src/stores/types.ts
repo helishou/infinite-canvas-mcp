@@ -5,9 +5,10 @@ import type {
     RuntimeTask, RuntimeTaskEvent, RuntimeTaskStatus,
 } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
+import type { CanvasCommandContext } from "../canvas/collaboration.js";
 
 /** 各 store 的筛选条件。 */
-export type AssetFilter = { kind?: string; folderId?: string };
+export type AssetFilter = { kind?: string; folderId?: string; dramaId?: string };
 export type LogFilter = { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number };
 export type LogDeleteScope = { id?: string; projectId?: string; nodeId?: string };
 export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null };
@@ -39,10 +40,9 @@ export type CanvasProjectStore = {
     list(): CanvasProject[];
     listSummaries(filter?: CanvasProjectFilter): CanvasProject[];
     get(id: string): CanvasProject | null;
-    upsert(project: CanvasProject): CanvasProject;
-    replaceAll(projects: CanvasProject[]): CanvasProject[];
+    create(project: CanvasProject): { project: CanvasProject; created: boolean };
     delete(id: string): number;
-    applyOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[], context?: { operationId?: string; source?: Record<string, unknown> }): { project: CanvasProject; revision: number; operationResults: unknown[]; operations: CanvasOperation[]; duplicated?: boolean };
+    applyOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[], context?: CanvasCommandContext): { project: CanvasProject; revision: number; operationResults: unknown[]; operations: CanvasOperation[]; duplicated?: boolean };
     /** H3 任务终态与 Clip、生成日志在同一数据库事务中回写。 */
     writeBackH3Task(
         task: RuntimeTask,
@@ -51,10 +51,14 @@ export type CanvasProjectStore = {
     ): { project: CanvasProject; log: GenerationLog | null; operations: CanvasOperation[] } | null;
     writeBackCanvasImageTask(
         task: RuntimeTask,
-        input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append" },
+        input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append"; imageIds?: string[] },
         media: Array<Record<string, unknown>>,
     ): { project: CanvasProject; operations: CanvasOperation[] } | null;
     markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    writeBackCanvasVideoTask(task: RuntimeTask, input: { projectId: string; nodeId: string; prompt: string; model: string }, media: Record<string, unknown>): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    markCanvasVideoTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    writeBackCanvasAudioTask(task: RuntimeTask, input: { projectId: string; nodeId: string; prompt: string; model: string }, media: Record<string, unknown>): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    markCanvasAudioTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;
     /** H3 节点历史运行产物（替代老的 metadata.materials 与 segments[i].results[].params 字段）。 */
     getH3NodeMaterials(projectId: string, nodeId: string, limit?: number, segmentId?: string): H3NodeMaterial[];
 };

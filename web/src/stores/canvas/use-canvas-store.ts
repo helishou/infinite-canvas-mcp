@@ -6,8 +6,13 @@ import i18n from "@/i18n";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { normalizeViewportTransform } from "@/lib/canvas/canvas-viewport";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
-import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, deleteBackendCanvasFolder, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder, upsertBackendProject } from "@/services/backend-api";
+import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, createBackendProject, deleteBackendCanvasFolder, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
+import { getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId } from "@/services/backend-api";
+import { CanvasCommandQueue, type CanvasCommand } from "@/lib/canvas/canvas-command-queue";
+import { canvasDraftPersistence } from "@/lib/canvas/canvas-draft-persistence";
+import { CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS, H3_LOCAL_VIEW_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
+import { flushCanvasTexts, onCanvasTextCommit, prepareCanvasTextWith, receiveCanvasTextEvent } from "@/services/api/canvas-text";
 
 export type CanvasProject = {
     id: string;
@@ -64,11 +69,10 @@ type CanvasStore = {
     collaborators: Record<string, CanvasCollaborator[]>;
     canvasConflicts: Record<string, CanvasConflictRecord>;
     clearCanvasConflict: (id: string) => void;
-    /** 弹窗"保留我的 N 个操作"：syncBase 推进到远端 revision，本地不动，
-     *  下一次显式编辑会基于新 revision 重新提交 pendingOps，达成自动 rebase。 */
-    keepPendingOpsOnCanvasConflict: (id: string) => void;
+    /** 显式保留：用新命令 ID 替换已拒绝意图，再基于远端提交。 */
+    keepPendingOpsOnCanvasConflict: (id: string) => Promise<void>;
     /** 弹窗"采用远端"：用缓存的 remoteProject 直接覆盖本地，syncBase = remote。 */
-    adoptRemoteOnCanvasConflict: (id: string) => void;
+    adoptRemoteOnCanvasConflict: (id: string) => Promise<void>;
     createProject: (title?: string) => string;
     importProject: (project: Partial<CanvasProject>) => string;
     createFolder: (name?: string) => string;
@@ -92,15 +96,12 @@ export type CanvasFolder = {
 const projectCache = localforage.createInstance({ name: "infinite-canvas-project-cache" });
 const cachedProjects = new Map<string, CanvasProject>();
 const cachedBases = new Map<string, CanvasProject | undefined>();
-const comparedProjects = new Map<string, CanvasProject>();
 const projectLoads = new Map<string, Promise<CanvasProject>>();
-const CANVAS_PROJECT_INDEX_KEY = "infinite-canvas-project-index-v3";
-const CANVAS_PROJECT_DELETIONS_KEY = "infinite-canvas-project-deletions-v1";
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let localSnapshotTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingLocalSnapshot: { projects: CanvasProject[]; bases: Map<string, CanvasProject> } | null = null;
-let localSnapshotWritePromise: Promise<void> | null = null;
+let localSnapshotWritePromise: Promise<boolean> | null = null;
 let syncPromise: Promise<void> | null = null;
 let syncRequested = false;
 let syncGeneration = 0;
@@ -108,34 +109,49 @@ let knownProjectIds = new Set<string>();
 let knownCanvasFolderIds = new Set<string>();
 let folderSaveTimer: ReturnType<typeof setTimeout> | null = null;
 const syncBases = new Map<string, CanvasProject>();
-// Backend 已明确拒绝的同一批操作不再自动重试。签名包含基线 revision 与完整 op
-// 内容的短哈希，因此无关的 store/SSE 对象重建不会解除熔断，用户真正修改内容后会。
-const rejectedSyncSignatures = new Map<string, string>();
-const pendingOperationIds = new Map<string, { signature: string; operationId: string }>();
+export function getCanvasAcknowledgedRevision(projectId: string) { return Number(syncBases.get(projectId)?.revision || 0); }
+// 明确拒绝持久化在原命令上；刷新或无关编辑都不解除，必须由用户选择处理。
+type LegacyCanvasCommand = { operationId: string; base: CanvasProject; submitted: CanvasProject; operations: Array<Record<string, unknown>> };
+const commandOutbox = localforage.createInstance({ name: "infinite-canvas-command-outbox", storeName: "commands", description: "未确认的画布操作" });
+const draftSessionId = getCanvasDraftSessionId();
+const commandBackend = getBackendUrl();
+const cacheKey = (id: string) => JSON.stringify([commandBackend, draftSessionId, id]);
+const deletionCache = localforage.createInstance({ name: "infinite-canvas-project-deletions" });
+let deletionWrite: Promise<unknown> = Promise.resolve();
+const pendingCommands = new CanvasCommandQueue<CanvasProject>({
+    save: (command) => canvasDraftPersistence.save({ key: `command:${command.operationId}`, projectId: command.projectId, label: "画布编辑命令", record: command, write: () => commandOutbox.setItem(command.operationId, command) }),
+    remove: (id) => canvasDraftPersistence.save({ key: `command:${id}`, label: "清理已确认命令", record: null, write: () => commandOutbox.removeItem(id) }),
+});
+let commandOrder = Date.now();
+function captureCanvasAction(before: CanvasProject, after: CanvasProject) {
+    const operations = diffCanvasProject(before, after);
+    if (!operations.length) return;
+    if (getBackendUrl() !== commandBackend) throw new Error("后台地址已改变，请刷新后继续编辑；原后台草稿仍保留");
+    pendingCommands.enqueue({ operationId: nanoid(), projectId: before.id, ownerId: draftSessionId, backend: commandBackend, source: getCanvasCollaborationClient(), order: ++commandOrder, base: before, operations });
+}
+function projectCanvasCommands(remote: CanvasProject) {
+    let projection = remote;
+    const conflicts: CanvasConflictTarget[] = [];
+    for (const command of pendingCommands.list(remote.id)) {
+        conflicts.push(...detectCanvasConflicts(command.operations, projection, command.base));
+        projection = applyBackendCanvasDelta(projection, command.operations, Number(remote.revision || 0));
+    }
+    return { projection, conflicts };
+}
+const pendingCommandEvents = new Map<string, unknown[]>();
 let deferredBackendEvents: unknown[] = [];
 let deferredBackendEventsWaiter: Promise<void> | null = null;
 let canvasHydrationPromise: Promise<void> | null = null;
 let localCanvasHydrated = false;
 let backendCanvasHydrated = false;
 const canvasDeltaRecovery = new Set<string>();
-const pendingDeletedProjectIds = loadDeletedProjectIds();
-
-function loadDeletedProjectIds(): Set<string> {
-    try {
-        const raw = localStorage.getItem(CANVAS_PROJECT_DELETIONS_KEY);
-        const ids = raw ? JSON.parse(raw) : [];
-        return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && id.length > 0) : []);
-    } catch {
-        return new Set();
-    }
-}
+const pendingDeletedProjectIds = new Set<string>();
 
 function persistDeletedProjectIds() {
-    try {
-        localStorage.setItem(CANVAS_PROJECT_DELETIONS_KEY, JSON.stringify([...pendingDeletedProjectIds]));
-    } catch {
-        // 删除意图只作为刷新期间的同步标记，浏览器存储不可用时继续走 Backend 同步。
-    }
+    const ids = [...pendingDeletedProjectIds];
+    deletionWrite = deletionWrite.catch(() => {}).then(() => canvasDraftPersistence.save({ key: cacheKey("deletions"), label: "项目删除意图", record: { backend: commandBackend, ownerId: draftSessionId, ids }, write: () => deletionCache.setItem(cacheKey("deletions"), ids) }));
+    void deletionWrite.catch((error) => console.error("画布删除意图保存失败，尚未提交后台", error));
+    return deletionWrite;
 }
 
 async function syncCanvasFolders(folders: CanvasFolder[]) {
@@ -162,45 +178,10 @@ function scheduleCanvasFolderSync() {
 //     → 页面只读，绝不能把"页面恢复时的旧快照"重新提交，否则会覆盖任务回写。
 //     → 注意：H3 的"运行历史"已从 node.metadata 迁出（v4），落到 generation_logs.outputs_json。
 //       由 /canvas/projects/:id/nodes/:nodeId/materials 与 MCP h3_get_node_materials 按需返回。
-//   - 页面 UI 瞬态：playhead
-//     → H3 工作台 rAF tick 每帧都在改它（onPlayheadTick → updateMetadata），属于"看见/听见"的本地状态。
-//       不应该走主同步流，否则用户拖一下窗口 / 滚一下视图就会被弹冲突。
-//     → 其它 tab 看自己 video.currentTime 即可，不需要靠 sync 同步这个值。
-const H3_BACKEND_NODE_METADATA_FIELDS = new Set([
-    "status", "runProgress", "runtimeTaskId", "runtimeRunId", "runRequestId", "runRequestConsumedId",
-    "cancelRequested", "errorDetails", "content", "storageKey",
-    "playhead",
-]);
-const H3_BACKEND_SEGMENT_FIELDS = new Set([
-    "status", "progress", "runtimeTaskId", "result", "resultStorageKey", "results", "errorDetails",
-]);
-
-function loadFromLocalStorage(): CanvasProject[] {
-    try {
-        const raw = localStorage.getItem(CANVAS_PROJECT_INDEX_KEY);
-        if (!raw) return [];
-        const val = JSON.parse(raw);
-        return Array.isArray(val) ? val.filter((item) => !pendingDeletedProjectIds.has(String(item?.id || ""))).map((item) => ({
-            ...item,
-            summary: item.summary || { nodeCount: 0, connectionCount: 0 },
-            nodes: [],
-            connections: [],
-            chatSessions: [],
-            activeChatId: null,
-            backgroundMode: "lines" as const,
-            showImageInfo: false,
-            globalPrompt: "",
-            viewport: normalizeViewportTransform(item.viewport),
-        })) as CanvasProject[] : [];
-    } catch { return []; }
-}
-
-function saveToLocalStorage(projects: CanvasProject[]) {
-    try {
-        const index = projects.map(({ id, title, folderId, revision, createdAt, updatedAt, nodes, connections, summary, viewport }) => ({ id, title, folderId, revision, createdAt, updatedAt, viewport, summary: summary || { nodeCount: nodes.length, connectionCount: connections.length } }));
-        localStorage.setItem(CANVAS_PROJECT_INDEX_KEY, JSON.stringify(index));
-    } catch { /* localStorage 满了就放弃 */ }
-}
+//   - 窗口视图状态由插件 view 独立维护；此处同样禁止旧字段进入同步流。
+const H3_BACKEND_NODE_METADATA_FIELDS = new Set<string>([...H3_RUNTIME_NODE_FIELDS, ...H3_LOCAL_VIEW_FIELDS]);
+const H3_BACKEND_SEGMENT_FIELDS = new Set<string>(H3_RUNTIME_SEGMENT_FIELDS);
+const ACTIVE_TASK_NODE_METADATA_FIELDS = new Set<string>(CANVAS_ACTIVE_TASK_NODE_FIELDS);
 
 function persistCurrentCanvasSnapshot() {
     if (localSnapshotTimer) clearTimeout(localSnapshotTimer);
@@ -215,44 +196,79 @@ function persistCanvasSnapshot(projects: CanvasProject[]) {
     pendingLocalSnapshot = { projects, bases: new Map(syncBases) };
     if (localSnapshotWritePromise) return localSnapshotWritePromise;
     localSnapshotWritePromise = (async () => {
+        let persisted = true;
         while (pendingLocalSnapshot) {
             const { projects: next, bases } = pendingLocalSnapshot;
             pendingLocalSnapshot = null;
-            try {
-                const ids = new Set(next.map((project) => project.id));
-                for (const project of next) {
+            const ids = new Set(next.map((project) => project.id));
+            const failed = (error: unknown) => { persisted = false; console.error("画布本地快照保存失败", error); };
+            for (const project of next) {
+                try {
                     const base = bases.get(project.id);
                     if (cachedProjects.get(project.id) === project && cachedBases.get(project.id) === base) continue;
-                    await projectCache.setItem(project.id, { project, base });
+                    const record = { project, base, queueVersion: 2 };
+                    await canvasDraftPersistence.save({ key: cacheKey(project.id), projectId: project.id, label: base ? "画布本机缓存" : "新建画布草稿", record: { ...record, backend: commandBackend, ownerId: draftSessionId }, write: () => projectCache.setItem(cacheKey(project.id), record) });
                     cachedProjects.set(project.id, project);
                     cachedBases.set(project.id, base);
-                }
-                for (const id of cachedProjects.keys()) {
-                    if (ids.has(id)) continue;
-                    await projectCache.removeItem(id);
+                } catch (error) { failed(error); }
+            }
+            for (const id of cachedProjects.keys()) {
+                if (ids.has(id)) continue;
+                try {
+                    await canvasDraftPersistence.save({ key: cacheKey(id), label: "清理画布缓存", projectId: id, record: null, write: () => projectCache.removeItem(cacheKey(id)) });
                     cachedProjects.delete(id);
                     cachedBases.delete(id);
-                }
-                saveToLocalStorage(next);
-            } catch (error) {
-                console.error("画布本地快照保存失败", error);
+                } catch (error) { failed(error); }
             }
         }
+        return persisted;
     })().finally(() => { localSnapshotWritePromise = null; });
     return localSnapshotWritePromise;
 }
 
 async function hydrateCanvasProjectsFromLocalStore() {
     try {
-        const projects: CanvasProject[] = [];
-        await projectCache.iterate<{ project: CanvasProject; base?: CanvasProject }, void>((entry) => {
-            if (!entry?.project?.id || pendingDeletedProjectIds.has(entry.project.id)) return;
-            projects.push(entry.project);
-            cachedProjects.set(entry.project.id, entry.project);
-            cachedBases.set(entry.project.id, entry.base);
-            if (entry.base) syncBases.set(entry.project.id, entry.base);
+        for (const id of await deletionCache.getItem<string[]>(cacheKey("deletions")) || []) pendingDeletedProjectIds.add(id);
+        const legacy: Array<{ key: string; command: LegacyCanvasCommand }> = [];
+        await commandOutbox.iterate<CanvasCommand<CanvasProject> | LegacyCanvasCommand, void>((command, key) => {
+            if ("ownerId" in command) {
+                if (command.ownerId !== draftSessionId || command.backend !== commandBackend) return;
+                pendingCommands.restore(command);
+                commandOrder = Math.max(commandOrder, command.order);
+            } else if (key.startsWith(draftSessionId + ":")) legacy.push({ key, command });
         });
-        const normalizedProjects = projects.filter((project) => !pendingDeletedProjectIds.has(project.id)).map(normalizeProjectMediaUrls);
+        // 转存已有用户草稿，而非丢弃旧数据：请求 ID、原始操作和已发送基线保持不变。
+        for (const { key, command } of legacy) {
+            pendingCommands.restore({ operationId: command.operationId, projectId: command.submitted.id, ownerId: draftSessionId, backend: commandBackend, order: ++commandOrder, base: command.base, baseRevision: Number(command.base.revision || 0), operations: command.operations });
+            await pendingCommands.prepare(command.operationId, Number(command.base.revision || 0));
+            await commandOutbox.removeItem(key);
+        }
+        const projects: CanvasProject[] = [];
+        await projectCache.iterate<{ project: CanvasProject; base?: CanvasProject; queueVersion?: number }, void>((entry, key) => {
+            if (!entry?.project?.id || pendingDeletedProjectIds.has(entry.project.id)) return;
+            const id = entry.project.id;
+            // 无归属的旧共享缓存原样保留，不能静默当作本窗口草稿提交或清理。
+            if (key !== cacheKey(id)) return;
+            if (entry.base) syncBases.set(id, entry.base);
+            if (entry.queueVersion !== 2 && entry.base) {
+                const submitted = legacy.find((item) => item.command.submitted.id === id)?.command.submitted || entry.base;
+                captureCanvasAction(submitted, entry.project);
+            }
+            // v2 缓存是可丢弃投影，只有明确的命令表示未提交编辑。
+            const commandBase = pendingCommands.list(id)[0]?.base;
+            const seed = entry.base && !entry.base.summary ? entry.base : commandBase || entry.project;
+            if (entry.base?.summary && commandBase && !commandBase.summary) syncBases.set(id, commandBase);
+            const projected = { ...projectCanvasCommands(seed).projection, viewport: entry.project.viewport };
+            projects.push(projected);
+            cachedProjects.set(id, projected);
+            cachedBases.set(id, entry.base);
+        });
+        for (const command of pendingCommands.list()) {
+            if (pendingDeletedProjectIds.has(command.projectId) || projects.some((project) => project.id === command.projectId)) continue;
+            projects.push(projectCanvasCommands(command.base).projection);
+            syncBases.set(command.projectId, command.base);
+        }
+        const normalizedProjects = projects.map(normalizeProjectMediaUrls);
         const currentProjects = useCanvasStore.getState().projects;
         const currentById = new Map(currentProjects.map((project) => [project.id, project]));
         const localById = new Map(normalizedProjects.map((project) => [project.id, project]));
@@ -261,265 +277,108 @@ async function hydrateCanvasProjectsFromLocalStore() {
             const current = currentById.get(id);
             if (!local) return current!;
             if (!current) return local;
+            // 列表索引只带标题/时间，不能凭较新的 updatedAt 覆盖队列恢复出的完整画布。
+            if (current.summary && !local.summary) return local;
             return isLocalProjectNewer(current, local) ? current : local;
         });
-        saveToLocalStorage(mergedProjects);
         if (JSON.stringify(currentProjects) !== JSON.stringify(mergedProjects)) useCanvasStore.setState({ projects: mergedProjects });
-    } catch {
-        // IndexedDB 不可用时保持当前内存状态，错误不会阻塞 Backend hydration。
+    } catch (error) {
+        console.error("画布草稿恢复失败，未删除未确认命令", error);
     }
-}
-
-/**
- * 最近一次成功同步里"用户刚提交的字段值"快照，path-based。
- * 用途：syncCanvasProjects 把本地改动写进 Backend 之后，pendingOps 清空；
- * 这时若 MCP / 另一窗口在更晚时刻提交了冲突的字段，applyBackendCanvasEvent
- * 不会因为 pendingOps 为空而漏报——可以拿这份快照去跟 remote 比对，发现"刚同步的
- * 字段被远端覆盖"就当作冲突弹窗。
- *
- * path 形如 ["title"] / ["metadata", "status"] / ["metadata", "segments", "s1", "result"]。
- */
-type SyncedChange = { nodeId: string; path: string[]; value: unknown; label: string };
-const recentlySyncedChanges: Map<string, Array<SyncedChange>> = new Map();
-
-function getValueAtPath(root: unknown, path: string[]): unknown {
-    let current: any = root;
-    for (const key of path) {
-        if (current == null || typeof current !== "object") return undefined;
-        current = current[key];
-    }
-    return current;
-}
-
-function recordSyncedChanges(projectId: string, operations: Array<Record<string, unknown>>) {
-    const changes: Array<SyncedChange> = [];
-    for (const op of operations) {
-        if (op.type === "update_node") {
-            const nodeId = String(op.id || "");
-            if (!nodeId) continue;
-            if (op.patch && typeof op.patch === "object") {
-                for (const [key, value] of Object.entries(op.patch as Record<string, unknown>)) {
-                    changes.push({ nodeId, path: [key], value, label: `节点「${nodeId}」的「${key}」` });
-                }
-            }
-            if (op.metadata && typeof op.metadata === "object" && !Array.isArray(op.metadata)) {
-                for (const [key, value] of Object.entries(op.metadata as Record<string, unknown>)) {
-                    // segments 在 H3 走细粒度 op；update_node.metadata.segments 只可能是 replace
-                    if (key === "segments") continue;
-                    changes.push({ nodeId, path: ["metadata", key], value, label: `节点「${nodeId}」的 metadata.${key}` });
-                }
-            }
-        } else if (op.type === "update_h3_segment") {
-            const nodeId = String(op.nodeId || "");
-            const segmentId = String(op.segmentId || "");
-            if (!nodeId || !segmentId) continue;
-            if (op.patch && typeof op.patch === "object") {
-                for (const [key, value] of Object.entries(op.patch as Record<string, unknown>)) {
-                    if (key === "id") continue;
-                    changes.push({ nodeId, path: ["metadata", "segments", segmentId, key], value, label: `H3 段「${segmentId}」的「${key}」` });
-                }
-            }
-        } else if (op.type === "add_h3_segment") {
-            const nodeId = String(op.nodeId || "");
-            const segment = (op.segment || {}) as Record<string, unknown>;
-            const segmentId = String(segment.id || "");
-            if (!nodeId || !segmentId) continue;
-            for (const [key, value] of Object.entries(segment)) {
-                if (key === "id") continue;
-                changes.push({ nodeId, path: ["metadata", "segments", segmentId, key], value, label: `H3 段「${segmentId}」的「${key}」` });
-            }
-        } else if (op.type === "replace_h3_segments") {
-            const nodeId = String(op.nodeId || "");
-            const segments = Array.isArray(op.segments) ? op.segments as Array<Record<string, unknown>> : [];
-            for (const segment of segments) {
-                const segmentId = String(segment.id || "");
-                if (!segmentId) continue;
-                for (const [key, value] of Object.entries(segment)) {
-                    if (key === "id") continue;
-                    changes.push({ nodeId, path: ["metadata", "segments", segmentId, key], value, label: `H3 段「${segmentId}」的「${key}」` });
-                }
-            }
-        }
-        // delete_h3_segment / add_node / delete_node / connect_nodes / update_project
-        // 都不进快照：删除是 no-op 语义，连线和项目级字段现有 conflict 检测已经覆盖。
-    }
-    if (changes.length) recentlySyncedChanges.set(projectId, changes);
-    else recentlySyncedChanges.delete(projectId);
-}
-
-function detectRecentlySyncedOverwrites(remote: CanvasProject): CanvasConflictTarget[] {
-    const changes = recentlySyncedChanges.get(remote.id);
-    if (!changes || !changes.length) return [];
-    const targets: CanvasConflictTarget[] = [];
-    for (const change of changes) {
-        if (!change.nodeId || !change.path.length) continue;
-        const remoteNode = remote.nodes.find((n) => n.id === change.nodeId);
-        if (!remoteNode) {
-            targets.push({ id: `${change.nodeId}:${change.path.join(".")}`, kind: "update", detail: `${change.label} 所属节点已被删除/重排` });
-            continue;
-        }
-        const remoteVal = getValueAtPath(remoteNode, change.path);
-        if (JSON.stringify(remoteVal) !== JSON.stringify(change.value)) {
-            targets.push({ id: `${change.nodeId}:${change.path.join(".")}`, kind: "update", detail: `${change.label} 被远端覆盖（你的值：${JSON.stringify(change.value).slice(0, 60)}；远端：${JSON.stringify(remoteVal).slice(0, 60)}）` });
-        }
-    }
-    return targets;
 }
 
 async function syncCanvasProjects(projects: CanvasProject[], generation: number, forceBackend = false) {
-    saveToLocalStorage(projects);
-    // 本地首屏快照可能只有项目索引（节点数组为空），在 Backend 共同基线读取完成前
-    // 禁止把它当成真实画布提交；否则刷新/关闭页面会把远端节点误判为用户删除并清空项目。
-    if (!backendCanvasHydrated) return;
-    if (!forceBackend && !useBackendStore.getState().connected) return;
-    let currentProjectId = "";
-    let currentOperationSignature = "";
-    try {
-        const ids = new Set(projects.map((project) => project.id));
-        for (const project of projects) {
-            if (comparedProjects.get(project.id) === project || useCanvasStore.getState().canvasConflicts[project.id]) continue;
-            currentProjectId = project.id;
-            if (generation !== syncGeneration) return;
-            const base = syncBases.get(project.id);
+    if (!backendCanvasHydrated || (!forceBackend && !useBackendStore.getState().connected)) return;
+    if (getBackendUrl() !== commandBackend) throw new Error("后台地址已改变，请刷新后同步原后台草稿");
+    for (const project of projects) {
+        if (generation !== syncGeneration) return;
+        if (useCanvasStore.getState().canvasConflicts[project.id]) continue;
+        let active: CanvasCommand<CanvasProject> | undefined;
+        try {
+            let base = syncBases.get(project.id);
             if (!base) {
-                // syncBase 丢失（首次连接、热更新或恢复竞态）时，不能把本地旧快照
-                // 直接 upsert 到 Backend；该快照可能已经落后于 MCP / 任务回写。
-                // 先读取远端作为共同基线：已有项目走同一套细粒度 diff，只有远端确实
-                // 没有该项目时才创建。
-                let remote: CanvasProject | undefined;
-                try { remote = (await fetchBackendProject(project.id)).project as unknown as CanvasProject; }
+                try { base = normalizeProjectMediaUrls((await fetchBackendProject(project.id)).project as unknown as CanvasProject); }
                 catch (error) { if (!(error instanceof BackendApiError && error.status === 404)) throw error; }
-                if (!remote) {
-                    const response = await upsertBackendProject(project as unknown as Record<string, unknown>);
-                    const saved = response.project as unknown as CanvasProject | undefined;
-                    if (saved) syncBases.set(project.id, saved);
-                    continue;
+                if (!base) {
+                    // 创建只写初始种子；其后编辑已经各自入队，不能把含这些编辑的整图重复创建。
+                    const seed = pendingCommands.list(project.id)[0]?.base || project;
+                    base = normalizeProjectMediaUrls((await createBackendProject(seed as unknown as Record<string, unknown>)).project as unknown as CanvasProject);
                 }
-                syncBases.set(project.id, remote);
-                const operations = diffCanvasProject(remote, project);
-                if (!operations.length) {
-                    useCanvasStore.setState((state) => ({ projects: state.projects.map((item) => item.id === project.id ? { ...remote, viewport: item.viewport } : item) }));
-                    continue;
+                syncBases.set(project.id, base);
+                knownProjectIds.add(project.id);
+            }
+            while ((active = pendingCommands.list(project.id)[0])) {
+                if (!active.operations.length) { await pendingCommands.acknowledge(active.operationId); continue; }
+                if (active.rejected) {
+                    setCanvasCommandConflict(project.id, base, active.rejected);
+                    break;
                 }
-                currentOperationSignature = canvasOperationSignature(Number(remote.revision || 0), operations);
-                if (rejectedSyncSignatures.get(project.id) === currentOperationSignature) continue;
-                const operationId = canvasOperationId(project.id, currentOperationSignature);
-                const response = await applyBackendCanvasOperations(project.id, operations, Number(remote.revision || 0), operationId);
-                pendingOperationIds.delete(project.id);
-                rejectedSyncSignatures.delete(project.id);
-                const saved = applyBackendCanvasDelta(remote, response.operations, response.revision, response.updatedAt);
-                if (saved) {
-                    syncBases.set(project.id, saved);
-                    const current = useCanvasStore.getState().projects.find((item) => item.id === project.id);
-                    if (current?.updatedAt === project.updatedAt) {
-                        useCanvasStore.setState((state) => ({ projects: state.projects.map((item) => item.id === project.id ? { ...saved, viewport: item.viewport } : item) }));
-                    } else {
-                        syncRequested = true;
+                // 仅未发送的动作可以选择当前基线。已发请求只重放原信封，先取原回执。
+                if (active.baseRevision === undefined) {
+                    const conflicts = detectCanvasConflicts(active.operations, base, active.base);
+                    if (conflicts.length) {
+                        setCanvasCommandConflict(project.id, base, "本地操作的目标已被其他协作者修改", conflicts);
+                        break;
                     }
                 }
-                continue;
-            }
-            const operations = diffCanvasProject(base, project);
-            if (!operations.length) {
-                comparedProjects.set(project.id, project);
-                // syncBase 是 Backend 的权威基线，不能用本地投影替换它。
-                // H3 的运行状态/结果字段刻意不进入 diff；若这里写入本地快照，
-                // 过期的 loading/result 就会伪装成最新远端基线。
-                continue;
-            }
-            recordSyncedChanges(project.id, operations);
-            currentOperationSignature = canvasOperationSignature(Number(base.revision || 0), operations);
-            if (rejectedSyncSignatures.get(project.id) === currentOperationSignature) continue;
-            const operationId = canvasOperationId(project.id, currentOperationSignature);
-            const response = await applyBackendCanvasOperations(project.id, operations, Number(base.revision || 0), operationId);
-            pendingOperationIds.delete(project.id);
-            rejectedSyncSignatures.delete(project.id);
-            const saved = applyBackendCanvasDelta(base, response.operations, response.revision, response.updatedAt);
-            if (saved) {
-                syncBases.set(project.id, saved);
+                const command = await pendingCommands.prepare(active.operationId, Number(base.revision || 0));
+                const response = await applyBackendCanvasOperations(project.id, command.operations, command.baseRevision, command.operationId, command.source);
+                const received = normalizeProjectMediaUrls(response.project as unknown as CanvasProject);
+                // 重放旧请求的回执可能落后于已收到的远端文档；不能回退权威基线。
+                base = Number(base.revision || 0) > response.revision ? base : received;
+                syncBases.set(project.id, base);
+                await pendingCommands.acknowledge(command.operationId);
                 const current = useCanvasStore.getState().projects.find((item) => item.id === project.id);
-                if (current === project) {
-                    const projection = { ...saved, viewport: project.viewport };
-                    useCanvasStore.setState((state) => ({ projects: state.projects.map((item) => item.id === project.id ? projection : item) }));
-                    comparedProjects.set(project.id, projection);
-                    persistCurrentCanvasSnapshot();
-                } else syncRequested = true;
+                const { projection, conflicts } = projectCanvasCommands(base);
+                if (conflicts.length) setCanvasCommandConflict(project.id, base, "后续编辑与远端改动冲突，已保留命令", conflicts);
+                else if (current) useCanvasStore.setState((state) => ({
+                    projects: state.projects.map((item) => item.id === project.id ? { ...projection, viewport: current.viewport } : item),
+                    backendRevisions: { ...state.backendRevisions, [project.id]: Number(base!.revision || 0) },
+                }));
+                replayPendingCommandEvents(project.id);
+                if (conflicts.length) break;
             }
+        } catch (error) {
+            if (active && error instanceof BackendApiError && [400, 401, 403, 404, 409].includes(error.status)) {
+                // 拒绝也保留原命令，只有用户明确选择后才替换/丢弃，刷新不能解除熔断。
+                await pendingCommands.reject(active.operationId, error.message).catch(() => {});
+                const remote = error.details.project as CanvasProject | undefined || syncBases.get(project.id) || project;
+                setCanvasCommandConflict(project.id, remote, error.message);
+                replayPendingCommandEvents(project.id);
+            } else console.error("画布命令尚未确认，已保留不可变请求和后续动作", error);
         }
-        if (generation !== syncGeneration) return;
-        const idsToDelete = new Set([
-            ...[...knownProjectIds].filter((id) => !ids.has(id)),
-            ...pendingDeletedProjectIds,
-        ]);
-        await Promise.all([...idsToDelete].map(async (id) => {
+    }
+    // 删除必须来自显式动作；项目列表缺项不再隐式表示删除远端项目。
+    // 与编辑命令一样：持久化失败时禁止发送删除，刷新后仍可恢复明确的意图。
+    await deletionWrite;
+    for (const id of [...pendingDeletedProjectIds]) {
+        try {
             await deleteBackendProject(id);
+            await pendingCommands.discard(id);
+            pendingCommandEvents.delete(id);
             pendingDeletedProjectIds.delete(id);
             knownProjectIds.delete(id);
             syncBases.delete(id);
-        }));
-        persistDeletedProjectIds();
-        knownProjectIds = ids;
-    } catch (error) {
-        if (error instanceof BackendApiError && error.status === 409 && currentProjectId) {
-            const remote = error.details.project as CanvasProject | undefined;
-            const revision = Number(error.details.revision || remote?.revision || 0);
-            const pending = useCanvasStore.getState().projects.find((item) => item.id === currentProjectId);
-            if (!pending) return;
-            // 冲突判断必须基于本次提交前的共同基线。若先把 syncBase 改成 remote，
-            // detectCanvasConflicts 会拿 remote 和自身比较，永远得出“无冲突”，随后
-            // 自动重提整份本地旧 metadata，把 MCP / 生成任务刚写入的 segments 覆盖掉。
-            const base = syncBases.get(currentProjectId);
-            const pendingOps = base ? diffCanvasProject(base, pending) : [];
-            const conflicts = remote ? detectCanvasConflicts(pendingOps, remote, base) : [];
-            // 与 applyBackendCanvasEvent 对齐：无真正冲突的 ops（update_project /
-            // delete 已经在远端没的节点 / disconnect 已经在远端没的连线）走自动 rebase，
-            // 不要再弹窗——否则用户拖动一下画布也会看到冲突提示。
-            if (conflicts.length === 0) {
-                if (remote) {
-                    const rebased = { ...applyBackendCanvasDelta(remote, pendingOps, revision, pending.updatedAt), viewport: pending.viewport };
-                    syncBases.set(currentProjectId, remote);
-                    useCanvasStore.setState((state) => ({ projects: state.projects.map((item) => item.id === currentProjectId ? rebased : item) }));
-                    scheduleCanvasSync();
-                }
-                return;
-            }
-            useCanvasStore.setState((state) => ({
-                canvasConflicts: {
-                    ...state.canvasConflicts,
-                    [currentProjectId]: {
-                        message: "画布已被其他窗口更新，你的操作与远端改动冲突",
-                        revision,
-                        pendingOperations: pendingOps.length,
-                        conflictTargets: conflicts,
-                        remoteProject: remote || pending,
-                    },
-                },
-            }));
-            window.dispatchEvent(new CustomEvent("canvas-sync-conflict", { detail: { projectId: currentProjectId, revision } }));
-        } else if (error instanceof BackendApiError && error.status === 400 && currentProjectId) {
-            if (currentOperationSignature) rejectedSyncSignatures.set(currentProjectId, currentOperationSignature);
-            console.error(`画布 ${currentProjectId} 的增量同步被 Backend 拒绝，已停止自动重试；下一次编辑后会重新提交。`, error);
-        }
-        // 保留本地投影和 syncBases，下一次显式修改会按新 revision 重试待提交操作。
+        } catch (error) { console.error("画布删除尚未确认", error); }
     }
+    await persistDeletedProjectIds();
+    persistCurrentCanvasSnapshot();
 }
 
-function canvasOperationSignature(revision: number, operations: Array<Record<string, unknown>>): string {
-    const value = JSON.stringify([revision, operations]);
-    let hash = 2166136261;
-    for (let index = 0; index < value.length; index += 1) {
-        hash ^= value.charCodeAt(index);
-        hash = Math.imul(hash, 16777619);
-    }
-    return `${revision}:${value.length}:${hash >>> 0}`;
+function setCanvasCommandConflict(id: string, remote: CanvasProject, message: string, targets?: CanvasConflictTarget[]) {
+    const commands = pendingCommands.list(id);
+    useCanvasStore.setState((state) => ({ canvasConflicts: { ...state.canvasConflicts, [id]: {
+        message, revision: Number(remote.revision || 0),
+        pendingOperations: commands.reduce((count, command) => count + command.operations.length, 0),
+        conflictTargets: targets?.length ? targets : [{ id, kind: "update", detail: message }],
+        remoteProject: remote,
+    } } }));
 }
 
-function canvasOperationId(projectId: string, signature: string) {
-    const pending = pendingOperationIds.get(projectId);
-    if (pending?.signature === signature) return pending.operationId;
-    const operationId = crypto.randomUUID();
-    pendingOperationIds.set(projectId, { signature, operationId });
-    return operationId;
+function replayPendingCommandEvents(projectId: string) {
+    const events = pendingCommandEvents.get(projectId) || [];
+    pendingCommandEvents.delete(projectId);
+    for (const event of events) applyBackendCanvasEvent(event, true);
 }
 
 function fromProjectSummary(value: Record<string, unknown>): CanvasProject {
@@ -627,51 +486,51 @@ export async function hydrateCanvasProjects() {
 
 export const useCanvasStore = create<CanvasStore>()((set, get) => ({
     hydrated: false,
-    projects: loadFromLocalStorage().map(normalizeProjectMediaUrls),
+    projects: [],
     folders: [],
     backendRevisions: {},
     collaborators: {},
     canvasConflicts: {},
     clearCanvasConflict: (id) => set((state) => { const next = { ...state.canvasConflicts }; delete next[id]; return { canvasConflicts: next }; }),
-    keepPendingOpsOnCanvasConflict: (id) => {
+    keepPendingOpsOnCanvasConflict: async (id) => {
         const conflict = get().canvasConflicts[id];
         if (!conflict) return;
-        const base = syncBases.get(id);
         const local = get().projects.find((project) => project.id === id);
-        if (conflict.remoteDeleted) {
-            syncBases.delete(id);
-            comparedProjects.delete(id);
-            knownProjectIds.delete(id);
-        } else if (base && local) {
-            const rebased = { ...applyBackendCanvasDelta(conflict.remoteProject, diffCanvasProject(base, local), conflict.revision, local.updatedAt), viewport: local.viewport };
-            syncBases.set(id, conflict.remoteProject);
-            set((state) => ({ projects: state.projects.map((project) => project.id === id ? rebased : project) }));
-        }
-        set((state) => {
-            const next = { ...state.canvasConflicts };
-            delete next[id];
-            return { canvasConflicts: next, backendRevisions: { ...state.backendRevisions, [id]: conflict.revision } };
-        });
-        // 同步关闭弹窗后立即按新 revision 主动重提 pendingOps。
-        // 否则只能等下一次显式编辑触发 scheduleCanvasSync，pendingOps 一直留在本地，
-        // 下一次远端事件 / sync 又会算出冲突并再次弹窗。
-        scheduleCanvasSync();
+        if (!local) return;
+        try {
+            const operations = pendingCommands.list(id).flatMap((command) => command.operations);
+            const remote = conflict.remoteDeleted ? local : conflict.remoteProject;
+            const replacement = { operationId: nanoid(), projectId: id, backend: commandBackend, ownerId: draftSessionId, source: getCanvasCollaborationClient(), order: ++commandOrder, base: remote, operations: conflict.remoteDeleted ? [] : operations };
+            await pendingCommands.replace(replacement);
+            if (conflict.remoteDeleted) {
+                await pendingCommands.acknowledge(replacement.operationId);
+                syncBases.delete(id);
+                knownProjectIds.delete(id);
+            } else {
+                syncBases.set(id, remote);
+                set((state) => ({ projects: state.projects.map((project) => project.id === id ? { ...projectCanvasCommands(remote).projection, viewport: project.viewport } : project) }));
+            }
+            get().clearCanvasConflict(id);
+            persistCurrentCanvasSnapshot();
+            scheduleCanvasSync();
+        } catch (error) { console.error("未能持久化冲突选择，原操作仍保留", error); }
     },
-    adoptRemoteOnCanvasConflict: (id) => {
+    adoptRemoteOnCanvasConflict: async (id) => {
         const conflict = get().canvasConflicts[id];
         if (!conflict) return;
-        if (conflict.remoteDeleted) {
-            syncBases.delete(id);
-            comparedProjects.delete(id);
-            knownProjectIds.delete(id);
-            set((state) => ({ projects: state.projects.filter((project) => project.id !== id) }));
-            persistCurrentCanvasSnapshot();
-        } else adoptRemoteProject(conflict.remoteProject);
-        set((state) => {
-            const next = { ...state.canvasConflicts };
-            delete next[id];
-            return { canvasConflicts: next };
-        });
+        try {
+            const tombstone = { operationId: nanoid(), projectId: id, backend: commandBackend, ownerId: draftSessionId, order: ++commandOrder, base: conflict.remoteProject, operations: [] };
+            await pendingCommands.replace(tombstone);
+            await pendingCommands.acknowledge(tombstone.operationId);
+            if (conflict.remoteDeleted) {
+                syncBases.delete(id);
+                knownProjectIds.delete(id);
+                set((state) => ({ projects: state.projects.filter((project) => project.id !== id) }));
+                persistCurrentCanvasSnapshot();
+            } else adoptRemoteProject(conflict.remoteProject);
+            get().clearCanvasConflict(id);
+            replayPendingCommandEvents(id);
+        } catch (error) { console.error("未能持久化冲突选择，原操作仍保留", error); }
     },
     createProject: (Title = i18n.t("canvas.project.untitled")) => {
         const now = new Date().toISOString();
@@ -737,6 +596,7 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         scheduleCanvasFolderSync();
     },
     deleteFolder: (id) => {
+        for (const project of get().projects) if (project.folderId === id) captureCanvasAction(project, { ...project, folderId: null });
         set((state) => ({
             folders: state.folders.filter((folder) => folder.id !== id),
             projects: state.projects.map((project) => project.folderId === id ? { ...project, folderId: null, updatedAt: new Date().toISOString() } : project),
@@ -747,6 +607,7 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
     },
     moveProjectsToFolder: (ids, folderId) => {
         const idSet = new Set(ids);
+        for (const project of get().projects) if (idSet.has(project.id)) captureCanvasAction(project, { ...project, folderId });
         set((state) => ({ projects: state.projects.map((project) => idSet.has(project.id) ? { ...project, folderId, updatedAt: new Date().toISOString() } : project) }));
         persistCurrentCanvasSnapshot();
         scheduleCanvasSync();
@@ -759,6 +620,9 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         return get().projects.find((item) => item.id === id) || null;
     },
     renameProject: (id, title) => {
+        const before = get().projects.find((project) => project.id === id);
+        if (!before) return;
+        captureCanvasAction(before, { ...before, title: title.trim() || before.title });
         set((state) => ({
             projects: state.projects.map((project) => (project.id === id ? { ...project, title: title.trim() || project.title, updatedAt: new Date().toISOString() } : project)),
         }));
@@ -779,9 +643,23 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         // 重连后 syncCanvasProjects 仍会兜底补删。
         if (useBackendStore.getState().connected) void flushCanvasSyncNow();
     },
-    replaceProjects: (projects) => { set({ projects: projects.map((project) => ({ ...project, viewport: normalizeViewportTransform(project.viewport) })) }); persistCurrentCanvasSnapshot(); scheduleCanvasSync(); },
+    replaceProjects: (projects) => {
+        const previous = get().projects;
+        for (const project of projects) {
+            const before = previous.find((item) => item.id === project.id);
+            if (before) captureCanvasAction(before, project);
+        }
+        for (const project of previous) if (!projects.some((item) => item.id === project.id)) pendingDeletedProjectIds.add(project.id);
+        persistDeletedProjectIds();
+        set({ projects: projects.map((project) => ({ ...project, viewport: normalizeViewportTransform(project.viewport) })) });
+        persistCurrentCanvasSnapshot();
+        scheduleCanvasSync();
+    },
     updateProject: (id, patch) => {
         const normalizedPatch = patch.viewport ? { ...patch, viewport: normalizeViewportTransform(patch.viewport) } : patch;
+        const before = get().projects.find((project) => project.id === id);
+        if (!before) return;
+        captureCanvasAction(before, { ...before, ...normalizedPatch });
         set((state) => ({
             projects: state.projects.map((project) => (project.id === id ? { ...project, ...normalizedPatch, updatedAt: new Date().toISOString() } : project)),
         }));
@@ -804,7 +682,22 @@ function scheduleCanvasSync() {
     }, 400);
 }
 
-/** 立即提交当前画布投影；生成任务绑定节点时用它建立落库时序。 */
+/** 生成前必须确认目标画布已落库；后台自动同步仍允许保留草稿后静默重试。 */
+export async function flushCanvasProjectBeforeGeneration(projectId: string) {
+    if (!backendCanvasHydrated) throw new Error("画布尚未完成加载，请稍后再生成");
+    await flushCanvasTexts(projectId);
+    await flushCanvasSyncNow();
+    const state = useCanvasStore.getState();
+    const project = state.projects.find((item) => item.id === projectId);
+    const base = syncBases.get(projectId);
+    if (!project || !base) throw new Error("目标画布尚未保存，未提交生成任务");
+    if (state.canvasConflicts[projectId]) throw new Error("请先处理此画布的同步冲突，再生成");
+    if (pendingCommands.has(projectId)) {
+        throw new Error("画布修改尚未得到 Backend 确认，已保留草稿；恢复连接并保存后再生成");
+    }
+}
+
+/** 立即尝试提交当前画布投影；生成入口应调用带项目确认的版本。 */
 export async function flushCanvasSyncNow() {
     if (saveTimer) {
         clearTimeout(saveTimer);
@@ -866,11 +759,13 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
         const isH3 = isH3NodeType(String(previous.type || node.type || ""));
         const previousSegments = isH3 && Array.isArray(previousMetadata.segments) ? previousMetadata.segments as Array<Record<string, unknown>> : [];
         const nextSegments = isH3 && Array.isArray(nextMetadata.segments) ? nextMetadata.segments as Array<Record<string, unknown>> : [];
+        const backendTaskActive = !isH3 && Boolean(previousMetadata.runtimeTaskId || nextMetadata.runtimeTaskId);
         const metadataKeysToSkip = new Set<string>();
         if (isH3) metadataKeysToSkip.add("segments");
         for (const key of new Set([...Object.keys(previousMetadata), ...Object.keys(nextMetadata)])) {
             if (metadataKeysToSkip.has(key)) continue;
             if (isH3 && H3_BACKEND_NODE_METADATA_FIELDS.has(key)) continue;
+            if (backendTaskActive && ACTIVE_TASK_NODE_METADATA_FIELDS.has(key)) continue;
             if (JSON.stringify(previousMetadata[key]) === JSON.stringify(nextMetadata[key])) continue;
             if (key in nextMetadata && nextMetadata[key] !== undefined) metadataPatch[key] = nextMetadata[key];
             else metadataDelete.push(key);
@@ -947,13 +842,14 @@ function isH3NodeType(type: string): boolean {
  *  - delete_node     → 远端已无此 id = no-op（不算冲突）
  *  - connect_nodes   → 远端已有同 id connection = 冲突（重复 connect）
  *  - delete_connections → 远端已无此 id = no-op
- *  - update_project → 不算冲突（覆盖语义安全） */
-export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>, remote: CanvasProject, base?: CanvasProject): CanvasConflictTarget[] {
+ *  - update_project → 按实际修改字段检查并发 */
+export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>, remote: CanvasProject, base?: CanvasProject, options?: { guardLayout?: boolean }): CanvasConflictTarget[] {
     const remoteNodeIds = new Set(remote.nodes.map((node) => node.id));
     const remoteConnectionIds = new Set(remote.connections.map((connection) => connection.id));
     const baseNodes = new Map((base?.nodes || []).map((node) => [node.id, node]));
     const remoteNodes = new Map(remote.nodes.map((node) => [node.id, node]));
     const targets: CanvasConflictTarget[] = [];
+    const removedConnectionIds = new Set(pendingOps.filter((op) => op.type === "delete_connections").flatMap((op) => Array.isArray(op.ids) ? op.ids.map(String) : []));
     for (const op of pendingOps) {
         const type = op.type as string;
         if (type === "add_node") {
@@ -976,7 +872,7 @@ export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>
                     ...Object.keys(opMetadata).filter((key) => key !== "segments"),
                     ...(Array.isArray(op.metadataDelete) ? op.metadataDelete.map(String).filter((key) => key !== "segments") : []),
                 ];
-                const patchKeys = Object.keys((op.patch || {}) as Record<string, unknown>);
+                const patchKeys = Object.keys((op.patch || {}) as Record<string, unknown>).filter((key) => options?.guardLayout || !["position", "width", "height"].includes(key));
                 const metadataConflict = metadataKeys.some((key) => JSON.stringify(baseMetadata[key]) !== JSON.stringify(remoteMetadata[key]));
                 const patchConflict = patchKeys.some((key) => JSON.stringify((baseNode as Record<string, unknown> | undefined)?.[key]) !== JSON.stringify((remoteNode as Record<string, unknown> | undefined)?.[key]));
                 if (metadataConflict || patchConflict) targets.push({ id, kind: "update", detail: `节点「${id}」的字段已被远端更新，本地旧快照不会覆盖它` });
@@ -986,10 +882,15 @@ export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>
             if (id && !remoteNodeIds.has(id)) continue; // no-op
         } else if (type === "connect_nodes") {
             const id = String(op.id || "");
-            if (id && remoteConnectionIds.has(id)) targets.push({ id, kind: "connect", detail: `连线「${id}」在远端已存在` });
+            if (id && remoteConnectionIds.has(id) && !removedConnectionIds.has(id)) targets.push({ id, kind: "connect", detail: `连线「${id}」在远端已存在` });
         } else if (type === "delete_connections") {
             const ids = Array.isArray(op.ids) ? op.ids.map(String) : [];
             if (!ids.some((id) => remoteConnectionIds.has(id))) continue; // no-op
+            if (base && ids.some((id) => remoteConnectionIds.has(id) && JSON.stringify(base.connections.find((item) => item.id === id)) !== JSON.stringify(remote.connections.find((item) => item.id === id)))) targets.push({ id: ids.join(","), kind: "disconnect", detail: "连线已被远端修改" });
+        } else if (type === "update_project" && base) {
+            for (const key of Object.keys((op.patch || {}) as object)) {
+                if (JSON.stringify(base[key as keyof CanvasProject]) !== JSON.stringify(remote[key as keyof CanvasProject])) targets.push({ id: key, kind: "update", detail: `画布字段「${key}」已被远端修改` });
+            }
         } else if (type === "add_h3_segment" || type === "update_h3_segment" || type === "delete_h3_segment") {
             // H3 细粒度 op 的冲突检测：节点 + 段 + 字段三元组。
             const nodeId = String(op.nodeId || "");
@@ -1035,7 +936,7 @@ function adoptRemoteProject(remote: CanvasProject) {
         const nextProjects = state.projects.some((p) => p.id === remote.id)
             ? state.projects.map((p) => p.id === remote.id ? { ...remote, viewport: p.viewport } : p)
             : [remote, ...state.projects];
-        saveToLocalStorage(nextProjects);
+        persistCurrentCanvasSnapshot();
         return { projects: nextProjects, backendRevisions: { ...state.backendRevisions, [remote.id]: Number(remote.revision || 0) } };
     });
     syncBases.set(remote.id, remote);
@@ -1133,6 +1034,7 @@ async function recoverCanvasProjectSnapshot(projectId: string) {
 
 export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChanges = false) {
     if (!event || typeof event !== "object") return;
+    receiveCanvasTextEvent(event);
     const value = event as { type?: unknown; entityId?: unknown; revision?: unknown; payload?: unknown; source?: unknown; createdAt?: unknown };
     if (value.type === "canvas-folder.updated") {
         const entityId = typeof value.entityId === "string" ? value.entityId : "";
@@ -1143,7 +1045,7 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
                 folders: state.folders.filter((folder) => folder.id !== entityId),
                 projects: state.projects.map((project) => project.folderId === entityId ? { ...project, folderId: null } : project),
             }));
-            saveToLocalStorage(useCanvasStore.getState().projects);
+            persistCurrentCanvasSnapshot();
             return;
         }
         if (typeof payload.id === "string" && typeof payload.name === "string" && typeof payload.createdAt === "string") {
@@ -1153,40 +1055,7 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
         }
         return;
     }
-    if (value.type === "canvas.presence") {
-        const entityId = typeof value.entityId === "string" ? value.entityId : "";
-        const payload = value.payload && typeof value.payload === "object" ? value.payload as Record<string, unknown> : {};
-        const participants = Array.isArray(payload.participants) ? payload.participants : [];
-        const collaborators = participants.flatMap((item): CanvasCollaborator[] => {
-            if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-            const participant = item as Record<string, unknown>;
-            if (!participant.clientId) return [];
-            return [{
-                clientId: String(participant.clientId),
-                kind: ["browser", "mcp", "agent", "task", "system"].includes(String(participant.kind)) ? String(participant.kind) as CanvasCollaborator["kind"] : "system",
-                label: String(participant.label || participant.kind || "协作者"),
-                lastActivityAt: String(participant.joinedAt || value.createdAt || new Date().toISOString()),
-            }];
-        });
-        if (entityId) useCanvasStore.setState((state) => ({ collaborators: { ...state.collaborators, [entityId]: collaborators } }));
-        return;
-    }
     if (value.type !== "canvas.updated") return;
-    const eventEntityId = typeof value.entityId === "string" ? value.entityId : "";
-    const eventSource = value.source && typeof value.source === "object" && !Array.isArray(value.source) ? value.source as Record<string, unknown> : null;
-    if (eventEntityId && eventSource?.clientId) {
-        const collaborator: CanvasCollaborator = {
-            clientId: String(eventSource.clientId),
-            kind: ["browser", "mcp", "agent", "task", "system"].includes(String(eventSource.kind)) ? String(eventSource.kind) as CanvasCollaborator["kind"] : "system",
-            label: String(eventSource.label || eventSource.kind || "协作者"),
-            lastActivityAt: typeof value.createdAt === "string" ? value.createdAt : new Date().toISOString(),
-        };
-        useCanvasStore.setState((state) => {
-            const previous = state.collaborators[eventEntityId] || [];
-            const collaborators = [collaborator, ...previous.filter((item) => item.clientId !== collaborator.clientId)].slice(0, 8);
-            return { collaborators: { ...state.collaborators, [eventEntityId]: collaborators } };
-        });
-    }
     if (syncPromise) {
         deferredBackendEvents.push(event);
         if (!deferredBackendEventsWaiter) {
@@ -1209,6 +1078,13 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
     );
     const isProjectList = payload && typeof payload === "object" && Array.isArray((payload as { projects?: unknown }).projects);
     const entityId = typeof value.entityId === "string" ? value.entityId : "";
+    const unconfirmed = pendingCommands.list(entityId)[0];
+    if (entityId && unconfirmed?.baseRevision !== undefined && !unconfirmed.rejected) {
+        // 可能已提交但丢回执；先重放原请求取回执，不能把自己的提交误判为远端冲突。
+        pendingCommandEvents.set(entityId, [...(pendingCommandEvents.get(entityId) || []), event]);
+        scheduleCanvasSync();
+        return;
+    }
     const isDelta = Boolean(payload && typeof payload === "object" && Array.isArray((payload as { operations?: unknown }).operations));
     if (isDelta && entityId) {
         const base = syncBases.get(entityId);
@@ -1261,31 +1137,9 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
             // 算出本地相对于 syncBase 的 pendingOps，检测其中是否有目标已经在 remote 里
             // 被别人改 / 删的目标，命中就写入冲突状态、由用户决定"保留 / 采用远端"；
             // 没冲突就推进 syncBase + 接受 remote，pendingOps 在新 base 上自然 rebase。
-            const base = syncBases.get(remote.id);
-            const pendingOps = base && local ? diffCanvasProject(base, local) : [];
-            // 不论 pendingOps 是不是空，先把刚同步的"用户提交值快照"跟远端对一遍——
-            // 之前「pendingOps 为空 → 直接拿 remote 覆盖 local」会把你刚 sync 的字段悄悄
-            // 抹掉，这里把任何刚同步的字段被覆盖都升级成冲突弹窗。
-            const recentOverwrites = detectRecentlySyncedOverwrites(remote);
-            if (recentOverwrites.length) {
-                recentlySyncedChanges.delete(remote.id);
-                return {
-                    projects: state.projects,
-                    backendRevisions: { ...state.backendRevisions, [remote.id]: remoteRevision },
-                    canvasConflicts: {
-                        ...state.canvasConflicts,
-                        [remote.id]: {
-                            message: "你刚才改的字段被 MCP / 任务回写覆盖",
-                            revision: remoteRevision,
-                            pendingOperations: pendingOps.length,
-                            conflictTargets: recentOverwrites,
-                            remoteProject: remote,
-                        },
-                    },
-                };
-            }
+            const pendingOps = pendingCommands.list(remote.id).flatMap((command) => command.operations);
             if (local && pendingOps.length) {
-                const conflicts = detectCanvasConflicts(pendingOps, remote, base);
+                const { projection, conflicts } = projectCanvasCommands(remote);
                 if (conflicts.length) {
                     return {
                         projects: state.projects,
@@ -1302,7 +1156,7 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
                         },
                     };
                 }
-                const rebased = { ...applyBackendCanvasDelta(remote, pendingOps, remoteRevision, local.updatedAt), viewport: local.viewport };
+                const rebased = { ...projection, updatedAt: local.updatedAt, viewport: local.viewport };
                 syncBases.set(remote.id, remote);
                 setTimeout(scheduleCanvasSync, 0);
                 return {
@@ -1318,7 +1172,7 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
         } else if (deleted) {
             const local = state.projects.find((project) => project.id === entityId);
             const base = syncBases.get(entityId);
-            const pendingOps = local && base ? diffCanvasProject(base, local) : [];
+            const pendingOps = pendingCommands.list(entityId).flatMap((command) => command.operations);
             if (local && pendingOps.length && !pendingDeletedProjectIds.has(entityId)) {
                 return { canvasConflicts: { ...state.canvasConflicts, [entityId]: {
                     message: "画布已在远端删除，本地仍有未提交修改",
@@ -1328,7 +1182,6 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
                 } } };
             }
             syncBases.delete(entityId);
-            comparedProjects.delete(entityId);
             knownProjectIds.delete(entityId);
             pendingDeletedProjectIds.delete(entityId);
             persistDeletedProjectIds();
@@ -1336,13 +1189,20 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
             nextProjects = state.projects.filter((project) => project.id !== entityId);
             nextRevisions[entityId] = (nextRevisions[entityId] || 0) + 1;
         }
-        saveToLocalStorage(nextProjects);
+        persistCurrentCanvasSnapshot();
         return { projects: nextProjects, backendRevisions: nextRevisions };
     });
     persistCurrentCanvasSnapshot();
 }
 
+onCanvasTextCommit(applyBackendCanvasEvent);
+prepareCanvasTextWith(flushCanvasSyncNow);
+
 if (typeof window !== "undefined") {
+    window.addEventListener("canvas-storage-recovered", () => {
+        void persistDeletedProjectIds().then(() => scheduleCanvasSync()).catch(() => {});
+        persistCurrentCanvasSnapshot();
+    });
     void hydrateCanvasProjects();
     window.addEventListener("backend-connected", () => {
         void hydrateCanvasProjects();

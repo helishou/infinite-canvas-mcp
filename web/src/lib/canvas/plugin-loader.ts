@@ -116,13 +116,13 @@ async function syncPluginMcpToBackend() {
     try {
         const records = usePluginStore.getState().plugins;
         const plugins: AgentPluginMcpDeclaration[] = [...HOST_SYSTEM_PLUGINS.values()].flatMap((plugin) => (
-            plugin.mcp ? [{ id: plugin.id, name: plugin.name, version: plugin.version, mcp: { tools: plugin.mcp.tools, enabled: true } }] : []
+            plugin.mcp ? [{ id: plugin.id, name: plugin.name, version: plugin.version, mcp: { tools: [...plugin.mcp.tools], enabled: true } }] : []
         ));
         for (const record of records) {
             if (HOST_SYSTEM_PLUGIN_IDS.has(record.id)) continue;
             const plugin = evaluatedPlugins.get(record.id);
             if (!plugin?.mcp || !record.enabled) continue;
-            plugins.push({ id: record.id, name: record.name, version: record.version, mcp: { tools: plugin.mcp.tools, enabled: true } });
+            plugins.push({ id: record.id, name: record.name, version: record.version, mcp: { tools: [...plugin.mcp.tools], enabled: true } });
         }
         const updatedAt = new Date().toISOString();
         await saveBackendPluginMcpDeclarations(plugins.map((plugin) => ({

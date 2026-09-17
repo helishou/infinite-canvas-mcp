@@ -76,9 +76,7 @@ let referencesHydration: Promise<ReferenceImage[]> | null = null;
 let referencesSaveQueue = Promise.resolve();
 
 function saveWorkbenchReferences(references: ReferenceImage[]) {
-    referencesSaveQueue = referencesSaveQueue
-        .then(() => saveStructuredSetting("image-workbench-references", references))
-        .catch(() => undefined);
+    referencesSaveQueue = referencesSaveQueue.then(() => saveStructuredSetting("image-workbench-references", references)).catch(() => undefined);
 }
 
 function hydrateWorkbenchReferences() {
@@ -87,13 +85,15 @@ function hydrateWorkbenchReferences() {
         let stored = await fetchStructuredSetting<ReferenceImage[]>("image-workbench-references");
         if (!stored) {
             const legacy = localStorage.getItem(LEGACY_REFERENCES_KEY);
-            const parsed = legacy ? JSON.parse(legacy) as ReferenceImage[] : null;
+            const parsed = legacy ? (JSON.parse(legacy) as ReferenceImage[]) : null;
             if (Array.isArray(parsed)) {
-                stored = await Promise.all(parsed.map(async (ref) => {
-                    if (ref.storageKey || !ref.dataUrl.startsWith("data:")) return ref;
-                    const uploaded = await uploadImage(ref.dataUrl, { category: "input" });
-                    return { ...ref, dataUrl: uploaded.url, storageKey: uploaded.storageKey };
-                }));
+                stored = await Promise.all(
+                    parsed.map(async (ref) => {
+                        if (ref.storageKey || !ref.dataUrl.startsWith("data:")) return ref;
+                        const uploaded = await uploadImage(ref.dataUrl, { category: "input" });
+                        return { ...ref, dataUrl: uploaded.url, storageKey: uploaded.storageKey };
+                    }),
+                );
                 await saveStructuredSetting("image-workbench-references", stored);
             }
         }
@@ -102,7 +102,9 @@ function hydrateWorkbenchReferences() {
             ...ref,
             dataUrl: ref.storageKey ? backendMediaUrl(ref.storageKey) : ref.dataUrl,
         }));
-    })().finally(() => { referencesHydration = null; });
+    })().finally(() => {
+        referencesHydration = null;
+    });
     return referencesHydration;
 }
 
@@ -128,7 +130,9 @@ export default function ImagePage() {
             setReferences(stored);
             setReferencesHydrated(true);
         });
-        return () => { active = false; };
+        return () => {
+            active = false;
+        };
     }, []);
 
     useEffect(() => {
@@ -183,7 +187,7 @@ export default function ImagePage() {
     }, []);
 
     // 选中 ComfyUI 渠道模型时，按「本次参考图数量」解析该场景实际会跑的工作流，拉它的详情渲染参数面板，
-    // 并用渠道设置里为该场景配的参数作为初值；参考图数量变化 → 场景变化 → 工作流与参数字段一起切换。
+    // 并用模型设置里为该场景配的参数作为初值；参考图数量变化 → 场景变化 → 内部实现与参数字段一起切换。
     useEffect(() => {
         const workflowName = activeWorkflowName;
         if (!workflowName) {
@@ -200,7 +204,7 @@ export default function ImagePage() {
                 const initial: Record<string, unknown> = {};
                 for (const field of detail.config?.fields || []) {
                     if (isWorkflowImageField(field, detail.workflow) || field.isPrompt) continue;
-                    // 渠道设置里为当前场景配的参数优先，其余按字段默认值
+                    // 模型设置里为当前场景配的参数优先，其余按字段默认值
                     if (routedParams[field.id] !== undefined) {
                         initial[field.id] = routedParams[field.id];
                         continue;
@@ -224,7 +228,9 @@ export default function ImagePage() {
                 setWorkflowDetail(null);
                 setCustomFieldValues({});
             });
-        return () => { cancelled = true; };
+        return () => {
+            cancelled = true;
+        };
     }, [activeWorkflowName, config, model, references.length]);
 
     const addReferences = async (files?: FileList | null) => {
@@ -484,11 +490,18 @@ export default function ImagePage() {
                 result = await requestGeneration(snapshot.config, snapshot.text).then((items) => items[0]);
             }
             if (!result) throw new Error(t("imageWorkbench.missingResult"));
-            const source = "url" in result
-                ? await fetch((result as { url: string }).url).then((response) => response.blob())
-                : (result as { dataUrl: string }).dataUrl;
+            const source = "url" in result ? await fetch((result as { url: string }).url).then((response) => response.blob()) : (result as { dataUrl: string }).dataUrl;
             const stored = await uploadImage(source, { category: "output" });
-            const nextImage: GeneratedImage = { id: nanoid(), dataUrl: stored.url, ...(stored.storageKey ? { storageKey: stored.storageKey } : {}), durationMs: performance.now() - itemStartedAt, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
+            const nextImage: GeneratedImage = {
+                id: nanoid(),
+                dataUrl: stored.url,
+                ...(stored.storageKey ? { storageKey: stored.storageKey } : {}),
+                durationMs: performance.now() - itemStartedAt,
+                width: stored.width,
+                height: stored.height,
+                bytes: stored.bytes,
+                mimeType: stored.mimeType,
+            };
             setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
             return nextImage;
         } catch (error) {
@@ -642,7 +655,15 @@ export default function ImagePage() {
                             </div>
 
                             <div className="hidden gap-4 sm:grid sm:grid-cols-2">
-                                <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} workflowDetail={workflowDetail} customFieldValues={customFieldValues} setCustomFieldValues={setCustomFieldValues} />
+                                <GenerationSettings
+                                    config={effectiveConfig}
+                                    model={model}
+                                    updateConfig={updateConfig}
+                                    openConfigDialog={openConfigDialog}
+                                    workflowDetail={workflowDetail}
+                                    customFieldValues={customFieldValues}
+                                    setCustomFieldValues={setCustomFieldValues}
+                                />
                             </div>
                         </div>
 
@@ -705,7 +726,15 @@ export default function ImagePage() {
             </Drawer>
             <Drawer title={t("workbench.settings")} placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
-                    <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} workflowDetail={workflowDetail} customFieldValues={customFieldValues} setCustomFieldValues={setCustomFieldValues} />
+                    <GenerationSettings
+                        config={effectiveConfig}
+                        model={model}
+                        updateConfig={updateConfig}
+                        openConfigDialog={openConfigDialog}
+                        workflowDetail={workflowDetail}
+                        customFieldValues={customFieldValues}
+                        setCustomFieldValues={setCustomFieldValues}
+                    />
                 </div>
             </Drawer>
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />

@@ -9,6 +9,7 @@ import { setMediaBlob } from "@/services/file-storage";
 import { setImageBlob } from "@/services/image-storage";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
 import { CanvasProjectCard } from "@/components/canvas/canvas-project-card";
+import { CanvasDraftsButton } from "@/components/canvas/canvas-drafts-button";
 import type { CanvasExportFile } from "@/types/canvas-export";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -179,7 +180,7 @@ export default function CanvasPage() {
                                         <Button disabled={!hydrated} onClick={() => setDeleteIds(selectedIds)}>{t("canvas.deleteSelected")}</Button>
                                     </>
                                 ) : null}
-                                {projects.length ? <Button disabled={!hydrated} onClick={() => setDeleteIds(projects.map((project) => project.id))}>{t("canvas.deleteAll")}</Button> : null}
+                                <CanvasDraftsButton />
                                 <Button disabled={!hydrated} icon={<FileUp className="size-4" />} onClick={() => inputRef.current?.click()}>{t("canvas.import")}</Button>
                                 <Button disabled={!hydrated} type="primary" icon={<Plus className="size-4" />} onClick={createAndEnter}>{t("canvas.create")}</Button>
                             </div>

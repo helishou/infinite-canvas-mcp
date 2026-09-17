@@ -260,7 +260,50 @@ export type CanvasGenerationLogs = {
     remove: (options: { id?: string; projectId?: string; nodeId?: string }) => Promise<number>;
 };
 
+export type CanvasTextTarget = { nodeId?: string; segmentId?: string; textItemId?: string; field: "prompt" | "content" | "composerContent" | "globalPrompt" };
+export type CanvasTextSnapshot = { ready: boolean; pending: number; blocked: boolean; error: string; text: string };
+export type CanvasTextSuggestionInput = { id: string; target: CanvasTextTarget; documentId: string; base: string; text: string };
+export type CanvasTextSuggestion = CanvasTextSuggestionInput & { status: "pending" | "applied" | "dismissed"; revision: number };
+export type CanvasTextSuggestions = {
+    getSnapshot: () => { items: CanvasTextSuggestion[]; pending: number; error: string };
+    subscribe: (listener: () => void) => () => void;
+    refresh: (retryRejected?: boolean) => Promise<void>;
+    save: (input: Omit<CanvasTextSuggestionInput, "target">) => Promise<void>;
+    apply: (id: string, documentId: string, expectedText: string) => Promise<void>;
+    dismiss: (id: string) => Promise<void>;
+};
+export type CanvasTextDocument = {
+    getSnapshot: () => CanvasTextSnapshot;
+    subscribe: (listener: () => void) => () => void;
+    getDocumentId: () => string;
+    flush: () => Promise<void>;
+};
+export type CanvasTextEditorHandle = {
+    insert: (text: string, options?: { prefixNewline?: boolean; select?: boolean }) => void;
+    replace: (text: string) => void;
+    focus: () => void;
+};
+export type CanvasTextReference = { label: string; title?: string; insert?: string; previewUrl?: string; active?: boolean; kind?: string };
+export type CanvasTextEditorProps = {
+    projectId: string; target: CanvasTextTarget; placeholder?: string;
+    references?: CanvasTextReference[]; chips?: boolean;
+    className?: string; style?: import("react").CSSProperties;
+    editorRef?: import("react").Ref<CanvasTextEditorHandle>;
+    onSubmit?: () => void; onBlur?: () => void; onEscape?: () => void;
+    autoFocus?: boolean;
+};
+
 export type CanvasNodeContext = {
+    TextEditor: ComponentType<CanvasTextEditorProps>;
+    textDocument: (target: CanvasTextTarget) => CanvasTextDocument;
+    textSuggestions: (target: CanvasTextTarget) => CanvasTextSuggestions;
+    replaceText: (target: CanvasTextTarget, documentId: string, expectedText: string, text: string) => Promise<boolean>;
+    /** 当前窗口的节点视图状态，不同步给其他协作者。 */
+    view: {
+        getSnapshot: () => Record<string, unknown>;
+        subscribe: (listener: () => void) => () => void;
+        update: (patch: Record<string, unknown>) => void;
+    };
     projectId: string;
     // 自身数据
     node: CanvasNodeData;
@@ -344,7 +387,7 @@ export type CanvasNodeDefinition = {
     interactionToggle?: boolean;
     // 配合 interactionToggle:返回 true 表示当前节点内容「强制可交互」(如编辑态),
     // 此时忽略 interactive 标志、始终允许操作,并隐藏移动/交互开关。缺省视为 false。
-    forceInteractive?: (node: CanvasNodeData) => boolean;
+    forceInteractive?: (node: CanvasNodeData, view: Record<string, unknown>) => boolean;
     keepAspectRatio?: (node: CanvasNodeData) => boolean;
     resource?: (node: CanvasNodeData) => CanvasNodeResource | CanvasNodeResource[] | null;
     // 渲染
@@ -434,7 +477,7 @@ export type McpToolHandler = (input: Record<string, unknown>, context: PluginMcp
 export type CanvasPluginMcp = {
     id: string; // 应等于插件 id
     version: string;
-    tools: McpToolDefinition[];
+    tools: readonly McpToolDefinition[];
     // 返回「工具 id -> 处理函数」映射,Agent 据此为每个工具调用 registerTool。
     // 官方/本地插件由 Agent 侧打包的 MCP 模块提供,浏览器声明可省略。
     createHandler?: (context: PluginMcpContext) => Record<string, McpToolHandler>;

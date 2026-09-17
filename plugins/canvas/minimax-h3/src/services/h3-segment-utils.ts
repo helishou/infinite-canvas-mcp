@@ -37,9 +37,10 @@ export function buildRestoreParamsPatch(segments: H3Segment[], ref: H3Ref): Part
     // 「设为当前 Clip」会一并还原 prompt（源段提示词带入当前 clip），
     // 因为提示词区已支持按 clip 隔离的撤销/重做，误覆盖可用 Ctrl+Z 回退。
     // 注意：H3_SETTINGS_KEYS（复制/粘贴设置）仍排除 prompt，仅本函数使用含 prompt 的 RESTORABLE_PARAM_KEYS。
-    const source = segments.find((segment) => resultUrl(segment.result) === ref.url || (segment.results || []).some((item) => resultUrl(item.url) === ref.url || (ref.storageKey && item.storageKey === ref.storageKey)))
-        || (ref.segmentId ? segments.find((segment) => segment.id === ref.segmentId) : undefined);
     const snapshot = ref.params && typeof ref.params === "object" ? ref.params : undefined;
+    // 带 generationLogId 的素材来自独立历史日志，必须使用生成时刻快照；不能拿源 Clip 的当前参数覆盖历史。
+    const source = ref.generationLogId ? undefined : segments.find((segment) => resultUrl(segment.result) === ref.url || (segment.results || []).some((item) => resultUrl(item.url) === ref.url || (ref.storageKey && item.storageKey === ref.storageKey)))
+        || (ref.segmentId ? segments.find((segment) => segment.id === ref.segmentId) : undefined);
     const snapshotRefs = Array.isArray(snapshot?.refs) ? snapshot.refs as H3Ref[] : Array.isArray(snapshot?.refItems) ? snapshot.refItems as H3Ref[] : undefined;
     const base = source ? restorableParams(source as Record<string, unknown>, RESTORABLE_PARAM_KEYS) : restorableParams(snapshot, RESTORABLE_PARAM_KEYS);
     const refsPatch = source ? segmentRefsPatch(refsForSegment(source)) : snapshotRefs ? segmentRefsPatch(snapshotRefs) : {};

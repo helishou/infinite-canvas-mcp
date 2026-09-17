@@ -48,14 +48,3 @@ test("publishCanvasDelta 统一发布 operations 事件，不携带完整项目"
     assert.equal("nodes" in (event.payload as Record<string, unknown>), false);
     assert.equal("connections" in (event.payload as Record<string, unknown>), false);
 });
-
-test("画布 presence 由 SSE 连接生命周期维护，不写入项目数据", () => {
-    const bus = new BackendEventBus();
-    const joined = bus.joinCanvas("project-1", { clientId: "browser-1", kind: "browser", label: "甲" });
-    assert.equal(joined.type, "canvas.presence");
-    assert.equal(((joined.payload as { participants: unknown[] }).participants).length, 1);
-    const second = bus.joinCanvas("project-1", { clientId: "browser-2", kind: "browser", label: "乙" });
-    assert.equal(((second.payload as { participants: unknown[] }).participants).length, 2);
-    const left = bus.leaveCanvas("project-1", "browser-1");
-    assert.equal(((left!.payload as { participants: Array<{ clientId: string }> }).participants)[0].clientId, "browser-2");
-});

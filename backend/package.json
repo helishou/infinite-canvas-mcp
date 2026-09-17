@@ -13,7 +13,7 @@
     "workers"
   ],
   "scripts": {
-    "dev": "tsx --watch src/index.ts",
+    "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "redact-inline-media": "tsx src/maintenance/redact-inline-media.ts",
     "test": "node ../scripts/test.mjs",
@@ -28,6 +28,7 @@
     "sharp": "^0.35.4",
     "winston": "^3.19.0",
     "ws": "^8.21.3",
+    "yjs": "^13.6.32",
     "zod": "^3.25.0"
   },
   "devDependencies": {

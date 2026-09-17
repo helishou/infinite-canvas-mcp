@@ -9,7 +9,8 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useBackendStore } from "@/stores/use-backend-store";
-import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
+import { CanvasCollaborativeText } from "./canvas-collaborative-text";
+import { useParams } from "react-router-dom";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -18,6 +19,8 @@ import { useTranslation } from "react-i18next";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
+const emptyPluginView: Record<string, unknown> = {};
+const subscribeNoPluginView = () => () => undefined;
 
 type CanvasNodeProps = {
     data: CanvasNodeData;
@@ -48,7 +51,6 @@ type CanvasNodeProps = {
     onResizeStart: (nodeId: string) => void;
     onResize: (nodeId: string, width: number, height: number, position?: Position) => void;
     onResizeEnd: (nodeId: string) => void;
-    onContentChange: (nodeId: string, content: string) => void;
     // 角色节点双击标题：打开完整编辑面板（名字/描述/参考图/声线）
     onEditCharacter?: (node: CanvasNodeData) => void;
     // 拖入图片/音频到角色节点
@@ -71,13 +73,12 @@ type NodeContentRendererProps = {
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     scale: number;
     isEditingContent: boolean;
-    textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+    textareaRef: React.RefObject<HTMLDivElement | null>;
     isBatchRoot: boolean;
     batchCount: number;
     batchExpanded: boolean;
     renderNodeContent?: (node: CanvasNodeData) => ReactNode;
     pluginContext?: CanvasNodeContext | null;
-    onContentChange: (nodeId: string, content: string) => void;
     onStopEditing: () => void;
     mentionReferences: CanvasResourceReference[];
     onRetry?: (node: CanvasNodeData) => void;
@@ -119,7 +120,6 @@ export const CanvasNode = React.memo(function CanvasNode({
     onResizeStart,
     onResize,
     onResizeEnd,
-    onContentChange,
     onTitleChange,
     onToggleBatch,
     onSetBatchPrimary,
@@ -153,13 +153,17 @@ export const CanvasNode = React.memo(function CanvasNode({
     // Nodes with the interaction/move toggle ignore content pointer events in move mode and allow interaction in interactive mode.
     // forceInteractive states such as editing stay interactive, as do empty nodes so their upload and generation actions remain usable.
     const supportsInteractionToggle = Boolean(definition?.interactionToggle);
-    const forceInteractive = supportsInteractionToggle ? Boolean(definition?.forceInteractive?.(data)) : false;
+    const forceInteractive = useSyncExternalStore(
+        pluginContext?.view.subscribe || subscribeNoPluginView,
+        () => supportsInteractionToggle ? Boolean(definition?.forceInteractive?.(data, pluginContext?.view.getSnapshot() || emptyPluginView)) : false,
+        () => false,
+    );
     const contentInteractive = !supportsInteractionToggle || forceInteractive || !data.metadata?.content ? true : Boolean(data.metadata?.interactive);
     // Transparent nodes such as SVGs blend into the canvas while retaining outlines for selected or related states.
     const transparentBg = Boolean(definition?.transparentBackground);
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
     const imageBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : "transparent";
-    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const textareaRef = useRef<HTMLDivElement>(null);
     const titleInputRef = useRef<HTMLInputElement>(null);
     const resizeRef = useRef({
         isResizing: false,
@@ -210,13 +214,6 @@ export const CanvasNode = React.memo(function CanvasNode({
         textarea.addEventListener("wheel", handleWheel, { passive: false });
         return () => textarea.removeEventListener("wheel", handleWheel);
     }, [data.type, isEditingContent]);
-
-    useEffect(() => {
-        if (!isEditingContent) return;
-        const textarea = textareaRef.current;
-        textarea?.focus();
-        textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
-    }, [isEditingContent]);
 
     useEffect(() => {
         if (!isEditingContent) return;
@@ -493,7 +490,6 @@ export const CanvasNode = React.memo(function CanvasNode({
                         renderNodeContent={renderNodeContent}
                         pluginContext={pluginContext}
                         mentionReferences={mentionReferences}
-                        onContentChange={onContentChange}
                         onStopEditing={() => setIsEditingContent(false)}
                         onRetry={onRetry}
                         onToggleBatch={() => onToggleBatch?.(data.id)}
@@ -628,7 +624,8 @@ function MissingPluginContent({ theme, type }: Pick<NodeContentRendererProps, "t
     );
 }
 
-function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, batchExpanded, onContentChange, onStopEditing, onToggleBatch, onSetBatchPrimary }: NodeContentRendererProps) {
+function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, batchExpanded, onStopEditing, onToggleBatch, onSetBatchPrimary }: NodeContentRendererProps) {
+    const { id: projectId = "" } = useParams();
     const { t } = useTranslation();
     const fontSize = node.metadata?.fontSize || 14;
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
@@ -649,22 +646,18 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                 : null}
             <div className="flex h-full w-full flex-col overflow-hidden rounded-3xl">
                 {isEditingContent ? (
-                    <CanvasResourceMentionTextarea
-                        ref={textareaRef}
-                        className={`thin-scrollbar block h-full w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-none bg-transparent m-0 font-mono outline-none select-text appearance-none ${paddingClass}`}
-                        style={textStyle}
-                        value={content}
-                        references={mentionReferences}
-                        highlightLabels={false}
-                        onChange={(value) => onContentChange(node.id, value)}
-                        onBlur={onStopEditing}
-                        onKeyDown={(event) => {
-                            if (event.key === "Escape") onStopEditing();
-                        }}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onWheel={(event) => event.stopPropagation()}
-                    />
+                    <div ref={textareaRef} className="h-full w-full">
+                        <CanvasCollaborativeText
+                            projectId={projectId}
+                            target={{ nodeId: node.id, field: "content", ...(primaryText ? { textItemId: primaryText.id } : {}) }}
+                            className={`thin-scrollbar h-full w-full overflow-y-auto font-mono select-text ${paddingClass}`}
+                            style={textStyle}
+                            references={mentionReferences}
+                            autoFocus
+                            onBlur={onStopEditing}
+                            onEscape={onStopEditing}
+                        />
+                    </div>
                 ) : content ? (
                     <div className={`thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent font-mono ${paddingClass}`} style={textStyle} onWheel={(event) => event.stopPropagation()}>
                         {content}

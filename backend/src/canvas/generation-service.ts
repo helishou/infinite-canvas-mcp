@@ -9,6 +9,11 @@ import { CanvasH3Runner } from "./h3-runner.js";
 import { CanvasImageDispatcher, type CanvasImageGenerationInput } from "./image-dispatcher.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
 import { resolveCanvasImageReferences } from "./image-references.js";
+import { CanvasTextDispatcher, type CanvasTextGenerationInput } from "./text-dispatcher.js";
+import { CanvasVideoDispatcher } from "./video-dispatcher.js";
+import { CanvasAudioDispatcher } from "./audio-dispatcher.js";
+import { CanvasBrowserScriptDispatcher } from "./browser-script-dispatcher.js";
+import { decodeChannelModel, modelOptionName, resolveModelScript } from "./model-workflow.js";
 import type { Stores } from "../stores/types.js";
 
 /**
@@ -26,13 +31,32 @@ export class CanvasGenerationService {
         private readonly events: BackendEventBus,
         private readonly comfy: ComfyUiBackend,
         private readonly runningHub: RunningHubBackend,
+        private readonly text?: CanvasTextDispatcher,
+        private readonly video?: CanvasVideoDispatcher,
+        private readonly audio?: CanvasAudioDispatcher,
+        private readonly browserScript?: CanvasBrowserScriptDispatcher,
     ) {}
 
     async start(command: CanvasGenerationCommand) {
         const operation = command.operation || "generate";
         if (operation === "h3-run") return this.startH3(command);
+        const script = command.model ? resolveModelScript(this.stores.settings?.get?.("ai.config"), command.model) : "";
+        if (script) {
+            if (!this.browserScript) throw new Error("浏览器脚本执行器未初始化");
+            const resolved = this.resolveImageReferences(command);
+            const result = this.browserScript.start(resolved, script);
+            return { ...result, task: this.stores.tasks.get(result.taskId) || undefined };
+        }
+        if (command.model && requiresBrowserProvider(this.stores.settings?.get?.("ai.config"), command)) {
+            if (!this.browserScript) throw new Error("浏览器模型执行器未初始化");
+            const resolved = this.resolveImageReferences(command);
+            const result = this.browserScript.start(resolved, "", "browser-provider");
+            return { ...result, task: this.stores.tasks.get(result.taskId) || undefined };
+        }
+        if (command.mode === "text") return this.startText(command);
         if (command.mode === "image") return this.startImage(command);
         if (command.mode === "video") return this.startVideo(command);
+        if (command.mode === "audio") return this.startAudio(command);
         throw new Error(`画布生成模式暂不支持：${command.mode}`);
     }
 
@@ -66,6 +90,20 @@ export class CanvasGenerationService {
         return { ...result, task: task || undefined };
     }
 
+    private startText(command: CanvasGenerationCommand) {
+        if (!this.text) throw new Error("画布文本执行器未初始化");
+        if (!command.model) throw new Error("画布文本生成缺少 model");
+        const resolved = this.resolveImageReferences(command);
+        const input = {
+            ...resolved,
+            prompt: String(resolved.prompt || ""),
+            ...(resolved.idempotencyKey && !resolved.clientTaskId ? { clientTaskId: resolved.idempotencyKey } : {}),
+        } as CanvasTextGenerationInput;
+        const result = this.text.start(input);
+        const task = this.stores.tasks.get(result.taskId);
+        return { ...result, task: task || undefined };
+    }
+
     private resolveImageReferences(command: CanvasGenerationCommand): CanvasGenerationCommand {
         if (!command.projectId) return command;
         const sourceNodeId = command.sourceNodeId || command.nodeId;
@@ -79,6 +117,13 @@ export class CanvasGenerationService {
     }
 
     private async startVideo(command: CanvasGenerationCommand) {
+        if (this.video) {
+            if (!command.model) throw new Error("画布视频生成缺少 model");
+            const resolved = this.resolveImageReferences(command);
+            const result = this.video.start({ ...resolved, model: command.model, prompt: String(resolved.prompt || ""),
+                ...(resolved.idempotencyKey && !resolved.clientTaskId ? { clientTaskId: resolved.idempotencyKey } : {}) });
+            return { ...result, task: this.stores.tasks.get(result.taskId) || undefined };
+        }
         const executor = resolveCanvasExecutor({ mode: "video", model: command.model, preset: command.preset });
         const params: Record<string, unknown> = {
             ...(command.params || {}),
@@ -93,16 +138,34 @@ export class CanvasGenerationService {
         const clientTaskId = command.idempotencyKey || command.clientTaskId || (binding ? `canvas-${crypto.randomUUID()}` : undefined);
         const engine = String(params.minimaxEngine || params.engine || "").trim().toLowerCase();
         const onCreated = binding && binding.bindOnStart !== false
-            ? (created: RuntimeTask) => bindCanvasTask(this.stores, this.events, binding, created.id)
+            ? (created: RuntimeTask) => bindCanvasTask(this.stores, binding, created.id)
             : undefined;
         const task = engine === "runninghub"
             ? await this.runningHub.run(command.input || {}, params, clientTaskId, onCreated)
             : await this.comfy.run(command.preset || "minimax-h3", command.input || {}, params, command.comfyUrl, clientTaskId, onCreated);
         return { ok: true, task, taskId: task.id, executor };
     }
+
+    private startAudio(command: CanvasGenerationCommand) {
+        if (!this.audio) throw new Error("画布音频执行器未初始化");
+        if (!command.model) throw new Error("画布音频生成缺少 model");
+        const result = this.audio.start({
+            projectId: command.projectId,
+            nodeId: command.nodeId,
+            sourceNodeId: command.sourceNodeId,
+            model: command.model,
+            prompt: String(command.prompt || ""),
+            voice: String(command.params?.voice || ""),
+            format: String(command.params?.format || ""),
+            speed: String(command.params?.speed || ""),
+            instructions: String(command.params?.instructions || ""),
+            ...(command.clientTaskId ? { clientTaskId: command.clientTaskId } : {}),
+        });
+        return { ...result, task: this.stores.tasks.get(result.taskId) || undefined };
+    }
 }
 
-function bindCanvasTask(stores: Stores, events: BackendEventBus, binding: Record<string, unknown>, taskId: string) {
+function bindCanvasTask(stores: Stores, binding: Record<string, unknown>, taskId: string) {
     const projectId = String(binding.projectId || "");
     const nodeId = String(binding.nodeId || "");
     const segmentId = String(binding.segmentId || "");
@@ -114,7 +177,7 @@ function bindCanvasTask(stores: Stores, events: BackendEventBus, binding: Record
     const metadata = recordOf(node.metadata);
     const segments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
     if (!segments.some((segment) => String(segment.id || "") === segmentId)) throw new Error(`找不到 H3 片段: ${segmentId}`);
-    const result = stores.projects.applyOperations(projectId, Number(project.revision || 0), [
+    stores.projects.applyOperations(projectId, Number(project.revision || 0), [
         {
             type: "update_node",
             id: nodeId,
@@ -128,10 +191,28 @@ function bindCanvasTask(stores: Stores, events: BackendEventBus, binding: Record
             patch: { runtimeTaskId: taskId, status: "loading", progress: 0 },
             patchDelete: ["errorDetails"],
         },
-    ]);
-    events.publishCanvasDelta({ entityId: projectId, revision: result.revision, operations: result.operations, updatedAt: String(result.project.updatedAt || ""), source: { clientId: "task:generation", kind: "task", label: "生成任务" } });
+    ], { runtimeWrite: true, source: { clientId: `task:${taskId}`, kind: "task", label: "生成任务" } });
 }
 
 function recordOf(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function requiresBrowserProvider(value: unknown, command: CanvasGenerationCommand) {
+    const config = recordOf(value);
+    const channels = Array.isArray(config.channels) ? config.channels.map(recordOf) : [];
+    const selected = String(command.model || "").trim();
+    const decoded = decodeChannelModel(selected);
+    const model = modelOptionName(selected).trim();
+    const channel = decoded
+        ? channels.find((item) => String(item.id || "") === decoded.channelId)
+        : channels.find((item) => (Array.isArray(item.models) ? item.models.map(recordOf) : []).some((entry) => String(entry.name || "") === model));
+    if (!channel) return false;
+    const kind = String(channel.kind || "api");
+    const apiFormat = String(channel.apiFormat || config.apiFormat || "openai");
+    if (command.mode === "image") return kind !== "comfyui" && (apiFormat === "gemini" || !/^gpt-image(?:-|$)/i.test(model));
+    if (command.mode === "text") return kind === "comfyui" || !["openai", "openai-chat"].includes(apiFormat);
+    if (command.mode === "audio") return kind === "comfyui" || apiFormat !== "openai";
+    if (command.mode === "video") return kind !== "comfyui" && apiFormat !== "openai";
+    return false;
 }

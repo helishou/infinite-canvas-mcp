@@ -1,6 +1,6 @@
 // 便利贴节点:纯展示便利贴——整块可拖动、双击编辑、右上角自选颜色。
 // 不再声明 resource(避免宿主在右上角显示「文本N」资源角标),也不再衍生节点。
-import { definePlugin, useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
+import { definePlugin, useEffect, useRef, useState, useSyncExternalStore } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
 
 // 预设便签色(点选切换),并额外提供自定义取色
@@ -8,7 +8,8 @@ const PRESET_COLORS = ["#fde68a", "#fca5a5", "#fdba74", "#a7f3d0", "#bfdbfe", "#
 const DEFAULT_COLOR = PRESET_COLORS[0];
 
 function StickyNoteContent({ ctx }: CanvasNodeContentProps) {
-    const [editing, setEditing] = useState(false);
+    const editing = useSyncExternalStore(ctx.view.subscribe, () => Boolean(ctx.view.getSnapshot().editing));
+    const setEditing = (value: boolean) => ctx.view.update({ editing: value });
     const [paletteOpen, setPaletteOpen] = useState(false);
     // 取色时的本地预览色:仅本组件即时重渲染,避免每次都写宿主 store
     const [draftColor, setDraftColor] = useState<string | null>(null);
@@ -115,21 +116,13 @@ function StickyNoteContent({ ctx }: CanvasNodeContentProps) {
 
             {/* 内容区:双击进入编辑;非编辑态整块可直接拖动移动节点 */}
             {editing ? (
-                <textarea
+                <ctx.TextEditor
+                    projectId={ctx.projectId}
+                    target={{ nodeId: ctx.node.id, field: "content" }}
                     autoFocus
-                    value={content}
                     placeholder="输入便利贴内容…（点击别处或按 Esc 退出编辑）"
-                    onChange={(e) => ctx.updateMetadata({ content: e.target.value })}
                     onBlur={() => setEditing(false)}
-                    onKeyDown={(e) => {
-                        if (e.key === "Escape") {
-                            e.stopPropagation();
-                            setEditing(false);
-                        }
-                    }}
-                    onMouseDown={stop}
-                    onPointerDown={stop}
-                    onWheel={stop}
+                    onEscape={() => setEditing(false)}
                     style={{ flex: 1, width: "100%", resize: "none", border: "none", outline: "none", background: "transparent", color: "#1c1917", fontSize: 15, lineHeight: 1.5, fontFamily: "inherit" }}
                 />
             ) : (

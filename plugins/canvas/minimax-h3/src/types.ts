@@ -28,7 +28,7 @@ export type H3CharacterGroup = {
     voiceEnabled: boolean;
 };
 
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; enabled?: boolean; usage?: H3ReferenceUsage };
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; enabled?: boolean; usage?: H3ReferenceUsage };
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { BookOpen, Bot, Download, FileText, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
-import { Button, Dropdown, Input, Modal, Popover, Tooltip } from "antd";
+import { Button, Dropdown, Modal, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { UserStatusActions } from "@/components/layout/user-status-actions";
@@ -9,8 +9,12 @@ import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { DOCS_URL } from "@/constant/env";
 import type { CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
+import { CanvasCollaborativeText } from "./canvas-collaborative-text";
+import { CanvasDraftsButton } from "./canvas-drafts-button";
+import { CanvasTextSuggestionsButton } from "./canvas-text-suggestions-button";
 
 export function CanvasTopBar({
+    projectId,
     title,
     titleDraft,
     isTitleEditing,
@@ -33,10 +37,10 @@ export function CanvasTopBar({
     compactAgentStatus,
     onToggleAgent,
     globalPrompt,
-    onGlobalPromptChange,
     onOpenGenerationLogs,
     collaborators,
 }: {
+    projectId: string;
     title: string;
     titleDraft: string;
     isTitleEditing: boolean;
@@ -59,7 +63,6 @@ export function CanvasTopBar({
     compactAgentStatus: { connected: boolean; enabled: boolean; activity: string };
     onToggleAgent: () => void;
     globalPrompt: string;
-    onGlobalPromptChange: (value: string) => void;
     onOpenGenerationLogs: () => void;
     collaborators: CanvasCollaborator[];
 }) {
@@ -146,10 +149,12 @@ export function CanvasTopBar({
                     </div>
                     <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />
                     <CanvasCollaborators collaborators={collaborators} />
+                    <CanvasDraftsButton />
+                    <CanvasTextSuggestionsButton projectId={projectId} />
                     <Popover
                         trigger="click"
                         placement="bottomLeft"
-                        content={<div className="w-80"><Input.TextArea autoFocus value={globalPrompt} onChange={(event) => onGlobalPromptChange(event.target.value)} placeholder={t("canvas.globalPromptPlaceholder")} autoSize={{ minRows: 3, maxRows: 8 }} /></div>}
+                        content={<div className="w-80"><CanvasCollaborativeText projectId={projectId} target={{ field: "globalPrompt" }} placeholder={t("canvas.globalPromptPlaceholder")} /></div>}
                     >
                         <Tooltip title={t("canvas.globalPromptHint")}>
                                 <button type="button" aria-label={t("canvas.globalPrompt")} className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: globalPrompt.trim() ? theme.node.text : theme.node.muted }}>

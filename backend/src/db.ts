@@ -4,8 +4,14 @@ import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
+import { completedImageSlots, imageSlotStatus, imageSourceStatus } from "./canvas/image-result-slots.js";
 import { applyCanvasProjectOperations, type CanvasOperation } from "./canvas/project-ops.js";
+import { prepareClientCanvasOperation, stripCanvasLocalViewState } from "./canvas/operation-authority.js";
+import { collaborationError, commandFingerprint, concurrentCommandConflicts, type CanvasCommandContext, type CanvasCommit } from "./canvas/collaboration.js";
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
+import * as Y from "yjs";
+import { textSuggestionInputSchema, type CanvasTextSuggestion } from "@basketikun/canvas-agent/schemas";
+import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, textOperation, textTargetSchema, type CanvasTextTarget } from "./canvas/collaborative-text.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -51,7 +57,7 @@ export type CanvasFolder = {
 };
 export type Asset = {
     id: string; kind: string; title: string; coverUrl: string; tags: string[];
-    folderId: string | null; data: Record<string, unknown>; note: string | null;
+    folderId: string | null; dramaId?: string | null; data: Record<string, unknown>; note: string | null;
     source: string | null; metadata: Record<string, unknown>;
     createdAt: string; updatedAt: string;
 };
@@ -61,6 +67,7 @@ export type DramaEpisode = {
     episodeNumber: number;
     title: string;
     synopsis: string;
+    fullPlot: string;
     canvasId: string | null;
     createdAt: string;
     updatedAt: string;
@@ -115,6 +122,9 @@ export type WorkflowConfigRow = {
 
 export class BackendDatabase {
     readonly db: DatabaseSync;
+    private canvasCommitListener?: (commit: CanvasCommit) => void;
+
+    onCanvasCommit(listener: (commit: CanvasCommit) => void) { this.canvasCommitListener = listener; }
 
     constructor(file: string = DB_FILE) {
         ensureDataDirs();
@@ -150,6 +160,28 @@ export class BackendDatabase {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS canvas_operation_batches_project_revision ON canvas_operation_batches(project_id, revision);
+            CREATE TABLE IF NOT EXISTS canvas_command_receipts (
+                operation_id TEXT PRIMARY KEY REFERENCES canvas_operation_batches(operation_id) ON DELETE CASCADE,
+                request_hash TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS canvas_collaboration_checkpoints (
+                project_id TEXT PRIMARY KEY REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                revision INTEGER NOT NULL,
+                data_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS canvas_text_documents (
+                project_id TEXT NOT NULL REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                target_key TEXT NOT NULL,
+                state BLOB NOT NULL,
+                PRIMARY KEY (project_id, target_key)
+            );
+            CREATE TABLE IF NOT EXISTS canvas_text_suggestions (
+                project_id TEXT NOT NULL REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                id TEXT NOT NULL,
+                target_key TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                PRIMARY KEY (project_id, id)
+            );
             CREATE TABLE IF NOT EXISTS canvas_folders (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -169,6 +201,7 @@ export class BackendDatabase {
                 episode_number INTEGER NOT NULL,
                 title TEXT NOT NULL DEFAULT '',
                 synopsis TEXT NOT NULL DEFAULT '',
+                full_plot TEXT NOT NULL DEFAULT '',
                 canvas_id TEXT REFERENCES canvas_projects(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -184,6 +217,7 @@ export class BackendDatabase {
                 cover_url TEXT NOT NULL DEFAULT '',
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 folder_id TEXT REFERENCES asset_folders(id) ON DELETE SET NULL,
+                drama_id TEXT REFERENCES drama_projects(folder_id) ON DELETE SET NULL,
                 data_json TEXT NOT NULL DEFAULT '{}',
                 note TEXT,
                 source TEXT,
@@ -279,6 +313,15 @@ export class BackendDatabase {
                 updated_at TEXT NOT NULL
             );
         `);
+        // 文本身份属于对象的一次生命周期，不得由可复用的 nodeId / segmentId 推导。
+        const textColumns = this.db.prepare("PRAGMA table_info(canvas_text_documents)").all() as Array<{ name: string }>;
+        if (!textColumns.some((column) => column.name === "document_id")) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec("ALTER TABLE canvas_text_documents ADD COLUMN document_id TEXT; UPDATE canvas_text_documents SET document_id = lower(hex(randomblob(16)))");
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
         const version = this.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version?: number } | undefined;
         const currentVersion = version?.version || 0;
         if (currentVersion < 1) {
@@ -337,6 +380,40 @@ export class BackendDatabase {
             // v7 已可能在旧服务进程中执行：补清 data_json.folderId，并把 episode 外键/唯一约束统一到最终模型。
             this.migrateV7ToV8EpisodeConstraints();
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (8, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 9) {
+            // 资产文件夹只表达库内整理方式；drama_id 单独记录资产所属剧目。
+            // 旧 drama-file 已把归属写在 data_json.dramaId，迁移时回填到正式列。
+            this.attachAssetsToDramas();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (9, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 10) {
+            // 分集梗概用于快速浏览，完整剧情单独保存，避免长文本挤占卡片摘要。
+            this.attachFullPlotToDramaEpisodes();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (10, ?)").run(new Date().toISOString());
+        }
+    }
+
+    private attachFullPlotToDramaEpisodes() {
+        const columns = this.db.prepare("PRAGMA table_info(drama_episodes)").all() as Array<{ name: string }>;
+        if (!columns.some((column) => column.name === "full_plot")) {
+            this.db.exec("ALTER TABLE drama_episodes ADD COLUMN full_plot TEXT NOT NULL DEFAULT ''");
+        }
+    }
+
+    private attachAssetsToDramas() {
+        const columns = this.db.prepare("PRAGMA table_info(assets)").all() as Array<{ name: string }>;
+        if (!columns.some((column) => column.name === "drama_id")) {
+            this.db.exec("ALTER TABLE assets ADD COLUMN drama_id TEXT REFERENCES drama_projects(folder_id) ON DELETE SET NULL");
+        }
+        this.db.exec("CREATE INDEX IF NOT EXISTS assets_drama ON assets(drama_id)");
+        const legacyFiles = this.db.prepare("SELECT id, data_json FROM assets WHERE kind = 'drama-file' AND drama_id IS NULL").all() as Array<{ id: string; data_json: string }>;
+        const update = this.db.prepare("UPDATE assets SET drama_id = ? WHERE id = ?");
+        for (const row of legacyFiles) {
+            const dramaId = parseJsonObject(row.data_json).dramaId;
+            if (typeof dramaId !== "string") continue;
+            const exists = this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(dramaId);
+            if (exists) update.run(dramaId, row.id);
         }
     }
 
@@ -480,6 +557,7 @@ export class BackendDatabase {
                 episode_number INTEGER NOT NULL,
                 title TEXT NOT NULL DEFAULT '',
                 synopsis TEXT NOT NULL DEFAULT '',
+                full_plot TEXT NOT NULL DEFAULT '',
                 canvas_id TEXT REFERENCES canvas_projects(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -487,6 +565,7 @@ export class BackendDatabase {
                 UNIQUE(canvas_id)
             )`);
         }
+        this.attachFullPlotToDramaEpisodes();
         this.db.exec("CREATE INDEX IF NOT EXISTS drama_episodes_drama_id ON drama_episodes(drama_id)");
         this.db.exec("CREATE INDEX IF NOT EXISTS drama_episodes_canvas_id ON drama_episodes(canvas_id)");
         const epCount = (this.db.prepare("SELECT COUNT(*) AS n FROM drama_episodes").get() as { n: number }).n;
@@ -678,7 +757,7 @@ export class BackendDatabase {
         const rows = this.db.prepare("SELECT data_json FROM canvas_projects ORDER BY updated_at DESC").all() as Array<{ data_json: string }>;
         return rows.flatMap((row) => {
             try {
-                const value = JSON.parse(row.data_json) as CanvasProject;
+                const value = stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject;
                 return value && typeof value === "object" && value.id ? [value] : [];
             } catch { return []; }
         });
@@ -734,40 +813,172 @@ export class BackendDatabase {
             FROM canvas_projects ${whereClause} ORDER BY updated_at DESC`).all(...params) as CanvasProject[];
     }
 
-    upsertCanvasProject(project: CanvasProject) {
-        const now = new Date().toISOString();
-        const updatedAt = String(project.updatedAt || now);
-        const current = this.getCanvasProject(project.id);
-        const currentRevision = Number(current?.revision || 0);
-        const incomingRevision = Number(project.revision ?? currentRevision);
-        // revision 是画布写入的权威顺序；旧全量快照不能靠较新的时间戳覆盖新操作。
-        if (current && incomingRevision < currentRevision) return current;
-        // 客户端可能持有旧的全量画布快照；不能让它覆盖 MCP 刚写入的节点状态。
-        if (current && Date.parse(String(current.updatedAt || "")) > Date.parse(updatedAt)) return current;
-        project.revision = Math.max(currentRevision, incomingRevision);
-        // v7: 画布表已删 folder_id 列；画布与剧目/分集的关系由 drama_episodes.canvas_id 承载。
-        const persistedProject = structuredClone(project) as Record<string, unknown>;
-        delete persistedProject.folderId;
-        this.db.prepare(
-            "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
-        ).run(project.id, JSON.stringify(persistedProject), updatedAt);
-        return this.getCanvasProject(project.id)!;
+    createCanvasProject(input: CanvasProject) {
+        if (typeof input?.id !== "string" || !input.id.trim()) throw new Error("project.id 必填");
+        const project = stripCanvasLocalViewState(input as unknown as Record<string, unknown>) as unknown as CanvasProject;
+        delete project.folderId;
+        // revision 是后台权威顺序；导入/新建均从零开始，不能把外部版本带进本地日志。
+        project.revision = 0;
+        const seedHash = (value: CanvasProject) => {
+            const { revision: _revision, updatedAt: _updatedAt, createdAt: _createdAt, folderId: _folderId, ...seed } = value;
+            return commandFingerprint(seed);
+        };
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const current = this.getCanvasProject(project.id);
+            if (current) {
+                const checkpoint = this.db.prepare("SELECT revision, data_json FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(project.id) as { revision: number; data_json: string } | undefined;
+                if (!checkpoint || checkpoint.revision !== 0 || seedHash(JSON.parse(checkpoint.data_json)) !== seedHash(project)) {
+                    throw Object.assign(collaborationError("PROJECT_EXISTS", "画布已存在，不能用整图覆盖；请提交增量操作或使用新 ID 导入"), { project: current, revision: current.revision });
+                }
+                this.db.exec("COMMIT");
+                return { project: current, created: false };
+            }
+            const now = new Date().toISOString();
+            project.createdAt ||= now;
+            project.updatedAt = now;
+            const json = JSON.stringify(project);
+            this.db.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)").run(project.id, json, now);
+            this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, 0, ?)").run(project.id, json);
+            this.db.exec("COMMIT");
+            return { project, created: true };
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
     }
 
-    applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[], context?: { operationId?: string; source?: Record<string, unknown> }) {
+    getCanvasText(id: string, input: unknown) {
+        const target = textTargetSchema.parse(input);
+        const project = this.getCanvasProject(id);
+        if (!project) throw new Error(`画布不存在: ${id}`);
+        const text = readText(project, target);
+        const row = this.db.prepare("SELECT state FROM canvas_text_documents WHERE project_id = ? AND target_key = ?").get(id, textKey(target)) as { state: Uint8Array } | undefined;
+        const doc = loadTextDocument(row?.state, text);
+        try {
+            if (doc.getText("text").toString() !== text) replaceText(doc, text);
+            const state = Y.encodeStateAsUpdate(doc);
+            const documentId = this.saveCanvasText(id, target, state);
+            return { projectId: id, target, documentId, text, revision: Number(project.revision || 0), state: Buffer.from(state).toString("base64"), stateVector: Buffer.from(Y.encodeStateVector(doc)).toString("base64") };
+        } finally { doc.destroy(); }
+    }
+
+    private saveCanvasText(id: string, target: CanvasTextTarget, state: Uint8Array) {
+        const row = this.db.prepare("INSERT INTO canvas_text_documents (project_id, target_key, state, document_id) VALUES (?, ?, ?, ?) ON CONFLICT(project_id, target_key) DO UPDATE SET state = excluded.state RETURNING document_id").get(id, textKey(target), state, crypto.randomUUID()) as { document_id: string };
+        return row.document_id;
+    }
+
+    private applyCanvasTextOperation(id: string, project: Record<string, unknown>, operation: CanvasOperation): CanvasOperation {
+        const target = textTargetSchema.parse(operation.target);
+        const current = readText(project, target);
+        const row = this.db.prepare("SELECT state, document_id FROM canvas_text_documents WHERE project_id = ? AND target_key = ?").get(id, textKey(target)) as { state: Uint8Array; document_id: string } | undefined;
+        if (!row || row.document_id !== operation.documentId) throw collaborationError("TEXT_DOCUMENT_REPLACED", "文本对象已被替换，请保留旧草稿并重新读取目标");
+        const doc = loadTextDocument(row.state, current);
+        try {
+            if (doc.getText("text").toString() !== current) replaceText(doc, current);
+            const before = Y.encodeStateVector(doc);
+            if (operation.type === "text_replace") {
+                if (typeof operation.expectedText !== "string" || typeof operation.text !== "string") throw new Error("条件替换必须提供原文和新文本");
+                if (current !== operation.expectedText) throw collaborationError("TEXT_CONFLICT", "原文已变化，改写结果需作为建议保留，不能覆盖当前文本");
+                replaceText(doc, operation.text);
+            } else {
+                if (typeof operation.update !== "string" || !operation.update) throw new Error("缺少 Yjs 文本增量");
+                Y.applyUpdate(doc, Buffer.from(operation.update, "base64"));
+            }
+            if ([...doc.share.keys()].some((key) => key !== "text") || doc.getText("text").toDelta().some((item: { insert?: unknown }) => typeof item.insert !== "string")) throw new Error("协作文本只允许纯文字增量");
+            this.saveCanvasText(id, target, Y.encodeStateAsUpdate(doc));
+            return { ...textOperation(target, doc.getText("text").toString(), project), textUpdate: { target, documentId: row.document_id, update: Buffer.from(Y.encodeStateAsUpdate(doc, before)).toString("base64") } };
+        } finally { doc.destroy(); }
+    }
+
+    listCanvasTextSuggestions(id: string, input?: unknown): CanvasTextSuggestion[] {
+        if (!this.getCanvasProject(id)) throw new Error(`画布不存在: ${id}`);
+        const target = input === undefined ? undefined : textTargetSchema.parse(input);
+        const rows = (target
+            ? this.db.prepare("SELECT data_json FROM canvas_text_suggestions WHERE project_id = ? AND target_key = ?").all(id, textKey(target))
+            : this.db.prepare("SELECT data_json FROM canvas_text_suggestions WHERE project_id = ?").all(id)) as Array<{ data_json: string }>;
+        return rows.map((row) => JSON.parse(row.data_json) as CanvasTextSuggestion).sort((a, b) => b.revision - a.revision);
+    }
+
+    private applyTextSuggestion(id: string, project: Record<string, unknown>, operation: CanvasOperation): CanvasOperation {
+        let suggestion: CanvasTextSuggestion;
+        let canonical: CanvasOperation = { type: "text_suggestion" };
+        if (operation.type === "save_text_suggestion") {
+            const input = textSuggestionInputSchema.parse(operation.suggestion);
+            const existing = this.db.prepare("SELECT data_json FROM canvas_text_suggestions WHERE project_id = ? AND id = ?").get(id, input.id) as { data_json: string } | undefined;
+            if (existing) {
+                const saved = JSON.parse(existing.data_json) as CanvasTextSuggestion;
+                if (commandFingerprint(textSuggestionInputSchema.parse(saved)) !== commandFingerprint(input)) throw collaborationError("OPERATION_ID_REUSED", "候选 ID 已用于不同内容");
+                return { ...canonical, textSuggestion: saved };
+            }
+            // 生成途中目标可能被删除；仍保存返回结果，但绝不自动写入新建的同 ID 目标。
+            suggestion = { ...input, status: "pending", revision: Number(project.revision || 0) + 1 };
+        } else {
+            const row = this.db.prepare("SELECT data_json FROM canvas_text_suggestions WHERE project_id = ? AND id = ?").get(id, String(operation.id || "")) as { data_json: string } | undefined;
+            if (!row) throw new Error("找不到改写候选");
+            suggestion = JSON.parse(row.data_json) as CanvasTextSuggestion;
+            if (operation.action !== "apply" && operation.action !== "dismiss") throw new Error("候选操作必须为 apply 或 dismiss");
+            if (suggestion.status !== "pending") throw collaborationError("TEXT_SUGGESTION_RESOLVED", "候选已被处理，请同步最新状态");
+            if (operation.action === "apply") {
+                if (operation.documentId !== suggestion.documentId) throw collaborationError("TEXT_DOCUMENT_REPLACED", "候选属于旧文本对象，不能应用到重建的目标");
+                canonical = this.applyCanvasTextOperation(id, project, { type: "text_replace", target: suggestion.target, documentId: suggestion.documentId, expectedText: operation.expectedText, text: suggestion.text });
+            }
+            suggestion = { ...suggestion, status: operation.action === "apply" ? "applied" : "dismissed", revision: Number(project.revision || 0) + 1 };
+        }
+        this.db.prepare("INSERT INTO canvas_text_suggestions (project_id, id, target_key, data_json) VALUES (?, ?, ?, ?) ON CONFLICT(project_id, id) DO UPDATE SET data_json = excluded.data_json")
+            .run(id, suggestion.id, textKey(suggestion.target), JSON.stringify(suggestion));
+        return { ...canonical, textSuggestion: suggestion };
+    }
+
+    readCanvasChanges(id: string, afterRevision: number) {
+        const project = this.getCanvasProject(id);
+        if (!project) throw new Error(`画布不存在: ${id}`);
+        if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) throw new Error("afterRevision 必须为非负整数");
+        const revision = Number(project.revision || 0);
+        const rows = this.db.prepare("SELECT * FROM canvas_operation_batches WHERE project_id = ? AND revision > ? ORDER BY revision").all(id, afterRevision) as Array<Record<string, unknown>>;
+        const commits: CanvasCommit[] = rows.map((row) => ({ projectId: id, operationId: String(row.operation_id), baseRevision: Number(row.base_revision), revision: Number(row.revision), source: JSON.parse(String(row.source_json)), operations: JSON.parse(String(row.operations_json)), operationResults: JSON.parse(String(row.results_json)), updatedAt: String(row.created_at) }));
+        const complete = afterRevision <= revision && commits.length === revision - afterRevision && commits.every((commit, index) => commit.baseRevision === afterRevision + index && commit.revision === afterRevision + index + 1);
+        return { projectId: id, revision, reset: !complete, commits: complete ? commits : [], ...(!complete ? { project } : {}) };
+    }
+
+    private canvasProjectAt(id: string, revision: number): CanvasProject {
+        const row = this.db.prepare("SELECT revision, data_json FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id) as { revision: number; data_json: string } | undefined;
+        if (!row || row.revision > revision) throw collaborationError("RECEIPT_UNAVAILABLE", "旧请求没有可恢复回执，请读取最新画布后重新操作");
+        const project = stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject;
+        const rows = this.db.prepare("SELECT revision, operations_json, created_at FROM canvas_operation_batches WHERE project_id = ? AND revision > ? AND revision <= ? ORDER BY revision").all(id, row.revision, revision) as Array<{ revision: number; operations_json: string; created_at: string }>;
+        if (rows.length !== revision - row.revision) throw collaborationError("RECEIPT_UNAVAILABLE", "操作历史不连续，不能还原旧请求回执");
+        for (const entry of rows) {
+            applyCanvasProjectOperations(project, JSON.parse(entry.operations_json));
+            project.revision = entry.revision;
+            project.updatedAt = entry.created_at;
+        }
+        return stripCanvasLocalViewState(project as unknown as Record<string, unknown>) as unknown as CanvasProject;
+    }
+
+    applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, inputOperations: CanvasOperation[], context?: CanvasCommandContext) {
+        const operationId = context?.operationId || crypto.randomUUID();
+        const fingerprint = commandFingerprint({ id, expectedRevision, baseRevision: context?.baseRevision, operations: inputOperations });
+        const operations = structuredClone(inputOperations);
+        let commit: CanvasCommit;
         this.db.exec("BEGIN IMMEDIATE");
         try {
             const current = this.getCanvasProject(id);
             if (!current) throw new Error(`画布不存在: ${id}`);
             const currentRevision = Number(current.revision || 0);
-            const operationId = String(context?.operationId || "");
-            if (operationId) {
-                const existing = this.db.prepare("SELECT project_id AS projectId, revision, operations_json AS operationsJson, results_json AS resultsJson FROM canvas_operation_batches WHERE operation_id = ?").get(operationId) as { projectId: string; revision: number; operationsJson: string; resultsJson: string } | undefined;
+            {
+                const existing = this.db.prepare("SELECT b.project_id AS projectId, b.revision, b.operations_json AS operationsJson, b.results_json AS resultsJson, r.request_hash AS requestHash FROM canvas_operation_batches b LEFT JOIN canvas_command_receipts r ON r.operation_id = b.operation_id WHERE b.operation_id = ?").get(operationId) as { projectId: string; revision: number; operationsJson: string; resultsJson: string; requestHash?: string } | undefined;
                 if (existing) {
-                    if (existing.projectId !== id) throw new Error(`operationId 已用于其他画布：${operationId}`);
+                    if (existing.projectId !== id || existing.requestHash !== fingerprint) throw collaborationError("OPERATION_ID_REUSED", "operationId 已用于不同请求，请勿修改重试请求内容");
+                    const project = this.canvasProjectAt(id, Number(existing.revision));
                     this.db.exec("COMMIT");
-                    return { project: current, revision: Number(existing.revision), operationResults: JSON.parse(existing.resultsJson), operations: JSON.parse(existing.operationsJson), duplicated: true };
+                    return { project, revision: Number(existing.revision), operationId, operationResults: JSON.parse(existing.resultsJson), operations: JSON.parse(existing.operationsJson), duplicated: true };
                 }
+            }
+            if (!operations.length || operations.some((operation) => !operation || typeof operation.type !== "string")) throw new Error("operations 必须为非空有效操作数组");
+            if (context?.baseRevision !== undefined) {
+                const history = this.readCanvasChanges(id, context.baseRevision);
+                const conflicts = history.reset ? ["history"] : concurrentCommandConflicts(operations, history.commits.flatMap((entry) => entry.operations));
+                if (conflicts.length) throw Object.assign(collaborationError("FIELD_CONFLICT", "目标字段已被其他协作者修改"), { project: current, revision: currentRevision, conflictTargets: conflicts });
             }
             if (expectedRevision !== undefined && expectedRevision !== currentRevision) {
                 const error = new Error("画布版本冲突");
@@ -777,22 +988,62 @@ export class BackendDatabase {
                 throw error;
             }
             const project = structuredClone(current) as Record<string, unknown>;
-            const operationResults = applyCanvasProjectOperations(project, operations);
+            this.db.prepare("INSERT OR IGNORE INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
+            const operationResults = operations.flatMap((operation, index) => {
+                if (operation.type === "text_suggestion") throw new Error("text_suggestion 是服务端回执，不能直接提交");
+                // 文本增量与候选通知必须由本次事务计算，不能信任客户端夹带的回执字段。
+                delete operation.textUpdate;
+                delete operation.textUpdates;
+                delete operation.textSuggestion;
+                const isSuggestion = operation.type === "save_text_suggestion" || operation.type === "resolve_text_suggestion";
+                const isText = isSuggestion || operation.type === "text_update" || operation.type === "text_replace";
+                if (isSuggestion) operations[index] = this.applyTextSuggestion(id, project, operation);
+                else if (isText) operations[index] = this.applyCanvasTextOperation(id, project, operation);
+                if (!context?.runtimeWrite) prepareClientCanvasOperation(project, operations[index]);
+                const result = applyCanvasProjectOperations(project, [operations[index]]);
+                if (!isText) {
+                    // 每一步删除后立即清理；同批 delete + add 同 ID 也必须得到新文本身份。
+                    if (["delete_node", "delete_h3_segment", "replace_h3_segments"].includes(operation.type) || (operation.type === "update_node" && (["segments", "texts"].some((key) => Object.hasOwn(operation.metadata as object || {}, key) || (operation.metadataDelete as string[] || []).includes(key)) || Object.hasOwn(operation.patch as object || {}, "type")))) {
+                        const documents = this.db.prepare("SELECT target_key FROM canvas_text_documents WHERE project_id = ?").all(id) as Array<{ target_key: string }>;
+                        for (const { target_key } of documents) {
+                            const [nodeId, segmentId, field, textItemId] = JSON.parse(target_key);
+                            try { readText(project, { nodeId: nodeId || undefined, segmentId: segmentId || undefined, field, textItemId }); }
+                            catch { this.db.prepare("DELETE FROM canvas_text_documents WHERE project_id = ? AND target_key = ?").run(id, target_key); }
+                        }
+                    }
+                    const textUpdates = editedTextTargets(operation, project).flatMap((target) => {
+                        const row = this.db.prepare("SELECT state FROM canvas_text_documents WHERE project_id = ? AND target_key = ?").get(id, textKey(target)) as { state: Uint8Array } | undefined;
+                        if (!row) return [];
+                        const doc = loadTextDocument(row.state, "");
+                        try {
+                            const before = Y.encodeStateVector(doc);
+                            replaceText(doc, readText(project, target));
+                            const documentId = this.saveCanvasText(id, target, Y.encodeStateAsUpdate(doc));
+                            return [{ target, documentId, update: Buffer.from(Y.encodeStateAsUpdate(doc, before)).toString("base64") }];
+                        } finally { doc.destroy(); }
+                    });
+                    if (textUpdates.length) operations[index].textUpdates = textUpdates;
+                }
+                return result;
+            });
             const revision = currentRevision + 1;
             project.revision = revision;
             project.updatedAt = new Date().toISOString();
             this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?")
                 .run(JSON.stringify(project), String(project.updatedAt), id);
-            if (operationId) {
-                this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-                    .run(operationId, id, currentRevision, revision, JSON.stringify(context?.source || {}), JSON.stringify(operations), JSON.stringify(operationResults), String(project.updatedAt));
-            }
+            const source = context?.source || { clientId: "system:backend", kind: "system", label: "后台" };
+            this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+                .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(operations), JSON.stringify(operationResults), String(project.updatedAt));
+            this.db.prepare("INSERT INTO canvas_command_receipts (operation_id, request_hash) VALUES (?, ?)").run(operationId, fingerprint);
             this.db.exec("COMMIT");
-            return { project: project as CanvasProject, revision, operationResults, operations, duplicated: false };
+            commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations, operationResults, source, updatedAt: String(project.updatedAt) };
         } catch (error) {
             this.db.exec("ROLLBACK");
             throw error;
         }
+        // 已提交的数据不能因为通知失败而被报告成事务失败，更不能尝试 ROLLBACK。
+        try { this.canvasCommitListener?.(commit); } catch (error) { console.error("画布提交成功，但实时通知失败", error); }
+        return { project: this.getCanvasProject(id)!, revision: commit.revision, operationId, operationResults: commit.operationResults, operations: commit.operations, duplicated: false };
     }
 
     writeBackH3Task(
@@ -863,7 +1114,7 @@ export class BackendDatabase {
         }
         operations.push({ type: "update_node", id: binding.nodeId, metadata: nodeMetadataPatch });
         try {
-            this.applyCanvasProjectOperations(binding.projectId, Number(project.revision || 0), operations);
+            this.applyCanvasProjectOperations(binding.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "H3 任务" } });
         } catch (error) {
             // 409（revision 过期）或 update_h3_segment CAS 失败（runtimeTaskId 已被清空 / 改了）都视为放弃回写。
             const message = error instanceof Error ? error.message : String(error);
@@ -875,18 +1126,46 @@ export class BackendDatabase {
 
     writeBackCanvasImageTask(
         task: RuntimeTask,
-        input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append" },
+        input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append"; imageIds?: string[] },
         media: Array<Record<string, unknown>>,
     ): { project: CanvasProject; operations: CanvasOperation[] } | null {
-        this.db.exec("BEGIN IMMEDIATE");
-        try {
             const project = this.getCanvasProject(input.projectId);
-            if (!project) { this.db.exec("COMMIT"); return null; }
+            if (!project) return null;
             const nodes = Array.isArray(project.nodes) ? structuredClone(project.nodes) as Array<Record<string, any>> : [];
             const connections = Array.isArray(project.connections) ? structuredClone(project.connections) as Array<Record<string, any>> : [];
             const source = nodes.find((item) => String(item.id || "") === input.nodeId);
-            if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) { this.db.exec("COMMIT"); return null; }
+            if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) return null;
             const sourceMetadata = recordOf(source.metadata);
+            if (recordOf(recordOf(task.input).params).writeBackToTarget === true) {
+                const output = media[0];
+                if (!output) throw new Error("生成完成但没有返回图片");
+                const metadata = {
+                    content: output.url, url: output.url, storageKey: output.storageKey || "", mimeType: output.mimeType || "image/png",
+                    bytes: output.bytes, naturalWidth: output.width, naturalHeight: output.height,
+                    prompt: input.prompt, model: input.model, generationType: input.references?.length ? "edit" : "generation",
+                    status: "success", runProgress: 1, generationTaskId: task.id,
+                };
+                const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata,
+                    metadataDelete: ["runtimeTaskId", "errorDetails"] }];
+                const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
+                    { runtimeWrite: true, operationId: `image-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
+                return { project: result.project, operations: result.operations };
+            }
+            if (input.imageIds) {
+                if (!media.length) throw new Error("生成完成但没有返回图片");
+                const slots = completedImageSlots(sourceMetadata, input.imageIds, media);
+                const initialSize = recordOf(task.params.imageTargetSize);
+                const resultSize = slots.content && !sourceMetadata.freeResize && source.width === initialSize.width && source.height === initialSize.height
+                    ? fitImageNodeSize(Number(slots.naturalWidth || 0), Number(slots.naturalHeight || 0)) : {};
+                const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId,
+                    patch: resultSize,
+                    metadata: { ...slots, status: "success", runProgress: 1, generationTaskId: task.id },
+                    metadataDelete: ["runtimeTaskId", "errorDetails"] },
+                    ...imageSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success")];
+                const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
+                    { runtimeWrite: true, operationId: `image-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
+                return { project: result.project, operations: result.operations };
+            }
             const operations: CanvasOperation[] = [];
             const activeIds = new Set(Array.isArray(sourceMetadata.generatedResultIds)
                 ? sourceMetadata.generatedResultIds.map(String)
@@ -945,59 +1224,92 @@ export class BackendDatabase {
                 resultX += width + 40;
             });
             if (!createdIds.length) throw new Error("生成完成但没有返回图片");
-            const sourceMetadataPatch = { status: "success", runtimeTaskId: undefined, errorDetails: undefined, model: input.model, prompt: input.prompt, primaryImageId: createdIds[0], generatedResultIds: createdIds, generationTaskId: task.id };
+            const sourceMetadataPatch = { status: "success", primaryImageId: createdIds[0], generatedResultIds: createdIds, generationTaskId: task.id };
             source.metadata = { ...sourceMetadata, ...sourceMetadataPatch };
             operations.push({ type: "update_node", id: input.nodeId, metadata: sourceMetadataPatch, metadataDelete: ["runtimeTaskId", "errorDetails"] });
-            const nextProject: CanvasProject = { ...project, nodes, connections, revision: Number(project.revision || 0) + 1, updatedAt: new Date().toISOString() };
-            this.db.prepare(
-                "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
-            ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
-            this.db.exec("COMMIT");
-            return { project: this.getCanvasProject(nextProject.id)!, operations };
-        } catch (error) {
-            this.db.exec("ROLLBACK");
-            throw error;
-        }
+            operations.push(...imageSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success"));
+            const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
+            return { project: result.project, operations: result.operations };
     }
 
     markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null {
-        this.db.exec("BEGIN IMMEDIATE");
-        try {
             const project = this.getCanvasProject(input.projectId);
-            if (!project) { this.db.exec("COMMIT"); return null; }
+            if (!project) return null;
             const nodes = Array.isArray(project.nodes) ? structuredClone(project.nodes) as Array<Record<string, any>> : [];
             const source = nodes.find((item) => String(item.id || "") === input.nodeId);
-            if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) { this.db.exec("COMMIT"); return null; }
-            const metadataPatch = { status: task.status === "cancelled" ? "cancelled" : "error", runtimeTaskId: undefined, errorDetails: task.status === "cancelled" ? undefined : error };
+            if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) return null;
+            const status = task.status === "cancelled" ? "cancelled" : "error";
+            const errorDetails = task.status === "cancelled" ? undefined : error;
+            const metadataPatch = { status, runtimeTaskId: undefined, errorDetails,
+                ...imageSlotStatus(project, input.nodeId, task.input.imageIds as string[] | undefined, status, errorDetails) };
             source.metadata = { ...recordOf(source.metadata), ...metadataPatch };
             const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata: metadataPatch, metadataDelete: task.status === "cancelled" ? ["runtimeTaskId", "errorDetails"] : ["runtimeTaskId"] }];
-            const nextProject: CanvasProject = { ...project, nodes, revision: Number(project.revision || 0) + 1, updatedAt: new Date().toISOString() };
-            this.db.prepare(
-                "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
-            ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
-            this.db.exec("COMMIT");
-            return { project: this.getCanvasProject(nextProject.id)!, operations };
-        } catch (caught) {
-            this.db.exec("ROLLBACK");
-            throw caught;
-        }
+            operations.push(...imageSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, status));
+            const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
+            return { project: result.project, operations: result.operations };
     }
 
-    replaceCanvasProjects(projects: CanvasProject[]): CanvasProject[] {
-        const now = new Date().toISOString();
-        this.db.exec("BEGIN IMMEDIATE");
-        try {
-            this.db.prepare("DELETE FROM canvas_projects").run();
-            const insert = this.db.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)");
-            for (const project of projects) {
-                if (project.id) insert.run(project.id, JSON.stringify(project), String(project.updatedAt || now));
-            }
-            this.db.exec("COMMIT");
-        } catch (error) {
-            this.db.exec("ROLLBACK");
-            throw error;
-        }
-        return this.listCanvasProjects();
+    writeBackCanvasVideoTask(task: RuntimeTask, input: { projectId: string; nodeId: string; prompt: string; model: string }, media: Record<string, unknown>): { project: CanvasProject; operations: CanvasOperation[] } | null {
+            const project = this.getCanvasProject(input.projectId);
+            if (!project) return null;
+            const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+            const node = nodes.find((item) => String(item.id || "") === input.nodeId);
+            if (!node || String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) return null;
+            const metadata = recordOf(node.metadata);
+            const initialSize = recordOf(task.params.videoTargetSize);
+            const naturalWidth = Number(media.width || 0);
+            const naturalHeight = Number(media.height || 0);
+            const size = !metadata.freeResize && node.width === initialSize.width && node.height === initialSize.height && naturalWidth > 0 && naturalHeight > 0
+                ? fitImageNodeSize(naturalWidth, naturalHeight) : {};
+            const patch = {
+                status: "success", runProgress: 1, generationTaskId: task.id,
+                content: media.url, storageKey: media.storageKey || "", mimeType: media.mimeType || "video/mp4",
+                bytes: media.bytes, naturalWidth: media.width, naturalHeight: media.height, durationMs: media.durationMs,
+                prompt: input.prompt, model: input.model,
+            };
+            const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, patch: size, metadata: patch, metadataDelete: ["runtimeTaskId", "errorDetails"] }];
+            operations.push(...canvasMediaSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success"));
+            const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
+                { runtimeWrite: true, operationId: `video-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "视频生成任务" } });
+            return { project: result.project, operations: result.operations };
+    }
+
+    markCanvasVideoTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null {
+            const project = this.getCanvasProject(input.projectId);
+            if (!project) return null;
+            const node = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === input.nodeId) as Record<string, any> | undefined;
+            if (!node || String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) return null;
+            const status = task.status === "cancelled" ? "cancelled" : "error";
+            const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata: { status, errorDetails: status === "error" ? error : undefined },
+                metadataDelete: status === "cancelled" ? ["runtimeTaskId", "errorDetails"] : ["runtimeTaskId"] }];
+            operations.push(...canvasMediaSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, status));
+            const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
+                { runtimeWrite: true, operationId: `video-task-failed:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "视频生成任务" } });
+            return { project: result.project, operations: result.operations };
+    }
+
+    writeBackCanvasAudioTask(task: RuntimeTask, input: { projectId: string; nodeId: string; prompt: string; model: string }, media: Record<string, unknown>): { project: CanvasProject; operations: CanvasOperation[] } | null {
+        const project = this.getCanvasProject(input.projectId);
+        if (!project) return null;
+        const node = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === input.nodeId) as Record<string, any> | undefined;
+        if (!node || String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) return null;
+        const metadata = { status: "success", runProgress: 1, generationTaskId: task.id, content: media.url, storageKey: media.storageKey || "", mimeType: media.mimeType || "audio/mpeg", bytes: media.bytes, durationMs: media.durationMs, prompt: input.prompt, model: input.model };
+        const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata, metadataDelete: ["runtimeTaskId", "errorDetails"] }];
+        operations.push(...canvasMediaSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success"));
+        const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, operationId: `audio-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "音频生成任务" } });
+        return { project: result.project, operations: result.operations };
+    }
+
+    markCanvasAudioTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null {
+        const project = this.getCanvasProject(input.projectId);
+        if (!project) return null;
+        const node = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === input.nodeId) as Record<string, any> | undefined;
+        if (!node || String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) return null;
+        const status = task.status === "cancelled" ? "cancelled" : "error";
+        const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata: { status, errorDetails: status === "error" ? error : undefined }, metadataDelete: status === "cancelled" ? ["runtimeTaskId", "errorDetails"] : ["runtimeTaskId"] }];
+        operations.push(...canvasMediaSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, status));
+        const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, operationId: `audio-task-failed:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "音频生成任务" } });
+        return { project: result.project, operations: result.operations };
     }
 
     deleteCanvasProject(id: string): number {
@@ -1043,30 +1355,32 @@ export class BackendDatabase {
     // episode 主键是 id（nanoid），drama_id + episode_number 唯一。
     // upsertDramaEpisode 接受传入的 episode 对象，若 id 未填则随机生成；
     // 同 (drama_id, episode_number) 已存在时按 id 替换（保留原 id）。
-    upsertDramaEpisode(input: { id?: string; dramaId: string; episodeNumber: number; title: string; synopsis: string; canvasId?: string | null }): DramaEpisode {
+    upsertDramaEpisode(input: { id?: string; dramaId: string; episodeNumber: number; title: string; synopsis: string; fullPlot?: string; canvasId?: string | null }): DramaEpisode {
         const now = new Date().toISOString();
         const id = input.id || `episode-${input.dramaId}-${input.episodeNumber}-${Math.random().toString(36).slice(2, 8)}`;
         const existing = this.getDramaEpisodeByNumber(input.dramaId, input.episodeNumber);
         const createdAt = existing?.createdAt || now;
         const canvasId = input.canvasId ?? null;
+        const fullPlot = input.fullPlot ?? "";
         if (existing) {
             this.db.prepare(
-                "UPDATE drama_episodes SET title=?, synopsis=?, canvas_id=?, updated_at=? WHERE id=?"
-            ).run(input.title, input.synopsis, canvasId, now, existing.id);
+                "UPDATE drama_episodes SET title=?, synopsis=?, full_plot=?, canvas_id=?, updated_at=? WHERE id=?"
+            ).run(input.title, input.synopsis, fullPlot, canvasId, now, existing.id);
             return this.getDramaEpisode(existing.id)!;
         }
         this.db.prepare(
-            "INSERT INTO drama_episodes (id, drama_id, episode_number, title, synopsis, canvas_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        ).run(id, input.dramaId, input.episodeNumber, input.title, input.synopsis, canvasId, createdAt, now);
+            "INSERT INTO drama_episodes (id, drama_id, episode_number, title, synopsis, full_plot, canvas_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).run(id, input.dramaId, input.episodeNumber, input.title, input.synopsis, fullPlot, canvasId, createdAt, now);
         return this.getDramaEpisode(id)!;
     }
 
-    updateDramaEpisode(id: string, patch: { episodeNumber?: number; title?: string; synopsis?: string; canvasId?: string | null }): DramaEpisode | null {
+    updateDramaEpisode(id: string, patch: { episodeNumber?: number; title?: string; synopsis?: string; fullPlot?: string; canvasId?: string | null }): DramaEpisode | null {
         const existing = this.getDramaEpisode(id);
         if (!existing) return null;
         const nextNumber = patch.episodeNumber ?? existing.episodeNumber;
         const nextTitle = patch.title ?? existing.title;
         const nextSynopsis = patch.synopsis ?? existing.synopsis;
+        const nextFullPlot = patch.fullPlot ?? existing.fullPlot;
         const nextCanvasId = patch.canvasId === undefined ? existing.canvasId : patch.canvasId;
         const conflict = this.getDramaEpisodeByNumber(existing.dramaId, nextNumber);
         if (conflict && conflict.id !== id) throw new Error(`分集编号已存在: ${existing.dramaId}/${nextNumber}`);
@@ -1075,8 +1389,8 @@ export class BackendDatabase {
             if (canvasConflict && canvasConflict.id !== id) throw new Error(`画布已绑定到分集: ${canvasConflict.id}`);
         }
         this.db.prepare(
-            "UPDATE drama_episodes SET episode_number=?, title=?, synopsis=?, canvas_id=?, updated_at=? WHERE id=?"
-        ).run(nextNumber, nextTitle, nextSynopsis, nextCanvasId, new Date().toISOString(), id);
+            "UPDATE drama_episodes SET episode_number=?, title=?, synopsis=?, full_plot=?, canvas_id=?, updated_at=? WHERE id=?"
+        ).run(nextNumber, nextTitle, nextSynopsis, nextFullPlot, nextCanvasId, new Date().toISOString(), id);
         return this.getDramaEpisode(id);
     }
 
@@ -1111,6 +1425,7 @@ export class BackendDatabase {
             episodeNumber: Number(row.episode_number),
             title: String(row.title || ""),
             synopsis: String(row.synopsis || ""),
+            fullPlot: String(row.full_plot || ""),
             canvasId: row.canvas_id ? String(row.canvas_id) : null,
             createdAt: String(row.created_at),
             updatedAt: String(row.updated_at),
@@ -1134,7 +1449,7 @@ export class BackendDatabase {
     getCanvasProject(id: string): CanvasProject | null {
         const row = this.db.prepare("SELECT data_json FROM canvas_projects WHERE id = ?").get(id) as { data_json?: string } | undefined;
         if (!row?.data_json) return null;
-        try { return JSON.parse(row.data_json) as CanvasProject; } catch { return null; }
+        try { return stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject; } catch { return null; }
     }
 
     listPluginDeclarations(): PluginDeclaration[] {
@@ -1215,11 +1530,12 @@ export class BackendDatabase {
         return Number(this.db.prepare("DELETE FROM workflow_configs WHERE name = ?").run(name).changes);
     }
 
-    listAssets(options: { kind?: string; folderId?: string } = {}): Asset[] {
+    listAssets(options: { kind?: string; folderId?: string; dramaId?: string } = {}): Asset[] {
         const clauses: string[] = [];
         const values: Array<string | null> = [];
         if (options.kind) { clauses.push("kind = ?"); values.push(options.kind); }
         if (options.folderId) { clauses.push("folder_id = ?"); values.push(options.folderId); }
+        if (options.dramaId) { clauses.push("drama_id = ?"); values.push(options.dramaId); }
         const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
         const rows = this.db.prepare(`SELECT * FROM assets ${where} ORDER BY updated_at DESC`).all(...values) as Array<Record<string, unknown>>;
         return rows.map(assetFromRow);
@@ -1233,18 +1549,19 @@ export class BackendDatabase {
     upsertAsset(asset: Asset) {
         const now = new Date().toISOString();
         const updatedAt = asset.updatedAt || now;
+        const dramaId = asset.dramaId && this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(asset.dramaId) ? asset.dramaId : null;
         this.db.prepare(`
-            INSERT INTO assets (id, kind, title, cover_url, tags_json, folder_id, data_json, note, source, metadata_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO assets (id, kind, title, cover_url, tags_json, folder_id, drama_id, data_json, note, source, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 kind = excluded.kind, title = excluded.title, cover_url = excluded.cover_url,
-                tags_json = excluded.tags_json, folder_id = excluded.folder_id,
+                tags_json = excluded.tags_json, folder_id = excluded.folder_id, drama_id = excluded.drama_id,
                 data_json = excluded.data_json, note = excluded.note, source = excluded.source,
                 metadata_json = excluded.metadata_json, updated_at = excluded.updated_at
         `        ).run(
             asset.id, asset.kind, asset.title ?? "",
             asset.coverUrl ?? "", JSON.stringify(asset.tags ?? []),
-            asset.folderId ?? null, JSON.stringify(asset.data ?? {}),
+            asset.folderId ?? null, dramaId, JSON.stringify(asset.data ?? {}),
             asset.note ?? null, asset.source ?? null,
             JSON.stringify(asset.metadata ?? {}),
             asset.createdAt ?? now, updatedAt,
@@ -1261,13 +1578,14 @@ export class BackendDatabase {
             const insertFolder = this.db.prepare("INSERT INTO asset_folders (id, name, parent_id, created_at) VALUES (?, ?, ?, ?)");
             for (const folder of folders) insertFolder.run(folder.id, folder.name, folder.parentId, folder.createdAt);
             const insertAsset = this.db.prepare(`
-                INSERT INTO assets (id, kind, title, cover_url, tags_json, folder_id, data_json, note, source, metadata_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO assets (id, kind, title, cover_url, tags_json, folder_id, drama_id, data_json, note, source, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
             for (const asset of assets) {
+                const dramaId = asset.dramaId && this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(asset.dramaId) ? asset.dramaId : null;
                 insertAsset.run(
                     asset.id, asset.kind, asset.title ?? "", asset.coverUrl ?? "", JSON.stringify(asset.tags ?? []),
-                    asset.folderId ?? null, JSON.stringify(asset.data ?? {}), asset.note ?? null, asset.source ?? null,
+                    asset.folderId ?? null, dramaId, JSON.stringify(asset.data ?? {}), asset.note ?? null, asset.source ?? null,
                     JSON.stringify(asset.metadata ?? {}), asset.createdAt ?? now, asset.updatedAt ?? now,
                 );
             }
@@ -1683,6 +2001,13 @@ function fitImageNodeSize(width: number, height: number) {
     return { width: width * scale, height: height * scale };
 }
 
+function canvasMediaSourceStatus(project: CanvasProject, nodeId: string, sourceNodeId: string | undefined, taskId: string, status: string): CanvasOperation[] {
+    if (!sourceNodeId || sourceNodeId === nodeId) return [];
+    const source = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === sourceNodeId) as Record<string, any> | undefined;
+    if (source?.type !== "config" || source.metadata?.runtimeTaskId !== taskId) return [];
+    return [{ type: "update_node", id: sourceNodeId, metadata: { status }, metadataDelete: ["runtimeTaskId", "errorDetails"] }];
+}
+
 function recordOf(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -1697,6 +2022,7 @@ function assetFromRow(row: Record<string, unknown>): Asset {
         coverUrl: String(row.cover_url || ""),
         tags: parseJsonArray(row.tags_json) as string[],
         folderId: row.folder_id ? String(row.folder_id) : null,
+        dramaId: row.drama_id ? String(row.drama_id) : null,
         data: parseJsonObject(row.data_json),
         note: row.note ? String(row.note) : null,
         source: row.source ? String(row.source) : null,

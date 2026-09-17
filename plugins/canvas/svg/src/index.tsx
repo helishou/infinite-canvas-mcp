@@ -1,9 +1,10 @@
 // SVG 节点:编辑与渲染 SVG,透明背景直接融入画布;无自身内容时可取上游文本节点里的 SVG 源码。
-import { definePlugin, useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
+import { definePlugin, useEffect, useRef, useSyncExternalStore } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
 
 function SvgContent({ ctx }: CanvasNodeContentProps) {
-    const [editing, setEditing] = useState(false);
+    const editing = useSyncExternalStore(ctx.view.subscribe, () => Boolean(ctx.view.getSnapshot().editing));
+    const setEditing = (value: boolean) => ctx.view.update({ editing: value });
     const rootRef = useRef<HTMLDivElement>(null);
 
     const stored = ctx.node.metadata?.content as string | undefined;
@@ -45,24 +46,16 @@ function SvgContent({ ctx }: CanvasNodeContentProps) {
                 setEditing(true);
             }}
         >
-            <button type="button" style={toggle} onMouseDown={stop} onClick={() => setEditing((v) => !v)} title={editing ? "预览" : "编辑源码"}>
+            <button type="button" style={toggle} onMouseDown={stop} onClick={() => setEditing(!editing)} title={editing ? "预览" : "编辑源码"}>
                 {editing ? "👁" : "✎"}
             </button>
             {editing ? (
-                <textarea
+                <ctx.TextEditor
+                    projectId={ctx.projectId}
+                    target={{ nodeId: ctx.node.id, field: "content" }}
                     autoFocus
-                    value={value}
                     placeholder="粘贴 SVG 源码,如 <svg …>…</svg>"
-                    onChange={(e) => ctx.updateMetadata({ content: e.target.value })}
-                    onKeyDown={(e) => {
-                        if (e.key === "Escape") {
-                            e.stopPropagation();
-                            setEditing(false);
-                        }
-                    }}
-                    onMouseDown={stop}
-                    onPointerDown={stop}
-                    onWheel={stop}
+                    onEscape={() => setEditing(false)}
                     style={{ height: "100%", width: "100%", resize: "none", background: ctx.theme.node.fill, borderRadius: 16, padding: 16, boxSizing: "border-box", fontFamily: "monospace", fontSize: 12, outline: "none", border: `1px solid ${ctx.theme.node.stroke}`, color: ctx.theme.node.text }}
                 />
             ) : svg ? (

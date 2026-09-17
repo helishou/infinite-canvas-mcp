@@ -1,4 +1,4 @@
-import { App, Button, Form, Input, Modal, Progress, Select, Spin, Switch, Tabs } from "antd";
+import { App, Button, Form, Input, Modal, Progress, Select, Switch, Tabs } from "antd";
 import type { TFunction } from "i18next";
 import { Cloud, Download, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -9,6 +9,7 @@ import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
 import { ConfigLocalProxy } from "@/components/layout/config-local-proxy";
 import { ConfigPromptSources } from "@/components/layout/config-prompt-sources";
 import { ConfigLocalStorage } from "@/components/layout/config-local-storage";
+import { ConfigConnection } from "@/components/layout/config-connection";
 import type { AppLocale } from "@/i18n";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
@@ -71,7 +72,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const locale = i18n.resolvedLanguage as AppLocale;
     useEffect(() => setActiveTab(initialTab), [initialTab]);
 
-    if (!hydrated) return <div className="flex min-h-60 items-center justify-center"><Spin /></div>;
+    if (!hydrated) return <ConfigConnection active />;
 
     const saveConfig = (nextConfig: AiConfig) => {
         replaceConfig(nextConfig);
@@ -183,6 +184,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                 activeKey={activeTab}
                 onChange={(key) => setActiveTab(key as ConfigTabKey)}
                 items={[
+                    { key: "connection", label: "连接与协作", children: <ConfigConnection active={activeTab === "connection"} /> },
                     {
                         key: "channels",
                         label: t("config.tabs.channels"),

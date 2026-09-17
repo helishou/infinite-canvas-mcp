@@ -1,6 +1,6 @@
 ---
 name: vercel-react-best-practices
-description: React and Next.js performance optimization guidelines from Vercel Engineering. This skill should be used when writing, reviewing, or refactoring React/Next.js code to ensure optimal performance patterns. Triggers on tasks involving React components, Next.js pages, data fetching, bundle optimization, or performance improvements.
+description: Diagnose or improve React/Next.js rendering, loading and bundle performance when requested or when a concrete bottleneck is in scope. Not a mandatory review for every component edit.
 license: MIT
 metadata:
   author: vercel
@@ -13,12 +13,11 @@ Comprehensive performance optimization guide for React and Next.js applications,
 
 ## When to Apply
 
-Reference these guidelines when:
-- Writing new React components or Next.js pages
-- Implementing data fetching (client or server-side)
-- Reviewing code for performance issues
-- Refactoring existing React/Next.js code
-- Optimizing bundle size or load times
+Reference these guidelines for a requested performance review or a concrete rendering, data-fetching, bundle-size or load-time issue. A routine feature or correctness fix does not require a full performance audit.
+
+Read only the rule files relevant to the observed issue. Preserve project architecture and non-obvious invariants; do not introduce dependencies or unrelated refactoring merely to satisfy a rule. Choose verification proportional to the change and follow the repository's validation requirements.
+
+This project uses Vite and client-side React. Skip Next.js, RSC, server-action and SSR-only guidance unless those technologies actually occur in the target code. In particular, do not add Next.js/SWR infrastructure or replace canvas viewport handling with React state to match an example.
 
 ## Rule Categories by Priority
 
@@ -146,4 +145,4 @@ Each rule file contains:
 
 ## Full Compiled Document
 
-For the complete guide with all rules expanded: `AGENTS.md`
+For an explicitly requested broad audit, the complete guide is available in this skill's `AGENTS.md`. Do not load it by default; use the individual rules above for focused work.

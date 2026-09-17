@@ -1,36 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "@infinite-canvas/plugin-sdk";
-import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
-import type { KeyboardEvent } from "react";
+import { getReact, useEffect, useMemo, useRef, useState } from "@infinite-canvas/plugin-sdk";
+import type { CanvasNodeContext, CanvasTextEditorHandle } from "@infinite-canvas/plugin-sdk";
 import { Select } from "antd";
 import type { H3Ref, H3Segment } from "../types";
 import { H3Icon } from "./H3Icon";
 import { refsForSegment } from "../services/h3-data";
 import { segmentsFor } from "../hooks/useH3Segments";
+import { persistPromptCandidate, promptJobs, setPromptJob } from "../services/h3-prompt-jobs";
 import baseReference from "../storyboard-assets/references/base-en.txt?raw";
 import refReference from "../storyboard-assets/references/ref-en.txt?raw";
-
-const MIRROR_STYLE_PROPS = ["boxSizing", "width", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "fontStyle", "fontVariant", "fontWeight", "fontStretch", "fontSize", "lineHeight", "fontFamily", "textAlign", "textIndent", "letterSpacing", "wordSpacing", "tabSize", "textTransform"] as const;
-
-function getCaretPoint(textarea: HTMLTextAreaElement, index: number) {
-    const computed = window.getComputedStyle(textarea);
-    const mirror = document.createElement("div");
-    const style = mirror.style;
-    style.position = "absolute";
-    style.top = "0";
-    style.left = "-9999px";
-    style.visibility = "hidden";
-    style.whiteSpace = "pre-wrap";
-    style.overflowWrap = "break-word";
-    for (const prop of MIRROR_STYLE_PROPS) style[prop] = computed[prop];
-    mirror.textContent = textarea.value.slice(0, index);
-    const marker = document.createElement("span");
-    marker.textContent = textarea.value.slice(index) || ".";
-    mirror.appendChild(marker);
-    document.body.appendChild(mirror);
-    const point = { left: marker.offsetLeft, top: marker.offsetTop };
-    document.body.removeChild(mirror);
-    return point;
-}
 
 type Props = {
   ctx: CanvasNodeContext;
@@ -115,28 +92,35 @@ export function H3PromptSection({
   patchSelected,
   onOpenStoryboard,
 }: Props) {
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const prompt = String(selected?.prompt || "");
+  const editorRef = useRef<CanvasTextEditorHandle | null>(null);
+  const textTarget = useMemo(() => ({ nodeId: ctx.node.id, segmentId: selected?.id, field: "prompt" as const }), [ctx.node.id, selected?.id]);
+  const textDocument = useMemo(() => ctx.textDocument(textTarget), [ctx.projectId, ctx.node.id, selected?.id]);
+  const textStatus = getReact().useSyncExternalStore(textDocument.subscribe, textDocument.getSnapshot);
+  const suggestions = useMemo(() => ctx.textSuggestions(textTarget), [ctx.projectId, ctx.node.id, selected?.id]);
+  const suggestionState = getReact().useSyncExternalStore(suggestions.subscribe, suggestions.getSnapshot);
+  const prompt = textStatus.ready ? textStatus.text : String(selected?.prompt || "");
+  const TextEditor = ctx.TextEditor;
   const mode = String(selected?.mode || selected?.taskMode || "ref2va");
   const promptMode = mode in H3_PROMPT_MODE_CONFIG ? mode as keyof typeof H3_PROMPT_MODE_CONFIG : "ref2va";
   const modeConfig = H3_PROMPT_MODE_CONFIG[promptMode];
   const toolBlocks = modeConfig.tools as Record<string, string>;
-  const [mentionOpen, setMentionOpen] = useState(false);
-  const [mentionActive, setMentionActive] = useState(0);
-  const [mentionQuery, setMentionQuery] = useState("");
-  const [mentionPosition, setMentionPosition] = useState({ left: 8, top: 106 });
   const [helpOpen, setHelpOpen] = useState(false);
-  const [enhancingSegmentId, setEnhancingSegmentId] = useState<string | null>(null);
-  const enhancing = enhancingSegmentId === selected?.id;
+  const enhancement = selected ? promptJobs(ctx)[selected.id] : undefined;
+  const enhancing = enhancement?.status === "running";
+  useEffect(() => {
+    if (!selected || enhancement?.status !== "suggestion") return;
+    const saved = suggestionState.items.find((item) => item.id === enhancement.requestId);
+    if (saved && saved.status !== "pending") setPromptJob(ctx, selected.id, { ...enhancement, status: "done", error: undefined });
+  }, [selected?.id, enhancement, suggestionState.items]);
   // 翻译态：缓存最近一次翻译结果（按 prompt 内容做 key），切换时优先复用，prompt 变化自动失效
-  type Translation = { prompt: string; text: string };
+  type Translation = { segmentId: string; prompt: string; text: string };
   const [translation, setTranslation] = useState<Translation | null>(null);
   const [translating, setTranslating] = useState(false);
   const [isTranslated, setIsTranslated] = useState(false);
   const [translateError, setTranslateError] = useState<string | null>(null);
   // 用来在异步翻译返回时校验 prompt 是否已被用户改掉，避免显示错配的中文
-  const promptRef = useRef(prompt);
-  useEffect(() => { promptRef.current = prompt; }, [prompt]);
+  const promptRef = useRef({ prompt, segmentId: selected?.id });
+  promptRef.current = { prompt, segmentId: selected?.id };
   const models = ctx.ai.listModels("text");
   const promptModel = String(
     ctx.node.metadata?.minimaxLlmModel ||
@@ -155,90 +139,16 @@ export function H3PromptSection({
     ],
     [imageRefs, videoRefs, audioRefs],
   );
-  const visibleMentionItems = useMemo(() => {
-    if (promptMode === "t2v") return [];
-    const query = mentionQuery.trim().toLowerCase();
-    if (!query) return mentionItems;
-    return mentionItems.filter(({ ref }) => {
-      const aliases = ref.type === "image" ? ["图片", "picture", "subject"] : ref.type === "video" ? ["视频", "video"] : ["音频", "audio"];
-      return aliases.some((alias) => alias.includes(query) || query.includes(alias)) || String(ref.name || "").toLowerCase().includes(query);
-    });
-  }, [mentionItems, mentionQuery, promptMode]);
+  useEffect(() => { setIsTranslated(false); }, [selected?.id, prompt]);
 
-  const setPrompt = (value: string) => patchSelected({ prompt: value });
-
-  // ---- 提示词撤销/重做（按 clip 隔离，跨 clip 切换不丢历史）----
-  // 浏览器 textarea 原生撤销栈在受控组件被程序化改写 value（切 clip）时会失效，
-  // 这里自建 per-segment 历史栈，拦截 Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y。
-  const MAX_HISTORY = 200;
-  const undoRef = useRef<Map<string, { past: string[]; future: string[] }>>(new Map());
-  const lastPromptRef = useRef<string | undefined>(undefined);
-  const prevIdRef = useRef<string | undefined>(undefined);
-  const isProgrammaticRef = useRef(false);
-
-  // 统一记录每次 prompt 变更（用户键入、增强、@插入、外部 patch 如「设为当前 Clip」均覆盖）。
-  // 切 clip（segmentId 变化）不记录；undo/redo 自身通过 isProgrammaticRef 防重入。
-  useEffect(() => {
-    const id = selected?.id;
-    const newPrompt = String(selected?.prompt || "");
-    if (
-      id &&
-      prevIdRef.current === id &&
-      lastPromptRef.current !== undefined &&
-      lastPromptRef.current !== newPrompt &&
-      !isProgrammaticRef.current
-    ) {
-      const hist = undoRef.current.get(id) || { past: [], future: [] };
-      hist.past.push(lastPromptRef.current);
-      if (hist.past.length > MAX_HISTORY) hist.past.shift();
-      hist.future = [];
-      undoRef.current.set(id, hist);
-    }
-    prevIdRef.current = id;
-    lastPromptRef.current = newPrompt;
-    isProgrammaticRef.current = false;
-  }, [selected?.id, selected?.prompt]);
-
-  // 外部修改 prompt（用户键入、切 clip、外部 patch）时退出翻译态，
-  // 避免显示错配的中文；缓存的 translation 保留，下次点击同 prompt 仍可复用。
-  useEffect(() => {
-    setIsTranslated(false);
-  }, [prompt]);
-
-  const undo = () => {
-    const id = selected?.id;
-    if (!id) return;
-    const hist = undoRef.current.get(id);
-    if (!hist || hist.past.length === 0) return;
-    const current = String(selected?.prompt || "");
-    const target = hist.past.pop() as string;
-    if (hist.future.length > MAX_HISTORY) hist.future.shift();
-    hist.future.push(current);
-    undoRef.current.set(id, hist);
-    isProgrammaticRef.current = true;
-    setPrompt(target);
-  };
-
-  const redo = () => {
-    const id = selected?.id;
-    if (!id) return;
-    const hist = undoRef.current.get(id);
-    if (!hist || hist.future.length === 0) return;
-    const current = String(selected?.prompt || "");
-    const target = hist.future.pop() as string;
-    if (hist.past.length > MAX_HISTORY) hist.past.shift();
-    hist.past.push(current);
-    undoRef.current.set(id, hist);
-    isProgrammaticRef.current = true;
-    setPrompt(target);
-  };
   const enhancePrompt = async () => {
-    if (!prompt.trim() || enhancing) return;
+    if (!textStatus.ready || textStatus.blocked || !prompt.trim() || enhancing) return;
     const targetSegmentId = selected?.id;
     const promptAtCall = prompt;
-    if (!targetSegmentId) return;
-    setEnhancingSegmentId(targetSegmentId);
-    ctx.updateMetadata({ promptEnhancing: true, promptEnhanceError: "" });
+    if (!targetSegmentId || promptJobs(ctx)[targetSegmentId]?.status === "running") return;
+    const requestId = crypto.randomUUID();
+    const job = { requestId, base: promptAtCall, documentId: textDocument.getDocumentId() };
+    setPromptJob(ctx, targetSegmentId, { ...job, status: "running" });
     try {
       const model = String(
         ctx.node.metadata?.minimaxLlmModel ||
@@ -310,24 +220,16 @@ export function H3PromptSection({
       // 这里不能把 prompt 覆写成占位符/空串——保留用户原文，并给出明确失败提示。
       const enhanced = result.text.trim();
       if (enhanced) {
-        // 增强请求是异步的，期间用户可能已经切换 Clip。
-        // 必须按发起请求时捕获的 segmentId 写回最新节点，不能调用依赖当前 selected 的 patchSelected。
-        const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
-        const liveSegments = segmentsFor(liveMetadata);
-        if (liveSegments.some((segment) => segment.id === targetSegmentId)) {
-          ctx.updateMetadata({ segments: liveSegments.map((segment) => segment.id === targetSegmentId ? { ...segment, prompt: enhanced } : segment) });
-        }
+        setPromptJob(ctx, targetSegmentId, { ...job, text: enhanced, status: "suggestion" });
+        // 先保存候选，再尝试条件采用；切 Clip 不改变此闭包捕获的目标。
+        await persistPromptCandidate(suggestions, job, enhanced);
+        setPromptJob(ctx, targetSegmentId, { ...job, status: "done" });
       } else {
-        ctx.updateMetadata({ promptEnhanceError: "模型未返回内容，增强被跳过（请检查文本模型配置或重试）" });
+        setPromptJob(ctx, targetSegmentId, { ...job, status: "error", error: "模型未返回内容，增强被跳过（请检查文本模型配置或重试）" });
       }
     } catch (error) {
-      ctx.updateMetadata({
-        promptEnhanceError:
-          error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setEnhancingSegmentId(null);
-      ctx.updateMetadata({ promptEnhancing: false });
+      const candidate = promptJobs(ctx)[targetSegmentId];
+      setPromptJob(ctx, targetSegmentId, { ...job, text: candidate?.text, status: candidate?.text ? "suggestion" : "error", error: error instanceof Error ? error.message : String(error) });
     }
   };
 
@@ -350,11 +252,12 @@ export function H3PromptSection({
     }
     if (!prompt.trim()) return;
     // 缓存命中：直接切到中文态
-    if (translation && translation.prompt === prompt) {
+    if (translation && translation.segmentId === selected?.id && translation.prompt === prompt) {
       setIsTranslated(true);
       return;
     }
     const promptAtCall = prompt;
+    const segmentIdAtCall = selected?.id || "";
     setTranslating(true);
     setTranslateError(null);
     try {
@@ -370,9 +273,9 @@ export function H3PromptSection({
       });
       const text = result.text.trim();
       if (text) {
-        setTranslation({ prompt: promptAtCall, text });
+        setTranslation({ segmentId: segmentIdAtCall, prompt: promptAtCall, text });
         // 异步期间 prompt 可能已被用户改掉，只在没变时才切到中文态
-        if (promptRef.current === promptAtCall) setIsTranslated(true);
+        if (promptRef.current.prompt === promptAtCall && promptRef.current.segmentId === segmentIdAtCall) setIsTranslated(true);
       } else {
         setTranslateError("翻译模型未返回内容，请检查文本模型配置或重试");
       }
@@ -383,37 +286,7 @@ export function H3PromptSection({
     }
   };
 
-  // 南风 insertPromptBlock:光标处 setRangeText,插入点前一个字符不是换行就补 \n,光标落在插入内容末尾
-  const insertAtCursor = (
-    text: string,
-    opts: { prefixNewline?: boolean; select?: boolean } = {},
-  ) => {
-    const ta = textareaRef.current;
-    if (!ta) {
-      const insert =
-        (opts.prefixNewline !== false && prompt && !prompt.endsWith("\n")
-          ? "\n"
-          : "") + text;
-      setPrompt(prompt + insert);
-      return;
-    }
-    const start = ta.selectionStart ?? prompt.length;
-    const end = ta.selectionEnd ?? start;
-    const before = ta.value.slice(0, start);
-    const insert =
-      (opts.prefixNewline !== false &&
-      before.length > 0 &&
-      !before.endsWith("\n")
-        ? "\n"
-        : "") + text;
-    if (opts.select) {
-      ta.setRangeText(insert, start, end, "select");
-    } else {
-      ta.setRangeText(insert, start, end, "end");
-    }
-    setPrompt(ta.value);
-    requestAnimationFrame(() => ta.focus());
-  };
+  const insertAtCursor = (text: string) => editorRef.current?.insert(text, { prefixNewline: true });
 
   // 南风 mention 插入文案:图片 <Subject N>…<Picture N>,视频 <Video N>,音频 <Audio N>（与 nativeMention/多参绑定一致）
   const mentionText = (item: MentionItem) =>
@@ -427,85 +300,10 @@ export function H3PromptSection({
         ? `<Video ${item.ordinal}>`
         : `<Audio ${item.ordinal}>`;
 
-  const insertMention = (
-    item: MentionItem,
-    event?: { preventDefault: () => void },
-  ) => {
-    event?.preventDefault();
-    const ta = textareaRef.current;
-    if (ta && ta.isConnected) {
-      const start = ta.selectionStart ?? ta.value.length;
-      const atMatch = ta.value.slice(0, start).match(/@(\S*)$/);
-      if (atMatch) {
-        const insertStart = start - atMatch[0].length;
-        ta.setRangeText(mentionText(item), insertStart, start, "end");
-        setPrompt(ta.value);
-      } else {
-        insertAtCursor(mentionText(item));
-      }
-    } else {
-      insertAtCursor(mentionText(item));
-    }
-    setMentionOpen(false);
-    setMentionActive(0);
-    setMentionPosition({ left: 8, top: 106 });
-  };
-
-  const updateMentionPosition = (ta: HTMLTextAreaElement, caretIndex?: number) => {
-    const field = ta.closest(".minimax-prompt-field") as HTMLElement | null;
-    if (!field) return;
-    const point = getCaretPoint(ta, caretIndex ?? ta.selectionStart ?? 0);
-    const fieldRect = field.getBoundingClientRect();
-    const textareaRect = ta.getBoundingClientRect();
-    const computed = window.getComputedStyle(ta);
-    const lineHeight = Number.parseFloat(computed.lineHeight) || 17;
-    const menuWidth = Math.min(360, Math.max(220, fieldRect.width - 16));
-    const rawLeft = textareaRect.left - fieldRect.left + point.left - ta.scrollLeft;
-    const left = Math.max(8, Math.min(rawLeft, Math.max(8, fieldRect.width - menuWidth - 8)));
-    const top = textareaRect.top - fieldRect.top + point.top - ta.scrollTop + lineHeight + 4;
-    setMentionPosition({ left, top });
-  };
-
-  // 检测游标前的 @ 前缀,更新 mention 下拉(南风 openMentions:键入 @ 即弹)
-  const syncMention = (ta: HTMLTextAreaElement) => {
-    const start = ta.selectionStart ?? 0;
-    const match = ta.value.slice(0, start).match(/@(\S*)$/);
-    setMentionQuery(match?.[1] || "");
-    setMentionOpen(Boolean(match) && promptMode !== "t2v");
-    if (match && promptMode !== "t2v") updateMentionPosition(ta, start);
-    if (mentionActive >= visibleMentionItems.length) setMentionActive(0);
-  };
-
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // 自定义撤销/重做：拦截浏览器原生 Ctrl+Z（原生在受控切换 clip 后会失效）
-    if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z")) {
-      event.preventDefault();
-      if (event.shiftKey) redo();
-      else undo();
-      return;
-    }
-    if ((event.ctrlKey || event.metaKey) && (event.key === "y" || event.key === "Y")) {
-      event.preventDefault();
-      redo();
-      return;
-    }
-    if (!mentionOpen || !visibleMentionItems.length) return;
-    const active = Math.min(mentionActive, visibleMentionItems.length - 1);
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setMentionActive((current) => (current + 1) % visibleMentionItems.length);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setMentionActive(
-        (current) => (current + visibleMentionItems.length - 1) % visibleMentionItems.length,
-      );
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      insertMention(visibleMentionItems[active]);
-    } else if (event.key === "Escape") {
-      setMentionOpen(false);
-    }
-  };
+  const editorReferences = useMemo(() => promptMode === "t2v" ? [] : mentionItems.map((item) => ({
+    label: item.ref.type === "image" ? `图片${item.ordinal}` : item.ref.type === "video" ? `视频${item.ordinal}` : `音频${item.ordinal}`,
+    title: item.ref.name, kind: item.ref.type, previewUrl: item.ref.url, insert: mentionText(item),
+  })), [mentionItems, promptMode]);
 
   return (
     <label className="minimax-prompt-field minimax-prompt-field--mention">
@@ -533,15 +331,7 @@ export function H3PromptSection({
           />
           分镜图过渡
         </label>
-        {mentionOpen ? (
-          <button
-            key="cancel-mention"
-            type="button"
-            onClick={() => setMentionOpen(false)}
-          >
-            取消 @
-          </button>
-        ) : null}
+
       </span>
       <div key="prompt-modes" className="minimax-prompt-modes">
         <span className="minimax-prompt-mode-tools">
@@ -575,12 +365,29 @@ export function H3PromptSection({
         <code key="picture">&lt;Picture P&gt; 指认第 P 张参考图</code>{" "}
         <code key="video">&lt;Video V&gt; 指认第 V 段参考视频</code>{" "}
         <code key="audio">&lt;Audio A&gt; 指认第 A 段参考音频</code>
-        {ctx.node.metadata?.promptEnhanceError ? (
-          <span key="enhance-error" style={{ color: "#fca5a5" }}>
-            增强失败：{String(ctx.node.metadata.promptEnhanceError)}
+        {enhancement?.error ? (
+          <span key="enhance-error" role="alert">
+            增强失败：{enhancement.error}
           </span>
         ) : null}
       </small>
+      {suggestionState.error || suggestionState.pending ? <div role="status" className="minimax-prompt-help-panel">
+        {suggestionState.error || "候选正在保存"}{suggestionState.pending ? "；未确认结果已保留为本地草稿" : ""}
+        <button type="button" onClick={() => void suggestions.refresh(true).catch(() => {})}>重新同步候选</button>
+      </div> : null}
+      {suggestionState.items.filter((item) => item.status === "pending").map((item) => (
+        <details key={item.id} className="minimax-prompt-help-panel">
+          <summary>{item.documentId !== textDocument.getDocumentId() ? "旧文本对象的强化候选（只读保留）" : "待确认的强化候选（仅对应此 Clip）"}</summary>
+          <textarea value={item.text} readOnly aria-label="待确认的强化提示词" />
+          <button type="button" disabled={!textStatus.ready || textStatus.blocked || item.documentId !== textDocument.getDocumentId() || !item.revision}
+            onClick={() => void suggestions.apply(item.id, textDocument.getDocumentId(), prompt).catch(() => {})}>用此结果替换当前显示的原文</button>
+          <button type="button" disabled={!item.revision} onClick={() => void suggestions.dismiss(item.id).catch(() => {})}>保留原文并忽略此候选</button>
+        </details>
+      ))}
+      {enhancement?.text && enhancement.status === "suggestion" && !suggestionState.items.some((item) => item.id === enhancement.requestId) ? <details className="minimax-prompt-help-panel">
+        <summary>候选尚未存入草稿，请先复制保留</summary>
+        <textarea value={enhancement.text} readOnly aria-label="未保存的强化提示词" />
+      </details> : null}
       <div key="prompt-actions" className="nfh3-prompt-actions">
         <Select
           className="minimax-prompt-model"
@@ -623,33 +430,9 @@ export function H3PromptSection({
         </span>
       </div>
       <div key="prompt-textarea-wrap" className="minimax-prompt-translate-wrap">
-        <textarea
-          key="prompt-textarea"
-          ref={textareaRef}
-          value={isTranslated && translation && translation.prompt === prompt ? translation.text : prompt}
-          readOnly={isTranslated}
-          placeholder={isTranslated ? "中文翻译（只读）" : "请输入提示词"}
-          onChange={(event) => {
-            setPrompt(event.target.value);
-            syncMention(event.target);
-          }}
-          onKeyDown={handleKeyDown}
-          onBlur={() => {
-            setMentionOpen(false);
-            setMentionPosition({ left: 8, top: 106 });
-          }}
-          onScroll={() => {
-            if (mentionOpen) updateMentionPosition(textareaRef.current!);
-          }}
-          onMouseUp={() => {
-            const ta = textareaRef.current;
-            if (ta) syncMention(ta);
-          }}
-          onKeyUp={() => {
-            const ta = textareaRef.current;
-            if (ta) syncMention(ta);
-          }}
-        />
+        {isTranslated && translation && translation.segmentId === selected?.id && translation.prompt === prompt
+          ? <textarea readOnly value={translation.text} aria-label="中文翻译（只读）" />
+          : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} placeholder="请输入提示词" className="minimax-collaborative-prompt" style={{ minHeight: 160, height: 240, fontSize: 12 }} /> : null}
         <button
           key="prompt-translate"
           type="button"
@@ -681,38 +464,6 @@ export function H3PromptSection({
           </div>
         ) : null}
       </div>
-      {mentionOpen && visibleMentionItems.length ? (
-        <div
-          key="prompt-mentions"
-          className="minimax-prompt-mentions"
-          role="listbox"
-          style={{ left: mentionPosition.left, top: mentionPosition.top }}
-          onMouseDown={(event) => event.preventDefault()}
-        >
-          {visibleMentionItems.map((item, index) => (
-            <MentionRow
-              key={`${item.ref.type}-${item.ref.url}-${index}`}
-              item={item}
-              active={
-                index === Math.min(mentionActive, visibleMentionItems.length - 1)
-              }
-              onHover={() => setMentionActive(index)}
-              onPick={() => insertMention(item)}
-            />
-          ))}
-        </div>
-      ) : null}
-      {mentionOpen && !visibleMentionItems.length ? (
-        <div
-          key="prompt-mentions-empty"
-          className="minimax-prompt-mentions"
-          style={{ left: mentionPosition.left, top: mentionPosition.top }}
-        >
-          <span className="minimax-prompt-mention-empty">
-            请先在下方添加图片、视频或音频
-          </span>
-        </div>
-      ) : null}
     </label>
   );
 }
@@ -749,40 +500,4 @@ async function analyzeStoryboardTransitions(
     }
   }
   return lines.join("\n\n");
-}
-
-function MentionRow({
-  item,
-  active,
-  onHover,
-  onPick,
-}: {
-  item: MentionItem;
-  active: boolean;
-  onHover: () => void;
-  onPick: (item?: MentionItem) => void;
-}) {
-  const text = item.ref.bindingId ? `@${item.ref.name} · 稳定引用` : item.ref.type === "image" ? `<Picture ${item.ordinal}>` : item.ref.type === "video" ? `<Video ${item.ordinal}>` : `<Audio ${item.ordinal}>`;
-  return (
-    <button
-      type="button"
-      role="option"
-      aria-selected={active}
-      className={
-        active ? "minimax-prompt-mention is-active" : "minimax-prompt-mention"
-      }
-      onMouseEnter={onHover}
-      onClick={(event) => onPick(item)}
-    >
-      <img src={item.ref.url} alt="" loading="lazy" />
-      {item.ref.type === "video" ? (
-        <H3Icon name="clapperboard" />
-      ) : item.ref.type === "audio" ? (
-        <H3Icon name="output" />
-      ) : null}
-      <span className="minimax-prompt-mention-name">
-        {text} · {item.ref.name}
-      </span>
-    </button>
-  );
 }

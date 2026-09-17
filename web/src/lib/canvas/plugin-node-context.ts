@@ -1,5 +1,9 @@
 import { createPluginStorage, emitCanvasEvent, onCanvasEvent } from "@/lib/canvas/canvas-event-bus";
 import { getNodePluginId } from "@/lib/canvas/node-registry";
+import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
+import { CanvasCollaborativeText } from "@/components/canvas/canvas-collaborative-text";
+import { getCanvasTextSession, replaceCanvasText } from "@/services/api/canvas-text";
+import { getCanvasTextSuggestions } from "@/services/api/canvas-text-suggestions";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasNodeData } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
@@ -8,6 +12,11 @@ import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin"
 export function buildNodeContext(host: CanvasPluginHost, node: CanvasNodeData, theme: CanvasTheme, scale: number, isSelected = false): CanvasNodeContext {
     const storage = createPluginStorage(getNodePluginId(node.type));
     return {
+        TextEditor: CanvasCollaborativeText,
+        textDocument: (target) => getCanvasTextSession(host.projectId, target),
+        textSuggestions: (target) => getCanvasTextSuggestions(host.projectId, target),
+        replaceText: (target, documentId, expectedText, text) => replaceCanvasText(host.projectId, target, documentId, expectedText, text),
+        view: getPluginNodeView(host.projectId, node.id),
         node,
         projectId: host.projectId,
         theme,

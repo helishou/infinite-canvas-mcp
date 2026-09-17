@@ -1,5 +1,6 @@
 import i18n from "@/i18n";
 import { useBackendStore } from "@/stores/use-backend-store";
+import { useConfigStore } from "@/stores/use-config-store";
 
 /** 总后台未连接时显示黄色提示横幅。 */
 export function BackendBanner() {
@@ -26,6 +27,7 @@ export function BackendBanner() {
             <span className="inline-block h-2 w-2 rounded-full bg-amber-500" />
             <span>{i18n.t("backend.disconnected")}</span>
             {error && <span className="text-xs opacity-70">({error})</span>}
+            <button type="button" className="shrink-0 underline" onClick={() => useConfigStore.getState().openConfigDialog(false, "connection")}>连接设置</button>
         </div>
     );
 }

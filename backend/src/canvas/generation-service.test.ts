@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { CanvasGenerationService } from "./generation-service.js";
 
-function serviceWith(overrides: { image?: Record<string, unknown>; h3?: Record<string, unknown>; comfy?: Record<string, unknown>; stores?: Record<string, unknown> } = {}) {
+function serviceWith(overrides: { image?: Record<string, unknown>; h3?: Record<string, unknown>; comfy?: Record<string, unknown>; stores?: Record<string, unknown>; video?: Record<string, unknown>; browser?: Record<string, unknown> } = {}) {
     return new CanvasGenerationService(
         (overrides.image || {}) as never,
         (overrides.h3 || {}) as never,
@@ -11,8 +11,49 @@ function serviceWith(overrides: { image?: Record<string, unknown>; h3?: Record<s
         {} as never,
         (overrides.comfy || {}) as never,
         {} as never,
+        undefined,
+        overrides.video as never,
+        undefined,
+        overrides.browser as never,
     );
 }
+
+test("挂载自定义脚本的模型先进入 Backend 浏览器任务而不是模式直连分支", async () => {
+    let received: unknown;
+    const task = { id: "browser-1", kind: "canvas-browser-script", status: "queued", progress: 0, input: {}, params: {}, createdAt: "", updatedAt: "" };
+    const service = serviceWith({
+        image: { start: () => { throw new Error("不应进入图片直连执行器"); } },
+        browser: { start: (input: unknown, script: string) => { received = { input, script }; return { taskId: task.id, executor: "browser-script" }; } },
+        stores: {
+            settings: { get: () => ({ channels: [{ id: "c", models: [{ name: "custom", script: "return ['ok']" }] }] }) },
+            tasks: { get: () => task },
+        },
+    });
+
+    const command = { mode: "image" as const, model: "c::custom", prompt: "test", idempotencyKey: "browser-key" };
+    const result = await service.start(command);
+
+    assert.equal(result.executor, "browser-script");
+    assert.equal(result.task, task);
+    assert.deepEqual(received, { input: command, script: "return ['ok']" });
+});
+
+test("Backend 不原生支持的渠道协议也先建立浏览器权威任务", async () => {
+    let received: unknown;
+    const task = { id: "browser-provider-1", kind: "canvas-browser-script", status: "queued", progress: 0, input: {}, params: {}, createdAt: "", updatedAt: "" };
+    const service = serviceWith({
+        image: { start: () => { throw new Error("不应进入 Backend 图片执行器"); } },
+        browser: { start: (input: unknown, script: string, executor: string) => { received = { input, script, executor }; return { taskId: task.id, executor }; } },
+        stores: {
+            settings: { get: () => ({ channels: [{ id: "gemini", kind: "api", apiFormat: "gemini", models: [{ name: "imagen-4", capability: "image" }] }] }) },
+            tasks: { get: () => task },
+        },
+    });
+    const command = { mode: "image" as const, model: "gemini::imagen-4", prompt: "test" };
+    const result = await service.start(command);
+    assert.equal(result.executor, "browser-provider");
+    assert.deepEqual(received, { input: command, script: "", executor: "browser-provider" });
+});
 
 test("批量 H3 只传 nodeIds 也进入统一 runner", async () => {
     const calls: Array<{ input: unknown; idempotencyKey?: string }> = [];
@@ -47,6 +88,25 @@ test("图片执行器结果只采用 Dispatcher 的单次解析", async () => {
     assert.equal(result.executor, "comfy-workflow");
     assert.equal(result.task, task);
     assert.deepEqual(received, { ...command, clientTaskId: "image-key" });
+});
+
+test("文本命令进入统一文本执行器", async () => {
+    let received: unknown;
+    const task = { id: "text-1", kind: "canvas-text", status: "queued", progress: 0, input: {}, params: {}, createdAt: "", updatedAt: "" };
+    const service = serviceWith({
+        stores: {
+            projects: { get: () => ({ id: "project-1", nodes: [{ id: "config-1", type: "config" }], connections: [] }) },
+            tasks: { get: () => task },
+        },
+    });
+    Object.assign(service, { text: { start: (input: unknown) => { received = input; return { taskId: task.id, executor: "direct-text" }; } } });
+
+    const command = { mode: "text" as const, model: "channel::gpt-5-5", prompt: "分析参考图", projectId: "project-1", nodeId: "config-1" };
+    const result = await service.start(command);
+
+    assert.equal(result.taskId, task.id);
+    assert.equal(result.executor, "direct-text");
+    assert.deepEqual(received, { ...command, references: [] });
 });
 
 test("图片命令按源配置节点统一解析画布参考图", async () => {
@@ -102,4 +162,30 @@ test("视频命令保留统一 input、params 和幂等键", async () => {
     assert.equal(result.taskId, task.id);
     assert.equal(result.executor, "h3");
     assert.deepEqual(calls, [["minimax-h3", { prompt: "test" }, { duration: 8, executor: "h3", model: "minimax-h3:video", projectId: undefined, nodeId: undefined, segmentId: undefined }, "http://comfy.local", "video-key", undefined]]);
+});
+
+test("普通视频命令进入 Backend 视频父任务并按画布图谱解析图片参考", async () => {
+    let received: Record<string, unknown> | undefined;
+    const task = { id: "canvas-video-1", kind: "canvas-video", status: "queued", progress: 0, input: {}, params: {}, createdAt: "", updatedAt: "" };
+    const service = serviceWith({
+        video: { start: (input: Record<string, unknown>) => { received = input; return { taskId: task.id, executor: "workflow" }; } },
+        stores: {
+            projects: { get: () => ({
+                id: "project-1",
+                nodes: [
+                    { id: "config", type: "config" },
+                    { id: "result", type: "video" },
+                    { id: "scene", type: "image", metadata: { storageKey: "image:scene" } },
+                ],
+                connections: [{ id: "scene-config", fromNodeId: "scene", toNodeId: "config", order: 0 }],
+            }) },
+            tasks: { get: () => task },
+        },
+    });
+
+    const result = await service.start({ mode: "video", projectId: "project-1", nodeId: "result", sourceNodeId: "config", model: "local::movie", prompt: "test", idempotencyKey: "video-key" });
+
+    assert.equal(result.task, task);
+    assert.equal(received?.clientTaskId, "video-key");
+    assert.deepEqual((received?.references as Array<{ id: string }>).map((reference) => reference.id), ["scene"]);
 });

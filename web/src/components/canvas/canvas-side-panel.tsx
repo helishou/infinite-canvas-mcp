@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type 
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -11,10 +11,12 @@ import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
+import { fetchBackendCanvasDrama } from "@/services/backend-api";
 import { fetchSourcePrompts, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
+import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -30,6 +32,7 @@ const PANEL_EASE = [0.22, 1, 0.36, 1] as const;
 type PanelTab = "canvas" | "assets" | "prompts";
 
 type Props = {
+    projectId: string;
     nodes: CanvasNodeData[];
     selectedNodeIds: Set<string>;
     onFocusNode: (nodeId: string) => void;
@@ -53,7 +56,7 @@ const STATUS_COLOR: Record<string, string> = {
     idle: "transparent",
 };
 
-export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset }: Props) {
+export function CanvasSidePanel({ projectId, nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset }: Props) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
@@ -110,7 +113,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
                     {tab === "canvas" ? (
                         <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} theme={theme} />
                     ) : tab === "assets" ? (
-                        <CanvasAssetsTab onInsert={onInsertAsset} theme={theme} />
+                        <CanvasAssetsTab projectId={projectId} onInsert={onInsertAsset} theme={theme} />
                     ) : (
                         <CanvasPromptsTab onInsert={onInsertAsset} theme={theme} />
                     )}
@@ -340,6 +343,8 @@ const ASSET_GROUPS: { kind: AssetKind; icon: typeof Square }[] = [
     { kind: "text", icon: FileText },
     { kind: "character", icon: User },
 ];
+const ALL_ASSET_DRAMAS = "__all-asset-dramas__";
+const UNASSIGNED_ASSET_DRAMA = "__unassigned-asset-drama__";
 
 function buildInsertPayload(asset: Asset): InsertAssetPayload {
     if (asset.kind === "text") return { kind: "text", content: asset.data.content, title: asset.title };
@@ -349,25 +354,61 @@ function buildInsertPayload(asset: Asset): InsertAssetPayload {
     return { kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title };
 }
 
-const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onInsert: (payload: InsertAssetPayload) => void; theme: CanvasTheme }) {
+const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, theme }: { projectId: string; onInsert: (payload: InsertAssetPayload) => void; theme: CanvasTheme }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
+    const connected = useBackendStore((state) => state.connected);
+    const dramas = useCanvasStore((state) => state.folders);
     const assets = useAssetStore((state) => state.assets);
     const addAsset = useAssetStore((state) => state.addAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
     const [keyword, setKeyword] = useState("");
     const [tagFilter, setTagFilter] = useState<string>("all");
+    const [dramaFilter, setDramaFilter] = useState(ALL_ASSET_DRAMAS);
     // 默认全折叠，避免打开侧栏时被一堆自动展开的内容刷屏；用户手动展开过的会写入 setCollapsed 记录下来
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => Object.fromEntries(ASSET_GROUPS.map((group) => [group.kind, true])));
     const [uploading, setUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const dramaQuery = useQuery({
+        queryKey: ["canvas-drama", projectId],
+        queryFn: () => fetchBackendCanvasDrama(projectId),
+        enabled: connected && Boolean(projectId),
+        retry: false,
+    });
+    const visibleDramas = useMemo(() => {
+        const currentDrama = dramaQuery.data?.drama;
+        return currentDrama && !dramas.some((drama) => drama.id === currentDrama.id) ? [...dramas, currentDrama] : dramas;
+    }, [dramaQuery.data?.drama, dramas]);
+    const dramaIds = useMemo(() => new Set(visibleDramas.map((drama) => drama.id)), [visibleDramas]);
+    const dramaOptions = useMemo(() => [
+        { label: t("assets.drama.all"), value: ALL_ASSET_DRAMAS },
+        { label: t("assets.drama.unassigned"), value: UNASSIGNED_ASSET_DRAMA },
+        ...visibleDramas.map((drama) => ({ label: drama.name, value: drama.id })),
+    ], [t, visibleDramas]);
 
-    const allTags = useMemo(() => Array.from(new Set(assets.flatMap((asset) => asset.tags || []))).slice(0, 20), [assets]);
+    useEffect(() => {
+        setDramaFilter(ALL_ASSET_DRAMAS);
+        setTagFilter("all");
+    }, [projectId]);
+    useEffect(() => {
+        if (dramaQuery.isSuccess) {
+            setDramaFilter(dramaQuery.data.episode?.dramaId || ALL_ASSET_DRAMAS);
+            setTagFilter("all");
+        }
+    }, [dramaQuery.data?.episode?.dramaId, dramaQuery.isSuccess]);
+
+    const scopedAssets = useMemo(() => assets.filter((asset) => {
+        if (dramaFilter === ALL_ASSET_DRAMAS) return true;
+        if (dramaFilter === UNASSIGNED_ASSET_DRAMA) return !asset.dramaId || !dramaIds.has(asset.dramaId);
+        return asset.dramaId === dramaFilter;
+    }), [assets, dramaFilter, dramaIds]);
+
+    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.tags || []))).slice(0, 20), [scopedAssets]);
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
-        return assets.filter((asset) => (tagFilter === "all" || (asset.tags || []).includes(tagFilter)) && (!query || [asset.title, ...(asset.tags || [])].join(" ").toLowerCase().includes(query)));
-    }, [assets, keyword, tagFilter]);
+        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.tags || []).includes(tagFilter)) && (!query || [asset.title, ...(asset.tags || [])].join(" ").toLowerCase().includes(query)));
+    }, [keyword, scopedAssets, tagFilter]);
 
     const groups = useMemo(() => ASSET_GROUPS.map((group) => ({ ...group, items: filtered.filter((asset) => asset.kind === group.kind) })).filter((group) => group.items.length > 0), [filtered]);
 
@@ -377,15 +418,16 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
         setUploading(true);
         const hide = message.loading(t("canvas.sidePanel.addingAssets"), 0);
         let added = 0;
+        const dramaId = dramaFilter !== ALL_ASSET_DRAMAS && dramaFilter !== UNASSIGNED_ASSET_DRAMA ? dramaFilter : null;
         try {
             for (const file of files) {
                 if (file.type.startsWith("image/")) {
                     const image = await uploadImage(file);
-                    addAsset({ kind: "image", title: file.name || t("assets.kinds.image"), coverUrl: image.url, tags: [], data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
+                    addAsset({ kind: "image", title: file.name || t("assets.kinds.image"), coverUrl: image.url, tags: [], dramaId, data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
                     added += 1;
                 } else if (file.type.startsWith("video/")) {
                     const media = await uploadMediaFile(file, "video");
-                    addAsset({ kind: "video", title: file.name || t("assets.kinds.video"), coverUrl: "", tags: [], data: { url: media.url, storageKey: media.storageKey, width: media.width || 0, height: media.height || 0, bytes: media.bytes, mimeType: media.mimeType } });
+                    addAsset({ kind: "video", title: file.name || t("assets.kinds.video"), coverUrl: "", tags: [], dramaId, data: { url: media.url, storageKey: media.storageKey, width: media.width || 0, height: media.height || 0, bytes: media.bytes, mimeType: media.mimeType } });
                     added += 1;
                 }
             }
@@ -416,6 +458,17 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
                     {t("canvas.sidePanel.add")}
                 </button>
                 <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple className="hidden" onChange={(e) => void handleFiles(e.target.files)} />
+            </div>
+            <div className="flex items-center gap-2 px-3 pb-2">
+                <Clapperboard className="size-3.5 shrink-0 opacity-45" />
+                <Select
+                    size="small"
+                    className="min-w-0 flex-1"
+                    value={dramaFilter}
+                    options={dramaOptions}
+                    loading={dramaQuery.isLoading}
+                    onChange={(value) => { setDramaFilter(value); setTagFilter("all"); }}
+                />
             </div>
             {allTags.length ? (
                 <div className="flex flex-wrap gap-1.5 px-3 pb-2">

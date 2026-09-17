@@ -46,6 +46,7 @@ type AssetBase<T extends AssetKind> = {
     coverUrl: string;
     tags: string[];
     folderId?: string | null;
+    dramaId?: string | null;
     source?: string;
     note?: string;
     createdAt: string;
@@ -117,6 +118,7 @@ type LegacyCompositeAsset = {
     coverUrl: string;
     tags: string[];
     folderId?: string | null;
+    dramaId?: string | null;
     source?: string;
     note?: string;
     createdAt: string;
@@ -201,6 +203,7 @@ export function migrateCompositeToCharacter(asset: LegacyCompositeAsset, allAsse
         coverUrl,
         tags: asset.tags || [],
         folderId: asset.folderId ?? null,
+        dramaId: asset.dramaId ?? null,
         source: asset.source,
         note: asset.note,
         createdAt: asset.createdAt,
@@ -348,6 +351,13 @@ function scheduleAssetSync() {
 if (typeof window !== "undefined") {
     window.addEventListener("backend-connected", () => {
         void hydrateAssets();
+    });
+    window.addEventListener("backend-event", (event) => {
+        const detail = (event as CustomEvent<{ type?: string; entityId?: string; payload?: { deleted?: number } }>).detail;
+        if (detail?.type !== "canvas-folder.updated" || !detail.entityId || !detail.payload?.deleted) return;
+        useAssetStore.setState((state) => ({
+            assets: state.assets.map((asset) => asset.dramaId === detail.entityId ? { ...asset, dramaId: null } : asset),
+        }));
     });
 }
 

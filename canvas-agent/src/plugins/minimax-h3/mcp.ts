@@ -307,12 +307,6 @@ export const pluginMcp: PluginMcpModule = {
                 // 否则前端 H3Runner 会按 segment 缺省值静默回退到错误模型。
                 const inherited = inheritedH3Params(node);
                 const next = rawSegments.map((item) => ({ ...inherited, ...normalizePlannedSegment(item) }));
-                // selectedSegmentId 一致性：replace 会让旧 selectedSegmentId 指向的段消失，
-                // 留在 metadata 里就会变成"无效选中"——前端 selected = segments.find(...) || segments[0]
-                // 会回退到 segments[0]，看上去"换回到之前的 clip"。所以这里要按"旧选中索引 / 同标题 / 兜底首段"
-                // 在新 plan 里找一个对应段并把 selectedSegmentId 一起写回。
-                const previousSelectedId = String(((node.metadata || {}) as Record<string, unknown>).selectedSegmentId || "");
-                const previousSelectedIndex = Math.max(0, existing.findIndex((segment) => String(segment.id || "") === previousSelectedId));
                 if (input.replaceSegments === false) {
                     // append 路径：每个新段都走细粒度 add_h3_segment，避免一次写整数组触发冲突。
                     for (const segment of next) {
@@ -325,15 +319,7 @@ export const pluginMcp: PluginMcpModule = {
                 }
                 // 节点级元数据（status/runProgress/errorDetails）走 update_node（不带 segments）。
                 await context.updateCanvasNode(nodeId, {}, { status: "idle", errorDetails: "", runProgress: 0 });
-                if (next.length) {
-                    const remappedSelectedId = next[Math.min(previousSelectedIndex, next.length - 1)]?.id
-                        || next[0]?.id
-                        || "";
-                    if (remappedSelectedId && remappedSelectedId !== previousSelectedId) {
-                        await context.updateCanvasNode(nodeId, {}, { selectedSegmentId: remappedSelectedId });
-                    }
-                }
-                return { ok: true, projectId, nodeId, count: next.length, segments: next, selectedSegmentId: next.length ? (next[Math.min(previousSelectedIndex, next.length - 1)]?.id || next[0]?.id || "") : "" };
+                return { ok: true, projectId, nodeId, count: next.length, segments: next };
             },
             h3_list_models: async () => {
                 const catalog = await context.comfyUi.models();

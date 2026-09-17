@@ -1,7 +1,8 @@
-import { memo, useMemo } from "react";
+import { memo, useCallback, useMemo, useSyncExternalStore } from "react";
 
 import { connectionStrokeStyle } from "@/components/canvas/canvas-connections";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasNodeData, Position } from "@/types/canvas";
 
@@ -31,7 +32,7 @@ function nodeMediaKeys(node: CanvasNodeData) {
 
 // 当前选中 Clip 的参考图 → H3 节点。ref 通常没有 nodeId（拖放时未写入），
 // 因此按 storageKey 优先、url 兜底反查画布节点，保证历史数据也能连上。
-export function collectH3RefLinks(nodes: CanvasNodeData[]): H3RefLink[] {
+export function collectH3RefLinks(nodes: CanvasNodeData[], selectedSegmentIdForNode?: (node: CanvasNodeData) => unknown): H3RefLink[] {
     const nodeById = new Map(nodes.map((node) => [node.id, node]));
     const byStorageKey = new Map<string, CanvasNodeData>();
     const byUrl = new Map<string, CanvasNodeData>();
@@ -47,7 +48,7 @@ export function collectH3RefLinks(nodes: CanvasNodeData[]): H3RefLink[] {
         const meta = (node.metadata || {}) as Record<string, unknown>;
         const segments = Array.isArray(meta.segments) ? (meta.segments as SegmentLike[]) : [];
         if (!segments.length) return;
-        const selectedId = String(meta.selectedSegmentId || "");
+        const selectedId = String(selectedSegmentIdForNode ? selectedSegmentIdForNode(node) || "" : meta.selectedSegmentId || "");
         const segment = segments.find((item) => item?.id === selectedId) || segments[0];
         const seen = new Set<string>();
         segmentRefs(segment).forEach((ref) => {
@@ -75,9 +76,16 @@ function linkPath(from: CanvasNodeData, to: CanvasNodeData, dragPreviewPositions
 }
 
 // 当前 Clip 参考图的来源连线：区别于真实连线，用虚线且不参与交互。
-export const CanvasH3RefLinks = memo(function CanvasH3RefLinks({ nodes, selectedNodeIds, dragPreviewPositions }: { nodes: CanvasNodeData[]; selectedNodeIds?: ReadonlySet<string>; dragPreviewPositions?: ReadonlyMap<string, Position> }) {
+export const CanvasH3RefLinks = memo(function CanvasH3RefLinks({ projectId, nodes, selectedNodeIds, dragPreviewPositions }: { projectId: string; nodes: CanvasNodeData[]; selectedNodeIds?: ReadonlySet<string>; dragPreviewPositions?: ReadonlyMap<string, Position> }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const links = useMemo(() => collectH3RefLinks(nodes), [nodes]);
+    const h3NodeIds = useMemo(() => nodes.filter(isH3Node).map((node) => node.id), [nodes]);
+    const subscribe = useCallback((listener: () => void) => {
+        const releases = h3NodeIds.map((nodeId) => getPluginNodeView(projectId, nodeId).subscribe(listener));
+        return () => releases.forEach((release) => release());
+    }, [h3NodeIds, projectId]);
+    const getLocalSelections = useCallback(() => h3NodeIds.map((nodeId) => String(getPluginNodeView(projectId, nodeId).getSnapshot().selectedSegmentId || "")).join("\0"), [h3NodeIds, projectId]);
+    const localSelections = useSyncExternalStore(subscribe, getLocalSelections, getLocalSelections);
+    const links = useMemo(() => collectH3RefLinks(nodes, (node) => getPluginNodeView(projectId, node.id).getSnapshot().selectedSegmentId), [localSelections, nodes, projectId]);
     if (!links.length) return null;
 
     return (

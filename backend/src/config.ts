@@ -55,9 +55,11 @@ export type BackendConfig = {
     token: string;
     origins?: string[];
     port?: number;
+    /** 仅可信局域网显式设为 0.0.0.0；默认不对其他设备开放。 */
+    listenHost?: "127.0.0.1" | "0.0.0.0";
 };
 
-export type ResolvedConfig = Required<Pick<BackendConfig, "url" | "token">> & { port: number; origins: string[] };
+export type ResolvedConfig = Required<Pick<BackendConfig, "url" | "token">> & { port: number; origins: string[]; listenHost?: BackendConfig["listenHost"] };
 
 /** 读取 backend.json，不存在时生成默认配置。 */
 export function loadConfig(create = false): ResolvedConfig {
@@ -69,7 +71,7 @@ export function loadConfig(create = false): ResolvedConfig {
     const url = raw.url || `http://127.0.0.1:${port}`;
     const token = raw.token || crypto.randomBytes(18).toString("hex");
     const configuredOrigins = Array.isArray(raw.origins) ? raw.origins.filter((origin) => origin && origin !== "*") : [];
-    const config: ResolvedConfig = { url, token, port, origins: configuredOrigins.length ? configuredOrigins : DEFAULT_ORIGINS };
+    const config: ResolvedConfig = { url, token, port, listenHost: raw.listenHost === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1", origins: configuredOrigins.length ? configuredOrigins : DEFAULT_ORIGINS };
     if (create) saveConfig(config);
     return config;
 }
@@ -77,7 +79,7 @@ export function loadConfig(create = false): ResolvedConfig {
 /** 写入 backend.json，目录 0700 文件 0600。 */
 export function saveConfig(config: ResolvedConfig) {
     fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify({ url: config.url, token: config.token, port: config.port, origins: config.origins }, null, 2), { mode: 0o600 });
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify({ url: config.url, token: config.token, port: config.port, origins: config.origins, listenHost: config.listenHost || "127.0.0.1" }, null, 2), { mode: 0o600 });
     fs.chmodSync(DATA_DIR, 0o700);
     fs.chmodSync(CONFIG_FILE, 0o600);
 }

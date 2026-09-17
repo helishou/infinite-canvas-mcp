@@ -207,36 +207,37 @@ export default function WorkflowsPage() {
     };
 
     return (
-        <div className="mx-auto max-w-7xl p-6">
-            <div>
-                <h1 className="flex items-center gap-2 text-2xl font-semibold"><Workflow className="size-6" /> ComfyUI</h1>
-                <p className="mt-1 text-sm text-stone-500">集中管理工作流、模型路由和本地运行环境。</p>
+        <div className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-6 py-4">
+            <div className="shrink-0">
+                <h1 className="flex items-center gap-2 text-xl font-semibold"><Workflow className="size-5" /> ComfyUI</h1>
+                <p className="mt-0.5 text-xs text-stone-500">集中管理工作流、本地模型和运行环境。</p>
             </div>
 
             <Tabs
-                className="mt-4"
+                className="mt-2 shrink-0 [&_.ant-tabs-nav]:!mb-3"
                 activeKey={section}
                 onChange={setSection}
                 items={[
                     { key: "workflows", label: "工作流库" },
-                    { key: "models", label: "模型与路由" },
+                    { key: "models", label: "模型" },
                     { key: "runtime", label: "运行环境" },
                 ]}
             />
 
-            {section === "workflows" ? <div className="grid grid-cols-12 gap-6">
-                <div className="col-span-8">
+            <div className={`min-h-0 flex-1 ${section === "workflows" ? "overflow-hidden" : "overflow-y-auto"}`}>
+            {section === "workflows" ? <div className="grid h-full min-h-0 grid-cols-12 gap-4">
+                <div className="col-span-8 min-h-0">
                     {!selected ? (
-                        <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
+                        <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
                             <div className="text-center">
-                                <Workflow className="mx-auto size-12 text-stone-300" />
+                                <Workflow className="mx-auto size-10 text-stone-300" />
                                 <p className="mt-2 text-sm text-stone-500">选择工作流查看详情</p>
                             </div>
                         </div>
                     ) : (
-                        <div className="space-y-4">
-                            <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-stone-900">
-                                <div>
+                        <div className="flex h-full min-h-0 flex-col gap-3">
+                            <div className="flex shrink-0 items-center justify-between rounded-lg border border-stone-200 bg-white px-4 py-3 dark:border-stone-700 dark:bg-stone-900">
+                                <div className="min-w-0">
                                     {editingName === selected.name ? (
                                         <Input
                                             autoFocus
@@ -245,11 +246,11 @@ export default function WorkflowsPage() {
                                             onChange={(e) => setEditValue(e.target.value)}
                                             onPressEnter={() => handleRename(selected.name)}
                                             onBlur={() => handleRename(selected.name)}
-                                            className="mb-1 w-full"
+                                            className="w-full"
                                         />
                                     ) : (
                                         <h2
-                                            className={`text-lg font-semibold ${selected.builtin ? "" : "cursor-pointer hover:text-blue-600"}`}
+                                            className={`truncate text-base font-semibold ${selected.builtin ? "" : "cursor-pointer hover:text-blue-600"}`}
                                             title={selected.builtin ? "" : "双击重命名"}
                                             onDoubleClick={() => {
                                                 if (selected.builtin) return;
@@ -260,45 +261,45 @@ export default function WorkflowsPage() {
                                             {selected.config.title || selected.name}
                                         </h2>
                                     )}
-                                    <p className="text-sm text-stone-500">{selected.name.replace(/^custom\//, "")} · {Object.keys(selected.workflow).length} 个节点 · {selected.config.fields.length} 字段</p>
+                                    <p className="mt-0.5 truncate text-xs text-stone-500">{selected.name.replace(/^custom\//, "")} · {Object.keys(selected.workflow).length} 个节点 · {selected.config.fields.length} 字段</p>
                                 </div>
-                                <div className="flex gap-2">
-                                    <Button icon={<Download className="size-4" />} onClick={handleExport}>
+                                <div className="ml-3 flex shrink-0 gap-2">
+                                    <Button size="small" icon={<Download className="size-3.5" />} onClick={handleExport}>
                                         导出
                                     </Button>
                                     {!selected.builtin && (
-                                        <Button danger icon={<Trash2 className="size-4" />} onClick={() => handleDelete(selected.name)}>
+                                        <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => handleDelete(selected.name)}>
                                             删除
                                         </Button>
                                     )}
                                 </div>
                             </div>
 
-                            <div className="rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
-                                <div className="flex border-b border-stone-200 dark:border-stone-700">
+                            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
+                                <div className="flex shrink-0 border-b border-stone-200 dark:border-stone-700">
                                     <button
-                                        className={`flex items-center gap-2 px-4 py-3 text-sm transition ${activeTab === "structure" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
+                                        className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === "structure" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
                                         onClick={() => setActiveTab("structure")}
                                     >
-                                        <Code className="size-4" /> 节点图
+                                        <Code className="size-3.5" /> 节点图
                                     </button>
                                     <button
-                                        className={`flex items-center gap-2 px-4 py-3 text-sm transition ${activeTab === "run" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
+                                        className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === "run" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
                                         onClick={() => setActiveTab("run")}
                                     >
-                                        <Play className="size-4" /> 运行
+                                        <Play className="size-3.5" /> 运行
                                     </button>
                                     <button
-                                        className={`flex items-center gap-2 px-4 py-3 text-sm transition ${activeTab === "history" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
+                                        className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === "history" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
                                         onClick={() => setActiveTab("history")}
                                     >
-                                        <History className="size-4" /> 历史 ({historyLogs.length})
+                                        <History className="size-3.5" /> 历史 ({historyLogs.length})
                                     </button>
                                 </div>
 
-                                <div className="p-4">
+                                <div className="min-h-0 flex-1 overflow-y-auto p-3">
                                     {activeTab === "structure" && (
-                                        <div className="h-[500px]">
+                                        <div className="h-full min-h-[280px]">
                                             <WorkflowGraphPanel
                                                 name={selected.name}
                                                 workflow={selected.workflow}
@@ -368,8 +369,8 @@ export default function WorkflowsPage() {
                     )}
                 </div>
 
-                <div className="col-span-4 space-y-4">
-                    <div className="relative flex items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-900">
+                <div className="col-span-4 flex min-h-0 flex-col gap-3">
+                    <div className="relative flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-900">
                         {loading ? <Spin size="small" /> : <UploadIcon className="size-4 shrink-0 text-stone-400" />}
                         <span className="text-sm text-stone-600 dark:text-stone-300">{loading ? "正在导入…" : "导入 ComfyUI JSON / 工作流包"}</span>
                         <input
@@ -384,18 +385,18 @@ export default function WorkflowsPage() {
                         />
                     </div>
 
-                    <div className="rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
-                        <div className="border-b border-stone-200 px-4 py-3 dark:border-stone-700">
+                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
+                        <div className="shrink-0 border-b border-stone-200 px-3 py-2.5 dark:border-stone-700">
                             <h2 className="text-sm font-medium">工作流列表</h2>
                         </div>
                         {workflows.length === 0 ? (
-                            <div className="p-6"><Empty description="暂无工作流" /></div>
+                            <div className="flex flex-1 items-center justify-center p-6"><Empty description="暂无工作流" /></div>
                         ) : (
-                            <div className="divide-y divide-stone-200 dark:divide-stone-700">
+                            <div className="min-h-0 flex-1 divide-y divide-stone-200 overflow-y-auto dark:divide-stone-700">
                                 {workflows.map((wf) => (
                                     <div
                                         key={wf.name}
-                                        className={`cursor-pointer px-4 py-3 transition hover:bg-stone-50 dark:hover:bg-stone-800 ${selected?.name === wf.name ? "bg-stone-100 dark:bg-stone-800" : ""}`}
+                                        className={`cursor-pointer px-3 py-2.5 transition hover:bg-stone-50 dark:hover:bg-stone-800 ${selected?.name === wf.name ? "bg-stone-100 dark:bg-stone-800" : ""}`}
                                         onClick={() => { if (editingName !== wf.name) handleLoadDetail(wf.name); }}
                                     >
                                         <div className="flex items-center justify-between">
@@ -425,7 +426,7 @@ export default function WorkflowsPage() {
                                                         {wf.title}
                                                     </p>
                                                 )}
-                                                <p className="text-xs text-stone-500">{wf.name.replace(/^custom\//, "")}</p>
+                                                <p className="mt-0.5 truncate text-xs text-stone-500">{wf.name.replace(/^custom\//, "")}</p>
                                             </div>
                                             <Tag color="blue">{wf.fieldCount} 字段</Tag>
                                         </div>
@@ -436,6 +437,7 @@ export default function WorkflowsPage() {
                     </div>
                 </div>
             </div> : section === "models" ? <ComfyChannelsPanel /> : <ComfyRuntimePanel />}
+            </div>
         </div>
     );
 }

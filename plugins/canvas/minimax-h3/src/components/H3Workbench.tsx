@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "@infinite-canvas/plugi
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
 import type { H3CharacterGroup, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
+import { useH3LocalView } from "../hooks/useH3LocalView";
 import { applyCharacterGroupEdits, refsForSegment, removeCharacterGroup, resultUrl, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { normalizeDroppedH3Ref, readCharacterGroupFromDrop, readCharacterImagesFromDrop, readH3Refs } from "../services/h3-refs";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
@@ -16,15 +17,14 @@ import { H3WorkbenchToolbar } from "./H3WorkbenchToolbar";
 import { H3CharacterRefModal } from "./H3CharacterRefModal";
 import { H3ReferenceModal } from "./H3ReferenceModal";
 
-export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
+export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
+    const ctx = useH3LocalView(sharedContext);
     const metadata = ctx.node.metadata || {};
     const segments = segmentsFor(metadata);
     const storedSelectedId = String(metadata.selectedSegmentId || "");
     const selected = segments.find((item) => item.id === storedSelectedId) || segments[0];
     const selectedIndex = Math.max(0, segments.findIndex((item) => item.id === selected?.id));
-    // 兜底：MCP / 任务回写 / replace_h3_segments 等路径可能没把 selectedSegmentId 同步到新 plan。
-    // 这里检测到"选中的段已经不存在"就主动把 selectedSegmentId 写回成实际选中的段 id，
-    // 避免后续 patch / 引用 / 选段按钮继续打到失效 id 上。
+    // 远端删除当前 Clip 时，只修复本窗口的选择，不产生共享文档写入。
     useEffect(() => {
         if (!segments.length) return;
         if (storedSelectedId && storedSelectedId === selected?.id) return;
@@ -91,8 +91,8 @@ export function H3ContentExact({ ctx }: CanvasNodeContentProps) {
     const effRefLaneH = solved.r;
     const playRequest = Number(metadata.h3PlayRequest || 0);
     // 本地 playToken：仅在用户真正发起播放时（playAll / 续播换段）递增，
-    // 用作 H3PreviewPlayer 实际触发 v.play() 的信号。metadata 里的 h3PlayRequest 只用于
-    // 持久化"我刚才播到哪"，不直接驱动自动播放——避免 React StrictMode dev 模式下
+    // 用作 H3PreviewPlayer 实际触发 v.play() 的信号。本地 view 的 h3PlayRequest
+    // 不直接驱动自动播放——避免 React StrictMode dev 模式下
     // mount 时 useEffect 跑两次让 skipFirstPlayRequestRef 失效、也避免其它路径
     // （MCP 同步、metadata 写回等）无意间让视频自动起播。
     const [playToken, setPlayToken] = useState(0);

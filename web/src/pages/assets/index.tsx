@@ -1,4 +1,4 @@
-import { Check, Copy, Download, FolderPlus, PencilLine, Search, Trash2, Upload } from "lucide-react";
+import { Check, Clapperboard, Copy, Download, FolderPlus, PencilLine, Search, Trash2, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { App, Button, Card, Drawer, Dropdown, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
@@ -10,6 +10,7 @@ import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
 import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { cn } from "@/lib/utils";
+import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAssetStore, type Asset, type AssetKind, type CharacterAsset, type CharacterImage, type ImageAsset, type VideoAsset, type AudioAsset } from "@/stores/use-asset-store";
 import { exportAssets, readAssetPackage } from "./asset-transfer";
 
@@ -21,12 +22,15 @@ type AssetFormValues = {
     source?: string;
     note?: string;
     content?: string;
+    dramaId?: string;
 };
 
 type ImageDraft = ImageAsset["data"] | null;
 type VideoDraft = VideoAsset["data"] | null;
 
 const kindOptions = ["all", "text", "image", "video", "audio", "character"] as const;
+const ALL_DRAMAS = "__all-dramas__";
+const UNASSIGNED_DRAMA = "__unassigned-drama__";
 
 export default function AssetsPage() {
     const { message } = App.useApp();
@@ -38,6 +42,7 @@ export default function AssetsPage() {
     const videoInputRef = useRef<HTMLInputElement>(null);
     const audioInputRef = useRef<HTMLInputElement>(null);
     const assetInputRef = useRef<HTMLInputElement>(null);
+    const dramas = useCanvasStore((state) => state.folders);
     const assets = useAssetStore((state) => state.assets);
     const folders = useAssetStore((state) => state.folders);
     const addAsset = useAssetStore((state) => state.addAsset);
@@ -49,6 +54,7 @@ export default function AssetsPage() {
     const removeFolder = useAssetStore((state) => state.removeFolder);
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
+    const [dramaFilter, setDramaFilter] = useState(ALL_DRAMAS);
     const [folderFilter, setFolderFilter] = useState<string | null>(null);
     const [selection, setSelection] = useState<string[]>([]);
     const [page, setPage] = useState(1);
@@ -67,10 +73,20 @@ export default function AssetsPage() {
     const tags = Form.useWatch("tags", form) || [];
     const content = Form.useWatch("content", form) || "";
     const validAssets = useMemo(() => assets.filter((asset) => asset.kind === "text" || asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "character"), [assets]);
+    const dramaOptions = useMemo(() => [
+        { label: t("assets.drama.all"), value: ALL_DRAMAS },
+        { label: t("assets.drama.unassigned"), value: UNASSIGNED_DRAMA },
+        ...dramas.map((drama) => ({ label: drama.name, value: drama.id })),
+    ], [dramas, t]);
+    const matchesDrama = useCallback((asset: Asset) => (
+        dramaFilter === ALL_DRAMAS
+        || (dramaFilter === UNASSIGNED_DRAMA ? !asset.dramaId || !dramas.some((drama) => drama.id === asset.dramaId) : asset.dramaId === dramaFilter)
+    ), [dramaFilter, dramas]);
 
     const filteredAssets = useMemo(() => {
         const query = keyword.trim().toLowerCase();
         return validAssets.filter((asset) => {
+            if (!matchesDrama(asset)) return false;
             if (kindFilter !== "all" && asset.kind !== kindFilter) return false;
             if (folderFilter) {
                 if (folderFilter.startsWith("tag:")) {
@@ -80,7 +96,7 @@ export default function AssetsPage() {
             if (!query) return true;
             return assetSearchText(asset).includes(query);
         });
-    }, [validAssets, keyword, kindFilter, folderFilter]);
+    }, [validAssets, keyword, kindFilter, folderFilter, matchesDrama]);
 
     const visibleAssets = useMemo(() => {
         const start = (page - 1) * pageSize;
@@ -100,10 +116,19 @@ export default function AssetsPage() {
         const folder = folders.find((item) => item.id === folderFilter);
         return folder ? folder.name : t("assets.allAssets");
     }, [folderFilter, folders, t]);
+    const currentDramaName = dramaFilter === ALL_DRAMAS
+        ? t("assets.drama.all")
+        : dramaFilter === UNASSIGNED_DRAMA
+            ? t("assets.drama.unassigned")
+            : dramas.find((drama) => drama.id === dramaFilter)?.name || t("assets.drama.all");
     const folderCounts = (id: string | null) => {
-        if (id === null) return assets.filter((asset) => !asset.folderId).length;
-        return assets.filter((asset) => asset.folderId === id).length;
+        if (id === null) return validAssets.filter((asset) => matchesDrama(asset) && !asset.folderId).length;
+        return validAssets.filter((asset) => matchesDrama(asset) && asset.folderId === id).length;
     };
+
+    useEffect(() => {
+        if (dramaFilter !== ALL_DRAMAS && dramaFilter !== UNASSIGNED_DRAMA && !dramas.some((drama) => drama.id === dramaFilter)) setDramaFilter(UNASSIGNED_DRAMA);
+    }, [dramaFilter, dramas]);
 
     useEffect(() => {
         setSelection((prev) => prev.filter((id) => filteredAssets.some((asset) => asset.id === id)));
@@ -133,10 +158,17 @@ export default function AssetsPage() {
         });
         message.success(t("assets.tagged", { count: selection.length, tag }));
     };
+    const bulkMoveToDrama = (dramaId: string | null) => {
+        const count = selection.length;
+        selection.forEach((id) => updateAsset(id, { dramaId }));
+        setSelection([]);
+        message.success(t("assets.drama.moved", { count }));
+    };
 
     const [isDragging, setIsDragging] = useState(false);
     const dragDepth = useRef(0);
     const dropFolderId = folderFilter && !folderFilter.startsWith("tag:") ? folderFilter : null;
+    const dropDramaId = dramaFilter !== ALL_DRAMAS && dramaFilter !== UNASSIGNED_DRAMA ? dramaFilter : null;
     const addDroppedFiles = useCallback(async (files: File[]) => {
         const importable = files.filter((file) => file.type.startsWith("image/") || file.type.startsWith("audio/") || file.type.startsWith("video/"));
         if (!importable.length) {
@@ -147,7 +179,7 @@ export default function AssetsPage() {
         let failed = 0;
         for (const file of importable) {
             const title = file.name.replace(/\.[^.]+$/, "") || file.name;
-            const base = { title, coverUrl: "", tags: [], source: t("assets.droppedSource"), note: "", folderId: dropFolderId };
+            const base = { title, coverUrl: "", tags: [], source: t("assets.droppedSource"), note: "", folderId: dropFolderId, dramaId: dropDramaId };
             try {
                 if (file.type.startsWith("image/")) {
                     const image = await uploadImage(file, { category: "library" });
@@ -167,7 +199,7 @@ export default function AssetsPage() {
         if (added) message.success(t("assets.filesImported", { count: added }));
         const skipped = files.length - importable.length + failed;
         if (skipped > 0) message.warning(t("assets.filesSkipped", { count: skipped }));
-    }, [addAsset, dropFolderId, message, t]);
+    }, [addAsset, dropDramaId, dropFolderId, message, t]);
 
     useEffect(() => {
         const onPaste = (event: ClipboardEvent) => {
@@ -212,7 +244,7 @@ export default function AssetsPage() {
             setAudioDraft(null);
             setCharacterImages([]);
             setFormKind("text");
-            form.setFieldsValue({ kind: "text", title: "", coverUrl: "", tags: [], source: t("assets.manual"), note: "", content: "" });
+            form.setFieldsValue({ kind: "text", title: "", coverUrl: "", tags: [], source: t("assets.manual"), note: "", content: "", dramaId: dropDramaId || UNASSIGNED_DRAMA });
         setIsAssetOpen(true);
     };
 
@@ -220,6 +252,7 @@ export default function AssetsPage() {
         setEditingAsset(asset);
         setFormKind(asset.kind);
         setImageDraft(asset.kind === "image" ? asset.data as ImageAsset["data"] : null);
+        setVideoDraft(asset.kind === "video" ? asset.data as VideoAsset["data"] : null);
         setAudioDraft(asset.kind === "audio" ? asset.data as AudioAsset["data"] : null);
         setCharacterImages(asset.kind === "character" ? asset.data.images : []);
         form.setFieldsValue({
@@ -230,6 +263,7 @@ export default function AssetsPage() {
             source: asset.source,
             note: asset.note,
             content: asset.kind === "text" ? asset.data.content : asset.kind === "character" ? asset.data.description : "",
+            dramaId: asset.dramaId && dramas.some((drama) => drama.id === asset.dramaId) ? asset.dramaId : UNASSIGNED_DRAMA,
         });
         setIsAssetOpen(true);
     };
@@ -242,6 +276,7 @@ export default function AssetsPage() {
             tags: values.tags || [],
             source: values.source?.trim(),
             note: values.note?.trim(),
+            dramaId: values.dramaId && values.dramaId !== UNASSIGNED_DRAMA ? values.dramaId : null,
             metadata: editingAsset?.metadata || { source: "manual" },
         };
 
@@ -251,6 +286,10 @@ export default function AssetsPage() {
         } else if (values.kind === "audio") {
             if (!audioDraft) { message.error(t("assets.selectAudio")); return; }
             const asset = { ...base, kind: "audio" as const, data: audioDraft };
+            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+        } else if (values.kind === "video") {
+            if (!videoDraft) { message.error(t("assets.selectVideo")); return; }
+            const asset = { ...base, kind: "video" as const, data: videoDraft };
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         } else if (values.kind === "character") {
             if (!characterImages.length) { message.error(t("assets.characterRequireOneImage")); return; }
@@ -299,6 +338,13 @@ export default function AssetsPage() {
         if (!form.getFieldValue("title")) form.setFieldValue("title", file.name);
     };
 
+    const readVideoFile = async (file?: File) => {
+        if (!file || !file.type.startsWith("video/")) return;
+        const result = await uploadMediaFile(file, "video", "library");
+        setVideoDraft({ url: result.url, storageKey: result.storageKey, width: result.width || 0, height: result.height || 0, bytes: result.bytes, mimeType: result.mimeType });
+        if (!form.getFieldValue("title")) form.setFieldValue("title", file.name);
+    };
+
     const copyAssetText = async (asset: Asset) => {
         if (asset.kind !== "text") return;
         copyText(asset.data.content, t("assets.textCopied"));
@@ -330,7 +376,8 @@ export default function AssetsPage() {
             const idMap = new Map<string, string>();
             importedAssets.forEach((asset) => idMap.set(asset.id, nanoid()));
             importedAssets.forEach((asset) => {
-                const payload = { ...asset, id: idMap.get(asset.id) } as Record<string, unknown>;
+                const importedDramaId = dropDramaId || (asset.dramaId && dramas.some((drama) => drama.id === asset.dramaId) ? asset.dramaId : null);
+                const payload = { ...asset, id: idMap.get(asset.id), dramaId: importedDramaId } as Record<string, unknown>;
                 delete payload.createdAt;
                 delete payload.updatedAt;
                 addAsset(payload as Parameters<typeof addAsset>[0]);
@@ -393,14 +440,44 @@ export default function AssetsPage() {
                 </div>
             ) : null}
             <aside className="hidden w-56 shrink-0 flex-col border-r border-stone-200 p-3 md:flex dark:border-stone-800">
-                <div className="mb-2 text-xs font-medium text-stone-400">{t("assets.foldersTitle")}</div>
+                <div className="mb-2 text-xs font-medium text-stone-400">{t("assets.drama.title")}</div>
+                <button
+                    type="button"
+                    className={cn("mb-0.5 flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-stone-100 dark:hover:bg-stone-900", dramaFilter === ALL_DRAMAS && "bg-stone-100 font-medium text-stone-950 dark:bg-stone-900 dark:text-stone-100")}
+                    onClick={() => { setDramaFilter(ALL_DRAMAS); setPage(1); }}
+                >
+                    <span>{t("assets.drama.all")}</span>
+                    <span className="text-xs text-stone-400">{validAssets.length}</span>
+                </button>
+                <div className="space-y-0.5">
+                    {dramas.map((drama) => (
+                        <button
+                            key={drama.id}
+                            type="button"
+                            className={cn("flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-stone-100 dark:hover:bg-stone-900", dramaFilter === drama.id && "bg-stone-100 font-medium text-stone-950 dark:bg-stone-900 dark:text-stone-100")}
+                            onClick={() => { setDramaFilter(drama.id); setPage(1); }}
+                        >
+                            <span className="flex min-w-0 items-center gap-2"><Clapperboard className="size-3.5 shrink-0 text-stone-400" /><span className="truncate">{drama.name}</span></span>
+                            <span className="text-xs text-stone-400">{validAssets.filter((asset) => asset.dramaId === drama.id).length}</span>
+                        </button>
+                    ))}
+                    <button
+                        type="button"
+                        className={cn("flex w-full items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-stone-100 dark:hover:bg-stone-900", dramaFilter === UNASSIGNED_DRAMA && "bg-stone-100 font-medium text-stone-950 dark:bg-stone-900 dark:text-stone-100")}
+                        onClick={() => { setDramaFilter(UNASSIGNED_DRAMA); setPage(1); }}
+                    >
+                        <span>{t("assets.drama.unassigned")}</span>
+                        <span className="text-xs text-stone-400">{validAssets.filter((asset) => !asset.dramaId || !dramas.some((drama) => drama.id === asset.dramaId)).length}</span>
+                    </button>
+                </div>
+                <div className="mb-2 mt-5 text-xs font-medium text-stone-400">{t("assets.foldersTitle")}</div>
                 <button
                     type="button"
                     className={cn("mb-1 flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-stone-100 dark:hover:bg-stone-900", !folderFilter && "bg-stone-100 font-medium text-stone-950 dark:bg-stone-900 dark:text-stone-100")}
                     onClick={() => { setFolderFilter(null); setPage(1); }}
                 >
-                    <span>{t("assets.allAssets")}</span>
-                    <span className="text-xs text-stone-400">{assets.length}</span>
+                    <span>{t("assets.folder.all")}</span>
+                    <span className="text-xs text-stone-400">{validAssets.filter(matchesDrama).length}</span>
                 </button>
                 <div className="flex-1 space-y-0.5 overflow-y-auto">
                     <div>
@@ -464,7 +541,18 @@ export default function AssetsPage() {
                                         ],
                                     }}
                                 >
-                                    <Button size="small" icon={<FolderPlus className="size-3.5" />}>{t("assets.move")}</Button>
+                                <Button size="small" icon={<FolderPlus className="size-3.5" />}>{t("assets.move")}</Button>
+                            </Dropdown>
+                                <Dropdown
+                                    trigger={["click"]}
+                                    menu={{
+                                        items: [
+                                            { key: UNASSIGNED_DRAMA, label: t("assets.drama.unassigned"), onClick: () => bulkMoveToDrama(null) },
+                                            ...dramas.map((drama) => ({ key: drama.id, label: drama.name, onClick: () => bulkMoveToDrama(drama.id) })),
+                                        ],
+                                    }}
+                                >
+                                    <Button size="small" icon={<Clapperboard className="size-3.5" />}>{t("assets.drama.assign")}</Button>
                                 </Dropdown>
                                 <Dropdown
                                     trigger={["click"]}
@@ -484,7 +572,7 @@ export default function AssetsPage() {
                         ) : null}
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <div className="flex items-center gap-2">
-                                <div className="text-xs font-medium text-stone-500 dark:text-stone-400">{currentFolderName}</div>
+                                <div className="text-xs font-medium text-stone-500 dark:text-stone-400">{currentDramaName} / {currentFolderName}</div>
                                 <div className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500 dark:bg-stone-900 dark:text-stone-400">{filteredAssets.length}</div>
                                 {folderFilter ? (
                                     <button type="button" className="cursor-pointer text-xs text-stone-500 underline-offset-2 hover:underline dark:text-stone-400" onClick={() => { setFolderFilter(null); setPage(1); }}>
@@ -494,22 +582,28 @@ export default function AssetsPage() {
                             </div>
                         </div>
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                            <div className="grid gap-2 sm:grid-cols-[56px_minmax(0,1fr)] sm:items-center">
-                                <div className="text-xs font-medium text-stone-500 dark:text-stone-400">{t("assets.type")}</div>
-                                <div className="flex flex-wrap gap-2">
-                                    {kindOptions.map((option) => (
-                                        <Tag.CheckableTag
-                                            key={option}
-                                            checked={kindFilter === option}
-                                            className={cn("prompt-filter-tag", kindFilter === option && "is-active")}
-                                            onChange={() => {
-                                                setPage(1);
-                                                setKindFilter(option);
-                                            }}
-                                        >
-                                            {option === "all" ? t("common.all") : t(`assets.kinds.${option}`)}
-                                        </Tag.CheckableTag>
-                                    ))}
+                            <div className="grid gap-3">
+                                <div className="grid gap-2 sm:grid-cols-[56px_minmax(0,1fr)] sm:items-center md:hidden">
+                                    <div className="text-xs font-medium text-stone-500 dark:text-stone-400">{t("assets.drama.label")}</div>
+                                    <Select value={dramaFilter} options={dramaOptions} onChange={(value) => { setDramaFilter(value); setPage(1); }} />
+                                </div>
+                                <div className="grid gap-2 sm:grid-cols-[56px_minmax(0,1fr)] sm:items-center">
+                                    <div className="text-xs font-medium text-stone-500 dark:text-stone-400">{t("assets.type")}</div>
+                                    <div className="flex flex-wrap gap-2">
+                                        {kindOptions.map((option) => (
+                                            <Tag.CheckableTag
+                                                key={option}
+                                                checked={kindFilter === option}
+                                                className={cn("prompt-filter-tag", kindFilter === option && "is-active")}
+                                                onChange={() => {
+                                                    setPage(1);
+                                                    setKindFilter(option);
+                                                }}
+                                            >
+                                                {option === "all" ? t("common.all") : t(`assets.kinds.${option}`)}
+                                            </Tag.CheckableTag>
+                                        ))}
+                                    </div>
                                 </div>
                             </div>
                             <div className="flex flex-wrap gap-4">
@@ -597,6 +691,9 @@ export default function AssetsPage() {
                                 onChange={(value) => setFormKind(value)}
                             />
                         </Form.Item>
+                        <Form.Item name="dramaId" label={t("assets.drama.field")}>
+                            <Select options={dramaOptions.filter((option) => option.value !== ALL_DRAMAS)} />
+                        </Form.Item>
                         <Form.Item name="title" label={t("assets.fields.title")} rules={[{ required: true, message: t("assets.fields.titleRequired") }]}>
                             <Input size="large" placeholder={t("assets.fields.titlePlaceholder")} />
                         </Form.Item>
@@ -636,6 +733,23 @@ export default function AssetsPage() {
                                     ) : (
                                         <Typography.Text type="secondary" className="ml-3 text-xs">
                                             {t("assets.noAudioSelected")}
+                                        </Typography.Text>
+                                    )}
+                                </div>
+                            </Form.Item>
+                        ) : formKind === "video" ? (
+                            <Form.Item label={t("assets.fields.videoContent")} required>
+                                <div className="rounded-lg border border-dashed border-stone-300 p-4 dark:border-stone-700">
+                                    <Button icon={<Upload className="size-4" />} onClick={() => videoInputRef.current?.click()}>
+                                        {t("assets.selectVideoFile")}
+                                    </Button>
+                                    {videoDraft ? (
+                                        <Typography.Text type="secondary" className="ml-3 text-xs">
+                                            {videoDraft.width}x{videoDraft.height} · {formatBytes(videoDraft.bytes)}
+                                        </Typography.Text>
+                                    ) : (
+                                        <Typography.Text type="secondary" className="ml-3 text-xs">
+                                            {t("assets.noVideoSelected")}
                                         </Typography.Text>
                                     )}
                                 </div>
@@ -716,6 +830,13 @@ export default function AssetsPage() {
                     }}
                 />
                 <input
+                    ref={videoInputRef}
+                    type="file"
+                    accept="video/*"
+                    className="hidden"
+                    onChange={(event) => { void readVideoFile(event.target.files?.[0]); event.target.value = ""; }}
+                />
+                <input
                     ref={audioInputRef}
                     type="file"
                     accept="audio/*"
@@ -777,6 +898,13 @@ function AudioPlayer({ asset }: { asset: AudioAsset }) {
     return <audio src={src} controls className="!mt-2 h-9 w-full" />;
 }
 
+function AssetDramaTag({ asset }: { asset: Asset }) {
+    const { t } = useTranslation();
+    const dramas = useCanvasStore((state) => state.folders);
+    const drama = dramas.find((item) => item.id === asset.dramaId);
+    return <Tag icon={<Clapperboard className="size-3" />} className="m-0 max-w-full text-[11px]"><span className="inline-block max-w-28 truncate align-bottom">{drama?.name || t("assets.drama.unassigned")}</span></Tag>;
+}
+
 function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownload, onDelete }: { asset: Asset; selected: boolean; onSelect: () => void; onOpen: () => void; onEdit: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void; onDelete: () => void }) {
     const { t } = useTranslation();
     const cover = useResolvedCoverUrl(asset);
@@ -823,6 +951,7 @@ function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownlo
                         {summary}
                     </Typography.Paragraph>
                     <div className="mt-3 flex flex-wrap gap-1.5">
+                        <AssetDramaTag asset={asset} />
                         {(asset.tags || []).slice(0, 3).map((tag) => (
                             <Tag key={tag} className="m-0 text-[11px]">
                                 {tag}
@@ -875,6 +1004,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                         </Typography.Title>
                         <Space size={[4, 4]} wrap>
                             <Tag>{t(`assets.kinds.${asset.kind}`)}</Tag>
+                            <AssetDramaTag asset={asset} />
                             {(asset.tags || []).map((tag) => (
                                 <Tag key={tag}>{tag}</Tag>
                             ))}

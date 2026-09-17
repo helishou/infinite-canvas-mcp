@@ -12,11 +12,15 @@ import type { BackendEventBus } from "../events.js";
 /** Backend 唯一的视频拼接任务服务；任务状态统一写入 TaskStore。 */
 export class VideoConcatBackend {
     private readonly processes = new Map<string, ChildProcess>();
+    private readonly executing = new Set<string>();
     constructor(private readonly tasks: TaskStore, private readonly ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", private readonly events?: BackendEventBus, private readonly media?: MediaStore) {}
     status() { return new Promise<{ available: boolean; path: string; error?: string }>((resolve) => { const child = spawn(this.ffmpeg, ["-version"], { stdio: "ignore" }); child.once("error", (error) => resolve({ available: false, path: this.ffmpeg, error: error.message })); child.once("exit", (code) => resolve({ available: code === 0, path: this.ffmpeg, ...(code === 0 ? {} : { error: `ffmpeg exited with ${code}` }) })); }); }
-    async run(videos: string[], output = "", longEdge: number | "auto" = "auto") {
+    async run(videos: string[], output = "", longEdge: number | "auto" = "auto", clientTaskId?: string, parentTaskId?: string) {
         if (!videos.length) throw new Error("视频拼接至少需要一个视频"); if (videos.some((file) => !file.trim())) throw new Error("视频输入无效");
-        const task = this.tasks.create("video-concat", { videos }, { output, longEdge }); void this.execute(task).catch((error) => this.fail(task.id, error)); return task;
+        const existing = clientTaskId ? this.tasks.get(clientTaskId) : null;
+        if (existing && (!["queued", "running"].includes(existing.status) || this.executing.has(existing.id))) return existing;
+        const task = existing || (clientTaskId ? this.tasks.create(clientTaskId, "video-concat", { videos }, { output, longEdge, ...(parentTaskId ? { parentTaskId } : {}) }) : this.tasks.create("video-concat", { videos }, { output, longEdge, ...(parentTaskId ? { parentTaskId } : {}) }));
+        this.executing.add(task.id); void this.execute(task).catch((error) => this.fail(task.id, error)).finally(() => this.executing.delete(task.id)); return task;
     }
     cancel(id: string) {
         this.processes.get(id)?.kill();

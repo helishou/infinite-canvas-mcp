@@ -103,8 +103,8 @@ export function exportWorkflowPackage(name: string): Promise<WorkflowPackage> {
     return request<WorkflowPackage>("GET", `/api/workflows/${encodeURIComponent(name)}/export`);
 }
 
-export function importWorkflowPackage(name: string, workflowPackage: WorkflowPackage): Promise<{ name: string }> {
-    return request<{ name: string }>("POST", "/api/workflows/import", { name, package: workflowPackage });
+export function importWorkflowPackage(name: string, workflowPackage: WorkflowPackage, options?: { exposeModel?: boolean }): Promise<{ name: string }> {
+    return request<{ name: string }>("POST", "/api/workflows/import", { name, package: workflowPackage, exposeModel: options?.exposeModel });
 }
 
 // 仅重命名显示标题（title），不动底层文件名

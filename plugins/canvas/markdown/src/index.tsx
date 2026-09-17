@@ -4,8 +4,8 @@
 // 防闪烁:解析结果按源码模块级缓存,且只在 HTML 真正变化时写入 DOM——
 //   画布任何重渲染都不会重新解析或重载 Markdown 里的图片。
 // styles.css 由 esbuild 以 text 方式打进 bundle,通过 plugin.css 自动注入。
-import { definePlugin, useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
-import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
+import { definePlugin, useEffect, useRef, useState, useSyncExternalStore } from "@infinite-canvas/plugin-sdk";
+import type { CanvasNodeContentProps, CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 
 import css from "./styles.css";
 
@@ -66,24 +66,25 @@ function MarkdownPreview({ ctx }: CanvasNodeContentProps) {
 }
 
 function MarkdownEditor({ ctx }: CanvasNodeContentProps) {
-    const value = (ctx.node.metadata?.content as string | undefined) || "";
+    const TextEditor = ctx.TextEditor;
     return (
-        <textarea
+        <TextEditor
+            projectId={ctx.projectId}
+            target={{ nodeId: ctx.node.id, field: "content" }}
             autoFocus
-            value={value}
             placeholder="# 输入 Markdown"
-            onChange={(e) => ctx.updateMetadata({ content: e.target.value })}
-            onMouseDown={(e) => e.stopPropagation()}
-            onPointerDown={(e) => e.stopPropagation()}
-            onWheel={(e) => e.stopPropagation()}
-            style={{ height: "100%", width: "100%", resize: "none", background: ctx.theme.node.fill, borderRadius: 16, boxSizing: "border-box", padding: 16, fontFamily: "monospace", fontSize: 14, outline: "none", border: "none", color: ctx.theme.node.text }}
+            onEscape={() => ctx.view.update({ editing: false })}
+            style={{ height: "100%", width: "100%", background: ctx.theme.node.fill, borderRadius: 16, boxSizing: "border-box", padding: 16, fontFamily: "monospace", fontSize: 14, color: ctx.theme.node.text }}
         />
     );
 }
 
 function MarkdownContent({ ctx }: CanvasNodeContentProps) {
-    return ctx.node.metadata?.editing ? <MarkdownEditor ctx={ctx} /> : <MarkdownPreview ctx={ctx} />;
+    const editing = useSyncExternalStore(ctx.view.subscribe, () => Boolean(ctx.view.getSnapshot().editing));
+    return editing ? <MarkdownEditor ctx={ctx} /> : <MarkdownPreview ctx={ctx} />;
 }
+
+const isEditing = (ctx: CanvasNodeContext) => Boolean(ctx.view.getSnapshot().editing);
 
 export default definePlugin({
     id: "markdown",
@@ -103,12 +104,12 @@ export default definePlugin({
             hidePanel: true, // 纯展示/编辑节点:不弹出下方生图面板
             // 宿主统一提供「交互 ⇄ 移动」开关;编辑态强制可交互并隐藏该开关
             interactionToggle: true,
-            forceInteractive: (node) => Boolean(node.metadata?.editing),
+            forceInteractive: (_node, view) => Boolean(view.editing),
             resource: (node) => ({ kind: "text", text: node.metadata?.content }),
             Content: MarkdownContent,
-            // 仅保留「编辑/预览」开关(状态存 metadata.editing);交互/移动 由宿主自动注入
+            // 编辑态属于当前窗口视图，不进入共享画布文档；交互/移动由宿主自动注入。
             toolbar: (ctx) => {
-                const editing = Boolean(ctx.node.metadata?.editing);
+                const editing = isEditing(ctx);
                 return [
                     {
                         id: "md-toggle-edit",
@@ -116,7 +117,7 @@ export default definePlugin({
                         label: editing ? "预览" : "编辑",
                         icon: editing ? "👁" : "✎",
                         active: editing,
-                        onClick: () => ctx.updateMetadata({ editing: !editing }),
+                        onClick: () => ctx.view.update({ editing: !editing }),
                     },
                 ];
             },

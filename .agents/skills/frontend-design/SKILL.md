@@ -1,6 +1,6 @@
 ---
 name: frontend-design
-description: Create distinctive, production-grade frontend interfaces with high design quality. Use this skill when the user asks to build web components, pages, artifacts, posters, or applications (examples include websites, landing pages, dashboards, React components, HTML/CSS layouts, or when styling/beautifying any web UI). Generates creative, polished code and UI design that avoids generic AI aesthetics.
+description: Design new web interfaces or deliberately redesign their visual presentation. Use for requested UI creation or visual polish, not routine React logic, interaction bug fixes, or small changes within an established design.
 license: Complete terms in LICENSE.txt
 ---
 
@@ -8,11 +8,17 @@ This skill guides creation of distinctive, production-grade frontend interfaces 
 
 The user provides frontend requirements: a component, page, application, or interface to build. They may include context about the purpose, audience, or technical constraints.
 
+## Scope and Existing Products
+
+In an existing product, preserve its theme tokens, typography, component library, accessibility and interaction conventions unless the user requests a redesign. In this canvas project, follow the existing light/dark themes and flat visual style. A bug fix or adding a control is not authorization to change surrounding layout, fonts, colors or motion.
+
+The creative directions below apply where the brief leaves design freedom. They are options, not requirements to add effects, dependencies or a new design system. Use the smallest implementation that fulfills the requested visual outcome.
+
 ## Design Thinking
 
-Before coding, understand the context and commit to a BOLD aesthetic direction:
+Before coding, understand the context and choose a direction compatible with the brief and existing product:
 - **Purpose**: What problem does this interface solve? Who uses it?
-- **Tone**: Pick an extreme: brutally minimal, maximalist chaos, retro-futuristic, organic/natural, luxury/refined, playful/toy-like, editorial/magazine, brutalist/raw, art deco/geometric, soft/pastel, industrial/utilitarian, etc. There are so many flavors to choose from. Use these for inspiration but design one that is true to the aesthetic direction.
+- **Tone**: For a new visual direction, consider minimal, editorial, playful, organic, industrial or other styles suited to the audience. For an extension, inherit the established tone.
 - **Constraints**: Technical requirements (framework, performance, accessibility).
 - **Differentiation**: What makes this UNFORGETTABLE? What's the one thing someone will remember?
 
@@ -27,16 +33,16 @@ Then implement working code (HTML/CSS/JS, React, Vue, etc.) that is:
 ## Frontend Aesthetics Guidelines
 
 Focus on:
-- **Typography**: Choose fonts that are beautiful, unique, and interesting. Avoid generic fonts like Arial and Inter; opt instead for distinctive choices that elevate the frontend's aesthetics; unexpected, characterful font choices. Pair a distinctive display font with a refined body font.
+- **Typography**: Preserve existing product fonts. For a new design, select legible fonts with appropriate language coverage and character; system fonts, Arial or Inter are valid when they fit the brief. Add font assets only when their benefit justifies them.
 - **Color & Theme**: Commit to a cohesive aesthetic. Use CSS variables for consistency. Dominant colors with sharp accents outperform timid, evenly-distributed palettes.
-- **Motion**: Use animations for effects and micro-interactions. Prioritize CSS-only solutions for HTML. Use Motion library for React when available. Focus on high-impact moments: one well-orchestrated page load with staggered reveals (animation-delay) creates more delight than scattered micro-interactions. Use scroll-triggering and hover states that surprise.
+- **Motion**: Add motion only when it improves feedback or supports the requested design. Reuse existing mechanisms, respect reduced-motion preferences and keep interactions responsive; animations and new libraries are not required for a polished result.
 - **Spatial Composition**: Unexpected layouts. Asymmetry. Overlap. Diagonal flow. Grid-breaking elements. Generous negative space OR controlled density.
-- **Backgrounds & Visual Details**: Create atmosphere and depth rather than defaulting to solid colors. Add contextual effects and textures that match the overall aesthetic. Apply creative forms like gradient meshes, noise textures, geometric patterns, layered transparencies, dramatic shadows, decorative borders, custom cursors, and grain overlays.
+- **Backgrounds & Visual Details**: Use only details that support the chosen direction. Flat solid backgrounds are appropriate for restrained interfaces; textures, gradients, shadows and decorative effects are optional and must respect product conventions and performance.
 
-NEVER use generic AI-generated aesthetics like overused font families (Inter, Roboto, Arial, system fonts), cliched color schemes (particularly purple gradients on white backgrounds), predictable layouts and component patterns, and cookie-cutter design that lacks context-specific character.
+Avoid context-free decorative defaults. Familiar components, standard layouts and existing typography are appropriate when they support usability and consistency.
 
-Interpret creatively and make unexpected choices that feel genuinely designed for the context. No design should be the same. Vary between light and dark themes, different fonts, different aesthetics. NEVER converge on common choices (Space Grotesk, for example) across generations.
+For new concepts, make choices specific to the context. For related screens and iterations, consistency matters more than novelty; do not rotate themes or fonts merely to make each output different.
 
 **IMPORTANT**: Match implementation complexity to the aesthetic vision. Maximalist designs need elaborate code with extensive animations and effects. Minimalist or refined designs need restraint, precision, and careful attention to spacing, typography, and subtle details. Elegance comes from executing the vision well.
 
-Remember: Claude is capable of extraordinary creative work. Don't hold back, show what can truly be created when thinking outside the box and committing fully to a distinctive vision.
+Stop when the requested interface or visual change is complete and appropriately checked. Do not add another redesign or unrelated polish pass solely to demonstrate creativity.

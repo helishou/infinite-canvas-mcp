@@ -5,5 +5,14 @@ description: Planned follow-up work
 
 # TODO
 
+## 多人实时画布重构（尚未全部完成）
+
+- 全局/通用提示词、文本节点（含批量文本项）及 H3 Clip 已迁入 CodeMirror 6 + Yjs 13，远端文本光标与选区可视化已进入待验收；继续完成真实中文输入法及其他非正文输入框的协作边界核对。
+- 前端动作队列、后台/窗口缓存隔离、存储失败持续提示与内存备份，以及 Web Locks/普通 HTTP Backend 租约下的复制窗口隔离与关闭会话恢复已进入待验收；本版本已归属的会话/内存备份已支持显式导入与中断续传，未知归属但结构完整的旧画布快照可显式恢复为新 ID 副本。继续完成导入冲突的人工处理；未知文本增量与删除意图仍只检查/导出，同 ID 不同内容不覆盖。未缓存文档仍不能首次离线打开，不是完整离线协作交付。
+- H3 当前 Clip、播放头、播放控制、内部面板布局与强化进行状态已迁入窗口本地 view，参考虚线也跟随当前窗口选段；Markdown、HTML、便利贴、SVG 与模板插件的编辑态已窗口隔离，正文接入统一协作文本。Backend 在项目新建、旧项目读取、历史回执与增量写入边界统一剥离 H3 个人视图字段。返回的强化候选已改为 Backend 持久化、离线结果补交和原子采用；项目级候选管理可查看、复制和忽略已删除目标的候选，并禁止误采用。继续核对实际模型强化后切 Clip 的体验。
+- 协作命令/文本工具已统一 Agent/MCP 的公共目录与执行器；整批快照写入口停用、新建与整包导入只创建新的项目种子，向既有画布批量导入的新节点和连线也已验证为细粒度命令。H3 与活动中的普通生成任务字段后台归属已进入待验收。原生文本/图片/普通视频/标准音频执行器绑定、重试及取消迟到结果保护，以及网页通用生成与重试、文本编辑与图片问答、结果槽聚合、蒙版/视角编辑、插件标准 AI、浏览器自定义脚本和遗留浏览器渠道任务收口已进入待验收；媒体结果占位节点也已统一由 Backend 创建。H3 历史结果已从 Backend 日志恢复生成时快照。
+- 实体删除重建的文本身份隔离、已迁入编辑器的 Yjs 个人撤销已实现。局域网连接设置、窗口独立连接和密钥边界已进入待验收；仍须完成真实双设备 LAN/HTTPS 验证。网页画布生成入口与插件 flush 已纳入项目/文本落库确认，仍需用真实模型逐项核对各生成入口的交互与恢复行为。
+- 双窗口、Backend 重启后加载、断网刷新、丢失回执、冲突决策、复制窗口恢复、普通 HTTP Backend 草稿租约、H3 本地视图隔离、已删除目标候选管理及 MCP/Agent 实时回写已完成 25 个浏览器场景自动验收；继续完成真实双设备局域网、操作系统输入法组合输入、触屏、真实模型切 Clip 强化和画布拖动性能验收。在这些用例通过前，不将整套多人协作标记为完成。
+
 - Replace the Claude Code CLI adapter with a Claude Agent SDK adapter and improve the tool queue, following the [Local Agent Integration Plan](/docs/progress/local-agent-integration-plan).
 - Add Skill installation from web search, Skill resource-file management, and controlled local-memory persistence.

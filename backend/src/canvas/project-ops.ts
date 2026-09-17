@@ -70,7 +70,9 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
         const result: CanvasOperationResult = { type: operation.type, ok: true };
         if (!operation.type) throw new Error("画布操作缺少 type");
 
-        if (operation.type === "add_node") {
+        if (operation.type === "text_suggestion") {
+            // 候选存在独立表；日志重放只推进 revision，不污染画布节点快照。
+        } else if (operation.type === "add_node") {
             const id = String(operation.id || `${String(operation.nodeType || "node")}-${crypto.randomUUID()}`);
             operation.id = id;
             if (nodes.some((node) => String(node.id) === id)) throw new Error(`节点已存在：${id}`);

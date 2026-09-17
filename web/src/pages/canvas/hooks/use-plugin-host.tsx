@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 
-import { requestEdit, requestGeneration, requestImageQuestion, type AiTextMessage } from "@/services/api/image";
-import { imageToDataUrl } from "@/services/image-storage";
-import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
+import { storeGeneratedVideo } from "@/services/api/video";
 import { getLocalH3Task, getRunningHubH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
-import { createBackendGenerationLog, deleteBackendGenerationLogs, deleteProjectReferenceAsset, fetchBackendGenerationLogs, fetchProjectReferenceAssets, getBackendUrl, startCanvasGeneration, updateBackendGenerationLog, upsertProjectReferenceAsset, validateProjectReferences } from "@/services/backend-api";
+import { backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, deleteProjectReferenceAsset, fetchBackendGenerationLogs, fetchProjectReferenceAssets, getBackendUrl, startCanvasGeneration, updateBackendGenerationLog, upsertProjectReferenceAsset, validateProjectReferences } from "@/services/backend-api";
+import { observeCanvasGenerationTask } from "@/services/api/canvas-generation-task";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
 import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
@@ -16,16 +15,14 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
 import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost, CanvasReferenceService } from "@/types/canvas-plugin";
-import type { ReferenceImage } from "@/types/image";
 import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
-import { flushCanvasSyncNow } from "@/stores/canvas/use-canvas-store";
+import { flushCanvasProjectBeforeGeneration, useCanvasStore } from "@/stores/canvas/use-canvas-store";
 
 type CanvasTheme = (typeof canvasThemes)[keyof typeof canvasThemes];
 
 type PluginHostParams = {
     projectId: string;
-    updateProject: (id: string, patch: { nodes?: CanvasNodeData[] }) => void;
     effectiveConfig: AiConfig;
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
     openConfigDialog: (open: boolean) => void;
@@ -61,7 +58,8 @@ async function persistH3Result<T extends { url: string; mimeType: string; storag
  */
 export function usePluginHost(params: PluginHostParams) {
     const { t } = useTranslation();
-    const { projectId, updateProject, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, applyAgentOps } = params;
+    const { projectId, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, applyAgentOps } = params;
+    const getProject = useCallback(() => useCanvasStore.getState().projects.find((item) => item.id === projectId), [projectId]);
     const generationLogs = useMemo<CanvasGenerationLogs>(() => {
         return {
             list: async (options: Parameters<CanvasGenerationLogs["list"]>[0] = {}) => { const result = await fetchBackendGenerationLogs({ ...options, projectId: options.projectId || projectId }); return result.logs || []; },
@@ -98,8 +96,9 @@ export function usePluginHost(params: PluginHostParams) {
 
     // Host capabilities available to plugin nodes; methods receive nodeId and are not bound to a specific node.
     const pluginAi = useMemo<CanvasPluginAi>(() => {
-        // Convert plugin reference images (data URLs or URLs) into the ReferenceImage[] expected by the host generation API.
-        const toReferences = (refs?: string[]): ReferenceImage[] => (refs || []).filter(Boolean).map((src, index) => ({ id: `plugin-ref-${index}`, name: `ref-${index}.png`, type: "image/png", dataUrl: src }));
+        const signal = (value?: AbortSignal) => value || new AbortController().signal;
+        const toReferences = (refs?: string[]) => (refs || []).filter(Boolean).map((src, index) => ({ id: `plugin-ref-${index}`, name: `ref-${index}.png`, mimeType: "image/png", ...(src.startsWith("data:") ? { dataUrl: src } : { url: src }) }));
+        const mediaUrl = (media: { storageKey?: string; url?: string }) => media.storageKey ? backendMediaUrl(media.storageKey) : String(media.url || "");
         // Open the configuration dialog and throw when AI is not configured, allowing the plugin to handle the error.
         const ensureReady = (config: AiConfig) => {
             if (!isAiConfigReady(config, config.model)) {
@@ -111,16 +110,9 @@ export function usePluginHost(params: PluginHostParams) {
             generateImage: async (prompt, options) => {
                 const config = { ...buildGenerationConfig(effectiveConfig, undefined, "image"), count: String(options?.count || 1), ...(options?.model ? { model: options.model } : {}), ...(options?.size ? { size: options.size } : {}) };
                 ensureReady(config);
-                const references = toReferences(options?.references);
-                const items = references.length ? await requestEdit(config, prompt, references, { signal: options?.signal }) : await requestGeneration(config, prompt, { signal: options?.signal });
-                const images = await Promise.all(items.map(async (item) => {
-                    try {
-                        return await imageToDataUrl({ dataUrl: item.dataUrl }, { signal: options?.signal });
-                    } catch (error) {
-                        if (options?.signal?.aborted) throw error;
-                        return item.dataUrl;
-                    }
-                }));
+                const task = await observeCanvasGenerationTask({ mode: "image", projectId, model: config.model, prompt, references: toReferences(options?.references), count: options?.count || 1, size: options?.size || config.size }, signal(options?.signal), "插件图片");
+                const images = (task.result?.media || task.result?.images || []).map(mediaUrl).filter(Boolean);
+                if (!images.length) throw new Error("插件图片任务成功但没有返回图片");
                 return { images };
             },
             generateVideo: async (prompt, options) => {
@@ -131,18 +123,19 @@ export function usePluginHost(params: PluginHostParams) {
                     ...(options?.seconds ? { videoSeconds: options.seconds } : {}),
                 };
                 ensureReady(config);
-                const file = await storeGeneratedVideo(await requestVideoGeneration(config, prompt, toReferences(options?.references), { signal: options?.signal }));
-                return { url: file.url, mimeType: file.mimeType, width: file.width, height: file.height, durationMs: file.durationMs };
+                const task = await observeCanvasGenerationTask({ mode: "video", projectId, model: config.model, prompt, references: toReferences(options?.references), size: options?.size || config.size, seconds: options?.seconds || config.videoSeconds }, signal(options?.signal), "插件视频");
+                const file = (task.result?.media || [])[0];
+                if (!file) throw new Error("插件视频任务成功但没有返回视频");
+                return { url: mediaUrl(file), mimeType: file.mimeType, width: file.width || undefined, height: file.height || undefined, durationMs: file.durationMs || undefined };
             },
             generateText: async (prompt, options) => {
-                console.log("pluginAi.generateText", { prompt, options });
                 const config = { ...buildGenerationConfig(effectiveConfig, undefined, "text"), ...(options?.model ? { model: options.model } : {}) };
                 ensureReady(config);
-                const content = options?.references?.length
-                    ? [{ type: "text" as const, text: prompt }, ...options.references.map((reference) => ({ type: "image_url" as const, image_url: { url: reference.url } }))]
-                    : prompt;
-                const messages: AiTextMessage[] = [...(options?.system ? [{ role: "system" as const, content: options.system }] : []), { role: "user" as const, content }];
-                const text = await requestImageQuestion(config, messages, (delta) => options?.onDelta?.(delta), { signal: options?.signal });
+                const references = (options?.references || []).map((reference, index) => ({ id: `plugin-ref-${index}`, name: reference.name || `ref-${index}.png`, mimeType: "image/png", ...(reference.url.startsWith("data:") ? { dataUrl: reference.url } : { url: reference.url }) }));
+                const task = await observeCanvasGenerationTask({ mode: "text", projectId, model: config.model, prompt, references, count: 1, params: { ...(options?.system ? { systemPrompt: options.system } : {}), reasoningEffort: config.reasoningEffort } }, signal(options?.signal), "插件文本");
+                const text = String(task.result?.texts?.[0]?.content || "");
+                if (!text) throw new Error("插件文本任务成功但没有返回文本");
+                options?.onDelta?.(text);
                 return { text };
             },
             runCanvasGeneration: async (command: CanvasGenerationCommand) => {
@@ -188,14 +181,14 @@ export function usePluginHost(params: PluginHostParams) {
             listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: decodeChannelModel(value)?.model || value })),
             defaultModel: (capability) => buildGenerationConfig(effectiveConfig, undefined, capability).model,
         };
-    }, [effectiveConfig, isAiConfigReady, openConfigDialog, t]);
+    }, [effectiveConfig, isAiConfigReady, openConfigDialog, projectId, t]);
 
     const pluginHost = useMemo<CanvasPluginHost>(
         () => ({
             projectId,
-            getNode: (id) => nodesRef.current.find((node) => node.id === id) || null,
-            getNodes: () => nodesRef.current,
-            getConnections: () => connectionsRef.current,
+            getNode: (id) => getProject()?.nodes.find((node) => node.id === id) || null,
+            getNodes: () => getProject()?.nodes || [],
+            getConnections: () => getProject()?.connections || [],
             getUpstream: (nodeId) =>
                 connectionsRef.current
                     .filter((conn) => conn.toNodeId === nodeId)
@@ -207,19 +200,21 @@ export function usePluginHost(params: PluginHostParams) {
                     .map((conn) => nodesRef.current.find((node) => node.id === conn.toNodeId))
                     .filter((node): node is CanvasNodeData => Boolean(node)),
             updateNode: (nodeId, patch) => {
-                const nextNodes = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, ...patch } : node));
-                nodesRef.current = nextNodes;
-                setNodes(nextNodes);
-                updateProject(projectId, { nodes: nextNodes });
+                setNodes((nodes) => {
+                    const next = nodes.map((node) => (node.id === nodeId ? { ...node, ...patch } : node));
+                    nodesRef.current = next;
+                    return next;
+                });
             },
             updateMetadata: (nodeId, patch) => {
-                const nextNodes = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node));
-                nodesRef.current = nextNodes;
-                setNodes(nextNodes);
-                updateProject(projectId, { nodes: nextNodes });
+                setNodes((nodes) => {
+                    const next = nodes.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node));
+                    nodesRef.current = next;
+                    return next;
+                });
             },
             applyOps: (ops) => applyAgentOps(ops),
-            flush: flushCanvasSyncNow,
+            flush: () => flushCanvasProjectBeforeGeneration(projectId),
             ai: pluginAi,
             h3Defaults,
             references,
@@ -228,7 +223,7 @@ export function usePluginHost(params: PluginHostParams) {
             openAssetPicker,
             generationLogs,
         }),
-        [applyAgentOps, generationLogs, h3Defaults, openAssetPicker, pluginAi, projectId, references, updateProject],
+        [applyAgentOps, generationLogs, getProject, h3Defaults, openAssetPicker, pluginAi, projectId, references, setNodes],
     );
 
     const renderPluginPanel = useCallback(
@@ -248,7 +243,7 @@ export function usePluginHost(params: PluginHostParams) {
             const ctx = buildNodeContext(pluginHost, node, theme, viewportRef.current.k);
             const custom = definition?.toolbar?.(ctx) || [];
             // Show the interaction/move toggle only for nodes with content that are not forced into an interactive state.
-            if (!definition?.interactionToggle || !node.metadata?.content || definition.forceInteractive?.(node)) return custom;
+            if (!definition?.interactionToggle || !node.metadata?.content || definition.forceInteractive?.(node, ctx.view.getSnapshot())) return custom;
             const interactive = Boolean(node.metadata?.interactive);
             const toggle: CanvasNodeToolbarItem = {
                 id: "node-interaction-toggle",

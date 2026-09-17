@@ -1,13 +1,7 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { nanoid } from "nanoid";
-import {
-    WORKFLOW_ROUTE_UNSUPPORTED,
-    builtinWorkflowName,
-    resolveWorkflowForModel,
-    scenarioFromReferenceCount,
-    type ModelInputScenario,
-} from "@basketikun/canvas-agent/model-workflow";
+import { WORKFLOW_ROUTE_UNSUPPORTED, builtinWorkflowName, resolveWorkflowForModel, scenarioFromReferenceCount, type ModelInputScenario } from "@basketikun/canvas-agent/model-workflow";
 
 import i18n from "@/i18n";
 import { fetchStructuredSetting, saveStructuredSetting } from "@/services/settings-api";
@@ -93,7 +87,7 @@ export type WebdavSyncConfig = {
     directory: string;
     lastSyncedAt: string;
 };
-export type ConfigTabKey = "channels" | "local-proxy" | "preferences" | "prompt-sources" | "webdav" | "local-storage";
+export type ConfigTabKey = "channels" | "local-proxy" | "preferences" | "prompt-sources" | "webdav" | "local-storage" | "connection";
 export type ChannelCredentialsImportResult = { status: "created" | "updated" | "missing-base-url" | "invalid-base-url"; channelName?: string };
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
@@ -258,9 +252,9 @@ export function modelWorkflowMissingMessage(config: AiConfig, value: string, ref
     const scenario = scenarioFromReferenceCount(referenceCount);
     if (modelScenarioUnsupported(config, value, referenceCount)) {
         const capability = findChannelModel(config, value)?.model.capability || "image";
-        return `模型「${name}」不支持${MODEL_SCENARIO_LABELS[capability][scenario]}输入（已在渠道设置里把该场景标记为「不支持」），请改用其它模型或调整它的工作流路由`;
+        return `模型「${name}」不支持${MODEL_SCENARIO_LABELS[capability][scenario]}输入，请改用其它模型或调整模型配置`;
     }
-    return `模型「${name}」没有可用工作流，请到渠道设置里为它配置工作流`;
+    return `模型「${name}」没有可用的本地实现，请到模型设置里完成配置`;
 }
 
 /** 该模型是否挂了工作流（用于 UI 展示与「是否走本地工作流」判断）。 */
@@ -269,7 +263,7 @@ export function modelHasWorkflowConfig(config: AiConfig, value: string) {
 }
 
 /**
- * 读取某模型在当前输入场景下的工作流参数覆盖值（渠道设置里按场景配的默认参数）。
+ * 读取某模型在当前输入场景下的内部实现参数覆盖值（模型设置里按场景配置）。
  * 调用方把它作为字段默认值：节点/工作台上手填的值优先级更高。
  */
 export function resolveModelWorkflowParams(config: AiConfig, value: string, referenceCount: number): Record<string, unknown> {
@@ -288,13 +282,12 @@ let webdavSyncQueue = Promise.resolve();
 
 function syncConfigToBackend(config: AiConfig) {
     if (typeof window === "undefined") return;
-    configSyncQueue = configSyncQueue.then(async () => {
-        const [api, backend] = await Promise.all([
-            import("@/services/backend-api"),
-            import("@/stores/use-backend-store"),
-        ]);
-        if (backend.useBackendStore.getState().connected) await api.syncBackendAiConfig(config);
-    }).catch(() => undefined);
+    configSyncQueue = configSyncQueue
+        .then(async () => {
+            const [api, backend] = await Promise.all([import("@/services/backend-api"), import("@/stores/use-backend-store")]);
+            if (backend.useBackendStore.getState().connected) await api.syncBackendAiConfig(config);
+        })
+        .catch(() => undefined);
 }
 
 function syncWebdavToBackend(webdav: WebdavSyncConfig) {
@@ -345,15 +338,9 @@ function readLegacyConfigState(): { config?: Partial<AiConfig>; webdav?: Partial
 export async function hydrateConfigFromBackend(): Promise<boolean> {
     if (typeof window === "undefined") return false;
     try {
-        const [{ fetchBackendAiConfig, syncBackendAiConfig }, { useBackendStore }] = await Promise.all([
-            import("@/services/backend-api"),
-            import("@/stores/use-backend-store"),
-        ]);
+        const [{ fetchBackendAiConfig, syncBackendAiConfig }, { useBackendStore }] = await Promise.all([import("@/services/backend-api"), import("@/stores/use-backend-store")]);
         if (!useBackendStore.getState().connected) return false;
-        const [response, storedWebdav] = await Promise.all([
-            fetchBackendAiConfig(),
-            fetchStructuredSetting<WebdavSyncConfig>("webdav"),
-        ]);
+        const [response, storedWebdav] = await Promise.all([fetchBackendAiConfig(), fetchStructuredSetting<WebdavSyncConfig>("webdav")]);
         const legacy = readLegacyConfigState();
         let config = response?.config ? normalizeConfig(response.config as Partial<AiConfig>) : null;
         if (!config && legacy?.config) {
@@ -529,13 +516,15 @@ export function upsertChannelCredentials(config: AiConfig, input: { baseUrl?: st
         if (url.protocol !== "http:" && url.protocol !== "https:") return { status: "invalid-base-url", config };
         url.hash = "";
         baseUrl = url.toString().replace(/\/+$/, "");
-    } catch { return { status: "invalid-base-url", config }; }
+    } catch {
+        return { status: "invalid-base-url", config };
+    }
     const key = baseUrl.replace(/\/v1$/i, "").toLowerCase();
     const apiKey = input.apiKey?.trim() || "";
     const index = config.channels.findIndex((channel) => channel.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/i, "").toLowerCase() === key);
     if (index >= 0) {
         const existing = config.channels[index];
-        const channels = config.channels.map((channel, itemIndex) => itemIndex === index ? { ...existing, baseUrl, ...(apiKey ? { apiKey } : {}) } : channel);
+        const channels = config.channels.map((channel, itemIndex) => (itemIndex === index ? { ...existing, baseUrl, ...(apiKey ? { apiKey } : {}) } : channel));
         return { status: "updated", channelName: existing.name, config: { ...config, channels } };
     }
     const channel = createModelChannel({ name: new URL(baseUrl).hostname.replace(/^(?:www|api)\./i, "") || i18n.t("config.channels.newName"), baseUrl, apiKey, apiFormat: "openai", models: [] });
@@ -587,7 +576,18 @@ export function resolveModelChannel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
     const model = decoded?.model || value;
     const matched = decoded ? config.channels.find((channel) => channel.id === decoded.channelId) : config.channels.find((channel) => channel.models.some((item) => item.name === model));
-    return matched || config.channels[0] || createModelChannel({ id: "default", name: i18n.t("config.channels.defaultName"), baseUrl: config.baseUrl, apiKey: config.apiKey, apiFormat: config.apiFormat, models: config.models.map(modelOptionName).map((name) => ({ name, capability: guessCapability(name) })) });
+    return (
+        matched ||
+        config.channels[0] ||
+        createModelChannel({
+            id: "default",
+            name: i18n.t("config.channels.defaultName"),
+            baseUrl: config.baseUrl,
+            apiKey: config.apiKey,
+            apiFormat: config.apiFormat,
+            models: config.models.map(modelOptionName).map((name) => ({ name, capability: guessCapability(name) })),
+        })
+    );
 }
 
 export function resolveModelRequestConfig(config: AiConfig, value: string) {
@@ -612,9 +612,7 @@ function normalizeChannels(config: AiConfig) {
         });
         // 17372 was briefly used as the Agent gateway in the first local-channel build.
         // Migrate that exact generated default; custom ComfyUI ports remain untouched.
-        return normalized.kind === "comfyui" && normalized.baseUrl.replace(/\/$/, "") === "http://127.0.0.1:17372"
-            ? { ...normalized, baseUrl: "http://127.0.0.1:8188" }
-            : normalized;
+        return normalized.kind === "comfyui" && normalized.baseUrl.replace(/\/$/, "") === "http://127.0.0.1:17372" ? { ...normalized, baseUrl: "http://127.0.0.1:8188" } : normalized;
     });
     if (!channels.length) {
         channels.push(
