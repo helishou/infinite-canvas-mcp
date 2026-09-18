@@ -24,12 +24,19 @@ const IMAGE_PREVIEW_VERSION = 1;
 const previewStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_previews" });
 const previewUrls = new Map<string, string>();
 const previewListeners = new Set<() => void>();
+const previewListenersByKey = new Map<string, Set<() => void>>();
+const previewRevisionsByKey = new Map<string, number>();
 const previewJobs = new Set<string>();
 let previewRevision = 0;
 let previewQueue: Promise<unknown> = Promise.resolve();
 
 type ImageReadOptions = { signal?: AbortSignal; category?: "input" | "output" | "library" };
 type StoredImagePreview = { version: number; blob?: Blob };
+
+// 预览是浏览器本地的可丢弃缓存；同一个 storageKey 在不同 Backend 中不能共用。
+function previewCacheKey(storageKey: string) {
+    return `${useBackendStore.getState().url || "local"}\u0000${storageKey}`;
+}
 
 export async function uploadImage(input: string | Blob, options?: ImageReadOptions): Promise<UploadedImage> {
     if (typeof input !== "string") return storeImage(input, options);
@@ -151,7 +158,7 @@ export async function getImageBlob(storageKey: string) {
 
 // 原图由 Backend 媒体库持有；这里仅缓存可随时重建的 WebP 画布预览。
 export function previewUrlFor(storageKey?: string) {
-    return storageKey ? previewUrls.get(storageKey) : undefined;
+    return storageKey ? previewUrls.get(previewCacheKey(storageKey)) : undefined;
 }
 
 export function subscribeImagePreviews(listener: () => void) {
@@ -165,27 +172,44 @@ export function getImagePreviewRevision() {
     return previewRevision;
 }
 
+export function subscribeImagePreview(storageKey: string | undefined, listener: () => void) {
+    if (!storageKey) return () => undefined;
+    const key = previewCacheKey(storageKey);
+    const listeners = previewListenersByKey.get(key) || new Set<() => void>();
+    listeners.add(listener);
+    previewListenersByKey.set(key, listeners);
+    return () => {
+        listeners.delete(listener);
+        if (!listeners.size) previewListenersByKey.delete(key);
+    };
+}
+
+export function getImagePreviewRevisionFor(storageKey?: string) {
+    return storageKey ? previewRevisionsByKey.get(previewCacheKey(storageKey)) || 0 : 0;
+}
+
 export async function ensureImagePreview(storageKey?: string) {
     if (!storageKey) return undefined;
-    const cached = previewUrls.get(storageKey);
+    const cacheKey = previewCacheKey(storageKey);
+    const cached = previewUrls.get(cacheKey);
     if (cached) return cached;
-    const stored = await previewStore.getItem<StoredImagePreview>(storageKey).catch(() => null);
-    if (stored?.version === IMAGE_PREVIEW_VERSION) return stored.blob ? cacheImagePreview(storageKey, stored.blob) : undefined;
-    queueImagePreview(storageKey);
+    const stored = await previewStore.getItem<StoredImagePreview>(cacheKey).catch(() => null);
+    if (stored?.version === IMAGE_PREVIEW_VERSION) return stored.blob ? cacheImagePreview(storageKey, stored.blob, cacheKey) : undefined;
+    queueImagePreview(storageKey, undefined, cacheKey);
     return undefined;
 }
 
-function queueImagePreview(storageKey: string, original?: Blob) {
-    if (previewJobs.has(storageKey)) return;
-    previewJobs.add(storageKey);
+function queueImagePreview(storageKey: string, original?: Blob, cacheKey = previewCacheKey(storageKey)) {
+    if (previewJobs.has(cacheKey)) return;
+    previewJobs.add(cacheKey);
     scheduleIdle(() => {
         previewQueue = previewQueue
             .then(async () => {
-                const source = original || await getImageBlob(storageKey);
-                if (source) await storeImagePreview(storageKey, source);
+                const source = original || (await getImageBlob(storageKey));
+                if (source) await storeImagePreview(storageKey, source, cacheKey);
             })
             .catch(() => undefined)
-            .finally(() => previewJobs.delete(storageKey));
+            .finally(() => previewJobs.delete(cacheKey));
     });
 }
 
@@ -195,28 +219,32 @@ function scheduleIdle(callback: () => void) {
     else window.setTimeout(callback, 0);
 }
 
-async function storeImagePreview(storageKey: string, original: Blob) {
+async function storeImagePreview(storageKey: string, original: Blob, cacheKey = previewCacheKey(storageKey)) {
     const preview = await createImageThumbnail(original).catch(() => undefined);
-    await previewStore.setItem<StoredImagePreview>(storageKey, { version: IMAGE_PREVIEW_VERSION, blob: preview }).catch(() => undefined);
-    return preview ? cacheImagePreview(storageKey, preview) : undefined;
+    await previewStore.setItem<StoredImagePreview>(cacheKey, { version: IMAGE_PREVIEW_VERSION, blob: preview }).catch(() => undefined);
+    return preview ? cacheImagePreview(storageKey, preview, cacheKey) : undefined;
 }
 
-function cacheImagePreview(storageKey: string, preview: Blob) {
-    const previous = previewUrls.get(storageKey);
+function cacheImagePreview(storageKey: string, preview: Blob, cacheKey = previewCacheKey(storageKey)) {
+    const previous = previewUrls.get(cacheKey);
     if (previous) URL.revokeObjectURL(previous);
     const url = URL.createObjectURL(preview);
-    previewUrls.set(storageKey, url);
+    previewUrls.set(cacheKey, url);
     previewRevision += 1;
+    previewRevisionsByKey.set(cacheKey, (previewRevisionsByKey.get(cacheKey) || 0) + 1);
+    previewListenersByKey.get(cacheKey)?.forEach((listener) => listener());
     previewListeners.forEach((listener) => listener());
     return url;
 }
 
 async function deleteImagePreview(storageKey: string) {
-    const url = previewUrls.get(storageKey);
+    const cacheKey = previewCacheKey(storageKey);
+    const url = previewUrls.get(cacheKey);
     if (url) URL.revokeObjectURL(url);
-    previewUrls.delete(storageKey);
-    previewJobs.delete(storageKey);
-    await previewStore.removeItem(storageKey).catch(() => undefined);
+    previewUrls.delete(cacheKey);
+    previewJobs.delete(cacheKey);
+    previewRevisionsByKey.delete(cacheKey);
+    await previewStore.removeItem(cacheKey).catch(() => undefined);
 }
 
 export async function setImageBlob(storageKey: string, blob: Blob) {

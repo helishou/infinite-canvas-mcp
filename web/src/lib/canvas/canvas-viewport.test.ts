@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { needsViewportCull, normalizeViewportTransform, VIEWPORT_CULL_SCREEN_MARGIN, VIEWPORT_CULL_ZOOM_RATIO, VIEWPORT_RENDER_SCREEN_PADDING, viewportRenderPadding } from "./canvas-viewport";
+import { needsViewportCull, normalizeViewportTransform, VIEWPORT_CULL_SCREEN_MARGIN, VIEWPORT_CULL_ZOOM_RATIO, VIEWPORT_RENDER_SCREEN_PADDING, viewportNeedsCoverageRefresh, viewportRenderPadding } from "./canvas-viewport";
 
 const at = (x: number, y: number, k = 1) => ({ x, y, k });
 
@@ -39,6 +39,16 @@ test("缩放幅度够大时触发重算，微小抖动不触发", () => {
     assert.equal(needsViewportCull(at(0, 0, 1), at(0, 0, 1 + VIEWPORT_CULL_ZOOM_RATIO)), true);
     // 缩小同样算（视野变大，会有新节点进入）。
     assert.equal(needsViewportCull(at(0, 0, 1), at(0, 0, 1 - VIEWPORT_CULL_ZOOM_RATIO)), true);
+});
+
+test("视口即将越出已挂载范围时必须补裁剪，不能只看 35% 缩放阈值", () => {
+    const wideScreen = { width: 3248, height: 1500 };
+    // 左上角锚点从 100% 缩至 80% 时，旧逻辑认为 20% < 35%，不会重算；
+    // 但视口右边界会多出 329.6px，已经越过原先 400px 渲染外扩中的 100px 安全带。
+    assert.equal(viewportNeedsCoverageRefresh(at(0, 0, 1), at(0, 0, 0.8), wideScreen), true);
+    assert.equal(needsViewportCull(at(0, 0, 1), at(0, 0, 0.8), wideScreen), true);
+    // 很小的缩放变化仍留在安全带内，不应把每次滚轮都变成 React 裁剪更新。
+    assert.equal(viewportNeedsCoverageRefresh(at(0, 0, 1), at(0, 0, 0.98), wideScreen), false);
 });
 
 test("渲染 padding 必须大于补重算阈值，否则补渲染会晚于空白出现", () => {

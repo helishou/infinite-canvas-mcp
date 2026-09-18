@@ -9,7 +9,6 @@ export type ViewportChangeOptions = { live?: boolean };
 
 type InfiniteCanvasProps = {
     containerRef: React.RefObject<HTMLDivElement | null>;
-    viewport: ViewportTransform;
     /** 实时视口。渲染时读它而不是 state，避免命令式写入被滞后的 state 覆盖回去。 */
     viewportRef: React.RefObject<ViewportTransform>;
     /** 注册「立即把视口写进 DOM」的函数，父组件在拖动/滚轮中直接调用，跳过 React 渲染。 */
@@ -25,21 +24,31 @@ type InfiniteCanvasProps = {
     children: React.ReactNode;
 };
 
-export function InfiniteCanvas({ containerRef, viewport, viewportRef, registerViewportWriter, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onCanvasDoubleClick, onContextMenu, onDrop, children }: InfiniteCanvasProps) {
+export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWriter, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onCanvasDoubleClick, onContextMenu, onDrop, children }: InfiniteCanvasProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const transformRef = useRef<HTMLDivElement | null>(null);
     const gridRef = useRef<HTMLDivElement | null>(null);
+    const lastWrittenViewportRef = useRef<{
+        frame: HTMLDivElement | null;
+        grid: HTMLDivElement | null;
+        x: number;
+        y: number;
+        k: number;
+    } | null>(null);
     // 平移/缩放期间视口每帧都在变，走 React state 会让整棵画布树（几百个节点）跟着重渲染。
     // 这里直接把变换写进 DOM：拖动只改 style，React 一次都不跑。
     const writeViewport = useCallback((next: ViewportTransform) => {
         const frame = transformRef.current;
-        if (frame) frame.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.k})`;
         const grid = gridRef.current;
+        const previous = lastWrittenViewportRef.current;
+        if (previous && previous.frame === frame && previous.grid === grid && previous.x === next.x && previous.y === next.y && previous.k === next.k) return;
+        if (frame) frame.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.k})`;
         if (grid) {
             const gridSize = 48 * next.k;
             grid.style.backgroundSize = `${gridSize}px ${gridSize}px`;
             grid.style.backgroundPosition = `${next.x % gridSize}px ${next.y % gridSize}px`;
         }
+        if (frame || grid) lastWrittenViewportRef.current = { frame, grid, x: next.x, y: next.y, k: next.k };
     }, []);
     useEffect(() => {
         registerViewportWriter?.(writeViewport);
@@ -55,23 +64,31 @@ export function InfiniteCanvas({ containerRef, viewport, viewportRef, registerVi
         startY: 0,
         initialX: 0,
         initialY: 0,
+        initialK: 1,
         hasMoved: false,
         startedOnBackground: false,
     });
-    const scaleRef = useRef(viewport.k);
     const frameRef = useRef<number | null>(null);
     const nextViewportRef = useRef<ViewportTransform | null>(null);
+    const wheelViewportRef = useRef<ViewportTransform | null>(null);
+    const wheelCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const flushPendingWheelViewport = useCallback(() => {
+        if (wheelCommitTimerRef.current) {
+            clearTimeout(wheelCommitTimerRef.current);
+            wheelCommitTimerRef.current = null;
+        }
+        const next = wheelViewportRef.current;
+        wheelViewportRef.current = null;
+        if (next) onViewportChange(next, { live: false });
+    }, [onViewportChange]);
     const [isSpacePressed, setIsSpacePressed] = useState(false);
     const [isControlPressed, setIsControlPressed] = useState(false);
     const [isPanning, setIsPanning] = useState(false);
 
-    useEffect(() => {
-        scaleRef.current = viewport.k;
-    }, [viewport.k]);
-
     useEffect(
         () => () => {
             if (frameRef.current) cancelAnimationFrame(frameRef.current);
+            if (wheelCommitTimerRef.current) clearTimeout(wheelCommitTimerRef.current);
         },
         [],
     );
@@ -96,6 +113,7 @@ export function InfiniteCanvas({ containerRef, viewport, viewportRef, registerVi
         };
 
         const handleBlur = () => {
+            flushPendingWheelViewport();
             setIsSpacePressed(false);
             setIsControlPressed(false);
             panState.current.isPanning = false;
@@ -111,7 +129,7 @@ export function InfiniteCanvas({ containerRef, viewport, viewportRef, registerVi
             window.removeEventListener("keyup", handleKeyUp);
             window.removeEventListener("blur", handleBlur);
         };
-    }, []);
+    }, [flushPendingWheelViewport]);
 
     const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
         const target = event.target instanceof Element ? event.target : null;
@@ -130,14 +148,20 @@ export function InfiniteCanvas({ containerRef, viewport, viewportRef, registerVi
         const worldX = (mouseX - current.x) / current.k;
         const worldY = (mouseY - current.y) / current.k;
 
-        onViewportChange({
+        const next = {
             x: mouseX - worldX * newScale,
             y: mouseY - worldY * newScale,
             k: newScale,
-        }, { live: true });
+        };
+        onViewportChange(next, { live: true });
+        wheelViewportRef.current = next;
+        if (wheelCommitTimerRef.current) clearTimeout(wheelCommitTimerRef.current);
+        // 滚轮停止后提交最终视口，让裁剪范围、持久化快照与命令式 DOM 回到同一版本。
+        wheelCommitTimerRef.current = setTimeout(flushPendingWheelViewport, 500);
     };
 
     const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+        flushPendingWheelViewport();
         const target = event.target instanceof Element ? event.target : null;
         if (target?.closest("[data-canvas-no-zoom]")) return;
         if (target?.closest("[data-connection-create-menu]")) return;
@@ -149,12 +173,16 @@ export function InfiniteCanvas({ containerRef, viewport, viewportRef, registerVi
         if (shouldPan) {
             event.preventDefault();
             event.currentTarget.setPointerCapture(event.pointerId);
+            // 滚轮缩放只会先写实时 ref/DOM，React viewport 可能尚未补重算。
+            // 平移必须从同一份实时视口起步，否则第一帧会跳回缩放前的 state。
+            const current = viewportRef.current;
             panState.current = {
                 isPanning: true,
                 startX: event.clientX,
                 startY: event.clientY,
-                initialX: viewport.x,
-                initialY: viewport.y,
+                initialX: current.x,
+                initialY: current.y,
+                initialK: current.k,
                 hasMoved: false,
                 startedOnBackground: isBackgroundClick,
             };
@@ -189,7 +217,7 @@ export function InfiniteCanvas({ containerRef, viewport, viewportRef, registerVi
             nextViewportRef.current = {
                 x: panState.current.initialX + dx,
                 y: panState.current.initialY + dy,
-                k: scaleRef.current,
+                k: panState.current.initialK,
             };
             if (frameRef.current) return;
             frameRef.current = requestAnimationFrame(() => {
@@ -271,7 +299,7 @@ export function InfiniteCanvas({ containerRef, viewport, viewportRef, registerVi
     );
 }
 
-function CanvasGrid({ viewport, mode, gridRef }: { viewport: ViewportTransform; mode: CanvasBackgroundMode; gridRef?: React.RefObject<HTMLDivElement | null> }) {
+const CanvasGrid = React.memo(function CanvasGrid({ viewport, mode, gridRef }: { viewport: ViewportTransform; mode: CanvasBackgroundMode; gridRef?: React.RefObject<HTMLDivElement | null> }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     if (mode === "blank") return null;
 
@@ -293,4 +321,4 @@ function CanvasGrid({ viewport, mode, gridRef }: { viewport: ViewportTransform; 
             }}
         />
     );
-}
+});
