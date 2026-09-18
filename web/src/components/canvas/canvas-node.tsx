@@ -313,7 +313,6 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
     const overview =
         (resolvedProps.overviewMode || !detailModeRef.current) &&
         !resolvedProps.isDetailSelected &&
-        !resolvedProps.isHovered &&
         !resolvedProps.isConnectionSource &&
         !resolvedProps.isGroupDropTarget &&
         !resolvedProps.showPanel &&
@@ -322,8 +321,9 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
         !resolvedProps.previewPosition &&
         !resolvedProps.previewBounds;
     if (overview) return <CanvasNodeOverview {...resolvedProps} />;
-    // isHovered/overviewMode 只决定是否切换到概览壳；完整节点内部使用自己的 hover 状态，
-    // 不要把父层每次 hover 变化继续传给图片、视频或插件内容，避免整棵节点子树重渲染。
+    // overviewMode 只决定是否切换到概览壳。远处节点悬停时仍保持缩略预览，
+    // 只有明确选中/编辑才切回完整内容；避免低倍率下闪回一堆难读的小字。
+    // 完整节点内部使用自己的 hover 状态，不要把父层每次 hover 变化继续传给图片、视频或插件内容。
     return <CanvasNode {...resolvedProps} isHovered={undefined} overviewMode={undefined} />;
 });
 
