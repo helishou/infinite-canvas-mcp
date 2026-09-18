@@ -113,6 +113,11 @@ export class CanvasGenerationService {
         const references = resolveCanvasImageReferences(project, sourceNodeId);
         // 无法从画布图谱解析时保留调用方显式参考图；节点落库时序由前端
         // 生成前的强制同步保证，不在这里把运行请求变成卡控错误。
+        // 图谱解析到参考图时，以 Backend 的权威结果为准；解析为空时保留调用方
+        // 已经整理好的参考图（例如智能节点刚建立的连接尚未出现在本次快照中）。
+        // 否则显式参考图会被空数组覆盖，H3 工作流随后只能报“缺少必选图片”。
+        if (references?.length) return { ...command, references };
+        if (references && Array.isArray(command.references) && command.references.length) return command;
         return references ? { ...command, references } : command;
     }
 

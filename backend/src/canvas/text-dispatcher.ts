@@ -5,6 +5,8 @@ import type { RuntimeTask } from "../db.js";
 import type { Stores } from "../stores/types.js";
 import { decodeChannelModel, modelOptionName } from "./model-workflow.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
+import { prepareCanvasGenerationTarget } from "./generation-target.js";
+import type { CanvasOperation } from "./project-ops.js";
 
 export type CanvasTextReference = {
     id?: string;
@@ -50,7 +52,7 @@ export class CanvasTextDispatcher {
     ) {}
 
     start(rawInput: CanvasTextGenerationInput) {
-        const input = this.prepareInput(rawInput);
+        let input = this.prepareInput(rawInput);
         const provider = this.resolveProvider(input);
         const executor = resolveCanvasExecutor({ mode: "text", model: provider.model });
         const taskId = input.clientTaskId || `canvas-text-${crypto.randomUUID()}`;
@@ -58,7 +60,19 @@ export class CanvasTextDispatcher {
         if (existing) return { taskId: existing.id, executor };
         const active = this.findActiveTask(input);
         if (active) return { taskId: active.id, executor: active.executor || executor };
-        const project = this.canvasTarget(input);
+        let project = this.canvasTarget(input);
+        let createOperations: CanvasOperation[] = [];
+        const source = project && input.nodeId ? arrayRecords(project.nodes).find((node) => node.id === input.nodeId) : undefined;
+        if (source?.type === "config" && recordOf(source.metadata).smart === true) {
+            const prepared = prepareCanvasGenerationTarget(this.stores, {
+                ...input,
+                mode: "text",
+                params: { ...(input.params || {}), targetTextNodeId: input.nodeId },
+            }, taskId);
+            input = prepared.command as CanvasTextGenerationInput;
+            project = prepared.project;
+            createOperations = prepared.createOperations;
+        }
 
         const task = this.stores.tasks.create(taskId, "canvas-text", input, {
             projectId: input.projectId,
@@ -69,11 +83,14 @@ export class CanvasTextDispatcher {
             resultPolicy: input.resultPolicy || "replace-active",
         });
         try {
-            if (project) this.stores.projects.applyOperations(input.projectId!, Number(project.revision || 0), [{
-                type: "update_node", id: input.nodeId!,
-                metadata: { runtimeTaskId: task.id, status: "loading", runProgress: 0 },
-                metadataDelete: ["errorDetails"],
-            }], { operationId: `text-task-bind:${task.id}`, runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "文本生成任务" } });
+            if (project) this.stores.projects.applyOperations(input.projectId!, Number(project.revision || 0), [
+                ...createOperations,
+                {
+                    type: "update_node", id: input.nodeId!,
+                    metadata: { runtimeTaskId: task.id, status: "loading", runProgress: 0 },
+                    metadataDelete: ["errorDetails"],
+                },
+            ], { operationId: `text-task-bind:${task.id}`, runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "文本生成任务" } });
         } catch (error) {
             this.stores.tasks.update(task.id, { status: "failed", error: error instanceof Error ? error.message : String(error) });
             throw error; // 绑定未落库不得调用模型，也不能让恢复流程盲目接管节点。
@@ -163,7 +180,7 @@ export class CanvasTextDispatcher {
         const targetTextNodeId = String(input.params?.targetTextNodeId || "");
         if (targetTextNodeId) {
             const target = arrayRecords(project.nodes).find((node) => node.id === targetTextNodeId);
-            if (!target || target.type !== "text") throw new Error("文本重试结果节点不存在，未启动模型");
+            if (!target || (target.type !== "text" && !(target.type === "config" && recordOf(target.metadata).smart === true))) throw new Error("文本重试结果节点不存在，未启动模型");
         }
         return project;
     }

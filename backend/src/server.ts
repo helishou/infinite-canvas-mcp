@@ -52,6 +52,7 @@ import {
   registerConnectionRoutes,
 } from "./server/connection-routes.js";
 import { CanvasDraftSessionLeases } from "./canvas/draft-session-leases.js";
+import { registerMcpObservabilityRoutes } from "./server/mcp-observability-routes.js";
 
 const logger = createLogger("backend");
 
@@ -706,16 +707,26 @@ export function startServer(
   });
   app.delete("/canvas/folders/:id", (req, res) => {
     const dramaId = String(req.params.id || "");
-    for (const asset of stores.assets.list({ kind: "drama-file", dramaId })) {
-      const storageKey = typeof asset.data.storageKey === "string" ? asset.data.storageKey : "";
-      stores.assets.delete(asset.id);
-      if (storageKey) stores.media.delete(storageKey);
-    }
+    if (db.isDramaProject(dramaId))
+      return void res.status(409).json({ ok: false, error: "这是短剧项目，请在短剧制作台中删除" });
     const deleted = stores.canvasFolders.delete(dramaId);
     events.publishCanvasFolder({
       entityId: dramaId,
       payload: { deleted },
     });
+    res.json({ ok: true, deleted });
+  });
+  app.delete("/drama/projects/:dramaId", (req, res) => {
+    const dramaId = String(req.params.dramaId || "");
+    if (!db.isDramaProject(dramaId))
+      return void res.status(404).json({ ok: false, error: "剧目不存在" });
+    for (const asset of stores.assets.list({ kind: "drama-file", dramaId })) {
+      const storageKey = typeof asset.data.storageKey === "string" ? asset.data.storageKey : "";
+      stores.assets.delete(asset.id);
+      if (storageKey) stores.media.delete(storageKey);
+    }
+    const deleted = stores.canvasFolders.deleteDrama(dramaId);
+    events.publishCanvasFolder({ entityId: dramaId, payload: { deleted } });
     res.json({ ok: true, deleted });
   });
   // ── Drama episodes：剧目 → 分集 → 画布 ───────────────────────────────
@@ -1661,6 +1672,7 @@ export function startServer(
     }
   });
 
+  registerMcpObservabilityRoutes(app, stores.mcpObservability);
   registerBackendErrorHandler(app);
 
   return { app: app as Express, stores, events };

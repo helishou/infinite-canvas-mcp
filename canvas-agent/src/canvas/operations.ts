@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 import type { ToolName } from "./schemas.js";
-import { nextCanvasAnchor, nextCanvasX } from "./tools.js";
+import { nextCanvasFlowAnchor, nextCanvasX } from "./tools.js";
 import type { CanvasNode, CanvasNodeType, CanvasSnapshot } from "./types.js";
 
 export type CanvasToolRequest = { name: "canvas_apply_ops"; input: Record<string, unknown> };
@@ -16,7 +16,7 @@ export function sanitizeCanvasPrompt(value: string) {
 
 /** 将上层画布工具调用转换为前端可执行的批量操作。 */
 export function buildCanvasToolRequest(name: ToolName, input: Record<string, unknown>, state: CanvasSnapshot | null): CanvasToolRequest {
-    if (name === "canvas_apply_ops") return { name, input };
+    if (name === "canvas_apply_ops") return { name, input: normalizeCanvasApplyOps(input) };
     if (name === "canvas_create_node") {
         const data = input as { nodeType: CanvasNodeType; title?: string; x?: number; y?: number; width?: number; height?: number; metadata?: Record<string, unknown> };
         return applyOps([{ type: "add_node", nodeType: data.nodeType, title: data.title, position: { x: data.x ?? nextCanvasX(state), y: data.y ?? 0 }, width: data.width, height: data.height, metadata: data.metadata }]);
@@ -96,7 +96,12 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
     if (name === "canvas_run_generation") {
         const data = input as { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append"; segmentId?: string };
         const referenceNodeIds = [...new Set(data.referenceNodeIds || [])];
-        if (!referenceNodeIds.length) return applyOps([runGenerationOp({ ...data, mode: generationMode(data.mode) })]);
+        const prompt = String(data.prompt || "").trim();
+        const promptOp = prompt ? [{ type: "update_node", id: data.nodeId, metadata: { composerContent: prompt, prompt } }] : [];
+        if (!referenceNodeIds.length) return applyOps([
+            ...promptOp,
+            runGenerationOp({ ...data, mode: generationMode(data.mode) }),
+        ]);
         if (!state) throw new Error("替换生成参考图前必须先读取当前画布");
         const nodeById = new Map((state.nodes || []).map((node) => [node.id, node]));
         if (!nodeById.has(data.nodeId)) throw new Error(`找不到生成节点：${data.nodeId}`);
@@ -107,6 +112,7 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
         return applyOps([
             ...(oldReferenceConnectionIds.length ? [{ type: "delete_connections", ids: oldReferenceConnectionIds }] : []),
             ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: data.nodeId, role: "reference", order })),
+            ...promptOp,
             runGenerationOp({ ...data, mode: generationMode(data.mode), referenceNodeIds: undefined }),
         ]);
     }
@@ -122,6 +128,28 @@ export function fitAttachmentNodeSize(width: number, height: number) {
 /** 创建统一的批量画布操作请求。 */
 function applyOps(ops: unknown[]): CanvasToolRequest {
     return { name: "canvas_apply_ops", input: { ops } };
+}
+
+/** 直接提交 ops 时也要把显式提示词写回智能节点，避免绕过专用生成工具。 */
+function normalizeCanvasApplyOps(input: Record<string, unknown>) {
+    if (!Array.isArray(input.ops)) return input;
+    const ops: Array<Record<string, unknown>> = [];
+    for (const value of input.ops) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+            ops.push(value as Record<string, unknown>);
+            continue;
+        }
+        const op = value as Record<string, unknown>;
+        if (op.type === "run_generation") {
+            const nodeId = String(op.nodeId || "");
+            const prompt = String(op.prompt || "").trim();
+            if (nodeId && prompt && !ops.some((previous) => previous.type === "update_node" && previous.id === nodeId && String((previous.metadata as Record<string, unknown> | undefined)?.prompt || "").trim() === prompt)) {
+                ops.push({ type: "update_node", id: nodeId, metadata: { composerContent: prompt, prompt } });
+            }
+        }
+        ops.push(op);
+    }
+    return { ...input, ops };
 }
 
 /** 创建文本节点操作。 */
@@ -142,6 +170,7 @@ function configNodeOp(id: string, input: Record<string, unknown>, x: number, y: 
         width: typeof input.width === "number" ? input.width : undefined,
         height: typeof input.height === "number" ? input.height : undefined,
         metadata: cleanRecord({
+            smart: true,
             generationMode: mode,
             composerContent: prompt,
             prompt,
@@ -168,12 +197,6 @@ function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot
     const mode = generationMode(input.mode);
     const prompt = sanitizeCanvasPrompt(String(input.prompt || ""));
     const referenceNodeIds = Array.isArray(input.referenceNodeIds) ? input.referenceNodeIds.filter((id): id is string => typeof id === "string") : [];
-    // 有 reference 时优先把新节点贴到第一个 reference 节点同行右侧（间距 96 + 0 之间 324px 留给 config），
-    // 避免 nextCanvasX 把新节点推到画布全局最右、导致连续 MCP 生成的链路散到几屏宽之外。
-    // 没有 reference 时退回到 nextCanvasX（画布全局最右）+ y=0，保持纯文生的老行为。
-    const anchor = nextCanvasAnchor(state, referenceNodeIds[0]);
-    const x = Number(input.x ?? anchor.x);
-    const y = Number(input.y ?? anchor.y);
     const textId = `text-${crypto.randomUUID()}`;
     const configId = `config-${crypto.randomUUID()}`;
     // When the prompt only @-mentions nodes already passed as references, reuse them instead of minting a duplicate text node.
@@ -181,6 +204,12 @@ function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot
     const reuseReferences = referenceNodeIds.length > 0 && mentionedIds.length > 0
         && mentionedIds.every((id) => referenceNodeIds.includes(id))
         && prompt.replace(/@\[node:[\w-]+\]/g, "").trim() === "";
+    // 有 reference 时优先贴在第一个 reference 节点同行右侧；若该位置已有上一条生成流，
+    // 向右寻找完整空位，避免连续 MCP 调用把 prompt/config 叠在同一坐标。
+    // 没有 reference 时退回到画布全局最右 + y=0，保持纯文生的老行为。
+    const anchor = nextCanvasFlowAnchor(state, referenceNodeIds[0], { includePrompt: !reuseReferences });
+    const x = Number(input.x ?? anchor.x);
+    const y = Number(input.y ?? anchor.y);
     const tokens = reuseReferences ? referenceNodeIds.map((id) => `@[node:${id}]`) : [`@[node:${textId}]`, ...referenceNodeIds.map((id) => `@[node:${id}]`)];
     return [
         ...(reuseReferences ? [] : [textNodeOp({ id: textId, text: prompt, title: String(input.title || "提示词") }, x, y)]),

@@ -6,8 +6,18 @@ import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageToDataUrl } from "@/services/image-storage";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasNodeResource } from "@/types/canvas-plugin";
+import { buildCanvasSpatialIndex, type CanvasSpatialIndex } from "@/lib/canvas/canvas-spatial-index";
 
 export type CanvasResourceKind = "image" | "video" | "audio" | "text";
+
+export type CanvasCharacterReferenceSelection = {
+    imageKeys?: string[];
+    voiceEnabled?: boolean;
+};
+
+export function characterReferenceKey(image: { storageKey?: string; url?: string; name?: string }, index: number) {
+    return image.storageKey || image.url || image.name || `image-${index}`;
+}
 
 export type CanvasResourceReference = {
     id: string;
@@ -24,17 +34,43 @@ export type CanvasGraphIndex = {
     nodeById: Map<string, CanvasNodeData>;
     incomingByNodeId: Map<string, CanvasNodeData[]>;
     outgoingByNodeId: Map<string, CanvasNodeData[]>;
+    connectionsByNodeId: Map<string, CanvasConnection[]>;
     groupChildrenById: Map<string, CanvasNodeData[]>;
+    nodeSpatialIndex: CanvasSpatialIndex<CanvasNodeData>;
+    connectionSpatialIndex: CanvasSpatialIndex<CanvasConnection>;
 };
+
+function connectionBounds(connection: CanvasConnection, nodeById: Map<string, CanvasNodeData>) {
+    const from = nodeById.get(connection.fromNodeId);
+    const to = nodeById.get(connection.toNodeId);
+    if (!from || !to) return null;
+    const startX = from.position.x + from.width;
+    const startY = from.position.y + from.height / 2;
+    const endX = to.position.x;
+    const endY = to.position.y + to.height / 2;
+    const curvature = Math.max(Math.abs(endX - startX) * 0.5, 50);
+    return {
+        left: Math.min(startX, endX - curvature),
+        top: Math.min(startY, endY),
+        right: Math.max(startX + curvature, endX),
+        bottom: Math.max(startY, endY),
+    };
+}
 
 export function buildCanvasGraphIndex(nodes: CanvasNodeData[], connections: CanvasConnection[]): CanvasGraphIndex {
     const nodeById = new Map(nodes.map((node) => [node.id, node]));
     const incomingByNodeId = new Map<string, CanvasNodeData[]>();
     const outgoingByNodeId = new Map<string, CanvasNodeData[]>();
+    const connectionsByNodeId = new Map<string, CanvasConnection[]>();
     connections.forEach((connection) => {
         const source = nodeById.get(connection.fromNodeId);
         const target = nodeById.get(connection.toNodeId);
         if (!source || !target) return;
+        for (const nodeId of [source.id, target.id]) {
+            const related = connectionsByNodeId.get(nodeId) || [];
+            related.push(connection);
+            connectionsByNodeId.set(nodeId, related);
+        }
         const incoming = incomingByNodeId.get(target.id) || [];
         incoming.push(source);
         incomingByNodeId.set(target.id, incoming);
@@ -50,7 +86,9 @@ export function buildCanvasGraphIndex(nodes: CanvasNodeData[], connections: Canv
         children.push(node);
         groupChildrenById.set(groupId, children);
     });
-    return { nodeById, incomingByNodeId, outgoingByNodeId, groupChildrenById };
+    const nodeSpatialIndex = buildCanvasSpatialIndex(nodes, (node) => ({ left: node.position.x, top: node.position.y, right: node.position.x + node.width, bottom: node.position.y + node.height }));
+    const connectionSpatialIndex = buildCanvasSpatialIndex(connections, (connection) => connectionBounds(connection, nodeById));
+    return { nodeById, incomingByNodeId, outgoingByNodeId, connectionsByNodeId, groupChildrenById, nodeSpatialIndex, connectionSpatialIndex };
 }
 
 function graphIndex(nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex) {
@@ -140,7 +178,7 @@ function hasGroupResources(node: CanvasNodeData, nodes: CanvasNodeData[], index?
 }
 
 export function isCanvasReferenceNode(node: CanvasNodeData, nodes: CanvasNodeData[], index?: CanvasGraphIndex) {
-    return isResourceNode(node) || hasGroupResources(node, nodes, index);
+    return isResourceNode(node) || hasGroupResources(node, nodes, index) || hasLoopResources(node, nodes, index);
 }
 
 function expandGroupResourceNodes(inputNodes: CanvasNodeData[], nodes: CanvasNodeData[], index?: CanvasGraphIndex) {
@@ -173,6 +211,18 @@ function labelResourceNodes(nodes: CanvasNodeData[], active: boolean) {
 }
 
 export function nodeResourceItems(node: CanvasNodeData): CanvasNodeResource[] {
+    if (node.type === CanvasNodeType.Loop && node.metadata?.loopPromptEnabled && node.metadata.loopPrompt?.trim()) return [{ kind: "text", text: node.metadata.loopPrompt.trim() }];
+    const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart === true ? node.metadata?.generationMode || "image" : undefined;
+    if (smartMode === "image") {
+        const images = node.metadata?.images || [];
+        const primaryImageId = node.metadata?.primaryImageId || images[0]?.id;
+        const primaryImage = images.find((image) => image.id === primaryImageId && Boolean(image.content || image.storageKey));
+        if (primaryImage) return [{ kind: "image" as const, url: primaryImage.content || undefined, storageKey: primaryImage.storageKey }];
+        if (node.metadata?.content) return [{ kind: "image", url: node.metadata.content, storageKey: node.metadata.storageKey }];
+    }
+    if (smartMode === "video" && node.metadata?.content) return [{ kind: "video", url: node.metadata.content, storageKey: node.metadata.storageKey }];
+    if (smartMode === "audio" && node.metadata?.content) return [{ kind: "audio", url: node.metadata.content, storageKey: node.metadata.storageKey }];
+    if (smartMode === "text" && (node.metadata?.content || node.metadata?.prompt)) return [{ kind: "text", text: node.metadata.content || node.metadata.prompt }];
     if (node.type === CanvasNodeType.Image && node.metadata?.content) return [{ kind: "image", url: node.metadata.content, storageKey: node.metadata.storageKey }];
     if (node.type === CanvasNodeType.Video && node.metadata?.content) return [{ kind: "video", url: node.metadata.content, storageKey: node.metadata.storageKey }];
     if (node.type === CanvasNodeType.Audio && node.metadata?.content) return [{ kind: "audio", url: node.metadata.content, storageKey: node.metadata.storageKey }];
@@ -197,12 +247,25 @@ function isResourceNode(node: CanvasNodeData) {
     return Boolean(resourceKind(node));
 }
 
+function hasLoopResources(node: CanvasNodeData, nodes: CanvasNodeData[], index?: CanvasGraphIndex): boolean {
+    if (node.type !== CanvasNodeType.Loop) return false;
+    const metadata = node.metadata;
+    if (metadata?.loopPromptEnabled && metadata.loopPrompt?.trim()) return true;
+    if (!metadata?.loopImageEnabled && !metadata?.loopVideoEnabled && !metadata?.loopPromptEnabled) return false;
+    const resolvedIndex = graphIndex(nodes, [], index);
+    return (resolvedIndex.incomingByNodeId.get(node.id) || []).some((source) => source.type === CanvasNodeType.Loop
+        ? hasLoopResources(source, nodes, resolvedIndex)
+        : isResourceNode(source) || hasGroupResources(source, nodes, resolvedIndex));
+}
+
 function resourceText(node: CanvasNodeData): string | undefined {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt;
     return nodeResourceItems(node).find((resource) => resource.kind === "text")?.text;
 }
 
 function resourceKind(node: CanvasNodeData): CanvasResourceKind | null {
+    const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart === true ? node.metadata?.generationMode || "image" : undefined;
+    if (smartMode && nodeResourceItems(node).some((resource) => resource.kind === smartMode)) return smartMode;
     if (node.type === CanvasNodeType.Image && node.metadata?.content) return "image";
     if (node.type === CanvasNodeType.Video && node.metadata?.content) return "video";
     if (node.type === CanvasNodeType.Audio && node.metadata?.content) return "audio";

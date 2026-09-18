@@ -1,11 +1,11 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
 
-export function Minimap({ nodes, viewport, viewportSize, onViewportChange }: { nodes: CanvasNodeData[]; viewport: ViewportTransform; viewportSize: { width: number; height: number }; onViewportChange: (viewport: ViewportTransform) => void }) {
+export const Minimap = memo(function Minimap({ nodes, viewport, viewportSize, onViewportChange }: { nodes: CanvasNodeData[]; viewport: ViewportTransform; viewportSize: { width: number; height: number }; onViewportChange: (viewport: ViewportTransform) => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const containerRef = useRef<HTMLDivElement>(null);
     const [isDragging, setIsDragging] = useState(false);
@@ -46,6 +46,15 @@ export function Minimap({ nodes, viewport, viewportSize, onViewportChange }: { n
             offset: { x: (width - mapContentW) / 2, y: (height - mapContentH) / 2 },
         };
     }, [nodes]);
+
+    const minimapNodes = useMemo(() => nodes.map((node) => ({
+        id: node.id,
+        x: node.position.x,
+        y: node.position.y,
+        width: node.width,
+        height: node.height,
+        color: getNodeDefinition(node.type)?.minimapColor || theme.node.muted,
+    })), [nodes, theme.node.muted]);
 
     const toMinimap = useCallback(
         (worldX: number, worldY: number) => {
@@ -112,9 +121,8 @@ export function Minimap({ nodes, viewport, viewportSize, onViewportChange }: { n
                 onPointerUp={() => setIsDragging(false)}
                 onPointerLeave={() => setIsDragging(false)}
             >
-                {nodes.map((node) => {
-                    const pos = toMinimap(node.position.x, node.position.y);
-                    const color = getNodeDefinition(node.type)?.minimapColor || theme.node.muted;
+                {minimapNodes.map((node) => {
+                    const pos = toMinimap(node.x, node.y);
                     return (
                         <div
                             key={node.id}
@@ -124,7 +132,7 @@ export function Minimap({ nodes, viewport, viewportSize, onViewportChange }: { n
                                 top: pos.y,
                                 width: Math.max(node.width * scale, 2),
                                 height: Math.max(node.height * scale, 2),
-                                backgroundColor: color,
+                                backgroundColor: node.color,
                                 opacity: 0.8,
                             }}
                         />
@@ -134,4 +142,4 @@ export function Minimap({ nodes, viewport, viewportSize, onViewportChange }: { n
             </div>
         </div>
     );
-}
+});

@@ -45,6 +45,13 @@ export type GenerationLog = {
     outputs: Array<Record<string, unknown>>; error?: string;
     params: Record<string, unknown>; createdAt: string; updatedAt: string;
 };
+export type McpObservabilityEventInput = {
+    sessionId: string; traceId: string; event: "tool.started" | "tool.succeeded" | "tool.failed"; tool: string;
+    projectId?: string; nodeId?: string; operationId?: string; taskId?: string;
+    durationMs?: number; errorCode?: string; recoverable?: boolean; suggestedTool?: string;
+    inputSummary?: Record<string, unknown>; outputSummary?: Record<string, unknown>;
+};
+export type McpObservabilityEvent = McpObservabilityEventInput & { id: string; createdAt: string };
 export type MediaFile = {
     storageKey: string; filePath: string; mimeType: string;
     bytes: number; width: number | null; height: number | null; durationMs: number | null;
@@ -54,6 +61,8 @@ export type AssetFolder = { id: string; name: string; parentId: string | null; c
 export type CanvasFolder = {
     id: string; name: string; createdAt: string; updatedAt?: string;
     outline?: string; description?: string; coverStorageKey?: string | null; tags?: string[];
+    /** 画布侧创建的普通文件夹为 false；旧客户端未传时按短剧兼容。 */
+    isDrama?: boolean;
 };
 export type Asset = {
     id: string; kind: string; title: string; coverUrl: string; tags: string[];
@@ -288,6 +297,26 @@ export class BackendDatabase {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS task_events_task_id_id ON task_events(task_id, id);
+            CREATE TABLE IF NOT EXISTS mcp_observability_events (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                project_id TEXT,
+                node_id TEXT,
+                operation_id TEXT,
+                task_id TEXT,
+                duration_ms INTEGER,
+                error_code TEXT,
+                recoverable INTEGER,
+                suggested_tool TEXT,
+                input_summary_json TEXT NOT NULL DEFAULT '{}',
+                output_summary_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS mcp_observability_trace ON mcp_observability_events(trace_id, created_at);
+            CREATE INDEX IF NOT EXISTS mcp_observability_tool_event ON mcp_observability_events(tool, event, created_at);
             CREATE TABLE IF NOT EXISTS runtime_settings (
                 key TEXT PRIMARY KEY,
                 value_json TEXT NOT NULL,
@@ -391,6 +420,9 @@ export class BackendDatabase {
             // 分集梗概用于快速浏览，完整剧情单独保存，避免长文本挤占卡片摘要。
             this.attachFullPlotToDramaEpisodes();
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (10, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 11) {
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (11, ?)").run(new Date().toISOString());
         }
     }
 
@@ -1155,7 +1187,8 @@ export class BackendDatabase {
                 if (!media.length) throw new Error("生成完成但没有返回图片");
                 const slots = completedImageSlots(sourceMetadata, input.imageIds, media);
                 const initialSize = recordOf(task.params.imageTargetSize);
-                const resultSize = slots.content && !sourceMetadata.freeResize && source.width === initialSize.width && source.height === initialSize.height
+                const keepSmartLayout = source.type === "config" && sourceMetadata.smart === true;
+                const resultSize = slots.content && !keepSmartLayout && !sourceMetadata.freeResize && source.width === initialSize.width && source.height === initialSize.height
                     ? fitImageNodeSize(Number(slots.naturalWidth || 0), Number(slots.naturalHeight || 0)) : {};
                 const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId,
                     patch: resultSize,
@@ -1259,7 +1292,8 @@ export class BackendDatabase {
             const initialSize = recordOf(task.params.videoTargetSize);
             const naturalWidth = Number(media.width || 0);
             const naturalHeight = Number(media.height || 0);
-            const size = !metadata.freeResize && node.width === initialSize.width && node.height === initialSize.height && naturalWidth > 0 && naturalHeight > 0
+            const keepSmartLayout = node.type === "config" && metadata.smart === true;
+            const size = !keepSmartLayout && !metadata.freeResize && node.width === initialSize.width && node.height === initialSize.height && naturalWidth > 0 && naturalHeight > 0
                 ? fitImageNodeSize(naturalWidth, naturalHeight) : {};
             const patch = {
                 status: "success", runProgress: 1, generationTaskId: task.id,
@@ -1318,7 +1352,7 @@ export class BackendDatabase {
 
     listCanvasFolders(): CanvasFolder[] {
         const rows = this.db.prepare(
-            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.updated_at AS drama_updated_at FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id ORDER BY f.created_at ASC"
+            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.updated_at AS drama_updated_at, CASE WHEN d.folder_id IS NULL THEN 0 ELSE 1 END AS is_drama FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id ORDER BY f.created_at ASC"
         ).all() as Array<Record<string, unknown>>;
         return rows.map((row) => {
             const value = JSON.parse(String(row.tags_json || "[]"));
@@ -1328,6 +1362,7 @@ export class BackendDatabase {
                 updatedAt: String(row.drama_updated_at || row.created_at),
                 outline: String(row.outline || ""), description: String(row.description || ""),
                 coverStorageKey: row.cover_storage_key ? String(row.cover_storage_key) : null, tags,
+                isDrama: Number(row.is_drama) === 1,
             };
         });
     }
@@ -1340,15 +1375,18 @@ export class BackendDatabase {
             this.db.prepare(
                 "INSERT INTO canvas_folders (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name"
             ).run(folder.id, folder.name, folder.createdAt);
-            this.db.prepare(
-                "INSERT INTO drama_projects (folder_id, outline, description, cover_storage_key, tags_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id) DO UPDATE SET outline = excluded.outline, description = excluded.description, cover_storage_key = excluded.cover_storage_key, tags_json = excluded.tags_json, updated_at = excluded.updated_at"
-            ).run(folder.id, String(folder.outline || ""), String(folder.description || ""), folder.coverStorageKey || null, JSON.stringify(tags), updatedAt);
+            // 旧客户端没有 isDrama 字段，按原行为创建剧目；新画布普通文件夹显式传 false。
+            if (folder.isDrama !== false) {
+                this.db.prepare(
+                    "INSERT INTO drama_projects (folder_id, outline, description, cover_storage_key, tags_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id) DO UPDATE SET outline = excluded.outline, description = excluded.description, cover_storage_key = excluded.cover_storage_key, tags_json = excluded.tags_json, updated_at = excluded.updated_at"
+                ).run(folder.id, String(folder.outline || ""), String(folder.description || ""), folder.coverStorageKey || null, JSON.stringify(tags), updatedAt);
+            }
             this.db.exec("COMMIT");
         } catch (error) {
             this.db.exec("ROLLBACK");
             throw error;
         }
-        return { ...folder, updatedAt, outline: String(folder.outline || ""), description: String(folder.description || ""), coverStorageKey: folder.coverStorageKey || null, tags };
+        return { ...folder, updatedAt, outline: String(folder.outline || ""), description: String(folder.description || ""), coverStorageKey: folder.coverStorageKey || null, tags, isDrama: this.isDramaProject(folder.id) };
     }
 
     // ── drama_episodes ───────────────────────────────────────────
@@ -1433,8 +1471,24 @@ export class BackendDatabase {
     }
 
     deleteCanvasFolder(id: string): number {
-        // v7: ON DELETE CASCADE 由 drama_episodes（drama_id）和 drama_projects（folder_id）链式删除；
-        // canvas_projects 表无 folder_id 列，删除画布关联由 caller 决定（drama_episodes.canvas_id 是 SET NULL）。
+        // 画布普通文件夹才允许从这里删除；短剧项目由 deleteDramaProject 显式删除。
+        if (this.isDramaProject(id)) return 0;
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const deleted = Number(this.db.prepare("DELETE FROM canvas_folders WHERE id = ?").run(id).changes);
+            this.db.exec("COMMIT");
+            return deleted;
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+    }
+
+    isDramaProject(id: string): boolean {
+        return Boolean(this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(id));
+    }
+
+    deleteDramaProject(id: string): number {
         this.db.exec("BEGIN IMMEDIATE");
         try {
             const deleted = Number(this.db.prepare("DELETE FROM canvas_folders WHERE id = ?").run(id).changes);
@@ -1801,6 +1855,210 @@ export class BackendDatabase {
         return out;
     }
 
+    // ── MCP observability ─────────────────────────────────────────────────
+
+    createMcpObservabilityEvent(input: McpObservabilityEventInput): McpObservabilityEvent {
+        const event: McpObservabilityEvent = { ...input, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
+        this.db.prepare(`
+            INSERT INTO mcp_observability_events (
+                id, session_id, trace_id, event, tool, project_id, node_id, operation_id, task_id,
+                duration_ms, error_code, recoverable, suggested_tool, input_summary_json, output_summary_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            event.id, event.sessionId, event.traceId, event.event, event.tool,
+            event.projectId || null, event.nodeId || null, event.operationId || null, event.taskId || null,
+            event.durationMs == null ? null : Math.max(0, Math.round(event.durationMs)), event.errorCode || null,
+            event.recoverable == null ? null : event.recoverable ? 1 : 0, event.suggestedTool || null,
+            JSON.stringify(event.inputSummary || {}), JSON.stringify(event.outputSummary || {}), event.createdAt,
+        );
+        return event;
+    }
+
+    listMcpObservabilityEvents(traceId: string): McpObservabilityEvent[] {
+        const rows = this.db.prepare("SELECT * FROM mcp_observability_events WHERE trace_id = ? ORDER BY created_at, id").all(traceId) as Array<Record<string, unknown>>;
+        return rows.map(mcpObservabilityEventFromRow);
+    }
+
+    getMcpObservabilityReport() {
+        const totals = this.db.prepare(`
+            SELECT
+                SUM(CASE WHEN event = 'tool.started' THEN 1 ELSE 0 END) AS started,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN 1 ELSE 0 END) AS completed,
+                SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
+                AVG(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN duration_ms END) AS average_duration_ms,
+                MAX(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN duration_ms END) AS max_duration_ms
+            FROM mcp_observability_events
+        `).get() as Record<string, unknown>;
+        const byTool = this.db.prepare(`
+            WITH terminal AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (PARTITION BY tool ORDER BY duration_ms) AS duration_rank,
+                    COUNT(*) OVER (PARTITION BY tool) AS tool_count
+                FROM mcp_observability_events
+                WHERE event IN ('tool.succeeded', 'tool.failed')
+            )
+            SELECT tool,
+                COUNT(*) AS calls,
+                SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
+                AVG(duration_ms) AS average_duration_ms,
+                MAX(duration_ms) AS max_duration_ms,
+                MAX(CASE WHEN duration_rank = CAST((tool_count * 95 + 99) / 100 AS INTEGER) THEN duration_ms END) AS p95_duration_ms
+            FROM terminal
+            GROUP BY tool ORDER BY calls DESC, tool
+        `).all() as Array<Record<string, unknown>>;
+        const errors = this.db.prepare(`
+            SELECT error_code AS code, COUNT(*) AS count
+            FROM mcp_observability_events
+            WHERE event = 'tool.failed' AND error_code IS NOT NULL
+            GROUP BY error_code ORDER BY count DESC, error_code
+        `).all() as Array<Record<string, unknown>>;
+        const taskStatuses = this.db.prepare(`
+            SELECT COALESCE(tasks.status, 'missing') AS status, COUNT(DISTINCT events.task_id) AS count
+            FROM mcp_observability_events AS events
+            LEFT JOIN tasks ON tasks.id = events.task_id
+            WHERE events.event = 'tool.succeeded' AND events.task_id IS NOT NULL
+            GROUP BY COALESCE(tasks.status, 'missing') ORDER BY count DESC
+        `).all() as Array<Record<string, unknown>>;
+        const recovery = this.db.prepare(`
+            WITH terminal AS (
+                SELECT session_id, event, tool, suggested_tool, created_at, id,
+                    LEAD(event) OVER (PARTITION BY session_id ORDER BY created_at, id) AS next_event,
+                    LEAD(tool) OVER (PARTITION BY session_id ORDER BY created_at, id) AS next_tool
+                FROM mcp_observability_events
+                WHERE event IN ('tool.succeeded', 'tool.failed')
+            )
+            SELECT COUNT(*) AS suggested,
+                SUM(CASE WHEN next_tool = suggested_tool THEN 1 ELSE 0 END) AS followed,
+                SUM(CASE WHEN next_event = 'tool.succeeded' AND next_tool = suggested_tool THEN 1 ELSE 0 END) AS succeeded
+            FROM terminal WHERE event = 'tool.failed' AND suggested_tool IS NOT NULL
+        `).get() as Record<string, unknown>;
+        const sessions = this.db.prepare(`
+            SELECT COUNT(*) AS total, AVG(calls) AS average_calls, MAX(calls) AS max_calls
+            FROM (
+                SELECT session_id, COUNT(*) AS calls
+                FROM mcp_observability_events
+                WHERE event IN ('tool.succeeded', 'tool.failed')
+                GROUP BY session_id
+            )
+        `).get() as Record<string, unknown>;
+        const latency = this.db.prepare(`
+            WITH ranked AS (
+                SELECT duration_ms,
+                    ROW_NUMBER() OVER (ORDER BY duration_ms) AS duration_rank,
+                    COUNT(*) OVER () AS total
+                FROM mcp_observability_events
+                WHERE event IN ('tool.succeeded', 'tool.failed') AND duration_ms IS NOT NULL
+            )
+            SELECT MAX(CASE WHEN duration_rank = CAST((total * 95 + 99) / 100 AS INTEGER) THEN duration_ms END) AS p95_duration_ms
+            FROM ranked
+        `).get() as Record<string, unknown>;
+        const daily = this.db.prepare(`
+            SELECT date(created_at, 'localtime') AS date,
+                COUNT(*) AS calls,
+                SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
+                AVG(duration_ms) AS average_duration_ms
+            FROM mcp_observability_events
+            WHERE event IN ('tool.succeeded', 'tool.failed')
+            GROUP BY date(created_at, 'localtime') ORDER BY date
+        `).all() as Array<Record<string, unknown>>;
+        const failuresByTool = this.db.prepare(`
+            SELECT tool, COALESCE(error_code, 'UNKNOWN') AS code, COUNT(*) AS count
+            FROM mcp_observability_events
+            WHERE event = 'tool.failed'
+            GROUP BY tool, COALESCE(error_code, 'UNKNOWN')
+            ORDER BY count DESC, tool, code
+        `).all() as Array<Record<string, unknown>>;
+        const transitions = this.db.prepare(`
+            WITH terminal AS (
+                SELECT session_id, tool,
+                    LEAD(tool) OVER (PARTITION BY session_id ORDER BY created_at, id) AS next_tool
+                FROM mcp_observability_events
+                WHERE event IN ('tool.succeeded', 'tool.failed')
+            )
+            SELECT tool AS from_tool, next_tool AS to_tool, COUNT(*) AS count
+            FROM terminal
+            WHERE next_tool IS NOT NULL
+            GROUP BY tool, next_tool
+            ORDER BY count DESC, from_tool, to_tool
+        `).all() as Array<Record<string, unknown>>;
+        const taskOutcomesByTool = this.db.prepare(`
+            SELECT events.tool, COALESCE(tasks.status, 'missing') AS status,
+                COUNT(DISTINCT events.task_id) AS count
+            FROM mcp_observability_events AS events
+            LEFT JOIN tasks ON tasks.id = events.task_id
+            WHERE events.event = 'tool.succeeded' AND events.task_id IS NOT NULL
+            GROUP BY events.tool, COALESCE(tasks.status, 'missing')
+            ORDER BY count DESC, events.tool, status
+        `).all() as Array<Record<string, unknown>>;
+        const started = Number(totals.started || 0);
+        const completed = Number(totals.completed || 0);
+        const succeeded = Number(totals.succeeded || 0);
+        const recoverySuggested = Number(recovery.suggested || 0);
+        const recoveryFollowed = Number(recovery.followed || 0);
+        const recoverySucceeded = Number(recovery.succeeded || 0);
+        const toolMetrics = byTool.map(metricRow);
+        const taskOutcomeMetrics = taskOutcomesByTool.map((row) => ({ tool: String(row.tool || ""), status: String(row.status || "unknown"), count: Number(row.count || 0) }));
+        const diagnostics = buildMcpObservabilityDiagnostics({
+            started,
+            completed,
+            succeeded,
+            failed: Number(totals.failed || 0),
+            p95DurationMs: latency.p95_duration_ms == null ? null : Number(latency.p95_duration_ms),
+            recoverySuggested,
+            recoverySucceeded,
+            tools: toolMetrics,
+            taskOutcomes: taskOutcomeMetrics,
+        });
+        return {
+            generatedAt: new Date().toISOString(),
+            calls: {
+                started,
+                completed,
+                incomplete: Math.max(0, started - completed),
+                succeeded,
+                failed: Number(totals.failed || 0),
+                successRate: completed ? succeeded / completed : null,
+                averageDurationMs: totals.average_duration_ms == null ? null : Math.round(Number(totals.average_duration_ms)),
+                maxDurationMs: totals.max_duration_ms == null ? null : Number(totals.max_duration_ms),
+                p95DurationMs: latency.p95_duration_ms == null ? null : Number(latency.p95_duration_ms),
+            },
+            sessions: {
+                total: Number(sessions.total || 0),
+                averageCalls: sessions.average_calls == null ? null : Number(Number(sessions.average_calls).toFixed(1)),
+                maxCalls: Number(sessions.max_calls || 0),
+            },
+            recovery: {
+                suggested: recoverySuggested,
+                followed: recoveryFollowed,
+                succeeded: recoverySucceeded,
+                followRate: recoverySuggested ? recoveryFollowed / recoverySuggested : null,
+                successRate: recoverySuggested ? recoverySucceeded / recoverySuggested : null,
+            },
+            byTool: toolMetrics,
+            errors: errors.map((row) => ({ code: String(row.code || "UNKNOWN"), count: Number(row.count || 0) })),
+            failuresByTool: failuresByTool.map((row) => ({ tool: String(row.tool || ""), code: String(row.code || "UNKNOWN"), count: Number(row.count || 0) })),
+            taskStatuses: taskStatuses.map((row) => ({ status: String(row.status || "unknown"), count: Number(row.count || 0) })),
+            taskOutcomesByTool: taskOutcomeMetrics,
+            transitions: transitions.map((row) => ({ fromTool: String(row.from_tool || ""), toTool: String(row.to_tool || ""), count: Number(row.count || 0) })),
+            daily: daily.map((row) => {
+                const calls = Number(row.calls || 0);
+                const dailySucceeded = Number(row.succeeded || 0);
+                return {
+                    date: String(row.date || ""),
+                    calls,
+                    succeeded: dailySucceeded,
+                    failed: Number(row.failed || 0),
+                    successRate: calls ? dailySucceeded / calls : null,
+                    averageDurationMs: row.average_duration_ms == null ? null : Math.round(Number(row.average_duration_ms)),
+                };
+            }),
+            diagnostics,
+        };
+    }
+
     // ── tasks ─────────────────────────────────────────────────────────────
 
     createTask(idOrKind: string, inputOrKindOrInput?: string | Record<string, unknown>, paramsOrInput?: Record<string, unknown>, paramsOrParams?: Record<string, unknown>): RuntimeTask {
@@ -2070,6 +2328,81 @@ function generationLogFromRow(row: Record<string, unknown>): GenerationLog {
         createdAt: String(row.created_at),
         updatedAt: String(row.updated_at),
     };
+}
+
+function mcpObservabilityEventFromRow(row: Record<string, unknown>): McpObservabilityEvent {
+    return {
+        id: String(row.id),
+        sessionId: String(row.session_id),
+        traceId: String(row.trace_id),
+        event: String(row.event) as McpObservabilityEvent["event"],
+        tool: String(row.tool),
+        projectId: row.project_id ? String(row.project_id) : undefined,
+        nodeId: row.node_id ? String(row.node_id) : undefined,
+        operationId: row.operation_id ? String(row.operation_id) : undefined,
+        taskId: row.task_id ? String(row.task_id) : undefined,
+        durationMs: row.duration_ms == null ? undefined : Number(row.duration_ms),
+        errorCode: row.error_code ? String(row.error_code) : undefined,
+        recoverable: row.recoverable == null ? undefined : Number(row.recoverable) === 1,
+        suggestedTool: row.suggested_tool ? String(row.suggested_tool) : undefined,
+        inputSummary: parseJsonObject(row.input_summary_json),
+        outputSummary: parseJsonObject(row.output_summary_json),
+        createdAt: String(row.created_at),
+    };
+}
+
+function metricRow(row: Record<string, unknown>) {
+    const calls = Number(row.calls || 0);
+    const succeeded = Number(row.succeeded || 0);
+    return {
+        tool: String(row.tool || ""),
+        calls,
+        succeeded,
+        failed: Number(row.failed || 0),
+        successRate: calls ? succeeded / calls : null,
+        averageDurationMs: row.average_duration_ms == null ? null : Math.round(Number(row.average_duration_ms)),
+        maxDurationMs: row.max_duration_ms == null ? null : Number(row.max_duration_ms),
+        p95DurationMs: row.p95_duration_ms == null ? null : Number(row.p95_duration_ms),
+    };
+}
+
+function buildMcpObservabilityDiagnostics(input: {
+    started: number;
+    completed: number;
+    succeeded: number;
+    failed: number;
+    p95DurationMs: number | null;
+    recoverySuggested: number;
+    recoverySucceeded: number;
+    tools: Array<ReturnType<typeof metricRow>>;
+    taskOutcomes: Array<{ tool: string; status: string; count: number }>;
+}) {
+    const diagnostics: Array<{ severity: "success" | "info" | "warning" | "error"; code: string; title: string; detail: string; tool?: string }> = [];
+    const incomplete = Math.max(0, input.started - input.completed);
+    if (!input.completed) {
+        diagnostics.push({ severity: "info", code: "NO_DATA", title: "等待真实调用数据", detail: "完成几次 MCP 画布操作后，这里会自动给出针对性的优化建议。" });
+        return diagnostics;
+    }
+    if (incomplete) diagnostics.push({ severity: "error", code: "INCOMPLETE_CALLS", title: "存在未闭合调用", detail: `${incomplete} 次调用只有 started 事件，优先检查进程中断、连接断开或未捕获异常。` });
+    const successRate = input.succeeded / input.completed;
+    if (successRate < 0.9) diagnostics.push({ severity: "warning", code: "LOW_SUCCESS_RATE", title: "整体成功率偏低", detail: `当前成功率 ${(successRate * 100).toFixed(1)}%，建议先处理数量最多的错误代码和失败工具。` });
+    for (const tool of input.tools) {
+        if (tool.calls >= 5 && tool.failed / tool.calls >= 0.2) diagnostics.push({ severity: "warning", code: "TOOL_FAILURE_HOTSPOT", title: `${tool.tool} 失败率偏高`, detail: `${tool.calls} 次调用中失败 ${tool.failed} 次，优先检查参数说明、前置状态与错误恢复建议。`, tool: tool.tool });
+        if (tool.calls >= 5 && tool.p95DurationMs != null && tool.p95DurationMs > 5000) diagnostics.push({ severity: "warning", code: "TOOL_LATENCY_HOTSPOT", title: `${tool.tool} 尾延迟偏高`, detail: `P95 为 ${tool.p95DurationMs} ms，建议检查远端等待、重复读取或任务轮询路径。`, tool: tool.tool });
+    }
+    const taskOutcomes = new Map<string, { total: number; failed: number }>();
+    for (const outcome of input.taskOutcomes) {
+        const metric = taskOutcomes.get(outcome.tool) || { total: 0, failed: 0 };
+        if (!["queued", "running"].includes(outcome.status)) metric.total += outcome.count;
+        if (["failed", "cancelled", "missing"].includes(outcome.status)) metric.failed += outcome.count;
+        taskOutcomes.set(outcome.tool, metric);
+    }
+    for (const [tool, metric] of taskOutcomes) {
+        if (metric.total >= 3 && metric.failed / metric.total >= 0.2) diagnostics.push({ severity: "warning", code: "TASK_OUTCOME_HOTSPOT", title: `${tool} 后续任务失败率偏高`, detail: `${metric.total} 个已结束任务中有 ${metric.failed} 个失败、取消或丢失；工具调用成功不代表生成结果成功，应优先检查执行器和任务回写。`, tool });
+    }
+    if (input.recoverySuggested >= 3 && input.recoverySucceeded / input.recoverySuggested < 0.5) diagnostics.push({ severity: "warning", code: "LOW_RECOVERY_RATE", title: "恢复建议命中率偏低", detail: `${input.recoverySuggested} 次恢复建议仅成功 ${input.recoverySucceeded} 次，应调整 suggestedAction 或工具参数说明。` });
+    if (!diagnostics.length) diagnostics.push({ severity: "success", code: "HEALTHY", title: "当前 MCP 调用健康", detail: `已完成 ${input.completed} 次调用，未发现明显失败热点、未闭合调用或高尾延迟。` });
+    return diagnostics;
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> {

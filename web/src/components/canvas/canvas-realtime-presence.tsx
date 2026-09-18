@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import { create } from "zustand";
 import { MousePointer2 } from "lucide-react";
 import { connectCanvasRealtime, type CanvasPeer } from "@/services/api/canvas-realtime";
@@ -21,6 +21,8 @@ export function useCanvasRealtimePresence(projectId: string, selectedNodeIds: Se
     const token = useBackendStore((state) => state.token);
     const connection = useRef<ReturnType<typeof connectCanvasRealtime> | null>(null);
     const selectedRef = useRef<string[]>([]);
+    const pendingCursorRef = useRef<Position | undefined>(undefined);
+    const cursorFrameRef = useRef<number | null>(null);
     useEffect(() => {
         if (!projectId || !token) return;
         let membership = "";
@@ -35,6 +37,11 @@ export function useCanvasRealtimePresence(projectId: string, selectedNodeIds: Se
         connection.current = session;
         session.update({ selectedNodeIds: selectedRef.current });
         return () => {
+            if (cursorFrameRef.current !== null) {
+                cancelAnimationFrame(cursorFrameRef.current);
+                cursorFrameRef.current = null;
+            }
+            pendingCursorRef.current = undefined;
             if (connection.current === session) connection.current = null;
             session.close();
         };
@@ -43,17 +50,23 @@ export function useCanvasRealtimePresence(projectId: string, selectedNodeIds: Se
         selectedRef.current = [...selectedNodeIds];
         connection.current?.update({ selectedNodeIds: selectedRef.current });
     }, [selectedNodeIds]);
-    const publishCursor = useCallback((cursor?: Position) => connection.current?.update({ cursor }), []);
+    const publishCursor = useCallback((cursor?: Position) => {
+        pendingCursorRef.current = cursor;
+        if (cursorFrameRef.current !== null) return;
+        cursorFrameRef.current = requestAnimationFrame(() => {
+            cursorFrameRef.current = null;
+            connection.current?.update({ cursor: pendingCursorRef.current });
+        });
+    }, []);
     const publishDrag = useCallback((positions: Map<string, Position>) => connection.current?.update({ drag: [...positions].map(([nodeId, position]) => ({ nodeId, position })) }), []);
     return { publishCursor, publishDrag };
 }
 
-export function CanvasRealtimePresenceLayer({ projectId, nodes, viewport }: { projectId: string; nodes: CanvasNodeData[]; viewport: ViewportTransform }) {
+export const CanvasRealtimePresenceLayer = memo(function CanvasRealtimePresenceLayer({ projectId, nodeById, viewport }: { projectId: string; nodeById: ReadonlyMap<string, CanvasNodeData>; viewport: ViewportTransform }) {
     const peers = usePresence((state) => state.peers[projectId] || emptyPeers);
     const error = usePresence((state) => state.errors[projectId] || "");
     const layer = useRef<HTMLDivElement>(null);
-    const latestViewport = useRef(viewport);
-    latestViewport.current = viewport;
+    const initialViewport = useRef(viewport);
     useEffect(() => {
         const write = (next: ViewportTransform) => {
             if (!layer.current) return;
@@ -61,22 +74,26 @@ export function CanvasRealtimePresenceLayer({ projectId, nodes, viewport }: { pr
             layer.current.style.setProperty("--inverse-scale", String(1 / next.k));
         };
         viewportWriters.set(projectId, write);
-        write(latestViewport.current);
+        write(initialViewport.current);
         return () => { if (viewportWriters.get(projectId) === write) viewportWriters.delete(projectId); };
     }, [projectId]);
-    useEffect(() => { writeCanvasPresenceViewport(projectId, viewport); }, [projectId, viewport]);
     const ownId = getCanvasCollaborationClient().clientId;
-    const nodesById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+    const remotePeers = useMemo(() => peers
+        .filter((peer) => peer.clientId !== ownId)
+        .map((peer) => ({
+            peer,
+            dragByNodeId: new Map((peer.drag || []).map((item) => [item.nodeId, item.position])),
+        })), [ownId, peers]);
     return (
         <div className="pointer-events-none absolute inset-0 z-40 overflow-hidden">
             {error ? <div className="absolute bottom-24 left-4 text-xs text-amber-600 dark:text-amber-400" role="status">{error}</div> : null}
             <div ref={layer} className="absolute inset-0 origin-top-left" aria-hidden>
-                {peers.filter((peer) => peer.clientId !== ownId).map((peer) => (
+                {remotePeers.map(({ peer, dragByNodeId }) => (
                     <div key={peer.connectionId}>
                         {peer.selectedNodeIds.map((id) => {
-                            const node = nodesById.get(id);
+                            const node = nodeById.get(id);
                             if (!node) return null;
-                            const position = peer.drag?.find((item) => item.nodeId === id)?.position || node.position;
+                            const position = dragByNodeId.get(id) || node.position;
                             return <div key={id} className="absolute rounded-lg border-solid" style={{ left: position.x, top: position.y, width: node.width, height: node.height, borderWidth: "calc(2px * var(--inverse-scale))", borderColor: peer.color }} />;
                         })}
                         {peer.cursor ? <div className="absolute flex origin-top-left items-start" style={{ left: peer.cursor.x, top: peer.cursor.y, transform: "scale(var(--inverse-scale))", color: peer.color }}>
@@ -88,4 +105,4 @@ export function CanvasRealtimePresenceLayer({ projectId, nodes, viewport }: { pr
             </div>
         </div>
     );
-}
+}, (previous, next) => previous.projectId === next.projectId && previous.nodeById === next.nodeById);

@@ -19,6 +19,7 @@ export enum CanvasNodeType {
     Config = "config",
     Video = "video",
     Audio = "audio",
+    Loop = "loop",
     Group = "group",
     /** 角色节点：承载一个角色资产（多张参考图 + outfit），可作为下游参考节点。 */
     Character = "character",
@@ -53,6 +54,8 @@ export type CanvasNodeText = {
 export type CanvasNodeMetadata = {
     content?: string;
     composerContent?: string;
+    /** 新建的智能生成节点把提示词、参数和结果收在同一个 Config 节点里。 */
+    smart?: boolean;
     prompt?: string;
     status?: CanvasNodeStatus;
     errorDetails?: string;
@@ -105,9 +108,21 @@ export type CanvasNodeMetadata = {
     characterPrimaryIndex?: number;
     // 拖入角色节点的声线（音频）：从音频节点/音频资产/音频文件拖入后记录，存入资产库映射到 CharacterAsset.voice*。
     characterVoiceName?: string;
+    characterVoiceDescription?: string;
     characterVoiceUrl?: string;
     characterVoiceStorageKey?: string;
     characterVoiceAssetId?: string;
+    /** 角色节点作为某个生成节点参考输入时的选择快照；未记录时默认使用全部图片与声线。 */
+    characterReferences?: Record<string, { imageKeys?: string[]; voiceEnabled?: boolean }>;
+    loopCount?: number;
+    loopMode?: "serial" | "parallel";
+    loopPromptEnabled?: boolean;
+    loopImageEnabled?: boolean;
+    loopVideoEnabled?: boolean;
+    loopStart?: number;
+    loopImageBatchSize?: number;
+    loopVideoBatchSize?: number;
+    loopPrompt?: string;
 };
 
 export type CanvasNodeData = {

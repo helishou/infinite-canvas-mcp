@@ -2,8 +2,8 @@ import { useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useParams } from "react-router-dom";
 import { getCanvasTextSession } from "@/services/api/canvas-text";
 import type { CanvasTextEditorHandle, CanvasTextTarget } from "@/types/canvas-plugin";
-import { ArrowUp, LoaderCircle, Maximize2, Square } from "lucide-react";
-import { Button, Modal, Tooltip } from "antd";
+import { ArrowUp, Image as ImageIcon, LoaderCircle, Maximize2, MessageSquare, Music2, Square, Video } from "lucide-react";
+import { Button, Modal, Segmented, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -17,7 +17,7 @@ import { CanvasCollaborativeText } from "./canvas-collaborative-text";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
 import { CanvasTextSettingsPopover } from "./canvas-text-settings-popover";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
-import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import type { CanvasCharacterReferenceSelection, CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { CanvasNodeReferenceBar } from "./canvas-node-reference-bar";
 
 export type CanvasNodeGenerationMode = CanvasGenerationMode;
@@ -33,22 +33,24 @@ type CanvasNodePromptPanelProps = {
     connectedNodes?: CanvasNodeData[];
     onDisconnectReference?: (fromNodeId: string, toNodeId: string) => void;
     onStartReferenceSelection?: (nodeId: string) => void;
+    onCharacterReferenceChange?: (sourceNodeId: string, selection: CanvasCharacterReferenceSelection) => void;
     onImageSettingsOpenChange?: (open: boolean) => void;
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], onDisconnectReference, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], onDisconnectReference, onStartReferenceSelection, onCharacterReferenceChange, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const mode = modeOverride ?? defaultMode(node.type);
+    const isSmartGenerationNode = node.type === CanvasNodeType.Config && node.metadata?.smart === true;
+    const mode = modeOverride ?? (isSmartGenerationNode ? node.metadata?.generationMode || "image" : defaultMode(node.type));
     const config = buildNodeConfig(globalConfig, node, mode);
-    const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
-    const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
+    const hasTextContent = (node.type === CanvasNodeType.Text || (isSmartGenerationNode && mode === "text")) && Boolean(node.metadata?.content?.trim());
+    const hasImageContent = (node.type === CanvasNodeType.Image || (isSmartGenerationNode && mode === "image")) && Boolean(node.metadata?.content);
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const { id: projectId = "" } = useParams();
-    const field = isEditingExistingContent ? "composerContent" : "prompt";
+    const field = node.type === CanvasNodeType.Config || isEditingExistingContent ? "composerContent" : "prompt";
     const target = useMemo<CanvasTextTarget>(() => ({ nodeId: node.id, field }), [node.id, field]);
     const session = useMemo(() => getCanvasTextSession(projectId, target), [projectId, target]);
     const textStatus = useSyncExternalStore(session.subscribe, session.getSnapshot);
@@ -80,9 +82,26 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
             style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
         >
-            <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} onDisconnect={onDisconnectReference} onStartSelection={onStartReferenceSelection} />
+            <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} onDisconnect={onDisconnectReference} onStartSelection={onStartReferenceSelection} onCharacterSelectionChange={onCharacterReferenceChange} />
+            {isSmartGenerationNode ? (
+                <Segmented
+                    className="mb-2 w-full"
+                    size="small"
+                    block
+                    disabled={isRunning}
+                    value={mode}
+                    onChange={(value) => onConfigChange(node.id, { generationMode: value as CanvasGenerationMode })}
+                    options={[
+                        { value: "image", label: <span className="inline-flex items-center gap-1"><ImageIcon className="size-3.5" />{t("canvas.configNode.image")}</span> },
+                        { value: "video", label: <span className="inline-flex items-center gap-1"><Video className="size-3.5" />{t("canvas.configNode.video")}</span> },
+                        { value: "audio", label: <span className="inline-flex items-center gap-1"><Music2 className="size-3.5" />{t("canvas.configNode.audio")}</span> },
+                        { value: "text", label: <span className="inline-flex items-center gap-1"><MessageSquare className="size-3.5" />{t("canvas.configNode.text")}</span> },
+                    ]}
+                />
+            ) : null}
             <CanvasCollaborativeText
                 projectId={projectId} target={target} chips
                 references={mentionReferences}
@@ -155,7 +174,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
             </div>
             <Modal title={t("canvas.promptPanel.editorTitle")} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
-                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
+                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} onCharacterSelectionChange={onCharacterReferenceChange} />
                     <CanvasCollaborativeText
                         projectId={projectId} target={target} chips
                         references={mentionReferences}

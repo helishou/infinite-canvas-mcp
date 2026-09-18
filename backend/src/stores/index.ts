@@ -3,6 +3,7 @@ import type { Stores } from "./types.js";
 import { createAssetStore } from "./asset-store.js";
 import { createLogStore } from "./log-store.js";
 import { createMediaStore } from "./media-store.js";
+import { createMcpObservabilityStore } from "./mcp-observability-store.js";
 import { createProjectStore } from "./project-store.js";
 import { createSettingStore } from "./setting-store.js";
 import { createTaskStore } from "./task-store.js";
@@ -15,11 +16,13 @@ export function createStores(db: BackendDatabase): Stores {
             list: () => db.listCanvasFolders(),
             upsert: (folder: CanvasFolder) => db.upsertCanvasFolder(folder),
             delete: (id: string) => db.deleteCanvasFolder(id),
+            deleteDrama: (id: string) => db.deleteDramaProject(id),
         },
         assets: createAssetStore(db),
         media: createMediaStore(db),
         tasks: createTaskStore(db),
         logs: createLogStore(db),
+        mcpObservability: createMcpObservabilityStore(db),
         settings: createSettingStore(db),
     };
 }

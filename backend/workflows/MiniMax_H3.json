@@ -146,7 +146,7 @@
   },
   "127": {
     "inputs": {
-      "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "unet_name": "h3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
       "weight_dtype": "default"
     },
     "class_type": "UNETLoader",
@@ -179,6 +179,7 @@
       "fps": 24,
       "bit_depth": 8,
       "color_space": "sRGB",
+      "codec": "none",
       "images": [
         "122",
         0
@@ -291,4 +292,3 @@
     }
   }
 }
-

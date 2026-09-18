@@ -7,6 +7,7 @@ export function refsForSegment(segment: H3Segment) {
             url: binding.url || "", type: binding.mediaType || inferRefType(binding.mimeType || binding.url || binding.label), name: binding.label,
             storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId, role: binding.role,
             subjectId: binding.subjectId, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, enabled: binding.enabled, usage: binding.usage,
+            groupId: binding.groupId, outfitId: binding.outfitId,
         } as H3Ref));
     }
     const buckets = segment.refs;
@@ -50,7 +51,7 @@ export function inferReferenceRole(ref: Pick<H3Ref, "name" | "role" | "type">): 
 }
 
 function refToBinding(ref: H3Ref): H3ReferenceBinding {
-    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], enabled: ref.enabled !== false, usage: ref.usage || "reference", subjectId: ref.subjectId, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId };
+    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], enabled: ref.enabled !== false, usage: ref.usage || "reference", subjectId: ref.subjectId, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId, groupId: ref.groupId, outfitId: ref.outfitId };
 }
 
 function ensureReferenceIdentity(ref: H3Ref, index: number): H3Ref {
@@ -94,6 +95,33 @@ export function findCharacterGroupBySource(segment: H3Segment, source: { charact
         (source.characterAssetId && group.characterAssetId === source.characterAssetId)
         || (source.characterNodeId && group.characterNodeId === source.characterNodeId)
     ));
+}
+
+function characterGroupCapacity(segment: H3Segment, groupId?: string) {
+    const rawMode = String(segment.mode || segment.taskMode || "ref2va");
+    const mode = rawMode === "t2v" || rawMode === "i2v" || rawMode === "fl2v" ? rawMode : "ref2va";
+    const imageLimit = mode === "t2v" ? 0 : mode === "i2v" ? 1 : mode === "fl2v" ? 2 : 9;
+    const audioLimit = mode === "ref2va" ? 3 : 0;
+    const currentRefs = segment.refItems?.length ? segment.refItems : refsForSegment(segment);
+    const otherRefs = currentRefs.filter((ref) => !groupId || ref.groupId !== groupId);
+    return {
+        images: Math.max(0, imageLimit - otherRefs.filter((ref) => ref.type === "image").length),
+        voice: otherRefs.filter((ref) => ref.type === "audio").length < audioLimit,
+    };
+}
+
+function fitCharacterGroupToCapacity(segment: H3Segment, group: H3CharacterGroup): H3CharacterGroup {
+    const capacity = characterGroupCapacity(segment, group.id);
+    let imagesLeft = capacity.images;
+    return {
+        ...group,
+        outfits: group.outfits.map((outfit) => {
+            if (!outfit.enabled || imagesLeft <= 0) return { ...outfit, enabled: false };
+            imagesLeft -= 1;
+            return outfit;
+        }),
+        voiceEnabled: Boolean(group.voice) && group.voiceEnabled && capacity.voice,
+    };
 }
 
 /** 从一个角色组派生当前应在 ref 槽里的 refs：每张 enabled outfit 拆为 image ref，voiceEnabled 时 voice 拆为 audio ref。 */
@@ -177,16 +205,20 @@ export function upsertCharacterGroup(segment: H3Segment, input: {
                 enabled: prev ? prev.enabled : true,
             };
         });
-        groups[existing.id] = {
+        const nextVoice = input.voice || existing.voice;
+        const nextGroup = fitCharacterGroupToCapacity(segment, {
             ...existing,
             characterName: input.characterName || existing.characterName,
-            voice: input.voice || existing.voice,
+            voice: nextVoice,
             outfits: nextOutfits,
-        };
+            voiceEnabled: nextVoice ? (existing.voice ? existing.voiceEnabled : (input.defaultVoiceEnabled ?? true)) : false,
+        });
+        if (!nextGroup.outfits.some((outfit) => outfit.enabled)) return segment;
+        groups[existing.id] = nextGroup;
         return setSegmentCharacterGroups(segment, groups);
     }
     const id = genGroupId();
-    groups[id] = {
+    const nextGroup = fitCharacterGroupToCapacity(segment, {
         id,
         characterName: input.characterName,
         characterAssetId: input.characterAssetId,
@@ -201,7 +233,9 @@ export function upsertCharacterGroup(segment: H3Segment, input: {
             enabled: true,
         })),
         voiceEnabled: input.voice ? (input.defaultVoiceEnabled ?? true) : false,
-    };
+    });
+    if (!nextGroup.outfits.some((outfit) => outfit.enabled)) return segment;
+    groups[id] = nextGroup;
     return setSegmentCharacterGroups(segment, groups);
 }
 
@@ -216,14 +250,14 @@ export function removeCharacterGroup(segment: H3Segment, groupId: string): H3Seg
 export function applyCharacterGroupEdits(segment: H3Segment, groupId: string, patch: { outfitEnabled?: Record<string, boolean>; voiceEnabled?: boolean }): H3Segment {
     const group = segment.h3CharacterGroups?.[groupId];
     if (!group) return segment;
-    const nextGroup: H3CharacterGroup = {
+    const nextGroup = fitCharacterGroupToCapacity(segment, {
         ...group,
         outfits: patch.outfitEnabled ? group.outfits.map((outfit) => ({
             ...outfit,
             enabled: patch.outfitEnabled![outfit.id] ?? outfit.enabled,
         })) : group.outfits,
         voiceEnabled: patch.voiceEnabled ?? group.voiceEnabled,
-    };
+    });
     // 全部 outfit 都关了 → 直接删组
     if (!nextGroup.outfits.some((outfit) => outfit.enabled)) {
         return removeCharacterGroup(segment, groupId);

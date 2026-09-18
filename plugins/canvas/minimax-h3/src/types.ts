@@ -1,6 +1,6 @@
 export type H3ReferenceRole = "character_identity" | "character_turnaround" | "storyboard" | "scene" | "blocking" | "keyframe" | "motion_reference" | "audio_reference" | "character_voice" | "style" | "palette" | "prop" | "other";
 export type H3ReferenceUsage = "reference" | "first_frame" | "last_frame";
-export type H3ReferenceBinding = { id: string; assetId: string; label: string; role: H3ReferenceRole; tags: string[]; enabled: boolean; usage: H3ReferenceUsage; subjectId?: string; mediaType?: "image" | "video" | "audio"; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string };
+export type H3ReferenceBinding = { id: string; assetId: string; label: string; role: H3ReferenceRole; tags: string[]; enabled: boolean; usage: H3ReferenceUsage; subjectId?: string; mediaType?: "image" | "video" | "audio"; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string; groupId?: string; outfitId?: string };
 
 export type H3CharacterOutfit = {
     id: string;
@@ -14,6 +14,7 @@ export type H3CharacterOutfit = {
 export type H3CharacterVoice = {
     url: string;
     name: string;
+    description?: string;
     storageKey?: string;
     assetId?: string;
 };

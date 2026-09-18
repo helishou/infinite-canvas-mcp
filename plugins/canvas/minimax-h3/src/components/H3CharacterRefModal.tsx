@@ -58,7 +58,10 @@ export function H3CharacterRefModal({
             </div>
             {group.voice ? <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 10, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
                 <span style={{ fontSize: 13 }}>声线</span>
-                <span style={{ flex: 1, fontSize: 12, opacity: 0.7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.voice.name}</span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 12, opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.voice.name}</span>
+                    {group.voice.description ? <span style={{ display: "block", marginTop: 2, fontSize: 11, opacity: 0.55 }}>{group.voice.description}</span> : null}
+                </span>
                 <Switch checked={voiceEnabled} onChange={setVoiceEnabled} />
             </div> : null}
             <div style={{ display: "flex", justifyContent: "flex-end" }}>

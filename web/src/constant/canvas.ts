@@ -13,9 +13,10 @@ type CanvasNodeSpec = {
 export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Image]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.image"); } },
     [CanvasNodeType.Text]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.text"); } },
-    [CanvasNodeType.Config]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.config"); } },
+    [CanvasNodeType.Config]: { width: 420, height: 540, get title() { return i18n.t("canvas.nodeTypes.config"); } },
     [CanvasNodeType.Video]: { width: 420, height: 236, get title() { return i18n.t("canvas.nodeTypes.video"); } },
     [CanvasNodeType.Audio]: { width: 340, height: 120, get title() { return i18n.t("canvas.nodeTypes.audio"); } },
+    [CanvasNodeType.Loop]: { width: 380, height: 320, get title() { return i18n.t("canvas.nodeTypes.loop"); } },
     [CanvasNodeType.Group]: { width: 760, height: 480, get title() { return i18n.t("canvas.nodeTypes.group"); } },
     [CanvasNodeType.Character]: { width: 380, height: 320, get title() { return i18n.t("canvas.nodeTypes.character"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
@@ -30,8 +31,8 @@ export const NODE_SPECS = {
         metadata: { content: "", status: "idle", fontSize: 14 },
     },
     [CanvasNodeType.Config]: {
-        width: 340, height: 240, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Config].title; },
-        metadata: { content: "", status: "idle", generationMode: "image" },
+        width: 420, height: 540, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Config].title; },
+        metadata: { content: "", status: "idle", generationMode: "image", smart: true },
     },
     [CanvasNodeType.Video]: {
         width: 420, height: 236, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Video].title; },
@@ -40,6 +41,10 @@ export const NODE_SPECS = {
     [CanvasNodeType.Audio]: {
         width: 340, height: 120, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Audio].title; },
         metadata: { content: "", status: "idle" },
+    },
+    [CanvasNodeType.Loop]: {
+        width: 380, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Loop].title; },
+        metadata: { status: "idle", loopCount: 3, loopMode: "serial", loopPromptEnabled: false, loopImageEnabled: false, loopVideoEnabled: false, loopStart: 1, loopImageBatchSize: 1, loopVideoBatchSize: 1, loopPrompt: "" },
     },
     [CanvasNodeType.Group]: {
         width: 760, height: 480, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Group].title; },

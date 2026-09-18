@@ -76,13 +76,19 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const id = String(operation.id || `${String(operation.nodeType || "node")}-${crypto.randomUUID()}`);
             operation.id = id;
             if (nodes.some((node) => String(node.id) === id)) throw new Error(`节点已存在：${id}`);
+            const width = Number(operation.width || 320);
+            const height = Number(operation.height || 240);
+            const hasExplicitPosition = operation.position !== undefined || operation.x !== undefined || operation.y !== undefined;
+            const position = hasExplicitPosition
+                ? operation.position || { x: Number(operation.x || 0), y: Number(operation.y || 0) }
+                : nextUntakenNodePosition(nodes);
             nodes.push({
                 id,
                 type: String(operation.nodeType || "text"),
                 title: String(operation.title || ""),
-                position: operation.position || { x: Number(operation.x || 0), y: Number(operation.y || 0) },
-                width: Number(operation.width || 320),
-                height: Number(operation.height || 240),
+                position,
+                width,
+                height,
                 metadata: operation.metadata || {},
             });
             result.createdNodeIds = [id];
@@ -299,4 +305,20 @@ function sameValue(left: unknown, right: unknown) {
         try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
     }
     return String(left ?? "") === String(right ?? "");
+}
+
+/**
+ * Raw canvas_apply_ops callers may omit position. Never put several such nodes
+ * at (0,0): the operation list is applied sequentially, so a rightward slot
+ * chosen from the current nodes also spaces nodes created in the same batch.
+ */
+function nextUntakenNodePosition(nodes: Array<Record<string, unknown>>) {
+    const gap = 96;
+    const validNodes = nodes.filter((node) => node.position && typeof node.position === "object");
+    if (!validNodes.length) return { x: 0, y: 0 };
+    const right = Math.max(...validNodes.map((node) => {
+        const position = recordOf(node.position);
+        return Number(position.x || 0) + Number(node.width || 320);
+    }));
+    return { x: right + gap, y: 0 };
 }

@@ -17,6 +17,14 @@ type RunResult = {
     status: { status_str: string; completed: boolean };
 };
 
+function workflowRequestError(action: string, url: string, error: unknown) {
+    const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
+    const hint = /fetch failed|failed to fetch|networkerror|econnrefused|enotfound|etimedout|socket/i.test(reason)
+        ? "请确认 ComfyUI 已启动、地址可访问，且端口没有被防火墙拦截"
+        : "请检查 ComfyUI 返回的错误和当前工作流配置";
+    return new Error(`${action}失败：${url}（${reason}）。${hint}。`);
+}
+
 
 /**
  * 将用户字段值转换为 {node_id: {input_name: value}} 格式
@@ -357,11 +365,13 @@ async function uploadDataUrlToComfy(
     form.set("image", new Blob([blob], { type: mimeType }), filename);
     form.set("overwrite", "true");
 
-    const response = await fetch(`${comfyUrl.replace(/\/$/, "")}/upload/image`, {
-        method: "POST",
-        body: form,
-        signal,
-    });
+    const endpoint = `${comfyUrl.replace(/\/$/, "")}/upload/image`;
+    let response: Response;
+    try {
+        response = await fetch(endpoint, { method: "POST", body: form, signal });
+    } catch (error) {
+        throw workflowRequestError("上传参考图片到 ComfyUI", endpoint, error);
+    }
     if (!response.ok) {
         const text = await response.text().catch(() => "");
         throw new Error(`ComfyUI upload failed: HTTP ${response.status} ${text.slice(0, 200)}`);
@@ -404,7 +414,12 @@ async function processMediaFields(
                 const backendBase = `http://127.0.0.1:${process.env.PORT || 17370}`;
                 url = `${backendBase}${value}`;
             }
-            const resp = await fetch(url, { signal });
+            let resp: Response;
+            try {
+                resp = await fetch(url, { signal });
+            } catch (error) {
+                throw workflowRequestError(`读取字段「${field.name || field.id}」的${mediaKind}`, url, error);
+            }
             if (!resp.ok) throw new Error(`为字段 ${field.id} 拉取${mediaKind}失败: HTTP ${resp.status}`);
             const blob = await resp.blob();
             const ext = blob.type.split("/")[1]?.split(";")[0] || (mediaKind === "音频" ? "wav" : mediaKind === "视频" ? "mp4" : "png");
@@ -412,11 +427,13 @@ async function processMediaFields(
             const form = new FormData();
             form.set("image", blob, filename);
             form.set("overwrite", "true");
-            const uploadResp = await fetch(`${comfyUrl.replace(/\/$/, "")}/upload/image`, {
-                method: "POST",
-                body: form,
-                signal,
-            });
+            const uploadEndpoint = `${comfyUrl.replace(/\/$/, "")}/upload/image`;
+            let uploadResp: Response;
+            try {
+                uploadResp = await fetch(uploadEndpoint, { method: "POST", body: form, signal });
+            } catch (error) {
+                throw workflowRequestError(`上传字段「${field.name || field.id}」到 ComfyUI`, uploadEndpoint, error);
+            }
             if (!uploadResp.ok) {
                 const text = await uploadResp.text().catch(() => "");
                 throw new Error(`ComfyUI 上传失败: HTTP ${uploadResp.status} ${text.slice(0, 200)}`);
@@ -427,6 +444,19 @@ async function processMediaFields(
         }
     }
     return result;
+}
+
+export function applyWorkflowFieldDefaults(
+    fields: WorkflowField[],
+    values: FieldValues,
+): FieldValues {
+    const merged: FieldValues = {};
+    for (const field of fields || []) {
+        if (field.default !== undefined) merged[field.id] = field.default;
+    }
+    // Explicit values, including false/0/null, are intentional overrides.
+    Object.assign(merged, values || {});
+    return merged;
 }
 
 export class WorkflowExecutor {
@@ -454,16 +484,17 @@ export class WorkflowExecutor {
     ): Promise<RunResult> {
         const controller = new AbortController();
         const url = comfyUrl ?? this.bridge.getUrl();
+        const effectiveFieldValues = applyWorkflowFieldDefaults(config.fields || [], fieldValues);
         for (const field of config.fields || []) {
-            const value = fieldValues[field.id];
+            const value = effectiveFieldValues[field.id];
             if (field.required === true && !isMediaField(field, workflowJson) && (value === undefined || value === null || value === "")) {
                 throw new Error(`工作流缺少必填字段：${field.name || field.id}`);
             }
         }
         // 先处理媒体字段：上传 dataURL → 获取 ComfyUI input 文件名
-        const processedValues = await processMediaFields(config.fields, workflowJson, fieldValues, url, controller.signal);
+        const processedValues = await processMediaFields(config.fields, workflowJson, effectiveFieldValues, url, controller.signal);
         const promptText = buildPrompt(config.fields, processedValues) || config.title;
-        const persistedFieldValues = redactInlineMedia(fieldValues);
+        const persistedFieldValues = redactInlineMedia(effectiveFieldValues);
         // 处理 seed=-1 随机化
         for (const field of config.fields || []) {
             if ((field.id === "seed" || field.id === "noise_seed") && processedValues[field.id] === -1) {
@@ -638,12 +669,18 @@ export class WorkflowExecutor {
                 } catch {}
             }
 
-            const response = await fetch(`${comfyUrl}/prompt`, {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ prompt: workflow, client_id: task.id }),
-                signal: controller.signal,
-            });
+            const promptEndpoint = `${comfyUrl}/prompt`;
+            let response: Response;
+            try {
+                response = await fetch(promptEndpoint, {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ prompt: workflow, client_id: task.id }),
+                    signal: controller.signal,
+                });
+            } catch (error) {
+                throw workflowRequestError("提交 ComfyUI 工作流", promptEndpoint, error);
+            }
             if (!response.ok) {
                 const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000);
                 throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`);
@@ -674,7 +711,13 @@ export class WorkflowExecutor {
 
                 if (wsClosed) throw new Error("WebSocket 已关闭但未收到 executed");
 
-                const historyRes = await fetch(`${comfyUrl}/history/${encodeURIComponent(promptId)}`, { signal: controller.signal });
+                const historyEndpoint = `${comfyUrl}/history/${encodeURIComponent(promptId)}`;
+                let historyRes: Response;
+                try {
+                    historyRes = await fetch(historyEndpoint, { signal: controller.signal });
+                } catch (error) {
+                    throw workflowRequestError("查询 ComfyUI 任务状态", historyEndpoint, error);
+                }
                 if (historyRes.ok) {
                     const history = await historyRes.json() as Record<string, any>;
                     const item = history[promptId];

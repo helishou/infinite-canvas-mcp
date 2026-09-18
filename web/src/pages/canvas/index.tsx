@@ -60,6 +60,11 @@ export default function CanvasPage() {
         if (next?.trim()) renameFolder(id, next);
     };
     const removeFolder = (id: string) => {
+        const folder = folders.find((item) => item.id === id);
+        if (folder?.isDrama) {
+            message.warning("这是短剧项目，请到短剧制作台删除，避免误删剧目资料");
+            return;
+        }
         if (!window.confirm(t("canvas.folder.deleteDescription"))) return;
         deleteFolder(id);
         if (folderFilter === id) setFolderFilter(null);

@@ -6,7 +6,7 @@ import i18n from "@/i18n";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { normalizeViewportTransform } from "@/lib/canvas/canvas-viewport";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
-import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, createBackendProject, deleteBackendCanvasFolder, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder } from "@/services/backend-api";
+import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, createBackendProject, deleteBackendCanvasFolder, deleteBackendDramaProject, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId } from "@/services/backend-api";
 import { CanvasCommandQueue, type CanvasCommand } from "@/lib/canvas/canvas-command-queue";
@@ -75,10 +75,11 @@ type CanvasStore = {
     adoptRemoteOnCanvasConflict: (id: string) => Promise<void>;
     createProject: (title?: string) => string;
     importProject: (project: Partial<CanvasProject>) => string;
-    createFolder: (name?: string) => string;
+    createFolder: (name?: string, isDrama?: boolean) => string;
     renameFolder: (id: string, name: string) => void;
     updateFolder: (id: string, patch: Partial<Pick<CanvasFolder, "name" | "outline" | "description" | "coverStorageKey" | "tags">>) => void;
     deleteFolder: (id: string) => void;
+    deleteDramaProject: (id: string) => void;
     moveProjectsToFolder: (ids: string[], folderId: string | null) => void;
     replaceFolders: (folders: CanvasFolder[]) => void;
     openProject: (id: string) => CanvasProject | null;
@@ -90,7 +91,7 @@ type CanvasStore = {
 
 export type CanvasFolder = {
     id: string; name: string; createdAt: string; updatedAt?: string;
-    outline?: string; description?: string; coverStorageKey?: string | null; tags?: string[];
+    outline?: string; description?: string; coverStorageKey?: string | null; tags?: string[]; isDrama?: boolean;
 };
 
 const projectCache = localforage.createInstance({ name: "infinite-canvas-project-cache" });
@@ -156,12 +157,8 @@ function persistDeletedProjectIds() {
 
 async function syncCanvasFolders(folders: CanvasFolder[]) {
     if (!useBackendStore.getState().connected) return;
-    const folderIds = new Set(folders.map((folder) => folder.id));
-    await Promise.all([
-        ...folders.map((folder) => upsertBackendCanvasFolder(folder as unknown as Record<string, unknown>)),
-        ...[...knownCanvasFolderIds].filter((id) => !folderIds.has(id)).map((id) => deleteBackendCanvasFolder(id)),
-    ]);
-    knownCanvasFolderIds = folderIds;
+    await Promise.all(folders.map((folder) => upsertBackendCanvasFolder(folder as unknown as Record<string, unknown>)));
+    knownCanvasFolderIds = new Set(folders.map((folder) => folder.id));
 }
 
 function scheduleCanvasFolderSync() {
@@ -578,9 +575,9 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         void importLegacyGenerationLogs(project.id, (source as Partial<CanvasProject> & { logs?: unknown[] }).logs);
         return project.id;
     },
-    createFolder: (name = "新文件夹") => {
+    createFolder: (name = "新文件夹", isDrama = false) => {
         const now = new Date().toISOString();
-        const folder = { id: nanoid(), name: name.trim() || "新文件夹", createdAt: now, updatedAt: now, outline: "", description: "", coverStorageKey: null, tags: [] };
+        const folder = { id: nanoid(), name: name.trim() || "新文件夹", createdAt: now, updatedAt: now, outline: "", description: "", coverStorageKey: null, tags: [], isDrama };
         set((state) => ({ folders: [...state.folders, folder] }));
         scheduleCanvasFolderSync();
         return folder.id;
@@ -602,6 +599,20 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
             projects: state.projects.map((project) => project.folderId === id ? { ...project, folderId: null, updatedAt: new Date().toISOString() } : project),
         }));
         persistCurrentCanvasSnapshot();
+        knownCanvasFolderIds.delete(id);
+        void deleteBackendCanvasFolder(id).catch((error) => console.error("画布文件夹删除失败", error));
+        scheduleCanvasFolderSync();
+        scheduleCanvasSync();
+    },
+    deleteDramaProject: (id) => {
+        for (const project of get().projects) if (project.folderId === id) captureCanvasAction(project, { ...project, folderId: null });
+        set((state) => ({
+            folders: state.folders.filter((folder) => folder.id !== id),
+            projects: state.projects.map((project) => project.folderId === id ? { ...project, folderId: null, updatedAt: new Date().toISOString() } : project),
+        }));
+        persistCurrentCanvasSnapshot();
+        knownCanvasFolderIds.delete(id);
+        void deleteBackendDramaProject(id).catch((error) => console.error("短剧项目删除失败", error));
         scheduleCanvasFolderSync();
         scheduleCanvasSync();
     },

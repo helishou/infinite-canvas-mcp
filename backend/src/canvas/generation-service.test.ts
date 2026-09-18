@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { BackendDatabase } from "../db.js";
+import { createStores } from "../stores/index.js";
 import { CanvasGenerationService } from "./generation-service.js";
 
 function serviceWith(overrides: { image?: Record<string, unknown>; h3?: Record<string, unknown>; comfy?: Record<string, unknown>; stores?: Record<string, unknown>; video?: Record<string, unknown>; browser?: Record<string, unknown> } = {}) {
@@ -188,4 +190,27 @@ test("普通视频命令进入 Backend 视频父任务并按画布图谱解析�
     assert.equal(result.task, task);
     assert.equal(received?.clientTaskId, "video-key");
     assert.deepEqual((received?.references as Array<{ id: string }>).map((reference) => reference.id), ["scene"]);
+});
+
+test("画布图谱没有参考图时保留视频命令里的显式图片", async (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "smart", type: "config", metadata: { smart: true } }], connections: [] });
+    const stores = createStores(db);
+    let received: Record<string, unknown> | undefined;
+    const service = serviceWith({
+        stores,
+        video: { start: (input: Record<string, unknown>) => { received = input; return { taskId: "video-task", executor: "workflow" }; } },
+    });
+
+    await service.start({
+        mode: "video",
+        projectId: "p",
+        nodeId: "smart",
+        model: "local::MiniMax_H3",
+        prompt: "让画面动起来",
+        references: [{ id: "ref", name: "reference.png", dataUrl: "data:image/png;base64,aGVsbG8=" }],
+    });
+
+    assert.equal((received?.references as Array<Record<string, unknown>>)[0].id, "ref");
 });

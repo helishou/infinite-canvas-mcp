@@ -838,7 +838,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 const context = canvasContextRef.current;
                 if (!context) throw new Error(rt("openCanvasFirst"));
                 result = context.applyOps(appliedOps);
-                void postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
+                // 等待最新快照写回请求完成，再返回工具结果；否则连续 MCP 生成会用到上一轮位置。
+                await postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
             } else if (payload.name === "canvas_create_attachment_nodes") {
                 const context = canvasContextRef.current;
                 if (!context) throw new Error(rt("openCanvasFirst"));

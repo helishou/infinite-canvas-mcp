@@ -114,7 +114,7 @@ export class CanvasAudioDispatcher {
         if (!input.projectId) throw new Error("画布音频任务指定 nodeId 时必须提供 projectId");
         const project = this.stores.projects.get(input.projectId);
         const node = project && (project.nodes as Array<Record<string, unknown>>).find((item) => item.id === input.nodeId);
-        if (!project || node?.type !== "audio") throw new Error("画布音频生成目标不存在，未恢复模型");
+        if (!project || (node?.type !== "audio" && !(node?.type === "config" && (node.metadata as Record<string, unknown> | undefined)?.smart === true))) throw new Error("画布音频生成目标不存在，未恢复模型");
         return project;
     }
 

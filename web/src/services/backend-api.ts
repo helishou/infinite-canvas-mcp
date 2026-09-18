@@ -40,13 +40,21 @@ export class BackendApiError extends Error {
 export async function request<T = unknown>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
     if (method !== "GET" && /^\/canvas\/projects(?:\/|$)/.test(path)) await ensureCanvasDraftLease();
     const token = getBackendTokenShared();
-    const url = `${getBackendUrl().replace(/\/$/, "")}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
-    const res = await fetch(url, {
-        method,
-        headers: body ? { "content-type": "application/json" } : {},
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: options?.signal,
-    });
+    const backendUrl = getBackendUrl().replace(/\/$/, "");
+    const url = `${backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+    let res: Response;
+    try {
+        res = await fetch(url, {
+            method,
+            headers: body ? { "content-type": "application/json" } : {},
+            body: body !== undefined ? JSON.stringify(body) : undefined,
+            signal: options?.signal,
+        });
+    } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") throw error;
+        const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
+        throw new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
+    }
     const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
     if (!res.ok) {
         // 把后端返回的 error 字符串完整透传（之前 30 字符截断导致 500 错看不到）
@@ -134,6 +142,10 @@ export function upsertBackendCanvasFolder(folder: Record<string, unknown>) {
 
 export function deleteBackendCanvasFolder(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/folders/${encodeURIComponent(id)}`);
+}
+
+export function deleteBackendDramaProject(id: string) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/projects/${encodeURIComponent(id)}`);
 }
 
 export type DramaEpisode = {

@@ -44,6 +44,7 @@ export const toolNames = [
   ...collaborationToolNames,
   "site_navigate",
   "canvas_list_projects",
+  "canvas_inspect",
   "canvas_get_state",
   "canvas_get_selection",
   "canvas_export_snapshot",
@@ -68,7 +69,9 @@ export const toolNames = [
   "canvas_connect_nodes",
   "canvas_select_nodes",
   "canvas_run_generation",
+  "canvas_task_status",
   "generation_get_status",
+  "mcp_observability_report",
   "models_list",
   "h3_get_node_materials",
   "comfyui_status",
@@ -263,6 +266,15 @@ export const toolInputSchemas = {
       ),
     page: z.number().optional().describe("页码，从 1 开始；默认 1"),
     pageSize: z.number().optional().describe("每页数量，默认 20，最大 100"),
+  }),
+  canvas_inspect: canvasProjectSchema.extend({
+    nodeLimit: z
+      .number()
+      .int()
+      .min(1)
+      .max(500)
+      .optional()
+      .describe("最多返回多少个节点摘要，默认 100，最大 500"),
   }),
   canvas_get_state: canvasProjectSchema.passthrough(),
   canvas_get_selection: canvasProjectSchema.passthrough(),
@@ -479,6 +491,11 @@ export const toolInputSchemas = {
       .optional()
       .describe("replace-active=替换当前激活结果；append=追加新结果"),
   }),
+  canvas_task_status: canvasProjectSchema.extend({
+    taskId: z.string().optional().describe("精确查询任务 ID；传入后不再按画布过滤"),
+    nodeId: z.string().optional().describe("只查询某个画布节点的生成任务"),
+    limit: z.number().int().min(1).max(100).optional().describe("最多返回多少条，默认 10"),
+  }),
   generation_get_status: canvasProjectSchema.extend({
     scope: z
       .enum(["all", "canvas", "image", "video"])
@@ -494,6 +511,9 @@ export const toolInputSchemas = {
       .optional()
       .describe("仅对 H3 节点：按分镜 ID 过滤"),
     limit: z.number().optional().describe("每来源最多返回多少条，默认 10"),
+  }),
+  mcp_observability_report: z.object({
+    traceId: z.string().optional().describe("可选；传入后返回该次调用的完整脱敏事件链，不传则返回累计聚合报告"),
   }),
   models_list: z.object({
     capability: z
@@ -639,6 +659,8 @@ export const toolDescriptions: Record<ToolName, string> = {
     "跳转网站页面。path 可为 / (首页)、/canvas (我的画布)、/canvas/:id (指定画布)、/image (生图工作台)、/video (视频创作台)、/prompts (提示词库)、/assets (我的素材)、/config (配置)。操作画布前若不在画布页，先用本工具打开画布。",
   canvas_list_projects:
     "列出用户全部画布（仅标题、创建/更新时间、节点数、连线数，不含完整数据），支持 keyword 搜索和 page/pageSize 分页。返回的 id 可配合 site_navigate 跳转到 /canvas/:id 打开对应画布。",
+  canvas_inspect:
+    "操作画布前的首选入口。一次返回活动画布、选区、节点摘要、可引用节点、生成目标和已配置模型能力；未选画布时返回候选画布与下一步，不要求调用方猜测隐藏状态。",
   canvas_get_state:
     "读取当前画布的节点、连线和选区。浏览器视口中心与缩放属于页面本地状态，不通过 MCP 读取。",
   canvas_get_selection: "读取当前网页画布选中的节点。",
@@ -682,8 +704,12 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_select_nodes: "设置当前选中节点；空数组=清空选区。",
   canvas_run_generation:
     "触发指定节点生成，通常用于配置节点或文本/图片/视频/音频节点。若本次要换一套参考图，传 referenceNodeIds；它会先替换现有媒体参考连线，再提交生成，避免旧参考图残留。H3 节点可用 segmentId 单跑某分镜。",
+  canvas_task_status:
+    "查询 MCP 发起的画布生成任务。优先传 taskId 精确查询；不传时默认使用当前活动画布，可用 nodeId 缩小范围。返回统一状态摘要、产物、错误和建议的下一步。",
   generation_get_status:
     "查询当前活动网页的生成任务状态。默认返回画布、生图工作台和视频工作台最近任务；可用 scope 过滤来源，用 taskId 查询工作台任务，用 nodeIds 查询画布节点。H3 节点可用 segmentIds 过滤分镜。要看 H3 历史输入快照（prompt/refs/params），用 scope='video' + nodeIds + segmentIds。",
+  mcp_observability_report:
+    "读取本机 MCP 脱敏诊断数据。不传参数返回累计调用成功率、耗时、错误分布、恢复建议采纳率和关联任务终态；传 traceId 返回该次调用的 started/terminal 事件链。",
   models_list:
     "列出可用于生成的模型及其能力。工作流是模型内部实现，不直接对外暴露。",
   h3_get_node_materials:

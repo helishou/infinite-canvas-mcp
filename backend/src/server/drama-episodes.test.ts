@@ -74,6 +74,20 @@ test("drama episode REST：剧目、分集、画布三层关系可读写", async
     // 确认测试库没有留下错误的旧直属列
     const columns = db.db.prepare("PRAGMA table_info(canvas_projects)").all() as Array<{ name: string }>;
     assert.equal(columns.some((column) => column.name === "folder_id"), false);
+
+    const protectedDelete = await request("DELETE", "/canvas/folders/drama-1");
+    assert.equal(protectedDelete.status, 409, "画布文件夹入口不应删除短剧项目");
+    assert.equal((await request("GET", "/drama/projects/drama-1/episodes")).status, 200);
+
+    const canvasFolder = await request("POST", "/canvas/folders", { id: "canvas-folder-1", name: "普通画布文件夹", isDrama: false, createdAt: "2026-01-01T00:00:00.000Z" });
+    assert.equal(canvasFolder.status, 201);
+    assert.equal((canvasFolder.body.folder as Record<string, unknown>).isDrama, false);
+    const canvasFolderDeleted = await request("DELETE", "/canvas/folders/canvas-folder-1");
+    assert.equal(canvasFolderDeleted.status, 200);
+
+    const dramaDeleted = await request("DELETE", "/drama/projects/drama-1");
+    assert.equal(dramaDeleted.status, 200);
+    assert.equal((await request("GET", "/canvas/projects/canvas-2")).status, 200, "删除剧目仍应保留场景画布");
 });
 
 test("drama asset REST：可上传、列出、下载并删除任意剧目文件", async (context) => {

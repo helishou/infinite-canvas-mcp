@@ -97,7 +97,7 @@ export function readCharacterGroupFromDrop(event: React.DragEvent<HTMLElement> |
     characterAssetId?: string;
     characterNodeId?: string;
     outfits: Array<{ url: string; name: string; storageKey?: string; mimeType?: string }>;
-    voice?: { url: string; name: string; storageKey?: string; assetId?: string };
+    voice?: { url: string; name: string; description?: string; storageKey?: string; assetId?: string };
 } | null {
     const transfer = event.dataTransfer;
     const encoded = transfer.getData("application/x-infinite-canvas-ref");
@@ -122,8 +122,9 @@ export function readCharacterGroupFromDrop(event: React.DragEvent<HTMLElement> |
     // voice 字段兼容：老 payload 用 characterVoice*，新 payload 用 voice*；character 节点 metadata 也用 characterVoice*
     const voiceUrl = String(value.characterVoiceUrl || value.voice || "").trim();
     const voiceName = String(value.characterVoiceName || value.voiceName || "声线");
-    const voiceStorageKey = typeof value.characterVoiceStorageKey === "string" ? value.characterVoiceStorageKey : undefined;
+    const voiceDescription = String(value.characterVoiceDescription || value.voiceDescription || "").trim();
+    const voiceStorageKey = typeof value.characterVoiceStorageKey === "string" ? value.characterVoiceStorageKey : (typeof value.voiceStorageKey === "string" ? value.voiceStorageKey : undefined);
     const voiceAssetId = typeof value.characterVoiceAssetId === "string" ? value.characterVoiceAssetId : (typeof value.voiceAssetId === "string" ? value.voiceAssetId : undefined);
-    const voice = voiceUrl ? { url: voiceUrl, name: voiceName, storageKey: voiceStorageKey, assetId: voiceAssetId } : undefined;
+    const voice = voiceUrl ? { url: voiceUrl, name: voiceName, description: voiceDescription || undefined, storageKey: voiceStorageKey, assetId: voiceAssetId } : undefined;
     return { characterName, characterAssetId, characterNodeId, outfits, voice };
 }

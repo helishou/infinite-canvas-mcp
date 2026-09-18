@@ -29,3 +29,36 @@ test("配置节点没有媒体入边时解析为空数组而不是丢失生成�
     const project = { id: "project-1", nodes: [{ id: "config", type: "config" }], connections: [] };
     assert.deepEqual(resolveCanvasImageReferences(project, "config"), []);
 });
+
+test("角色参考入边按生成节点保存的服装选择解析为图片输入", () => {
+    const project = {
+        id: "project-1",
+        nodes: [
+            { id: "config", type: "config", metadata: { characterReferences: { char: { imageKeys: ["image:outfit-b"] } } } },
+            { id: "char", type: "character", title: "沈昭宁", metadata: { characterImages: [
+                { url: "outfit-a", storageKey: "image:outfit-a", name: "outfit-a", mimeType: "image/png" },
+                { url: "outfit-b", storageKey: "image:outfit-b", name: "outfit-b", mimeType: "image/png" },
+            ] } },
+        ],
+        connections: [{ id: "char-config", fromNodeId: "char", toNodeId: "config", role: "reference", order: 0 }],
+    };
+
+    assert.deepEqual(resolveCanvasImageReferences(project, "config")?.map((reference) => reference.storageKey), ["image:outfit-b"]);
+});
+
+test("智能生成节点作为参考入边时解析全部已完成图片结果", () => {
+    const project = {
+        id: "project-1",
+        nodes: [
+            { id: "target", type: "config", metadata: { smart: true, generationMode: "image" } },
+            { id: "source", type: "config", title: "源智能节点", metadata: { smart: true, generationMode: "image", images: [
+                { id: "image-1", content: "first.png", storageKey: "image:first", mimeType: "image/png" },
+                { id: "image-2", content: "second.png", storageKey: "image:second", mimeType: "image/png" },
+                { id: "image-3", content: "third.png", storageKey: "image:third", mimeType: "image/png" },
+            ] } },
+        ],
+        connections: [{ id: "source-target", fromNodeId: "source", toNodeId: "target", role: "reference" }],
+    };
+
+    assert.deepEqual(resolveCanvasImageReferences(project, "target")?.map((reference) => reference.storageKey), ["image:first", "image:second", "image:third"]);
+});

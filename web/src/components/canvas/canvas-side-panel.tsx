@@ -2,11 +2,12 @@ import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type 
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, ListChecks, ListRestart, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
+import { findCharacterVoiceAsset, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
@@ -15,7 +16,7 @@ import { fetchBackendCanvasDrama } from "@/services/backend-api";
 import { fetchSourcePrompts, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
-import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
+import { useAssetStore, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
@@ -46,7 +47,9 @@ const NODE_TYPE_ICON: Record<string, typeof Square> = {
     [CanvasNodeType.Audio]: Music2,
     [CanvasNodeType.Text]: Type,
     [CanvasNodeType.Config]: Settings2,
+    [CanvasNodeType.Loop]: ListRestart,
     [CanvasNodeType.Group]: Square,
+    [CanvasNodeType.Character]: User,
 };
 
 const STATUS_COLOR: Record<string, string> = {
@@ -56,7 +59,7 @@ const STATUS_COLOR: Record<string, string> = {
     idle: "transparent",
 };
 
-export function CanvasSidePanel({ projectId, nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset }: Props) {
+export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset }: Props) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
@@ -122,7 +125,7 @@ export function CanvasSidePanel({ projectId, nodes, selectedNodeIds, onFocusNode
             </motion.aside>
         </motion.div>
     );
-}
+});
 
 function TabButton({ label, active, theme, onClick }: { label: string; active: boolean; theme: CanvasTheme; onClick: () => void }) {
     return (
@@ -137,14 +140,14 @@ function TabButton({ label, active, theme, onClick }: { label: string; active: b
 // Canvas tab: list nodes and center, zoom, and select the clicked node.
 // ---------------------------------------------------------------------------
 
-const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Group];
+const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Loop, CanvasNodeType.Character, CanvasNodeType.Group];
 
 function nodePreviewText(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt || "";
     return getNodeDefinition(node.type)?.title || node.type;
 }
 
-function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme }) {
+const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const [keyword, setKeyword] = useState("");
@@ -239,6 +242,7 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
                             const { node, depth, hasChildren } = treeRows[virtualRow.index];
                             const Icon = NODE_TYPE_ICON[node.type] || FileText;
                             const isImage = node.type === CanvasNodeType.Image && node.metadata?.content;
+                            const isCharacter = node.type === CanvasNodeType.Character;
                             const isChecked = checked.has(node.id);
                             const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
                             return (
@@ -252,7 +256,7 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
                                     <button type="button" onClick={() => (selectMode ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.sidePanel.focusNode")}>
                                         {selectMode ? <CheckMark checked={isChecked} theme={theme} /> : null}
                                         <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
-                                            {isImage ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
+                                            {isImage || isCharacter ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
                                         </span>
                                         <span className="min-w-0 flex-1 space-y-0.5">
                                             <span className="block truncate text-sm font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
@@ -295,14 +299,18 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
             ) : null}
         </div>
     );
-}
+});
 
 function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     const [url, setUrl] = useState("");
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
-    const content = node.metadata?.content || "";
-    const storageKey = node.metadata?.storageKey;
+    const isCharacter = node.type === CanvasNodeType.Character;
+    const characterImages = node.metadata?.characterImages || [];
+    const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex ?? 0, 0), Math.max(characterImages.length - 1, 0));
+    const primaryImage = isCharacter ? characterImages[primaryIndex] || characterImages[0] : undefined;
+    const content = isCharacter ? primaryImage?.url || "" : node.metadata?.content || "";
+    const storageKey = isCharacter ? primaryImage?.storageKey : node.metadata?.storageKey;
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
 
     useEffect(() => {
@@ -321,7 +329,7 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     }, [backendConnected, backendToken, content, storageKey]);
 
     const source = previewUrlFor(storageKey) || url;
-    return source ? <img src={source} alt={node.title} className="size-full object-cover" /> : <ImageIcon className="size-5 opacity-60" />;
+    return source ? <img src={source} alt={node.title} className="size-full object-cover" /> : isCharacter ? <User className="size-5 opacity-60" /> : <ImageIcon className="size-5 opacity-60" />;
 }
 
 function CheckMark({ checked, theme }: { checked: boolean; theme: CanvasTheme }) {
@@ -346,11 +354,36 @@ const ASSET_GROUPS: { kind: AssetKind; icon: typeof Square }[] = [
 const ALL_ASSET_DRAMAS = "__all-asset-dramas__";
 const UNASSIGNED_ASSET_DRAMA = "__unassigned-asset-drama__";
 
+function characterPrimaryIndex(asset: Extract<Asset, { kind: "character" }>) {
+    if (asset.data.primaryIndex != null) return asset.data.primaryIndex;
+    const coverIndex = asset.data.images.findIndex((image) => image.url === asset.coverUrl);
+    return coverIndex >= 0 ? coverIndex : 0;
+}
+
 function buildInsertPayload(asset: Asset): InsertAssetPayload {
     if (asset.kind === "text") return { kind: "text", content: asset.data.content, title: asset.title };
     if (asset.kind === "video") return { kind: "video", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, width: asset.data.width, height: asset.data.height };
     if (asset.kind === "audio") return { kind: "audio", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, bytes: asset.data.bytes, mimeType: asset.data.mimeType, durationMs: asset.data.durationMs };
-    if (asset.kind === "character") return { kind: "character", title: asset.title, images: asset.data.images };
+    if (asset.kind === "character") {
+        const voiceAsset = findCharacterVoiceAsset(useAssetStore.getState().assets.filter((candidate): candidate is AudioAsset => candidate.kind === "audio"), {
+            assetId: asset.data.voiceAssetId,
+            storageKey: asset.data.voiceStorageKey,
+            url: asset.data.voice,
+        });
+        return {
+        kind: "character",
+        assetId: asset.id,
+        title: asset.title,
+        description: asset.data.description,
+        images: asset.data.images,
+        primaryIndex: characterPrimaryIndex(asset),
+        voice: asset.data.voice || voiceAsset?.data.url || "",
+        voiceName: resolveCharacterVoiceName(asset.data.voiceName, voiceAsset),
+        voiceDescription: asset.data.voiceDescription,
+        voiceStorageKey: asset.data.voiceStorageKey || voiceAsset?.data.storageKey,
+        voiceAssetId: asset.data.voiceAssetId || voiceAsset?.id || "",
+        };
+    }
     return { kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title };
 }
 
@@ -403,11 +436,11 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
         return asset.dramaId === dramaFilter;
     }), [assets, dramaFilter, dramaIds]);
 
-    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.tags || []))).slice(0, 20), [scopedAssets]);
+    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.kind === "character" ? [] : asset.tags || []))).slice(0, 20), [scopedAssets]);
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
-        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.tags || []).includes(tagFilter)) && (!query || [asset.title, ...(asset.tags || [])].join(" ").toLowerCase().includes(query)));
+        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.kind !== "character" && (asset.tags || []).includes(tagFilter))) && (!query || [asset.title, ...(asset.kind === "character" ? [] : asset.tags || [])].join(" ").toLowerCase().includes(query)));
     }, [keyword, scopedAssets, tagFilter]);
 
     const groups = useMemo(() => ASSET_GROUPS.map((group) => ({ ...group, items: filtered.filter((asset) => asset.kind === group.kind) })).filter((group) => group.items.length > 0), [filtered]);
@@ -532,9 +565,12 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
                 characterName: asset.data.name || asset.title,
                 characterDescription: asset.data.description,
                 characterImages: asset.data.images,
-                voice: asset.data.voice,
-                voiceName: asset.data.voiceName,
-                voiceAssetId: asset.data.voiceAssetId,
+                characterPrimaryIndex: characterPrimaryIndex(asset),
+                characterVoiceUrl: asset.data.voice,
+                characterVoiceName: asset.data.voiceName,
+                characterVoiceDescription: asset.data.voiceDescription,
+                characterVoiceStorageKey: asset.data.voiceStorageKey,
+                characterVoiceAssetId: asset.data.voiceAssetId,
             };
             const payload = JSON.stringify(ref);
             event.dataTransfer.effectAllowed = "copy";
@@ -581,6 +617,8 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
 function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }> }) {
     const { t } = useTranslation();
     const [covers, setCovers] = useState<string[]>([]);
+    const primaryIndex = Math.min(Math.max(characterPrimaryIndex(asset), 0), Math.max(asset.data.images.length - 1, 0));
+    const orderedImages = asset.data.images.length ? [asset.data.images[primaryIndex], ...asset.data.images.filter((_, index) => index !== primaryIndex)] : [];
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     useEffect(() => {
         let cancelled = false;
@@ -589,7 +627,7 @@ function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }
         const addUrl = (url?: string) => { if (url && !urls.includes(url)) urls.push(url); };
         const addStorageKey = (key?: string) => { if (key && !storageKeys.includes(key)) storageKeys.push(key); };
         addUrl(asset.coverUrl);
-        for (const image of asset.data.images) {
+        for (const image of orderedImages) {
             addUrl(image.url);
             addStorageKey(image.storageKey);
             void ensureImagePreview(image.storageKey);
@@ -598,9 +636,9 @@ function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }
             if (!cancelled) setCovers([...urls, ...resolved.filter((url): url is string => Boolean(url) && !urls.includes(url))]);
         }).catch(() => { if (!cancelled) setCovers(urls); });
         return () => { cancelled = true; };
-    }, [asset.id, asset.coverUrl, asset.data.images]);
+    }, [asset.id, asset.coverUrl, asset.data.images, primaryIndex]);
     const count = asset.data.images.length;
-    const preview = asset.data.images.map((image) => previewUrlFor(image.storageKey)).find(Boolean);
+    const preview = orderedImages.map((image) => previewUrlFor(image.storageKey)).find(Boolean);
     if (preview || covers.length) return <img src={preview || covers[0]} alt="" onError={() => setCovers((current) => current.slice(1))} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     return (
         <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">

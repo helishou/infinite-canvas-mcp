@@ -33,8 +33,11 @@ export type CharacterAsset = AssetBase<"character"> & {
         description: string;
         voice: string;
         voiceName: string;
+        voiceDescription: string;
+        voiceStorageKey?: string;
         voiceAssetId: string;
         images: CharacterImage[];
+        primaryIndex?: number;
     };
 };
 export type Asset = TextAsset | ImageAsset | VideoAsset | AudioAsset | CharacterAsset;
@@ -220,8 +223,10 @@ export function migrateCompositeToCharacter(asset: LegacyCompositeAsset, allAsse
             description,
             voice: "",
             voiceName: "",
+            voiceDescription: "",
             voiceAssetId: "",
             images,
+            primaryIndex: 0,
         },
     };
 }

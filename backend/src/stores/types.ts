@@ -2,6 +2,7 @@ import path from "node:path";
 import type {
     Asset, AssetFolder, CanvasFolder, CanvasProject,
     GenerationLog, GenerationLogStatus, MediaFile,
+    McpObservabilityEvent, McpObservabilityEventInput,
     RuntimeTask, RuntimeTaskEvent, RuntimeTaskStatus,
 } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
@@ -68,6 +69,7 @@ export type CanvasFolderStore = {
     list(): CanvasFolder[];
     upsert(folder: CanvasFolder): CanvasFolder;
     delete(id: string): number;
+    deleteDrama(id: string): number;
 };
 
 /** 资产 store：assets + asset_folders 统一入口。 */
@@ -128,6 +130,13 @@ export type GenerationLogStore = {
     delete(scope: LogDeleteScope): number;
 };
 
+/** MCP 调用只保存脱敏摘要，用 traceId 串联工具、画布事务和任务。 */
+export type McpObservabilityStore = {
+    record(input: McpObservabilityEventInput): McpObservabilityEvent;
+    trace(traceId: string): McpObservabilityEvent[];
+    report(): Record<string, unknown>;
+};
+
 /** 运行时设置 store（runtime_settings 表）。 */
 export type SettingStore = {
     get(key: string): unknown;
@@ -143,6 +152,7 @@ export type Stores = {
     media: MediaStore;
     tasks: TaskStore;
     logs: GenerationLogStore;
+    mcpObservability: McpObservabilityStore;
     settings: SettingStore;
 };
 

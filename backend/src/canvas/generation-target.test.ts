@@ -50,3 +50,41 @@ test("图片槽重试和插件原位写回不会新建结果节点", (t) => {
     assert.equal(plugin.command.nodeId, "image");
     assert.deepEqual(plugin.createOperations, []);
 });
+
+test("智能生成节点把图片结果槽直接绑定到自身", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [
+        { id: "smart", type: "config", width: 420, height: 540,
+            metadata: { smart: true, generationMode: "image", composerContent: "一只猫", generatedResultIds: ["legacy-image"], primaryImageId: "legacy-image" } },
+        { id: "legacy-image", type: "image", width: 340, height: 240, metadata: { content: "legacy.png" } },
+    ], connections: [{ id: "legacy-connection", fromNodeId: "smart", toNodeId: "legacy-image" }] });
+    const stores = createStores(db);
+    const prepared = prepareCanvasGenerationTarget(stores, {
+        mode: "image", projectId: "p", nodeId: "smart", model: "gpt-image-2", prompt: "一只猫", count: 2,
+    }, "smart-task");
+    assert.equal(prepared.command.nodeId, "smart");
+    assert.equal(prepared.command.sourceNodeId, undefined);
+    assert.equal(prepared.command.imageIds?.length, 2);
+    assert.deepEqual(prepared.createOperations.map((operation) => operation.type), ["delete_node", "update_node"]);
+    assert.deepEqual((prepared.createOperations[1] as any).metadataDelete, ["generatedResultIds", "primaryImageId", "generatedTextResultIds", "primaryTextNodeId"]);
+});
+
+test("智能生成节点切换到音频、视频或文本时仍复用自身，不创建输出节点", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [
+        { id: "smart", type: "config", width: 420, height: 540, metadata: { smart: true, generationMode: "image", generatedTextResultIds: ["legacy-text"] } },
+        { id: "legacy-text", type: "text", width: 340, height: 240, metadata: { content: "旧结果" } },
+    ], connections: [{ id: "legacy-text-connection", fromNodeId: "smart", toNodeId: "legacy-text" }] });
+    const stores = createStores(db);
+    for (const mode of ["video", "audio", "text"] as const) {
+        const prepared = prepareCanvasGenerationTarget(stores, {
+            mode, projectId: "p", nodeId: "smart", model: `${mode}-model`, prompt: "测试",
+        }, `${mode}-task`);
+        assert.equal(prepared.command.nodeId, "smart");
+        assert.deepEqual(prepared.createOperations.map((operation) => operation.type), ["delete_node", "update_node"]);
+        assert.equal((prepared.createOperations[1] as any).id, "smart");
+        assert.equal((prepared.createOperations[1] as any).metadata.generationMode, mode);
+    }
+});

@@ -239,7 +239,7 @@ async function startBackendHttpServer() {
   });
   runtime.agent = agent;
   app.use("/agent", agent.app);
-  const mcpHttp = registerBackendMcpHttpRoutes(app, config);
+  const mcpHttp = registerBackendMcpHttpRoutes(app, config, stores.mcpObservability);
   // Backend 重启后继续观察已提交但尚未结束的 ComfyUI 任务；绑定信息在 SQLite 中。
   for (const task of stores.tasks.list()) {
     if (

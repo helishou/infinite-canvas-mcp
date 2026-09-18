@@ -21,7 +21,7 @@ export function prepareCanvasGenerationTarget(
     command: CanvasGenerationCommand,
     taskId: string,
 ): PreparedCanvasGenerationTarget {
-    if (!command.projectId || !command.nodeId || !["image", "video", "audio"].includes(command.mode)) {
+    if (!command.projectId || !command.nodeId || !["image", "video", "audio", "text"].includes(command.mode)) {
         return { command, project: null, createOperations: [] };
     }
     const project = stores.projects.get(command.projectId);
@@ -29,6 +29,7 @@ export function prepareCanvasGenerationTarget(
     if (!project || !source) throw new Error(`画布${modeLabel(command.mode)}生成目标不存在，未启动模型`);
 
     if (command.mode === "image") return prepareImage(project, source, command, taskId);
+    if (source.type === "config" && record(source.metadata).smart === true) return prepareSmartMedia(project, source, command);
     if (source.type === command.mode) {
         return {
             command,
@@ -47,31 +48,73 @@ export function prepareCanvasGenerationTarget(
     };
 }
 
+function prepareSmartMedia(project: CanvasProject, source: Record<string, any>, command: CanvasGenerationCommand): PreparedCanvasGenerationTarget {
+    const metadata = record(source.metadata);
+    const legacyResultIds = [...new Set([
+        ...(Array.isArray(metadata.generatedResultIds) ? metadata.generatedResultIds.map(String) : []),
+        ...(metadata.primaryImageId ? [String(metadata.primaryImageId)] : []),
+        ...(Array.isArray(metadata.generatedTextResultIds) ? metadata.generatedTextResultIds.map(String) : []),
+        ...(metadata.primaryTextNodeId ? [String(metadata.primaryTextNodeId)] : []),
+    ].filter((id) => id && id !== String(source.id)))];
+    return {
+        command,
+        project,
+        createOperations: [
+            ...legacyResultIds.map((id) => ({ type: "delete_node", id })),
+            {
+                type: "update_node",
+                id: String(source.id),
+                metadata: { prompt: String(command.prompt || ""), model: command.model, generationMode: command.mode },
+                metadataDelete: ["content", "storageKey", "mimeType", "bytes", "naturalWidth", "naturalHeight", "durationMs", "images", "primaryImageId", "texts", "primaryTextId", "generatedTextResultIds", "primaryTextNodeId", "errorDetails", "runProgress"],
+            },
+        ],
+        targetSize: { width: Number(source.width || defaultSize(command.mode).width), height: Number(source.height || defaultSize(command.mode).height) },
+    };
+}
+
 function prepareImage(project: CanvasProject, source: Record<string, any>, command: CanvasGenerationCommand, taskId: string): PreparedCanvasGenerationTarget {
     const metadata = record(source.metadata);
     const writeBackToTarget = record(command.params).writeBackToTarget === true;
+    const useSmartNode = source.type === "config" && metadata.smart === true;
     if (command.imageIds?.length) {
         const slots = Array.isArray(metadata.images) ? metadata.images : [];
-        if (source.type !== "image" || command.imageIds.length !== countOf(command)
+        if ((!useSmartNode && source.type !== "image") || command.imageIds.length !== countOf(command)
             || new Set(command.imageIds).size !== command.imageIds.length
             || command.imageIds.some((id) => !slots.some((slot: Record<string, unknown>) => String(slot.id || "") === id))) {
             throw new Error("图片结果槽与生成数量或目标节点不匹配，未启动模型");
         }
     }
-    const useExisting = writeBackToTarget || (source.type === "image" && (Boolean(command.imageIds?.length) || !metadata.content));
+    // 智能生成节点沿用 Config 类型保存提示词与参数，但生成结果直接回写同一节点，
+    // 这样网页、MCP 和 Agent 都能共享同一套结果槽与任务绑定语义。旧 Config 节点
+    // 没有 smart 标记，继续保留“配置节点 -> 新图片结果节点”的兼容行为。
+    const useExisting = writeBackToTarget || useSmartNode || (source.type === "image" && (Boolean(command.imageIds?.length) || !metadata.content));
     const count = countOf(command);
     if (useExisting) {
         const imageIds = command.imageIds?.length ? command.imageIds : Array.from({ length: count }, () => `image-slot-${crypto.randomUUID()}`);
-        const createOperations: CanvasOperation[] = command.imageIds?.length || writeBackToTarget ? [] : [{
-            type: "update_node",
-            id: String(source.id),
-            metadata: {
-                prompt: String(command.prompt || ""),
-                model: command.model,
-                count,
-                images: imageIds.map((id) => ({ id, status: "idle", content: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" })),
-            },
-        }];
+        const legacyResultIds = useSmartNode
+            ? [...new Set([
+                ...(Array.isArray(metadata.generatedResultIds) ? metadata.generatedResultIds.map(String) : []),
+                ...(metadata.primaryImageId ? [String(metadata.primaryImageId)] : []),
+                ...(Array.isArray(metadata.generatedTextResultIds) ? metadata.generatedTextResultIds.map(String) : []),
+                ...(metadata.primaryTextNodeId ? [String(metadata.primaryTextNodeId)] : []),
+            ].filter((id) => id && id !== String(source.id)))]
+            : [];
+        const createOperations: CanvasOperation[] = [
+            ...legacyResultIds.map((id) => ({ type: "delete_node", id })),
+            ...(command.imageIds?.length || writeBackToTarget ? [] : [{
+                type: "update_node",
+                id: String(source.id),
+                metadata: {
+                    prompt: String(command.prompt || ""),
+                    model: command.model,
+                    generationMode: "image",
+                    count,
+                    generationType: command.references?.length ? "edit" : "generation",
+                    images: imageIds.map((id) => ({ id, status: "idle", content: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" })),
+                },
+                    ...(useSmartNode ? { metadataDelete: ["generatedResultIds", "primaryImageId", "generatedTextResultIds", "primaryTextNodeId"] } : {}),
+            }]),
+        ];
         return {
             command: writeBackToTarget ? command : { ...command, imageIds },
             project,

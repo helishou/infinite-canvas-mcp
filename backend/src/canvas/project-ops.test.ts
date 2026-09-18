@@ -194,3 +194,36 @@ test("referenceBindings CAS 使用结构比较，且项目参考资产不会改�
     assert.deepEqual(project.referenceCatalog, [{ id: "asset-1", label: "人物", mediaType: "image", role: "character_identity", tags: [], storageKey: "image:1" }]);
     assert.throws(() => applyCanvasProjectOperations(project, [{ type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { referenceBindings: [] }, expectedFields: { referenceBindings: [{ ...bindings[0], label: "旧人物" }] } }]));
 });
+
+test("add_node：省略坐标时按当前画布向右排布，同批节点不重叠", () => {
+    const project = makeProject([]);
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_node", id: "a", nodeType: "image", width: 320, height: 240 },
+        { type: "add_node", id: "b", nodeType: "image", width: 320, height: 240 },
+        { type: "add_node", id: "c", nodeType: "image", width: 640, height: 480 },
+    ]);
+    assert.deepEqual(project.nodes.map((node) => node.position), [
+        { x: 0, y: 0 },
+        { x: 416, y: 0 },
+        { x: 832, y: 0 },
+    ]);
+});
+
+test("add_node：显式坐标仍保持调用方布局，不被自动排布覆盖", () => {
+    const project = makeProject([]);
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_node", id: "a", nodeType: "text", position: { x: 120, y: 240 } },
+    ]);
+    assert.deepEqual(project.nodes[0].position, { x: 120, y: 240 });
+});
+
+test("run_generation 前的提示词更新会持久化到智能节点", () => {
+    const project = makeProject([{ id: "config-1", type: "config", title: "智能生成", position: { x: 0, y: 0 }, width: 320, height: 240, metadata: { smart: true, generationMode: "image" } }]);
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "update_node", id: "config-1", metadata: { composerContent: "新的场景提示词", prompt: "新的场景提示词" } },
+        { type: "run_generation", nodeId: "config-1", mode: "image", prompt: "新的场景提示词" },
+    ]);
+    const metadata = project.nodes[0].metadata as Record<string, unknown>;
+    assert.equal(metadata.composerContent, "新的场景提示词");
+    assert.equal(metadata.prompt, "新的场景提示词");
+});

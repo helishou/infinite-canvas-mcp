@@ -32,6 +32,8 @@ export function resolveCanvasImageReferences(project: CanvasProject, sourceNodeI
     const referenceTarget = inputNode || source;
     for (const node of incomingNodes(String(referenceTarget.id || ""), connections, nodeById)) {
         if (String(node.type || "") === "image") addImageReference(node, references, added);
+        if (String(node.type || "") === "config" && recordOf(node.metadata).smart === true) addSmartImageReferences(node, references, added);
+        if (String(node.type || "") === "character") addCharacterImageReferences(node, referenceTarget, references, added);
     }
     return references;
 }
@@ -78,6 +80,61 @@ function addImageReference(node: Record<string, unknown>, references: ResolvedCa
         ...(content.startsWith("data:") ? { dataUrl: content } : {}),
         ...(content && !content.startsWith("data:") ? { url: content } : {}),
         mimeType: String(metadata.mimeType || "image/png"),
+    });
+}
+
+function addSmartImageReferences(node: Record<string, unknown>, references: ResolvedCanvasImageReference[], added: Set<string>) {
+    const id = String(node.id || "");
+    if (!id) return;
+    const metadata = recordOf(node.metadata);
+    const images = Array.isArray(metadata.images) ? metadata.images.filter((image): image is Record<string, unknown> => Boolean(image) && typeof image === "object" && !Array.isArray(image)) : [];
+    const completedImages = images.filter((image) => Boolean(image.content || image.storageKey));
+    if (!completedImages.length) {
+        addImageReference(node, references, added);
+        return;
+    }
+    completedImages.forEach((image, index) => {
+        const imageId = String(image.id || index);
+        const referenceId = `${id}:image:${imageId}`;
+        if (added.has(referenceId)) return;
+        const content = String(image.content || "");
+        const storageKey = String(image.storageKey || "");
+        added.add(referenceId);
+        references.push({
+            id: referenceId,
+            name: `${String(node.title || id).replace(/[^\w\u4e00-\u9fff-]+/g, "-")}-${index + 1}.png`,
+            ...(storageKey ? { storageKey } : {}),
+            ...(content.startsWith("data:") ? { dataUrl: content } : {}),
+            ...(content && !content.startsWith("data:") ? { url: content } : {}),
+            mimeType: String(image.mimeType || metadata.mimeType || "image/png"),
+        });
+    });
+}
+
+function addCharacterImageReferences(node: Record<string, unknown>, referenceTarget: Record<string, unknown>, references: ResolvedCanvasImageReference[], added: Set<string>) {
+    const id = String(node.id || "");
+    if (!id || added.has(id)) return;
+    added.add(id);
+    const metadata = recordOf(node.metadata);
+    const images = Array.isArray(metadata.characterImages) ? metadata.characterImages.filter((image): image is Record<string, unknown> => Boolean(image) && typeof image === "object" && !Array.isArray(image)) : [];
+    const targetMetadata = recordOf(referenceTarget.metadata);
+    const selections = recordOf(targetMetadata.characterReferences);
+    const selection = recordOf(selections[id]);
+    const selectedKeys = Array.isArray(selection.imageKeys) ? new Set(selection.imageKeys.map(String)) : undefined;
+    images.forEach((image, index) => {
+        const key = String(image.storageKey || image.url || image.name || `image-${index}`);
+        if (selectedKeys && !selectedKeys.has(key)) return;
+        const content = String(image.url || "");
+        const storageKey = String(image.storageKey || "");
+        if (!content && !storageKey) return;
+        references.push({
+            id: `${id}:character-image:${key}`,
+            name: String(image.name || node.title || id),
+            ...(storageKey ? { storageKey } : {}),
+            ...(content.startsWith("data:") ? { dataUrl: content } : {}),
+            ...(content && !content.startsWith("data:") ? { url: content } : {}),
+            mimeType: String(image.mimeType || "image/png"),
+        });
     });
 }
 

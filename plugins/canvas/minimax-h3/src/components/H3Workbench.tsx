@@ -204,6 +204,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             if (!valid.length) return;
             const voiceUrl = String(detail.characterVoiceUrl || detail.voice || "").trim();
             const voiceName = String(detail.characterVoiceName || detail.voiceName || "声线");
+            const voiceDescription = String(detail.characterVoiceDescription || detail.voiceDescription || "").trim();
             const voiceStorageKey = typeof detail.characterVoiceStorageKey === "string" ? detail.characterVoiceStorageKey : undefined;
             const voiceAssetId = typeof detail.characterVoiceAssetId === "string" ? detail.characterVoiceAssetId : (typeof detail.voiceAssetId === "string" ? detail.voiceAssetId : undefined);
             const updated = upsertCharacterGroup(target, {
@@ -211,7 +212,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 characterAssetId: typeof detail.characterAssetId === "string" ? detail.characterAssetId : undefined,
                 characterNodeId: typeof detail.characterNodeId === "string" ? detail.characterNodeId : undefined,
                 outfits: valid,
-                voice: voiceUrl ? { url: voiceUrl, name: voiceName, storageKey: voiceStorageKey, assetId: voiceAssetId } : undefined,
+                voice: voiceUrl ? { url: voiceUrl, name: voiceName, description: voiceDescription || undefined, storageKey: voiceStorageKey, assetId: voiceAssetId } : undefined,
             });
             ctx.updateMetadata({ selectedSegmentId: target.id, segments: segments.map((item) => item.id === target.id ? updated : item) });
             return;

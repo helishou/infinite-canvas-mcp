@@ -52,13 +52,17 @@ const config = {
         {
           name: "krea2",
           capability: "image",
-          workflows: ["custom/krea2改图.json", "custom/krea2双图编辑.json"],
+          workflows: [
+            "custom/krea2改图.json",
+            "custom/krea2双图编辑.json",
+            "custom/Krea2文生图.json",
+          ],
           workflowRouting: {
-            text: WORKFLOW_ROUTE_UNSUPPORTED,
+            text: "custom/Krea2文生图.json",
             single: "custom/krea2改图.json",
             multi: "custom/krea2双图编辑.json",
           },
-          workflowParams: { multi: { f_demo: 16 } },
+          workflowParams: { text: { seed: -1 }, multi: { f_demo: 16 } },
         },
         { name: "custom/seevr图像放大.json", capability: "image" },
       ],
@@ -104,11 +108,11 @@ test("krea2 单图 → krea2改图；多图 → krea2双图编辑（这就是 MC
   assert.deepEqual(multi.ok && multi.params, { f_demo: 16 });
 });
 
-test("krea2 文生（0 张参考）被标记不支持 → 明确失败且不回退", () => {
+test("krea2 文生（0 张参考）→ Krea2 文生图工作流", () => {
   const r = resolveWorkflowForModel(config, "krea2", 0);
-  assert.equal(r.ok, false);
-  assert.equal(!r.ok && r.reason, "unsupported");
-  assert.match(workflowResolutionMessage(r as never), /不支持文生图输入/);
+  assert.equal(r.ok, true);
+  assert.equal(r.ok && r.workflow, "custom/Krea2文生图.json");
+  assert.deepEqual(r.ok && r.params, { seed: -1 });
 });
 
 test("带渠道前缀与不带前缀结果一致", () => {

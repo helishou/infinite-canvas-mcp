@@ -93,7 +93,7 @@ test("v7 迁移：把 v6 的 folder_id 搬到 drama_episodes，并给所有 dram
 
         // 7. 后续迁移同样完整执行
         const versions = db["db"].prepare("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: number }>;
-        assert.deepEqual(versions.map((v) => v.version), [6, 7, 8, 9, 10]);
+        assert.deepEqual(versions.map((v) => v.version), [6, 7, 8, 9, 10, 11]);
     } finally {
         db.close();
     }

@@ -48,7 +48,7 @@ export default function DramaPage() {
     const createFolder = useCanvasStore((state) => state.createFolder);
     const createProject = useCanvasStore((state) => state.createProject);
     const updateFolder = useCanvasStore((state) => state.updateFolder);
-    const deleteFolder = useCanvasStore((state) => state.deleteFolder);
+    const deleteDramaProject = useCanvasStore((state) => state.deleteDramaProject);
     const [activeView, setActiveView] = useState(DRAMA_LIBRARY);
     const [transitionDramaId, setTransitionDramaId] = useState<string | null>(null);
     const [editorOpen, setEditorOpen] = useState(false);
@@ -64,7 +64,8 @@ export default function DramaPage() {
     const coverInputRef = useRef<HTMLInputElement>(null);
     const assetInputRef = useRef<HTMLInputElement>(null);
 
-    const activeFolder = folders.find((folder) => folder.id === activeView);
+    const dramaFolders = folders.filter((folder) => folder.isDrama);
+    const activeFolder = dramaFolders.find((folder) => folder.id === activeView);
     useEffect(() => {
         if (activeView !== DRAMA_LIBRARY && !activeFolder) setActiveView(DRAMA_LIBRARY);
     }, [activeFolder, activeView]);
@@ -76,12 +77,12 @@ export default function DramaPage() {
         return () => { disposed = true; };
     }, [activeFolder?.coverStorageKey]);
     useEffect(() => {
-        if (!hydrated || !folders.length) {
+        if (!hydrated || !dramaFolders.length) {
             setEpisodesByDrama({});
             return;
         }
         let disposed = false;
-        void Promise.all(folders.map(async (folder) => {
+        void Promise.all(dramaFolders.map(async (folder) => {
             try {
                 const result = await fetchBackendDramaEpisodes(folder.id);
                 return [folder.id, result.episodes || []] as const;
@@ -93,7 +94,7 @@ export default function DramaPage() {
             if (!disposed) setEpisodesByDrama(Object.fromEntries(entries));
         });
         return () => { disposed = true; };
-    }, [folders, hydrated]);
+    }, [dramaFolders, hydrated]);
     useEffect(() => {
         if (!activeFolder) return;
         let disposed = false;
@@ -106,7 +107,7 @@ export default function DramaPage() {
 
     const createDrama = () => {
         const name = window.prompt(t("drama.createProjectPrompt"), t("drama.defaultProjectName"));
-        if (name?.trim()) setActiveView(createFolder(name.trim()));
+        if (name?.trim()) setActiveView(createFolder(name.trim(), true));
     };
     const changeDramaView = (nextView: string, dramaId: string) => {
         const viewDocument = document as DramaViewTransitionDocument;
@@ -236,7 +237,7 @@ export default function DramaPage() {
             okType: "danger",
             cancelText: t("common.cancel"),
             onOk: () => {
-                deleteFolder(folder.id);
+                deleteDramaProject(folder.id);
                 setEditorOpen(false);
                 setDraft(null);
                 setActiveView(DRAMA_LIBRARY);
@@ -316,9 +317,9 @@ export default function DramaPage() {
                         <section className="mt-6">
                             {!hydrated ? (
                                 <div className="flex min-h-72 items-center justify-center border-y border-stone-200 text-sm text-stone-500 dark:border-stone-800">{t("canvas.loading")}</div>
-                            ) : folders.length ? (
+                            ) : dramaFolders.length ? (
                                 <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
-                                    {folders.map((folder) => <DramaCard key={folder.id} folder={folder} episodes={episodesByDrama[folder.id] || []} transitioning={transitionDramaId === folder.id} onOpen={() => changeDramaView(folder.id, folder.id)} t={t} />)}
+                                    {dramaFolders.map((folder) => <DramaCard key={folder.id} folder={folder} episodes={episodesByDrama[folder.id] || []} transitioning={transitionDramaId === folder.id} onOpen={() => changeDramaView(folder.id, folder.id)} t={t} />)}
                                 </div>
                             ) : (
                                 <div className="flex min-h-72 flex-col items-center justify-center rounded-2xl border border-dashed border-stone-300 px-6 text-center dark:border-stone-700">

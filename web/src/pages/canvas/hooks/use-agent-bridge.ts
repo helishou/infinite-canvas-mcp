@@ -43,6 +43,13 @@ export function useAgentBridge(params: AgentBridgeParams) {
             const safeOps = Array.isArray(ops) ? ops.filter((op) => op?.type) : [];
             const before = { projectId, title: projectTitle, nodes: nodesRef.current, connections: connectionsRef.current, selectedNodeIds: Array.from(selectedNodeIdsRef.current) };
             const generationOps = safeOps.filter((op): op is Extract<CanvasAgentOp, { type: "run_generation" }> => op.type === "run_generation" && Boolean(op.nodeId));
+            const promptPersistenceOps = generationOps.flatMap((op) => {
+                const prompt = op.prompt?.trim();
+                if (!prompt) return [];
+                const alreadyPersisted = safeOps.some((candidate) => candidate.type === "update_node" && candidate.id === op.nodeId
+                    && candidate.metadata?.composerContent === prompt && candidate.metadata?.prompt === prompt);
+                return alreadyPersisted ? [] : [{ type: "update_node" as const, id: op.nodeId, metadata: { composerContent: prompt, prompt } }];
+            });
             const referenceOps = generationOps.flatMap((op) => {
                 const referenceNodeIds = [...new Set(op.referenceNodeIds || [])];
                 if (!referenceNodeIds.length) return [];
@@ -61,7 +68,7 @@ export function useAgentBridge(params: AgentBridgeParams) {
             });
             const next = applyCanvasAgentOps(
                 before,
-                [...safeOps.filter((op) => op.type !== "run_generation"), ...referenceOps],
+                [...safeOps.filter((op) => op.type !== "run_generation"), ...promptPersistenceOps, ...referenceOps],
             );
             nodesRef.current = next.nodes;
             connectionsRef.current = next.connections;

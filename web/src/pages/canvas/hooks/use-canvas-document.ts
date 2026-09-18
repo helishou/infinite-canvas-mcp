@@ -74,6 +74,7 @@ export function useCanvasDocument(projectId: string) {
     }, [currentHistory, projectId, refreshHistory]);
 
     return {
+        project,
         nodes: project?.nodes || EMPTY_NODES, connections: project?.connections || EMPTY_CONNECTIONS,
         chatSessions: project?.chatSessions || EMPTY_SESSIONS, activeChatId: project?.activeChatId || null,
         backgroundMode: project?.backgroundMode || "lines", showImageInfo: project?.showImageInfo || false,

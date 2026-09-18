@@ -404,7 +404,8 @@ export class CanvasImageDispatcher {
     if (!project || !Array.isArray(project.nodes) || !project.nodes.some((node) => (node as Record<string, unknown>).id === input.nodeId)) throw new Error("画布图片生成目标不存在，未启动模型");
     if (input.imageIds) {
       const node = project.nodes.find((node) => (node as Record<string, unknown>).id === input.nodeId) as Record<string, any>;
-      if (node.type !== "image" || input.imageIds.length !== Math.max(1, Math.min(4, Math.floor(input.count || 1)))
+      const isSmartGenerationNode = node.type === "config" && node.metadata?.smart === true;
+      if ((!isSmartGenerationNode && node.type !== "image") || input.imageIds.length !== Math.max(1, Math.min(4, Math.floor(input.count || 1)))
         || new Set(input.imageIds).size !== input.imageIds.length
         || input.imageIds.some((id) => !node.metadata?.images?.some((image: { id: string }) => image.id === id))) {
         throw new Error("图片结果槽与生成数量或目标节点不匹配，未启动模型");

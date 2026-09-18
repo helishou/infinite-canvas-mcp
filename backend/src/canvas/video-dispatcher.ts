@@ -195,7 +195,7 @@ export class CanvasVideoDispatcher {
         if (!input.projectId) throw new Error("画布视频任务指定 nodeId 时必须提供 projectId");
         const project = this.stores.projects.get(input.projectId);
         const node = project && (project.nodes as Array<Record<string, unknown>>).find((node) => node.id === input.nodeId);
-        if (!project || node?.type !== "video") throw new Error("画布视频生成目标不存在，未启动模型");
+        if (!project || (node?.type !== "video" && !(node?.type === "config" && (node.metadata as Record<string, unknown> | undefined)?.smart === true))) throw new Error("画布视频生成目标不存在，未启动模型");
         return project;
     }
 

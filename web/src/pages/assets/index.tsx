@@ -1,4 +1,4 @@
-import { Check, Clapperboard, Copy, Download, FolderPlus, PencilLine, Search, Trash2, Upload } from "lucide-react";
+import { Check, Clapperboard, Copy, Download, FolderPlus, PencilLine, Search, Trash2, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { App, Button, Card, Drawer, Dropdown, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
@@ -10,9 +10,11 @@ import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
 import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { cn } from "@/lib/utils";
+import { VoiceAssetSelect } from "@/components/assets/voice-asset-select";
+import { findCharacterVoiceAsset, hasCharacterVoiceSource, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAssetStore, type Asset, type AssetKind, type CharacterAsset, type CharacterImage, type ImageAsset, type VideoAsset, type AudioAsset } from "@/stores/use-asset-store";
-import { exportAssets, readAssetPackage } from "./asset-transfer";
+import { exportAssets, exportCharacterImages, readAssetPackage } from "./asset-transfer";
 
 type AssetFormValues = {
     kind: AssetKind;
@@ -41,6 +43,7 @@ export default function AssetsPage() {
     const imageInputRef = useRef<HTMLInputElement>(null);
     const videoInputRef = useRef<HTMLInputElement>(null);
     const audioInputRef = useRef<HTMLInputElement>(null);
+    const characterVoiceInputRef = useRef<HTMLInputElement>(null);
     const assetInputRef = useRef<HTMLInputElement>(null);
     const dramas = useCanvasStore((state) => state.folders);
     const assets = useAssetStore((state) => state.assets);
@@ -57,6 +60,7 @@ export default function AssetsPage() {
     const [dramaFilter, setDramaFilter] = useState(ALL_DRAMAS);
     const [folderFilter, setFolderFilter] = useState<string | null>(null);
     const [selection, setSelection] = useState<string[]>([]);
+    const selectionHasTaggableAsset = useMemo(() => selection.some((id) => assets.some((asset) => asset.id === id && asset.kind !== "character")), [assets, selection]);
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(10);
     const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
@@ -68,11 +72,15 @@ export default function AssetsPage() {
     const [videoDraft, setVideoDraft] = useState<VideoDraft>(null);
     const [audioDraft, setAudioDraft] = useState<AudioAsset["data"] | null>(null);
     const [characterImages, setCharacterImages] = useState<CharacterImage[]>([]);
+    const [characterPrimaryIndex, setCharacterPrimaryIndex] = useState(0);
+    const [characterVoice, setCharacterVoice] = useState<{ url: string; name: string; description: string; storageKey?: string; assetId: string }>({ url: "", name: "", description: "", assetId: "" });
     const coverUrl = Form.useWatch("coverUrl", form) || "";
     const title = Form.useWatch("title", form) || "";
     const tags = Form.useWatch("tags", form) || [];
     const content = Form.useWatch("content", form) || "";
+    const characterCoverUrl = characterImages[Math.min(Math.max(characterPrimaryIndex, 0), Math.max(0, characterImages.length - 1))]?.url || "";
     const validAssets = useMemo(() => assets.filter((asset) => asset.kind === "text" || asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "character"), [assets]);
+    const audioAssets = useMemo(() => assets.filter((asset): asset is AudioAsset => asset.kind === "audio"), [assets]);
     const dramaOptions = useMemo(() => [
         { label: t("assets.drama.all"), value: ALL_DRAMAS },
         { label: t("assets.drama.unassigned"), value: UNASSIGNED_DRAMA },
@@ -90,6 +98,7 @@ export default function AssetsPage() {
             if (kindFilter !== "all" && asset.kind !== kindFilter) return false;
             if (folderFilter) {
                 if (folderFilter.startsWith("tag:")) {
+                    if (asset.kind === "character") return false;
                     if (!(asset.tags || []).includes(folderFilter.slice(4))) return false;
                 } else if ((asset.folderId ?? null) !== folderFilter) return false;
             }
@@ -107,7 +116,7 @@ export default function AssetsPage() {
     const childFoldersOf = (id: string) => folders.filter((folder) => folder.parentId === id);
     const legacyTagFolders = useMemo(() => {
         const counts = new Map<string, number>();
-        for (const asset of assets) for (const tag of asset.tags || []) counts.set(tag, (counts.get(tag) || 0) + 1);
+        for (const asset of assets) if (asset.kind !== "character") for (const tag of asset.tags || []) counts.set(tag, (counts.get(tag) || 0) + 1);
         return Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0], "zh-Hans-CN"));
     }, [assets]);
     const currentFolderName = useMemo(() => {
@@ -152,11 +161,15 @@ export default function AssetsPage() {
         message.success(t("assets.movedToFolder", { count: selection.length }));
     };
     const bulkAddTag = (tag: string) => {
+        let count = 0;
         selection.forEach((id) => {
             const asset = useAssetStore.getState().assets.find((a) => a.id === id);
-            if (asset && !(asset.tags || []).includes(tag)) updateAsset(id, { tags: [...(asset.tags || []), tag] });
+            if (asset && asset.kind !== "character" && !(asset.tags || []).includes(tag)) {
+                updateAsset(id, { tags: [...(asset.tags || []), tag] });
+                count += 1;
+            }
         });
-        message.success(t("assets.tagged", { count: selection.length, tag }));
+        if (count) message.success(t("assets.tagged", { count, tag }));
     };
     const bulkMoveToDrama = (dramaId: string | null) => {
         const count = selection.length;
@@ -243,6 +256,8 @@ export default function AssetsPage() {
             setVideoDraft(null);
             setAudioDraft(null);
             setCharacterImages([]);
+            setCharacterPrimaryIndex(0);
+            setCharacterVoice({ url: "", name: "", description: "", assetId: "" });
             setFormKind("text");
             form.setFieldsValue({ kind: "text", title: "", coverUrl: "", tags: [], source: t("assets.manual"), note: "", content: "", dramaId: dropDramaId || UNASSIGNED_DRAMA });
         setIsAssetOpen(true);
@@ -255,6 +270,25 @@ export default function AssetsPage() {
         setVideoDraft(asset.kind === "video" ? asset.data as VideoAsset["data"] : null);
         setAudioDraft(asset.kind === "audio" ? asset.data as AudioAsset["data"] : null);
         setCharacterImages(asset.kind === "character" ? asset.data.images : []);
+        if (asset.kind === "character") {
+            const coverIndex = asset.data.images.findIndex((image) => image.url === asset.coverUrl);
+            setCharacterPrimaryIndex(Math.min(Math.max(asset.data.primaryIndex ?? (coverIndex >= 0 ? coverIndex : 0), 0), Math.max(asset.data.images.length - 1, 0)));
+            const voiceAsset = findCharacterVoiceAsset(assets.filter((candidate): candidate is AudioAsset => candidate.kind === "audio"), {
+                assetId: asset.data.voiceAssetId,
+                storageKey: asset.data.voiceStorageKey,
+                url: asset.data.voice,
+            });
+            setCharacterVoice({
+                url: asset.data.voice || (voiceAsset?.kind === "audio" ? voiceAsset.data.url : ""),
+                name: resolveCharacterVoiceName(asset.data.voiceName, voiceAsset),
+                description: asset.data.voiceDescription || "",
+                storageKey: asset.data.voiceStorageKey || (voiceAsset?.kind === "audio" ? voiceAsset.data.storageKey : undefined),
+                assetId: asset.data.voiceAssetId || voiceAsset?.id || "",
+            });
+        } else {
+            setCharacterPrimaryIndex(0);
+            setCharacterVoice({ url: "", name: "", description: "", assetId: "" });
+        }
         form.setFieldsValue({
             kind: asset.kind,
             title: asset.title,
@@ -293,18 +327,22 @@ export default function AssetsPage() {
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         } else if (values.kind === "character") {
             if (!characterImages.length) { message.error(t("assets.characterRequireOneImage")); return; }
+            const primaryIndex = Math.min(Math.max(characterPrimaryIndex, 0), characterImages.length - 1);
             const characterData: CharacterAsset["data"] = {
                 name: values.title.trim(),
                 englishName: "",
                 description: "",
-                voice: "",
-                voiceName: "",
-                voiceAssetId: "",
+                voice: characterVoice.url,
+                voiceName: resolveCharacterVoiceName(characterVoice.name),
+                voiceDescription: characterVoice.description,
+                voiceStorageKey: characterVoice.storageKey,
+                voiceAssetId: characterVoice.assetId,
                 images: characterImages,
+                primaryIndex,
             };
             // 角色表单的"描述"从 form.content 读取（在表单里复用 content 字段避免再加一项）
             if (values.content) characterData.description = values.content;
-            const asset = { ...base, kind: "character" as const, data: characterData, coverUrl: characterImages[0]?.url || base.coverUrl };
+            const asset = { ...base, kind: "character" as const, data: characterData, coverUrl: characterImages[primaryIndex]?.url || "" };
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         } else {
             if (!imageDraft) { message.error(t("assets.selectImage")); return; }
@@ -338,6 +376,12 @@ export default function AssetsPage() {
         if (!form.getFieldValue("title")) form.setFieldValue("title", file.name);
     };
 
+    const readCharacterVoiceFile = async (file?: File) => {
+        if (!file || !file.type.startsWith("audio/")) return;
+        const result = await uploadMediaFile(file, "audio", "library");
+        setCharacterVoice((current) => ({ url: result.url, name: file.name, description: current.description, storageKey: result.storageKey, assetId: "" }));
+    };
+
     const readVideoFile = async (file?: File) => {
         if (!file || !file.type.startsWith("video/")) return;
         const result = await uploadMediaFile(file, "video", "library");
@@ -360,6 +404,16 @@ export default function AssetsPage() {
         } catch { message.error(t("common.downloadFailed")); }
     };
 
+    const downloadCharacterImages = async (asset: Asset) => {
+        if (asset.kind !== "character") return;
+        try {
+            const filename = `${asset.title.trim() || t("assets.kinds.character")}-images.zip`;
+            await exportCharacterImages(asset, filename);
+        } catch {
+            message.error(t("common.downloadFailed"));
+        }
+    };
+
     const exportAllAssets = async () => {
         if (!validAssets.length) {
             message.warning(t("assets.noneToExport"));
@@ -377,7 +431,15 @@ export default function AssetsPage() {
             importedAssets.forEach((asset) => idMap.set(asset.id, nanoid()));
             importedAssets.forEach((asset) => {
                 const importedDramaId = dropDramaId || (asset.dramaId && dramas.some((drama) => drama.id === asset.dramaId) ? asset.dramaId : null);
-                const payload = { ...asset, id: idMap.get(asset.id), dramaId: importedDramaId } as Record<string, unknown>;
+                const remapped = asset.kind === "character" ? {
+                    ...asset,
+                    data: {
+                        ...asset.data,
+                        voiceAssetId: idMap.get(asset.data.voiceAssetId) || asset.data.voiceAssetId,
+                        images: asset.data.images.map((image) => ({ ...image, assetId: image.assetId ? idMap.get(image.assetId) || image.assetId : undefined })),
+                    },
+                } : asset;
+                const payload = { ...remapped, id: idMap.get(asset.id), dramaId: importedDramaId } as Record<string, unknown>;
                 delete payload.createdAt;
                 delete payload.updatedAt;
                 addAsset(payload as Parameters<typeof addAsset>[0]);
@@ -554,17 +616,19 @@ export default function AssetsPage() {
                                 >
                                     <Button size="small" icon={<Clapperboard className="size-3.5" />}>{t("assets.drama.assign")}</Button>
                                 </Dropdown>
-                                <Dropdown
-                                    trigger={["click"]}
-                                    menu={{
-                                        items: [
-                                            { type: "divider" as const },
-                                            ...legacyTagFolders.slice(0, 20).map(([tag]) => ({ key: tag, label: tag, onClick: () => bulkAddTag(tag) })),
-                                        ],
-                                    }}
-                                >
-                                    <Button size="small">{t("assets.addTag")}</Button>
-                                </Dropdown>
+                                {selectionHasTaggableAsset ? (
+                                    <Dropdown
+                                        trigger={["click"]}
+                                        menu={{
+                                            items: [
+                                                { type: "divider" as const },
+                                                ...legacyTagFolders.slice(0, 20).map(([tag]) => ({ key: tag, label: tag, onClick: () => bulkAddTag(tag) })),
+                                            ],
+                                        }}
+                                    >
+                                        <Button size="small">{t("assets.addTag")}</Button>
+                                    </Dropdown>
+                                ) : null}
                                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={confirmBulkDelete}>
                                     {t("assets.deleteBulk")}
                                 </Button>
@@ -653,6 +717,7 @@ export default function AssetsPage() {
                                 onEdit={() => openEdit(asset)}
                                 onCopy={copyAssetText}
                                 onDownload={downloadImage}
+                                onDownloadCharacter={downloadCharacterImages}
                                 onDelete={() => setDeletingAsset(asset)}
                             />
                         ))}
@@ -681,6 +746,7 @@ export default function AssetsPage() {
                     <Form form={form} layout="vertical" requiredMark={false} initialValues={{ kind: "text", tags: [] }}>
                         <Form.Item name="kind" label={t("assets.type")}>
                             <Select
+                                disabled={Boolean(editingAsset)}
                                 options={[
                                     { label: t("assets.kinds.text"), value: "text" },
                                     { label: t("assets.kinds.image"), value: "image" },
@@ -694,20 +760,24 @@ export default function AssetsPage() {
                         <Form.Item name="dramaId" label={t("assets.drama.field")}>
                             <Select options={dramaOptions.filter((option) => option.value !== ALL_DRAMAS)} />
                         </Form.Item>
-                        <Form.Item name="title" label={t("assets.fields.title")} rules={[{ required: true, message: t("assets.fields.titleRequired") }]}>
-                            <Input size="large" placeholder={t("assets.fields.titlePlaceholder")} />
+                        <Form.Item name="title" label={formKind === "character" ? t("assets.fields.characterName") : t("assets.fields.title")} rules={[{ required: true, message: formKind === "character" ? t("assets.fields.characterNameRequired") : t("assets.fields.titleRequired") }]}>
+                            <Input size="large" placeholder={formKind === "character" ? t("assets.fields.characterNamePlaceholder") : t("assets.fields.titlePlaceholder")} />
                         </Form.Item>
-                        <Form.Item name="coverUrl" label={t("assets.fields.coverUrl")}>
-                            <Space.Compact className="w-full">
-                                <Input placeholder={t("assets.fields.coverPlaceholder")} />
-                                <Button icon={<Upload className="size-3.5" />} onClick={() => coverInputRef.current?.click()}>
-                                    {t("common.upload")}
-                                </Button>
-                            </Space.Compact>
-                        </Form.Item>
-                        <Form.Item name="tags" label={t("assets.fields.tags")}>
-                            <Select mode="tags" tokenSeparators={[",", "，"]} placeholder={t("assets.fields.tagsPlaceholder")} />
-                        </Form.Item>
+                        {formKind !== "character" ? (
+                            <Form.Item name="coverUrl" label={t("assets.fields.coverUrl")}>
+                                <Space.Compact className="w-full">
+                                    <Input placeholder={t("assets.fields.coverPlaceholder")} />
+                                    <Button icon={<Upload className="size-3.5" />} onClick={() => coverInputRef.current?.click()}>
+                                        {t("common.upload")}
+                                    </Button>
+                                </Space.Compact>
+                            </Form.Item>
+                        ) : null}
+                        {formKind !== "character" ? (
+                            <Form.Item name="tags" label={t("assets.fields.tags")}>
+                                <Select mode="tags" tokenSeparators={[",", "，"]} placeholder={t("assets.fields.tagsPlaceholder")} />
+                            </Form.Item>
+                        ) : null}
                         <div className="grid gap-4 sm:grid-cols-2">
                             <Form.Item name="source" label={t("assets.fields.source")}>
                                 <Input placeholder={t("assets.fields.sourcePlaceholder")} />
@@ -759,8 +829,41 @@ export default function AssetsPage() {
                                 <Form.Item name="content" label={t("assets.fields.characterDescription")}>
                                     <Input.TextArea rows={4} placeholder={t("assets.fields.characterDescriptionPlaceholder")} />
                                 </Form.Item>
+                                <Form.Item label={t("canvas.character.voice")}>
+                                    <div className="space-y-2">
+                                        <Space.Compact className="w-full">
+                                            <Input
+                                                value={characterVoice.name || characterVoice.url}
+                                                onChange={(event) => setCharacterVoice((current) => ({ ...current, name: event.target.value, assetId: "" }))}
+                                                placeholder={t("canvas.character.editVoicePlaceholder")}
+                                            />
+                                            <Button icon={<Upload className="size-3.5" />} onClick={() => characterVoiceInputRef.current?.click()}>
+                                                {t("common.upload")}
+                                            </Button>
+                                            {hasCharacterVoiceSource(characterVoice) ? <Button aria-label={t("common.delete")} icon={<X className="size-3.5" />} onClick={() => setCharacterVoice({ url: "", name: "", description: "", assetId: "" })} /> : null}
+                                        </Space.Compact>
+                                        {audioAssets.length || hasCharacterVoiceSource(characterVoice) ? (
+                                            <VoiceAssetSelect
+                                                assets={audioAssets}
+                                                allowClear
+                                                placeholder={t("canvas.character.editPickVoiceAsset")}
+                                                value={characterVoice.assetId || undefined}
+                                                preview={hasCharacterVoiceSource(characterVoice) ? { id: characterVoice.assetId, url: characterVoice.url, storageKey: characterVoice.storageKey, name: characterVoice.name } : undefined}
+                                                onChange={(asset) => setCharacterVoice((current) => asset
+                                                    ? { url: asset.data.url, name: asset.title, description: current.description, storageKey: asset.data.storageKey, assetId: asset.id }
+                                                    : { url: "", name: "", description: "", assetId: "" })}
+                                            />
+                                        ) : null}
+                                        <Input.TextArea
+                                            rows={2}
+                                            value={characterVoice.description}
+                                            onChange={(event) => setCharacterVoice((current) => ({ ...current, description: event.target.value }))}
+                                            placeholder={t("assets.character.voiceDescriptionPlaceholder")}
+                                        />
+                                    </div>
+                                </Form.Item>
                                 <Form.Item label={t("assets.fields.characterImages")} required>
-                                    <CharacterEditor images={characterImages} onChange={setCharacterImages} />
+                                    <CharacterEditor images={characterImages} primaryIndex={characterPrimaryIndex} onPrimaryIndexChange={setCharacterPrimaryIndex} onChange={setCharacterImages} />
                                 </Form.Item>
                             </>
                         ) : (
@@ -785,8 +888,8 @@ export default function AssetsPage() {
                     <div className="rounded-xl border border-stone-200 bg-stone-50 p-4 dark:border-stone-800 dark:bg-stone-950">
                         <Typography.Text strong>{t("assets.preview")}</Typography.Text>
                         <div className="mt-3 overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-                            {coverUrl || imageDraft?.dataUrl ? (
-                                <img src={coverUrl || imageDraft?.dataUrl} alt="" className="aspect-[4/3] w-full object-cover" />
+                            {(formKind === "character" ? characterCoverUrl : coverUrl || imageDraft?.dataUrl) ? (
+                                <img src={formKind === "character" ? characterCoverUrl : coverUrl || imageDraft?.dataUrl} alt="" className="aspect-[4/3] w-full object-cover" />
                             ) : (
                                 <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-5 text-center text-sm text-stone-500 dark:bg-stone-900">{content || t("assets.noCover")}</div>
                             )}
@@ -795,15 +898,15 @@ export default function AssetsPage() {
                                     {title || t("assets.untitled")}
                                 </Typography.Text>
                                 <div className="mt-2 flex flex-wrap gap-1.5">
-                                    {tags.length ? (
+                                    {formKind !== "character" && tags.length ? (
                                         tags.map((tag) => (
                                             <Tag key={tag} className="m-0">
                                                 {tag}
                                             </Tag>
                                         ))
-                                    ) : (
+                                    ) : formKind !== "character" ? (
                                         <Tag className="m-0">{t("assets.untagged")}</Tag>
-                                    )}
+                                    ) : null}
                                 </div>
                             </div>
                         </div>
@@ -843,9 +946,16 @@ export default function AssetsPage() {
                     className="hidden"
                     onChange={(event) => { void readAudioFile(event.target.files?.[0]); event.target.value = ""; }}
                 />
+                <input
+                    ref={characterVoiceInputRef}
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    onChange={(event) => { void readCharacterVoiceFile(event.target.files?.[0]); event.target.value = ""; }}
+                />
             </Modal>
 
-            <AssetDrawer asset={previewAsset} onClose={() => setPreviewAsset(null)} onCopy={copyAssetText} onDownload={downloadImage} />
+            <AssetDrawer asset={previewAsset} onClose={() => setPreviewAsset(null)} onCopy={copyAssetText} onDownload={downloadImage} onDownloadCharacter={downloadCharacterImages} />
 
             <input ref={assetInputRef} type="file" accept="application/zip,.zip" className="hidden" onChange={(event) => void importAssetZip(event.target.files?.[0])} />
 
@@ -905,7 +1015,7 @@ function AssetDramaTag({ asset }: { asset: Asset }) {
     return <Tag icon={<Clapperboard className="size-3" />} className="m-0 max-w-full text-[11px]"><span className="inline-block max-w-28 truncate align-bottom">{drama?.name || t("assets.drama.unassigned")}</span></Tag>;
 }
 
-function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownload, onDelete }: { asset: Asset; selected: boolean; onSelect: () => void; onOpen: () => void; onEdit: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void; onDelete: () => void }) {
+function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownload, onDownloadCharacter, onDelete }: { asset: Asset; selected: boolean; onSelect: () => void; onOpen: () => void; onEdit: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void; onDownloadCharacter: (asset: Asset) => void; onDelete: () => void }) {
     const { t } = useTranslation();
     const cover = useResolvedCoverUrl(asset);
     const summary = assetSummary(asset);
@@ -952,12 +1062,12 @@ function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownlo
                     </Typography.Paragraph>
                     <div className="mt-3 flex flex-wrap gap-1.5">
                         <AssetDramaTag asset={asset} />
-                        {(asset.tags || []).slice(0, 3).map((tag) => (
+                        {(asset.kind === "character" ? [] : asset.tags || []).slice(0, 3).map((tag) => (
                             <Tag key={tag} className="m-0 text-[11px]">
                                 {tag}
                             </Tag>
                         ))}
-                        {!asset.tags?.length ? <Tag className="m-0 text-[11px]">{t("assets.noTags")}</Tag> : null}
+                        {asset.kind !== "character" && !asset.tags?.length ? <Tag className="m-0 text-[11px]">{t("assets.noTags")}</Tag> : null}
                     </div>
                 </div>
             </button>
@@ -978,6 +1088,11 @@ function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownlo
                         {t("common.download")}
                     </Button>
                 ) : null}
+                {asset.kind === "character" ? (
+                    <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownloadCharacter(asset)}>
+                        {t("assets.character.downloadImages")}
+                    </Button>
+                ) : null}
                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={onDelete}>
                     {t("common.delete")}
                 </Button>
@@ -986,7 +1101,7 @@ function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownlo
     );
 }
 
-function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | null; onClose: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void }) {
+function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }: { asset: Asset | null; onClose: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void; onDownloadCharacter: (asset: Asset) => void }) {
     const { t } = useTranslation();
     const cover = useResolvedCoverUrl(asset);
     return (
@@ -1005,7 +1120,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                         <Space size={[4, 4]} wrap>
                             <Tag>{t(`assets.kinds.${asset.kind}`)}</Tag>
                             <AssetDramaTag asset={asset} />
-                            {(asset.tags || []).map((tag) => (
+                            {(asset.kind === "character" ? [] : asset.tags || []).map((tag) => (
                                 <Tag key={tag}>{tag}</Tag>
                             ))}
                         </Space>
@@ -1027,10 +1142,16 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                             </div>
                         ) : asset.kind === "character" ? (
                             <div className="mt-2 space-y-3">
-                                {asset.data.description ? (
-                                    <Typography.Paragraph className="!mb-0 whitespace-pre-wrap">{asset.data.description}</Typography.Paragraph>
-                                ) : null}
-                                {asset.data.images.length ? (
+                                 {asset.data.description ? (
+                                     <Typography.Paragraph className="!mb-0 whitespace-pre-wrap">{asset.data.description}</Typography.Paragraph>
+                                 ) : null}
+                                 {asset.data.voiceName || asset.data.voiceDescription ? (
+                                     <div className="rounded-md border border-stone-200 p-3 dark:border-stone-700">
+                                         <Typography.Text strong>{asset.data.voiceName || t("canvas.character.voice")}</Typography.Text>
+                                         {asset.data.voiceDescription ? <Typography.Paragraph type="secondary" className="!mb-0 !mt-1 whitespace-pre-wrap">{asset.data.voiceDescription}</Typography.Paragraph> : null}
+                                     </div>
+                                 ) : null}
+                                 {asset.data.images.length ? (
                                     <div className="grid grid-cols-3 gap-2">
                                         {asset.data.images.map((image, idx) => (
                                             <Image key={idx} src={image.url} alt={image.outfit || image.name} className="!rounded-md" />
@@ -1061,6 +1182,11 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                                 {asset.kind === "video" ? t("assets.downloadVideo") : asset.kind === "audio" ? t("assets.downloadAudio") : t("assets.downloadImage")}
                             </Button>
                         ) : null}
+                        {asset.kind === "character" ? (
+                            <Button type="primary" icon={<Download className="size-4" />} onClick={() => onDownloadCharacter(asset)}>
+                                {t("assets.character.downloadImages")}
+                            </Button>
+                        ) : null}
                     </Space>
                 </div>
             ) : null}
@@ -1088,12 +1214,12 @@ function assetSummary(asset: Asset) {
 
 function assetSearchText(asset: Asset) {
     const extra = asset.kind === "text" ? asset.data.content
-        : asset.kind === "character" ? `${asset.data.name} ${asset.data.description} ${asset.data.images.length} images`
+        : asset.kind === "character" ? `${asset.data.name} ${asset.data.description} ${asset.data.voiceName} ${asset.data.voiceDescription || ""} ${asset.data.images.length} images`
         : asset.data.mimeType;
-    return [asset.title, asset.source || "", asset.note || "", (asset.tags || []).join(" "), extra].join(" ").toLowerCase();
+    return [asset.title, asset.source || "", asset.note || "", asset.kind === "character" ? "" : (asset.tags || []).join(" "), extra].join(" ").toLowerCase();
 }
 
-function CharacterEditor({ images, onChange }: { images: CharacterImage[]; onChange: (images: CharacterImage[]) => void }) {
+function CharacterEditor({ images, primaryIndex, onPrimaryIndexChange, onChange }: { images: CharacterImage[]; primaryIndex: number; onPrimaryIndexChange: (index: number) => void; onChange: (images: CharacterImage[]) => void }) {
     const { t } = useTranslation();
     const fileInputRef = useRef<HTMLInputElement>(null);
     const pendingIdxRef = useRef<number | "new" | null>(null);
@@ -1151,13 +1277,19 @@ function CharacterEditor({ images, onChange }: { images: CharacterImage[]; onCha
         next[idx] = { ...next[idx], ...patch };
         onChange(next);
     };
-    const removeImage = (idx: number) => onChange(images.filter((_, i) => i !== idx));
+    const removeImage = (idx: number) => {
+        onChange(images.filter((_, i) => i !== idx));
+        if (idx === primaryIndex) onPrimaryIndexChange(0);
+        else if (idx < primaryIndex) onPrimaryIndexChange(primaryIndex - 1);
+    };
     const moveImage = (idx: number, dir: -1 | 1) => {
         const target = idx + dir;
         if (target < 0 || target >= images.length) return;
         const next = [...images];
         [next[idx], next[target]] = [next[target], next[idx]];
         onChange(next);
+        if (primaryIndex === idx) onPrimaryIndexChange(target);
+        else if (primaryIndex === target) onPrimaryIndexChange(idx);
     };
 
     return (
@@ -1167,7 +1299,7 @@ function CharacterEditor({ images, onChange }: { images: CharacterImage[]; onCha
                     <div className="flex gap-3">
                         <div className="size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-stone-50 dark:border-stone-700 dark:bg-stone-900">
                             {previews[idx] ? (
-                                <img src={previews[idx]} alt={image.outfit || image.name} className="size-full object-cover" />
+                                <Image src={previews[idx]} alt={image.outfit || image.name} preview={{ src: previews[idx] }} className="!size-full !object-cover" />
                             ) : (
                                 <div className="flex size-full items-center justify-center text-xs text-stone-400">无图</div>
                             )}
@@ -1196,6 +1328,9 @@ function CharacterEditor({ images, onChange }: { images: CharacterImage[]; onCha
                             />
                             <div className="flex flex-wrap gap-1.5">
                                 <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => { pendingIdxRef.current = idx; fileInputRef.current?.click(); }}>{t("common.upload")}</Button>
+                                <Button size="small" type={idx === primaryIndex ? "primary" : "default"} onClick={() => onPrimaryIndexChange(idx)}>
+                                    {idx === primaryIndex ? t("assets.character.defaultImage") : t("assets.character.setDefaultImage")}
+                                </Button>
                                 <Button size="small" disabled={idx === 0} onClick={() => moveImage(idx, -1)}>↑</Button>
                                 <Button size="small" disabled={idx === images.length - 1} onClick={() => moveImage(idx, 1)}>↓</Button>
                                 <Button size="small" danger onClick={() => removeImage(idx)}>{t("common.delete")}</Button>

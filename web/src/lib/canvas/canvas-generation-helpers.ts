@@ -3,6 +3,7 @@ import i18n from "@/i18n";
 import { ensureImagePreview, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
 import { referenceUrl } from "@/lib/canvas/canvas-node-factory";
+import { nodeResourceItems } from "@/lib/canvas/canvas-resource-references";
 import type { NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
@@ -233,14 +234,21 @@ export function findRetrySourceNode(nodeId: string, nodes: CanvasNodeData[], con
 }
 
 export function sourceNodeReferenceImages(node: CanvasNodeData | null) {
-    if (!node || node.type !== CanvasNodeType.Image || !node.metadata?.content) return [];
+    if (!node || !node.metadata) return [];
+    const metadata = node.metadata;
+    const hasSmartImageSlots = node.type === CanvasNodeType.Config && metadata.smart === true && metadata.generationMode === "image" && Boolean(metadata.images?.length);
+    if ((node.type !== CanvasNodeType.Image && !(node.type === CanvasNodeType.Config && metadata.smart)) || (!metadata.content && !hasSmartImageSlots)) return [];
+    if (node.type === CanvasNodeType.Config && metadata.generationMode === "image" && metadata.images?.length) {
+        const primary = nodeResourceItems(node).find((resource) => resource.kind === "image");
+        if (primary) return [{ id: `${node.id}-primary`, name: `${node.title || node.id}.png`, type: metadata.mimeType || "image/png", dataUrl: primary.url || "", storageKey: primary.storageKey }];
+    }
     return [
         {
             id: node.id,
             name: `${node.title || node.id}.png`,
-            type: node.metadata.mimeType || "image/png",
-            dataUrl: node.metadata.content,
-            storageKey: node.metadata.storageKey,
+            type: metadata.mimeType || "image/png",
+            dataUrl: metadata.content || "",
+            storageKey: metadata.storageKey,
         },
     ];
 }
