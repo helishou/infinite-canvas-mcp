@@ -118,6 +118,7 @@ export function H3PromptSection({
   const [translating, setTranslating] = useState(false);
   const [isTranslated, setIsTranslated] = useState(false);
   const [translateError, setTranslateError] = useState<string | null>(null);
+  const [copiedError, setCopiedError] = useState(false);
   // 用来在异步翻译返回时校验 prompt 是否已被用户改掉，避免显示错配的中文
   const promptRef = useRef({ prompt, segmentId: selected?.id });
   promptRef.current = { prompt, segmentId: selected?.id };
@@ -159,6 +160,12 @@ export function H3PromptSection({
       const normalizedMode = mode === "t2v" ? "t2va" : mode === "i2v" ? "i2va" : mode === "fl2v" ? "fl2va" : "ref2va";
       const target = segmentsFor(ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {}).find((segment) => segment.id === targetSegmentId) || selected;
       const references = target ? refsForSegment(target) : [];
+      const missingAddress = references.filter((ref) => !ref.url && !ref.storageKey);
+      if (missingAddress.length) {
+        const names = missingAddress.map((ref) => ref.name || "未命名参考").join("、");
+        setPromptJob(ctx, targetSegmentId, { ...job, status: "error", error: `参考图缺少可读取地址：${names}` });
+        return;
+      }
       const ordinals = { image: 0, video: 0, audio: 0 };
       const manifest = references.map((ref) => {
         const ordinal = ++ordinals[ref.type];
@@ -214,7 +221,12 @@ export function H3PromptSection({
       const result = await ctx.ai.generateText(userPrompt, {
         model,
         system,
-        references: references.map((ref) => ({ url: ref.url, name: ref.name })),
+        references: references.map((ref) => ({
+          url: ref.url,
+          name: ref.name,
+          storageKey: ref.storageKey,
+          mimeType: ref.mimeType,
+        })),
       });
       // 模型未返回内容时（如 Ollama 空响应），requestImageQuestion 现在返回空串，
       // 这里不能把 prompt 覆写成占位符/空串——保留用户原文，并给出明确失败提示。
@@ -366,8 +378,33 @@ export function H3PromptSection({
         <code key="video">&lt;Video V&gt; 指认第 V 段参考视频</code>{" "}
         <code key="audio">&lt;Audio A&gt; 指认第 A 段参考音频</code>
         {enhancement?.error ? (
-          <span key="enhance-error" role="alert">
-            增强失败：{enhancement.error}
+          <span
+            key="enhance-error"
+            role="alert"
+            title="点击复制错误信息到剪贴板"
+            onClick={() => {
+              const text = `增强失败：${enhancement.error}`;
+              const fallback = () => {
+                const ta = document.createElement("textarea");
+                ta.value = text;
+                ta.style.position = "fixed";
+                ta.style.opacity = "0";
+                document.body.appendChild(ta);
+                ta.select();
+                try { document.execCommand("copy"); } catch { /* ignore */ }
+                document.body.removeChild(ta);
+              };
+              if (navigator.clipboard?.writeText) {
+                navigator.clipboard.writeText(text).catch(fallback);
+              } else {
+                fallback();
+              }
+              setCopiedError(true);
+              window.setTimeout(() => setCopiedError(false), 1500);
+            }}
+            style={{ cursor: "pointer", userSelect: "none" }}
+          >
+            {copiedError ? "已复制到剪贴板" : `增强失败：${enhancement.error}`}
           </span>
         ) : null}
       </small>

@@ -400,7 +400,12 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     // 只看 playToken 是否变化，**不**依赖 h3PlayRequest：metadata 里的 h3PlayRequest 残留值、
     // MCP / 多端同步、StrictMode dev 模式下 useEffect 跑两次都不会触发自动播放。
     // h3PlayRequest 由本窗口 view 持有，不能用共享 metadata 触发播放。
+    // ⚠️ 必须比较 playToken 的**变化**：effect 在 mount 时也会执行一次，而刚挂载的 video
+    // 必然是 paused=true，只判断 v.paused 会让每次刷新页面 / 节点重新挂载都自动播放。
+    const playedTokenRef = useRef(playToken);
     useEffect(() => {
+        if (playedTokenRef.current === playToken) return;
+        playedTokenRef.current = playToken;
         const v = videosRef.current[activeRef.current];
         if (!v) return;
         if (v.paused) void v.play().catch(() => undefined);

@@ -351,9 +351,35 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
 
 export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem(props: CanvasNodeProps) {
     const { dragPreviewPosition, resizePreviewBounds } = useCanvasNodePreview(props.projectId, props.data.id);
+    const autoFitImageRef = useRef("");
     let resolvedProps = props;
     if (dragPreviewPosition && props.previewPosition !== dragPreviewPosition) resolvedProps = { ...resolvedProps, previewPosition: dragPreviewPosition };
     if (resizePreviewBounds && resolvedProps.previewBounds !== resizePreviewBounds) resolvedProps = { ...resolvedProps, previewBounds: resizePreviewBounds };
+    const isSmartImageNode = props.data.type === CanvasNodeType.Config && props.data.metadata?.smart === true && (props.data.metadata?.generationMode || "image") === "image";
+    const isAspectLockedImage = isSmartImageNode || (props.data.type === CanvasNodeType.Image && !props.data.metadata?.freeResize);
+    const adaptiveImageSize = isAspectLockedImage ? imageNaturalSize(props.data) : null;
+    const adaptiveImageWidth = adaptiveImageSize?.width;
+    const adaptiveImageHeight = adaptiveImageSize?.height;
+    useEffect(() => {
+        if (!adaptiveImageWidth || !adaptiveImageHeight) {
+            autoFitImageRef.current = "";
+            return;
+        }
+        const key = `${props.data.id}:${adaptiveImageWidth}:${adaptiveImageHeight}`;
+        if (autoFitImageRef.current === key) return;
+        autoFitImageRef.current = key;
+
+        const scale = Math.min(props.data.width / adaptiveImageWidth, props.data.height / adaptiveImageHeight);
+        const width = adaptiveImageWidth * scale;
+        const height = adaptiveImageHeight * scale;
+        if (Math.abs(width - props.data.width) < 0.5 && Math.abs(height - props.data.height) < 0.5) return;
+        props.onResizeStart(props.data.id);
+        props.onResize(props.data.id, width, height, {
+            x: props.data.position.x + (props.data.width - width) / 2,
+            y: props.data.position.y + (props.data.height - height) / 2,
+        });
+        props.onResizeEnd(props.data.id);
+    }, [adaptiveImageHeight, adaptiveImageWidth, props.data.height, props.data.id, props.data.position.x, props.data.position.y, props.data.width, props.onResize, props.onResizeEnd, props.onResizeStart]);
     const screenShortSide = Math.min(resolvedProps.data.width, resolvedProps.data.height) * resolvedProps.scale;
     const detailModeRef = useRef(screenShortSide > NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE);
     if (screenShortSide >= NODE_DETAIL_MODE_ENTER_SCREEN_SIZE) detailModeRef.current = true;
@@ -534,8 +560,6 @@ export const CanvasNode = React.memo(function CanvasNode({
         keepRatio: false,
         ratio: 1,
     });
-    const autoFitImageRef = useRef("");
-
     useEffect(() => {
         setTitleDraft(data.title || "");
     }, [data.title]);
@@ -594,10 +618,10 @@ export const CanvasNode = React.memo(function CanvasNode({
 
             const dx = (event.clientX - resizeRef.current.startX) / scale;
             const dy = (event.clientY - resizeRef.current.startY) / scale;
-            // 竖向裁剪图经常在生成时就接近原来的 220px 最小宽度，
-            // 图片节点需要允许继续缩小；其他节点保留原有可读性下限。
-            const minWidth = data.type === CanvasNodeType.Image ? 120 : 220;
-            const minHeight = data.type === CanvasNodeType.Image ? 120 : 160;
+            // 竖向裁剪图经常接近尺寸下限，图片节点和智能图片节点都允许缩到 120px；其他节点保留原有可读性下限。
+            const isImageResize = data.type === CanvasNodeType.Image || isSmartImageNode;
+            const minWidth = isImageResize ? 120 : 220;
+            const minHeight = isImageResize ? 120 : 160;
             const startRight = resizeRef.current.startLeft + resizeRef.current.startWidth;
             const startBottom = resizeRef.current.startTop + resizeRef.current.startHeight;
             const fromLeft = resizeRef.current.corner.includes("left");
@@ -657,30 +681,6 @@ export const CanvasNode = React.memo(function CanvasNode({
         window.addEventListener("mousemove", handleResizeMove);
         window.addEventListener("mouseup", handleResizeUp);
     };
-
-    const adaptiveImageSize = isAspectLockedImage ? imageNaturalSize(data) : null;
-    const adaptiveImageWidth = adaptiveImageSize?.width;
-    const adaptiveImageHeight = adaptiveImageSize?.height;
-    useEffect(() => {
-        if (!isAspectLockedImage || !adaptiveImageWidth || !adaptiveImageHeight) {
-            autoFitImageRef.current = "";
-            return;
-        }
-        const key = `${data.id}:${adaptiveImageWidth}:${adaptiveImageHeight}`;
-        if (autoFitImageRef.current === key) return;
-        autoFitImageRef.current = key;
-
-        const scale = Math.min(data.width / adaptiveImageWidth, data.height / adaptiveImageHeight);
-        const width = adaptiveImageWidth * scale;
-        const height = adaptiveImageHeight * scale;
-        if (Math.abs(width - data.width) < 0.5 && Math.abs(height - data.height) < 0.5) return;
-        onResizeStart(data.id);
-        onResize(data.id, width, height, {
-            x: data.position.x + (data.width - width) / 2,
-            y: data.position.y + (data.height - height) / 2,
-        });
-        onResizeEnd(data.id);
-    }, [data.height, data.id, data.position.x, data.position.y, data.width, isAspectLockedImage, onResize, onResizeEnd, onResizeStart, adaptiveImageHeight, adaptiveImageWidth]);
 
     useEffect(() => {
         return () => {

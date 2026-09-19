@@ -7,6 +7,7 @@ import { readH3Layout } from "../../../../../canvas-agent/src/plugins/minimax-h3
 
 const LAYOUT_KEY = "minimax-h3-default-layout";
 let cachedPayload: StoredPayload | null = null;
+let cachedLayoutPanes: Record<string, number> | null = null;
 
 export interface StoredH3Defaults {
     type: "minimax-h3-settings";
@@ -20,6 +21,7 @@ type StoredPayload = { type?: string; version?: number; settings?: Record<string
 
 export function setDefaultParamsCache(settings: Record<string, unknown>): void {
     cachedPayload = { type: "minimax-h3-settings", version: 2, settings };
+    cachedLayoutPanes = null;
 }
 
 if (typeof window !== "undefined") {
@@ -76,10 +78,17 @@ export function writeDefaultParams(settings: Record<string, unknown>): void {
 
 export function clearDefaultParams(): void {
     cachedPayload = null;
+    cachedLayoutPanes = null;
     try {
         if (typeof localStorage === "undefined") return;
         localStorage.removeItem(LAYOUT_KEY);
     } catch {
         // 忽略
     }
+}
+
+// 默认布局里的模块宽高：节点自己还没有任何布局值时的初值（渲染路径每帧都要读，这里做一层缓存）。
+export function readDefaultLayoutPanes(): Record<string, number> {
+    cachedLayoutPanes ??= readDefaultLayout().panes || {};
+    return cachedLayoutPanes;
 }
