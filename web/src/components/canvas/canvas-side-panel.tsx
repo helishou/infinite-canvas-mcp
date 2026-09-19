@@ -1,8 +1,8 @@
-import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, ListChecks, ListRestart, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, ListChecks, ListRestart, MapPinned, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -12,6 +12,7 @@ import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
+import { CustomPromptDialog } from "@/components/prompts/custom-prompt-dialog";
 import { fetchBackendCanvasDrama } from "@/services/backend-api";
 import { fetchSourcePrompts, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
@@ -50,6 +51,7 @@ const NODE_TYPE_ICON: Record<string, typeof Square> = {
     [CanvasNodeType.Loop]: ListRestart,
     [CanvasNodeType.Group]: Square,
     [CanvasNodeType.Character]: User,
+    [CanvasNodeType.Scene]: MapPinned,
 };
 
 const STATUS_COLOR: Record<string, string> = {
@@ -140,7 +142,7 @@ function TabButton({ label, active, theme, onClick }: { label: string; active: b
 // Canvas tab: list nodes and center, zoom, and select the clicked node.
 // ---------------------------------------------------------------------------
 
-const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Loop, CanvasNodeType.Character, CanvasNodeType.Group];
+const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Loop, CanvasNodeType.Character, CanvasNodeType.Scene, CanvasNodeType.Group];
 
 function nodePreviewText(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt || "";
@@ -243,6 +245,7 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                             const Icon = NODE_TYPE_ICON[node.type] || FileText;
                             const isImage = node.type === CanvasNodeType.Image && node.metadata?.content;
                             const isCharacter = node.type === CanvasNodeType.Character;
+                            const isScene = node.type === CanvasNodeType.Scene;
                             const isChecked = checked.has(node.id);
                             const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
                             return (
@@ -256,7 +259,7 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                                     <button type="button" onClick={() => (selectMode ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.sidePanel.focusNode")}>
                                         {selectMode ? <CheckMark checked={isChecked} theme={theme} /> : null}
                                         <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
-                                            {isImage || isCharacter ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
+                                            {isImage || isCharacter || isScene ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
                                         </span>
                                         <span className="min-w-0 flex-1 space-y-0.5">
                                             <span className="block truncate text-sm font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
@@ -306,11 +309,12 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
     const isCharacter = node.type === CanvasNodeType.Character;
+    const isScene = node.type === CanvasNodeType.Scene;
     const characterImages = node.metadata?.characterImages || [];
     const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex ?? 0, 0), Math.max(characterImages.length - 1, 0));
     const primaryImage = isCharacter ? characterImages[primaryIndex] || characterImages[0] : undefined;
-    const content = isCharacter ? primaryImage?.url || "" : node.metadata?.content || "";
-    const storageKey = isCharacter ? primaryImage?.storageKey : node.metadata?.storageKey;
+    const content = isCharacter ? primaryImage?.url || "" : isScene ? node.metadata?.sceneImage?.url || "" : node.metadata?.content || "";
+    const storageKey = isCharacter ? primaryImage?.storageKey : isScene ? node.metadata?.sceneImage?.storageKey : node.metadata?.storageKey;
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
 
     useEffect(() => {
@@ -329,7 +333,7 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     }, [backendConnected, backendToken, content, storageKey]);
 
     const source = previewUrlFor(storageKey) || url;
-    return source ? <img src={source} alt={node.title} className="size-full object-cover" /> : isCharacter ? <User className="size-5 opacity-60" /> : <ImageIcon className="size-5 opacity-60" />;
+    return source ? <img src={source} alt={node.title} className="size-full object-cover" /> : isCharacter ? <User className="size-5 opacity-60" /> : isScene ? <MapPinned className="size-5 opacity-60" /> : <ImageIcon className="size-5 opacity-60" />;
 }
 
 function CheckMark({ checked, theme }: { checked: boolean; theme: CanvasTheme }) {
@@ -350,6 +354,7 @@ const ASSET_GROUPS: { kind: AssetKind; icon: typeof Square }[] = [
     { kind: "audio", icon: Music2 },
     { kind: "text", icon: FileText },
     { kind: "character", icon: User },
+    { kind: "scene", icon: MapPinned },
 ];
 const ALL_ASSET_DRAMAS = "__all-asset-dramas__";
 const UNASSIGNED_ASSET_DRAMA = "__unassigned-asset-drama__";
@@ -384,6 +389,7 @@ function buildInsertPayload(asset: Asset): InsertAssetPayload {
         voiceAssetId: asset.data.voiceAssetId || voiceAsset?.id || "",
         };
     }
+    if (asset.kind === "scene") return { kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorCardPrompt: asset.data.colorCardPrompt };
     return { kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title };
 }
 
@@ -436,11 +442,11 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
         return asset.dramaId === dramaFilter;
     }), [assets, dramaFilter, dramaIds]);
 
-    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.kind === "character" ? [] : asset.tags || []))).slice(0, 20), [scopedAssets]);
+    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.kind === "character" || asset.kind === "scene" ? [] : asset.tags || []))).slice(0, 20), [scopedAssets]);
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
-        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.kind !== "character" && (asset.tags || []).includes(tagFilter))) && (!query || [asset.title, ...(asset.kind === "character" ? [] : asset.tags || [])].join(" ").toLowerCase().includes(query)));
+        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.kind !== "character" && asset.kind !== "scene" && (asset.tags || []).includes(tagFilter))) && (!query || [asset.title, ...(asset.kind === "character" || asset.kind === "scene" ? [] : asset.tags || [])].join(" ").toLowerCase().includes(query)));
     }, [keyword, scopedAssets, tagFilter]);
 
     const groups = useMemo(() => ASSET_GROUPS.map((group) => ({ ...group, items: filtered.filter((asset) => asset.kind === group.kind) })).filter((group) => group.items.length > 0), [filtered]);
@@ -579,6 +585,15 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
             event.dataTransfer.setData("text/plain", payload);
             return;
         }
+        if (asset.kind === "scene") {
+            const ref = { type: "scene", kind: "scene", name: asset.title, sceneAssetId: asset.id, sceneName: asset.data.name || asset.title, sceneDescription: asset.data.description, sceneImage: asset.data.image, sceneColorCard: asset.data.colorCard, sceneColorCardPrompt: asset.data.colorCardPrompt };
+            const payload = JSON.stringify(ref);
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);
+            event.dataTransfer.setData("application/json", payload);
+            event.dataTransfer.setData("text/plain", payload);
+            return;
+        }
         const ref = asset.kind === "image"
             ? { url: asset.data.dataUrl, dataUrl: asset.data.dataUrl, type: "image", kind: "image", name: asset.title, storageKey: asset.data.storageKey }
             : { url: asset.data.url, type: asset.kind, kind: asset.kind, name: asset.title, storageKey: asset.data.storageKey };
@@ -656,6 +671,7 @@ function AssetCover({ asset }: { asset: Asset }) {
         return <video src={`${asset.data.url}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     }
     if (asset.kind === "character") return <CharacterCover asset={asset} />;
+    if (asset.kind === "scene") return <SceneCover asset={asset} />;
     if (asset.kind === "audio") {
         return (
             <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
@@ -665,6 +681,12 @@ function AssetCover({ asset }: { asset: Asset }) {
         );
     }
     return <ImageAssetCover asset={asset as ImageAsset} />;
+}
+
+function SceneCover({ asset }: { asset: Extract<Asset, { kind: "scene" }> }) {
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
+    useEffect(() => { void ensureImagePreview(asset.data.image.storageKey); }, [asset.data.image.storageKey]);
+    return <img src={previewUrlFor(asset.data.image.storageKey) || asset.data.image.url || asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
 }
 
 function ImageAssetCover({ asset }: { asset: ImageAsset }) {
@@ -692,6 +714,21 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
     const [expanded, setExpanded] = useState<Record<string, boolean>>({});
     const [customOpen, setCustomOpen] = useState(true);
     const [detail, setDetail] = useState<Prompt | null>(null);
+    const [addDialogOpen, setAddDialogOpen] = useState(false);
+    const addPromptAction = (
+        <button
+            type="button"
+            onClick={(event) => {
+                event.stopPropagation();
+                setAddDialogOpen(true);
+            }}
+            className="grid size-6 place-items-center rounded-md opacity-60 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10"
+            aria-label={t("canvas.sidePanel.addPrompt")}
+            title={t("canvas.sidePanel.addPrompt")}
+        >
+            <Plus className="size-3.5" />
+        </button>
+    );
 
     useEffect(() => {
         if (!customLoaded) void loadCustomPrompts().catch(() => message.error(t("prompts.loadFailed")));
@@ -713,7 +750,7 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 <div className="space-y-1">
-                    {customLoaded ? <PromptItemsGroup items={customPromptItems} keyword={keyword} open={customOpen} sourceName={CUSTOM_PROMPTS_CATEGORY} icon={Sparkles} theme={theme} onToggle={() => setCustomOpen((value) => !value)} onInsert={onInsert} onView={setDetail} emptyText={t("canvas.sidePanel.customEmpty")} /> : null}
+                    {customLoaded ? <PromptItemsGroup items={customPromptItems} keyword={keyword} open={customOpen} sourceName={CUSTOM_PROMPTS_CATEGORY} icon={Sparkles} theme={theme} onToggle={() => setCustomOpen((value) => !value)} onInsert={onInsert} onView={setDetail} emptyText={t("canvas.sidePanel.customEmpty")} headerAction={addPromptAction} /> : null}
                     {enabledSources.length ? enabledSources.map((source) => (
                         <PromptSourceGroup
                             key={source.id}
@@ -731,6 +768,7 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
                 </div>
             </div>
             <PromptDetailDialog prompt={detail} onClose={() => setDetail(null)} onCopy={(prompt) => void copyPrompt(prompt)} />
+            <CustomPromptDialog open={addDialogOpen} mode="add" onClose={() => setAddDialogOpen(false)} />
         </div>
     );
 });
@@ -776,6 +814,7 @@ function PromptItemsGroup({
     error = false,
     onRetry,
     emptyText,
+    headerAction,
 }: {
     items: Prompt[];
     keyword: string;
@@ -790,6 +829,7 @@ function PromptItemsGroup({
     error?: boolean;
     onRetry?: () => void;
     emptyText: string;
+    headerAction?: ReactNode;
 }) {
     const { t } = useTranslation();
     const showResults = open || !!keyword.trim();
@@ -801,12 +841,15 @@ function PromptItemsGroup({
     const insertPrompt = (item: Prompt) => onInsert({ kind: "text", content: item.prompt, title: item.title });
     return (
         <div>
-            <button type="button" onClick={onToggle} className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-xs font-semibold opacity-75 transition hover:opacity-100">
-                <ChevronRight className={cn("size-3.5 transition-transform", showResults && "rotate-90")} />
-                <Icon className="size-3.5" />
-                <span className="min-w-0 flex-1 truncate">{sourceName}</span>
+            <div className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-xs font-semibold opacity-75 transition hover:opacity-100">
+                <button type="button" onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+                    <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", showResults && "rotate-90")} />
+                    <Icon className="size-3.5 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{sourceName}</span>
+                </button>
+                {headerAction}
                 {!loading && !error && items.length > 0 ? <span className="opacity-50">{filtered.length}</span> : null}
-            </button>
+            </div>
             {showResults ? (
                 <div className="px-1 pb-2 pt-1">
                     {loading ? (

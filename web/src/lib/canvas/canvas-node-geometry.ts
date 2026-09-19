@@ -12,6 +12,32 @@ export function nodeBounds(nodes: CanvasNodeData[]) {
     );
 }
 
+/** 组框相对成员包围盒的内边距；顶边多留一截避开组标题栏（容器 p-3 + 标题行 h-7）。 */
+export const GROUP_FRAME_PADDING = { left: 24, right: 24, top: 44, bottom: 24 };
+
+/**
+ * 组框 = 成员包围盒 + 内边距。组作为容器必须包住自己的成员，所以坐标由成员反推，
+ * 不接受外部指定；成员为空时返回 null（没有可包的矩形）。
+ */
+export function groupFrameOfMembers(rects: Array<{ x: number; y: number; width: number; height: number }>) {
+    if (!rects.length) return null;
+    const bounds = rects.reduce(
+        (acc, rect) => ({
+            minX: Math.min(acc.minX, rect.x),
+            minY: Math.min(acc.minY, rect.y),
+            maxX: Math.max(acc.maxX, rect.x + rect.width),
+            maxY: Math.max(acc.maxY, rect.y + rect.height),
+        }),
+        { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity },
+    );
+    return {
+        x: Math.round(bounds.minX - GROUP_FRAME_PADDING.left),
+        y: Math.round(bounds.minY - GROUP_FRAME_PADDING.top),
+        width: Math.round(bounds.maxX - bounds.minX + GROUP_FRAME_PADDING.left + GROUP_FRAME_PADDING.right),
+        height: Math.round(bounds.maxY - bounds.minY + GROUP_FRAME_PADDING.top + GROUP_FRAME_PADDING.bottom),
+    };
+}
+
 type GroupDropCandidates = {
     hasMovedGroup: boolean;
     movingNodes: readonly CanvasNodeData[];

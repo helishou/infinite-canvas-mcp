@@ -19,7 +19,7 @@ function loadImage(url: string): Promise<HTMLImageElement> {
 }
 
 export function ImageCompareModal({ open, beforeUrl, afterUrl, title, onClose }: ImageCompareModalProps) {
-    const [sliderPos, setSliderPos] = useState(50);
+    const [sliderPos, setSliderPos] = useState(0);
     // 算出"两张图同高"的统一显示尺寸（高度统一 = 两者中较大自然高度，按视口约束后取整）
     const [displaySize, setDisplaySize] = useState<{ width: number; height: number } | null>(null);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -105,10 +105,10 @@ export function ImageCompareModal({ open, beforeUrl, afterUrl, title, onClose }:
         }
     }, [open, handleMouseMove, handleTouchMove, handleEnd]);
 
-    // 默认 50%（左半 before、右半 after）。需要在 open 切换 *和* 切图（beforeUrl/afterUrl 变）时都重置：
+    // 默认 0%（比较线位于最左侧）。需要在 open 切换 *和* 切图（beforeUrl/afterUrl 变）时都重置：
     // 只挂 [open] 的话，同一 modal 没关就换图就不会 reset，旧的滑块位置会"飘"到下一张图上。
     useEffect(() => {
-        if (open) setSliderPos(50);
+        if (open) setSliderPos(0);
     }, [open, beforeUrl, afterUrl]);
 
     return (

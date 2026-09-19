@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { FileText, Image as ImageIcon, Music2, Plus, Puzzle, User, Video, X } from "lucide-react";
+import { FileText, Image as ImageIcon, Music2, Plus, Puzzle, Video, X } from "lucide-react";
 import { Popover } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -54,27 +54,21 @@ function CharacterReferenceItem({ node, selection, onOpen, onRemove }: { node: C
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const images = node.metadata?.characterImages || [];
-    const primary = images[Math.min(node.metadata?.characterPrimaryIndex || 0, Math.max(images.length - 1, 0))] || images[0];
     const selectedImageCount = selection?.imageKeys ? selection.imageKeys.length : images.length;
     const voiceIncluded = selection?.voiceEnabled !== false && Boolean(node.metadata?.characterVoiceUrl || node.metadata?.characterVoiceStorageKey);
     return (
-        <Popover placement="topLeft" mouseEnterDelay={0.15} content={primary?.url ? <div className="w-52"><img src={primary.url} alt={node.metadata?.characterName || node.title} className="max-h-56 w-full rounded-lg object-contain" /><div className="mt-1 text-sm">{node.metadata?.characterName || node.title || "角色"}</div></div> : null}>
-            <div
-                className="group relative flex h-14 w-24 shrink-0 cursor-pointer items-center gap-1.5 rounded-xl border px-1.5 transition hover:opacity-85"
-                style={{ background: theme.toolbar.activeBg, borderColor: theme.node.activeStroke || theme.toolbar.border }}
-                title={onOpen ? "双击选择角色参考输入" : t("canvas.references.empty")}
-                onDoubleClick={(event) => { event.stopPropagation(); onOpen?.(); }}
-            >
-                <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-lg" style={{ background: theme.toolbar.panel }}>
-                    {primary?.url ? <img src={primary.url} alt="" className="size-full object-cover" draggable={false} /> : <User className="size-4 opacity-65" />}
-                </span>
-                <span className="min-w-0 flex-1 leading-tight">
-                    <span className="block truncate text-[11px] font-medium">{node.metadata?.characterName || node.title || "角色"}</span>
-                    <span className="mt-0.5 block truncate text-[10px]" style={{ color: theme.node.muted }}>{selectedImageCount} 图{voiceIncluded ? " · 声线" : ""}</span>
-                </span>
-                <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
-            </div>
-        </Popover>
+        <div
+            className="group relative grid size-12 shrink-0 cursor-pointer place-items-center rounded-xl border p-1 transition hover:opacity-85"
+            style={{ background: theme.toolbar.activeBg, borderColor: theme.node.activeStroke || theme.toolbar.border }}
+            title={onOpen ? "双击选择角色参考输入" : t("canvas.references.empty")}
+            onDoubleClick={(event) => { event.stopPropagation(); onOpen?.(); }}
+        >
+            <span className="min-w-0 max-w-full text-center leading-tight">
+                <span className="block truncate text-[10px] font-medium">{node.metadata?.characterName || node.title || "角色"}</span>
+                <span className="mt-0.5 block truncate text-[9px]" style={{ color: theme.node.muted }}>{selectedImageCount} 图{voiceIncluded ? " · 声线" : ""}</span>
+            </span>
+            <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
+        </div>
     );
 }
 

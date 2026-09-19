@@ -571,7 +571,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         );
         res.json({ ok: true, task, events });
       } catch {
-        res.status(404).json({ ok: false, error: "task not found" });
+        res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
       }
     }),
   );

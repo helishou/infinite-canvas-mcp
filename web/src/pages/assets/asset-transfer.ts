@@ -3,7 +3,7 @@ import { saveAs } from "file-saver";
 import { createZip, readZip } from "@/lib/zip";
 import { getMediaBlob, setMediaBlob } from "@/services/file-storage";
 import { getImageBlob, setImageBlob } from "@/services/image-storage";
-import type { Asset, AudioAsset, CharacterAsset, ImageAsset, VideoAsset } from "@/stores/use-asset-store";
+import type { Asset, AudioAsset, CharacterAsset, ImageAsset, VideoAsset, SceneAsset } from "@/stores/use-asset-store";
 
 type AssetExportFile = {
     app: "infinite-canvas";
@@ -65,6 +65,16 @@ export async function exportAssets(assets: Asset[], filename: string) {
                         files.push({ storageKey: asset.data.voiceStorageKey, path, mimeType: blob.type || "audio/*", bytes: blob.size });
                         zipFiles.push({ name: path, data: blob });
                     }
+                }
+            } else if (asset.kind === "scene") {
+                for (const image of [asset.data.image, asset.data.colorCard].filter((item): item is NonNullable<SceneAsset["data"]["colorCard"]> => Boolean(item))) {
+                    if (!image.storageKey || requestedKeys.has(image.storageKey)) continue;
+                    requestedKeys.add(image.storageKey);
+                    const blob = await getImageBlob(image.storageKey);
+                    if (!blob) continue;
+                    const path = `files/${safeFileName(image.storageKey)}.${fileExtension(blob.type, "image")}`;
+                    files.push({ storageKey: image.storageKey, path, mimeType: blob.type || image.mimeType, bytes: blob.size });
+                    zipFiles.push({ name: path, data: blob });
                 }
             }
         }),

@@ -16,7 +16,7 @@ import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { hasAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
-import { uploadBackendMedia } from "@/services/backend-api";
+import { fetchBackendDramaEpisodes, uploadBackendMedia } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { cn } from "@/lib/utils";
 
@@ -42,18 +42,51 @@ export default function CanvasPage() {
     const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
     const [folderFilter, setFolderFilter] = useState<string | null>(null);
+    const [dramaCanvasFolderByProjectId, setDramaCanvasFolderByProjectId] = useState<Record<string, string>>({});
+    const backendConnected = useBackendStore((state) => state.connected);
 
     const mode = searchParams.get("mode");
     const agentMode = mode === "new" || mode === "recent" || mode === "choose";
     const agentQuery = agentMode ? `?${searchParams.toString()}` : "";
+    useEffect(() => {
+        if (!hydrated || !backendConnected) {
+            setDramaCanvasFolderByProjectId({});
+            return;
+        }
+        const dramaFolders = folders.filter((folder) => folder.isDrama);
+        if (!dramaFolders.length) {
+            setDramaCanvasFolderByProjectId({});
+            return;
+        }
+        let disposed = false;
+        void Promise.all(dramaFolders.map(async (folder) => {
+            try {
+                const result = await fetchBackendDramaEpisodes(folder.id);
+                return [folder.id, result.episodes || []] as const;
+            } catch {
+                return [folder.id, []] as const;
+            }
+        })).then((entries) => {
+            if (disposed) return;
+            const next: Record<string, string> = {};
+            for (const [folderId, episodes] of entries) {
+                for (const episode of episodes) {
+                    if (episode.canvasId) next[episode.canvasId] = folderId;
+                }
+            }
+            setDramaCanvasFolderByProjectId(next);
+        });
+        return () => { disposed = true; };
+    }, [backendConnected, folders, hydrated]);
+    const getProjectFolderId = (project: CanvasProject) => project.folderId || dramaCanvasFolderByProjectId[project.id] || null;
     const visibleProjects = useMemo(() => {
         if (folderFilter === null) return projects;
-        if (folderFilter === UNFILED_FOLDER) return projects.filter((project) => !project.folderId);
-        return projects.filter((project) => project.folderId === folderFilter);
-    }, [folderFilter, projects]);
+        if (folderFilter === UNFILED_FOLDER) return projects.filter((project) => !getProjectFolderId(project));
+        return projects.filter((project) => getProjectFolderId(project) === folderFilter);
+    }, [dramaCanvasFolderByProjectId, folderFilter, projects]);
     const folderCounts = (folderId: string | null) => folderId === null
-        ? projects.filter((project) => !project.folderId).length
-        : projects.filter((project) => project.folderId === folderId).length;
+        ? projects.filter((project) => !getProjectFolderId(project)).length
+        : projects.filter((project) => getProjectFolderId(project) === folderId).length;
     const createAndSelectFolder = () => setFolderFilter(createFolder());
     const renameFolderFromPrompt = (id: string, name: string) => {
         const next = window.prompt(t("canvas.folder.rename"), name);

@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
+import { applyCanvasAgentOps, arrangeGroupMembers, computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData } from "@/types/canvas";
 
 const node = (id: string, type: string, x: number, y: number, width: number, height: number) =>
@@ -406,6 +406,367 @@ test("不压到选区外的节点：重排结果整体让开旁边的未选中�
         const rect = { x: item.position.x, y: item.position.y, w: item.width, h: item.height };
         const hit = rects.find((other) => overlapOf(other, rect));
         assert.ok(!hit, `整理结果压住了未选中节点 ${item.id}（被 ${hit?.id} 压住）`);
+    });
+});
+
+/** 整理一批选中的节点：ids 是选中节点，`useRegion` 对应画布入口的「整理后回到原区域」。 */
+const arrangeSelected = (nodes: CanvasNodeData[], connections: CanvasConnection[], useRegion: boolean) => {
+    const selected = nodes.filter((item) => item.type !== "blocker");
+    const box = selected.reduce(
+        (acc, item) => ({
+            minX: Math.min(acc.minX, item.position.x),
+            minY: Math.min(acc.minY, item.position.y),
+            maxX: Math.max(acc.maxX, item.position.x + item.width),
+            maxY: Math.max(acc.maxY, item.position.y + item.height),
+        }),
+        { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity },
+    );
+    const layout = computeFlowLayout({
+        nodes,
+        connections,
+        ids: selected.map((item) => item.id),
+        scopeEdges: true,
+        anchorX: box.minX,
+        anchorY: box.minY,
+        normalizeSizes: true,
+        ...(useRegion ? { centerInPlace: true } : {}),
+    });
+    const rects = selected.map((item) => {
+        const pos = layout.get(item.id)!;
+        return { id: item.id, x: pos.x, y: pos.y, w: pos.width ?? item.width, h: pos.height ?? item.height };
+    });
+    const out = rects.reduce(
+        (acc, rect) => ({
+            minX: Math.min(acc.minX, rect.x),
+            minY: Math.min(acc.minY, rect.y),
+            maxX: Math.max(acc.maxX, rect.x + rect.w),
+            maxY: Math.max(acc.maxY, rect.y + rect.h),
+        }),
+        { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity },
+    );
+    return { layout, rects, box, out, centerDrift: { x: (out.minX + out.maxX) / 2 - (box.minX + box.maxX) / 2, y: (out.minY + out.maxY) / 2 - (box.minY + box.maxY) / 2 } };
+};
+
+test("整理选中的一部分：结果重心仍落在原选区中心", () => {
+    // 锚点固定是选区左上角，整理后的形状又通常和原选区不同 —— 死锚左上角会让整块只朝右下方生长，
+    // 用户看到的就是「整理完跑到了别的地方」。传 region 后结果应中心对齐回原选区。
+    const nodes = [
+        node("ref0", "image", 2400, 1800, 340, 240),
+        node("ref1", "image", 2750, 1810, 340, 240),
+        node("h3vid", "video", 2600, 2100, 420, 236),
+        node("out", "video", 3100, 2090, 420, 236),
+        node("note", "text", 2500, 2450, 300, 180),
+    ];
+    const conns = [edge("ref0", "h3vid"), edge("ref1", "h3vid"), edge("h3vid", "out")];
+    const { centerDrift } = arrangeSelected(nodes, conns, true);
+    assert.ok(Math.abs(centerDrift.x) < 1 && Math.abs(centerDrift.y) < 1, `重心漂移=${JSON.stringify(centerDrift)} 应≈0`);
+});
+
+test("孤立节点不排成细长一列：一堆无连接节点的形状贴近原选区", () => {
+    // 货架换行判定曾把「上一块后的 tail gap」也算进行宽，于是每行的可用宽度凭空少一个 CLUSTER_GAP：
+    // 实测选中 6 个 300×200 的孤立节点会被拉成 300×1800 的一列（原选区是 1060×680），看着就像搬了家。
+    const nodes = Array.from({ length: 6 }, (_, i) => node(`g${i}`, "image", 1200 + (i % 3) * 260, 900 + Math.floor(i / 3) * 240, 300, 200));
+    const { out, box } = arrangeSelected(nodes, [], true);
+    assert.ok(out.maxX - out.minX >= 600, `整理后宽度=${Math.round(out.maxX - out.minX)} 应至少排得下两列（修复前只有 300）`);
+    assert.ok(out.maxY - out.minY <= (box.maxY - box.minY) * 2, `整理后高度=${Math.round(out.maxY - out.minY)} 不应远超原选区高度 ${box.maxY - box.minY}`);
+});
+
+test("就近让开：上方有空位时不往下推整屏", () => {
+    // 避让一度只往右 / 往下推：下方正好压着未选中节点时会被推到离原区域很远的地方。
+    // 现在四个方向各求一次位移并取最短的，这里上方空着，应该就近往上抬。
+    const nodes = [
+        ...[0, 1, 2].map((i) => node(`p${i}`, "image", 3000 + i * 400, 1200, 300, 200)),
+        node("below", "blocker", 3050, 1500, 1200, 400),
+    ];
+    const { rects, centerDrift } = arrangeSelected(nodes, [], true);
+    const blocker = nodes.find((item) => item.id === "below")!;
+    rects.forEach((rect) => {
+        const clash =
+            rect.x < blocker.position.x + blocker.width && rect.x + rect.w > blocker.position.x &&
+            rect.y < blocker.position.y + blocker.height && rect.y + rect.h > blocker.position.y;
+        assert.ok(!clash, `${rect.id} 压住了未选中节点 below`);
+    });
+    assert.ok(centerDrift.y < 0 && centerDrift.y > -500, `应就近往上抬（实际中心漂移 y=${Math.round(centerDrift.y)}，往下推会是 +1000 量级）`);
+});
+
+test("重复整理幂等（带 region）：连点两次整理布局坐标不再变化", () => {
+    const nodes = [
+        node("ref0", "image", 2400, 1800, 340, 240),
+        node("ref1", "image", 2750, 1810, 340, 240),
+        node("h3vid", "video", 2600, 2100, 420, 236),
+        node("out", "video", 3100, 2090, 420, 236),
+        node("note", "text", 2500, 2450, 300, 180),
+        node("side", "blocker", 1200, 1200, 300, 200),
+    ];
+    const conns = [edge("ref0", "h3vid"), edge("ref1", "h3vid"), edge("h3vid", "out")];
+    const first = arrangeSelected(nodes, conns, true);
+    const moved = nodes.map((item) => {
+        const pos = first.layout.get(item.id);
+        if (!pos) return item;
+        return { ...item, position: { x: pos.x, y: pos.y }, width: pos.width ?? item.width, height: pos.height ?? item.height };
+    });
+    const second = arrangeSelected(moved, conns, true);
+    nodes.filter((item) => first.layout.has(item.id)).forEach((item) => {
+        const a = first.layout.get(item.id)!;
+        const b = second.layout.get(item.id)!;
+        assert.ok(Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01, `${item.id} 第二次整理后位置应不变`);
+    });
+});
+
+/** 组关系走 metadata.groupId（成员指向所属组节点），与画布运行时一致。 */
+const groupedNode = (id: string, type: string, x: number, y: number, width: number, height: number, groupId?: string) =>
+    ({ id, type, title: id, position: { x, y }, width, height, metadata: groupId ? { groupId } : {} }) as unknown as CanvasNodeData;
+
+/** 直接按 ids 整理，等价于画布「整理布局」入口（scopeEdges + centerInPlace）。 */
+const arrange = (nodes: CanvasNodeData[], connections: CanvasConnection[], ids: string[]) => {
+    const positionOf = (id: string) => nodes.find((item) => item.id === id)!.position;
+    const layout = computeFlowLayout({
+        nodes,
+        connections,
+        ids,
+        scopeEdges: true,
+        anchorX: Math.min(...ids.map((id) => positionOf(id).x)),
+        anchorY: Math.min(...ids.map((id) => positionOf(id).y)),
+        normalizeSizes: true,
+        centerInPlace: true,
+    });
+    const rectOf = (id: string) => {
+        const item = nodes.find((node) => node.id === id)!;
+        const pos = layout.get(id)!;
+        return { x: pos.x, y: pos.y, width: pos.width ?? item.width, height: pos.height ?? item.height };
+    };
+    return { layout, rectOf };
+};
+
+const containsBox = (outer: ReturnType<ReturnType<typeof arrange>["rectOf"]>, inner: typeof outer) =>
+    inner.x >= outer.x - 0.5 &&
+    inner.y >= outer.y - 0.5 &&
+    inner.x + inner.width <= outer.x + outer.width + 0.5 &&
+    inner.y + inner.height <= outer.y + outer.height + 0.5;
+
+const groupFixture = () => {
+    const members = [
+        groupedNode("m1", "image", 1060, 1080, 300, 200, "g1"),
+        groupedNode("m2", "image", 1400, 1080, 300, 200, "g1"),
+        groupedNode("m3", "text", 1200, 1350, 280, 160, "g1"),
+    ];
+    return { group: groupedNode("g1", "group", 1000, 1000, 760, 480), members, outside: node("out", "video", 1900, 1150, 420, 236) };
+};
+
+/** 跑一组 agent ops（等价于画布 Cache → Backend 之外的本地应用路径）。 */
+const applyOps = (nodes: CanvasNodeData[], ops: Parameters<typeof applyCanvasAgentOps>[1], selectedNodeIds: string[] = []) =>
+    applyCanvasAgentOps({ projectId: "p1", title: "画布", nodes, connections: [], selectedNodeIds }, ops);
+
+test("生成组：组框包住所有被选中的节点，成员的 groupId 指向新组", () => {
+    const nodes = [node("a", "image", 100, 100, 300, 200), node("b", "text", 500, 360, 280, 160), node("out", "video", 900, 100, 420, 236)];
+    const { nodes: next, selectedNodeIds } = applyOps(nodes, [{ type: "create_group", memberIds: ["a", "b"] }]);
+    const group = next.find((item) => item.type === "group");
+    assert.ok(group, "应生成一个新组节点");
+    assert.equal(selectedNodeIds.length, 1);
+    assert.equal(selectedNodeIds[0], group!.id);
+    // 组 = 成员包围盒 + 内边距；成员只要在内缩一个边距的范围内，就一定是被覆盖的。
+    ["a", "b"].forEach((id) => {
+        const member = next.find((item) => item.id === id)!;
+        assert.equal(member.metadata?.groupId, group!.id, `${id} 应归属新组`);
+        assert.ok(
+            member.position.x >= group!.position.x
+                && member.position.y >= group!.position.y
+                && member.position.x + member.width <= group!.position.x + group!.width
+                && member.position.y + member.height <= group!.position.y + group!.height,
+            `组应覆盖 ${id}`,
+        );
+    });
+    const untouched = next.find((item) => item.id === "out")!;
+    assert.equal(untouched.metadata?.groupId, undefined, "未选中的节点不该被拉进组");
+    // 层级由 DOM 顺序决定（同 z-index 下后者在上），组排在成员后面就会盖住成员的点击与拖动。
+    const memberIndex = Math.min(...["a", "b"].map((id) => next.findIndex((item) => item.id === id)));
+    assert.ok(next.findIndex((item) => item.id === group!.id) < memberIndex, "组应排在自己的成员之前（渲染在成员下面）");
+});
+
+test("生成组：成员离开旧组后，旧组按剩余成员收紧，成员被搬空则删除旧组", () => {
+    const { group, members } = groupFixture();
+    const nodes = [group, ...members, node("free", "text", 1800, 1080, 280, 160)];
+    // 把 m1、m2 从旧组搬进新组：旧组只剩 m3，框应收紧到 m3；连同 m3 一起搬走时旧组空壳要删掉。
+    const parted = applyOps(nodes, [{ type: "create_group", memberIds: ["m1", "m2"] }]).nodes;
+    const kept = parted.find((item) => item.id === "g1")!;
+    const left = parted.find((item) => item.id === "m3")!;
+    assert.ok(left.position.x >= kept.position.x && left.position.x + left.width <= kept.position.x + kept.width, "旧组应收紧到剩余成员");
+    assert.ok(kept.width < group.width, "旧组宽度应变小");
+    assert.equal(parted.find((item) => item.id === "m1")!.metadata?.groupId !== "g1", true);
+
+    const emptied = applyOps(nodes, [{ type: "create_group", memberIds: ["m1", "m2", "m3"] }]).nodes;
+    assert.equal(emptied.some((item) => item.id === "g1"), false, "成员被搬空的旧组应删除，不留空壳");
+});
+
+test("生成组：组不套组，选中的组节点不会被收进新组", () => {
+    const { group, members } = groupFixture();
+    const nodes = [group, ...members];
+    const next = applyOps(nodes, [{ type: "create_group", memberIds: ["g1", "m1", "m2"] }]).nodes;
+    const created = next.find((item) => item.type === "group" && item.id !== "g1")!;
+    assert.equal(next.find((item) => item.id === "g1")!.metadata?.groupId, undefined, "已有的组不应变成新组的成员");
+    ["m1", "m2"].forEach((id) => assert.equal(next.find((item) => item.id === id)!.metadata?.groupId, created.id, `${id} 应归属新组`));
+    // 只有组节点被选中时没有任何可用成员，不该凭空生成一个空组。
+    const onlyGroup = applyOps(nodes, [{ type: "create_group", memberIds: ["g1"] }]).nodes;
+    assert.equal(onlyGroup.length, nodes.length, "没有可用成员时不生成组");
+});
+
+test("组整理后仍覆盖自己的成员", () => {
+    // 组是容器：之前组和成员被当成互不相干的两块各排各的，组跑到别处、成员也被排走。
+    // 现在组不参与分层排布，成员落位后组框按「成员包围盒 + 内边距」重新生成 —— 覆盖关系是构造性成立的。
+    const { group, members, outside } = groupFixture();
+    const nodes = [group, ...members, outside];
+    const { rectOf } = arrange(nodes, [edge("m1", "m2"), edge("m2", "out")], ["g1", "m1", "m2", "m3", "out"]);
+    const box = rectOf("g1");
+    members.forEach((member) => assert.ok(containsBox(box, rectOf(member.id)), `整理后组应覆盖成员 ${member.id}`));
+});
+
+test("只选中成员：整组跟着一起整理，组仍覆盖全部成员", () => {
+    // 选中组里的某个成员去整理时，若不带上它所属的组，这个成员就会被排到组外 —— 组再也覆盖不住它。
+    const { group, members, outside } = groupFixture();
+    const nodes = [group, ...members, outside];
+    const { layout, rectOf } = arrange(nodes, [edge("m1", "out")], ["m1", "out"]);
+    assert.ok(layout.has("g1"), "选了成员就该带上它所属的组");
+    assert.ok(layout.has("m2") && layout.has("m3"), "同组其它成员应随组一起排布");
+    const box = rectOf("g1");
+    members.forEach((member) => assert.ok(containsBox(box, rectOf(member.id)), `组应覆盖成员 ${member.id}`));
+});
+
+test("嵌套组：内层组先包住自己的成员，外层组再包住内层组", () => {
+    const inner = groupedNode("g2", "group", 1100, 1150, 600, 400, "g1");
+    const innerMembers = [groupedNode("i1", "image", 1150, 1250, 300, 200, "g2"), groupedNode("i2", "image", 1500, 1250, 300, 200, "g2")];
+    const outerMember = groupedNode("m1", "image", 1060, 1080, 300, 200, "g1");
+    const outer = groupedNode("g1", "group", 1000, 1000, 760, 480);
+    const nodes = [outer, inner, ...innerMembers, outerMember];
+    const { rectOf } = arrange(nodes, [], ["g1"]);
+    const innerBox = rectOf("g2");
+    const outerBox = rectOf("g1");
+    innerMembers.forEach((member) => assert.ok(containsBox(innerBox, rectOf(member.id)), `内层组应覆盖 ${member.id}`));
+    assert.ok(containsBox(outerBox, innerBox), "外层组应覆盖内层组");
+    assert.ok(containsBox(outerBox, rectOf("m1")), "外层组应覆盖自己的直属成员");
+});
+
+test("空组没有成员可包：仍按普通节点参与排布", () => {
+    const nodes = [groupedNode("gEmpty", "group", 1000, 1000, 760, 480), node("out", "video", 1900, 1150, 420, 236)];
+    const { layout } = arrange(nodes, [], ["gEmpty", "out"]);
+    const pos = layout.get("gEmpty")!;
+    assert.ok(Number.isFinite(pos.x) && Number.isFinite(pos.y), "空组也应拿到有效坐标");
+    assert.deepEqual(overlaps(nodes, layout), []);
+});
+
+test("重复整理幂等（含组）：组框重新生成后第二次坐标不再变化", () => {
+    const { group, members, outside } = groupFixture();
+    const nodes = [group, ...members, outside];
+    const ids = ["g1", "m1", "m2", "m3", "out"];
+    const first = arrange(nodes, [edge("m1", "m2"), edge("m2", "out")], ids);
+    const moved = nodes.map((item) => {
+        const pos = first.layout.get(item.id);
+        if (!pos) return item;
+        return { ...item, position: { x: pos.x, y: pos.y }, width: pos.width ?? item.width, height: pos.height ?? item.height };
+    });
+    const second = arrange(moved, [edge("m1", "m2"), edge("m2", "out")], ids);
+    ids.forEach((id) => {
+        const a = first.layout.get(id)!;
+        const b = second.layout.get(id)!;
+        assert.ok(Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01, `${id} 第二次整理后位置应不变`);
+    });
+});
+
+/** 组内整理（工具栏「整理」）的输入：一个组框 + 若干带 groupId 的成员。 */
+const arrangeGroup = (group: CanvasNodeData, members: CanvasNodeData[]) => {
+    const nodes = [group, ...members];
+    const layout = arrangeGroupMembers(group, nodes);
+    return { nodes, layout, rectOf: (id: string) => layout.get(id)! };
+};
+
+const ratioOf = (size: { width: number; height: number }) => size.width / size.height;
+
+test("组内整理：成员尺寸收进相近带宽，图片保持原宽高比，全部落在组框内", () => {
+    const group = groupedNode("g1", "group", 0, 0, 1200, 900);
+    const members = [
+        groupedNode("m1", "image", 100, 100, 400, 300, "g1"),
+        groupedNode("m2", "image", 600, 120, 300, 200, "g1"),
+        groupedNode("m3", "video", 150, 500, 800, 300, "g1"),
+    ];
+    const { layout, rectOf } = arrangeGroup(group, members);
+    const box = { x: group.position.x, y: group.position.y, width: group.width, height: group.height };
+    members.forEach((member) => {
+        const rect = rectOf(member.id);
+        assert.ok(rect, `${member.id} 应该有排布结果`);
+        assert.ok(containsBox(box, rect), `${member.id} 应排在组框范围内`);
+        // 等比缩放：宽高比与整理前一致（四舍五入误差按 1% 容忍）。
+        assert.ok(Math.abs(ratioOf(rect) - ratioOf(member)) / ratioOf(member) < 0.01, `${member.id} 宽高比应保持不变`);
+    });
+    // 相近尺寸：最大高度不应超过最小高度的两倍（与整理布局同一档带宽）。
+    const heights = members.map((member) => rectOf(member.id).height);
+    assert.ok(Math.max(...heights) <= Math.min(...heights) * 2, `尺寸应被收进相近档位，实际 ${heights.join("/")}`);
+    // 顺序：原视觉第一行的 m1/m2 排在第二行的 m3 上方，行内按左到右。
+    assert.equal(rectOf("m3").y > rectOf("m1").y, true, "原视觉顺序应保持：m3 在 m1/m2 下方");
+    assert.equal(rectOf("m2").x > rectOf("m1").x, true, "同一行内应按左到右排列");
+    // 成员之间不重叠。
+    for (let i = 0; i < members.length; i++) {
+        for (let j = i + 1; j < members.length; j++) {
+            const a = rectOf(members[i].id);
+            const b = rectOf(members[j].id);
+            const overlap = a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+            assert.equal(overlap, false, `${members[i].id} 与 ${members[j].id} 不应重叠`);
+        }
+    }
+    assert.equal(layout.size, members.length);
+});
+
+test("组内整理：组框装不下时整体等比缩小，仍然不溢出组框", () => {
+    const group = groupedNode("g1", "group", 500, 500, 800, 400);
+    const members = [0, 1, 2].map((index) => groupedNode(`m${index}`, "image", 520 + index * 420, 560, 400, 300, "g1"));
+    const { rectOf } = arrangeGroup(group, members);
+    const box = { x: group.position.x, y: group.position.y, width: group.width, height: group.height };
+    members.forEach((member) => {
+        const rect = rectOf(member.id);
+        assert.ok(rect.width < member.width && rect.height < member.height, `${member.id} 应被缩小以适配组框`);
+        assert.ok(containsBox({ ...box, width: box.width + 6, height: box.height + 6 }, rect), `${member.id} 缩小后不应溢出组框`);
+        assert.ok(Math.abs(ratioOf(rect) - ratioOf(member)) / ratioOf(member) < 0.02, `${member.id} 缩小后宽高比应保持`);
+    });
+});
+
+test("组内整理：不因换行把成员缩过头（竖图 + 横图混排）", () => {
+    // 按「当前规划的超标比例」一步缩到底会把这三个节点缩到原尺寸的 1/3；
+    // 二分「能装下的最大比例」后应保留 6 成上下，组框大而成员被缩成缩略图是明显的体验倒退。
+    const group = groupedNode("g1", "group", 0, 0, 1000, 700);
+    const members = [
+        groupedNode("v1", "image", 40, 60, 300, 600, "g1"),
+        groupedNode("h1", "video", 400, 60, 640, 360, "g1"),
+        groupedNode("v2", "image", 40, 700, 400, 800, "g1"),
+    ];
+    const { rectOf } = arrangeGroup(group, members);
+    assert.ok(rectOf("h1").width > 640 * 0.5, `横图不应被缩过头，实际 ${rectOf("h1").width}`);
+    assert.ok(rectOf("v2").height > 800 * 0.5, `竖图不应被缩过头，实际 ${rectOf("v2").height}`);
+    const box = { x: 0, y: 0, width: 1000, height: 700 };
+    members.forEach((member) => assert.ok(containsBox(box, rectOf(member.id)), `${member.id} 应排在组框内`));
+});
+
+test("组内整理：重复执行结果不变（幂等），非画面节点不被缩放", () => {
+    const group = groupedNode("g1", "group", 0, 0, 1200, 900);
+    const members = [
+        groupedNode("m1", "image", 100, 100, 400, 300, "g1"),
+        groupedNode("m2", "image", 600, 120, 300, 200, "g1"),
+        groupedNode("t1", "text", 120, 700, 280, 160, "g1"),
+    ];
+    const first = arrangeGroup(group, members);
+    // 文本节点保持原尺寸，只被挪位置。
+    const text = first.rectOf("t1");
+    assert.equal(text.width, 280);
+    assert.equal(text.height, 160);
+    const moved = first.nodes.map((item) => {
+        const rect = first.layout.get(item.id);
+        return rect ? { ...item, position: { x: rect.x, y: rect.y }, width: rect.width, height: rect.height } : item;
+    });
+    const second = arrangeGroupMembers(moved.find((item) => item.id === "g1")!, moved);
+    members.forEach((member) => {
+        const a = first.layout.get(member.id)!;
+        const b = second.get(member.id)!;
+        assert.equal(b.x, a.x, `${member.id} 第二次整理 x 应不变`);
+        assert.equal(b.y, a.y, `${member.id} 第二次整理 y 应不变`);
+        assert.equal(b.width, a.width, `${member.id} 第二次整理宽度应不变`);
+        assert.equal(b.height, a.height, `${member.id} 第二次整理高度应不变`);
     });
 });
 

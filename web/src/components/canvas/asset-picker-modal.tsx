@@ -5,14 +5,15 @@ import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
 import { findCharacterVoiceAsset, resolveCharacterVoiceName } from "@/lib/character-voice";
-import { useAssetStore, type Asset, type AudioAsset, type CharacterImage, type ImageAsset } from "@/stores/use-asset-store";
+import { useAssetStore, type Asset, type AudioAsset, type CharacterImage, type ImageAsset, type SceneImage } from "@/stores/use-asset-store";
 
 export type InsertAssetPayload =
     | { kind: "text"; content: string; title: string }
     | { kind: "image"; dataUrl: string; title: string; storageKey?: string }
     | { kind: "video"; url: string; title: string; storageKey?: string; width?: number; height?: number }
     | { kind: "audio"; url: string; title: string; storageKey?: string; bytes: number; mimeType: string; durationMs?: number }
-    | { kind: "character"; assetId: string; title: string; description: string; images: CharacterImage[]; primaryIndex: number; voice: string; voiceName: string; voiceDescription: string; voiceStorageKey?: string; voiceAssetId: string };
+    | { kind: "character"; assetId: string; title: string; description: string; images: CharacterImage[]; primaryIndex: number; voice: string; voiceName: string; voiceDescription: string; voiceStorageKey?: string; voiceAssetId: string }
+    | { kind: "scene"; assetId: string; title: string; description: string; image: SceneImage; colorCard?: SceneImage; colorCardPrompt: string };
 
 type Props = {
     open: boolean;
@@ -33,7 +34,7 @@ export function AssetPickerModal({ open, allowedKinds, onInsert, onClose }: Prop
 
 const PAGE_SIZE = 8;
 
-const kindOptions = ["all", "text", "image", "video", "audio", "character"];
+const kindOptions = ["all", "text", "image", "video", "audio", "character", "scene"];
 
 function PickerCard({ title, kind, cover, onClick }: { title: string; kind: string; cover: string; onClick: () => void }) {
     const { t } = useTranslation();
@@ -71,10 +72,10 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
         return assets
-            .filter((a) => a.kind === "text" || a.kind === "image" || a.kind === "video" || a.kind === "audio" || a.kind === "character")
+            .filter((a) => a.kind === "text" || a.kind === "image" || a.kind === "video" || a.kind === "audio" || a.kind === "character" || a.kind === "scene")
             .filter((a) => !allowedKinds?.length || allowedKinds.includes(a.kind))
             .filter((a) => kindFilter === "all" || a.kind === kindFilter)
-            .filter((a) => !query || [a.title, ...(a.kind === "character" ? [] : a.tags || [])].join(" ").toLowerCase().includes(query));
+            .filter((a) => !query || [a.title, ...(a.kind === "character" || a.kind === "scene" ? [] : a.tags || [])].join(" ").toLowerCase().includes(query));
     }, [allowedKinds, assets, keyword, kindFilter]);
 
     const visible = useMemo(() => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [filtered, page]);
@@ -115,6 +116,8 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
                 voiceStorageKey: asset.data.voiceStorageKey || voiceAsset?.data.storageKey,
                 voiceAssetId: asset.data.voiceAssetId || voiceAsset?.id || "",
             });
+        } else if (asset.kind === "scene") {
+            onInsert({ kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorCardPrompt: asset.data.colorCardPrompt });
         } else {
             onInsert({ kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title });
         }
@@ -155,7 +158,7 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
             {visible.length ? (
                 <div className="grid grid-cols-4 gap-3">
                     {visible.map((asset) => (
-                        <PickerCard key={asset.id} title={asset.title} kind={asset.kind} cover={asset.coverUrl || (asset.kind === "image" ? (asset as ImageAsset).data.dataUrl : "")} onClick={() => handleInsert(asset)} />
+                        <PickerCard key={asset.id} title={asset.title} kind={asset.kind} cover={asset.coverUrl || (asset.kind === "image" ? (asset as ImageAsset).data.dataUrl : asset.kind === "scene" ? asset.data.image.url : "")} onClick={() => handleInsert(asset)} />
                     ))}
                 </div>
             ) : (

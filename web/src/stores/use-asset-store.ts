@@ -6,7 +6,7 @@ import { cleanupUnusedMedia } from "@/services/file-storage";
 import { deleteBackendAsset, deleteBackendAssetFolder, fetchBackendAssets, upsertBackendAsset, upsertBackendAssetFolder } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
-export type AssetKind = "text" | "image" | "video" | "audio" | "character";
+export type AssetKind = "text" | "image" | "video" | "audio" | "character" | "scene";
 export type TextAsset = AssetBase<"text"> & { data: { content: string } };
 export type ImageAsset = AssetBase<"image"> & { data: { dataUrl: string; storageKey?: string; width: number; height: number; bytes: number; mimeType: string } };
 export type VideoAsset = AssetBase<"video"> & { data: { url: string; storageKey?: string; width: number; height: number; bytes: number; mimeType: string } };
@@ -40,7 +40,25 @@ export type CharacterAsset = AssetBase<"character"> & {
         primaryIndex?: number;
     };
 };
-export type Asset = TextAsset | ImageAsset | VideoAsset | AudioAsset | CharacterAsset;
+export type SceneImage = {
+    url: string;
+    storageKey?: string;
+    name: string;
+    width: number;
+    height: number;
+    bytes: number;
+    mimeType: string;
+};
+export type SceneAsset = AssetBase<"scene"> & {
+    data: {
+        name: string;
+        description: string;
+        image: SceneImage;
+        colorCard?: SceneImage;
+        colorCardPrompt: string;
+    };
+};
+export type Asset = TextAsset | ImageAsset | VideoAsset | AudioAsset | CharacterAsset | SceneAsset;
 
 type AssetBase<T extends AssetKind> = {
     id: string;

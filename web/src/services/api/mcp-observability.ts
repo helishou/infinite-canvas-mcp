@@ -9,6 +9,7 @@ export type McpObservabilityMetric = {
     averageDurationMs: number | null;
     maxDurationMs: number | null;
     p95DurationMs: number | null;
+    ordinaryP95DurationMs?: number | null;
 };
 
 export type McpObservabilityReport = {
@@ -35,12 +36,19 @@ export type McpObservabilityReport = {
         succeeded: number;
         followRate: number | null;
         successRate: number | null;
+        followedSuccessRate?: number | null;
+        observation?: string;
     };
     byTool: McpObservabilityMetric[];
     errors: Array<{ code: string; count: number }>;
-    failuresByTool: Array<{ tool: string; code: string; count: number }>;
+    failuresByTool: Array<{ tool: string; code: string; count: number; latestTraceId?: string }>;
     taskStatuses: Array<{ status: string; count: number }>;
     taskOutcomesByTool: Array<{ tool: string; status: string; count: number }>;
+    taskAssociation?: { incomplete: boolean; note: string };
+    latency?: {
+        ordinary: McpObservabilityDurationSummary;
+        waiting: McpObservabilityDurationSummary;
+    };
     transitions: Array<{ fromTool: string; toTool: string; count: number }>;
     daily: Array<{
         date: string;
@@ -57,6 +65,13 @@ export type McpObservabilityReport = {
         detail: string;
         tool?: string;
     }>;
+};
+
+export type McpObservabilityDurationSummary = {
+    calls: number;
+    averageDurationMs: number | null;
+    maxDurationMs: number | null;
+    p95DurationMs: number | null;
 };
 
 export type McpObservabilityEvent = {

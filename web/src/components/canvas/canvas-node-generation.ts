@@ -154,6 +154,7 @@ function flattenGenerationInputs(inputs: NodeGenerationInput[]) {
 function readNodeGenerationResource(node: CanvasNodeData, characterSelection?: CanvasCharacterReferenceSelection, nodes?: CanvasNodeData[], connections?: CanvasConnection[], index?: CanvasGraphIndex, loopContext?: CanvasLoopRuntimeContext, visited = new Set<string>()): NodeGenerationResourceInput[] {
     if (node.type === CanvasNodeType.Loop && nodes && connections) return readLoopGenerationResources(node, nodes, connections, index, loopContext, visited);
     if (node.type === CanvasNodeType.Character) return readCharacterGenerationResources(node, characterSelection);
+    if (node.type === CanvasNodeType.Scene) return readSceneGenerationResources(node);
     const image = readReferenceImage(node);
     if (image) return [{ nodeId: node.id, type: "image", title: node.title, image }];
     const video = readReferenceVideo(node);
@@ -170,6 +171,17 @@ function readNodeGenerationResource(node: CanvasNodeData, characterSelection?: C
     });
     const text = readNodeTextInput(node);
     return text ? [{ nodeId: node.id, type: "text", title: node.title, text }] : [];
+}
+
+function readSceneGenerationResources(node: CanvasNodeData): NodeGenerationResourceInput[] {
+    const image = node.metadata?.sceneImage;
+    if (!image?.url && !image?.storageKey) return [];
+    return [{
+        nodeId: node.id,
+        type: "image",
+        title: `${node.title} · 场景图`,
+        image: { id: `${node.id}-场景图`, name: image.name || `${node.title || node.id}.png`, type: image.mimeType || "image/png", dataUrl: image.url || "", storageKey: image.storageKey },
+    }];
 }
 
 function readLoopGenerationResources(node: CanvasNodeData, nodes: CanvasNodeData[], connections: CanvasConnection[], index: CanvasGraphIndex | undefined, loopContext: CanvasLoopRuntimeContext | undefined, visited: Set<string>): NodeGenerationResourceInput[] {

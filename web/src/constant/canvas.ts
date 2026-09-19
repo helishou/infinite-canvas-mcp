@@ -19,6 +19,7 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Loop]: { width: 380, height: 320, get title() { return i18n.t("canvas.nodeTypes.loop"); } },
     [CanvasNodeType.Group]: { width: 760, height: 480, get title() { return i18n.t("canvas.nodeTypes.group"); } },
     [CanvasNodeType.Character]: { width: 380, height: 320, get title() { return i18n.t("canvas.nodeTypes.character"); } },
+    [CanvasNodeType.Scene]: { width: 380, height: 320, get title() { return i18n.t("canvas.nodeTypes.scene"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
 
 export const NODE_SPECS = {
@@ -53,6 +54,10 @@ export const NODE_SPECS = {
     [CanvasNodeType.Character]: {
         width: 380, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Character].title; },
         metadata: { status: "idle", characterImages: [], characterPrimaryIndex: 0 },
+    },
+    [CanvasNodeType.Scene]: {
+        width: 380, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Scene].title; },
+        metadata: { status: "idle" },
     },
 } satisfies Record<CanvasNodeType, CanvasNodeSpec>;
 

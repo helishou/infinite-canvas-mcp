@@ -34,6 +34,7 @@ export function resolveCanvasImageReferences(project: CanvasProject, sourceNodeI
         if (String(node.type || "") === "image") addImageReference(node, references, added);
         if (String(node.type || "") === "config" && recordOf(node.metadata).smart === true) addSmartImageReferences(node, references, added);
         if (String(node.type || "") === "character") addCharacterImageReferences(node, referenceTarget, references, added);
+        if (String(node.type || "") === "scene") addSceneImageReferences(node, references, added);
     }
     return references;
 }
@@ -93,21 +94,22 @@ function addSmartImageReferences(node: Record<string, unknown>, references: Reso
         addImageReference(node, references, added);
         return;
     }
-    completedImages.forEach((image, index) => {
-        const imageId = String(image.id || index);
-        const referenceId = `${id}:image:${imageId}`;
-        if (added.has(referenceId)) return;
-        const content = String(image.content || "");
-        const storageKey = String(image.storageKey || "");
-        added.add(referenceId);
-        references.push({
-            id: referenceId,
-            name: `${String(node.title || id).replace(/[^\w\u4e00-\u9fff-]+/g, "-")}-${index + 1}.png`,
-            ...(storageKey ? { storageKey } : {}),
-            ...(content.startsWith("data:") ? { dataUrl: content } : {}),
-            ...(content && !content.startsWith("data:") ? { url: content } : {}),
-            mimeType: String(image.mimeType || metadata.mimeType || "image/png"),
-        });
+    const primaryImageId = String(metadata.primaryImageId || "");
+    const image = completedImages.find((item) => String(item.id || "") === primaryImageId) || completedImages[0];
+    const imageIndex = images.indexOf(image);
+    const imageId = String(image.id || imageIndex);
+    const referenceId = `${id}:image:${imageId}`;
+    if (added.has(referenceId)) return;
+    const content = String(image.content || "");
+    const storageKey = String(image.storageKey || "");
+    added.add(referenceId);
+    references.push({
+        id: referenceId,
+        name: `${String(node.title || id).replace(/[^\w\u4e00-\u9fff-]+/g, "-")}-${imageIndex + 1}.png`,
+        ...(storageKey ? { storageKey } : {}),
+        ...(content.startsWith("data:") ? { dataUrl: content } : {}),
+        ...(content && !content.startsWith("data:") ? { url: content } : {}),
+        mimeType: String(image.mimeType || metadata.mimeType || "image/png"),
     });
 }
 
@@ -136,6 +138,37 @@ function addCharacterImageReferences(node: Record<string, unknown>, referenceTar
             mimeType: String(image.mimeType || "image/png"),
         });
     });
+}
+
+function addSceneImageReferences(node: Record<string, unknown>, references: ResolvedCanvasImageReference[], added: Set<string>) {
+    const id = String(node.id || "");
+    if (!id || added.has(id)) return;
+    const metadata = recordOf(node.metadata);
+    // 色卡是 SVG 元数据，供画布展示/提示词使用，不作为图片模型的二进制参考图。
+    // 直连 GPT Image 的 multipart image[] 只接受可解码的栅格图片；把 SVG 色卡混入会让整个请求失败。
+    const images = [
+        { key: "sceneImage", label: "scene" },
+    ] as const;
+    let addedImage = false;
+    for (const { key, label } of images) {
+        const image = recordOf(metadata[key]);
+        const content = String(image.url || "");
+        const storageKey = String(image.storageKey || "");
+        if (!content && !storageKey) continue;
+        addedImage = true;
+        const referenceId = `${id}:${label}`;
+        if (added.has(referenceId)) continue;
+        added.add(referenceId);
+        references.push({
+            id: referenceId,
+            name: String(image.name || `${node.title || id}-${label}`),
+            ...(storageKey ? { storageKey } : {}),
+            ...(content.startsWith("data:") ? { dataUrl: content } : {}),
+            ...(content && !content.startsWith("data:") ? { url: content } : {}),
+            mimeType: String(image.mimeType || "image/png"),
+        });
+    }
+    if (addedImage) added.add(id);
 }
 
 function recordOf(value: unknown): Record<string, unknown> {

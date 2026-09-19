@@ -291,6 +291,7 @@ const DIRECT_CANVAS_TOOLS = [
   "canvas_create_generation_flow",
   "canvas_generate_text",
   "canvas_generate_image",
+  "canvas_generate_image_batch",
   "canvas_generate_video",
   "canvas_generate_audio",
   "canvas_update_node",
@@ -303,6 +304,7 @@ const DIRECT_CANVAS_TOOLS = [
   "canvas_select_nodes",
   "canvas_run_generation",
   "canvas_task_status",
+  "canvas_wait_tasks",
   "generation_get_status",
   "mcp_observability_report",
   "models_list",
@@ -428,6 +430,114 @@ async function executeDirectCanvasTool(
         }));
     });
     return { models };
+  }
+  if (name === "canvas_generate_image_batch") {
+    const projectId = String(input.projectId || state.activeProjectId || "");
+    if (!projectId) throw new Error("缺少 projectId；请先选择活动画布");
+    const items = Array.isArray(input.items)
+      ? (input.items as Array<Record<string, unknown>>)
+      : [];
+    const defaultModel = items.some((item) => !String(item.model || "").trim())
+      ? String(
+          (
+            await applyGenerationDefaults(
+              "canvas_generate_image",
+              { projectId },
+              backendApi,
+            )
+          ).model || "",
+        )
+      : undefined;
+    const results: Array<Record<string, unknown>> = [];
+    const taskIds: string[] = [];
+    for (const item of items) {
+      try {
+        const key = String(item.key || "");
+        const { key: _key, ...generationInput } = item;
+        const resolvedGenerationInput = await applyGenerationDefaults(
+          "canvas_generate_image",
+          { projectId, ...generationInput },
+          backendApi,
+          defaultModel,
+        );
+        // 生产图像只创建一个智能 config 节点。不要走 canvas_generate_image，
+        // 那条兼容路径会额外创建仅承载 prompt 的 text 节点。
+        const smartNodeId = `config-smart-${crypto.randomUUID()}`;
+        await executeDirectCanvasTool(
+          config,
+          backendApi,
+          state,
+          "canvas_create_config_node",
+          {
+            projectId,
+            id: smartNodeId,
+            mode: "image",
+            autoRun: false,
+            ...resolvedGenerationInput,
+          },
+        );
+        const result = (await executeDirectCanvasTool(
+          config,
+          backendApi,
+          state,
+          "canvas_run_generation",
+          {
+            projectId,
+            nodeId: smartNodeId,
+            mode: "image",
+            ...resolvedGenerationInput,
+          },
+        )) as Record<string, unknown>;
+        const directTasks = Array.isArray(result.directTasks)
+          ? result.directTasks
+              .filter(
+                (task): task is Record<string, unknown> =>
+                  Boolean(task) && typeof task === "object" && !Array.isArray(task),
+              )
+              .map((task) => ({
+                taskId: String(task.taskId || ""),
+                nodeId: String(task.nodeId || ""),
+                model: String(task.model || ""),
+              }))
+          : [];
+        for (const task of directTasks) if (task.taskId) taskIds.push(task.taskId);
+        results.push({
+          key,
+          operationId: result.operationId,
+          directTasks,
+        });
+      } catch (error) {
+        throw Object.assign(
+          error instanceof Error ? error : new Error(String(error)),
+          { taskIds: [...new Set(taskIds)], projectId },
+        );
+      }
+    }
+    const uniqueTaskIds = [...new Set(taskIds)];
+    const wait =
+      input.waitForCompletion === true
+        ? await waitForCanvasTasks(backendApi, uniqueTaskIds, input)
+        : undefined;
+    return {
+      ok: true,
+      requestId: crypto.randomUUID(),
+      projectId,
+      count: results.length,
+      items: results,
+      taskIds: uniqueTaskIds,
+      directTasks: results.flatMap((result) =>
+        Array.isArray(result.directTasks) ? result.directTasks : [],
+      ),
+      ...(wait ? { wait } : {}),
+      ...(uniqueTaskIds.length ? { next: waitTasksAction(uniqueTaskIds) } : {}),
+    };
+  }
+  if (name === "canvas_wait_tasks") {
+    const taskIds = Array.isArray(input.taskIds) ? input.taskIds.map(String) : [];
+    return {
+      ok: true,
+      ...(await waitForCanvasTasks(backendApi, taskIds, input)),
+    };
   }
   if (name === "canvas_inspect")
     return inspectCanvasContext(config, backendApi, state, input);
@@ -562,15 +672,9 @@ async function executeDirectCanvasTool(
     directTasks,
     next:
       directTasks.length === 1
-        ? {
-            tool: "canvas_task_status",
-            input: { taskId: directTasks[0].taskId },
-          }
+        ? waitTasksAction([directTasks[0].taskId])
         : directTasks.length > 1
-          ? {
-              tool: "canvas_task_status",
-              input: { projectId: withLoadingState.id },
-            }
+          ? waitTasksAction(directTasks.map((task) => task.taskId))
           : undefined,
     state: compactProject(withLoadingState as Record<string, unknown>),
   };
@@ -653,7 +757,7 @@ function registerDirectCanvasTools(
             name,
             input,
           );
-          const context = mcpToolResultContext(value, input, state);
+          const context = mcpToolResultContext(value, input, state, name);
           await recordMcpObservabilityEvent(recordEvent, {
             sessionId: state.clientId,
             traceId,
@@ -666,6 +770,7 @@ function registerDirectCanvasTools(
           return textResult(withTraceId(value, traceId));
         } catch (error) {
           const details = classifyToolError(error, rawInput, state);
+          const errorContext = mcpToolErrorContext(error, rawInput, state);
           await recordMcpObservabilityEvent(recordEvent, {
             sessionId: state.clientId,
             traceId,
@@ -678,7 +783,11 @@ function registerDirectCanvasTools(
             recoverable: details.recoverable,
             suggestedTool: details.suggestedTool,
             inputSummary,
-            outputSummary: { errorCode: details.code },
+            ...errorContext,
+            outputSummary: {
+              ...recordOf(errorContext.outputSummary),
+              errorCode: details.code,
+            },
           });
           return toolErrorResult(error, name, rawInput, state, traceId, details);
         }
@@ -720,7 +829,7 @@ function registerDirectCanvasTools(
       });
     },
   );
-  for (const name of ["assets_list", "assets_add"] as ToolName[]) {
+  for (const name of ["assets_list", "assets_add", "assets_upsert_batch"] as ToolName[]) {
     const schema = toolInputSchemas[name];
     server.registerTool(
       name,
@@ -738,6 +847,46 @@ function registerDirectCanvasTools(
               })
             ).assets,
           );
+        if (name === "assets_upsert_batch") {
+          const now = new Date().toISOString();
+          const items = Array.isArray(input.items)
+            ? (input.items as Array<Record<string, unknown>>)
+            : [];
+          const assets = await Promise.all(
+            items.map((item) =>
+              backendApi.upsertAsset({
+                id: String(item.id || `asset-${crypto.randomUUID()}`),
+                kind: String(item.kind || "image"),
+                title: String(item.title || ""),
+                coverUrl: String(item.coverUrl || ""),
+                tags: Array.isArray(item.tags) ? item.tags.map(String) : [],
+                folderId: item.folderId == null ? null : String(item.folderId),
+                ...(item.dramaId == null ? {} : { dramaId: String(item.dramaId) }),
+                data: recordOf(item.data),
+                note: item.note == null ? null : String(item.note),
+                source: item.source == null ? null : String(item.source),
+                metadata: recordOf(item.metadata),
+                createdAt: now,
+                updatedAt: now,
+              }),
+            ),
+          );
+          const listed = await backendApi.listAssets();
+          const savedIds = new Set(
+            listed.assets
+              .filter(
+                (asset): asset is Record<string, unknown> =>
+                  Boolean(asset) && typeof asset === "object" && !Array.isArray(asset),
+              )
+              .map((asset) => String(asset.id || "")),
+          );
+          return textResult({
+            ok: true,
+            count: assets.length,
+            verifiedCount: assets.filter((asset) => savedIds.has(String(asset.id || ""))).length,
+            assets,
+          });
+        }
         const now = new Date().toISOString();
         const asset = await backendApi.upsertAsset({
           id: `asset-${crypto.randomUUID()}`,
@@ -1365,6 +1514,7 @@ async function applyGenerationDefaults(
   name: ToolName,
   input: Record<string, unknown>,
   backend: ReturnType<typeof createBackendClient>,
+  cachedModel?: string,
 ) {
   if (input.model) return input;
   const generateNow = name.startsWith("canvas_generate_");
@@ -1385,10 +1535,12 @@ async function applyGenerationDefaults(
     | "image"
     | "video"
     | "audio";
-  const aiConfig = await backend.getAiConfig();
+  const aiConfig = cachedModel
+    ? undefined
+    : await backend.getAiConfig();
   const key = `${mode}Model`;
-  const fallback = mode === "image" || mode === "text" ? aiConfig.model : "";
-  const model = String(aiConfig[key] || fallback || "").trim();
+  const fallback = mode === "image" || mode === "text" ? aiConfig?.model : "";
+  const model = String(cachedModel || aiConfig?.[key] || fallback || "").trim();
   if (!model)
     throw new Error(
       `没有配置默认${generationModeLabel(mode)}模型；请显式传 model 或先在模型设置中配置`,
@@ -1578,20 +1730,75 @@ function recordOf(value: unknown): Record<string, unknown> {
     : {};
 }
 
+async function waitForCanvasTasks(
+  backend: ReturnType<typeof createBackendClient>,
+  taskIds: string[],
+  input: Record<string, unknown>,
+) {
+  const timeoutMs = Math.max(
+    1000,
+    Math.min(1_800_000, Number(input.timeoutMs || 900_000)),
+  );
+  const pollMs = Math.max(250, Math.min(10_000, Number(input.pollMs || 2_000)));
+  const startedAt = Date.now();
+  const terminal = new Set(["succeeded", "failed", "cancelled", "completed", "missing"]);
+  let pollCount = 0;
+  let tasks: Array<Record<string, unknown>> = [];
+  for (;;) {
+    pollCount += 1;
+    const result = await listTasksFromBackend(backend, { taskIds });
+    const snapshots = new Map(
+      result.tasks.map((task) => [String(task.taskId || ""), task]),
+    );
+    tasks = taskIds.map(
+      (taskId) =>
+        snapshots.get(taskId) || {
+          taskId,
+          status: "missing",
+          progress: 0,
+          outputs: [],
+          error: "任务不存在或已被清理",
+        },
+    );
+    const complete = tasks.every((task) => terminal.has(String(task.status)));
+    const elapsedMs = Date.now() - startedAt;
+    if (complete || elapsedMs >= timeoutMs) {
+      const pendingTaskIds = tasks
+        .filter((task) => !terminal.has(String(task.status)))
+        .map((task) => String(task.taskId || ""))
+        .filter(Boolean);
+      return {
+        timedOut: !complete,
+        elapsedMs,
+        pollCount,
+        summary: {
+          total: tasks.length,
+          complete: tasks.filter((task) => terminal.has(String(task.status))).length,
+          byStatus: tasks.reduce<Record<string, number>>((counts, task) => {
+            const status = String(task.status || "unknown");
+            counts[status] = (counts[status] || 0) + 1;
+            return counts;
+          }, {}),
+        },
+        ...(pendingTaskIds.length ? { next: waitTasksAction(pendingTaskIds) } : {}),
+        tasks,
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
+
 async function listTasksFromBackend(
   backend: ReturnType<typeof createBackendClient>,
   input: Record<string, unknown>,
 ) {
   const taskId = typeof input.taskId === "string" ? input.taskId : "";
+  const taskIds = Array.isArray(input.taskIds) ? input.taskIds.map(String).filter(Boolean) : [];
   const source = (
     taskId
-      ? [
-          await backend
-            .getTask(taskId)
-            .then((value) => value.task)
-            .catch(() => null),
-        ]
+      ? [await getTaskForQuery(backend, taskId)]
       : await backend.listTasks({
+          taskIds: taskIds.length ? taskIds : undefined,
           scope: ["all", "canvas", "image", "video"].includes(
             String(input.scope || "all"),
           )
@@ -1635,6 +1842,7 @@ async function listTasksFromBackend(
   );
   const projectId = String(input.projectId || "");
   const scope = String(input.scope || "all");
+  const exactTaskQuery = Boolean(taskId);
   const tasks = source
     .filter((task): task is NonNullable<typeof task> => Boolean(task))
     .filter((task) => {
@@ -1653,16 +1861,18 @@ async function listTasksFromBackend(
       const taskModel = String(
         task.model || params.model || params.modelName || taskInput.model || "",
       );
-      if (projectId && taskProjectId !== projectId) return false;
-      if (nodeIds.size && !nodeIds.has(taskNodeId)) return false;
-      if (segmentIds.size && !segmentIds.has(taskSegmentId)) return false;
-      if (scope === "canvas" && !taskProjectId) return false;
+      if (!exactTaskQuery && projectId && taskProjectId !== projectId) return false;
+      if (!exactTaskQuery && nodeIds.size && !nodeIds.has(taskNodeId)) return false;
+      if (!exactTaskQuery && segmentIds.size && !segmentIds.has(taskSegmentId)) return false;
+      if (!exactTaskQuery && scope === "canvas" && !taskProjectId) return false;
       if (
+        !exactTaskQuery &&
         scope === "image" &&
         !/image/i.test(`${task.kind} ${taskExecutor} ${taskModel}`)
       )
         return false;
       if (
+        !exactTaskQuery &&
         scope === "video" &&
         !/video|h3/i.test(`${task.kind} ${taskExecutor} ${taskModel}`)
       )
@@ -1672,6 +1882,23 @@ async function listTasksFromBackend(
     .slice(0, Math.max(1, Math.min(500, Number(input.limit || 100))))
     .map(toCanvasTask);
   return { tasks };
+}
+
+async function getTaskForQuery(
+  backend: ReturnType<typeof createBackendClient>,
+  taskId: string,
+) {
+  try {
+    return (await backend.getTask(taskId)).task;
+  } catch (error) {
+    const details = backendErrorInfo(error);
+    const missing =
+      details.code === "TASK_NOT_FOUND" ||
+      (details.status === 404 && /task not found|任务不存在/i.test(safeErrorMessage(error))) ||
+      /task not found|任务不存在/i.test(safeErrorMessage(error));
+    if (missing) return null;
+    throw error;
+  }
 }
 
 function toCanvasTask(task: {
@@ -1903,10 +2130,10 @@ function summarizeCanvasTasks(
       ...task,
       suggestedAction:
         task.status === "queued" || task.status === "running"
-          ? { tool: "canvas_task_status", input: { taskId: task.taskId } }
+          ? waitTasksAction([task.taskId])
           : task.status === "succeeded"
             ? { tool: "canvas_inspect", input: { projectId: task.projectId } }
-            : { action: "检查 error，修正输入或模型配置后重新生成" },
+            : { action: "检查任务 error 和产物；当前不自动重新提交相同生成请求" },
     })),
   };
 }
@@ -1992,7 +2219,9 @@ function toolErrorResult(
               tool,
               activeProjectId: state.activeProjectId,
               requestedProjectId: input.projectId || null,
+              requestedTaskId: input.taskId || null,
             },
+            errorContext: mcpToolErrorContext(error, input, state).outputSummary,
             suggestedAction,
           },
           null,
@@ -2003,11 +2232,109 @@ function toolErrorResult(
   };
 }
 
+function backendErrorInfo(error: unknown) {
+  const value = error && typeof error === "object"
+    ? error as Record<string, unknown>
+    : {};
+  const status = typeof value.status === "number" ? value.status : undefined;
+  const kind = typeof value.kind === "string" ? value.kind : undefined;
+  const code = typeof value.code === "string" ? value.code : undefined;
+  return { status, kind, code };
+}
+
+function inputTaskIds(input: Record<string, unknown>) {
+  const ids = Array.isArray(input.taskIds) ? input.taskIds.map(String).filter(Boolean) : [];
+  const taskId = typeof input.taskId === "string" ? input.taskId : "";
+  return [...new Set(taskId ? [taskId, ...ids] : ids)];
+}
+
+function waitTasksAction(taskIds: string[]) {
+  const groups = chunkTaskIds(taskIds);
+  return {
+    tool: "canvas_wait_tasks",
+    input: { taskIds: groups[0] || [] },
+    ...(groups.length > 1
+      ? {
+          additionalActions: groups.slice(1).map((group) => ({
+            tool: "canvas_wait_tasks",
+            input: { taskIds: group },
+          })),
+        }
+      : {}),
+  };
+}
+
+function chunkTaskIds(taskIds: string[]) {
+  const groups: string[][] = [];
+  for (let index = 0; index < taskIds.length; index += 32)
+    groups.push(taskIds.slice(index, index + 32));
+  return groups;
+}
+
+function safeErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(/([?&](?:token|api[_-]?key|authorization|secret)=)[^&\s]+/gi, "$1[REDACTED]")
+    .slice(0, 240);
+}
+
+function errorTaskIds(error: unknown) {
+  const value = error && typeof error === "object"
+    ? error as Record<string, unknown>
+    : {};
+  return Array.isArray(value.taskIds)
+    ? [...new Set(value.taskIds.map(String).filter(Boolean))]
+    : [];
+}
+
+function errorOperationId(error: unknown, input: Record<string, unknown>) {
+  const value = error && typeof error === "object"
+    ? error as Record<string, unknown>
+    : {};
+  return optionalText(value.operationId || input.operationId);
+}
+
+function mcpToolErrorContext(
+  error: unknown,
+  input: Record<string, unknown>,
+  state: McpSessionState,
+): Partial<McpObservabilityEventInput> {
+  const backendError = backendErrorInfo(error);
+  const taskIds = errorTaskIds(error);
+  const operationId = errorOperationId(error, input);
+  const value = error && typeof error === "object"
+    ? error as Record<string, unknown>
+    : {};
+  const revision = ["revision", "expectedRevision", "actualRevision"]
+    .map((key) => [key, value[key] as unknown] as const)
+    .filter(([, item]) => typeof item === "number")
+    .reduce<Record<string, number>>((result, [key, item]) => {
+      result[key] = item as number;
+      return result;
+    }, {});
+  return {
+    projectId: optionalText(value.projectId || input.projectId || state.activeProjectId),
+    nodeId: optionalText(value.nodeId || input.nodeId || input.id),
+    operationId,
+    taskId: optionalText(taskIds[0] || input.taskId),
+    outputSummary: {
+      errorCode: backendError.code,
+      errorKind: backendError.kind,
+      httpStatus: backendError.status,
+      message: safeErrorMessage(error),
+      createdTaskIds: taskIds,
+      waitsForTasks: input.waitForCompletion === true || Array.isArray(input.taskIds),
+      ...(revision ? { ...revision } : {}),
+    },
+  };
+}
+
 function classifyToolError(
   error: unknown,
   input: Record<string, unknown>,
   state: McpSessionState,
 ) {
+  const backendError = backendErrorInfo(error);
   const message =
     error instanceof z.ZodError
       ? error.issues
@@ -2020,13 +2347,29 @@ function classifyToolError(
         ? error.message
         : String(error);
   const selectionRequired =
+    backendError.code === "PROJECT_SELECTION_REQUIRED" ||
     /显式指定 projectId|活动画布|缺少 projectId/.test(message);
-  const missingProject = /画布不存在/.test(message);
-  const missingTask = /任务不存在/.test(message);
-  const missingNode = /找不到|节点.+不存在|生成目标不存在/.test(message);
-  const missingModel = /模型/.test(message) && /未配置|没有配置|缺少/.test(message);
-  const conflict = /revision|冲突|基线/.test(message);
+  const missingProject =
+    backendError.code === "PROJECT_NOT_FOUND" || /画布不存在|project not found/i.test(message);
+  const missingTask =
+    backendError.code === "TASK_NOT_FOUND" ||
+    (backendError.status === 404 && /task|任务/i.test(message)) ||
+    /生成任务不存在|任务不存在|task not found/i.test(message);
+  const missingNode =
+    backendError.code === "NODE_NOT_FOUND" ||
+    /(?:节点|node|生成目标).*(?:不存在|not found)|找不到(?:画布)?节点/i.test(
+      message,
+    );
+  const missingModel =
+    backendError.code === "MODEL_REQUIRED" ||
+    (/模型/.test(message) && /未配置|没有配置|缺少/.test(message));
+  const conflict =
+    backendError.code === "REVISION_CONFLICT" || /revision|冲突|基线/.test(message);
   const invalidInput = error instanceof z.ZodError;
+  const authFailure = backendError.status === 401 || backendError.status === 403;
+  const timeout = backendError.kind === "timeout";
+  const networkFailure = backendError.kind === "network";
+  const invalidResponse = backendError.kind === "invalid_response";
   const code = selectionRequired
     ? "PROJECT_SELECTION_REQUIRED"
     : missingProject
@@ -2038,12 +2381,28 @@ function classifyToolError(
           : missingModel
             ? "MODEL_REQUIRED"
             : conflict
-              ? "REVISION_CONFLICT"
-              : invalidInput
+          ? "REVISION_CONFLICT"
+            : invalidInput
                 ? "INVALID_INPUT"
-                : "CANVAS_TOOL_FAILED";
-  const suggestedAction = selectionRequired || missingProject
-    ? { tool: "canvas_inspect", input: {} }
+                : authFailure
+                  ? `BACKEND_HTTP_${backendError.status}`
+                  : timeout
+                    ? "BACKEND_TIMEOUT"
+                    : networkFailure
+                      ? "BACKEND_NETWORK_ERROR"
+                      : invalidResponse
+                        ? "BACKEND_INVALID_RESPONSE"
+                        : backendError.status && backendError.status >= 500
+                          ? `BACKEND_HTTP_${backendError.status}`
+                          : "CANVAS_TOOL_FAILED";
+  const taskIds = inputTaskIds(input);
+  const projectId = String(input.projectId || state.activeProjectId || "");
+  const suggestedAction = selectionRequired
+    ? { tool: "canvas_list_projects", input: {} }
+    : missingProject
+      ? { tool: "canvas_list_projects", input: {} }
+      : missingTask && projectId
+        ? { tool: "canvas_task_status", input: { projectId } }
     : missingNode || conflict
       ? {
           tool: "canvas_inspect",
@@ -2053,11 +2412,16 @@ function classifyToolError(
         }
       : missingModel
         ? { tool: "models_list", input: {} }
-        : { action: "根据 error 修正输入后重试；不要重复提交完全相同的失败请求" };
+        : timeout && taskIds.length
+          ? waitTasksAction(taskIds)
+          : authFailure
+            ? { action: "检查 Backend 地址、Token 和权限后再重试" }
+            : { action: "检查 errorContext 后修正输入或连接；不要重复提交完全相同的失败请求" };
+  const recoverable = selectionRequired || missingProject || missingTask || missingNode || missingModel || conflict || timeout;
   return {
     code,
     message,
-    recoverable: true,
+    recoverable,
     suggestedAction,
     suggestedTool: "tool" in suggestedAction ? suggestedAction.tool : undefined,
   };
@@ -2111,10 +2475,16 @@ function installMcpToolObservability(
         const valueRecord = recordOf(value);
         if (resultRecord.isError === true || valueRecord.ok === false) {
           const errorRecord = recordOf(valueRecord.error);
-          const error = new Error(
-            String(errorRecord.message || valueRecord.error || "MCP 工具执行失败"),
+          const error = Object.assign(
+            new Error(String(errorRecord.message || valueRecord.error || "MCP 工具执行失败")),
+            {
+              code: typeof errorRecord.code === "string" ? errorRecord.code : undefined,
+              status: typeof errorRecord.httpStatus === "number" ? errorRecord.httpStatus : undefined,
+              kind: typeof errorRecord.errorKind === "string" ? errorRecord.errorKind : undefined,
+            },
           );
           const details = classifyToolError(error, input, state);
+          const errorContext = mcpToolErrorContext(error, input, state);
           await recordMcpObservabilityEvent(recordEvent, {
             sessionId: state.clientId,
             traceId,
@@ -2130,7 +2500,9 @@ function installMcpToolObservability(
                 : details.recoverable,
             suggestedTool: details.suggestedTool,
             inputSummary,
+            ...errorContext,
             outputSummary: {
+              ...recordOf(errorContext.outputSummary),
               errorCode: optionalText(errorRecord.code) || details.code,
             },
           });
@@ -2142,12 +2514,13 @@ function installMcpToolObservability(
             tool: name,
             durationMs: Date.now() - startedAt,
             inputSummary,
-            ...mcpToolResultContext(value, input, state),
+            ...mcpToolResultContext(value, input, state, name),
           });
         }
         return withTraceIdInToolResult(result, traceId);
       } catch (error) {
         const details = classifyToolError(error, input, state);
+        const errorContext = mcpToolErrorContext(error, input, state);
         await recordMcpObservabilityEvent(recordEvent, {
           sessionId: state.clientId,
           traceId,
@@ -2160,7 +2533,11 @@ function installMcpToolObservability(
           recoverable: details.recoverable,
           suggestedTool: details.suggestedTool,
           inputSummary,
-          outputSummary: { errorCode: details.code },
+          ...errorContext,
+          outputSummary: {
+            ...recordOf(errorContext.outputSummary),
+            errorCode: details.code,
+          },
         });
         return toolErrorResult(
           error,
@@ -2230,6 +2607,8 @@ function summarizeMcpToolInput(input: Record<string, unknown>) {
     hasProjectId: Boolean(input.projectId),
     hasNodeId: Boolean(input.nodeId || input.id),
     hasTaskId: Boolean(input.taskId),
+    hasOperationId: Boolean(input.operationId),
+    expectedRevision: typeof input.expectedRevision === "number" ? input.expectedRevision : undefined,
     hasModel: Boolean(input.model),
     mode: typeof input.mode === "string" ? input.mode : undefined,
     textLength: typeof text === "string" ? text.length : 0,
@@ -2244,6 +2623,7 @@ function mcpToolResultContext(
   value: unknown,
   input: Record<string, unknown>,
   state: McpSessionState,
+  tool?: string,
 ): Partial<McpObservabilityEventInput> {
   const result = recordOf(value);
   const tasks = Array.isArray(result.directTasks)
@@ -2253,6 +2633,10 @@ function mcpToolResultContext(
       )
     : [];
   const firstTask = tasks[0] || {};
+  const createdTaskIds = [...new Set([
+    ...tasks.map((task) => String(task.taskId || "")).filter(Boolean),
+    ...(typeof result.taskId === "string" ? [result.taskId] : []),
+  ])];
   const operationResults = Array.isArray(result.operationResults)
     ? result.operationResults
     : [];
@@ -2263,7 +2647,9 @@ function mcpToolResultContext(
     taskId: optionalText(firstTask.taskId || result.taskId),
     outputSummary: {
       ok: result.ok !== false,
-      taskCount: tasks.length || (result.taskId ? 1 : 0),
+      taskCount: createdTaskIds.length || (result.taskId ? 1 : 0),
+      createdTaskIds,
+      waitsForTasks: tool === "canvas_wait_tasks" || Boolean(result.wait) || input.waitForCompletion === true,
       operationCount: operationResults.length,
       returnedNodeCount: Array.isArray(result.nodes) ? result.nodes.length : undefined,
       ready: typeof result.ready === "boolean" ? result.ready : undefined,

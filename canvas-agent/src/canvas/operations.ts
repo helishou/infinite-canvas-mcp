@@ -36,7 +36,7 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
     if (name === "canvas_create_config_node") {
         const x = Number(input.x ?? nextCanvasX(state));
         const y = Number(input.y ?? 0);
-        const configId = `config-${crypto.randomUUID()}`;
+        const configId = String(input.id || `config-${crypto.randomUUID()}`);
         const mode = generationMode(input.mode);
         const prompt = String(input.prompt || "");
         return applyOps([configNodeOp(configId, input, x, y), ...(input.autoRun ? [runGenerationOp({
@@ -210,17 +210,22 @@ function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot
     const anchor = nextCanvasFlowAnchor(state, referenceNodeIds[0], { includePrompt: !reuseReferences });
     const x = Number(input.x ?? anchor.x);
     const y = Number(input.y ?? anchor.y);
-    const tokens = reuseReferences ? referenceNodeIds.map((id) => `@[node:${id}]`) : [`@[node:${textId}]`, ...referenceNodeIds.map((id) => `@[node:${id}]`)];
+    // 图片生产直接把提示词写入智能 config 节点；文本节点只保留给明确的提示词文档/非图片流程。
+    const smartImage = mode === "image";
+    const tokens = smartImage
+        ? [prompt]
+        : (reuseReferences ? referenceNodeIds.map((id) => `@[node:${id}]`) : [`@[node:${textId}]`, ...referenceNodeIds.map((id) => `@[node:${id}]`)]);
+    const configPrompt = smartImage ? prompt : tokens.join("\n");
     return [
-        ...(reuseReferences ? [] : [textNodeOp({ id: textId, text: prompt, title: String(input.title || "提示词") }, x, y)]),
-        configNodeOp(configId, { ...input, prompt: tokens.join("\n") }, x + 420, y),
-        ...(reuseReferences ? [] : [{ type: "connect_nodes", fromNodeId: textId, toNodeId: configId }]),
+        ...(smartImage || reuseReferences ? [] : [textNodeOp({ id: textId, text: prompt, title: String(input.title || "提示词") }, x, y)]),
+        configNodeOp(configId, { ...input, prompt: configPrompt }, smartImage ? x : x + 420, y),
+        ...(!smartImage && !reuseReferences ? [{ type: "connect_nodes", fromNodeId: textId, toNodeId: configId }] : []),
         ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: configId, role: "reference", order })),
         { type: "select_nodes", ids: [configId] },
         ...(input.autoRun ? [runGenerationOp({
             nodeId: configId,
             mode,
-            prompt: tokens.join("\n"),
+            prompt: configPrompt,
             params: input.params as Record<string, unknown> | undefined,
             idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined,
             resultPolicy: input.resultPolicy as "replace-active" | "append" | undefined,

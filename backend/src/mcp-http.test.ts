@@ -113,6 +113,22 @@ async function mockBackend(t: import("node:test").TestContext, onMcpEvent?: (eve
       ],
     }),
   );
+  app.get("/tasks/:id", (req, res) =>
+    res.json({
+      ok: true,
+      task: {
+        id: req.params.id,
+        kind: "canvas-image",
+        status: "running",
+        progress: 0.5,
+        input: { projectId: "canvas-1", nodeId: "config-1" },
+        params: { model: "test::image-model" },
+        createdAt: "2026-09-17T00:00:00.000Z",
+        updatedAt: "2026-09-17T00:00:01.000Z",
+      },
+      events: [],
+    }),
+  );
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(async () => {
@@ -137,17 +153,32 @@ async function mockGenerationBackend(t: import("node:test").TestContext) {
     connections: [],
   };
   let generationCommand: Record<string, unknown> | null = null;
+  let singleTaskRequests = 0;
+  let bulkTaskRequests = 0;
+  let aiConfigRequests = 0;
+  const taskRecord = (id: string) => ({
+    id,
+    kind: "canvas-image",
+    status: "succeeded",
+    progress: 1,
+    input: { projectId: "canvas-generate", nodeId: id === "task-generated" ? "image-generated" : `image-${id}` },
+    params: { model: "test::default-image" },
+    result: { media: [{ storageKey: id === "task-generated" ? "image:generated" : `image:${id}` }] },
+    createdAt: "2026-09-17T00:00:00.000Z",
+    updatedAt: "2026-09-17T00:00:01.000Z",
+  });
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
   app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
-  app.get("/settings/ai-config", (_req, res) =>
+  app.get("/settings/ai-config", (_req, res) => {
+    aiConfigRequests += 1;
     res.json({
       ok: true,
       config: {
         imageModel: "test::default-image",
         channels: [{ id: "test", models: [{ name: "default-image", capability: "image" }] }],
       },
-    }),
-  );
+    });
+  });
   app.post("/canvas/projects/:id/ops", (req, res) => {
     const operations = Array.isArray(req.body.operations) ? req.body.operations : [];
     const nodes = [...(project.nodes as Array<Record<string, unknown>> || [])];
@@ -173,6 +204,27 @@ async function mockGenerationBackend(t: import("node:test").TestContext) {
     generationCommand = req.body;
     res.status(201).json({ ok: true, taskId: "task-generated", executor: "direct", task: { id: "task-generated" } });
   });
+  app.get("/tasks", (req, res) => {
+    bulkTaskRequests += 1;
+    const ids = typeof req.query.taskIds === "string"
+      ? req.query.taskIds.split(",").map((id) => id.trim()).filter(Boolean)
+      : [];
+    res.json({ ok: true, tasks: ids.map(taskRecord) });
+  });
+  app.get("/tasks/:id", (req, res) => {
+    singleTaskRequests += 1;
+    res.json({
+      ok: true,
+      task: taskRecord(req.params.id),
+      events: [],
+    });
+  });
+  const assets = new Map<string, Record<string, unknown>>();
+  app.get("/canvas/assets", (_req, res) => res.json({ ok: true, assets: [...assets.values()], folders: [] }));
+  app.post("/canvas/assets", (req, res) => {
+    assets.set(String(req.body.id), req.body as Record<string, unknown>);
+    res.json({ ok: true, asset: req.body });
+  });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(async () => {
@@ -184,6 +236,9 @@ async function mockGenerationBackend(t: import("node:test").TestContext) {
   return {
     url: `http://127.0.0.1:${address.port}`,
     generationCommand: () => generationCommand,
+    project: () => project,
+    taskRequestCounts: () => ({ single: singleTaskRequests, bulk: bulkTaskRequests }),
+    aiConfigRequestCount: () => aiConfigRequests,
   };
 }
 
@@ -300,7 +355,21 @@ test("canvas_task_status defaults to the active canvas and suggests polling", as
 
   assert.equal(payload.query.projectId, "canvas-1");
   assert.equal(payload.summary.byStatus.running, 1);
-  assert.equal(payload.tasks[0].suggestedAction.tool, "canvas_task_status");
+  assert.equal(payload.tasks[0].suggestedAction.tool, "canvas_wait_tasks");
+  assert.deepEqual(payload.tasks[0].suggestedAction.input.taskIds, ["task-1"]);
+});
+
+test("canvas_task_status with taskId ignores unrelated project and node filters", async (t) => {
+  const backendUrl = await mockBackend(t);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const result = await client.callTool({
+    name: "canvas_task_status",
+    arguments: { taskId: "task-1", projectId: "wrong-project", nodeId: "missing-node" },
+  });
+  const payload = textPayload(result);
+
+  assert.equal(payload.summary.total, 1);
+  assert.equal(payload.tasks[0].taskId, "task-1");
 });
 
 test("direct canvas tools return recoverable structured errors", async (t) => {
@@ -316,10 +385,10 @@ test("direct canvas tools return recoverable structured errors", async (t) => {
   assert.equal(payload.error.code, "PROJECT_NOT_FOUND");
   assert.equal(payload.error.recoverable, true);
   assert.equal(payload.currentState.requestedProjectId, "missing-canvas");
-  assert.equal(payload.suggestedAction.tool, "canvas_inspect");
+  assert.equal(payload.suggestedAction.tool, "canvas_list_projects");
 });
 
-test("canvas_generate_image resolves the configured default model and returns the next status call", async (t) => {
+test("canvas_generate_image resolves the configured default model and returns the next wait call", async (t) => {
   const backend = await mockGenerationBackend(t);
   const client = await mcpClient(t, await fixture(t, backend.url));
   const result = await client.callTool({
@@ -330,6 +399,116 @@ test("canvas_generate_image resolves the configured default model and returns th
 
   assert.equal(payload.ok, true);
   assert.equal(payload.directTasks[0].taskId, "task-generated");
-  assert.equal(payload.next.tool, "canvas_task_status");
+  assert.equal(payload.next.tool, "canvas_wait_tasks");
+  assert.deepEqual(payload.next.input.taskIds, ["task-generated"]);
   assert.equal(backend.generationCommand()?.model, "test::default-image");
+  const nodes = backend.project().nodes as Array<Record<string, unknown>>;
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].type, "config");
+  assert.equal((nodes[0].metadata as Record<string, unknown>).smart, true);
+});
+
+test("canvas_generate_image_batch submits keyed items in one MCP call", async (t) => {
+  const backend = await mockGenerationBackend(t);
+  const client = await mcpClient(t, await fixture(t, backend.url));
+  const result = await client.callTool({
+    name: "canvas_generate_image_batch",
+    arguments: {
+      projectId: "canvas-generate",
+      items: [
+        { key: "scene-a", prompt: "雪院入口", title: "场景 A" },
+        { key: "scene-b", prompt: "雪院回廊", title: "场景 B" },
+      ],
+    },
+  });
+  const payload = textPayload(result);
+
+  assert.equal(payload.ok, true);
+  assert.equal(payload.count, 2);
+  assert.deepEqual(payload.items.map((item: { key: string }) => item.key), ["scene-a", "scene-b"]);
+  assert.equal(payload.items[0].directTasks[0].taskId, "task-generated");
+  assert.deepEqual(payload.taskIds, ["task-generated"]);
+  const nodes = backend.project().nodes as Array<Record<string, unknown>>;
+  assert.equal(nodes.filter((node) => node.type === "text").length, 0);
+  assert.equal(nodes.length, 2);
+  assert.ok(nodes.every((node) => node.type === "config" && (node.metadata as Record<string, unknown>).smart === true));
+});
+
+test("canvas_generate_image_batch resolves the default model once per batch", async (t) => {
+  const backend = await mockGenerationBackend(t);
+  const client = await mcpClient(t, await fixture(t, backend.url));
+  const result = await client.callTool({
+    name: "canvas_generate_image_batch",
+    arguments: {
+      projectId: "canvas-generate",
+      items: [
+        { key: "scene-a", prompt: "雪院入口" },
+        { key: "scene-b", prompt: "雪院回廊" },
+        { key: "scene-c", prompt: "书房门口" },
+      ],
+    },
+  });
+  const payload = textPayload(result);
+
+  assert.equal(payload.ok, true);
+  assert.equal(payload.count, 3);
+  assert.equal(backend.aiConfigRequestCount(), 1);
+});
+
+test("canvas_wait_tasks returns terminal task output in taskId order", async (t) => {
+  const backend = await mockGenerationBackend(t);
+  const client = await mcpClient(t, await fixture(t, backend.url));
+  const result = await client.callTool({
+    name: "canvas_wait_tasks",
+    arguments: { taskIds: ["task-generated"], pollMs: 250 },
+  });
+  const payload = textPayload(result);
+
+  assert.equal(payload.ok, true);
+  assert.equal(payload.timedOut, false);
+  assert.equal(payload.summary.complete, 1);
+  assert.equal(payload.tasks[0].taskId, "task-generated");
+  assert.equal(payload.tasks[0].outputs[0].storageKey, "image:generated");
+});
+
+test("canvas_wait_tasks polls all taskIds through one bulk request per round", async (t) => {
+  const backend = await mockGenerationBackend(t);
+  const client = await mcpClient(t, await fixture(t, backend.url));
+  const result = await client.callTool({
+    name: "canvas_wait_tasks",
+    arguments: { taskIds: ["task-a", "task-b", "task-c"], pollMs: 250 },
+  });
+  const payload = textPayload(result);
+
+  assert.equal(payload.ok, true);
+  assert.equal(payload.timedOut, false);
+  assert.equal(payload.pollCount, 1);
+  assert.equal(payload.summary.total, 3);
+  assert.equal(payload.summary.complete, 3);
+  assert.deepEqual(payload.tasks.map((task: { taskId: string }) => task.taskId), ["task-a", "task-b", "task-c"]);
+  assert.deepEqual(backend.taskRequestCounts(), { single: 0, bulk: 1 });
+});
+
+test("assets_upsert_batch writes complete assets and verifies them by id", async (t) => {
+  const backend = await mockGenerationBackend(t);
+  const client = await mcpClient(t, await fixture(t, backend.url));
+  const result = await client.callTool({
+    name: "assets_upsert_batch",
+    arguments: {
+      items: [
+        {
+          id: "asset-scene-1",
+          kind: "scene",
+          title: "雪院入口",
+          data: { image: { storageKey: "image:scene-1" }, colorCard: { storageKey: "image:card-1" } },
+        },
+      ],
+    },
+  });
+  const payload = textPayload(result);
+
+  assert.equal(payload.ok, true);
+  assert.equal(payload.count, 1);
+  assert.equal(payload.verifiedCount, 1);
+  assert.equal(payload.assets[0].id, "asset-scene-1");
 });

@@ -19,7 +19,7 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, running
 }
 
 function taskResponse(id: string, prefix: string, stores: Stores, req: Request, res: Response) {
-    const task = stores.tasks.get(id); if (!task || (prefix && !task.kind.startsWith(prefix))) return res.status(404).json({ ok: false, error: "task not found" });
+    const task = stores.tasks.get(id); if (!task || (prefix && !task.kind.startsWith(prefix))) return res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
     return res.json({ ok: true, task, events: stores.tasks.events(id, Number(req.query.after || 0)) });
 }
 function objectBody(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }

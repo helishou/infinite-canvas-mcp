@@ -58,6 +58,7 @@ export const toolNames = [
   "canvas_create_generation_flow",
   "canvas_generate_text",
   "canvas_generate_image",
+  "canvas_generate_image_batch",
   "canvas_generate_video",
   "canvas_generate_audio",
   "canvas_set_generation_references",
@@ -70,6 +71,7 @@ export const toolNames = [
   "canvas_select_nodes",
   "canvas_run_generation",
   "canvas_task_status",
+  "canvas_wait_tasks",
   "generation_get_status",
   "mcp_observability_report",
   "models_list",
@@ -84,6 +86,7 @@ export const toolNames = [
   "prompts_search",
   "assets_list",
   "assets_add",
+  "assets_upsert_batch",
   "drama_list_episodes",
   "drama_get_episode",
   "drama_create_episode",
@@ -247,6 +250,29 @@ const generationFlowSchema = z.object({
     .describe("参考节点 ID 数组，按此顺序连线；空数组=无参考"),
 });
 
+const imageBatchItemSchema = generationFlowSchema
+  .extend({
+    key: z
+      .string()
+      .min(1)
+      .describe("调用方业务键；用于把返回的 taskId/nodeId 对回原始条目"),
+  })
+  .merge(generationOptionsSchema);
+
+const assetUpsertItemSchema = z.object({
+  id: z.string().optional().describe("稳定资产 ID；传入后重复调用执行更新而不是新增"),
+  kind: z.string().min(1).describe("资产类型，例如 character、scene、image、text"),
+  title: z.string().min(1).describe("资产标题"),
+  coverUrl: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  folderId: z.string().nullable().optional(),
+  dramaId: z.string().nullable().optional(),
+  data: recordSchema.describe("资产业务数据；可保存 images、outfit、colorCard 等结构化字段"),
+  note: z.string().nullable().optional(),
+  source: z.string().nullable().optional(),
+  metadata: recordSchema.optional(),
+});
+
 export const toolInputSchemas = {
   ...collaborationSchemas,
   site_navigate: z.object({
@@ -334,10 +360,14 @@ export const toolInputSchemas = {
   }),
   canvas_create_config_node: canvasProjectSchema
     .extend({
+      id: z
+        .string()
+        .optional()
+        .describe("可选的智能节点 ID；批量流程用它保证创建与运行指向同一个节点"),
       prompt: z
         .string()
         .optional()
-        .describe("生成提示词；可后续用 canvas_update_node_text 覆盖"),
+        .describe("生成提示词；直接写入智能节点元数据，不创建额外文字节点"),
       mode: generationModeSchema.optional(),
       title: z.string().optional(),
       x: z.number().optional(),
@@ -386,6 +416,31 @@ export const toolInputSchemas = {
         .describe("生图提示词；仅当前工作流要求提示词时必填"),
     })
     .merge(generationOptionsSchema),
+  canvas_generate_image_batch: canvasProjectSchema.extend({
+    items: z
+      .array(imageBatchItemSchema)
+      .min(1)
+      .max(32)
+      .describe("批量生图条目；同一画布内由 Backend 串行提交以避免 revision 冲突"),
+    waitForCompletion: z
+      .boolean()
+      .optional()
+      .describe("true=由 MCP 内部轮询到全部任务终态后返回；默认 false"),
+    timeoutMs: z
+      .number()
+      .int()
+      .min(1000)
+      .max(1800000)
+      .optional()
+      .describe("waitForCompletion=true 时的最长等待时间，默认 900000ms"),
+    pollMs: z
+      .number()
+      .int()
+      .min(250)
+      .max(10000)
+      .optional()
+      .describe("waitForCompletion=true 时的轮询间隔，默认 2000ms"),
+  }),
   canvas_generate_video: canvasProjectSchema
     .extend(generationFlowSchema.shape)
     .merge(generationOptionsSchema),
@@ -495,6 +550,27 @@ export const toolInputSchemas = {
     taskId: z.string().optional().describe("精确查询任务 ID；传入后不再按画布过滤"),
     nodeId: z.string().optional().describe("只查询某个画布节点的生成任务"),
     limit: z.number().int().min(1).max(100).optional().describe("最多返回多少条，默认 10"),
+  }),
+  canvas_wait_tasks: z.object({
+    taskIds: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(32)
+      .describe("要等待的 Backend taskId 数组"),
+    timeoutMs: z
+      .number()
+      .int()
+      .min(1000)
+      .max(1800000)
+      .optional()
+      .describe("最长等待时间，默认 900000ms"),
+    pollMs: z
+      .number()
+      .int()
+      .min(250)
+      .max(10000)
+      .optional()
+      .describe("轮询间隔，默认 2000ms"),
   }),
   generation_get_status: canvasProjectSchema.extend({
     scope: z
@@ -607,6 +683,13 @@ export const toolInputSchemas = {
     source: z.string().optional().describe("素材来源说明"),
     note: z.string().optional().describe("备注"),
   }),
+  assets_upsert_batch: z.object({
+    items: z
+      .array(assetUpsertItemSchema)
+      .min(1)
+      .max(100)
+      .describe("要幂等写入的完整资产数组；传稳定 id 可更新已有资产"),
+  }),
   drama_list_episodes: z.object({
     dramaId: z
       .string()
@@ -685,6 +768,8 @@ export const toolDescriptions: Record<ToolName, string> = {
     "创建文本生成流程并立即触发（autoRun=true 强制）。例：{ prompt: '为《婚书未烬》写一段 30 秒短剧开场独白，120 字以内' }",
   canvas_generate_image:
     "创建图片生成流程并立即触发。提示词默认可省略，当前工作流声明必填提示词时仍需传入。",
+  canvas_generate_image_batch:
+    "批量创建并提交图片生成流程。Backend 在 MCP 内部串行处理画布 revision，并一次返回每项的业务键、节点 ID 和 taskId；可用 waitForCompletion=true 让 MCP 内部统一轮询，不再编写外部 JSON-RPC/轮询脚本。",
   canvas_generate_video:
     "创建视频生成流程并立即触发。例：{ prompt: '...', size: '16:9', seconds: '6', referenceNodeIds: [...] }",
   canvas_generate_audio:
@@ -705,7 +790,9 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_run_generation:
     "触发指定节点生成，通常用于配置节点或文本/图片/视频/音频节点。若本次要换一套参考图，传 referenceNodeIds；它会先替换现有媒体参考连线，再提交生成，避免旧参考图残留。H3 节点可用 segmentId 单跑某分镜。",
   canvas_task_status:
-    "查询 MCP 发起的画布生成任务。优先传 taskId 精确查询；不传时默认使用当前活动画布，可用 nodeId 缩小范围。返回统一状态摘要、产物、错误和建议的下一步。",
+    "即时查询 MCP 发起的画布生成任务。优先传 taskId 精确查询；传入 taskId 后忽略 projectId/nodeId 等过滤条件。不传 taskId 时默认使用当前活动画布，可用 nodeId 缩小范围。运行中任务建议使用 canvas_wait_tasks 等待收口；本工具用于即时查看，不会提交或重试任务。",
+  canvas_wait_tasks:
+    "等待一组 Backend 生成任务进入终态，并按传入顺序返回状态、产物和错误；适合批量生成后一次性收口。超时会返回原 taskId 的下一次等待指引，不会重新提交生成；每次最多传 32 个 taskId，更多任务按返回的分组继续调用。",
   generation_get_status:
     "查询当前活动网页的生成任务状态。默认返回画布、生图工作台和视频工作台最近任务；可用 scope 过滤来源，用 taskId 查询工作台任务，用 nodeIds 查询画布节点。H3 节点可用 segmentIds 过滤分镜。要看 H3 历史输入快照（prompt/refs/params），用 scope='video' + nodeIds + segmentIds。",
   mcp_observability_report:
@@ -731,6 +818,8 @@ export const toolDescriptions: Record<ToolName, string> = {
     "列出用户「我的素材」，支持 kind（text/image/video）过滤、keyword 搜索和 page/pageSize 分页。为控制体积不返回图片/视频原始 data，仅返回封面与元信息。",
   assets_add:
     "向「我的素材」新增素材。kind=text 时用 content 传文本内容；kind=image 时用 imageUrl 传图片地址或 dataURL。可附带 title、tags、source、note。例：{ kind: 'text', title: '婚书未烬·人物小传', content: '沈昭宁...', tags: ['角色','短剧'] }",
+  assets_upsert_batch:
+    "批量幂等写入完整资产并回读校验。适合把生成结果、角色/服装四视图、场景色卡一次归档到「我的素材」；传稳定 id 时更新已有资产，不会重复创建。",
   drama_list_episodes:
     "列出一个剧目的全部分集，按 episodeNumber 升序返回；每项含标题、剧情和绑定画布 ID。",
   drama_get_episode:

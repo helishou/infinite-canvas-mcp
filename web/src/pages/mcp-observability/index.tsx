@@ -42,9 +42,10 @@ export default function McpObservabilityPage() {
         void loadReport();
     }, [loadReport]);
 
-    const queryTrace = async () => {
-        const id = traceId.trim();
+    const queryTrace = async (requestedTraceId = traceId) => {
+        const id = requestedTraceId.trim();
         if (!id) return;
+        setTraceId(id);
         setTraceLoading(true);
         try {
             const events = await fetchMcpObservabilityTrace(id);
@@ -55,6 +56,20 @@ export default function McpObservabilityPage() {
         } finally {
             setTraceLoading(false);
         }
+    };
+
+    const exportTrace = () => {
+        const id = traceId.trim();
+        if (!id || !traceEvents.length) return;
+        const payload = { formatVersion: 1, exportedAt: new Date().toISOString(), scope: "mcp-observability-trace", traceId: id, events: traceEvents };
+        const objectUrl = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = `mcp-observability-trace-${id}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
     };
 
     const exportReport = () => {
@@ -116,6 +131,7 @@ export default function McpObservabilityPage() {
                 </div>
 
                 <Alert type="info" showIcon title="数据仅保存在本地 Backend SQLite；当前不会自动上传、轮询刷新或清理历史。载入的基线只留在当前浏览器页面。" />
+                {report?.taskAssociation?.incomplete ? <Alert type="warning" showIcon title="任务关联数据不完整" description={report.taskAssociation.note} /> : null}
 
                 <section className="space-y-3">
                     <div>
@@ -149,9 +165,16 @@ export default function McpObservabilityPage() {
                         <Statistic title="每会话调用" value={report?.sessions.averageCalls ?? "—"} suffix={report ? `最高 ${report.sessions.maxCalls}` : undefined} />
                     </Card>
                     <Card loading={loading}>
-                        <Statistic title="恢复成功率" value={percent(report?.recovery.successRate ?? null)} suffix={report ? `成功 ${report.recovery.succeeded} · 采纳 ${report.recovery.followed} · 建议 ${report.recovery.suggested}` : undefined} />
+                        <Statistic title="建议采纳率" value={percent(report?.recovery.followRate ?? null)} suffix={report ? `采纳后成功 ${percent(report.recovery.followedSuccessRate ?? null)} · ${report.recovery.observation === "same_session_adjacent_terminal_call" ? "同会话相邻调用" : "未采集口径"}` : undefined} />
                     </Card>
                 </div>
+
+                <Card title="耗时口径">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                        <Statistic title="普通调用 P95" value={duration(report?.latency?.ordinary.p95DurationMs)} suffix={report?.latency ? `${report.latency.ordinary.calls} 次 · 均值 ${duration(report.latency.ordinary.averageDurationMs)}` : "未采集"} />
+                        <Statistic title="包含任务等待 P95" value={duration(report?.latency?.waiting.p95DurationMs)} suffix={report?.latency ? `${report.latency.waiting.calls} 次 · 均值 ${duration(report.latency.waiting.averageDurationMs)}` : "未采集"} />
+                    </div>
+                </Card>
 
                 {baselineReport ? (
                     <Card title="基线对比" extra={<Typography.Text type="secondary">{baselineName}</Typography.Text>}>
@@ -212,6 +235,12 @@ export default function McpObservabilityPage() {
                                 { title: "工具", dataIndex: "tool" },
                                 { title: "错误代码", dataIndex: "code", render: (value: string) => <Tag color="error">{value}</Tag> },
                                 { title: "次数", dataIndex: "count", width: 70 },
+                                {
+                                    title: "最新 Trace",
+                                    dataIndex: "latestTraceId",
+                                    width: 150,
+                                    render: (value: string | undefined) => value ? <Button type="link" size="small" onClick={() => void queryTrace(value)}>查看</Button> : <Typography.Text type="secondary">未采集</Typography.Text>,
+                                },
                             ]}
                         />
                     </Card>
@@ -287,6 +316,9 @@ export default function McpObservabilityPage() {
                         <Button type="primary" icon={<Search className="size-4" />} loading={traceLoading} onClick={() => void queryTrace()}>
                             查询
                         </Button>
+                        <Button icon={<Download className="size-4" />} disabled={!traceEvents.length} onClick={exportTrace}>
+                            导出链路
+                        </Button>
                     </Space.Compact>
                     <Table
                         rowKey="id"
@@ -302,7 +334,7 @@ export default function McpObservabilityPage() {
                             {
                                 title: "上下文",
                                 render: (_: unknown, item: McpObservabilityEvent) =>
-                                    [item.projectId && `project=${item.projectId}`, item.nodeId && `node=${item.nodeId}`, item.taskId && `task=${item.taskId}`, item.errorCode && `error=${item.errorCode}`].filter(Boolean).join(" · ") || "—",
+                                    [item.projectId && `project=${item.projectId}`, item.nodeId && `node=${item.nodeId}`, item.operationId && `op=${item.operationId}`, item.taskId && `task=${item.taskId}`, item.errorCode && `error=${item.errorCode}`, item.outputSummary?.httpStatus && `HTTP=${item.outputSummary.httpStatus}`].filter(Boolean).join(" · ") || "—",
                             },
                         ]}
                     />

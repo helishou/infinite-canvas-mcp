@@ -15,17 +15,6 @@
       "title": "保存视频"
     }
   },
-  "115": {
-    "inputs": {
-      "aspect_ratio": "16:9 (Widescreen)",
-      "megapixels": 0.4,
-      "multiple": 32
-    },
-    "class_type": "ResolutionSelector",
-    "_meta": {
-      "title": "Resolution Selector (Size)"
-    }
-  },
   "119": {
     "inputs": {
       "vae_name": "minimax_h3_video_vae_fp16.safetensors"
@@ -215,6 +204,24 @@
       "title": "Float (Duration)"
     }
   },
+  "140": {
+    "inputs": {
+      "value": 864
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Int (Width)"
+    }
+  },
+  "141": {
+    "inputs": {
+      "value": 480
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Int (Height)"
+    }
+  },
   "136": {
     "inputs": {
       "prompt": [
@@ -222,12 +229,12 @@
         0
       ],
       "width": [
-        "115",
+        "140",
         0
       ],
       "height": [
-        "115",
-        1
+        "141",
+        0
       ],
       "length": [
         "131",
@@ -291,4 +298,3 @@
     }
   }
 }
-

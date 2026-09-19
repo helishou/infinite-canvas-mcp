@@ -23,6 +23,8 @@ export enum CanvasNodeType {
     Group = "group",
     /** 角色节点：承载一个角色资产（多张参考图 + outfit），可作为下游参考节点。 */
     Character = "character",
+    /** 场景节点：承载场景图、描述和可选色卡。 */
+    Scene = "scene",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -114,6 +116,12 @@ export type CanvasNodeMetadata = {
     characterVoiceAssetId?: string;
     /** 角色节点作为某个生成节点参考输入时的选择快照；未记录时默认使用全部图片与声线。 */
     characterReferences?: Record<string, { imageKeys?: string[]; voiceEnabled?: boolean }>;
+    sceneAssetId?: string;
+    sceneName?: string;
+    sceneDescription?: string;
+    sceneImage?: { url: string; storageKey?: string; name: string; width: number; height: number; bytes: number; mimeType: string };
+    sceneColorCard?: { url: string; storageKey?: string; name: string; width: number; height: number; bytes: number; mimeType: string };
+    sceneColorCardPrompt?: string;
     loopCount?: number;
     loopMode?: "serial" | "parallel";
     loopPromptEnabled?: boolean;
@@ -187,6 +195,10 @@ export type SelectionBox = {
     startWorldY: number;
     currentWorldX: number;
     currentWorldY: number;
+    startLocalX: number;
+    startLocalY: number;
+    currentLocalX: number;
+    currentLocalY: number;
     additive: boolean;
     initialSelectedNodeIds: string[];
 };

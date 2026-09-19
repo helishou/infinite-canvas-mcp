@@ -9,7 +9,6 @@ import type { CanvasConnection, CanvasNodeData, ConnectionHandle, Position } fro
 const EMPTY_ACTIVE_CONNECTION_POINTER: Position = { x: 0, y: 0 };
 const activeConnectionPointers = new Map<string, Position>();
 const activeConnectionPointerListeners = new Map<string, Set<() => void>>();
-const activeConnectionPointerFrames = new Map<string, number>();
 
 function notifyActiveConnectionPointer(projectId: string) {
     activeConnectionPointerListeners.get(projectId)?.forEach((listener) => listener());
@@ -19,20 +18,12 @@ export function writeActiveConnectionPointer(projectId: string, position: Positi
     const current = activeConnectionPointers.get(projectId);
     if (current?.x === position.x && current.y === position.y) return;
     activeConnectionPointers.set(projectId, position);
-    if (activeConnectionPointerFrames.has(projectId)) return;
-    activeConnectionPointerFrames.set(projectId, requestAnimationFrame(() => {
-        activeConnectionPointerFrames.delete(projectId);
-        notifyActiveConnectionPointer(projectId);
-    }));
+    // Drag moves are already coalesced by the caller; notify in that frame so the line does not lag another frame.
+    notifyActiveConnectionPointer(projectId);
 }
 
 export function clearActiveConnectionPointer(projectId: string) {
-    const frame = activeConnectionPointerFrames.get(projectId);
-    if (frame !== undefined) {
-        cancelAnimationFrame(frame);
-        activeConnectionPointerFrames.delete(projectId);
-    }
-    if (!activeConnectionPointers.delete(projectId) && frame === undefined) return;
+    if (!activeConnectionPointers.delete(projectId)) return;
     notifyActiveConnectionPointer(projectId);
 }
 

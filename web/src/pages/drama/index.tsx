@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { flushSync } from "react-dom";
 import { App, Button, Input, Modal, Select, Tag } from "antd";
-import { ArrowLeft, ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, LayoutDashboard, PencilLine, Plus, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, PencilLine, Plus, Trash2, Upload } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -296,17 +296,16 @@ export default function DramaPage() {
     return (
         <main className="h-full overflow-y-auto bg-background text-stone-950 dark:text-stone-100">
             <div className="mx-auto max-w-7xl px-6 py-8 lg:px-10">
-                <header className="flex flex-wrap items-center justify-between gap-5 border-b border-stone-200 pb-6 dark:border-stone-800">
+                <header className="flex flex-wrap items-start justify-between gap-5 border-b border-stone-200 pb-6 dark:border-stone-800">
                         <div className="min-w-0 max-w-2xl">
-                            <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-orange-600 dark:text-orange-400">
-                                <Clapperboard className="size-4" />
+                            <div className="flex items-center gap-2 text-sm font-semibold tracking-[0.12em] text-orange-600 dark:text-orange-400">
+                                <Clapperboard className="size-5" />
                                 {t("drama.eyebrow")}
                             </div>
                             <h1 className="mt-2 truncate text-2xl font-semibold tracking-tight sm:text-3xl" style={activeFolder && transitionDramaId === activeFolder.id ? { viewTransitionName: "drama-title" } : undefined}>{activeFolder?.name || t("drama.libraryTitle")}</h1>
                             <p className="mt-1.5 max-w-xl truncate text-sm text-stone-500 dark:text-stone-400" style={activeFolder && transitionDramaId === activeFolder.id ? { viewTransitionName: "drama-summary" } : undefined}>{activeFolder ? activeFolder.description || t("drama.detailDescription") : t("drama.libraryDescription")}</p>
                         </div>
                         <div className="flex flex-wrap gap-2">
-                            <Button onClick={() => navigate("/canvas")} icon={<LayoutDashboard className="size-4" />}>{t("drama.openCanvasLibrary")}</Button>
                             {activeFolder
                                 ? <Button type="primary" onClick={() => openEpisodeEditor()} icon={<Plus className="size-4" />}>{t("drama.newEpisode")}</Button>
                                 : <Button type="primary" onClick={createDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>}
@@ -331,8 +330,11 @@ export default function DramaPage() {
                             )}
                         </section>
                 ) : (
-                    <div className="mt-8">
-                        <button type="button" className="mb-5 flex items-center gap-2 text-sm text-stone-500 transition hover:text-stone-950 dark:text-stone-400 dark:hover:text-stone-100" onClick={() => changeDramaView(DRAMA_LIBRARY, activeFolder.id)}><ArrowLeft className="size-4" />{t("drama.backToProjects")}</button>
+                    <div className="mt-4">
+                        <button type="button" className="group mb-4 inline-flex items-center gap-1.5 px-0.5 py-1 text-xs font-medium tracking-wide text-stone-500 transition-colors hover:text-orange-600 dark:text-stone-400 dark:hover:text-orange-400" onClick={() => changeDramaView(DRAMA_LIBRARY, activeFolder.id)}>
+                            <ArrowLeft className="size-3.5 transition-transform duration-200 group-hover:-translate-x-0.5" />
+                            <span>{t("drama.backToProjects")}</span>
+                        </button>
                         <div className="mb-10 grid overflow-hidden rounded-2xl border border-stone-200 bg-stone-100/70 dark:border-stone-800 dark:bg-stone-900/60 md:grid-cols-[200px_minmax(0,1fr)_auto]">
                             <div className="relative min-h-44 overflow-hidden rounded-2xl bg-stone-200 dark:bg-stone-800" style={transitionDramaId === activeFolder.id ? { viewTransitionName: "drama-cover" } : undefined}>
                                 {activeCoverUrl ? <img src={activeCoverUrl} alt={activeFolder.name} className="h-full w-full object-cover" /> : <div className="grid h-full min-h-44 place-items-center text-orange-500"><Clapperboard className="size-10 stroke-[1.2]" /></div>}

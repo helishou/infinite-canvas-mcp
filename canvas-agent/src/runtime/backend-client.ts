@@ -14,6 +14,68 @@ import {
   canvasTaskPath,
 } from "../canvas/generation-api.js";
 
+export type BackendClientErrorKind =
+  | "http"
+  | "network"
+  | "timeout"
+  | "invalid_response";
+
+export class BackendClientError extends Error {
+  readonly kind: BackendClientErrorKind;
+  readonly method: string;
+  readonly path: string;
+  readonly status?: number;
+  readonly code?: string;
+
+  constructor(
+    message: string,
+    details: {
+      kind: BackendClientErrorKind;
+      method: string;
+      path: string;
+      status?: number;
+      code?: string;
+      cause?: unknown;
+    },
+  ) {
+    super(message, details.cause === undefined ? undefined : { cause: details.cause });
+    this.name = "BackendClientError";
+    this.kind = details.kind;
+    this.method = details.method;
+    this.path = details.path;
+    this.status = details.status;
+    this.code = details.code;
+  }
+}
+
+function errorPayload(value: unknown) {
+  const body = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const nested = body.error && typeof body.error === "object" && !Array.isArray(body.error)
+    ? body.error as Record<string, unknown>
+    : {};
+  const message = typeof nested.message === "string"
+    ? nested.message
+    : typeof body.error === "string"
+      ? body.error
+      : typeof body.message === "string"
+        ? body.message
+        : undefined;
+  const code = typeof nested.code === "string"
+    ? nested.code
+    : typeof body.code === "string"
+      ? body.code
+      : undefined;
+  return { message, code };
+}
+
+function isTimeoutError(error: unknown) {
+  return error instanceof DOMException
+    ? error.name === "AbortError" || error.name === "TimeoutError"
+    : error instanceof Error && /timeout|timed out|aborted/i.test(error.message);
+}
+
 /** 总后台 API 客户端（canvas-agent 作为调用方）。 */
 export class BackendClient {
   backendUrl: string;
@@ -41,20 +103,37 @@ export class BackendClient {
     signal?: AbortSignal,
   ): Promise<T> {
     const url = `${this.backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(this.backendToken)}`;
-    const res = await fetch(url, {
-      method,
-      headers: body ? { "content-type": "application/json" } : {},
-      body: body ? JSON.stringify(body) : undefined,
-      signal: signal ?? AbortSignal.timeout(15_000),
-    });
-    const data = (await res.json().catch(() => ({}))) as T & {
-      ok?: boolean;
-      error?: string;
-    };
-    if (!res.ok)
-      throw new Error(
-        `Backend ${method} ${path} failed: HTTP ${res.status} ${data.error || ""}`,
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: body ? { "content-type": "application/json" } : {},
+        body: body ? JSON.stringify(body) : undefined,
+        signal: signal ?? AbortSignal.timeout(15_000),
+      });
+    } catch (error) {
+      const kind = isTimeoutError(error) ? "timeout" : "network";
+      throw new BackendClientError(
+        kind === "timeout"
+          ? `Backend ${method} ${path} timed out`
+          : `Backend ${method} ${path} network request failed`,
+        { kind, method, path, cause: error },
       );
+    }
+    const data = (await res.json().catch(() => ({}))) as T;
+    if (!res.ok) {
+      const details = errorPayload(data);
+      throw new BackendClientError(
+        `Backend ${method} ${path} failed: HTTP ${res.status}${details.code ? ` ${details.code}` : ""}${details.message ? ` ${details.message}` : ""}`,
+        {
+          kind: "http",
+          method,
+          path,
+          status: res.status,
+          code: details.code,
+        },
+      );
+    }
     return data;
   }
 
@@ -199,7 +278,15 @@ export class BackendClient {
       input,
     );
     if (!data.task && !data.taskId)
-      throw new Error("Backend canvas generation returned no task");
+      throw new BackendClientError(
+        "Backend canvas generation returned no task",
+        {
+          kind: "invalid_response",
+          method: "POST",
+          path: CANVAS_GENERATION_PATH,
+          code: "BACKEND_INVALID_RESPONSE",
+        },
+      );
     return data;
   }
 
@@ -370,7 +457,16 @@ export class BackendClient {
       task?: RuntimeTask;
       events?: RuntimeTaskEvent[];
     }>(canvasTaskPath(id));
-    if (!data.task) throw new Error(`backend task not found: ${id}`);
+    if (!data.task)
+      throw new BackendClientError(
+        `Backend ${canvasTaskPath(id)} returned no task`,
+        {
+          kind: "invalid_response",
+          method: "GET",
+          path: canvasTaskPath(id),
+          code: "BACKEND_INVALID_RESPONSE",
+        },
+      );
     return { task: data.task, events: data.events || [] };
   }
 
@@ -384,6 +480,7 @@ export class BackendClient {
       nodeIds?: string[];
       segmentIds?: string[];
       taskId?: string;
+      taskIds?: string[];
       limit?: number;
       offset?: number;
     } = {},
@@ -399,6 +496,8 @@ export class BackendClient {
     if (options.segmentIds?.length)
       query.set("segmentIds", options.segmentIds.join(","));
     if (options.taskId) query.set("taskId", options.taskId);
+    if (options.taskIds?.length)
+      query.set("taskIds", options.taskIds.join(","));
     if (options.limit) query.set("limit", String(options.limit));
     if (options.offset) query.set("offset", String(options.offset));
     const data = await this.get<{ tasks?: RuntimeTask[] }>(
@@ -569,7 +668,16 @@ export class BackendClient {
         ...(clientTaskId ? { clientTaskId } : {}),
       },
     );
-    if (!data.task) throw new Error("backend comfy run missing task");
+    if (!data.task)
+      throw new BackendClientError(
+        "Backend ComfyUI run returned no task",
+        {
+          kind: "invalid_response",
+          method: "POST",
+          path: "/comfy/run",
+          code: "BACKEND_INVALID_RESPONSE",
+        },
+      );
     return data.task;
   }
 
@@ -584,7 +692,16 @@ export class BackendClient {
     }>(
       `/comfy/tasks/${encodeURIComponent(id)}${after ? `?after=${after}` : ""}`,
     );
-    if (!data.task) throw new Error(`backend comfy task not found: ${id}`);
+    if (!data.task)
+      throw new BackendClientError(
+        `Backend /comfy/tasks/${id} returned no task`,
+        {
+          kind: "invalid_response",
+          method: "GET",
+          path: `/comfy/tasks/${encodeURIComponent(id)}`,
+          code: "BACKEND_INVALID_RESPONSE",
+        },
+      );
     return { task: data.task, events: data.events || [] };
   }
 

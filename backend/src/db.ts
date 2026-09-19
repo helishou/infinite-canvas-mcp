@@ -424,6 +424,12 @@ export class BackendDatabase {
         if (currentVersion < 11) {
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (11, ?)").run(new Date().toISOString());
         }
+        if (currentVersion < 12) {
+            // MiniMax H3 工作流把宽高从比例/像素量计算改为可直接暴露的 PrimitiveInt 参数，
+            // 让已经初始化过的数据库也能看到宽度、高度和时长字段。
+            this.migrateMiniMaxH3WorkflowFields();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (12, ?)").run(new Date().toISOString());
+        }
     }
 
     private attachFullPlotToDramaEpisodes() {
@@ -779,6 +785,25 @@ export class BackendDatabase {
                 fieldsJson: JSON.stringify(next),
             });
         }
+    }
+
+    private migrateMiniMaxH3WorkflowFields() {
+        const row = this.db.prepare("SELECT fields_json FROM workflow_configs WHERE name = ?").get("MiniMax_H3.json") as { fields_json?: string } | undefined;
+        if (!row?.fields_json) return;
+        let fields: WorkflowField[];
+        try { fields = JSON.parse(row.fields_json) as WorkflowField[]; } catch { return; }
+        if (!Array.isArray(fields) || fields.some((field) => ["width", "height"].includes(field.id))) return;
+        const legacy = new Set(["aspect_ratio", "megapixels"]);
+        if (!fields.some((field) => legacy.has(field.id))) return;
+        const next = fields.filter((field) => !legacy.has(field.id));
+        const durationIndex = next.findIndex((field) => field.id === "duration");
+        const sizeFields: WorkflowField[] = [
+            { id: "width", node: "140", input: "value", name: "宽度（像素）", type: "number", default: 864, step: 32 },
+            { id: "height", node: "141", input: "value", name: "高度（像素）", type: "number", default: 480, step: 32 },
+        ];
+        next.splice(durationIndex < 0 ? next.length : durationIndex, 0, ...sizeFields);
+        this.upsertWorkflowConfig("MiniMax_H3.json", { fieldsJson: JSON.stringify(next) });
+        console.log("[migrate v12] exposed MiniMax H3 width/height workflow fields");
     }
 
     // ── canvas_projects ───────────────────────────────────────────────────
@@ -1914,13 +1939,24 @@ export class BackendDatabase {
             WHERE event = 'tool.failed' AND error_code IS NOT NULL
             GROUP BY error_code ORDER BY count DESC, error_code
         `).all() as Array<Record<string, unknown>>;
-        const taskStatuses = this.db.prepare(`
-            SELECT COALESCE(tasks.status, 'missing') AS status, COUNT(DISTINCT events.task_id) AS count
-            FROM mcp_observability_events AS events
-            LEFT JOIN tasks ON tasks.id = events.task_id
-            WHERE events.event = 'tool.succeeded' AND events.task_id IS NOT NULL
-            GROUP BY COALESCE(tasks.status, 'missing') ORDER BY count DESC
+        const taskObservationEvents = this.db.prepare(`
+            SELECT tool, task_id, event, output_summary_json, created_at, id
+            FROM mcp_observability_events
+            WHERE event IN ('tool.succeeded', 'tool.failed')
+              AND (task_id IS NOT NULL OR output_summary_json != '{}')
+            ORDER BY created_at, id
         `).all() as Array<Record<string, unknown>>;
+        const observedTasks = collectObservedTaskLinks(taskObservationEvents);
+        const taskStatusQuery = this.db.prepare("SELECT status FROM tasks WHERE id = ?");
+        const taskStatusesByStatus = new Map<string, number>();
+        const taskOutcomesByToolMap = new Map<string, number>();
+        for (const link of observedTasks.links) {
+            const row = taskStatusQuery.get(link.taskId) as { status?: unknown } | undefined;
+            const status = String(row?.status || "missing");
+            taskStatusesByStatus.set(status, (taskStatusesByStatus.get(status) || 0) + 1);
+            const key = `${link.tool}\u0000${status}`;
+            taskOutcomesByToolMap.set(key, (taskOutcomesByToolMap.get(key) || 0) + 1);
+        }
         const recovery = this.db.prepare(`
             WITH terminal AS (
                 SELECT session_id, event, tool, suggested_tool, created_at, id,
@@ -1943,17 +1979,22 @@ export class BackendDatabase {
                 GROUP BY session_id
             )
         `).get() as Record<string, unknown>;
-        const latency = this.db.prepare(`
-            WITH ranked AS (
-                SELECT duration_ms,
-                    ROW_NUMBER() OVER (ORDER BY duration_ms) AS duration_rank,
-                    COUNT(*) OVER () AS total
-                FROM mcp_observability_events
-                WHERE event IN ('tool.succeeded', 'tool.failed') AND duration_ms IS NOT NULL
-            )
-            SELECT MAX(CASE WHEN duration_rank = CAST((total * 95 + 99) / 100 AS INTEGER) THEN duration_ms END) AS p95_duration_ms
-            FROM ranked
-        `).get() as Record<string, unknown>;
+        const terminalDurationRows = this.db.prepare(`
+            SELECT tool, duration_ms, output_summary_json
+            FROM mcp_observability_events
+            WHERE event IN ('tool.succeeded', 'tool.failed') AND duration_ms IS NOT NULL
+        `).all() as Array<Record<string, unknown>>;
+        const allLatency = summarizeDurations(terminalDurationRows);
+        const ordinaryLatency = summarizeDurations(terminalDurationRows.filter((row) => !waitsForTasks(row.output_summary_json)));
+        const waitingLatency = summarizeDurations(terminalDurationRows.filter((row) => waitsForTasks(row.output_summary_json)));
+        const ordinaryByTool = new Map<string, Array<Record<string, unknown>>>();
+        for (const row of terminalDurationRows) {
+            if (waitsForTasks(row.output_summary_json)) continue;
+            const tool = String(row.tool || "");
+            const rows = ordinaryByTool.get(tool) || [];
+            rows.push(row);
+            ordinaryByTool.set(tool, rows);
+        }
         const daily = this.db.prepare(`
             SELECT date(created_at, 'localtime') AS date,
                 COUNT(*) AS calls,
@@ -1965,8 +2006,17 @@ export class BackendDatabase {
             GROUP BY date(created_at, 'localtime') ORDER BY date
         `).all() as Array<Record<string, unknown>>;
         const failuresByTool = this.db.prepare(`
-            SELECT tool, COALESCE(error_code, 'UNKNOWN') AS code, COUNT(*) AS count
-            FROM mcp_observability_events
+            SELECT tool, COALESCE(error_code, 'UNKNOWN') AS code, COUNT(*) AS count,
+                (
+                    SELECT latest.trace_id
+                    FROM mcp_observability_events AS latest
+                    WHERE latest.event = 'tool.failed'
+                      AND latest.tool = events.tool
+                      AND COALESCE(latest.error_code, 'UNKNOWN') = COALESCE(events.error_code, 'UNKNOWN')
+                    ORDER BY latest.created_at DESC, latest.id DESC
+                    LIMIT 1
+                ) AS latest_trace_id
+            FROM mcp_observability_events AS events
             WHERE event = 'tool.failed'
             GROUP BY tool, COALESCE(error_code, 'UNKNOWN')
             ORDER BY count DESC, tool, code
@@ -1984,30 +2034,33 @@ export class BackendDatabase {
             GROUP BY tool, next_tool
             ORDER BY count DESC, from_tool, to_tool
         `).all() as Array<Record<string, unknown>>;
-        const taskOutcomesByTool = this.db.prepare(`
-            SELECT events.tool, COALESCE(tasks.status, 'missing') AS status,
-                COUNT(DISTINCT events.task_id) AS count
-            FROM mcp_observability_events AS events
-            LEFT JOIN tasks ON tasks.id = events.task_id
-            WHERE events.event = 'tool.succeeded' AND events.task_id IS NOT NULL
-            GROUP BY events.tool, COALESCE(tasks.status, 'missing')
-            ORDER BY count DESC, events.tool, status
-        `).all() as Array<Record<string, unknown>>;
+        const taskOutcomesByTool = [...taskOutcomesByToolMap.entries()]
+            .map(([key, count]) => {
+                const [tool, status] = key.split("\u0000");
+                return { tool, status, count };
+            })
+            .sort((left, right) => right.count - left.count || left.tool.localeCompare(right.tool) || left.status.localeCompare(right.status));
         const started = Number(totals.started || 0);
         const completed = Number(totals.completed || 0);
         const succeeded = Number(totals.succeeded || 0);
         const recoverySuggested = Number(recovery.suggested || 0);
         const recoveryFollowed = Number(recovery.followed || 0);
         const recoverySucceeded = Number(recovery.succeeded || 0);
-        const toolMetrics = byTool.map(metricRow);
+        const toolMetrics = byTool.map((row) => metricRow({
+            ...row,
+            ordinary_p95_duration_ms: ordinaryByTool.has(String(row.tool || ""))
+                ? summarizeDurations(ordinaryByTool.get(String(row.tool || "")) || []).p95DurationMs
+                : null,
+        }));
         const taskOutcomeMetrics = taskOutcomesByTool.map((row) => ({ tool: String(row.tool || ""), status: String(row.status || "unknown"), count: Number(row.count || 0) }));
         const diagnostics = buildMcpObservabilityDiagnostics({
             started,
             completed,
             succeeded,
             failed: Number(totals.failed || 0),
-            p95DurationMs: latency.p95_duration_ms == null ? null : Number(latency.p95_duration_ms),
+            p95DurationMs: allLatency.p95DurationMs,
             recoverySuggested,
+            recoveryFollowed,
             recoverySucceeded,
             tools: toolMetrics,
             taskOutcomes: taskOutcomeMetrics,
@@ -2023,7 +2076,7 @@ export class BackendDatabase {
                 successRate: completed ? succeeded / completed : null,
                 averageDurationMs: totals.average_duration_ms == null ? null : Math.round(Number(totals.average_duration_ms)),
                 maxDurationMs: totals.max_duration_ms == null ? null : Number(totals.max_duration_ms),
-                p95DurationMs: latency.p95_duration_ms == null ? null : Number(latency.p95_duration_ms),
+                p95DurationMs: allLatency.p95DurationMs,
             },
             sessions: {
                 total: Number(sessions.total || 0),
@@ -2036,12 +2089,24 @@ export class BackendDatabase {
                 succeeded: recoverySucceeded,
                 followRate: recoverySuggested ? recoveryFollowed / recoverySuggested : null,
                 successRate: recoverySuggested ? recoverySucceeded / recoverySuggested : null,
+                followedSuccessRate: recoveryFollowed ? recoverySucceeded / recoveryFollowed : null,
+                observation: "same_session_adjacent_terminal_call",
             },
             byTool: toolMetrics,
             errors: errors.map((row) => ({ code: String(row.code || "UNKNOWN"), count: Number(row.count || 0) })),
-            failuresByTool: failuresByTool.map((row) => ({ tool: String(row.tool || ""), code: String(row.code || "UNKNOWN"), count: Number(row.count || 0) })),
-            taskStatuses: taskStatuses.map((row) => ({ status: String(row.status || "unknown"), count: Number(row.count || 0) })),
+            failuresByTool: failuresByTool.map((row) => ({ tool: String(row.tool || ""), code: String(row.code || "UNKNOWN"), count: Number(row.count || 0), latestTraceId: row.latest_trace_id ? String(row.latest_trace_id) : undefined })),
+            taskStatuses: [...taskStatusesByStatus.entries()].map(([status, count]) => ({ status, count })).sort((left, right) => right.count - left.count || left.status.localeCompare(right.status)),
             taskOutcomesByTool: taskOutcomeMetrics,
+            taskAssociation: {
+                incomplete: observedTasks.incomplete,
+                note: observedTasks.incomplete
+                    ? "部分历史事件只保存了任务数量，未保存全部 taskId；相关任务统计可能不完整。"
+                    : "当前任务统计按创建工具和去重后的 taskId 计算。",
+            },
+            latency: {
+                ordinary: ordinaryLatency,
+                waiting: waitingLatency,
+            },
             transitions: transitions.map((row) => ({ fromTool: String(row.from_tool || ""), toTool: String(row.to_tool || ""), count: Number(row.count || 0) })),
             daily: daily.map((row) => {
                 const calls = Number(row.calls || 0);
@@ -2351,6 +2416,50 @@ function mcpObservabilityEventFromRow(row: Record<string, unknown>): McpObservab
     };
 }
 
+function waitsForTasks(value: unknown) {
+    return parseJsonObject(value).waitsForTasks === true;
+}
+
+function summarizeDurations(rows: Array<Record<string, unknown>>) {
+    const values = rows
+        .map((row) => Number(row.duration_ms))
+        .filter((value) => Number.isFinite(value))
+        .sort((left, right) => left - right);
+    if (!values.length)
+        return {
+            calls: 0,
+            averageDurationMs: null as number | null,
+            maxDurationMs: null as number | null,
+            p95DurationMs: null as number | null,
+        };
+    return {
+        calls: values.length,
+        averageDurationMs: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length),
+        maxDurationMs: values[values.length - 1],
+        p95DurationMs: values[Math.max(0, Math.ceil(values.length * 0.95) - 1)],
+    };
+}
+
+function collectObservedTaskLinks(rows: Array<Record<string, unknown>>) {
+    const links = new Map<string, { taskId: string; tool: string }>();
+    let incomplete = false;
+    for (const row of rows) {
+        const output = parseJsonObject(row.output_summary_json);
+        const createdTaskIds = Array.isArray(output.createdTaskIds)
+            ? [...new Set(output.createdTaskIds.map(String).filter(Boolean))]
+            : [];
+        const scalarTaskId = row.task_id ? String(row.task_id) : "";
+        const taskIds = [...new Set([...createdTaskIds, ...(scalarTaskId ? [scalarTaskId] : [])])];
+        const declaredCount = typeof output.taskCount === "number" ? output.taskCount : undefined;
+        if (declaredCount != null && declaredCount > taskIds.length)
+            incomplete = true;
+        for (const taskId of taskIds) {
+            if (!links.has(taskId)) links.set(taskId, { taskId, tool: String(row.tool || "unknown") });
+        }
+    }
+    return { links: [...links.values()], incomplete };
+}
+
 function metricRow(row: Record<string, unknown>) {
     const calls = Number(row.calls || 0);
     const succeeded = Number(row.succeeded || 0);
@@ -2363,6 +2472,7 @@ function metricRow(row: Record<string, unknown>) {
         averageDurationMs: row.average_duration_ms == null ? null : Math.round(Number(row.average_duration_ms)),
         maxDurationMs: row.max_duration_ms == null ? null : Number(row.max_duration_ms),
         p95DurationMs: row.p95_duration_ms == null ? null : Number(row.p95_duration_ms),
+        ordinaryP95DurationMs: row.ordinary_p95_duration_ms == null ? null : Number(row.ordinary_p95_duration_ms),
     };
 }
 
@@ -2373,6 +2483,7 @@ function buildMcpObservabilityDiagnostics(input: {
     failed: number;
     p95DurationMs: number | null;
     recoverySuggested: number;
+    recoveryFollowed: number;
     recoverySucceeded: number;
     tools: Array<ReturnType<typeof metricRow>>;
     taskOutcomes: Array<{ tool: string; status: string; count: number }>;
@@ -2388,7 +2499,7 @@ function buildMcpObservabilityDiagnostics(input: {
     if (successRate < 0.9) diagnostics.push({ severity: "warning", code: "LOW_SUCCESS_RATE", title: "整体成功率偏低", detail: `当前成功率 ${(successRate * 100).toFixed(1)}%，建议先处理数量最多的错误代码和失败工具。` });
     for (const tool of input.tools) {
         if (tool.calls >= 5 && tool.failed / tool.calls >= 0.2) diagnostics.push({ severity: "warning", code: "TOOL_FAILURE_HOTSPOT", title: `${tool.tool} 失败率偏高`, detail: `${tool.calls} 次调用中失败 ${tool.failed} 次，优先检查参数说明、前置状态与错误恢复建议。`, tool: tool.tool });
-        if (tool.calls >= 5 && tool.p95DurationMs != null && tool.p95DurationMs > 5000) diagnostics.push({ severity: "warning", code: "TOOL_LATENCY_HOTSPOT", title: `${tool.tool} 尾延迟偏高`, detail: `P95 为 ${tool.p95DurationMs} ms，建议检查远端等待、重复读取或任务轮询路径。`, tool: tool.tool });
+        if (tool.calls >= 5 && tool.ordinaryP95DurationMs != null && tool.ordinaryP95DurationMs > 5000) diagnostics.push({ severity: "warning", code: "TOOL_LATENCY_HOTSPOT", title: `${tool.tool} 尾延迟偏高`, detail: `普通调用 P95 为 ${tool.ordinaryP95DurationMs} ms，已排除任务等待耗时；建议检查远端读取或重复调用路径。`, tool: tool.tool });
     }
     const taskOutcomes = new Map<string, { total: number; failed: number }>();
     for (const outcome of input.taskOutcomes) {
@@ -2400,7 +2511,8 @@ function buildMcpObservabilityDiagnostics(input: {
     for (const [tool, metric] of taskOutcomes) {
         if (metric.total >= 3 && metric.failed / metric.total >= 0.2) diagnostics.push({ severity: "warning", code: "TASK_OUTCOME_HOTSPOT", title: `${tool} 后续任务失败率偏高`, detail: `${metric.total} 个已结束任务中有 ${metric.failed} 个失败、取消或丢失；工具调用成功不代表生成结果成功，应优先检查执行器和任务回写。`, tool });
     }
-    if (input.recoverySuggested >= 3 && input.recoverySucceeded / input.recoverySuggested < 0.5) diagnostics.push({ severity: "warning", code: "LOW_RECOVERY_RATE", title: "恢复建议命中率偏低", detail: `${input.recoverySuggested} 次恢复建议仅成功 ${input.recoverySucceeded} 次，应调整 suggestedAction 或工具参数说明。` });
+    if (input.recoverySuggested >= 3 && input.recoveryFollowed === 0) diagnostics.push({ severity: "warning", code: "LOW_RECOVERY_RATE", title: "没有观察到恢复建议被采纳", detail: `${input.recoverySuggested} 次恢复建议在同一会话的相邻终态调用中没有采纳样本；请检查调用指引、会话连续性或客户端是否中断。` });
+    else if (input.recoveryFollowed >= 3 && input.recoverySucceeded / input.recoveryFollowed < 0.5) diagnostics.push({ severity: "warning", code: "LOW_RECOVERY_RATE", title: "已采纳恢复建议成功率偏低", detail: `${input.recoveryFollowed} 次被采纳的恢复建议中仅 ${input.recoverySucceeded} 次成功，应调整 suggestedAction 或工具参数说明。` });
     if (!diagnostics.length) diagnostics.push({ severity: "success", code: "HEALTHY", title: "当前 MCP 调用健康", detail: `已完成 ${input.completed} 次调用，未发现明显失败热点、未闭合调用或高尾延迟。` });
     return diagnostics;
 }

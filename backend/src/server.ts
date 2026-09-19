@@ -1546,11 +1546,17 @@ export function startServer(
             .filter(Boolean)
         : [];
     const taskId = typeof req.query.taskId === "string" ? req.query.taskId : "";
+    const taskIds = list(req.query.taskIds);
     const tasks = taskId
       ? stores.tasks.get(taskId)
         ? [stores.tasks.get(taskId)!]
         : []
-      : stores.tasks.list({
+      : taskIds.length
+        ? taskIds.flatMap((id) => {
+            const task = stores.tasks.get(id);
+            return task ? [task] : [];
+          })
+        : stores.tasks.list({
           status: status as RuntimeTaskStatus | undefined,
           kind,
           model,
@@ -1569,7 +1575,7 @@ export function startServer(
   app.get(CANVAS_TASK_ROUTE, (req, res) => {
     const task = stores.tasks.get(req.params.id);
     if (!task)
-      return void res.status(404).json({ ok: false, error: "task not found" });
+      return void res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
     res.json({
       ok: true,
       task,
@@ -1627,7 +1633,7 @@ export function startServer(
       if (!current)
         return void res
           .status(404)
-          .json({ ok: false, error: "task not found" });
+          .json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
       const task = deps.cancelTask
         ? deps.cancelTask(current)
         : stores.tasks.cancel(taskId);
@@ -1647,7 +1653,7 @@ export function startServer(
       if (!current)
         return void res
           .status(404)
-          .json({ ok: false, error: "task not found" });
+          .json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
       if (!deps.retryTask)
         return void res
           .status(409)

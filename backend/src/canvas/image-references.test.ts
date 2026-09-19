@@ -46,12 +46,28 @@ test("角色参考入边按生成节点保存的服装选择解析为图片输�
     assert.deepEqual(resolveCanvasImageReferences(project, "config")?.map((reference) => reference.storageKey), ["image:outfit-b"]);
 });
 
-test("智能生成节点作为参考入边时解析全部已完成图片结果", () => {
+test("场景参考只提交栅格场景图，不把 SVG 色卡作为图片模型输入", () => {
+    const project = {
+        id: "project-1",
+        nodes: [
+            { id: "config", type: "config" },
+            { id: "scene", type: "scene", title: "场景", metadata: {
+                sceneImage: { storageKey: "image:scene", name: "scene.png", mimeType: "image/png" },
+                sceneColorCard: { storageKey: "image:color-card", name: "scene.svg", mimeType: "image/svg+xml" },
+            } },
+        ],
+        connections: [{ id: "scene-config", fromNodeId: "scene", toNodeId: "config", role: "reference", order: 0 }],
+    };
+
+    assert.deepEqual(resolveCanvasImageReferences(project, "config")?.map((reference) => reference.storageKey), ["image:scene"]);
+});
+
+test("智能生成节点作为参考入边时只解析主图", () => {
     const project = {
         id: "project-1",
         nodes: [
             { id: "target", type: "config", metadata: { smart: true, generationMode: "image" } },
-            { id: "source", type: "config", title: "源智能节点", metadata: { smart: true, generationMode: "image", images: [
+            { id: "source", type: "config", title: "源智能节点", metadata: { smart: true, generationMode: "image", primaryImageId: "image-2", images: [
                 { id: "image-1", content: "first.png", storageKey: "image:first", mimeType: "image/png" },
                 { id: "image-2", content: "second.png", storageKey: "image:second", mimeType: "image/png" },
                 { id: "image-3", content: "third.png", storageKey: "image:third", mimeType: "image/png" },
@@ -60,5 +76,5 @@ test("智能生成节点作为参考入边时解析全部已完成图片结果",
         connections: [{ id: "source-target", fromNodeId: "source", toNodeId: "target", role: "reference" }],
     };
 
-    assert.deepEqual(resolveCanvasImageReferences(project, "target")?.map((reference) => reference.storageKey), ["image:first", "image:second", "image:third"]);
+    assert.deepEqual(resolveCanvasImageReferences(project, "target")?.map((reference) => reference.storageKey), ["image:second"]);
 });

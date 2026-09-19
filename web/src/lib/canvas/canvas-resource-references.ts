@@ -26,6 +26,7 @@ export type CanvasResourceReference = {
     label: string;
     title: string;
     previewUrl?: string;
+    storageKey?: string;
     text?: string;
     active: boolean;
 };
@@ -109,7 +110,7 @@ export async function resolveCanvasReferenceImages(references: CanvasResourceRef
         const node = nodesById.get(reference.nodeId);
         if (!node) throw new Error(i18n.t("agent.composer.mentions.resourceMissing", { title: reference.title }));
         const metadata = node.metadata;
-        const dataUrl = await imageToDataUrl({ storageKey: metadata?.storageKey, url: reference.previewUrl });
+        const dataUrl = await imageToDataUrl({ storageKey: reference.storageKey || metadata?.storageKey, url: reference.previewUrl });
         if (!dataUrl.startsWith("data:image/")) throw new Error(i18n.t("agent.composer.mentions.imageReadFailed", { title: reference.title }));
         const meta = metadata?.naturalWidth && metadata.naturalHeight
             ? { width: metadata.naturalWidth, height: metadata.naturalHeight, mimeType: metadata.mimeType || dataUrl.match(/^data:([^;]+)/)?.[1] || "image/png" }
@@ -203,6 +204,7 @@ function labelResourceNodes(nodes: CanvasNodeData[], active: boolean) {
                 label,
                 title: nodeResourceTitle(node, resource, resourceIndex, label),
                 previewUrl: resource.url,
+                storageKey: resource.storageKey,
                 text: resource.text,
                 active,
             };
