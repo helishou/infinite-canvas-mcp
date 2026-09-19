@@ -1,3 +1,5 @@
+import { validateH3CharacterGroups } from "./character-reference-contract.js";
+
 export const REFERENCE_ROLES = [
     "character_identity", "character_turnaround", "scene", "blocking", "storyboard",
     "keyframe", "motion_reference", "audio_reference", "character_voice", "style",
@@ -37,11 +39,14 @@ export type ReferenceBinding = {
     enabled: boolean;
     usage: ReferenceUsage;
     subjectId?: string;
+    storyboardSubjectIds?: string[];
     mediaType?: ReferenceMediaType;
     url?: string;
     storageKey?: string;
     mimeType?: string;
     sourceNodeId?: string;
+    groupId?: string;
+    outfitId?: string;
 };
 
 export type ReferenceIssue = { severity: "error" | "warning"; code: string; message: string; bindingId?: string };
@@ -119,17 +124,37 @@ export function referenceBindingsOf(segment: Record<string, unknown>): { binding
             id: String(ref.bindingId || stableReferenceId("binding", identity, index)),
             assetId: String(ref.assetId || stableReferenceId("asset", identity)),
             label: String(ref.name || `参考 ${index + 1}`), role, tags: Array.isArray(ref.tags) ? ref.tags : [], enabled: ref.enabled !== false,
-            usage: ref.usage || "reference", subjectId: ref.subjectId, mediaType, url: ref.url, storageKey: ref.storageKey,
+            usage: ref.usage || "reference", subjectId: ref.subjectId, storyboardSubjectIds: Array.isArray(ref.storyboardSubjectIds) ? ref.storyboardSubjectIds.map(String) : undefined, mediaType, url: ref.url, storageKey: ref.storageKey,
             mimeType: ref.mimeType, sourceNodeId: ref.nodeId,
         });
     }).filter(Boolean) as ReferenceBinding[];
     return { bindings, migratedLegacyRefs: bindings.length > 0 };
 }
 
+function normalizeCharacterGroupBindingSubjects(bindings: ReferenceBinding[], segment: Record<string, unknown>) {
+    const groups = recordOf(segment.h3CharacterGroups);
+    const subjectByBinding = new Map<string, string>();
+    for (const [groupKey, rawGroup] of Object.entries(groups)) {
+        const group = recordOf(rawGroup);
+        const groupId = String(group.id || groupKey);
+        const subjectId = String(group.subjectId || "").trim() || String(group.characterNodeId || "").trim();
+        if (!subjectId) continue;
+        for (const rawOutfit of Array.isArray(group.outfits) ? group.outfits : []) {
+            const outfitId = String(recordOf(rawOutfit).id || "");
+            if (outfitId) subjectByBinding.set(JSON.stringify([groupId, outfitId]), subjectId);
+        }
+    }
+    return bindings.map((binding) => {
+        const subjectId = subjectByBinding.get(JSON.stringify([binding.groupId || "", binding.outfitId || ""]));
+        return subjectId && binding.subjectId !== subjectId ? { ...binding, subjectId } : binding;
+    });
+}
+
 export function compileReferenceSubmission(project: Record<string, unknown>, segment: Record<string, unknown>): ReferenceCompilation {
     const catalog = new Map(referenceCatalogOf(project).map((asset) => [asset.id, asset]));
-    const { bindings, migratedLegacyRefs } = referenceBindingsOf(segment);
-    const issues: ReferenceIssue[] = [];
+    const { bindings: rawBindings, migratedLegacyRefs } = referenceBindingsOf(segment);
+    const bindings = normalizeCharacterGroupBindingSubjects(rawBindings, segment);
+    const issues: ReferenceIssue[] = [...validateH3CharacterGroups(project, { ...segment, referenceBindings: bindings })];
     const counters: Record<ReferenceMediaType, number> = { image: 0, video: 0, audio: 0 };
     const references = bindings.filter((binding) => binding.enabled).flatMap((binding): CompiledReference[] => {
         const asset = catalog.get(binding.assetId);
@@ -157,8 +182,15 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
     });
     const semanticPrompt = String(segment.prompt || "");
     const byId = new Map(references.map((reference) => [reference.id, reference]));
+    const bySubjectId = new Map<string, CompiledReference>();
+    references.filter((reference) => reference.mediaType === "image").forEach((reference) => {
+        [reference.subjectId, reference.groupId].filter((id): id is string => Boolean(id)).forEach((id) => { if (!bySubjectId.has(id)) bySubjectId.set(id, reference); });
+    });
+    references.filter((reference) => reference.role === "storyboard").forEach((reference) => {
+        (reference.storyboardSubjectIds || []).forEach((id) => { if (!bySubjectId.has(id)) bySubjectId.set(id, reference); });
+    });
     const replaceMarker = (kind: "ref" | "subject", id: string) => {
-        const reference = byId.get(id);
+        const reference = byId.get(id) || (kind === "subject" ? bySubjectId.get(id) : undefined);
         if (!reference) {
             issues.push({ severity: "error", code: "prompt_binding_missing", bindingId: id, message: `提示词引用了不存在或已禁用的参考：${id}` });
             return `{{${kind}:${id}}}`;

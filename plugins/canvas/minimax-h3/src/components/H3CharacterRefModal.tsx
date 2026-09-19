@@ -22,7 +22,8 @@ export function H3CharacterRefModal({
         const map: Record<string, boolean> = {};
         for (const outfit of group.outfits) map[outfit.id] = outfit.enabled;
         return map;
-    }, [group.id, group.outfits.length]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [group.id, group.outfits]);
     const [enabledMap, setEnabledMap] = useState<Record<string, boolean>>(initialEnabled);
     const [voiceEnabled, setVoiceEnabled] = useState(group.voiceEnabled);
     useEffect(() => {
@@ -42,7 +43,8 @@ export function H3CharacterRefModal({
     >
         <div style={{ display: "flex", flexDirection: "column", gap: 16, paddingTop: 8 }}>
             <div>
-                <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 8 }}>服装（{Object.values(enabledMap).filter(Boolean).length}/{group.outfits.length}）</div>
+                <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 4 }}>目录 {group.outfits.length} 套 · 当前启用 {Object.values(enabledMap).filter(Boolean).length} 套</div>
+                <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 8 }}>源角色节点：{group.characterNodeId || "缺失（无法提交）"}</div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))", gap: 8 }}>
                     {group.outfits.map((outfit) => {
                         const checked = enabledMap[outfit.id] ?? false;
@@ -59,8 +61,8 @@ export function H3CharacterRefModal({
             {group.voice ? <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 10, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
                 <span style={{ fontSize: 13 }}>声线</span>
                 <span style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ display: "block", fontSize: 12, opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.voice.name}</span>
-                    {group.voice.description ? <span style={{ display: "block", marginTop: 2, fontSize: 11, opacity: 0.55 }}>{group.voice.description}</span> : null}
+                    <span style={{ display: "block", fontSize: 13, opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.voice.name}</span>
+                    {group.voice.description ? <span style={{ display: "block", marginTop: 2, fontSize: 12, opacity: 0.55 }}>{group.voice.description}</span> : null}
                 </span>
                 <Switch checked={voiceEnabled} onChange={setVoiceEnabled} />
             </div> : null}

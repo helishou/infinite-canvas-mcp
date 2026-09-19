@@ -6,7 +6,7 @@ export function refsForSegment(segment: H3Segment) {
         return segment.referenceBindings.filter((binding) => binding.enabled !== false && (binding.url || binding.storageKey)).map((binding) => ({
             url: binding.url || "", type: binding.mediaType || inferRefType(binding.mimeType || binding.url || binding.label), name: binding.label,
             storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId, role: binding.role,
-            subjectId: binding.subjectId, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, enabled: binding.enabled, usage: binding.usage,
+            subjectId: binding.subjectId, storyboardSubjectIds: binding.storyboardSubjectIds, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, enabled: binding.enabled, usage: binding.usage,
             groupId: binding.groupId, outfitId: binding.outfitId,
         } as H3Ref));
     }
@@ -51,7 +51,7 @@ export function inferReferenceRole(ref: Pick<H3Ref, "name" | "role" | "type">): 
 }
 
 function refToBinding(ref: H3Ref): H3ReferenceBinding {
-    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], enabled: ref.enabled !== false, usage: ref.usage || "reference", subjectId: ref.subjectId, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId, groupId: ref.groupId, outfitId: ref.outfitId };
+    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], enabled: ref.enabled !== false, usage: ref.usage || "reference", subjectId: ref.subjectId, storyboardSubjectIds: ref.storyboardSubjectIds, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId, groupId: ref.groupId, outfitId: ref.outfitId };
 }
 
 function ensureReferenceIdentity(ref: H3Ref, index: number): H3Ref {
@@ -100,13 +100,27 @@ export function findCharacterGroupBySource(segment: H3Segment, source: { charact
 function characterGroupCapacity(segment: H3Segment, groupId?: string) {
     const rawMode = String(segment.mode || segment.taskMode || "ref2va");
     const mode = rawMode === "t2v" || rawMode === "i2v" || rawMode === "fl2v" ? rawMode : "ref2va";
-    const imageLimit = mode === "t2v" ? 0 : mode === "i2v" ? 1 : mode === "fl2v" ? 2 : 9;
+    // ref2va 的参考图槽位不限数量（与画布 ref 槽位一致）：角色 outfit 不再按 9 张裁剪；
+    // i2v / fl2v 的图片是固定语义（首帧 / 首尾帧）才需要限制。
+    const imageLimit = mode === "t2v" ? 0 : mode === "i2v" ? 1 : mode === "fl2v" ? 2 : Number.POSITIVE_INFINITY;
     const audioLimit = mode === "ref2va" ? 3 : 0;
-    const currentRefs = segment.refItems?.length ? segment.refItems : refsForSegment(segment);
-    const otherRefs = currentRefs.filter((ref) => !groupId || ref.groupId !== groupId);
+    // 把"其他角色组"也算上：用 h3CharacterGroups 直接汇总每个组的 enabled outfit / audio，避免
+    // segment.refItems 在用户清空 / 替换时不一致而把当前 group 误判为超限。
+    const groups = segment.h3CharacterGroups || {};
+    let otherImages = 0;
+    let otherAudios = 0;
+    for (const [id, grp] of Object.entries(groups)) {
+        if (groupId && id === groupId) continue;
+        otherImages += grp.outfits.filter((outfit) => outfit.enabled).length;
+        if (grp.voiceEnabled) otherAudios += 1;
+    }
+    // 当前 group 之外的 standalone ref（用户手动拖入的非角色 ref）也参与计数
+    const standaloneRefs = (segment.refItems || []).filter((ref) => !ref.groupId);
+    otherImages += standaloneRefs.filter((ref) => ref.type === "image").length;
+    otherAudios += standaloneRefs.filter((ref) => ref.type === "audio").length;
     return {
-        images: Math.max(0, imageLimit - otherRefs.filter((ref) => ref.type === "image").length),
-        voice: otherRefs.filter((ref) => ref.type === "audio").length < audioLimit,
+        images: Math.max(0, imageLimit - otherImages),
+        voice: otherAudios < audioLimit,
     };
 }
 
@@ -116,7 +130,8 @@ function fitCharacterGroupToCapacity(segment: H3Segment, group: H3CharacterGroup
     return {
         ...group,
         outfits: group.outfits.map((outfit) => {
-            if (!outfit.enabled || imagesLeft <= 0) return { ...outfit, enabled: false };
+            if (!outfit.enabled) return outfit;
+            if (imagesLeft <= 0) return { ...outfit, enabled: false };
             imagesLeft -= 1;
             return outfit;
         }),
@@ -127,6 +142,7 @@ function fitCharacterGroupToCapacity(segment: H3Segment, group: H3CharacterGroup
 /** 从一个角色组派生当前应在 ref 槽里的 refs：每张 enabled outfit 拆为 image ref，voiceEnabled 时 voice 拆为 audio ref。 */
 export function refsFromCharacterGroup(group: H3CharacterGroup): H3Ref[] {
     const refs: H3Ref[] = [];
+    const subjectId = group.subjectId || group.characterNodeId;
     for (const outfit of group.outfits) {
         if (!outfit.enabled) continue;
         refs.push({
@@ -135,6 +151,9 @@ export function refsFromCharacterGroup(group: H3CharacterGroup): H3Ref[] {
             name: `${group.characterName} · ${outfit.name}`,
             storageKey: outfit.storageKey,
             mimeType: outfit.mimeType,
+            nodeId: group.characterNodeId,
+            role: "character_turnaround",
+            subjectId,
             groupId: group.id,
             outfitId: outfit.id,
         });
@@ -146,20 +165,28 @@ export function refsFromCharacterGroup(group: H3CharacterGroup): H3Ref[] {
             name: group.voice.name || `${group.characterName} · 声线`,
             storageKey: group.voice.storageKey,
             role: "character_voice",
+            nodeId: group.characterNodeId,
+            subjectId,
             groupId: group.id,
         });
     }
     return refs;
 }
 
-/** 把 segment 上的 refs 重写：原 refs 拆成 "group 派生 refs" + "非 group refs（独立 image/video/audio ref）"，再合并。 */
+/** 把 segment 上的 refs 重写：原 refs 拆成 "group 派生 refs + 非 group refs"。character group 的 ref 必须由当前 group.outfits 的 enabled 状态决定 —— 用户在 modal 取消勾选后，旧 ref 应该从 fromGroups 里丢掉，让 ref 槽只显示仍 enabled 的 outfit。 */
 function rewriteRefsWithGroups(segment: H3Segment, groups: Record<string, H3CharacterGroup>): H3Ref[] {
     const previous = refsForSegment(segment);
     const fromGroups: H3Ref[] = [];
     const standalone: H3Ref[] = [];
     for (const ref of previous) {
         if (ref.groupId && groups[ref.groupId]) {
-            fromGroups.push(ref);
+            // 仅当 ref 对应的 outfit 当前 enabled 时才保留 —— 否则当作 disabled，丢弃
+            const group = groups[ref.groupId];
+            const matchingOutfit = group?.outfits.find((outfit) => outfit.id === ref.outfitId);
+            // audio ref 没有 outfitId：用 group.voiceEnabled 决定是否保留
+            const isAudioRef = ref.type === "audio";
+            const stillEnabled = isAudioRef ? Boolean(group?.voiceEnabled) && Boolean(group?.voice?.url) : Boolean(matchingOutfit?.enabled);
+            if (stillEnabled) fromGroups.push(ref);
         } else if (ref.groupId) {
             // group 已被删，对应的 ref 一并丢弃
         } else {
@@ -169,10 +196,11 @@ function rewriteRefsWithGroups(segment: H3Segment, groups: Record<string, H3Char
     const derived: H3Ref[] = [];
     for (const group of Object.values(groups)) {
         for (const ref of refsFromCharacterGroup(group)) {
+            // derived 只补 fromGroups 没有的 ref（比如新增的 outfit / 之前没出现过的 audio ref）。
             if (!fromGroups.some((item) => sameRef(item, ref) && item.groupId === ref.groupId)) derived.push(ref);
         }
     }
-    return [...standalone, ...derived].filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
+    return [...standalone, ...fromGroups, ...derived].filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
 }
 
 export function setSegmentCharacterGroups(segment: H3Segment, groups: Record<string, H3CharacterGroup>): H3Segment {
@@ -180,35 +208,65 @@ export function setSegmentCharacterGroups(segment: H3Segment, groups: Record<str
     return withSegmentRefs(next, rewriteRefsWithGroups(next, groups));
 }
 
-/** 登记一个新角色组，或按 source 复用现有组并补齐最新 outfit/voice 列表（保留当前 enabled / voiceEnabled 选择）。 */
-export function upsertCharacterGroup(segment: H3Segment, input: {
+type CharacterOutfitInput = { url: string; name: string; storageKey?: string; mimeType?: string };
+
+type UpsertCharacterGroupInput = {
     characterName: string;
     characterAssetId?: string;
     characterNodeId?: string;
-    outfits: Array<{ url: string; name: string; storageKey?: string; mimeType?: string }>;
+    subjectId?: string;
+    outfits: CharacterOutfitInput[];
+    /** 只表达当前 Clip 的选择，不是服装目录。 */
+    selectedOutfitKeys?: string[];
     voice?: H3CharacterVoice;
     defaultVoiceEnabled?: boolean;
-}): H3Segment {
+};
+
+function outfitKey(outfit: Pick<CharacterOutfitInput, "storageKey" | "url">) {
+    return outfit.storageKey || outfit.url;
+}
+
+function mergeOutfitCatalog(existing: H3CharacterOutfit[], incoming: CharacterOutfitInput[], selectedOutfitKeys?: string[]) {
+    const incomingByKey = new Map(incoming.map((item) => [outfitKey(item), item]));
+    const existingByKey = new Map(existing.map((item) => [outfitKey(item), item]));
+    const orderedKeys = [
+        ...incoming.map(outfitKey),
+        ...existing.map(outfitKey).filter((key) => !incomingByKey.has(key)),
+    ];
+    return orderedKeys.map((key) => {
+        const item = incomingByKey.get(key);
+        const previous = existingByKey.get(key);
+        if (!item && previous) return previous;
+        if (!item) throw new Error(`角色服装目录项不存在:${key}`);
+        const selected = selectedOutfitKeys ? selectedOutfitKeys.includes(key) : undefined;
+        return {
+            id: previous?.id || genOutfitId(),
+            url: item.url,
+            name: item.name,
+            storageKey: item.storageKey,
+            mimeType: item.mimeType,
+            enabled: selected ?? previous?.enabled ?? true,
+        };
+    });
+}
+
+/** 登记一个角色组：outfits 是完整源目录，selectedOutfitKeys 只修改当前 Clip 的启用状态。 */
+export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterGroupInput): H3Segment {
+    if (!input.characterNodeId) throw new Error("角色组必须绑定已有 characterNodeId");
+    if (!input.outfits.length) throw new Error(`角色 ${input.characterName || input.characterNodeId} 缺少完整服装目录`);
+    if (input.selectedOutfitKeys && !input.selectedOutfitKeys.length) throw new Error("当前 Clip 至少需要选择一套角色服装");
     const existing = findCharacterGroupBySource(segment, input);
     const groups = { ...(segment.h3CharacterGroups || {}) };
     if (existing) {
-        // 同源角色：保留当前 enabled 选择，仅补齐新增的 outfit / 更新 voice 字段
-        const existingByUrl = new Map(existing.outfits.map((outfit) => [outfit.url, outfit]));
-        const nextOutfits: H3CharacterOutfit[] = input.outfits.map((item) => {
-            const prev = existingByUrl.get(item.url);
-            return {
-                id: prev?.id || genOutfitId(),
-                url: item.url,
-                name: item.name,
-                storageKey: item.storageKey,
-                mimeType: item.mimeType,
-                enabled: prev ? prev.enabled : true,
-            };
-        });
+        // 同源角色默认合并目录：即使调用方只带当前选择，也不能删除历史目录项。
+        const nextOutfits = mergeOutfitCatalog(existing.outfits, input.outfits, input.selectedOutfitKeys);
         const nextVoice = input.voice || existing.voice;
         const nextGroup = fitCharacterGroupToCapacity(segment, {
             ...existing,
             characterName: input.characterName || existing.characterName,
+            characterAssetId: input.characterAssetId || existing.characterAssetId,
+            characterNodeId: input.characterNodeId,
+            subjectId: input.subjectId || existing.subjectId || input.characterNodeId,
             voice: nextVoice,
             outfits: nextOutfits,
             voiceEnabled: nextVoice ? (existing.voice ? existing.voiceEnabled : (input.defaultVoiceEnabled ?? true)) : false,
@@ -223,15 +281,9 @@ export function upsertCharacterGroup(segment: H3Segment, input: {
         characterName: input.characterName,
         characterAssetId: input.characterAssetId,
         characterNodeId: input.characterNodeId,
+        subjectId: input.subjectId || input.characterNodeId,
         voice: input.voice,
-        outfits: input.outfits.map((item) => ({
-            id: genOutfitId(),
-            url: item.url,
-            name: item.name,
-            storageKey: item.storageKey,
-            mimeType: item.mimeType,
-            enabled: true,
-        })),
+        outfits: mergeOutfitCatalog([], input.outfits, input.selectedOutfitKeys),
         voiceEnabled: input.voice ? (input.defaultVoiceEnabled ?? true) : false,
     });
     if (!nextGroup.outfits.some((outfit) => outfit.enabled)) return segment;
@@ -277,4 +329,3 @@ export function resultUrl(value: unknown) {
     const item = value as Record<string, unknown>;
     return String(item.url || item.video_url || item.content || item.localUrl || "");
 }
-

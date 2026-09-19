@@ -86,7 +86,7 @@ export type PluginMcpModule = {
 type FirstPartyEntry = { version: string; load: () => Promise<PluginMcpModule> };
 export const KNOWN_FIRST_PARTY: Record<string, FirstPartyEntry> = {
     "minimax-h3": {
-        version: "1.3.0",
+        version: "1.4.0",
         load: async () => (await import("../plugins/minimax-h3/mcp.js")).pluginMcp,
     },
 };

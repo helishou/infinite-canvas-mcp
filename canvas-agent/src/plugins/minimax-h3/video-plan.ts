@@ -49,6 +49,10 @@ export function validateVideoPlan(segments: H3PlannedSegment[]) {
     if (!segments.length) throw new Error("视频计划至少需要一段");
     const ids = new Set<string>();
     for (const segment of segments) {
+        const rawSegment = segment as H3PlannedSegment & Record<string, unknown>;
+        if (Object.prototype.hasOwnProperty.call(rawSegment, "h3CharacterGroups") || Object.prototype.hasOwnProperty.call(rawSegment, "characterGroups")) {
+            throw new Error(`片段 ${segment.id || "?"} 不能直接携带角色组；请先绑定已有 character 节点`);
+        }
         if (!segment.id || ids.has(segment.id)) throw new Error(`视频计划片段 id 重复或为空:${segment.id}`);
         ids.add(segment.id);
         if (!Number.isFinite(segment.duration) || segment.duration <= 0) throw new Error(`片段 ${segment.id} 的 duration 必须大于 0`);

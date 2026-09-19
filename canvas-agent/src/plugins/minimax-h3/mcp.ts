@@ -1,6 +1,8 @@
 import type { AgentCanvasNode, McpToolHandler, PluginMcpContext, PluginMcpModule, PluginMcpToolWire } from "../../server/plugin-mcp.js";
 import { normalizeH3GenerationSettings, normalizePlannedSegment, validateVideoPlan, type H3PlannedSegment } from "./video-plan.js";
-import { compileReferenceSubmission, inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf } from "../../canvas/reference-contract.js";
+import { compileReferenceSubmission, inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf, assertReferenceCompilation } from "../../canvas/reference-contract.js";
+import { validateH3CharacterGroups } from "../../canvas/character-reference-contract.js";
+import { buildCharacterGroupFromExistingNode } from "./character-groups.js";
 
 // H3 片段(节点 metadata.segments 中的元素)
 type H3Segment = Record<string, unknown>;
@@ -156,6 +158,7 @@ const TOOLS: PluginMcpToolWire[] = [
     { id: "canvas_update_reference_asset", version: "1.0.0", name: "更新项目参考资产", description: "新增或更新项目参考资产；职责只保存一个 primary role，补充语义放 tags。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, asset: { type: "object" } }, required: ["projectId", "asset"] } },
     { id: "canvas_analyze_reference_asset", version: "1.0.0", name: "记录参考资产分析", description: "把模型对参考素材的职责、标签和摘要写入项目资产；调用方应先实际查看素材再提交分析。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, assetId: { type: "string" }, role: { type: "string" }, tags: { type: "array", items: { type: "string" } }, summary: { type: "string" }, model: { type: "string" } }, required: ["projectId", "assetId", "role", "tags", "summary"] } },
     { id: "h3_set_reference_bindings", version: "1.0.0", name: "设置 Clip 参考绑定", description: "按稳定 binding id 原子替换指定 Clip 的参考绑定，不修改节点位置或运行状态。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, bindings: { type: "array", items: { type: "object" } }, expectedBindings: { type: "array", items: { type: "object" } } }, required: ["projectId", "nodeId", "segmentId", "bindings"] } },
+    { id: "h3_bind_existing_character_groups", version: "1.0.0", name: "绑定现有角色节点组", description: "从指定的已有 character 画布节点读取完整服装目录，只按 selectedOutfitStorageKeys 选择当前 Clip；绝不创建角色节点。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, characters: { type: "array", items: { type: "object", properties: { characterNodeId: { type: "string" }, selectedOutfitStorageKeys: { type: "array", items: { type: "string" } }, voiceEnabled: { type: "boolean" } }, required: ["characterNodeId", "selectedOutfitStorageKeys"] } } }, required: ["projectId", "nodeId", "segmentId", "characters"] } },
     { id: "canvas_validate_generation", version: "1.0.0", name: "生成预检", description: "使用与 Backend 实际提交相同的编译器预检语义提示词、参考顺序、模式上限和缺失媒体。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] } },
 ];
 
@@ -215,7 +218,7 @@ async function assertProjectNode(context: PluginMcpContext, projectId: string, n
 
 export const pluginMcp: PluginMcpModule = {
     id: "minimax-h3",
-    version: "1.3.0",
+    version: "1.4.0",
     tools: TOOLS,
     createHandler(context: PluginMcpContext): Record<string, McpToolHandler> {
         return {
@@ -275,10 +278,78 @@ export const pluginMcp: PluginMcpModule = {
                 const bindings = referenceBindingsOf({ referenceBindings: rawBindings }).bindings;
                 if (bindings.length !== rawBindings.length) throw new Error("每个参考绑定都必须包含稳定的 id 和 assetId");
                 const expectedBindings = Array.isArray(input.expectedBindings) ? input.expectedBindings : segment.referenceBindings;
+                assertReferenceCompilation(compileReferenceSubmission(project, { ...segment, referenceBindings: bindings }));
                 const operation: Record<string, unknown> = { type: "update_h3_segment", nodeId, segmentId, patch: { referenceBindings: bindings } };
                 if (expectedBindings !== undefined) operation.expectedFields = { referenceBindings: expectedBindings };
                 const result = await context.backend.applyCanvasOperations(projectId, [operation]);
                 return { ok: true, projectId, nodeId, segmentId, bindings, revision: result.revision };
+            },
+            h3_bind_existing_character_groups: async (input) => {
+                const projectId = String(input.projectId || "");
+                const nodeId = String(input.nodeId || "");
+                const segmentId = String(input.segmentId || "");
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                if (!project) throw new Error(`画布不存在:${projectId}`);
+                const projectNodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+                const node = projectNodes.find((item) => String(item.id || "") === nodeId) as AgentCanvasNode | undefined;
+                if (!node) throw new Error(`找不到画布节点:${nodeId}`);
+                if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
+                const segment = segmentsOf(node).find((item) => String(item.id || "") === segmentId);
+                if (!segment) throw new Error(`找不到片段:${segmentId}`);
+                const rawCharacters = Array.isArray(input.characters) ? input.characters as Array<Record<string, unknown>> : [];
+                if (!rawCharacters.length) throw new Error("characters 至少需要一个已有 character 节点");
+                const existingGroups = segment.h3CharacterGroups && typeof segment.h3CharacterGroups === "object" && !Array.isArray(segment.h3CharacterGroups) ? segment.h3CharacterGroups as Record<string, unknown> : {};
+                const requestedNodeIds = new Set<string>();
+                const built = rawCharacters.map((request) => {
+                    const characterNodeId = String(request.characterNodeId || "");
+                    if (!characterNodeId || requestedNodeIds.has(characterNodeId)) throw new Error(`characterNodeId 缺失或重复:${characterNodeId}`);
+                    requestedNodeIds.add(characterNodeId);
+                    const sourceNode = projectNodes.find((item) => String(item.id || "") === characterNodeId);
+                    if (!sourceNode) throw new Error(`找不到已有 character 节点:${characterNodeId}`);
+                    if (String(sourceNode.type || "") !== "character") throw new Error(`只能绑定已有 character 节点:${characterNodeId}`);
+                    const selected = Array.isArray(request.selectedOutfitStorageKeys) ? request.selectedOutfitStorageKeys.map(String) : [];
+                    const existingGroup = Object.values(existingGroups).map((value) => value as Record<string, unknown>).find((group) => String(group.characterNodeId || "") === characterNodeId);
+                    return { characterNodeId, built: buildCharacterGroupFromExistingNode(sourceNode, { selectedOutfitStorageKeys: selected, ...(typeof request.voiceEnabled === "boolean" ? { voiceEnabled: request.voiceEnabled } : {}), existingGroup }) };
+                });
+                const removedGroupIds = new Set(Object.entries(existingGroups).filter(([, value]) => requestedNodeIds.has(String((value as Record<string, unknown>)?.characterNodeId || ""))).map(([key, value]) => String((value as Record<string, unknown>)?.id || key)));
+                const nextGroups: Record<string, unknown> = {};
+                for (const [key, value] of Object.entries(existingGroups)) {
+                    const group = value as Record<string, unknown>;
+                    if (!requestedNodeIds.has(String(group.characterNodeId || ""))) nextGroups[key] = value;
+                }
+                for (const item of built) nextGroups[item.built.group.id] = item.built.group;
+                const previousBindings = referenceBindingsOf(segment).bindings;
+                const preservedBindings = previousBindings.filter((binding) => !binding.groupId || (!removedGroupIds.has(String(binding.groupId)) && Boolean(nextGroups[String(binding.groupId)])));
+                const nextBindings = [...preservedBindings, ...built.flatMap((item) => item.built.refs)];
+                const candidate = { ...segment, h3CharacterGroups: nextGroups, referenceBindings: nextBindings };
+                const compilation = compileReferenceSubmission(project, candidate);
+                assertReferenceCompilation(compilation);
+                const expectedFields = { h3CharacterGroups: segment.h3CharacterGroups, referenceBindings: segment.referenceBindings };
+                const operations: Record<string, unknown>[] = [{ type: "update_h3_segment", nodeId, segmentId, patch: { h3CharacterGroups: nextGroups, referenceBindings: nextBindings }, expectedFields }];
+                const connections = Array.isArray(project.connections) ? project.connections as Array<Record<string, unknown>> : [];
+                let nextOrder = connections.filter((connection) => String(connection.toNodeId || "") === nodeId).length;
+                for (const item of built) {
+                    const alreadyConnected = connections.some((connection) => String(connection.fromNodeId || "") === item.characterNodeId && String(connection.toNodeId || "") === nodeId);
+                    if (!alreadyConnected) operations.push({ type: "connect_nodes", fromNodeId: item.characterNodeId, toNodeId: nodeId, role: "reference", order: nextOrder++ });
+                }
+                const result = await context.backend.applyCanvasOperations(projectId, operations, Number(project.revision || 0));
+                const refreshedProject = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                const refreshedNode = refreshedProject && (Array.isArray(refreshedProject.nodes) ? refreshedProject.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === nodeId) as AgentCanvasNode | undefined;
+                const refreshedSegment = refreshedNode && segmentsOf(refreshedNode).find((item) => String(item.id || "") === segmentId);
+                if (!refreshedProject || !refreshedSegment) throw new Error(`角色组写入后读取失败:${segmentId}`);
+                const refreshedCompilation = compileReferenceSubmission(refreshedProject, refreshedSegment);
+                assertReferenceCompilation(refreshedCompilation);
+                const refreshedConnections = Array.isArray(refreshedProject.connections) ? refreshedProject.connections as Array<Record<string, unknown>> : [];
+                return {
+                    ok: true,
+                    projectId,
+                    nodeId,
+                    segmentId,
+                    revision: result.revision,
+                    groups: built.map((item) => ({ characterNodeId: item.characterNodeId, groupId: item.built.group.id, catalogCount: item.built.group.outfits.length, enabledCount: item.built.group.outfits.filter((outfit) => outfit.enabled).length })),
+                    bindings: refreshedCompilation.references.filter((reference) => reference.groupId),
+                    connections: refreshedConnections.filter((connection) => requestedNodeIds.has(String(connection.fromNodeId || "")) && String(connection.toNodeId || "") === nodeId),
+                };
             },
             canvas_validate_generation: async (input) => {
                 const projectId = String(input.projectId || "");
@@ -301,6 +372,7 @@ export const pluginMcp: PluginMcpModule = {
                 const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
                 if (!project || !Array.isArray(project.nodes) || !(project.nodes as Array<Record<string, unknown>>).some((item) => String(item.id || "") === nodeId)) throw new Error(`节点不属于指定画布:${projectId}`);
                 const rawSegments = Array.isArray(input.segments) ? input.segments as H3PlannedSegment[] : [];
+                if (rawSegments.some((item) => Object.prototype.hasOwnProperty.call(item, "h3CharacterGroups") || Object.prototype.hasOwnProperty.call(item, "characterGroups"))) throw new Error("角色组必须通过 h3_bind_existing_character_groups 写入");
                 validateVideoPlan(rawSegments);
                 const existing = segmentsOf(node);
                 // 计划只描述剧情字段；节点上的生成参数（模型/LoRA/采样等）必须继承下来，
@@ -381,6 +453,8 @@ export const pluginMcp: PluginMcpModule = {
                 const target = segments[index];
                 if (!target.id) throw new Error(`片段 ${index} 缺少 id，无法使用细粒度 update_h3_segment`);
                 const patch = (input.patch as Record<string, unknown>) || {};
+                if (Object.prototype.hasOwnProperty.call(patch, "h3CharacterGroups")) throw new Error("角色组必须通过 h3_bind_existing_character_groups 写入");
+                if (Object.prototype.hasOwnProperty.call(patch, "referenceBindings")) assertReferenceCompilation(compileReferenceSubmission((await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === String(input.projectId || "")) || {}, { ...target, ...patch }));
                 await context.updateH3Segment(nodeId, String(target.id), patch, nodeProjection(patch));
                 const refreshed = await context.getCanvasNode(nodeId);
                 const refreshedSegment = refreshed && segmentsOf(refreshed).find((segment) => String(segment.id || "") === segmentId);

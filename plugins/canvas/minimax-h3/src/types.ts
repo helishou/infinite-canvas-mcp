@@ -1,6 +1,6 @@
 export type H3ReferenceRole = "character_identity" | "character_turnaround" | "storyboard" | "scene" | "blocking" | "keyframe" | "motion_reference" | "audio_reference" | "character_voice" | "style" | "palette" | "prop" | "other";
 export type H3ReferenceUsage = "reference" | "first_frame" | "last_frame";
-export type H3ReferenceBinding = { id: string; assetId: string; label: string; role: H3ReferenceRole; tags: string[]; enabled: boolean; usage: H3ReferenceUsage; subjectId?: string; mediaType?: "image" | "video" | "audio"; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string; groupId?: string; outfitId?: string };
+export type H3ReferenceBinding = { id: string; assetId: string; label: string; role: H3ReferenceRole; tags: string[]; enabled: boolean; usage: H3ReferenceUsage; subjectId?: string; storyboardSubjectIds?: string[]; mediaType?: "image" | "video" | "audio"; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string; groupId?: string; outfitId?: string };
 
 export type H3CharacterOutfit = {
     id: string;
@@ -24,12 +24,14 @@ export type H3CharacterGroup = {
     characterName: string;
     characterAssetId?: string;
     characterNodeId?: string;
+    /** 角色在当前 Clip 的稳定主体 ID；没有独立主体表时使用 characterNodeId。 */
+    subjectId?: string;
     voice?: H3CharacterVoice;
     outfits: H3CharacterOutfit[];
     voiceEnabled: boolean;
 };
 
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; enabled?: boolean; usage?: H3ReferenceUsage };
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; enabled?: boolean; usage?: H3ReferenceUsage };
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
