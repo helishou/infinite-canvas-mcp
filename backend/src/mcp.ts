@@ -29,7 +29,7 @@ import {
   buildCanvasToolRequest,
   sanitizeCanvasPrompt,
 } from "@basketikun/canvas-agent/operations";
-import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { createH3NodeMetadata, readH3Layout } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasImageGenerationInput } from "./canvas/image-dispatcher.js";
 import type { CanvasTextGenerationInput } from "./canvas/text-dispatcher.js";
@@ -1510,11 +1510,14 @@ async function applyNodeFactoryDefaults(
   if (String(input.nodeType || "") !== "minimax-h3:video") return input;
   const defaults = await backend.getH3Defaults();
   const metadata = recordOf(input.metadata);
+  // 默认参数里的 layout 是「设为默认参数」一并保存的布局快照：
+  // 节点宽高在这里消费，各模块区域宽高交给节点工厂写进 metadata。
+  const layout = readH3Layout(defaults.layout);
   return {
     ...input,
-    width: input.width ?? 1960,
-    height: input.height ?? 1080,
-    metadata: createH3NodeMetadata(defaults, metadata),
+    width: input.width ?? layout.width ?? 1960,
+    height: input.height ?? layout.height ?? 1080,
+    metadata: createH3NodeMetadata(defaults, metadata, layout.panes),
   };
 }
 

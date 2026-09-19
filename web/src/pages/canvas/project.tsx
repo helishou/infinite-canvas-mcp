@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 
 import { defaultConfig, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
 import { resolveComfyImageSize } from "@/services/api/comfyui";
-import { uploadImage, type UploadedImage } from "@/services/image-storage";
+import { uploadImage, resolveImageUrl, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { backendMediaUrl, fetchBackendCanvasDrama, type BackendMediaResult } from "@/services/backend-api";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
@@ -969,9 +969,11 @@ function InfiniteCanvasPage() {
         [nodes, selectedNodeIds],
     );
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
-    const previewContent = previewImageId ? previewNode?.metadata?.images?.find((image) => image.id === previewImageId)?.content : previewNode?.metadata?.content;
-    const previewBeforeContent = useMemo(() => {
-        if (!previewNode || !previewContent) return null;
+    const previewImage = previewImageId ? previewNode?.metadata?.images?.find((image) => image.id === previewImageId) : undefined;
+    const previewStorageKey = previewImage?.storageKey || previewNode?.metadata?.storageKey;
+    const previewRawContent = previewImage?.content || previewNode?.metadata?.content || "";
+    const previewBeforeReference = useMemo(() => {
+        if (!previewNode || !previewRawContent) return null;
         // 向上游查找最近的图片节点作为对比的「之前」图，
         // 允许中间隔着 Config 等中转节点（[Image1] → [Config] → [Image2]）。
         const upstreamByNode = new Map<string, string[]>();
@@ -991,7 +993,7 @@ function InfiniteCanvasPage() {
                 visited.add(upstreamId);
                 const source = nodeById.get(upstreamId);
                 if (source?.type === CanvasNodeType.Image && source.metadata?.content) {
-                    return source.metadata.content;
+                    return { storageKey: source.metadata.storageKey, content: source.metadata.content };
                 }
                 if (source?.type === CanvasNodeType.Config) {
                     queue.push({ id: upstreamId, depth: depth + 1 });
@@ -999,7 +1001,30 @@ function InfiniteCanvasPage() {
             }
         }
         return null;
-    }, [previewNode, previewContent, connections, nodeById]);
+    }, [previewNode, previewRawContent, connections, nodeById]);
+    const [previewContent, setPreviewContent] = useState("");
+    const [previewBeforeContent, setPreviewBeforeContent] = useState<string | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!previewRawContent && !previewStorageKey) {
+            setPreviewContent("");
+            setPreviewBeforeContent(null);
+            return;
+        }
+        const resolvePreview = (storageKey?: string, fallback = "") => resolveImageUrl(storageKey, fallback).catch(() => fallback);
+        Promise.all([
+            resolvePreview(previewStorageKey, previewRawContent),
+            previewBeforeReference ? resolvePreview(previewBeforeReference.storageKey, previewBeforeReference.content) : Promise.resolve("") ,
+        ]).then(([after, before]) => {
+            if (cancelled) return;
+            setPreviewContent(after);
+            setPreviewBeforeContent(before || null);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [previewBeforeReference, previewRawContent, previewStorageKey]);
     const hasMultipleSelectedNodes = selectedNodeIds.size > 1;
     const activeNodeId = hasMultipleSelectedNodes ? null : hoveredNodeId || (selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null);
     const focusedConnectionIds = useMemo(() => {
@@ -3277,11 +3302,12 @@ function InfiniteCanvasPage() {
             const maskNodeId = nanoid();
             const childId = nanoid();
             const imageId = nanoid();
+            const configNodeSize = NODE_DEFAULT_SIZE[CanvasNodeType.Config];
             const source = { id: node.id, name: `${node.title || node.id}.png`, type: node.metadata.mimeType || "image/png", dataUrl: node.metadata.content, storageKey: node.metadata.storageKey };
             const maskSource = { id: maskNodeId, name: "mask.png", type: maskImage.mimeType || "image/png", dataUrl: maskImage.url, storageKey: maskImage.storageKey };
             const references = [source, maskSource];
             const generationMetadata = buildImageGenerationMetadata("edit", generationConfig, 1, references);
-            const childMetadata = payload.generate ? { prompt, status: NODE_STATUS_IDLE, images: [{ id: imageId, status: NODE_STATUS_IDLE, content: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" }], ...generationMetadata } : { prompt };
+            const childMetadata: CanvasNodeMetadata = { smart: true, generationMode: "image", maskEdit: true, prompt, composerContent: prompt, status: NODE_STATUS_IDLE, ...(payload.generate ? { images: [{ id: imageId, status: NODE_STATUS_IDLE, content: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" }] } : {}), ...generationMetadata };
             const nextNodes: CanvasNodeData[] = [
                 ...nodesRef.current,
                 {
@@ -3291,15 +3317,15 @@ function InfiniteCanvasPage() {
                     position: { x: node.position.x, y: node.position.y + node.height + 96 },
                     width: node.width,
                     height: node.height,
-                    metadata: imageMetadata(maskImage),
+                    metadata: { ...imageMetadata(maskImage), maskOverlay: true },
                 },
                 {
                     id: childId,
-                    type: CanvasNodeType.Image,
+                    type: CanvasNodeType.Config,
                     title: userPrompt.slice(0, 32) || t("canvas.projectPage.maskResult"),
                     position: { x: node.position.x + node.width + 96, y: node.position.y },
-                    width: node.width,
-                    height: node.height,
+                    width: configNodeSize.width,
+                    height: configNodeSize.height,
                     metadata: childMetadata,
                 },
             ];
@@ -3321,6 +3347,7 @@ function InfiniteCanvasPage() {
                 await runCanvasImageTask(
                     {
                         mode: "image",
+                        maskEdit: true,
                         model: generationConfig.model,
                         prompt,
                         references,
@@ -3763,6 +3790,7 @@ function InfiniteCanvasPage() {
                     await runCanvasImageTask(
                         {
                             mode: "image",
+                            ...(sourceNode?.metadata?.maskEdit ? { maskEdit: true } : {}),
                             model: generationConfig.model,
                             prompt: effectivePrompt,
                             references: referenceImages,
@@ -3917,9 +3945,21 @@ function InfiniteCanvasPage() {
     }, []);
 
     const handleRetryNode = useCallback(
-        async (node: CanvasNodeData, imageId?: string) => {
+        async (initialNode: CanvasNodeData, imageId?: string) => {
+            let node = initialNode;
+            let projectFlushed = false;
             const activeRequest = generationRequestsRef.current.get(node.id);
             if (activeRequest && !activeRequest.controller.signal.aborted) return;
+            if (node.metadata?.maskEdit) {
+                try {
+                    await flushCanvasProjectBeforeGeneration(projectId);
+                    projectFlushed = true;
+                    node = useCanvasStore.getState().projects.find((project) => project.id === projectId)?.nodes.find((item) => item.id === node.id) || node;
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+                    return;
+                }
+            }
             const sourceNode = findRetrySourceNode(node.id, nodesRef.current, connectionsRef.current) || node;
             // 失败结果节点的面板允许重新选择模型。重试时优先沿用结果节点当前模型，
             // 避免回溯到上游配置节点里的旧模型（例如“视频拼接”）而与面板显示不一致。
@@ -3957,7 +3997,11 @@ function InfiniteCanvasPage() {
                       const targetContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(node.id, nodesRef.current, connectionsRef.current, retrySourcePrompt));
                       return targetContext.referenceImages.length || targetContext.referenceVideos.length || targetContext.referenceAudios.length ? targetContext : sourceContext;
                   })();
-            const prompt = (savedImageMetadata?.prompt || retrySourcePrompt || context?.prompt || "").trim();
+            const prompt = (
+                savedImageMetadata?.maskEdit && typeof savedImageMetadata.composerContent === "string"
+                    ? savedImageMetadata.composerContent
+                    : savedImageMetadata?.prompt || retrySourcePrompt || context?.prompt || ""
+            ).trim();
             if (!prompt) {
                 message.warning(t("canvas.projectPage.retryPromptMissing"));
                 return;
@@ -3998,11 +4042,12 @@ function InfiniteCanvasPage() {
                 const targetImageId = imageId || node.metadata?.primaryImageId || node.metadata?.images?.[0]?.id;
                 const controller = startGenerationRequest(node.id, sourceNode.id, node.id);
                 try {
-                    await flushCanvasProjectBeforeGeneration(projectId);
+                    if (!projectFlushed) await flushCanvasProjectBeforeGeneration(projectId);
                     const size = resolveComfyImageSize(generationConfig.size);
                     await runCanvasImageTask(
                         {
                             mode: "image",
+                            ...(node.metadata?.maskEdit ? { maskEdit: true } : {}),
                             model: generationConfig.model,
                             prompt,
                             references: retryImages,

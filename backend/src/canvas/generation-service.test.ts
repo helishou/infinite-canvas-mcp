@@ -140,6 +140,177 @@ test("图片命令按源配置节点统一解析画布参考图", async () => {
     assert.deepEqual((received?.references as Array<{ id: string }>).map((reference) => reference.id), ["scene", "character"]);
 });
 
+test("蒙版局部修改以调用方参考图为准，不被智能节点上游参考图覆盖", async () => {
+    let received: Record<string, unknown> | undefined;
+    const service = serviceWith({
+        image: { start: (input: Record<string, unknown>) => { received = input; return { taskId: "image-mask", logId: "log-mask", executor: "direct-image" }; } },
+        stores: {
+            projects: {
+                get: () => ({
+                    id: "project-1",
+                    nodes: [
+                        { id: "smart", type: "config", title: "智能生成", metadata: { smart: true, generationMode: "image", images: [{ id: "main", content: "smart.png", storageKey: "image:smart-main" }] } },
+                        { id: "mask", type: "image", title: "遮罩标注", metadata: { storageKey: "image:mask", maskOverlay: true } },
+                        { id: "result", type: "image", metadata: { generationType: "edit", status: "idle" } },
+                        { id: "char", type: "character", title: "谢临渊", metadata: { characterImages: [{ storageKey: "image:char", url: "char.png", name: "char.png" }] } },
+                    ],
+                    connections: [
+                        { id: "smart-result", fromNodeId: "smart", toNodeId: "result" },
+                        { id: "mask-result", fromNodeId: "mask", toNodeId: "result" },
+                        { id: "char-smart", fromNodeId: "char", toNodeId: "smart", role: "reference" },
+                    ],
+                }),
+            },
+            tasks: { get: () => null },
+        },
+    });
+
+    await service.start({
+        mode: "image",
+        maskEdit: true,
+        projectId: "project-1",
+        nodeId: "result",
+        sourceNodeId: "smart",
+        model: "gpt-image-2",
+        prompt: "参考图片1为原图，图片2是蓝色标注的待修改区域，把它改掉",
+        count: 1,
+        references: [
+            { id: "source", name: "原图.png", storageKey: "image:source" },
+            { id: "mask-node", name: "mask.png", storageKey: "image:mask" },
+        ],
+    });
+
+    assert.deepEqual((received?.references as Array<{ id: string }>).map((reference) => reference.id), ["source", "mask-node"]);
+});
+
+test("普通改图结果节点在没有 maskEdit 标记时仍按画布图谱解析参考图", async () => {
+    let received: Record<string, unknown> | undefined;
+    const service = serviceWith({
+        image: { start: (input: Record<string, unknown>) => { received = input; return { taskId: "image-edit", logId: "log-edit", executor: "direct-image" }; } },
+        stores: {
+            projects: {
+                get: () => ({
+                    id: "project-1",
+                    nodes: [
+                        { id: "smart", type: "config", metadata: { smart: true, generationMode: "image", images: [{ id: "main", content: "smart.png", storageKey: "image:smart-main" }] } },
+                        { id: "mask", type: "image", title: "遮罩标注", metadata: { storageKey: "image:mask", maskOverlay: true } },
+                        { id: "result", type: "image", metadata: { generationType: "edit" } },
+                    ],
+                    connections: [
+                        { id: "smart-result", fromNodeId: "smart", toNodeId: "result" },
+                        { id: "mask-result", fromNodeId: "mask", toNodeId: "result" },
+                    ],
+                }),
+            },
+            tasks: { get: () => null },
+        },
+    });
+
+    await service.start({ mode: "image", projectId: "project-1", nodeId: "result", sourceNodeId: "result", model: "gpt-image-2", prompt: "重跑", count: 1, references: [] });
+
+    assert.deepEqual((received?.references as Array<{ storageKey: string }>).map((reference) => reference.storageKey), ["image:smart-main", "image:mask"]);
+});
+
+test("局部修改未带 maskEdit 时按目标结果节点入边解析，不被智能节点上游覆盖", async () => {
+    let received: Record<string, unknown> | undefined;
+    const service = serviceWith({
+        image: { start: (input: Record<string, unknown>) => { received = input; return { taskId: "image-mask-fallback", logId: "log-mask", executor: "direct-image" }; } },
+        stores: {
+            projects: {
+                get: () => ({
+                    id: "project-1",
+                    nodes: [
+                        { id: "smart", type: "config", title: "分镜图·S01-10", metadata: { smart: true, generationMode: "image", images: [{ id: "main", content: "frame.png", storageKey: "image:smart-main" }] } },
+                        { id: "mask", type: "image", title: "遮罩标注", metadata: { storageKey: "image:mask", maskOverlay: true } },
+                        { id: "result", type: "image", metadata: { generationType: "edit" } },
+                        { id: "char", type: "character", title: "谢临渊", metadata: { characterImages: [{ storageKey: "image:char", url: "char.png", name: "char.png" }] } },
+                    ],
+                    connections: [
+                        { id: "smart-result", fromNodeId: "smart", toNodeId: "result" },
+                        { id: "mask-result", fromNodeId: "mask", toNodeId: "result" },
+                        { id: "char-smart", fromNodeId: "char", toNodeId: "smart", role: "reference" },
+                    ],
+                }),
+            },
+            tasks: { get: () => null },
+        },
+    });
+
+    await service.start({
+        mode: "image",
+        projectId: "project-1",
+        nodeId: "result",
+        sourceNodeId: "smart",
+        model: "gpt-image-2",
+        prompt: "参考图片1为原图，图片2是待修改区域",
+        count: 1,
+        references: [{ id: "source", name: "原图.png", storageKey: "image:source" }],
+    });
+
+    assert.deepEqual(
+        (received?.references as Array<{ storageKey: string }>).map((reference) => reference.storageKey),
+        ["image:smart-main", "image:mask"],
+    );
+});
+
+test("智能节点形态的局部修改结果节点也按自身入边解析", async () => {
+    let received: Record<string, unknown> | undefined;
+    const service = serviceWith({
+        image: { start: (input: Record<string, unknown>) => { received = input; return { taskId: "image-mask-smart", logId: "log-smart", executor: "comfy-workflow" }; } },
+        stores: {
+            projects: {
+                get: () => ({
+                    id: "project-1",
+                    nodes: [
+                        { id: "smart", type: "config", metadata: { smart: true, generationMode: "image", images: [{ id: "main", content: "frame.png", storageKey: "image:smart-main" }] } },
+                        { id: "mask", type: "image", title: "遮罩标注", metadata: { storageKey: "image:mask", maskOverlay: true } },
+                        { id: "result", type: "config", metadata: { smart: true, generationMode: "image", maskEdit: true, images: [{ id: "slot", status: "idle" }] } },
+                    ],
+                    connections: [
+                        { id: "smart-result", fromNodeId: "smart", toNodeId: "result" },
+                        { id: "mask-result", fromNodeId: "mask", toNodeId: "result" },
+                    ],
+                }),
+            },
+            tasks: { get: () => null },
+        },
+    });
+
+    await service.start({ mode: "image", projectId: "project-1", nodeId: "result", sourceNodeId: "smart", model: "Flux2-Klein", prompt: "只改涂抹区域", count: 1, references: [] });
+
+    assert.deepEqual(
+        (received?.references as Array<{ storageKey: string }>).map((reference) => reference.storageKey),
+        ["image:smart-main", "image:mask"],
+    );
+});
+
+test("智能节点自身生成不会被局部修改兜底改写参考图", async () => {
+    let received: Record<string, unknown> | undefined;
+    const service = serviceWith({
+        image: { start: (input: Record<string, unknown>) => { received = input; return { taskId: "image-smart-self", logId: "log-self", executor: "direct-image" }; } },
+        stores: {
+            projects: {
+                get: () => ({
+                    id: "project-1",
+                    nodes: [
+                        { id: "smart", type: "config", metadata: { smart: true, generationMode: "image" } },
+                        { id: "char", type: "character", title: "谢临渊", metadata: { characterImages: [{ storageKey: "image:char", url: "char.png", name: "char.png" }] } },
+                    ],
+                    connections: [{ id: "char-smart", fromNodeId: "char", toNodeId: "smart", role: "reference" }],
+                }),
+            },
+            tasks: { get: () => null },
+        },
+    });
+
+    await service.start({ mode: "image", projectId: "project-1", nodeId: "smart", sourceNodeId: "smart", model: "gpt-image-2", prompt: "正常生成", count: 1 });
+
+    assert.deepEqual(
+        (received?.references as Array<{ storageKey: string }>).map((reference) => reference.storageKey),
+        ["image:char"],
+    );
+});
+
 test("图片命令与 H3/视频一样使用 idempotencyKey 复用任务", async () => {
     let received: Record<string, unknown> | undefined;
     const task = { id: "image-idempotent", kind: "canvas-image", status: "queued", progress: 0, input: {}, params: {}, createdAt: "", updatedAt: "" };

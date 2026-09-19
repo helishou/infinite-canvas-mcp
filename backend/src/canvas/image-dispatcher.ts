@@ -40,6 +40,7 @@ export type CanvasImageGenerationInput = {
   nodeId?: string;
   sourceNodeId?: string;
   segmentId?: string;
+  maskEdit?: boolean;
   model: string;
   prompt: string;
   references?: CanvasImageReference[];
@@ -644,12 +645,17 @@ export class CanvasImageDispatcher {
         : null;
     }
 
+    const workflow =
+      input.maskEdit && references.length >= 2
+        ? maskReferenceWorkflow(detail.workflow, imageFields[1]?.node) || detail.workflow
+        : detail.workflow;
+
     const childTaskId = `workflow-child-${taskId}${suffix}`;
     this.assertNotCancelled(taskId);
     this.trackChild(taskId, childTaskId);
     try {
       const result = await this.workflowExecutor.run(
-        detail.workflow,
+        workflow,
         detail.config || emptyWorkflowConfig(workflowName),
         fieldValues,
         crypto.randomUUID(),
@@ -799,6 +805,83 @@ function builtinPreset(model: string) {
   if (value === "z-image") return "z-image";
   if (value === "flux2-klein") return "flux2-klein";
   return "";
+}
+
+/**
+ * 蒙版局部修改的工作流改写：只在能确认「蒙版图片接入了活动图像分支」时改写图，
+ * 否则返回 undefined，调用方退回原工作流按参考图顺序填第 1 张输入。
+ * 工作流本身没有蒙版输入时静默降级，不把本可硬跑的请求变成硬失败。
+ */
+function maskReferenceWorkflow(
+  workflow: Record<string, unknown>,
+  fieldNode?: string,
+) {
+  const referenceNodeIds = (fieldNode || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (!referenceNodeIds.length) return undefined;
+
+  const graph = JSON.parse(JSON.stringify(workflow)) as Record<string, unknown>;
+  if (activeGraphUsesImage(graph, referenceNodeIds)) return graph;
+
+  for (const node of Object.values(graph)) {
+    if (!node || typeof node !== "object") continue;
+    const item = node as { class_type?: string; inputs?: Record<string, unknown> };
+    if (item.class_type !== "PrimitiveBoolean" || !item.inputs || item.inputs.value !== false) continue;
+    item.inputs.value = true;
+    if (activeGraphUsesImage(graph, referenceNodeIds)) return graph;
+    item.inputs.value = false;
+  }
+
+  return undefined;
+}
+
+function activeGraphUsesImage(
+  workflow: Record<string, unknown>,
+  imageNodeIds: string[],
+) {
+  const outputs = Object.entries(workflow)
+    .filter(([, value]) => {
+      const node = value as { class_type?: string } | null;
+      return node?.class_type === "SaveImage" || node?.class_type === "PreviewImage";
+    })
+    .map(([id]) => id);
+  if (!outputs.length) return false;
+
+  const targets = new Set(imageNodeIds);
+  const visited = new Set<string>();
+  function visit(id: string): boolean {
+    if (targets.has(id)) return true;
+    if (visited.has(id)) return false;
+    visited.add(id);
+    const node = workflow[id] as {
+      class_type?: string;
+      inputs?: Record<string, unknown>;
+    } | null;
+    if (!node?.inputs) return false;
+    if (node.class_type === "ComfySwitchNode") {
+      const switchId = linkedNodeId(node.inputs.switch);
+      const selector = switchId
+        ? (workflow[switchId] as { inputs?: Record<string, unknown> } | null)
+        : null;
+      const selected = selector?.inputs?.value;
+      if (typeof selected !== "boolean") return false;
+      return visitLinkedInput(node.inputs[selected ? "on_true" : "on_false"]);
+    }
+    return Object.values(node.inputs).some((input) => visitLinkedInput(input));
+  }
+  function visitLinkedInput(input: unknown) {
+    const id = linkedNodeId(input);
+    return id ? visit(id) : false;
+  }
+
+  return outputs.some((id) => visit(id));
+}
+
+function linkedNodeId(value: unknown) {
+  if (!Array.isArray(value) || typeof value[0] !== "string") return undefined;
+  return value[0];
 }
 
 function isImageField(field: WorkflowField, workflow: Record<string, unknown>) {

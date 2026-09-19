@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Copy, Download, FileText, Group, Image as ImageIcon, ListRestart, MapPinned, Music2, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
+import { ChevronRight, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Music2, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -88,23 +88,29 @@ export type CanvasNodeProps = {
 };
 
 function nodeTypeIcon(node: CanvasNodeData) {
-    return node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && node.metadata?.generationMode === "image")
-        ? ImageIcon
-        : node.type === CanvasNodeType.Video || (node.type === CanvasNodeType.Config && node.metadata?.generationMode === "video")
-          ? Video
-          : node.type === CanvasNodeType.Audio || (node.type === CanvasNodeType.Config && node.metadata?.generationMode === "audio")
-            ? Music2
-              : node.type === CanvasNodeType.Text || (node.type === CanvasNodeType.Config && node.metadata?.generationMode === "text")
-                ? FileText
-              : node.type === CanvasNodeType.Character
-                ? User
-                : node.type === CanvasNodeType.Scene
-                  ? MapPinned
-                : node.type === CanvasNodeType.Group
-                  ? Group
-                  : node.type === CanvasNodeType.Loop
-                    ? ListRestart
-                    : Settings2;
+    if (node.type.includes("minimax-h3") || node.type === CanvasNodeType.Video) return Video;
+    if (node.type === CanvasNodeType.Image) return ImageIcon;
+    if (node.type === CanvasNodeType.Audio) return Music2;
+    if (node.type === CanvasNodeType.Text) return FileText;
+    if (node.type === CanvasNodeType.Character) return User;
+    if (node.type === CanvasNodeType.Scene) return MapPinned;
+    if (node.type === CanvasNodeType.Loop) return ListRestart;
+    if (node.type === CanvasNodeType.Config) {
+        const mode = node.metadata?.generationMode || (node.metadata?.smart ? "image" : undefined);
+        if (mode === "video") return Video;
+        if (mode === "audio") return Music2;
+        if (mode === "text") return FileText;
+        if (mode === "image") return ImageIcon;
+    }
+    return Settings2;
+}
+
+function nodeAccentColor(node: CanvasNodeData, theme: CanvasTheme) {
+    if (node.type === CanvasNodeType.Character) return theme.node.typeStroke.character;
+    if (node.type === CanvasNodeType.Scene) return theme.node.typeStroke.scene;
+    if (node.type === CanvasNodeType.Group) return theme.node.typeStroke.group;
+    if (node.type.includes("minimax-h3")) return theme.node.linkActive;
+    return theme.node.muted;
 }
 
 type OverviewImage = Pick<CanvasNodeImage, "content" | "storageKey" | "naturalWidth" | "naturalHeight">;
@@ -199,7 +205,7 @@ function OverviewImagePreview({ image, label, theme }: { image: OverviewImage; l
     );
 }
 
-function OverviewVideoPreview({ source, label, theme }: { source: string; label: string; theme: CanvasTheme }) {
+function OverviewVideoPreview({ source, label, theme, iconSize = 20 }: { source: string; label: string; theme: CanvasTheme; iconSize?: number }) {
     const subscribe = useCallback((listener: () => void) => subscribeVideoPreview(source, listener), [source]);
     const getRevision = useCallback(() => getVideoPreviewRevision(source), [source]);
     useSyncExternalStore(subscribe, getRevision, () => 0);
@@ -210,22 +216,22 @@ function OverviewVideoPreview({ source, label, theme }: { source: string; label:
     return src ? (
         <img src={src} alt={label} draggable={false} className="pointer-events-none h-full w-full select-none object-cover" />
     ) : (
-        <div className="flex h-full w-full items-center justify-center" style={{ background: theme.toolbar.activeBg }}>
-            <Video className="size-5 opacity-35" />
+        <div className="flex h-full w-full items-center justify-center">
+            <Video style={{ width: iconSize, height: iconSize, color: theme.node.linkActive, opacity: 0.78 }} />
         </div>
     );
 }
 
-function OverviewH3Preview({ data, projectId, label, theme }: { data: CanvasNodeData; projectId: string; label: string; theme: CanvasTheme }) {
+function OverviewH3Preview({ data, projectId, label, theme, iconSize }: { data: CanvasNodeData; projectId: string; label: string; theme: CanvasTheme; iconSize: number }) {
     const view = useMemo(() => getPluginNodeView(projectId, data.id), [data.id, projectId]);
     const viewState = useSyncExternalStore(view.subscribe, view.getSnapshot, () => emptyPluginView);
     const selectedSegmentId = typeof viewState.selectedSegmentId === "string" ? viewState.selectedSegmentId : undefined;
     const source = overviewVideoSource(data, selectedSegmentId);
     return source ? (
-        <OverviewVideoPreview source={source} label={label} theme={theme} />
+        <OverviewVideoPreview source={source} label={label} theme={theme} iconSize={iconSize} />
     ) : (
-        <div className="flex h-full w-full items-center justify-center" style={{ background: theme.toolbar.activeBg }}>
-            <Video className="size-5 opacity-35" />
+        <div className="flex h-full w-full items-center justify-center">
+            <Video style={{ width: iconSize, height: iconSize, color: theme.node.linkActive, opacity: 0.78 }} />
         </div>
     );
 }
@@ -263,33 +269,16 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     const isH3 = !image && data.type.includes("minimax-h3");
     const videoSource = !image && !isH3 ? overviewVideoSource(data) : undefined;
     const isGroup = data.type === CanvasNodeType.Group;
+    const isCharacter = data.type === CanvasNodeType.Character;
+    const isScene = data.type === CanvasNodeType.Scene;
     const isSmartGenerationNode = data.type === CanvasNodeType.Config && data.metadata?.smart === true;
     const isTextOverview = data.type === CanvasNodeType.Text || (isSmartGenerationNode && data.metadata?.generationMode === "text");
     const textOverviewTitle = data.title || "文本";
     // 字号在低倍率时维持约 14px 屏幕高度，但必须同时受节点宽高和两行标题容量约束，不能用 transform 放大后溢出。
     const textOverviewFontSize = Math.max(12, Math.min(14 / Math.max(scale, 0.01), (width * 0.8) / Math.max(1, Math.ceil(Array.from(textOverviewTitle).length / 2)), height * 0.28));
+    const overviewIconSize = Math.min(44 / Math.max(scale, 0.01), Math.min(width, height) * 0.42);
     const hasMediaPreview = Boolean(image || videoSource || isH3);
-    const borderColor = isGroup
-        ? active
-            ? selectionBlue
-            : theme.node.stroke
-        : isSmartGenerationNode
-          ? active
-              ? selectionBlue
-              : isRelated
-                ? theme.node.muted
-                : theme.node.stroke
-          : hasMediaPreview
-            ? active
-                ? selectionBlue
-                : isRelated
-                  ? theme.node.muted
-                  : theme.node.stroke
-            : active
-              ? selectionBlue
-              : isRelated
-                ? theme.node.muted
-                : theme.node.stroke;
+    const borderColor = active ? selectionBlue : isRelated ? theme.node.muted : nodeAccentColor(data, theme);
     const summary = overviewSummary(data);
 
     return (
@@ -303,6 +292,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
                 color: theme.node.text,
                 background: isGroup || isH3 || hasMediaPreview ? "transparent" : theme.node.fill,
                 borderColor,
+                borderWidth: isGroup ? 3 : undefined,
                 borderStyle: isGroup ? "dashed" : "solid",
                 boxShadow: active ? `0 0 0 1px ${selectionBlue}55` : isRelated ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
                 // 画布节点处于父级 scale 变换层内；content-visibility:auto 在缩放到 24% 以下时
@@ -324,9 +314,9 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
             {image ? (
                 <OverviewImagePreview image={image} label={data.title || data.type} theme={theme} />
             ) : isH3 ? (
-                <OverviewH3Preview data={data} projectId={projectId} label={data.title || data.type} theme={theme} />
+                <OverviewH3Preview data={data} projectId={projectId} label={data.title || data.type} theme={theme} iconSize={overviewIconSize} />
             ) : videoSource ? (
-                <OverviewVideoPreview source={videoSource} label={data.title || data.type} theme={theme} />
+                <OverviewVideoPreview source={videoSource} label={data.title || data.type} theme={theme} iconSize={overviewIconSize} />
             ) : isTextOverview ? (
                 <div className="flex h-full w-full items-center justify-center px-6 text-center" style={{ background: theme.node.fill }}>
                     <span className="line-clamp-2 font-semibold leading-snug opacity-85" style={{ fontSize: textOverviewFontSize }}>
@@ -334,12 +324,19 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
                     </span>
                 </div>
             ) : (
-                <div className="flex h-full w-full min-w-0 flex-col justify-between p-3" style={{ background: theme.node.fill }}>
-                    <div className="flex min-w-0 items-center gap-2">
-                        <Icon className="size-4 shrink-0 opacity-65" />
+                <div className="relative flex h-full w-full min-w-0 flex-col justify-between overflow-hidden p-3" style={{ background: theme.node.fill }}>
+                    {!isGroup ? (
+                        <Icon
+                            aria-hidden="true"
+                            className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+                            style={{ width: overviewIconSize, height: overviewIconSize, color: nodeAccentColor(data, theme), opacity: 0.22 }}
+                        />
+                    ) : null}
+                    <div className="relative flex min-w-0 items-center gap-2">
+                        {!isGroup ? <Icon className="size-4 shrink-0 opacity-80" style={{ color: nodeAccentColor(data, theme) }} /> : null}
                         <span className="truncate text-[11px] font-medium opacity-90">{data.title || data.type}</span>
                     </div>
-                    <span className="line-clamp-2 text-[10px] leading-4 opacity-65">{summary}</span>
+                    <span className="relative line-clamp-2 text-[10px] leading-4 opacity-75">{summary}</span>
                 </div>
             )}
             {image || videoSource || isH3 ? (
@@ -403,6 +400,19 @@ type NodeContentRendererProps = {
     compact: boolean;
 };
 
+function imageNaturalSize(node: CanvasNodeData) {
+    const images = node.metadata?.images || [];
+    const image = images.find((item) => item.id === node.metadata?.primaryImageId) || images[0];
+    const width = image?.naturalWidth || node.metadata?.naturalWidth || 0;
+    const height = image?.naturalHeight || node.metadata?.naturalHeight || 0;
+    return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0 ? { width, height } : null;
+}
+
+function imageAspectRatio(node: CanvasNodeData) {
+    const size = imageNaturalSize(node);
+    return size ? size.width / size.height : node.width / Math.max(1, node.height);
+}
+
 export const CanvasNode = React.memo(function CanvasNode({
     data,
     theme,
@@ -457,6 +467,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     const [titleDraft, setTitleDraft] = useState(data.title || "");
     const isSmartGenerationNode = data.type === CanvasNodeType.Config && data.metadata?.smart === true;
     const smartMode = isSmartGenerationNode ? data.metadata?.generationMode || "image" : undefined;
+    const isSmartImageNode = isSmartGenerationNode && smartMode === "image";
+    const isAspectLockedImage = isSmartImageNode || (data.type === CanvasNodeType.Image && !data.metadata?.freeResize);
     const hasTextContent = (data.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text")) && Boolean(data.metadata?.content?.trim());
     const hasImageContent = (data.type === CanvasNodeType.Image || (isSmartGenerationNode && smartMode === "image")) && Boolean(data.metadata?.content || data.metadata?.images?.length);
     const hasVideoContent = (data.type === CanvasNodeType.Video || (isSmartGenerationNode && smartMode === "video")) && Boolean(data.metadata?.content);
@@ -488,6 +500,26 @@ export const CanvasNode = React.memo(function CanvasNode({
     // 概览和完整媒体节点共用同一条默认边框，缩放跨过详情阈值时不再像换了一套卡片皮肤。
     const imageBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.stroke;
     const smartBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.stroke;
+    const characterBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.typeStroke.character;
+    const sceneBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.typeStroke.scene;
+    const groupBorderColor = isGroupDropTarget || isActive ? selectionBlue : theme.node.typeStroke.group;
+    const nodeBorderColor = isGroup
+        ? groupBorderColor
+        : isCharacter
+          ? characterBorderColor
+          : isScene
+            ? sceneBorderColor
+            : isSmartGenerationNode
+              ? smartBorderColor
+              : hasImageContent || hasCharacterContent || hasSceneContent
+                ? imageBorderColor
+                : isActive
+                  ? selectionBlue
+                  : isRelated
+                    ? theme.node.muted
+                    : transparentBg
+                      ? "transparent"
+                      : theme.node.stroke;
     const textareaRef = useRef<HTMLDivElement>(null);
     const titleInputRef = useRef<HTMLInputElement>(null);
     const resizeRef = useRef({
@@ -502,6 +534,7 @@ export const CanvasNode = React.memo(function CanvasNode({
         keepRatio: false,
         ratio: 1,
     });
+    const autoFitImageRef = useRef("");
 
     useEffect(() => {
         setTitleDraft(data.title || "");
@@ -618,12 +651,36 @@ export const CanvasNode = React.memo(function CanvasNode({
             startTop: data.position.y,
             startWidth: data.width,
             startHeight: data.height,
-            keepRatio: (data.type === CanvasNodeType.Image && !data.metadata?.freeResize) || data.type === CanvasNodeType.Video || Boolean(definition?.keepAspectRatio?.(data)),
-            ratio: (data.metadata?.naturalWidth || data.width) / (data.metadata?.naturalHeight || data.height || 1),
+            keepRatio: isAspectLockedImage || data.type === CanvasNodeType.Video || Boolean(definition?.keepAspectRatio?.(data)),
+            ratio: imageAspectRatio(data),
         };
         window.addEventListener("mousemove", handleResizeMove);
         window.addEventListener("mouseup", handleResizeUp);
     };
+
+    const adaptiveImageSize = isAspectLockedImage ? imageNaturalSize(data) : null;
+    const adaptiveImageWidth = adaptiveImageSize?.width;
+    const adaptiveImageHeight = adaptiveImageSize?.height;
+    useEffect(() => {
+        if (!isAspectLockedImage || !adaptiveImageWidth || !adaptiveImageHeight) {
+            autoFitImageRef.current = "";
+            return;
+        }
+        const key = `${data.id}:${adaptiveImageWidth}:${adaptiveImageHeight}`;
+        if (autoFitImageRef.current === key) return;
+        autoFitImageRef.current = key;
+
+        const scale = Math.min(data.width / adaptiveImageWidth, data.height / adaptiveImageHeight);
+        const width = adaptiveImageWidth * scale;
+        const height = adaptiveImageHeight * scale;
+        if (Math.abs(width - data.width) < 0.5 && Math.abs(height - data.height) < 0.5) return;
+        onResizeStart(data.id);
+        onResize(data.id, width, height, {
+            x: data.position.x + (data.width - width) / 2,
+            y: data.position.y + (data.height - height) / 2,
+        });
+        onResizeEnd(data.id);
+    }, [data.height, data.id, data.position.x, data.position.y, data.width, isAspectLockedImage, onResize, onResizeEnd, onResizeStart, adaptiveImageHeight, adaptiveImageWidth]);
 
     useEffect(() => {
         return () => {
@@ -732,22 +789,9 @@ export const CanvasNode = React.memo(function CanvasNode({
                 style={{
                     background: isGroup || data.type === "minimax-h3:video" ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || hasSceneContent || transparentBg ? "transparent" : theme.node.fill,
                     borderRadius: data.type === "minimax-h3:video" ? 8 : undefined,
-                    borderColor: isGroup
-                        ? isGroupDropTarget || isActive
-                            ? selectionBlue
-                            : theme.node.stroke
-                        : isSmartGenerationNode
-                          ? smartBorderColor
-                          : hasImageContent || hasCharacterContent || hasSceneContent
-                          ? imageBorderColor
-                          : isActive
-                            ? selectionBlue
-                            : isRelated
-                              ? theme.node.muted
-                              : transparentBg
-                                ? "transparent"
-                                : theme.node.stroke,
+                    borderColor: nodeBorderColor,
                     borderStyle: isGroup ? "dashed" : "solid",
+                    borderWidth: isGroup ? 3 : undefined,
                     boxShadow: isGroupDropTarget ? `0 0 0 2px ${selectionBlue}66, inset 0 0 0 999px ${selectionBlue}10` : isActive ? `0 0 0 1px ${selectionBlue}55` : isRelated ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
                 }}
                 onMouseDown={(event) => {
@@ -895,7 +939,7 @@ export const CanvasNode = React.memo(function CanvasNode({
 });
 
 function NodeContent(props: NodeContentRendererProps) {
-    if (props.compact) return <CompactNodeContent node={props.node} theme={props.theme} />;
+    if (props.compact) return <CompactNodeContent node={props.node} theme={props.theme} scale={props.scale} />;
     if (props.node.type === CanvasNodeType.Config && props.node.metadata?.smart && props.renderNodeContent) {
         const mode = props.node.metadata.generationMode || "image";
         const result =
@@ -946,29 +990,19 @@ function NodeContent(props: NodeContentRendererProps) {
     return <MissingPluginContent theme={props.theme} type={props.node.type} />;
 }
 
-function CompactNodeContent({ node, theme }: Pick<NodeContentRendererProps, "node" | "theme">) {
-    const Icon =
-        node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && node.metadata?.generationMode === "image")
-            ? ImageIcon
-            : node.type === CanvasNodeType.Video || (node.type === CanvasNodeType.Config && node.metadata?.generationMode === "video")
-              ? Video
-              : node.type === CanvasNodeType.Audio || (node.type === CanvasNodeType.Config && node.metadata?.generationMode === "audio")
-                ? Music2
-                : node.type === CanvasNodeType.Text || (node.type === CanvasNodeType.Config && node.metadata?.generationMode === "text")
-                  ? FileText
-                  : node.type === CanvasNodeType.Character
-                    ? User
-                    : node.type === CanvasNodeType.Scene
-                      ? MapPinned
-                    : node.type === CanvasNodeType.Group
-                      ? Group
-                      : node.type === CanvasNodeType.Loop
-                        ? ListRestart
-                        : Settings2;
+function CompactNodeContent({ node, theme, scale }: Pick<NodeContentRendererProps, "node" | "theme" | "scale">) {
+    const Icon = nodeTypeIcon(node);
+    const isGroup = node.type === CanvasNodeType.Group;
+    const iconSize = Math.min(44 / Math.max(scale, 0.01), Math.min(node.width, node.height) * 0.42);
     return (
-        <div className="flex h-full w-full items-center gap-2 overflow-hidden px-3" style={{ color: theme.node.text }}>
-            <Icon className="size-4 shrink-0 opacity-65" />
-            <span className="truncate text-[11px] opacity-80">{node.title || node.type}</span>
+        <div className="relative flex h-full w-full items-center justify-center overflow-hidden" style={{ color: theme.node.text }} aria-label={node.title || node.type}>
+            {!isGroup ? <Icon aria-hidden="true" style={{ width: iconSize, height: iconSize, color: nodeAccentColor(node, theme) }} /> : null}
+            <span
+                className={`absolute inset-x-1 truncate text-center opacity-75 ${isGroup ? "inset-y-0 flex items-center justify-center" : "bottom-1"}`}
+                style={isGroup ? { fontSize: Math.min(12 / Math.max(scale, 0.01), Math.min(node.width, node.height) * 0.35) } : undefined}
+            >
+                {node.title || node.type}
+            </span>
         </div>
     );
 }
@@ -1002,7 +1036,6 @@ function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererP
     return (
         <div className="pointer-events-none flex h-full w-full p-3">
             <div className="flex h-7 max-w-full items-center gap-2 px-1 text-xs font-medium" style={{ color: theme.node.text }}>
-                <Group className="size-3.5 shrink-0" style={{ color: theme.node.muted }} />
                 <span className="truncate">{node.title || t("canvas.node.group")}</span>
                 <span className="shrink-0 text-[11px] font-normal" style={{ color: theme.node.muted }}>
                     {t("canvas.node.nodeCount", { count: groupChildCount })}

@@ -432,7 +432,7 @@ export function H3PromptSection({
       <div key="prompt-textarea-wrap" className="minimax-prompt-translate-wrap">
         {isTranslated && translation && translation.segmentId === selected?.id && translation.prompt === prompt
           ? <textarea readOnly value={translation.text} aria-label="中文翻译（只读）" />
-          : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} placeholder="请输入提示词" className="minimax-collaborative-prompt" style={{ minHeight: 160, height: 240, fontSize: 12 }} /> : null}
+          : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} placeholder="请输入提示词" className="minimax-collaborative-prompt" style={{ minHeight: 160, height: 240, fontSize: 18 }} /> : null}
         <button
           key="prompt-translate"
           type="button"

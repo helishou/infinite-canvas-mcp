@@ -366,6 +366,13 @@ export function startServer(
     if (settings.videoSteps === undefined && settings.steps !== undefined)
       settings.videoSteps = settings.steps;
     delete settings.steps;
+    // layout 是「设为默认参数」随参数保存的布局快照（节点宽高 + 各模块宽高）。
+    // 调用方不发 layout（例如 MCP 保存生成参数）时保留上一次的快照，避免顺手把布局清掉。
+    if (settings.layout === undefined) {
+      const previous = stores.settings.get(H3_DEFAULTS_KEY) as { layout?: unknown } | null;
+      if (previous && typeof previous === "object" && previous.layout !== undefined)
+        settings.layout = previous.layout;
+    }
     stores.settings.set(H3_DEFAULTS_KEY, settings);
     events.publish({
       type: "settings.updated",

@@ -1,14 +1,14 @@
 import crypto from "node:crypto";
 
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
-import type { RuntimeTask } from "../db.js";
+import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { RunningHubBackend } from "../runtime/runninghub.js";
 import { CanvasH3Runner } from "./h3-runner.js";
 import { CanvasImageDispatcher, type CanvasImageGenerationInput } from "./image-dispatcher.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
-import { resolveCanvasImageReferences } from "./image-references.js";
+import { isMaskOverlayNode, resolveCanvasImageReferences } from "./image-references.js";
 import { CanvasTextDispatcher, type CanvasTextGenerationInput } from "./text-dispatcher.js";
 import { CanvasVideoDispatcher } from "./video-dispatcher.js";
 import { CanvasAudioDispatcher } from "./audio-dispatcher.js";
@@ -105,6 +105,10 @@ export class CanvasGenerationService {
     }
 
     private resolveImageReferences(command: CanvasGenerationCommand): CanvasGenerationCommand {
+        // 蒙版局部修改的参考图由调用方按提示词顺序给定（图片1=原图、图片2=蒙版），
+        // 必须原样透传：源节点常是智能节点（type=config），图谱回溯会把它上游的
+        // 角色/场景/站位图当成参考图，把原图和蒙版一起换掉。
+        if (command.mode === "image" && command.maskEdit === true && command.references?.length) return command;
         if (!command.projectId) return command;
         const project = this.stores.projects.get(command.projectId);
         if (!project) throw new Error(`画布不存在: ${command.projectId}`);
@@ -113,6 +117,19 @@ export class CanvasGenerationService {
         if (!sourceNodeId) return command;
         const sourceNode = nodes.find((node) => String(node.id || "") === sourceNodeId);
         const sourceMetadata = recordOf(sourceNode?.metadata);
+        // 局部修改的参考图挂在目标结果节点上（原图/智能生成节点 + 蒙版标注两条入边），
+        // 不在源节点上。调用方未标记 maskEdit 时（旧页面、MCP、Agent）仍按目标节点解析，
+        // 否则会拿源节点（常是智能节点）回溯上游角色/场景图，把原图和蒙版一起换掉。
+        const targetNodeId = String(command.nodeId || "");
+        if (
+            command.mode === "image"
+            && targetNodeId
+            && targetNodeId !== sourceNodeId
+            && hasMaskOverlayIncoming(project, targetNodeId)
+        ) {
+            const maskReferences = resolveCanvasImageReferences(project, targetNodeId);
+            if (maskReferences?.length) return { ...command, references: maskReferences };
+        }
         if (
             command.mode === "image"
             && String(sourceNode?.type || "") === "image"
@@ -208,6 +225,16 @@ function bindCanvasTask(stores: Stores, binding: Record<string, unknown>, taskId
             patchDelete: ["errorDetails"],
         },
     ], { runtimeWrite: true, source: { clientId: `task:${taskId}`, kind: "task", label: "生成任务" } });
+}
+
+/** 目标结果节点是否存在蒙版标注入边，用于识别「添加蒙版层后局部修改」。 */
+function hasMaskOverlayIncoming(project: CanvasProject, nodeId: string) {
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+    const connections = Array.isArray(project.connections) ? project.connections as Array<Record<string, unknown>> : [];
+    const nodeById = new Map(nodes.map((node) => [String(node.id || ""), node]));
+    return connections.some((connection) =>
+        String(connection.toNodeId || "") === nodeId
+        && isMaskOverlayNode(nodeById.get(String(connection.fromNodeId || "")) || {}));
 }
 
 function recordOf(value: unknown): Record<string, unknown> {

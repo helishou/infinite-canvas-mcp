@@ -26,8 +26,16 @@ export function resolveCanvasImageReferences(project: CanvasProject, sourceNodeI
     if (String(source.type || "") === "image") addImageReference(source, references, added);
 
     if (String(source.type || "") === "image" && recordOf(source.metadata).generationType === "edit") {
-        for (const node of incomingNodes(sourceNodeId, connections, nodeById)) {
+        // 局部修改的输入顺序就是提示词里的「图片1=原图、图片2=蒙版」：
+        // 先按连线顺序补上改图源（图片节点本身，或智能节点的主图），再把蒙版排到最后。
+        const incoming = incomingNodes(sourceNodeId, connections, nodeById);
+        for (const node of incoming) {
+            if (isMaskOverlayNode(node)) continue;
             if (String(node.type || "") === "image") addImageReference(node, references, added);
+            if (String(node.type || "") === "config" && recordOf(node.metadata).smart === true) addSmartImageReferences(node, references, added);
+        }
+        for (const node of incoming) {
+            if (String(node.type || "") === "image" && isMaskOverlayNode(node)) addImageReference(node, references, added);
         }
         return references;
     }
@@ -180,4 +188,14 @@ function addSceneImageReferences(node: Record<string, unknown>, references: Reso
 
 function recordOf(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/**
+ * 蒙版标注节点：新建画布写入 metadata.maskOverlay，旧画布没有标记时按标题兜底。
+ * 它只用于把蒙版排到改图输入的末位，不参与普通参考图解析。
+ */
+export function isMaskOverlayNode(node: Record<string, unknown>) {
+    const metadata = recordOf(node.metadata);
+    if (metadata.maskOverlay === true || metadata.maskRole === "mask") return true;
+    return /遮罩|蒙版/.test(String(node.title || ""));
 }

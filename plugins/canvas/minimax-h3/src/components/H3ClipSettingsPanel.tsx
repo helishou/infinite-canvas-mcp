@@ -54,10 +54,6 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected }: 
     };
     const saveAsDefault = async () => {
         const settings = exportH3Settings(selected).settings;
-        if (!settings || !Object.keys(settings).length) {
-            setTransferMessage("无可保存的参数");
-            return;
-        }
         // 布局快照：节点宽高 + 各模块区域宽高（手柄拖拽写入的 minimax* 键）。
         const node = ctx.node;
         const layout: H3DefaultLayout = {
@@ -65,11 +61,15 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected }: 
             height: node.height,
             panes: resolveH3PaneSizes(node.metadata),
         };
+        const payload = { ...(settings || {}), layout };
+        // 布局先落本地缓存，再写 Backend：后端不可用时本浏览器的新建节点仍能恢复默认布局。
+        writeDefaultParams(payload);
+        if (!settings || !Object.keys(settings).length) {
+            setTransferMessage("已设为默认布局");
+            return;
+        }
         try {
-            await ctx.h3Defaults.set(settings);
-            // 新建节点工厂是同步入口，更新当前页面内存缓存；权威数据仍在 Backend。
-            // 布局只保留在当前页面缓存：后端默认参数是生成参数，不参与布局恢复。
-            writeDefaultParams({ ...settings, layout });
+            await ctx.h3Defaults.set(payload);
             setTransferMessage("已设为默认参数");
         } catch (error) {
             setTransferMessage(error instanceof Error ? error.message : "保存默认参数失败");

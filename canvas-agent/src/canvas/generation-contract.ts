@@ -22,6 +22,8 @@ export const canvasGenerationCommandSchema = z
     model: z.string().optional(),
     prompt: z.string().optional(),
     references: z.array(z.record(z.string(), z.unknown())).optional(),
+    /** 标记画布蒙版局部编辑；工作流执行器需确保第二张输入图接入活动图像分支。 */
+    maskEdit: z.boolean().optional(),
     videoReferences: z.array(z.record(z.string(), z.unknown())).optional(),
     size: z.string().optional(),
     seconds: z.string().optional(),

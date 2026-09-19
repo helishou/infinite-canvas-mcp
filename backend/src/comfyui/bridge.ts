@@ -545,16 +545,27 @@ export class ComfyUiBackend {
                         ? wsExecutionSuccessOutputs
                         : (wsOutputs && typeof wsOutputs === "object" && Object.keys(wsOutputs).length > 0 ? wsOutputs : null);
                     if (useOutputs) {
-                        closeWs();
                         const media = await collectOutputMedia(useOutputs, comfyUrl, this.deps.media, controller.signal);
-                        return withActualSubmission({ promptId: body.prompt_id, outputs: useOutputs, media, status: { status_str: "success", completed: true } }, body.prompt_id);
+                        // NanFeng emits an intermediate executed event with a placeholder
+                        // text output before VHS_VideoCombine emits the final MP4. Do not
+                        // close the socket or mark the task complete until real media exists.
+                        if (media.length > 0) {
+                            closeWs();
+                            return withActualSubmission({ promptId: body.prompt_id, outputs: useOutputs, media, status: { status_str: "success", completed: true } }, body.prompt_id);
+                        }
                     }
                     const item = await fetchHistoryNow();
                     if (item) {
                         const statusStr = item?.status?.status_str;
                         if (statusStr === "error" || statusStr === "failed") { closeWs(); throw new Error(extractComfyErrorMessage(item.status)); }
-                        closeWs();
-                        return withActualSubmission({ promptId: body.prompt_id, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, body.prompt_id);
+                        const media = await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal);
+                        // /history can expose an intermediate H3 node result before the
+                        // final VHS_VideoCombine output is written. Keep waiting if it has
+                        // no retrievable media yet.
+                        if (media.length > 0) {
+                            closeWs();
+                            return withActualSubmission({ promptId: body.prompt_id, outputs: item!.outputs, media, status: item!.status || {} }, body.prompt_id);
+                        }
                     }
                     if (wsClosed) {
                         const reason = (wsCloseError as Error | null)?.message || "WebSocket 已关闭";
@@ -589,7 +600,11 @@ export class ComfyUiBackend {
                             throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item?.status)}`);
                         }
                         closeWs();
-                        return withActualSubmission({ promptId: body.prompt_id, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, body.prompt_id);
+                        const media = await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal);
+                        if (media.length === 0) {
+                            throw new Error(`ComfyUI 执行完成但未取回媒体输出，promptId ${body.prompt_id}`);
+                        }
+                        return withActualSubmission({ promptId: body.prompt_id, outputs: item!.outputs, media, status: item!.status || {} }, body.prompt_id);
                     }
                     if (item === undefined || (typeof item === "object" && Object.keys(item).length === 0)) {
                         missingHistoryCount++;

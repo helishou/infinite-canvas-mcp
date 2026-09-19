@@ -78,3 +78,37 @@ test("智能生成节点作为参考入边时只解析主图", () => {
 
     assert.deepEqual(resolveCanvasImageReferences(project, "target")?.map((reference) => reference.storageKey), ["image:second"]);
 });
+
+test("局部修改结果节点把智能节点主图当原图、蒙版排最后", () => {
+    const project = {
+        id: "project-1",
+        nodes: [
+            { id: "result", type: "image", metadata: { generationType: "edit" } },
+            { id: "smart", type: "config", title: "智能生成", metadata: { smart: true, generationMode: "image", images: [{ id: "main", content: "smart.png", storageKey: "image:smart-main", mimeType: "image/png" }] } },
+            { id: "mask", type: "image", title: "遮罩标注", metadata: { storageKey: "image:mask", maskOverlay: true } },
+        ],
+        connections: [
+            { id: "smart-result", fromNodeId: "smart", toNodeId: "result" },
+            { id: "mask-result", fromNodeId: "mask", toNodeId: "result" },
+        ],
+    };
+
+    assert.deepEqual(resolveCanvasImageReferences(project, "result")?.map((reference) => reference.storageKey), ["image:smart-main", "image:mask"]);
+});
+
+test("蒙版标注连在改图源之前也排到最后", () => {
+    const project = {
+        id: "project-1",
+        nodes: [
+            { id: "result", type: "image", metadata: { generationType: "edit" } },
+            { id: "source", type: "image", title: "原图", metadata: { storageKey: "image:source" } },
+            { id: "mask", type: "image", title: "遮罩标注", metadata: { storageKey: "image:mask", maskOverlay: true } },
+        ],
+        connections: [
+            { id: "mask-result", fromNodeId: "mask", toNodeId: "result" },
+            { id: "source-result", fromNodeId: "source", toNodeId: "result" },
+        ],
+    };
+
+    assert.deepEqual(resolveCanvasImageReferences(project, "result")?.map((reference) => reference.storageKey), ["image:source", "image:mask"]);
+});

@@ -76,6 +76,10 @@ export type CanvasNodeMetadata = {
     fontSize?: number;
     generationMode?: CanvasGenerationMode;
     generationType?: CanvasImageGenerationType;
+    /** 蒙版局部修改生成的智能节点：重试或再次生成时仍需启用蒙版输入分支。 */
+    maskEdit?: boolean;
+    /** 蒙版标注节点：局部修改时作为第 2 张参考图，Backend 据此把它排在原图之后。 */
+    maskOverlay?: boolean;
     generationEngine?: CanvasGenerationEngine;
     comfyPreset?: string;
     runtimeTaskId?: string;

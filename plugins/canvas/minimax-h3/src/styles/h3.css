@@ -143,8 +143,18 @@
 .minimax-prompt-field > span button:hover { background:rgba(59,130,246,.2); }
 .minimax-prompt-field > span button:disabled { cursor:not-allowed; opacity:.4; }
 .minimax-prompt-field > span button:disabled:hover { background:inherit; }
-.minimax-prompt-translate-wrap { position:relative; flex:1 1 auto; min-height:0; display:flex; }
-.minimax-prompt-translate-wrap > textarea { flex:1 1 auto; min-height:0; }
+.minimax-prompt-translate-wrap { position:relative; flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
+.minimax-prompt-translate-wrap > textarea,
+.minimax-prompt-translate-wrap > * { flex:1 1 auto; min-height:0; }
+/* TextEditor (CodeMirror) in prompt field — match the textarea rules so the editor actually fills the slot and uses a readable font size. */
+.minimax-prompt-field .minimax-collaborative-prompt,
+.minimax-prompt-field .minimax-collaborative-prompt .cm-editor,
+.minimax-prompt-field .minimax-collaborative-prompt .cm-scroller,
+.minimax-prompt-field .minimax-collaborative-prompt .cm-content,
+.minimax-prompt-field .minimax-collaborative-prompt .cm-line { font-size:18px !important; line-height:1.55 !important; }
+.minimax-prompt-field .minimax-collaborative-prompt { width:100%; min-height:0; box-sizing:border-box; }
+.minimax-current-main > .minimax-prompt-field .minimax-prompt-translate-wrap { grid-row:6 / -1; width:100%; min-height:86px; align-self:stretch; }
+.nfh3-prompt-actions,.nfh3-prompt-options { flex:0 0 auto; min-height:0; }
 .minimax-prompt-translate { position:absolute; right:8px; bottom:8px; width:30px; height:30px; padding:0; border:1px solid rgba(168,85,247,.35); border-radius:6px; background:rgba(168,85,247,.1); color:#c084fc; font-size:16px; font-weight:700; line-height:1; cursor:pointer; z-index:2; transition:background .15s ease,border-color .15s ease,color .15s ease; display:flex; align-items:center; justify-content:center; }
 .minimax-prompt-translate:hover { background:rgba(168,85,247,.25); }
 .minimax-prompt-translate:disabled { cursor:not-allowed; opacity:.4; }

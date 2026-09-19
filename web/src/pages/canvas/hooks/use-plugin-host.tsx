@@ -259,8 +259,9 @@ export function usePluginHost(params: PluginHostParams) {
     );
 
     // Load installed remote plugins on startup.
-    // v2 布局快照（layout）只存浏览器镜像：后端默认参数是生成参数集合，
-    // 上行同步/下行回写都必须剥掉 layout，避免布局混进生成参数。
+    // 布局快照（layout）随默认参数一起存在 Backend，但它是视图设置：下行必须原样喂给插件
+    // （插件缓存里读默认布局，生成参数读取时自行剥掉 layout），只有「老 localStorage 参数
+    // 上迁」这条上行路径要剥，避免把本地布局写进生成参数集合。
     const stripLayout = (settings: Record<string, unknown>): Record<string, unknown> => {
         const { layout: _layout, ...rest } = settings;
         return rest;
@@ -271,11 +272,11 @@ export function usePluginHost(params: PluginHostParams) {
             const local = raw ? (() => { try { const parsed = JSON.parse(raw) as { settings?: Record<string, unknown> }; return parsed.settings || {}; } catch { return {}; } })() : {};
             const remote = await h3Defaults.get().catch(() => ({}));
             if (Object.keys(remote).length) {
-                window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: stripLayout(remote) }));
+                window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: remote }));
                 if (raw) localStorage.removeItem("minimax-h3-default-params");
             } else if (Object.keys(stripLayout(local)).length) {
                 const migrated = await h3Defaults.set(stripLayout(local));
-                window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: stripLayout(migrated) }));
+                window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: migrated }));
                 localStorage.removeItem("minimax-h3-default-params");
             }
         })();
@@ -284,7 +285,7 @@ export function usePluginHost(params: PluginHostParams) {
         const refreshH3Defaults = (event: Event) => {
             const detail = (event as CustomEvent<{ type?: string; entityId?: string }>).detail;
             if (detail?.type !== "settings.updated" || detail.entityId !== "plugin:minimax-h3:defaults:v1") return;
-            void h3Defaults.get().then((settings) => window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: stripLayout(settings) })));
+            void h3Defaults.get().then((settings) => window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: settings })));
         };
         window.addEventListener("backend-connected", reloadPlugins);
         window.addEventListener("backend-event", refreshH3Defaults);

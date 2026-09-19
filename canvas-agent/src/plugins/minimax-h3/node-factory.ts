@@ -33,17 +33,45 @@ const NODE_LEVEL_KEYS = [
     "motionContextEnabled", "motionContextNoiseEnabled", "smartStoryboardCount", "smartStoryboardMode", "smartStoryboardSkill",
 ];
 
+/** H3 工作台各模块区域的布局键：与画布手柄拖拽写入的 metadata minimax* 键一一对应。 */
+export const H3_LAYOUT_PANE_KEYS = ["minimaxPreviewH", "minimaxPreviewW", "minimaxPromptW", "minimaxTimelineH", "minimaxRefLaneH"] as const;
+
+export type H3LayoutSnapshot = { width?: number; height?: number; panes: Record<string, number> };
+
+const positiveInt = (value: unknown) => {
+    const parsed = Math.round(Number(value));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+};
+
+/** 解析「设为默认参数」保存的布局快照；非有限正数一律丢弃，避免脏值污染新建节点。 */
+export function readH3Layout(source: unknown): H3LayoutSnapshot {
+    const record = source && typeof source === "object" && !Array.isArray(source) ? source as Record<string, unknown> : {};
+    const rawPanes = record.panes && typeof record.panes === "object" && !Array.isArray(record.panes) ? record.panes as Record<string, unknown> : {};
+    const panes: Record<string, number> = {};
+    for (const key of H3_LAYOUT_PANE_KEYS) {
+        const value = positiveInt(rawPanes[key]);
+        if (value !== undefined) panes[key] = value;
+    }
+    const width = positiveInt(record.width);
+    const height = positiveInt(record.height);
+    return { ...(width === undefined ? {} : { width }), ...(height === undefined ? {} : { height }), panes };
+}
+
 /** 按“节点显式值 > 保存默认值 > 基础默认值”创建完整 H3 metadata。 */
 export function createH3NodeMetadata(stored: Record<string, unknown> = {}, metadata: Record<string, unknown> = {}, panes: Record<string, number> = {}) {
     const storedParams = { ...stored };
+    // layout 是随默认参数一起保存的布局快照：只有各模块区域宽高进节点 metadata，
+    // 节点自身宽高由创建入口消费（前端 defaultLayoutSize / MCP width/height），不留在 metadata 里。
+    const layout = readH3Layout(storedParams.layout);
     delete storedParams.layout;
+    const nodePanes = { ...layout.panes, ...panes };
     const nodeLevel = Object.fromEntries(NODE_LEVEL_KEYS.filter((key) => key in storedParams).map((key) => [key, storedParams[key]]));
     const existingSegments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
     const existing = existingSegments[0] || {};
     const initialSegment = {
         ...BASE_H3_NODE_METADATA,
         ...storedParams,
-        ...panes,
+        ...nodePanes,
         ...existing,
         id: String(existing.id || "segment-1"),
         prompt: existing.prompt ?? metadata.prompt ?? defaultPrompt,
@@ -54,7 +82,7 @@ export function createH3NodeMetadata(stored: Record<string, unknown> = {}, metad
     return {
         ...BASE_H3_NODE_METADATA,
         ...nodeLevel,
-        ...panes,
+        ...nodePanes,
         ...storedParams,
         ...metadata,
         segments: [initialSegment],

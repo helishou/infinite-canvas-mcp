@@ -21,6 +21,7 @@ export const canvasThemes = {
             text: "#292524",
             muted: "#78716c",
             faint: "#a8a29e",
+            typeStroke: { character: "#7c3aed", scene: "#0f766e", group: "#b45309" },
         },
         toolbar: {
             panel: "rgba(251,250,247,.96)",
@@ -50,6 +51,7 @@ export const canvasThemes = {
             text: "#f5f5f4",
             muted: "#d6d3d1",
             faint: "#78716c",
+            typeStroke: { character: "#c4b5fd", scene: "#5eead4", group: "#fbbf24" },
         },
         toolbar: {
             panel: "rgba(31,29,26,.96)",
