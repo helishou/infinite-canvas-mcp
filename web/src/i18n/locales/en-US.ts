@@ -412,6 +412,7 @@ export default {
         agentDisconnected: "Codex disconnected",
         connecting: "Connecting",
         openAgent: "Open local Codex panel",
+        connectionFocusHint: "Grouped links converge at group inputs and outputs. Select a member to see its links; ungrouped links stay unchanged.",
         globalPrompt: "Global prompt",
         globalPromptHint: "Set the global prompt for this canvas",
         globalPromptPlaceholder: "Text automatically appended to image and video prompts on this canvas…",
@@ -454,6 +455,8 @@ export default {
             saveToAssetsSuccess: "Saved as character asset (replaced by name)",
             saveToAssetsFailed: "Save failed: {{error}}",
             saveNameRequired: "Set a character name in the node title first",
+            imageReference: "Image ref",
+            imagePreview: "Preview image",
         },
         scene: {
             empty: "Empty scene node",

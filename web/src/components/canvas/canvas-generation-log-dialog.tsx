@@ -1,13 +1,53 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { Button, Empty, Modal, Tag, message } from "antd";
+import { Button, Empty, Modal, Segmented, Tag, message } from "antd";
 import { ChevronDown, ChevronUp, Copy, Trash2 } from "lucide-react";
 
 import { deleteBackendGenerationLogs, fetchBackendGenerationLogs, backendMediaUrl, type BackendGenerationLog as GenerationLog } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
-import { CanvasTaskCenter } from "./canvas-task-center";
 
 const PAGE_SIZE = 30;
 const ESTIMATED_ROW_HEIGHT = 220;
+
+type LogKind = "image" | "video" | "audio" | "text" | "workflow" | "other";
+type LogFilterKind = LogKind | "all";
+
+const KIND_TABS: Array<{ value: LogFilterKind; label: string }> = [
+    { value: "all", label: "全部" },
+    { value: "image", label: "生图" },
+    { value: "video", label: "生视频" },
+    { value: "audio", label: "生音频" },
+    { value: "text", label: "生文" },
+    { value: "workflow", label: "工作流" },
+    { value: "other", label: "其他" },
+];
+
+const KIND_LABEL: Record<LogKind, string> = { image: "生图", video: "生视频", audio: "生音频", text: "生文", workflow: "工作流", other: "其他" };
+const KIND_COLOR: Record<LogKind, string | undefined> = { image: "blue", video: "purple", audio: "orange", text: "cyan", workflow: "geekblue", other: undefined };
+
+/** 归类单条日志：先看 outputs 的实际媒体，再用 platform/model 推断。
+ *  卡片类型标签与筛选按钮共用这一个函数，保证两边永远一致。 */
+function logKind(log: GenerationLog): LogKind {
+    const platform = String(log.platform || "").toLowerCase();
+    const model = String(log.model || "").toLowerCase();
+    if (platform === "workflow" || /\.json$/.test(model)) return "workflow";
+    if (/text|llm|chat|completion/.test(platform)) return "text";
+    const media = outputMediaKind(log.outputs);
+    if (media) return media;
+    if (platform.includes("image")) return "image";
+    if (platform.includes("h3") || platform.includes("video")) return "video";
+    if (platform.includes("audio") || platform.includes("tts") || platform.includes("speech")) return "audio";
+    return "other";
+}
+
+function outputMediaKind(outputs: Array<Record<string, unknown>> | undefined): "image" | "video" | "audio" | "" {
+    for (const output of outputs || []) {
+        const value = `${output?.mimeType || ""} ${output?.type || ""}`.toLowerCase();
+        if (/video|mp4|webm|mov/.test(value)) return "video";
+        if (/audio|mp3|wav|m4a/.test(value)) return "audio";
+        if (/image|png|jpe?g|webp/.test(value)) return "image";
+    }
+    return "";
+}
 
 export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: boolean; projectId: string; onClose: () => void }) {
     const connected = useBackendStore((state) => state.connected);
@@ -15,7 +55,7 @@ export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: 
     const [loading, setLoading] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
     const [hasMore, setHasMore] = useState(false);
-    const [tasksOpen, setTasksOpen] = useState(false);
+    const [kind, setKind] = useState<LogFilterKind>("all");
     const load = useCallback(async () => {
         if (!connected || !projectId) return;
         setLoading(true);
@@ -40,10 +80,20 @@ export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: 
         await deleteBackendGenerationLogs(id ? { id } : { projectId });
         await load();
     };
-    return <><Modal title={`生成日志${logs.length ? ` (${logs.length}${hasMore ? "+" : ""})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
-        <div className="mb-3 flex justify-end gap-2"><Button size="small" onClick={() => setTasksOpen(true)}>任务中心</Button><Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button></div>
-        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? "加载中…" : "暂无生成日志"} /> : <LogList logs={logs} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={(id) => void remove(id)} />}
-    </Modal><CanvasTaskCenter open={tasksOpen} projectId={projectId} onClose={() => setTasksOpen(false)} /></>;
+    // 筛选只作用于视图：logs 始终保留后端已拉取的全量，分页 offset 不受筛选影响
+    const visible = useMemo(() => kind === "all" ? logs : logs.filter((log) => logKind(log) === kind), [kind, logs]);
+    const kindOptions = useMemo(() => {
+        const counts: Record<LogFilterKind, number> = { all: logs.length, image: 0, video: 0, audio: 0, text: 0, workflow: 0, other: 0 };
+        for (const log of logs) counts[logKind(log)] += 1;
+        return KIND_TABS.map((tab) => ({ value: tab.value, label: `${tab.label} ${counts[tab.value]}` }));
+    }, [logs]);
+    return <Modal title={`生成日志${logs.length ? ` (${logs.length}${hasMore ? "+" : ""})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <Segmented size="small" value={kind} options={kindOptions} onChange={(value) => setKind(value as LogFilterKind)} />
+            <Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button>
+        </div>
+        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? "加载中…" : "暂无生成日志"} /> : visible.length ? <LogList logs={visible} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={(id) => void remove(id)} /> : <Empty description="当前筛选下暂无日志">{hasMore ? <Button size="small" loading={loadingMore} onClick={() => void loadMore()}>继续加载更多</Button> : null}</Empty>}
+    </Modal>;
 }
 
 function LogList({ logs, hasMore, loadingMore, onLoadMore, onDelete }: { logs: GenerationLog[]; hasMore: boolean; loadingMore: boolean; onLoadMore: () => void; onDelete: (id: string) => void }) {
@@ -114,10 +164,10 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
     const statusColor = log.status === "success" ? "green" : log.status === "failed" ? "red" : log.status === "running" ? "processing" : "default";
     const references = collectReferences(log);
     const actualSubmission = actualSubmissionText(log.params);
-    const typeLabel = platformTypeLabel(log.platform, log.model);
-    const typeColor = typeLabel === "生视频" ? "purple" : typeLabel === "生音频" ? "orange" : typeLabel === "工作流" ? "geekblue" : "blue";
+    const kind = logKind(log);
+    const typeLabel = kind === "other" ? String(log.platform || "其他") : KIND_LABEL[kind];
     return <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
-        <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={typeColor}>{typeLabel}</Tag><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
+        <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={KIND_COLOR[kind]}>{typeLabel}</Tag><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
         <div className="mt-2 flex flex-wrap gap-3 text-xs text-stone-500"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span></div>
         {references.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">输入 refs：</span>{references.map((reference, index) => <ReferencePreview key={`${log.id}-ref-${index}`} reference={reference} index={index} />)}</div> : null}
         {log.prompt ? <ExpandableText label="提示词" value={log.prompt} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.prompt || "")} /> : null}
@@ -125,17 +175,6 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
         {log.error ? <ExpandableText label="错误" value={log.error} expanded={expanded} error onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.error || "")} /> : null}
         {log.outputs.length ? <div className="mt-3 grid grid-cols-4 gap-2">{log.outputs.map((output, index) => <Output key={`${log.id}-${index}`} output={output} />)}</div> : null}
     </div>;
-}
-
-/** 把后端的 platform 翻译成画布上的高阶「类型」标签（生图/生视频/生音频/工作流）。 */
-function platformTypeLabel(platform: string, model?: string) {
-    const value = String(platform || "").toLowerCase();
-    const modelValue = String(model || "").toLowerCase();
-    if (value === "canvas-image" || value === "image" || value === "direct-image" || value === "gpt-image") return "生图";
-    if (value.includes("h3") || value.includes("video") || value === "minimax-h3" || value === "minimax-h3:video") return "生视频";
-    if (value === "audio" || value.includes("tts") || value.includes("speech")) return "生音频";
-    if (value === "workflow" || /\.json$/i.test(modelValue)) return "工作流";
-    return value || "工作流";
 }
 
 function ReferencePreview({ reference, index }: { reference: Record<string, unknown>; index: number }) {

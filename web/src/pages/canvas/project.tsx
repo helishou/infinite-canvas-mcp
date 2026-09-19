@@ -32,7 +32,7 @@ import { queryCanvasSpatialIndex, type CanvasSpatialBounds } from "@/lib/canvas/
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
 import { Alert, App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
-import { ActiveConnectionPath, clearActiveConnectionPointer, ConnectionOverviewPath, ConnectionPath, writeActiveConnectionPointer } from "@/components/canvas/canvas-connections";
+import { ActiveConnectionPath, clearActiveConnectionPointer, ConnectionBundleOverviewPath, ConnectionOverviewPath, ConnectionPath, writeActiveConnectionPointer } from "@/components/canvas/canvas-connections";
 import { CanvasH3RefLinks } from "@/components/canvas/canvas-h3-ref-links";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -932,6 +932,17 @@ function InfiniteCanvasPage() {
     const visibleConnections = useMemo(() => {
         return queryCanvasSpatialIndex(graphIndex.connectionSpatialIndex, visibleWorldBounds);
     }, [graphIndex.connectionSpatialIndex, visibleWorldBounds]);
+    const groupIdByNodeId = useMemo(() => {
+        const map = new Map<string, string>();
+        graphIndex.groupChildrenById.forEach((children, groupId) => children.forEach((child) => map.set(child.id, groupId)));
+        return map;
+    }, [graphIndex.groupChildrenById]);
+    const hasGroupedConnections = useMemo(
+        () => connections.some((connection) => groupIdByNodeId.has(connection.fromNodeId) || groupIdByNodeId.has(connection.toNodeId)),
+        [connections, groupIdByNodeId],
+    );
+    // 组连接在所有倍率下都汇总到组端点；平移和缩放都不会改变分组关系。
+    const groupConnectionOverview = hasGroupedConnections;
     const compactConnectionOverview = denseOverviewMode && !isNodeDragging && !isNodeResizing;
 
     // The toolbar follows a single selected node selected by click, creation, marquee, or keyboard.
@@ -991,6 +1002,10 @@ function InfiniteCanvasPage() {
     }, [previewNode, previewContent, connections, nodeById]);
     const hasMultipleSelectedNodes = selectedNodeIds.size > 1;
     const activeNodeId = hasMultipleSelectedNodes ? null : hoveredNodeId || (selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null);
+    const focusedConnectionIds = useMemo(() => {
+        if (!groupConnectionOverview || !singleSelectedNodeId || !groupIdByNodeId.has(singleSelectedNodeId)) return new Set<string>();
+        return new Set((graphIndex.connectionsByNodeId.get(singleSelectedNodeId) || []).map((connection) => connection.id));
+    }, [graphIndex.connectionsByNodeId, groupConnectionOverview, groupIdByNodeId, singleSelectedNodeId]);
     const groupChildCountById = useMemo(() => {
         const map = new Map<string, number>();
         graphIndex.groupChildrenById.forEach((children, groupId) => map.set(groupId, children.length));
@@ -1015,6 +1030,57 @@ function InfiniteCanvasPage() {
 
         return { nodeIds, connectionIds };
     }, [activeNodeId, graphIndex, nodeById]);
+
+    // 组相关连线始终改由组输入/输出汇总线表示；选中的单个节点恢复其真实连线。
+    const renderedConnections = useMemo(() => {
+        if (!groupConnectionOverview) return visibleConnections;
+        return visibleConnections.filter((connection) =>
+            connection.id === selectedConnectionId || focusedConnectionIds.has(connection.id) || (!groupIdByNodeId.has(connection.fromNodeId) && !groupIdByNodeId.has(connection.toNodeId)),
+        );
+    }, [focusedConnectionIds, groupConnectionOverview, groupIdByNodeId, selectedConnectionId, visibleConnections]);
+    const connectionOverviewBundles = useMemo(() => {
+        if (!groupConnectionOverview) return [];
+        const bundles = new Map<string, { fromX: number; fromY: number; toX: number; toY: number; count: number }>();
+        for (const connection of connections) {
+            if (focusedConnectionIds.has(connection.id)) continue;
+            const sourceGroupId = groupIdByNodeId.get(connection.fromNodeId);
+            const targetGroupId = groupIdByNodeId.get(connection.toNodeId);
+            if (!sourceGroupId && !targetGroupId) continue;
+            const sourceEntityId = sourceGroupId || connection.fromNodeId;
+            const targetEntityId = targetGroupId || connection.toNodeId;
+            if (sourceEntityId === targetEntityId || connection.id === selectedConnectionId) continue;
+            const sourceEntity = nodeById.get(sourceEntityId);
+            const targetEntity = nodeById.get(targetEntityId);
+            if (!sourceEntity || !targetEntity) continue;
+            const start = { x: sourceEntity.position.x + sourceEntity.width, y: sourceEntity.position.y + sourceEntity.height / 2 };
+            const end = { x: targetEntity.position.x, y: targetEntity.position.y + targetEntity.height / 2 };
+            const key = `${sourceEntityId}>${targetEntityId}`;
+            const bundle = bundles.get(key) || { fromX: 0, fromY: 0, toX: 0, toY: 0, count: 0 };
+            bundle.fromX += start.x;
+            bundle.fromY += start.y;
+            bundle.toX += end.x;
+            bundle.toY += end.y;
+            bundle.count += 1;
+            bundles.set(key, bundle);
+        }
+        return Array.from(bundles, ([id, bundle]) => ({
+            id,
+            from: { x: bundle.fromX / bundle.count, y: bundle.fromY / bundle.count },
+            to: { x: bundle.toX / bundle.count, y: bundle.toY / bundle.count },
+            count: bundle.count,
+        }));
+    }, [connections, focusedConnectionIds, groupConnectionOverview, groupIdByNodeId, nodeById, selectedConnectionId]);
+    const visibleConnectionOverviewBundles = useMemo(
+        () => connectionOverviewBundles.filter((bundle) => {
+            const curvature = Math.max(Math.abs(bundle.to.x - bundle.from.x) * 0.5, 50);
+            const left = Math.min(bundle.from.x, bundle.from.x + curvature, bundle.to.x - curvature, bundle.to.x);
+            const right = Math.max(bundle.from.x, bundle.from.x + curvature, bundle.to.x - curvature, bundle.to.x);
+            const top = Math.min(bundle.from.y, bundle.to.y);
+            const bottom = Math.max(bundle.from.y, bundle.to.y);
+            return right > visibleWorldBounds.left && left < visibleWorldBounds.right && bottom > visibleWorldBounds.top && top < visibleWorldBounds.bottom;
+        }),
+        [connectionOverviewBundles, visibleWorldBounds],
+    );
 
     const detailVisibleNodes = useMemo(() => {
         // 轻量概览节点不会消费配置输入或 @ 参考资源；密集画布中只为即将挂载完整内容的节点计算它们。
@@ -1216,6 +1282,13 @@ function InfiniteCanvasPage() {
         if (members.length < 2) return;
         applyAgentOps([{ type: "create_group", memberIds: members.map((node) => node.id) }]);
     }, [applyAgentOps]);
+
+    // 工具栏「组」按钮：选中 ≥2 个普通节点时直接把它们装进新组（复用右键「生成组」同一套逻辑），
+    // 否则维持原行为 —— 在画布中央新建一个空组。
+    const addGroupNode = useCallback(() => {
+        if (groupableSelectedCount >= 2) groupSelectedNodes();
+        else createNode(CanvasNodeType.Group);
+    }, [createNode, groupSelectedNodes, groupableSelectedCount]);
 
     // 组节点工具栏「整理」：把组内成员的尺寸收成相近档位（图片/视频等比缩放，宽高比不变），
     // 按视觉顺序铺进组框范围内。组框本身不动 —— 用户要的是「排列到组的范围里」。
@@ -4496,6 +4569,12 @@ function InfiniteCanvasPage() {
                     </div>
                 ) : null}
 
+                {groupConnectionOverview ? (
+                    <div role="status" className="pointer-events-none absolute bottom-[88px] left-1/2 z-40 -translate-x-1/2 rounded-md border px-3 py-1.5 text-xs backdrop-blur" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item }}>
+                        {t("canvas.connectionFocusHint")}
+                    </div>
+                ) : null}
+
                 <InfiniteCanvas
                     containerRef={containerRef}
                     viewportRef={liveViewportRef}
@@ -4532,12 +4611,16 @@ function InfiniteCanvasPage() {
                     onDrop={handleDrop}
                 >
                     <svg className="absolute left-0 top-0 h-[10000px] w-[10000px] overflow-visible" style={{ pointerEvents: "none", transform: "translateZ(0)", zIndex: 0 }}>
-                        {visibleConnections.map((connection) => {
+                        {visibleConnectionOverviewBundles.map((bundle) => (
+                            <ConnectionBundleOverviewPath key={bundle.id} bundle={bundle} theme={theme} />
+                        ))}
+                        {renderedConnections.map((connection) => {
                             const from = nodeById.get(connection.fromNodeId);
                             const to = nodeById.get(connection.toNodeId);
                             if (!from || !to) return null;
 
-                            const active = selectedConnectionId === connection.id || relatedHighlight.connectionIds.has(connection.id);
+                            const touchesGroup = groupIdByNodeId.has(connection.fromNodeId) || groupIdByNodeId.has(connection.toNodeId);
+                            const active = selectedConnectionId === connection.id || focusedConnectionIds.has(connection.id) || (!touchesGroup && relatedHighlight.connectionIds.has(connection.id));
                             if (compactConnectionOverview && !active) {
                                 return <ConnectionOverviewPath key={connection.id} connection={connection} from={from} to={to} active={false} theme={theme} onSelect={handleConnectionSelect} onContextMenu={handleConnectionContextMenu} />;
                             }
@@ -4720,7 +4803,8 @@ function InfiniteCanvasPage() {
                     onAddLoop={() => createNode(CanvasNodeType.Loop)}
                     onAddCharacter={() => createNode(CanvasNodeType.Character)}
                     onAddScene={() => createNode(CanvasNodeType.Scene)}
-                    onAddGroup={() => createNode(CanvasNodeType.Group)}
+                    onAddGroup={addGroupNode}
+                    groupSelection={groupableSelectedCount >= 2}
                     onAddExtensionNode={(type) => createNode(type)}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}

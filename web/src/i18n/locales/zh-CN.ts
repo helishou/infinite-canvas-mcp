@@ -412,6 +412,7 @@ export default {
         agentDisconnected: "Codex 未连接",
         connecting: "连接中",
         openAgent: "打开本地 Codex 面板",
+        connectionFocusHint: "组内外连线汇总到组输入/输出；选中组内节点查看真实连线，未分组连线保持原样",
         globalPrompt: "全局提示词",
         globalPromptHint: "设置当前画布的全局提示词",
         globalPromptPlaceholder: "输入会自动附加到本画布生图和生视频提示词的内容…",
@@ -454,6 +455,8 @@ export default {
             saveToAssetsSuccess: "已保存为角色资产（替换同名）",
             saveToAssetsFailed: "保存失败：{{error}}",
             saveNameRequired: "请先在节点标题填写角色名",
+            imageReference: "生图引用",
+            imagePreview: "放大预览",
         },
         scene: {
             empty: "空场景节点",

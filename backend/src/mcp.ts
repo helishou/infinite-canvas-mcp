@@ -587,6 +587,10 @@ async function executeDirectCanvasTool(
   const directTasks: Array<{ taskId: string; nodeId: string; model: string }> =
     [];
   let withLoadingState = saved;
+  const canBatchSubmitIndependentImages =
+    ops.length > 1 &&
+    ops.every((op) => op.type === "run_generation" && String(op.mode || "image") === "image") &&
+    new Set(ops.map((op) => String(op.nodeId || ""))).size === ops.length;
   for (const op of ops) {
     if (op.type !== "run_generation") continue;
     const currentState = withLoadingState as Record<string, unknown>;
@@ -610,7 +614,8 @@ async function executeDirectCanvasTool(
         ...textRequest,
         mode: "text",
       });
-      withLoadingState = await fetchCurrentCanvasProject(config, project.id);
+      if (!canBatchSubmitIndependentImages)
+        withLoadingState = await fetchCurrentCanvasProject(config, project.id);
       directTasks.push({
         taskId: task.taskId,
         nodeId: sourceId,
@@ -629,7 +634,8 @@ async function executeDirectCanvasTool(
         ...imageRequest,
         mode: "image",
       });
-      withLoadingState = await fetchCurrentCanvasProject(config, project.id);
+      if (!canBatchSubmitIndependentImages)
+        withLoadingState = await fetchCurrentCanvasProject(config, project.id);
       directTasks.push({
         taskId: task.taskId,
         nodeId: sourceId,
@@ -661,6 +667,8 @@ async function executeDirectCanvasTool(
       throw new Error(`Backend 画布生成执行器暂未注册模式：${mode}`);
     }
   }
+  if (canBatchSubmitIndependentImages && directTasks.length)
+    withLoadingState = await fetchCurrentCanvasProject(config, project.id);
   return {
     ok: true,
     intent: name.startsWith("canvas_generate_")

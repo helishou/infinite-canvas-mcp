@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Empty, Modal, Progress, Select, Tag, message } from "antd";
-import { ChevronDown, ChevronRight, RefreshCw, Square } from "lucide-react";
-
+import { Button, Empty, Modal, Progress, Select, Tag, Tooltip, message } from "antd";
+import { ChevronDown, ChevronRight, ListChecks, RefreshCw, Square } from "lucide-react";
 import { cancelBackendTask, fetchBackendTasks, retryBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
+import { useRunningTaskCount } from "@/hooks/use-running-task-count";
+import { canvasThemes } from "@/lib/canvas-theme";
+import { useThemeStore } from "@/stores/use-theme-store";
 
 type TaskGroup = {
     parent: BackendRuntimeTask;
@@ -201,4 +203,25 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
             })}
         </div>}
     </Modal>;
+}
+
+/**
+ * 画布顶栏右上角的「任务中心」入口：按钮 + 运行中任务角标，点击打开任务中心弹窗。
+ * 与「生成日志」同一层级；角标只统计当前项目里 running / queued 的任务，为 0 时不显示。
+ */
+export function CanvasTaskCenterButton({ projectId }: { projectId: string }) {
+    const colorTheme = useThemeStore((state) => state.theme);
+    const theme = canvasThemes[colorTheme];
+    const [open, setOpen] = useState(false);
+    const { running, queued, active } = useRunningTaskCount(projectId);
+    const tip = active ? `任务中心 · 运行中 ${running} · 排队 ${queued}` : "任务中心";
+    return <>
+        <Tooltip title={tip}>
+            <button type="button" aria-label={tip} className="relative grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={() => setOpen(true)}>
+                <ListChecks className="size-4" />
+                {active ? <span className="absolute right-0 top-0.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-semibold leading-none text-white" style={{ background: "#ff4d4f" }}>{active > 99 ? "99+" : active}</span> : null}
+            </button>
+        </Tooltip>
+        <CanvasTaskCenter open={open} projectId={projectId} onClose={() => setOpen(false)} />
+    </>;
 }

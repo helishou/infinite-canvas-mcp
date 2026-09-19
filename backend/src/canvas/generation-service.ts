@@ -106,10 +106,21 @@ export class CanvasGenerationService {
 
     private resolveImageReferences(command: CanvasGenerationCommand): CanvasGenerationCommand {
         if (!command.projectId) return command;
-        const sourceNodeId = command.sourceNodeId || command.nodeId;
-        if (!sourceNodeId) return command;
         const project = this.stores.projects.get(command.projectId);
         if (!project) throw new Error(`画布不存在: ${command.projectId}`);
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+        const sourceNodeId = command.sourceNodeId || command.nodeId;
+        if (!sourceNodeId) return command;
+        const sourceNode = nodes.find((node) => String(node.id || "") === sourceNodeId);
+        const sourceMetadata = recordOf(sourceNode?.metadata);
+        if (
+            command.mode === "image"
+            && String(sourceNode?.type || "") === "image"
+            && sourceMetadata.generationType === "edit"
+        ) {
+            const references = resolveCanvasImageReferences(project, sourceNodeId);
+            return references ? { ...command, references } : command;
+        }
         const references = resolveCanvasImageReferences(project, sourceNodeId);
         // 无法从画布图谱解析时保留调用方显式参考图；节点落库时序由前端
         // 生成前的强制同步保证，不在这里把运行请求变成卡控错误。

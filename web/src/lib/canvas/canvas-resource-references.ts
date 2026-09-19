@@ -212,6 +212,39 @@ function labelResourceNodes(nodes: CanvasNodeData[], active: boolean) {
     });
 }
 
+/** 判断节点是否为「图像类生成节点」：专用生图节点，或智能生成节点且生成模式为 image。 */
+export function isImageGenerationNode(node?: CanvasNodeData | null): boolean {
+    if (!node) return false;
+    if (node.type === CanvasNodeType.Image && Boolean(node.metadata?.content || node.metadata?.images?.length)) return true;
+    if (node.type === CanvasNodeType.Config && node.metadata?.smart === true) {
+        const mode = node.metadata?.generationMode || "image";
+        return mode === "image";
+    }
+    return false;
+}
+
+/** 判断节点是否为「音频类生成节点」：专用音频节点，或智能生成节点且生成模式为 audio。 */
+export function isAudioGenerationNode(node?: CanvasNodeData | null): boolean {
+    if (!node) return false;
+    if (node.type === CanvasNodeType.Audio) return true;
+    if (node.type === CanvasNodeType.Config && node.metadata?.smart === true) {
+        const mode = node.metadata?.generationMode || "image";
+        return mode === "audio";
+    }
+    return false;
+}
+
+/** 判断节点是否为「文本类生成节点」：专用文本节点（创建菜单「文本生成」），或智能生成节点且生成模式为 text。 */
+export function isTextGenerationNode(node?: CanvasNodeData | null): boolean {
+    if (!node) return false;
+    if (node.type === CanvasNodeType.Text) return true;
+    if (node.type === CanvasNodeType.Config && node.metadata?.smart === true) {
+        const mode = node.metadata?.generationMode || "image";
+        return mode === "text";
+    }
+    return false;
+}
+
 export function nodeResourceItems(node: CanvasNodeData): CanvasNodeResource[] {
     if (node.type === CanvasNodeType.Loop && node.metadata?.loopPromptEnabled && node.metadata.loopPrompt?.trim()) return [{ kind: "text", text: node.metadata.loopPrompt.trim() }];
     const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart === true ? node.metadata?.generationMode || "image" : undefined;

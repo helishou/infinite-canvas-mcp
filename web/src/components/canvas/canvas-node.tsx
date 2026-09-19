@@ -7,13 +7,16 @@ import { formatBytes } from "@/lib/image-utils";
 import { pickImageSource } from "@/lib/image-thumbnail";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
+import { isImageGenerationNode } from "@/lib/canvas/canvas-resource-references";
+import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { CanvasCollaborativeText } from "./canvas-collaborative-text";
 import { useParams } from "react-router-dom";
-import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position } from "@/types/canvas";
+import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { characterReferenceKey } from "@/lib/canvas/canvas-resource-references";
 import { ensureImagePreview, getImagePreviewRevisionFor, previewUrlFor, resolveImageUrl, subscribeImagePreview } from "@/services/image-storage";
 import { useTranslation } from "react-i18next";
 import { useCanvasNodePreview } from "@/lib/canvas/canvas-drag-preview";
@@ -27,6 +30,8 @@ const NODE_DETAIL_MODE_ENTER_SCREEN_SIZE = 180;
 const NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE = 100;
 const emptyPluginView: Record<string, unknown> = {};
 const subscribeNoPluginView = () => () => undefined;
+const EMPTY_NODES: CanvasNodeData[] = [];
+const EMPTY_CONNECTIONS: CanvasConnection[] = [];
 
 export type CanvasNodeProps = {
     projectId: string;
@@ -290,7 +295,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     return (
         <div
             data-node-id={data.id}
-            className={`node-element group/node absolute flex select-none overflow-hidden ${isH3 ? "rounded-lg border" : "rounded-3xl border-2"} ${isSelected ? "z-50" : "z-10"}`}
+            className={`node-element group/node absolute flex select-none overflow-hidden ${isH3 ? "rounded-lg border" : "rounded-3xl border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"}`}
             style={{
                 transform: `translate(${position.x}px, ${position.y}px)`,
                 width,
@@ -1271,6 +1276,47 @@ function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     );
 }
 
+/** 角色节点被图像类生成节点引用时，用选中的参考图作为节点背景的栅格展示：
+ *  1 张图 → 栅格 1 列（占 1 格方形，铺满节点）；2 张图 → 栅格 2 列（横向并排占 2 格的矩形）；不显示声线。 */
+type CharacterImage = NonNullable<NonNullable<CanvasNodeData["metadata"]>["characterImages"]>[number];
+type CharacterReferenceCell = { image: CharacterImage; index: number };
+
+function CharacterReferenceCellView({ node, theme, refs, thumbUrls }: { node: CanvasNodeData; theme: CanvasTheme; refs: CharacterReferenceCell[]; thumbUrls: Record<number, string> }) {
+    const { t } = useTranslation();
+    const urlFor = (image: CharacterImage, index: number) => previewUrlFor(image.storageKey) || thumbUrls[index] || image.url || "";
+    const cols = refs.length === 1 ? 1 : 2;
+    return (
+        <div className="relative h-full w-full overflow-hidden" style={{ background: theme.node.panel }}>
+            {/* 背景栅格：1 列 / 2 列，每格用所选图铺满 */}
+            <div className="absolute inset-0 grid gap-0.5 p-0.5" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+                {refs.map(({ image, index }) => {
+                    const url = urlFor(image, index);
+                    return (
+                        <div key={index} className="relative min-h-0 min-w-0 overflow-hidden rounded-md">
+                            {url ? (
+                                <img src={url} alt={image.outfit || image.name || ""} className="size-full object-cover" draggable={false} />
+                            ) : (
+                                <div className="flex size-full items-center justify-center" style={{ background: theme.node.fill }}>
+                                    <User className="size-6 opacity-30" />
+                                </div>
+                            )}
+                            {image.outfit ? (
+                                <div className="absolute bottom-1 left-1 max-w-[calc(100%-8px)] truncate rounded bg-black/55 px-1.5 py-0.5 text-[10px] font-medium text-white">{image.outfit}</div>
+                            ) : null}
+                        </div>
+                    );
+                })}
+            </div>
+            {/* 顶部信息条：浮动叠加在背景图上，半透明压暗保证可读 */}
+            <div className="absolute inset-x-0 top-0 flex shrink-0 items-center gap-1.5 border-b border-white/15 bg-black/35 px-2 py-1.5 text-[10px] backdrop-blur-[1px]">
+                <User className="size-3 shrink-0 text-white/90" />
+                <span className="min-w-0 truncate font-medium text-white">{node.metadata?.characterName || node.title || "角色"}</span>
+                <span className="ml-auto shrink-0 rounded bg-white/25 px-1 py-0.5 text-white">{t("canvas.character.imageReference")}</span>
+            </div>
+        </div>
+    );
+}
+
 /** 角色节点：主图（大）+ 底部 outfit 缩略图条；多图时像多图片输出节点一样可横向展开，点缩略图或“设为主图”切换主图。 */
 function CharacterNodeContent(props: NodeContentRendererProps) {
     const { node, theme, scale, batchExpanded, onToggleBatch, onSetBatchPrimary, onDeleteBatchImage, onViewBatchImage } = props;
@@ -1281,6 +1327,31 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
     const voiceUrl = node.metadata?.characterVoiceUrl || "";
     const voiceName = node.metadata?.characterVoiceName || "";
     const voiceDescription = node.metadata?.characterVoiceDescription || "";
+    // 角色节点被「图像类生成节点」（生图 / 智能选生图）引用时，用选中的参考图作为背景栅格展示：
+    // 1 张占 1 格（方形），2 张并排成横向矩形占 2 格；该模式下不显示声线。
+    // 注意：所选参考图保存在「引用本角色的生成节点」上：genNode.metadata.characterReferences[characterNodeId] = { imageKeys, voiceEnabled }。
+    const { id: projectId = "" } = useParams();
+    const upstreamNodes = useCanvasStore((state) => state.projects.find((project) => project.id === projectId)?.nodes || EMPTY_NODES);
+    const upstreamConnections = useCanvasStore((state) => state.projects.find((project) => project.id === projectId)?.connections || EMPTY_CONNECTIONS);
+    const imageGenReference = useMemo<{ image: CharacterImage; index: number }[] | null>(() => {
+        const genNode =
+            upstreamNodes.find((n) => isImageGenerationNode(n) && Boolean(n.metadata?.characterReferences?.[node.id])) ||
+            (() => {
+                for (const conn of upstreamConnections) {
+                    if (conn.fromNodeId !== node.id) continue;
+                    const n = upstreamNodes.find((m) => m.id === conn.toNodeId);
+                    if (isImageGenerationNode(n) && n?.metadata?.characterReferences?.[node.id]) return n;
+                }
+                return undefined;
+            })();
+        if (!genNode) return null;
+        const selection = genNode.metadata?.characterReferences?.[node.id];
+        const keys = selection?.imageKeys ? new Set(selection.imageKeys) : null;
+        const selected = keys
+            ? images.map((image, index) => ({ image, index })).filter(({ image, index }) => keys.has(characterReferenceKey(image, index)))
+            : images.map((image, index) => ({ image, index }));
+        return selected.length ? selected : null;
+    }, [node.id, images, upstreamNodes, upstreamConnections]);
     const [primaryUrl, setPrimaryUrl] = useState<string | null>(null);
     const [thumbUrls, setThumbUrls] = useState<Record<number, string>>({});
     const urlCache = useRef<Record<string, string>>({});
@@ -1363,6 +1434,10 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
                 <span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.character.empty")}</span>
             </div>
         );
+    }
+
+    if (imageGenReference) {
+        return <CharacterReferenceCellView node={node} theme={theme} refs={imageGenReference} thumbUrls={thumbUrls} />;
     }
 
     const visibleThumbs = images.slice(0, 5);

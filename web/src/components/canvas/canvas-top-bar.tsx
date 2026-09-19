@@ -11,6 +11,7 @@ import { DOCS_URL } from "@/constant/env";
 import type { CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
 import { CanvasCollaborativeText } from "./canvas-collaborative-text";
 import { CanvasDraftsButton } from "./canvas-drafts-button";
+import { CanvasTaskCenterButton } from "./canvas-task-center";
 import { CanvasTextSuggestionsButton } from "./canvas-text-suggestions-button";
 
 export function CanvasTopBar({
@@ -168,6 +169,7 @@ export function CanvasTopBar({
                 <div className="pointer-events-auto flex items-center gap-1.5">
                     <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />
                     <Tooltip title="生成日志"><button type="button" aria-label="生成日志" className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip>
+                    <CanvasTaskCenterButton projectId={projectId} />
                     <span className="h-6 w-px" style={{ background: theme.toolbar.border }} />
                     <Button
                         type="text"

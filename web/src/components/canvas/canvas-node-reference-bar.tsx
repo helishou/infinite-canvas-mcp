@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
-import { getGroupResourceNodes, nodeResourceItems, type CanvasCharacterReferenceSelection } from "@/lib/canvas/canvas-resource-references";
+import { characterReferenceKey, getGroupResourceNodes, isAudioGenerationNode, isImageGenerationNode, isTextGenerationNode, nodeResourceItems, type CanvasCharacterReferenceSelection } from "@/lib/canvas/canvas-resource-references";
 import { CanvasCharacterReferenceModal } from "./canvas-character-reference-modal";
 import type { CanvasNodeResource } from "@/types/canvas-plugin";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -35,6 +35,9 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, onDiscon
                         key={`${reference.sourceNodeId}:${reference.node.id}:character`}
                         node={reference.node}
                         selection={characterSelections[reference.node.id]}
+                        sourceIsImageGeneration={isImageGenerationNode(targetNode)}
+                        sourceIsAudioGeneration={isAudioGenerationNode(targetNode)}
+                        sourceIsTextGeneration={isTextGenerationNode(targetNode)}
                         onOpen={onCharacterSelectionChange ? () => setEditingCharacterNodeId(reference.node.id) : undefined}
                         onRemove={() => onDisconnect?.(reference.sourceNodeId, nodeId)}
                     />
@@ -45,28 +48,115 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, onDiscon
                     <Plus className="size-4" />
                 </button>
             </div>
-            {editingCharacterNode && onCharacterSelectionChange ? <CanvasCharacterReferenceModal node={editingCharacterNode} selection={characterSelections[editingCharacterNode.id]} onApply={(selection) => onCharacterSelectionChange(editingCharacterNode.id, selection)} onClose={() => setEditingCharacterNodeId(null)} /> : null}
+            {editingCharacterNode && onCharacterSelectionChange ? <CanvasCharacterReferenceModal node={editingCharacterNode} selection={characterSelections[editingCharacterNode.id]} hideVoiceOption={isImageGenerationNode(targetNode) || isTextGenerationNode(targetNode)} onApply={(selection) => onCharacterSelectionChange(editingCharacterNode.id, selection)} onClose={() => setEditingCharacterNodeId(null)} /> : null}
         </div>
     );
 }
 
-function CharacterReferenceItem({ node, selection, onOpen, onRemove }: { node: CanvasNodeData; selection?: CanvasCharacterReferenceSelection; onOpen?: () => void; onRemove: () => void }) {
+function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sourceIsAudioGeneration, sourceIsTextGeneration, onOpen, onRemove }: { node: CanvasNodeData; selection?: CanvasCharacterReferenceSelection; sourceIsImageGeneration?: boolean; sourceIsAudioGeneration?: boolean; sourceIsTextGeneration?: boolean; onOpen?: () => void; onRemove: () => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
     const images = node.metadata?.characterImages || [];
+    const keys = selection?.imageKeys?.length ? new Set(selection.imageKeys) : null;
+    const selectedImages = (keys ? images.filter((image, index) => keys.has(characterReferenceKey(image, index))) : images).slice(0, 2);
     const selectedImageCount = selection?.imageKeys ? selection.imageKeys.length : images.length;
-    const voiceIncluded = selection?.voiceEnabled !== false && Boolean(node.metadata?.characterVoiceUrl || node.metadata?.characterVoiceStorageKey);
+    const voiceIncluded = !sourceIsImageGeneration && !sourceIsAudioGeneration && !sourceIsTextGeneration && selection?.voiceEnabled !== false && Boolean(node.metadata?.characterVoiceUrl || node.metadata?.characterVoiceStorageKey);
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
+    const [urls, setUrls] = useState<string[]>([]);
+    useEffect(() => {
+        let cancelled = false;
+        void Promise.all(selectedImages.map((image) => {
+            void ensureImagePreview(image.storageKey);
+            return resolveImageUrl(image.storageKey, image.url || "").catch(() => image.url || "");
+        })).then((resolved) => { if (!cancelled) setUrls(resolved); });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, node.id, selection?.imageKeys?.join(","), images.length]);
+    // 音频生成节点：角色引用以「声线音频」作为输入，渲染音频格。
+    // 文本生成节点：角色引用以「角色文本设定」作为输入，渲染文本格。
+    // 两个早返回都放在 hooks 之后，避免切换生成模式时 hook 数量变化导致 React 报错。
+    if (sourceIsAudioGeneration) return <CharacterAudioReferenceItem node={node} onOpen={onOpen} onRemove={onRemove} />;
+    if (sourceIsTextGeneration) return <CharacterTextReferenceItem node={node} onOpen={onOpen} onRemove={onRemove} />;
+    // 选 1 张图 → 占 1 格方形；选 2 张图 → 横向矩形占 2 格；多张时角标显示总数。
+    const wide = selectedImages.length > 1;
     return (
         <div
-            className="group relative grid size-12 shrink-0 cursor-pointer place-items-center rounded-xl border p-1 transition hover:opacity-85"
-            style={{ background: theme.toolbar.activeBg, borderColor: theme.node.activeStroke || theme.toolbar.border }}
+            className={`group relative ${wide ? "h-12 w-[104px]" : "size-12"} shrink-0 cursor-pointer overflow-hidden rounded-xl border transition hover:opacity-85`}
+            style={{ borderColor: theme.node.activeStroke || theme.toolbar.border, background: theme.toolbar.activeBg }}
             title={onOpen ? "双击选择角色参考输入" : t("canvas.references.empty")}
             onDoubleClick={(event) => { event.stopPropagation(); onOpen?.(); }}
         >
-            <span className="min-w-0 max-w-full text-center leading-tight">
-                <span className="block truncate text-[10px] font-medium">{node.metadata?.characterName || node.title || "角色"}</span>
-                <span className="mt-0.5 block truncate text-[9px]" style={{ color: theme.node.muted }}>{selectedImageCount} 图{voiceIncluded ? " · 声线" : ""}</span>
+            <span className="flex size-full">
+                {selectedImages.map((image, index) => {
+                    const url = urls[index] || previewUrlFor(image.storageKey);
+                    return (
+                        <span key={index} className="relative min-w-0 flex-1 overflow-hidden" style={{ background: theme.node.panel }}>
+                            {url ? <img src={url} alt={image.outfit || image.name || ""} className="absolute inset-0 size-full object-cover" draggable={false} /> : <span className="grid size-full place-items-center text-[10px]" style={{ color: theme.node.muted }}>{selectedImageCount} 图</span>}
+                        </span>
+                    );
+                })}
+                {!selectedImages.length ? <span className="grid size-full place-items-center px-1 text-center leading-tight"><span className="min-w-0 truncate text-[10px] font-medium">{node.metadata?.characterName || node.title || "角色"}</span></span> : null}
             </span>
+            <span className="pointer-events-none absolute bottom-0 left-0 max-w-full truncate rounded-tr-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{node.metadata?.characterName || node.title || "角色"}{voiceIncluded ? " · 声线" : ""}</span>
+            <span className="pointer-events-none absolute right-0 top-0 rounded-bl-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{selectedImageCount}图</span>
+            <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
+        </div>
+    );
+}
+
+/** 角色节点被「音频类生成节点」引用时，角色引用以声线音频作为输入：方形音频格 + 角色名 + 试听。 */
+function CharacterAudioReferenceItem({ node, onOpen, onRemove }: { node: CanvasNodeData; onOpen?: () => void; onRemove: () => void }) {
+    const { t } = useTranslation();
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+    const voiceUrl = node.metadata?.characterVoiceUrl || "";
+    const voiceKey = node.metadata?.characterVoiceStorageKey;
+    const hasVoice = Boolean(voiceUrl || voiceKey);
+    const [url, setUrl] = useState("");
+    const [playing, setPlaying] = useState(false);
+    useEffect(() => {
+        let cancelled = false;
+        if (!voiceKey && !voiceUrl) { setUrl(""); return; }
+        void resolveImageUrl(voiceKey, voiceUrl).then((resolved) => { if (!cancelled) setUrl(resolved || voiceUrl); }).catch(() => { if (!cancelled) setUrl(voiceUrl); });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, voiceKey, voiceUrl]);
+    return (
+        <div
+            className="group relative grid size-12 shrink-0 cursor-pointer place-items-center rounded-xl border transition hover:opacity-85"
+            style={{ borderColor: theme.node.activeStroke || theme.toolbar.border, background: theme.toolbar.activeBg }}
+            title={onOpen ? "双击选择角色参考输入" : t("canvas.references.empty")}
+            onDoubleClick={(event) => { event.stopPropagation(); onOpen?.(); }}
+        >
+            <Music2 className="size-5" style={{ color: theme.node.muted }} />
+            <span className="pointer-events-none absolute bottom-0 left-0 max-w-full truncate rounded-tr-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{node.metadata?.characterName || node.title || "角色"}</span>
+            {hasVoice ? (
+                <button type="button" className="absolute left-0 top-0 grid size-5 place-items-center rounded-full border shadow-sm" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={playing ? "暂停" : "播放"} title={playing ? "暂停" : "播放"} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setPlaying((value) => !value); }}>
+                    {playing ? <span className="block size-2 rounded-[1px] bg-current" /> : <span className="ml-0.5 block size-0 border-y-[4px] border-l-[6px] border-y-transparent" style={{ borderLeftColor: theme.node.text }} />}
+                </button>
+            ) : null}
+            {hasVoice && url ? <audio className={`pointer-events-auto absolute inset-x-0 bottom-0 z-10 h-5 w-full ${playing ? "" : "hidden"}`} src={url} controls autoPlay={playing} ref={(element) => { if (element) { if (playing) void element.play().catch(() => {}) ; else element.pause(); } }} /> : null}
+            <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
+        </div>
+    );
+}
+
+/** 角色节点被「文本类生成节点」引用时，角色引用以角色的文本设定作为输入：方形文本格 + 角色名；双击可查看/调整。 */
+function CharacterTextReferenceItem({ node, onOpen, onRemove }: { node: CanvasNodeData; onOpen?: () => void; onRemove: () => void }) {
+    const { t } = useTranslation();
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const name = node.metadata?.characterName || node.title || "角色";
+    const description = node.metadata?.characterDescription || node.metadata?.characterEnglishName || "";
+    return (
+        <div
+            className="group relative grid size-12 shrink-0 cursor-pointer place-items-center rounded-xl border transition hover:opacity-85"
+            style={{ borderColor: theme.node.activeStroke || theme.toolbar.border, background: theme.toolbar.activeBg }}
+            title={onOpen ? `${name}${description ? ` · ${description}` : ""}（双击选择角色参考输入）` : t("canvas.references.empty")}
+            onDoubleClick={(event) => { event.stopPropagation(); onOpen?.(); }}
+        >
+            <FileText className="size-5" style={{ color: theme.node.muted }} />
+            <span className="pointer-events-none absolute bottom-0 left-0 max-w-full truncate rounded-tr-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{name}</span>
             <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
         </div>
     );

@@ -25,6 +25,13 @@ export function resolveCanvasImageReferences(project: CanvasProject, sourceNodeI
     const added = new Set<string>();
     if (String(source.type || "") === "image") addImageReference(source, references, added);
 
+    if (String(source.type || "") === "image" && recordOf(source.metadata).generationType === "edit") {
+        for (const node of incomingNodes(sourceNodeId, connections, nodeById)) {
+            if (String(node.type || "") === "image") addImageReference(node, references, added);
+        }
+        return references;
+    }
+
     const inputNode = String(source.type || "") === "config"
         ? source
         : outgoingNodes(sourceNodeId, connections, nodeById).find((node) => String(node.type || "") === "config")

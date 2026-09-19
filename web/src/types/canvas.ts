@@ -53,8 +53,20 @@ export type CanvasNodeText = {
     content: string;
 };
 
+export type CanvasNodeModeResult = {
+    content?: string;
+    url?: string;
+    storageKey?: string;
+    mimeType?: string;
+    bytes?: number;
+    naturalWidth?: number;
+    naturalHeight?: number;
+    durationMs?: number;
+};
+
 export type CanvasNodeMetadata = {
     content?: string;
+    url?: string;
     composerContent?: string;
     /** 新建的智能生成节点把提示词、参数和结果收在同一个 Config 节点里。 */
     smart?: boolean;
@@ -98,6 +110,8 @@ export type CanvasNodeMetadata = {
     mimeType?: string;
     bytes?: number;
     durationMs?: number;
+    /** 智能生成节点按模式暂存非当前的共享媒体字段；图片/文本结果集合仍留在各自字段。 */
+    generationResultsByMode?: Partial<Record<CanvasGenerationMode, CanvasNodeModeResult>>;
     groupId?: string;
     groupLocked?: boolean;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.

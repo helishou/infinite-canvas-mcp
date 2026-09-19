@@ -208,6 +208,31 @@ export const ConnectionOverviewPath = memo(function ConnectionOverviewPath({
     && previous.onSelect === next.onSelect
     && previous.onContextMenu === next.onContextMenu);
 
+/** Dense overview path: represents grouped connections as one non-interactive flow line. */
+export const ConnectionBundleOverviewPath = memo(function ConnectionBundleOverviewPath({
+    bundle,
+    theme,
+}: {
+    bundle: { id: string; from: Position; to: Position; count: number };
+    theme: CanvasTheme;
+}) {
+    const curvature = Math.max(Math.abs(bundle.to.x - bundle.from.x) * 0.5, 50);
+    const pathD = `M ${bundle.from.x} ${bundle.from.y} C ${bundle.from.x + curvature} ${bundle.from.y}, ${bundle.to.x - curvature} ${bundle.to.y}, ${bundle.to.x} ${bundle.to.y}`;
+
+    return (
+        <path
+            data-connection-bundle-id={bundle.id}
+            d={pathD}
+            fill="none"
+            stroke={theme.node.muted}
+            strokeWidth={1 + Math.min(Math.log2(bundle.count) * 0.4, 1.2)}
+            strokeOpacity={0.42}
+            vectorEffect="non-scaling-stroke"
+            pointerEvents="none"
+        />
+    );
+});
+
 export function ActiveConnectionPath({ projectId, node, handle, target }: { projectId: string; node?: CanvasNodeData; handle: ConnectionHandle; target?: CanvasNodeData }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mouseWorld = useActiveConnectionPointer(projectId);

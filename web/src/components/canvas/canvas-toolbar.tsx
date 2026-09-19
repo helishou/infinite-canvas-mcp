@@ -24,6 +24,7 @@ export function CanvasToolbar({
     onAddConfig,
     onAddLoop,
     onAddGroup,
+    groupSelection,
     onAddCharacter,
     onAddScene,
     onAddExtensionNode,
@@ -51,6 +52,8 @@ export function CanvasToolbar({
     onAddConfig: () => void;
     onAddLoop: () => void;
     onAddGroup: () => void;
+    /** 当前选中的普通节点 ≥2：点「组」会把它们装进新组，而不是新建空组。 */
+    groupSelection: boolean;
     onAddCharacter: () => void;
     onAddScene: () => void;
     onAddExtensionNode: (type: string) => void;
@@ -138,7 +141,7 @@ export function CanvasToolbar({
                 <ToolbarButton id="tool-scene" label={t("canvas.toolbar.scene")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddScene}>
                     <MapPinned className="size-4.5" />
                 </ToolbarButton>
-                <ToolbarButton id="tool-group" label={t("canvas.toolbar.group")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddGroup}>
+                <ToolbarButton id="tool-group" label={t(groupSelection ? "canvas.controls.group" : "canvas.toolbar.group")} active={groupSelection} activeStyle={activeStyle} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddGroup}>
                     <Group className="size-4.5" />
                 </ToolbarButton>
                 {extensionDefs.length ? (
@@ -376,7 +379,7 @@ function DockTip({ label, x, theme }: { label: string; x: number; theme: CanvasT
     );
 }
 
-function toolLabel(id: string, t: (key: string) => string) {
+function toolLabel(id: string, t: (key: string) => string, groupSelection = false) {
     if (id === "tool-select") return t("canvas.toolbar.select");
     if (id === "tool-pan") return t("canvas.toolbar.pan");
     if (id === "tool-undo") return t("canvas.undo");
@@ -384,10 +387,13 @@ function toolLabel(id: string, t: (key: string) => string) {
     if (id === "tool-text") return t("canvas.toolbar.text");
     if (id === "tool-image") return t("canvas.toolbar.image");
     if (id === "tool-video") return t("canvas.toolbar.video");
+    if (id === "tool-h3") return "MiniMax H3";
     if (id === "tool-audio") return t("canvas.toolbar.audio");
     if (id === "tool-config") return t("canvas.toolbar.config");
+    if (id === "tool-loop") return t("canvas.toolbar.loop");
     if (id === "tool-character") return t("canvas.toolbar.character");
-    if (id === "tool-group") return t("canvas.toolbar.group");
+    if (id === "tool-scene") return t("canvas.toolbar.scene");
+    if (id === "tool-group") return t(groupSelection ? "canvas.controls.group" : "canvas.toolbar.group");
     if (id === "tool-extensions") return t("canvas.toolbar.extensions");
     if (id === "tool-upload") return t("canvas.toolbar.upload");
     if (id === "tool-style") return t("canvas.toolbar.appearance");
