@@ -2,12 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 
-import { attachH3ActualSubmission, buildNativeNanFengV15Workflow, exactHistoryEntry, localComfyInputName, summarizeH3Workflow } from "./bridge.js";
+import { attachH3ActualSubmission, buildNativeNanFengV15Workflow, exactHistoryEntry, h3WatchdogState, localComfyInputName, summarizeH3Workflow } from "./bridge.js";
 import { MEDIA_DIR } from "../config.js";
 
 const promptA = "5ef69623-4030-4f1b-a00b-09e7355303e4";
 const promptB = "3d11bbd6-3b53-49c5-8514-d3fce9981704";
 const upload = async (file: string) => `uploaded-${file}`;
+
+test("H3 watchdog identifies a stagnant low-progress task and can be disabled", () => {
+    assert.deepEqual(h3WatchdogState(100_000, 0, 90_000, 0.05), { stalled: true, stagnantForMs: 100_000, progress: 0.05 });
+    assert.equal(h3WatchdogState(80_000, 0, 90_000, 0.05).stalled, false);
+    assert.equal(h3WatchdogState(100_000, 0, 0, 0.05).stalled, false);
+});
 
 test("history recovery never substitutes another prompt's output", () => {
     const history = {

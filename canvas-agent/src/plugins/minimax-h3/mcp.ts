@@ -64,6 +64,13 @@ const TOOLS: PluginMcpToolWire[] = [
         inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string", description: "画布节点 id" } }, required: ["projectId", "nodeId"] },
     },
     {
+        id: "h3_get_clip",
+        version: "1.0.0",
+        name: "H3 定向读取片段",
+        description: "只读取指定 H3 Clip、最终参考编译和运行参数快照，不扫描整张画布。",
+        inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] },
+    },
+    {
         id: "h3_run_clip",
         version: "1.3.0",
         name: "H3 运行单段",
@@ -154,11 +161,30 @@ const TOOLS: PluginMcpToolWire[] = [
             required: ["projectId"],
         },
     },
+    {
+        id: "h3_prepare_clip",
+        version: "1.0.0",
+        name: "H3 原子准备片段",
+        description: "一次性继承已完成片段参数、更新剧情/分镜/参考和已有角色组，编译并返回最终提交快照；预检失败不写入。",
+        inputJsonSchema: {
+            type: "object",
+            properties: {
+                projectId: { type: "string" },
+                nodeId: { type: "string" },
+                segmentId: { type: "string" },
+                inheritFromSegmentId: { type: "string", description: "已验证来源片段；省略则取目标之前最近完成片段" },
+                patch: { type: "object", description: "剧情字段和明确要覆盖的 H3 参数；不得包含 h3CharacterGroups/referenceBindings" },
+                referenceBindings: { type: "array", items: { type: "object" }, description: "完整替换后的参考绑定列表" },
+                characters: { type: "array", items: { type: "object", properties: { characterNodeId: { type: "string" }, subjectId: { type: "string", description: "提示词使用的稳定 subjectId；将同步写入角色组和全部角色参考绑定" }, selectedOutfitStorageKeys: { type: "array", items: { type: "string" } }, voiceEnabled: { type: "boolean" } }, required: ["characterNodeId", "selectedOutfitStorageKeys"] } },
+            },
+            required: ["projectId", "nodeId", "segmentId", "patch"],
+        },
+    },
     { id: "canvas_list_reference_assets", version: "1.0.0", name: "列出项目参考资产", description: "列出项目级参考资产库及其主要职责、标签和媒体句柄。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" } }, required: ["projectId"] } },
     { id: "canvas_update_reference_asset", version: "1.0.0", name: "更新项目参考资产", description: "新增或更新项目参考资产；职责只保存一个 primary role，补充语义放 tags。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, asset: { type: "object" } }, required: ["projectId", "asset"] } },
     { id: "canvas_analyze_reference_asset", version: "1.0.0", name: "记录参考资产分析", description: "把模型对参考素材的职责、标签和摘要写入项目资产；调用方应先实际查看素材再提交分析。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, assetId: { type: "string" }, role: { type: "string" }, tags: { type: "array", items: { type: "string" } }, summary: { type: "string" }, model: { type: "string" } }, required: ["projectId", "assetId", "role", "tags", "summary"] } },
     { id: "h3_set_reference_bindings", version: "1.0.0", name: "设置 Clip 参考绑定", description: "按稳定 binding id 原子替换指定 Clip 的参考绑定，不修改节点位置或运行状态。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, bindings: { type: "array", items: { type: "object" } }, expectedBindings: { type: "array", items: { type: "object" } } }, required: ["projectId", "nodeId", "segmentId", "bindings"] } },
-    { id: "h3_bind_existing_character_groups", version: "1.0.0", name: "绑定现有角色节点组", description: "从指定的已有 character 画布节点读取完整服装目录，只按 selectedOutfitStorageKeys 选择当前 Clip；绝不创建角色节点。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, characters: { type: "array", items: { type: "object", properties: { characterNodeId: { type: "string" }, selectedOutfitStorageKeys: { type: "array", items: { type: "string" } }, voiceEnabled: { type: "boolean" } }, required: ["characterNodeId", "selectedOutfitStorageKeys"] } } }, required: ["projectId", "nodeId", "segmentId", "characters"] } },
+    { id: "h3_bind_existing_character_groups", version: "1.0.0", name: "绑定现有角色节点组", description: "从指定的已有 character 画布节点读取完整服装目录，只按 selectedOutfitStorageKeys 选择当前 Clip；绝不创建角色节点。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, characters: { type: "array", items: { type: "object", properties: { characterNodeId: { type: "string" }, subjectId: { type: "string", description: "提示词使用的稳定 subjectId；将同步写入角色组和全部角色参考绑定" }, selectedOutfitStorageKeys: { type: "array", items: { type: "string" } }, voiceEnabled: { type: "boolean" } }, required: ["characterNodeId", "selectedOutfitStorageKeys"] } } }, required: ["projectId", "nodeId", "segmentId", "characters"] } },
     { id: "canvas_validate_generation", version: "1.0.0", name: "生成预检", description: "使用与 Backend 实际提交相同的编译器预检语义提示词、参考顺序、模式上限和缺失媒体。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] } },
 ];
 
@@ -177,26 +203,95 @@ function segmentsOf(node: AgentCanvasNode): H3Segment[] {
  * `segment.x || 硬编码默认`（如 h3-models.ts 的 compatibleH3Settings、H3Runner 的
  * `loraSlots: segment.loraSlots || []`），segment 缺参时会静默回退到错误模型/LoRA。
  *
- * 取值优先级：已有片段 > 节点级 metadata > nodeMetadata.comfyParams，
- * 参数优先级与 Backend 运行编排器一致。duration 属于计划，由调用方铺在后面覆盖。
+ * 取值优先级：显式或目标之前最近已完成片段 > 节点级 metadata > nodeMetadata.comfyParams，
+ * 未找到已完成片段时才回退到节点级配置；duration 属于计划，由调用方铺在后面覆盖。
  */
-function inheritedH3Params(node: AgentCanvasNode): Record<string, unknown> {
-    const meta = node.metadata || {};
+export function selectH3InheritanceSource(segments: H3Segment[], targetSegmentId?: string, explicitSourceId?: string): H3Segment | undefined {
+    if (explicitSourceId) {
+        const explicit = segments.find((segment) => String(segment.id || "") === explicitSourceId);
+        return explicit && (Boolean(explicit.result) || String(explicit.status || "") === "success") ? explicit : undefined;
+    }
+    const targetIndex = targetSegmentId ? segments.findIndex((segment) => String(segment.id || "") === targetSegmentId) : segments.length;
+    const before = (targetIndex >= 0 ? segments.slice(0, targetIndex) : segments).reverse();
+    return before.find((segment) => Boolean(segment.result) || String(segment.status || "") === "success");
+}
+
+export function inheritedH3Params(node: AgentCanvasNode | Record<string, unknown>, sourceSegmentId?: string, suppliedSegments?: H3Segment[]): Record<string, unknown> {
+    const meta = (node.metadata && typeof node.metadata === "object" ? node.metadata : node) as Record<string, unknown>;
     const nodeParams = meta.comfyParams && typeof meta.comfyParams === "object" && !Array.isArray(meta.comfyParams)
         ? meta.comfyParams as Record<string, unknown> : {};
+    const segments = suppliedSegments || segmentsOf(node as AgentCanvasNode);
+    const source = selectH3InheritanceSource(segments, undefined, sourceSegmentId);
     const inherited: Record<string, unknown> = {};
-    const take = (source: Record<string, unknown>) => {
+    const take = (value: unknown) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return;
+        const sourceRecord = value as Record<string, unknown>;
         for (const key of H3_PARAM_KEYS) {
-            const value = source[key];
-            if (value !== undefined && value !== null && value !== "") inherited[key] = value;
+            const item = sourceRecord[key];
+            if (item !== undefined && item !== null && item !== "") inherited[key] = item;
         }
     };
     take(meta);
     take(nodeParams);
-    const existing = segmentsOf(node)[0];
-    if (existing) take(existing);
+    take(source);
     delete inherited.steps;
     return inherited;
+}
+
+export function diffH3Settings(before: Record<string, unknown>, after: Record<string, unknown>) {
+    return H3_PARAM_KEYS.filter((key) => !Object.is(before[key], after[key]) && (before[key] !== undefined || after[key] !== undefined))
+        .map((key) => ({ key, before: before[key], after: after[key] }));
+}
+
+function buildH3ClipSnapshot(segment: H3Segment, compilation: ReturnType<typeof compileReferenceSubmission>, inheritance?: { sourceSegmentId?: string; changedSettings?: unknown[] }) {
+    const runtime = Object.fromEntries(H3_PARAM_KEYS.filter((key) => segment[key] !== undefined).map((key) => [key, segment[key]]));
+    const groups = Object.values(segment.h3CharacterGroups && typeof segment.h3CharacterGroups === "object" && !Array.isArray(segment.h3CharacterGroups) ? segment.h3CharacterGroups as Record<string, unknown> : {})
+        .map((value) => value as Record<string, unknown>)
+        .map((group) => ({
+            id: String(group.id || ""),
+            characterName: String(group.characterName || ""),
+            characterNodeId: String(group.characterNodeId || ""),
+            subjectId: String(group.subjectId || group.characterNodeId || ""),
+            catalogCount: Array.isArray(group.outfits) ? group.outfits.length : 0,
+            enabledCount: Array.isArray(group.outfits) ? group.outfits.filter((outfit) => (outfit as Record<string, unknown>)?.enabled === true).length : 0,
+            voiceEnabled: group.voiceEnabled === true,
+        }));
+    return {
+        ...(inheritance || {}),
+        segment: { id: String(segment.id || ""), sourceShotId: String(segment.sourceShotId || ""), title: String(segment.title || ""), duration: segment.duration, taskMode: String(segment.taskMode || "") },
+        runtime,
+        prompt: { semantic: compilation.semanticPrompt, compiled: compilation.compiledPrompt },
+        references: compilation.references.map((reference) => ({ id: reference.id, assetId: reference.assetId, label: reference.label, role: reference.role, mediaType: reference.mediaType, ordinal: reference.ordinal, token: reference.token, subjectId: reference.subjectId, groupId: reference.groupId, outfitId: reference.outfitId, storageKey: reference.storageKey, url: reference.url })),
+        characterGroups: groups,
+        issues: compilation.issues,
+    };
+}
+
+function buildCharacterCandidate(projectNodes: Array<Record<string, unknown>>, segment: H3Segment, rawCharacters: Array<Record<string, unknown>>) {
+    if (!rawCharacters.length) throw new Error("characters 至少需要一个已有 character 节点");
+    const existingGroups = segment.h3CharacterGroups && typeof segment.h3CharacterGroups === "object" && !Array.isArray(segment.h3CharacterGroups) ? segment.h3CharacterGroups as Record<string, unknown> : {};
+    const requestedNodeIds = new Set<string>();
+    const built = rawCharacters.map((request) => {
+        const characterNodeId = String(request.characterNodeId || "");
+        if (!characterNodeId || requestedNodeIds.has(characterNodeId)) throw new Error(`characterNodeId 缺失或重复:${characterNodeId}`);
+        requestedNodeIds.add(characterNodeId);
+        const sourceNode = projectNodes.find((item) => String(item.id || "") === characterNodeId);
+        if (!sourceNode) throw new Error(`找不到已有 character 节点:${characterNodeId}`);
+        if (String(sourceNode.type || "") !== "character") throw new Error(`只能绑定已有 character 节点:${characterNodeId}`);
+        const selected = Array.isArray(request.selectedOutfitStorageKeys) ? request.selectedOutfitStorageKeys.map(String) : [];
+        const existingGroup = Object.values(existingGroups).map((value) => value as Record<string, unknown>).find((group) => String(group.characterNodeId || "") === characterNodeId);
+        return { characterNodeId, built: buildCharacterGroupFromExistingNode(sourceNode, { selectedOutfitStorageKeys: selected, ...(typeof request.subjectId === "string" ? { subjectId: request.subjectId } : {}), ...(typeof request.voiceEnabled === "boolean" ? { voiceEnabled: request.voiceEnabled } : {}), existingGroup }) };
+    });
+    const removedGroupIds = new Set(Object.entries(existingGroups).filter(([, value]) => requestedNodeIds.has(String((value as Record<string, unknown>)?.characterNodeId || ""))).map(([key, value]) => String((value as Record<string, unknown>)?.id || key)));
+    const nextGroups: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(existingGroups)) {
+        const group = value as Record<string, unknown>;
+        if (!requestedNodeIds.has(String(group.characterNodeId || ""))) nextGroups[key] = value;
+    }
+    for (const item of built) nextGroups[item.built.group.id] = item.built.group;
+    const previousBindings = referenceBindingsOf(segment).bindings;
+    const preservedBindings = previousBindings.filter((binding) => !binding.groupId || (!removedGroupIds.has(String(binding.groupId)) && Boolean(nextGroups[String(binding.groupId)])));
+    return { built, requestedNodeIds, nextGroups, nextBindings: [...preservedBindings, ...built.flatMap((item) => item.built.refs)] };
 }
 
 function isH3Node(node: AgentCanvasNode): boolean {
@@ -218,7 +313,7 @@ async function assertProjectNode(context: PluginMcpContext, projectId: string, n
 
 export const pluginMcp: PluginMcpModule = {
     id: "minimax-h3",
-    version: "1.4.0",
+    version: "1.5.0",
     tools: TOOLS,
     createHandler(context: PluginMcpContext): Record<string, McpToolHandler> {
         return {
@@ -297,30 +392,8 @@ export const pluginMcp: PluginMcpModule = {
                 const segment = segmentsOf(node).find((item) => String(item.id || "") === segmentId);
                 if (!segment) throw new Error(`找不到片段:${segmentId}`);
                 const rawCharacters = Array.isArray(input.characters) ? input.characters as Array<Record<string, unknown>> : [];
-                if (!rawCharacters.length) throw new Error("characters 至少需要一个已有 character 节点");
-                const existingGroups = segment.h3CharacterGroups && typeof segment.h3CharacterGroups === "object" && !Array.isArray(segment.h3CharacterGroups) ? segment.h3CharacterGroups as Record<string, unknown> : {};
-                const requestedNodeIds = new Set<string>();
-                const built = rawCharacters.map((request) => {
-                    const characterNodeId = String(request.characterNodeId || "");
-                    if (!characterNodeId || requestedNodeIds.has(characterNodeId)) throw new Error(`characterNodeId 缺失或重复:${characterNodeId}`);
-                    requestedNodeIds.add(characterNodeId);
-                    const sourceNode = projectNodes.find((item) => String(item.id || "") === characterNodeId);
-                    if (!sourceNode) throw new Error(`找不到已有 character 节点:${characterNodeId}`);
-                    if (String(sourceNode.type || "") !== "character") throw new Error(`只能绑定已有 character 节点:${characterNodeId}`);
-                    const selected = Array.isArray(request.selectedOutfitStorageKeys) ? request.selectedOutfitStorageKeys.map(String) : [];
-                    const existingGroup = Object.values(existingGroups).map((value) => value as Record<string, unknown>).find((group) => String(group.characterNodeId || "") === characterNodeId);
-                    return { characterNodeId, built: buildCharacterGroupFromExistingNode(sourceNode, { selectedOutfitStorageKeys: selected, ...(typeof request.voiceEnabled === "boolean" ? { voiceEnabled: request.voiceEnabled } : {}), existingGroup }) };
-                });
-                const removedGroupIds = new Set(Object.entries(existingGroups).filter(([, value]) => requestedNodeIds.has(String((value as Record<string, unknown>)?.characterNodeId || ""))).map(([key, value]) => String((value as Record<string, unknown>)?.id || key)));
-                const nextGroups: Record<string, unknown> = {};
-                for (const [key, value] of Object.entries(existingGroups)) {
-                    const group = value as Record<string, unknown>;
-                    if (!requestedNodeIds.has(String(group.characterNodeId || ""))) nextGroups[key] = value;
-                }
-                for (const item of built) nextGroups[item.built.group.id] = item.built.group;
-                const previousBindings = referenceBindingsOf(segment).bindings;
-                const preservedBindings = previousBindings.filter((binding) => !binding.groupId || (!removedGroupIds.has(String(binding.groupId)) && Boolean(nextGroups[String(binding.groupId)])));
-                const nextBindings = [...preservedBindings, ...built.flatMap((item) => item.built.refs)];
+                const characterCandidate = buildCharacterCandidate(projectNodes, segment, rawCharacters);
+                const { built, requestedNodeIds, nextGroups, nextBindings } = characterCandidate;
                 const candidate = { ...segment, h3CharacterGroups: nextGroups, referenceBindings: nextBindings };
                 const compilation = compileReferenceSubmission(project, candidate);
                 assertReferenceCompilation(compilation);
@@ -351,6 +424,82 @@ export const pluginMcp: PluginMcpModule = {
                     connections: refreshedConnections.filter((connection) => requestedNodeIds.has(String(connection.fromNodeId || "")) && String(connection.toNodeId || "") === nodeId),
                 };
             },
+            h3_prepare_clip: async (input) => {
+                const projectId = String(input.projectId || "");
+                const nodeId = String(input.nodeId || "");
+                const segmentId = String(input.segmentId || "");
+                await assertProjectNode(context, projectId, nodeId);
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                if (!project) throw new Error(`画布不存在:${projectId}`);
+                const projectNodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+                const node = projectNodes.find((item) => String(item.id || "") === nodeId) as AgentCanvasNode | undefined;
+                if (!node || !isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
+                const segments = segmentsOf(node);
+                const segment = segments.find((item) => String(item.id || "") === segmentId);
+                if (!segment) throw new Error(`找不到片段:${segmentId}`);
+                const rawPatch = input.patch && typeof input.patch === "object" && !Array.isArray(input.patch) ? input.patch as Record<string, unknown> : {};
+                for (const key of ["h3CharacterGroups", "characterGroups", "referenceBindings", "status", "result", "resultStorageKey", "runtimeTaskId", "progress", "errorDetails", "cacheFingerprint"]) {
+                    if (Object.prototype.hasOwnProperty.call(rawPatch, key)) throw new Error(`h3_prepare_clip 不允许直接修改 ${key}`);
+                }
+                const explicitSourceId = input.inheritFromSegmentId ? String(input.inheritFromSegmentId) : undefined;
+                if (explicitSourceId && !segments.some((item) => String(item.id || "") === explicitSourceId)) throw new Error(`找不到继承来源片段:${explicitSourceId}`);
+                const source = selectH3InheritanceSource(segments, segmentId, explicitSourceId);
+                if (explicitSourceId && !source) throw new Error(`继承来源片段未完成，不能作为已验证基线:${explicitSourceId}`);
+                const inherited = inheritedH3Params(node, source?.id ? String(source.id) : undefined, segments);
+                const preparedPatch: Record<string, unknown> = { ...inherited, ...rawPatch };
+                if (Array.isArray(input.referenceBindings)) {
+                    const rawBindings = input.referenceBindings as Array<Record<string, unknown>>;
+                    const bindings = referenceBindingsOf({ referenceBindings: rawBindings }).bindings;
+                    if (bindings.length !== rawBindings.length) throw new Error("每个参考绑定都必须包含稳定的 id 和 assetId");
+                    preparedPatch.referenceBindings = bindings;
+                }
+                let candidate: H3Segment = { ...segment, ...preparedPatch };
+                let characterCandidate: ReturnType<typeof buildCharacterCandidate> | undefined;
+                if (Array.isArray(input.characters)) {
+                    characterCandidate = buildCharacterCandidate(projectNodes, candidate, input.characters as Array<Record<string, unknown>>);
+                    preparedPatch.h3CharacterGroups = characterCandidate.nextGroups;
+                    preparedPatch.referenceBindings = characterCandidate.nextBindings;
+                    candidate = { ...segment, ...preparedPatch };
+                }
+                const compilation = compileReferenceSubmission(project, candidate);
+                assertReferenceCompilation(compilation);
+                const operations: Record<string, unknown>[] = [{
+                    type: "update_h3_segment",
+                    nodeId,
+                    segmentId,
+                    patch: preparedPatch,
+                    expectedFields: {
+                        ...(segment.h3CharacterGroups !== undefined || preparedPatch.h3CharacterGroups !== undefined ? { h3CharacterGroups: segment.h3CharacterGroups } : {}),
+                        ...(segment.referenceBindings !== undefined || preparedPatch.referenceBindings !== undefined ? { referenceBindings: segment.referenceBindings } : {}),
+                    },
+                }];
+                if (characterCandidate) {
+                    const connections = Array.isArray(project.connections) ? project.connections as Array<Record<string, unknown>> : [];
+                    let nextOrder = connections.filter((connection) => String(connection.toNodeId || "") === nodeId).length;
+                    for (const item of characterCandidate.built) {
+                        const alreadyConnected = connections.some((connection) => String(connection.fromNodeId || "") === item.characterNodeId && String(connection.toNodeId || "") === nodeId);
+                        if (!alreadyConnected) operations.push({ type: "connect_nodes", fromNodeId: item.characterNodeId, toNodeId: nodeId, role: "reference", order: nextOrder++ });
+                    }
+                }
+                const result = await context.backend.applyCanvasOperations(projectId, operations, Number(project.revision || 0));
+                const refreshedProject = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                const refreshedNode = refreshedProject && (Array.isArray(refreshedProject.nodes) ? refreshedProject.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === nodeId) as AgentCanvasNode | undefined;
+                const refreshedSegment = refreshedNode && segmentsOf(refreshedNode).find((item) => String(item.id || "") === segmentId);
+                if (!refreshedProject || !refreshedSegment) throw new Error(`H3 片段准备后读取失败:${segmentId}`);
+                const refreshedCompilation = compileReferenceSubmission(refreshedProject, refreshedSegment);
+                assertReferenceCompilation(refreshedCompilation);
+                return {
+                    ok: true,
+                    projectId,
+                    nodeId,
+                    segmentId,
+                    revision: result.revision,
+                    snapshot: buildH3ClipSnapshot(refreshedSegment, refreshedCompilation, {
+                        ...(source?.id ? { sourceSegmentId: String(source.id) } : {}),
+                        changedSettings: diffH3Settings(inherited, refreshedSegment),
+                    }),
+                };
+            },
             canvas_validate_generation: async (input) => {
                 const projectId = String(input.projectId || "");
                 const nodeId = String(input.nodeId || "");
@@ -361,7 +510,8 @@ export const pluginMcp: PluginMcpModule = {
                 if (!node) throw new Error(`找不到画布节点:${nodeId}`);
                 const segment = segmentsOf(node).find((item) => String(item.id || "") === segmentId);
                 if (!segment) throw new Error(`找不到片段:${segmentId}`);
-                return { ok: true, projectId, nodeId, segmentId, validation: compileReferenceSubmission(project, segment) };
+                const validation = compileReferenceSubmission(project, segment);
+                return { ok: validation.issues.every((issue) => issue.severity !== "error"), projectId, nodeId, segmentId, validation, snapshot: buildH3ClipSnapshot(segment, validation) };
             },
             h3_apply_video_plan: async (input) => {
                 const projectId = String(input.projectId || "");
@@ -403,6 +553,19 @@ export const pluginMcp: PluginMcpModule = {
                     audioVaes: catalog.audioVaes || [],
                     nanfeng: catalog.nanfeng || {},
                 };
+            },
+            h3_get_clip: async (input) => {
+                const projectId = String(input.projectId || "");
+                const nodeId = String(input.nodeId || "");
+                const segmentId = String(input.segmentId || "");
+                await assertProjectNode(context, projectId, nodeId);
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                const node = project && (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === nodeId) as AgentCanvasNode | undefined;
+                if (!project || !node) throw new Error(`找不到画布或节点：${projectId}/${nodeId}`);
+                const segment = segmentsOf(node).find((item) => String(item.id || "") === segmentId);
+                if (!segment) throw new Error(`找不到片段:${segmentId}`);
+                const compilation = compileReferenceSubmission(project, segment);
+                return { ok: true, projectId, nodeId, segmentId, snapshot: buildH3ClipSnapshot(segment, compilation) };
             },
             h3_get_node: async (input) => {
                 const nodeId = String(input.nodeId || "");

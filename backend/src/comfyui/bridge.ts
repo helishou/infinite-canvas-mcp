@@ -68,6 +68,13 @@ export type H3ActualSubmission = {
     mediaInputs?: { images: string[]; videos: string[]; audios: string[] };
 };
 
+export type H3WatchdogState = { stalled: boolean; stagnantForMs: number; progress: number };
+
+export function h3WatchdogState(now: number, lastActivityAt: number, timeoutMs: number, progress: number): H3WatchdogState {
+    const stagnantForMs = Math.max(0, now - lastActivityAt);
+    return { stalled: timeoutMs > 0 && stagnantForMs >= timeoutMs, stagnantForMs, progress };
+}
+
 export type H3LivePreview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
 
 /** 只接受目标 promptId 的历史记录；绝不按时间猜测其他任务的输出。 */
@@ -413,6 +420,8 @@ export class ComfyUiBackend {
         let wsExecutionSuccessAt = 0;
         let wsClosed = false;
         let wsCloseError: Error | null = null;
+        let lastActivityAt = Date.now();
+        let lastProgress = 0.05;
         let closeWs: () => void = () => {};
         try {
             const uploadFn = preset === "minimax-h3"
@@ -462,6 +471,18 @@ export class ComfyUiBackend {
                                 // 仍然记录 execution_success 的 prompt_id 匹配失败，但不接管
                                 return;
                             }
+                            if (msg.type === "progress") {
+                                const data = msg.data || {};
+                                const value = Number(data.value);
+                                const total = Number(data.max);
+                                if (Number.isFinite(value) && Number.isFinite(total) && total > 0) {
+                                    lastProgress = Math.min(0.95, Math.max(0.05, 0.05 + 0.9 * (value / total)));
+                                    this.updateTask(task.id, { progress: lastProgress });
+                                    this.deps.tasks.addEvent(task.id, "progress", { promptId: capturedPromptId, value, total, progress: lastProgress });
+                                }
+                                lastActivityAt = Date.now();
+                            }
+                            if (msg.type === "executing" || msg.type === "executed" || msg.type === "execution_error" || msg.type === "execution_success") lastActivityAt = Date.now();
                             if (msg.type === "executed" || msg.type === "execution_success") {
                                 wsExecuted = true; wsExecutedAt = Date.now();
                                 // 多输出节点的工作流（如 Z-Image 的 PreviewImage + rgthree Image Comparer）
@@ -513,6 +534,10 @@ export class ComfyUiBackend {
             this.deps.tasks.addEvent(task.id, "submitted", actualSubmission ? { promptId: body.prompt_id, actualSubmission: { ...actualSubmission, promptId: body.prompt_id } } : { promptId: body.prompt_id });
             const startedAt = Date.now();
             const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(60 * 60 * 1000, Number(params.maxExecutionMs) || 30 * 60 * 1000));
+            const stallTimeoutMs = params.stallTimeoutMs === undefined
+                ? 90 * 1000
+                : Math.max(0, Number(params.stallTimeoutMs) || 0);
+            lastActivityAt = startedAt;
             let missingHistoryCount = 0;
             let consecutiveMissingInQueue = 0;
             // 收到 executed 信号后，先直接用消息携带的 outputs 回写（绕过 /history 被清理的坑）；
@@ -536,6 +561,25 @@ export class ComfyUiBackend {
             for (;;) {
                 if (controller.signal.aborted) { closeWs(); throw new Error("任务已取消"); }
                 if (Date.now() - startedAt > maxExecutionMs) { closeWs(); throw new Error(`ComfyUI 任务执行超时（已超过 ${Math.round(maxExecutionMs / 60000)} 分钟），请检查 ComfyUI 是否仍在运行`); }
+                const watchdog = h3WatchdogState(Date.now(), lastActivityAt, stallTimeoutMs, lastProgress);
+                if (watchdog.stalled) {
+                    let queueState = "unknown";
+                    try {
+                        const queueResponse = await fetch(`${comfyUrl}/queue`, { signal: controller.signal });
+                        if (queueResponse.ok) {
+                            const queue = await queueResponse.json() as { queue_running?: unknown[]; queue_pending?: unknown[] };
+                            const contains = (items: unknown[]) => items.some((entry) => Array.isArray(entry) && String(entry[1] || entry[0] || "").includes(promptId));
+                            queueState = contains(queue.queue_running || []) ? "running" : contains(queue.queue_pending || []) ? "pending" : "not-found";
+                        } else queueState = `queue-http-${queueResponse.status}`;
+                    } catch (error) {
+                        queueState = `queue-error:${error instanceof Error ? error.message : String(error)}`;
+                    }
+                    const stalledMessage = `ComfyUI H3 任务疑似卡住：${Math.round(watchdog.stagnantForMs / 1000)} 秒无进度变化，当前进度 ${Math.round(watchdog.progress * 100)}%，队列状态 ${queueState}；已自动停止，若需等待模型加载可把 stallTimeoutMs 设为更大值`;
+                    this.deps.tasks.addEvent(task.id, "watchdog_stalled", { promptId: body.prompt_id, progress: watchdog.progress, stagnantForMs: watchdog.stagnantForMs, queueState });
+                    await this.cancelComfyExecution(task.id);
+                    closeWs();
+                    throw new Error(stalledMessage);
+                }
                 if (wsError) { closeWs(); throw wsError; }
                 // WebSocket 已确认任务完成：优先用 execution_success 事件（v1.5+ 推送的整个 graph outputs），
                 // 没有就退回 executed 单节点 outputs；都没有再回 /history；

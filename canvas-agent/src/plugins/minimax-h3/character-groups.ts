@@ -1,10 +1,11 @@
-import { stableReferenceId, type ReferenceBinding } from "../../canvas/reference-contract.js";
+import { stableReferenceId, type ReferenceBinding, type ReferenceRole } from "../../canvas/reference-contract.js";
 
 type JsonRecord = Record<string, unknown>;
 
 type CharacterGroupRequest = {
     selectedOutfitStorageKeys: string[];
     voiceEnabled?: boolean;
+    subjectId?: string;
     existingGroup?: JsonRecord;
 };
 
@@ -15,7 +16,7 @@ type BuiltCharacterGroup = {
     characterNodeId: string;
     subjectId: string;
     voice?: { url: string; name: string; description?: string; storageKey?: string; assetId?: string };
-    outfits: Array<{ id: string; url: string; name: string; storageKey?: string; mimeType?: string; enabled: boolean }>;
+    outfits: Array<{ id: string; url: string; name: string; storageKey?: string; mimeType?: string; role: ReferenceRole; enabled: boolean }>;
     voiceEnabled: boolean;
 };
 
@@ -40,6 +41,12 @@ function sourceKey(image: JsonRecord) {
 
 function imageName(image: JsonRecord) {
     return stringOf(image.outfit) || stringOf(image.name) || "outfit";
+}
+
+const CHARACTER_IMAGE_ROLES: ReferenceRole[] = ["character_identity", "character_turnaround", "storyboard", "scene", "blocking", "keyframe", "motion_reference", "style", "palette", "prop", "other"];
+
+function imageRole(image: JsonRecord): ReferenceRole {
+    return CHARACTER_IMAGE_ROLES.includes(image.role as ReferenceRole) ? image.role as ReferenceRole : "character_turnaround";
 }
 
 function outfitId(nodeId: string, key: string) {
@@ -72,11 +79,11 @@ export function buildCharacterGroupFromExistingNode(node: JsonRecord, request: C
     const previousOutfits = Array.isArray(existingGroup.outfits) ? existingGroup.outfits.map(recordOf) : [];
     const previousByKey = new Map(previousOutfits.map((outfit) => [sourceKey(outfit), outfit]));
     const id = stringOf(existingGroup.id) || groupId(nodeId);
-    const subjectId = stringOf(existingGroup.subjectId) || nodeId;
+    const subjectId = stringOf(request.subjectId) || stringOf(existingGroup.subjectId) || nodeId;
     const outfits = images.map(({ image, key, url }) => {
         const previous = previousByKey.get(key);
         const id = stringOf(previous?.id) || outfitId(nodeId, key);
-        return { id, url, name: imageName(image), storageKey: stringOf(image.storageKey) || undefined, mimeType: stringOf(image.mimeType) || undefined, enabled: selectedKeys.has(key) };
+        return { id, url, name: imageName(image), storageKey: stringOf(image.storageKey) || undefined, mimeType: stringOf(image.mimeType) || undefined, role: imageRole(image), enabled: selectedKeys.has(key) };
     });
     const voiceUrl = stringOf(metadata.characterVoiceUrl);
     const voice = voiceUrl ? {
@@ -101,8 +108,8 @@ export function buildCharacterGroupFromExistingNode(node: JsonRecord, request: C
         id: stableReferenceId("binding", `${id}:${outfit.id}`, index),
         assetId: stableReferenceId("asset", `${nodeId}:${outfit.storageKey || outfit.url}`),
         label: `${characterName} · ${outfit.name}`,
-        role: "character_turnaround",
-        tags: ["character-group", "character-four-view"],
+        role: outfit.role,
+        tags: ["character-group", outfit.role],
         enabled: true,
         usage: "reference",
         subjectId,
