@@ -332,6 +332,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         const allRefs = refsForSegment(segment);
         const mode = String(segment.mode || segment.taskMode || "ref2va");
         const storyboardMode = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment);
+        const storyboardLaneVisible = supportsStoryboardTrack(segment) && (storyboardMode || !storyboardRefsForSegment(segment).length);
         const refs = allRefs.map((ref, index) => ({ ref, index })).filter(({ ref }) => !storyboardMode || ref.type !== "image" || inferReferenceRole(ref) !== "storyboard");
         // 多参考模式（ref2va）槽位不设上限：至少铺 9 格，之后每多一个参考就多一格，
         // 最后一格永远是空槽（点击可在画布上选节点，也仍可拖素材进），用来继续加参考。
@@ -341,7 +342,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         // 用 px 定位让 ref grid 跟随实际像素宽度（容器被拉宽时 clip 不会按比例缩成一条线）
         const left = Number(segment.start || 0) * 100;
         const width = Math.max(100, Number(segment.duration || 1) * 100);
-        return <div key={segment.id} data-segment-id={segment.id} className={`minimax-ref-grid ${slotCount === 0 ? "is-disabled" : ""} ${segment.id === selected?.id ? "active" : ""} ${storyboardMode ? "has-storyboard-row" : ""}`} style={{ left: `${left}px`, width: `${width}px`, ...(storyboardMode ? { top: "70px" } : {}), ...(slotCount > 0 && slotCount <= 3 ? { gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))`, gridTemplateRows: "minmax(0, 1fr)" } : {}) }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>{slotCount === 0 ? <span className="minimax-ref-empty-label">无需参考素材</span> : Array.from({ length: slotCount }).map((_, index) => {
+        return <div key={segment.id} data-segment-id={segment.id} className={`minimax-ref-grid ${slotCount === 0 ? "is-disabled" : ""} ${segment.id === selected?.id ? "active" : ""} ${storyboardLaneVisible ? "has-storyboard-row" : ""}`} style={{ left: `${left}px`, width: `${width}px`, ...(storyboardLaneVisible ? { top: "70px" } : {}), ...(slotCount > 0 && slotCount <= 3 ? { gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))`, gridTemplateRows: "minmax(0, 1fr)" } : {}) }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>{slotCount === 0 ? <span className="minimax-ref-empty-label">无需参考素材</span> : Array.from({ length: slotCount }).map((_, index) => {
             const entry = refs[index];
             const ref = entry?.ref;
             const refIndex = entry?.index ?? allRefs.length;
@@ -375,20 +376,21 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         if (!supportsStoryboardTrack(segment)) return null;
         const enabled = isStoryboardModeEnabled(segment);
         const items = storyboardTrackItems(segment);
+        const hasStoryboards = items.length > 0;
         const left = Number(segment.start || 0) * 100;
         const width = Math.max(50, Number(segment.duration || 1) * 100);
         const projected = items.map((item, index) => ({ ...item, duration: storyboardResize?.segmentId === segment.id && storyboardResize.index === index ? storyboardResize.leftDuration : storyboardResize?.segmentId === segment.id && storyboardResize.index + 1 === index ? items[index - 1].duration + items[index].duration - storyboardResize.leftDuration : item.duration }));
         let cursor = 0;
         return <>
-            <button
+            {hasStoryboards ? <button
                 type="button"
                 className={`minimax-storyboard-mode-toggle ${enabled ? "is-on" : ""}`}
                 style={{ left: `${left + 5}px` }}
                 aria-pressed={enabled}
                 title={enabled ? "关闭当前 Clip 的分镜时间轨" : "开启当前 Clip 的分镜时间轨"}
                 onClick={(event) => { event.stopPropagation(); onSegmentChange(setStoryboardMode(segment, !enabled)); }}
-            >{enabled ? "分镜轨 · 开" : "分镜轨 · 关"}</button>
-            {!enabled ? null : <div className="minimax-storyboard-lane" data-segment-id={segment.id} style={{ left: `${left}px`, width: `${width}px` }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>
+            >{enabled ? "分镜轨 · 开" : "分镜轨 · 关"}</button> : null}
+            {enabled || !hasStoryboards ? <div className="minimax-storyboard-lane" data-segment-id={segment.id} style={{ left: `${left}px`, width: `${width}px` }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>
                 {projected.length ? projected.map((item, index) => {
                     const start = cursor;
                     cursor += item.duration;
@@ -415,15 +417,16 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
                     >
                         <div className="minimax-storyboard-card-visual">
                             <img src={item.ref.url} alt={item.ref.name} draggable={false} />
-                            <span className="minimax-storyboard-time">{item.duration.toFixed(2)}s</span>
-                            <button type="button" className="minimax-storyboard-role" title="编辑分镜引用职责" onClick={(event) => { event.stopPropagation(); onEditRef(segment.id, item.ref); }}>分镜图</button>
-                            <button type="button" className="minimax-storyboard-remove" title="移除分镜图" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, item.ref); }}>×</button>
+                            {index > 0 ? <span className="minimax-storyboard-time" title="切镜点 · 前序分镜累计时长">{start.toFixed(2)}s</span> : null}
+                            <button type="button" className="minimax-storyboard-role" title="编辑分镜引用职责" onClick={(event) => { event.stopPropagation(); onEditRef(segment.id, item.ref); }} onDoubleClick={(event) => event.stopPropagation()}>分镜图</button>
+                            <button type="button" className="minimax-storyboard-remove" title="移除分镜图" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, item.ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button>
                             {index === projected.length - 1 ? <button
                                 type="button"
                                 className="minimax-storyboard-add-half"
                                 disabled={!canAdd}
                                 title={canAdd ? "选择画布图片，并与末张分镜平分时长" : "末张时长不足 1 秒，无法新增分镜"}
                                 onClick={(event) => { event.stopPropagation(); onRequestPickStoryboard(segment.id); }}
+                                onDoubleClick={(event) => event.stopPropagation()}
                             ><span>＋</span><small>新增</small></button> : null}
                         </div>
                         {index < projected.length - 1 ? <div
@@ -454,12 +457,13 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
                                 onSegmentChange(setStoryboardBoundary(segment, index, drag.leftDuration));
                             }}
                             onPointerCancel={() => { storyboardResizeRef.current = null; setStoryboardResize(null); }}
+                            onDoubleClick={(event) => event.stopPropagation()}
                         /> : null}
                     </div>;
-                }) : <button type="button" className="minimax-storyboard-first-add" onClick={(event) => { event.stopPropagation(); onRequestPickStoryboard(segment.id); }}>
+                }) : <button type="button" className={`minimax-storyboard-first-add ${pickingKey === `${segment.id}:-1` ? "is-picking" : ""}`} title={pickingKey === `${segment.id}:-1` ? "在画布上点选分镜图（Esc 取消）" : "选择画布图片作为首张分镜"} onClick={(event) => { event.stopPropagation(); onRequestPickStoryboard(segment.id); }} onDoubleClick={(event) => event.stopPropagation()}>
                     <H3Icon name="plus" /><span>选择首张分镜图 · 占满 {Number(segment.duration || 1).toFixed(2)} 秒</span>
                 </button>}
-            </div>}
+            </div> : null}
         </>;
     };
     return <div className="minimax-edit-timeline">

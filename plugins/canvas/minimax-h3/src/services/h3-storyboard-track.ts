@@ -73,34 +73,229 @@ export function reorderStoryboardRefs(segment: H3Segment, sourceBindingId: strin
     return withSegmentRefs(segment, nextRefs);
 }
 
-export function replaceStoryboardPromptSection(prompt: string, content: string) {
-    const headerPattern = /^storyboard_timeline:[ \t]*(?:\r?\n)?/mi;
-    const header = headerPattern.exec(prompt);
-    const sectionEndPattern = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description|storyboard_timeline):/mi;
-    if (!header) return content.trim() ? `${prompt.trimEnd()}${prompt.trim() ? "\n\n" : ""}storyboard_timeline:\n${content.trim()}` : prompt;
+const PROMPT_SECTION_END = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description|storyboard_timeline):/mi;
 
+function removeLegacyTimelineSection(prompt: string) {
+    const header = /^storyboard_timeline:[ \t]*(?:\r?\n)?/mi.exec(prompt);
+    if (!header) return prompt;
     const bodyStart = header.index + header[0].length;
     const remainder = prompt.slice(bodyStart);
-    const next = sectionEndPattern.exec(remainder);
-    const bodyEnd = bodyStart + (next?.index ?? remainder.length);
-    const before = prompt.slice(0, header.index).replace(/(?:\r?\n){2,}$/, "\n\n");
-    const after = prompt.slice(bodyEnd).replace(/^(?:\r?\n)+/, "");
-    if (!content.trim()) return `${before}${after ? `${before && !before.endsWith("\n\n") ? "\n" : ""}${after}` : ""}`.replace(/^\n+/, "").trimEnd();
-    return `${before}storyboard_timeline:\n${content.trim()}${after ? `\n\n${after}` : ""}`;
+    const next = PROMPT_SECTION_END.exec(remainder);
+    const after = prompt.slice(bodyStart + (next?.index ?? remainder.length)).replace(/^(?:\r?\n)+/, "");
+    const before = prompt.slice(0, header.index).replace(/(?:\r?\n){2,}$/, "\n\n").trimEnd();
+    return `${before}${before && after ? "\n\n" : ""}${after}`;
 }
 
-export function storyboardPromptBlock(segment: H3Segment) {
+function readPromptSection(prompt: string, section: string) {
+    const header = new RegExp(`^${section}:[ \\t]*(?:\\r?\\n)?`, "mi").exec(prompt);
+    if (!header) return "";
+    const bodyStart = header.index + header[0].length;
+    const remainder = prompt.slice(bodyStart);
+    const next = PROMPT_SECTION_END.exec(remainder);
+    return remainder.slice(0, next?.index ?? remainder.length).trim();
+}
+
+function replacePromptSection(prompt: string, section: string, content: string, mode: string) {
+    const headerPattern = new RegExp(`^${section}:[ \\t]*(?:\\r?\\n)?`, "mi");
+    const header = headerPattern.exec(prompt);
+    if (!header) {
+        if (!content.trim()) return prompt;
+        const order = mode === "ref2va"
+            ? ["subject_definitions", "summary", "retention_analysis", "detailed_description", "overall_soundscape", "non_diegetic_music"]
+            : ["integrated_multimodal_description", "overall_soundscape", "non_diegetic_music"];
+        const nextSection = order.slice(order.indexOf(section) + 1).find((name) => new RegExp(`^${name}:[ \\t]*`, "mi").test(prompt));
+        const next = nextSection ? new RegExp(`^${nextSection}:[ \\t]*`, "mi").exec(prompt) : null;
+        const text = `${section}:\n${content.trim()}`;
+        return next ? `${prompt.slice(0, next.index).trimEnd()}\n\n${text}\n\n${prompt.slice(next.index)}` : `${prompt.trimEnd()}${prompt.trim() ? "\n\n" : ""}${text}`;
+    }
+    const bodyStart = header.index + header[0].length;
+    const remainder = prompt.slice(bodyStart);
+    const next = PROMPT_SECTION_END.exec(remainder);
+    const suffix = prompt.slice(bodyStart + (next?.index ?? remainder.length)).replace(/^(?:\r?\n)+/, "");
+    return `${prompt.slice(0, header.index)}${section}:\n${content.trimEnd()}${suffix ? `\n\n${suffix}` : ""}`;
+}
+
+type PromptShot = { body: string; bindingId?: string; managed: boolean };
+
+function promptShotsOf(content: string, storyboardIds: Set<string>, imageRefs: H3Ref[]): { opening: string; shots: PromptShot[] } {
+    const markers = [...content.matchAll(/\[Shot\s+\d+\]/giu)];
+    if (!markers.length) return { opening: content.trim(), shots: [] };
+    const shots = markers.map((marker, index) => {
+        const start = marker.index! + marker[0].length;
+        const body = content.slice(start, markers[index + 1]?.index ?? content.length).trim();
+        const refs = [...body.matchAll(/\{\{ref:([^{}]+)\}\}/gu)].map((match) => match[1]);
+        const semanticRef = body.match(/Use the approved .+? from \{\{ref:([^{}]+)\}\} as (?:the visual anchor|the target composition reference) for this shot\./iu)?.[1];
+        const pictureNumber = body.match(/<Picture\s+(\d+)>/iu)?.[1];
+        const legacyBinding = pictureNumber ? imageRefs[Number(pictureNumber) - 1]?.bindingId : undefined;
+        const bindingId = refs.find((id) => storyboardIds.has(id)) || semanticRef || (legacyBinding && storyboardIds.has(legacyBinding) ? legacyBinding : undefined);
+        return { body, bindingId, managed: Boolean(bindingId || semanticRef) };
+    });
+    return { opening: content.slice(0, markers[0].index).trim(), shots };
+}
+
+function stripShotTime(body: string) {
+    return body
+        .replace(/^At\s+\d{1,2}:\d{2}(?:\.\d{1,3})?\s*,?\s*/iu, "")
+        .replace(/^\d{1,2}:\d{2}(?:\.\d{1,3})?\s*[:：]\s*/u, "")
+        .trim();
+}
+
+function canonicalStoryboardCue(bindingId: string) {
+    return `Use the approved storyboard frame from {{ref:${bindingId}}} as the target composition reference for this shot.`;
+}
+
+function formatShot(index: number, start: number | undefined, body: string) {
+    const time = index > 0 && start !== undefined ? ` At ${formatStoryboardTime(start)},` : "";
+    return `[Shot ${index + 1}]${time}${body ? ` ${body.trim()}` : ""}`;
+}
+
+const SHOT_TRANSITION_LEADIN = {
+    continuous: "the shot continues",
+    cut: "the shot hard-cuts",
+    dissolve: "the shot cross-dissolves",
+    fade_black: "the shot fades out to black, then fades in",
+} as const;
+
+function transitionTypeOf(value: string): keyof typeof SHOT_TRANSITION_LEADIN {
+    if (/continuous|continues|uninterrupted|no cut/iu.test(value)) return "continuous";
+    if (/cross[- ]dissolve|dissolve/iu.test(value)) return "dissolve";
+    if (/fade/iu.test(value)) return "fade_black";
+    return "cut";
+}
+
+function normalizeTransition(body: string, hasPrecedingShot: boolean) {
+    let text = body.trim();
+    let transitionType: keyof typeof SHOT_TRANSITION_LEADIN | undefined;
+    const cue = text.match(/Use the approved .+? from \{\{ref:[^{}]+\}\} as (?:the visual anchor|the target composition reference) for this shot\./iu)?.[0] || "";
+    if (cue) text = text.replace(cue, " ").replace(/\s+/gu, " ").trim();
+    const generated = text.match(/The shot transitions to the approved .+? from \{\{ref:[^{}]+\}\} using a (hard cut|cross-dissolve|fade|wipe|match cut)\./iu);
+    if (generated) {
+        transitionType = transitionTypeOf(generated[1]);
+        text = text.replace(generated[0], " ").replace(/\s+/gu, " ").trim();
+    }
+    const bracket = text.match(/^\[Transition:\s*([^\]]+)\]\s*/iu);
+    if (bracket) {
+        transitionType = transitionTypeOf(bracket[1]);
+        text = text.slice(bracket[0].length);
+    } else {
+        const natural = [
+            [/^the shot hard-cuts[.,]?\s*/iu, "cut"],
+            [/^the shot cross-dissolves[.,]?\s*/iu, "dissolve"],
+            [/^the shot fades out to black, then fades in[.,]?\s*/iu, "fade_black"],
+            [/^the shot continues[.,]?\s*/iu, "continuous"],
+        ] as const;
+        const match = natural.find(([pattern]) => pattern.test(text));
+        if (match) {
+            transitionType = match[1];
+            text = text.replace(match[0], "");
+        } else {
+            const legacy = [
+                [/^(?:the camera|the shot) cuts to\s*/iu, "cut"],
+                [/^the shot (?:transitions|changes|switches) to\s*/iu, "cut"],
+                [/^(?:the (?:shot|image) )?cross[- ]dissolves? to\s*/iu, "dissolve"],
+                [/^(?:the (?:shot|image) )?fades? (?:to|into)\s*/iu, "fade_black"],
+            ] as const;
+            const old = legacy.find(([pattern]) => pattern.test(text));
+            if (old) {
+                transitionType ||= old[1];
+                text = text.replace(old[0], "");
+            }
+        }
+    }
+    // 自愈：旧版解析曾把 lead/cue 成对泄进正文，这里循环剥掉残余副本，避免每次同步继续叠加。
+    for (;;) {
+        const residualCue = text.match(/^Use the approved .+? from \{\{ref:[^{}]+\}\} as (?:the visual anchor|the target composition reference) for this shot\.\s*/iu);
+        if (residualCue) {
+            text = text.slice(residualCue[0].length).replace(/\s+/gu, " ").trim();
+            continue;
+        }
+        const residualLead = text.match(/^the shot (?:hard-cuts|cross-dissolves|continues|fades out to black, then fades in)[.,]?\s*/iu);
+        if (residualLead) {
+            text = text.slice(residualLead[0].length).replace(/\s+/gu, " ").trim();
+            continue;
+        }
+        break;
+    }
+    return [
+        hasPrecedingShot ? `${SHOT_TRANSITION_LEADIN[transitionType || "cut"]}.` : "",
+        cue,
+        text.trim(),
+    ].filter(Boolean).join(" ");
+}
+
+function syncPromptShots(content: string, segment: H3Segment, activeItems: ReturnType<typeof storyboardTrackItems>) {
     const refs = refsForSegment(segment);
-    const items = storyboardTrackItems(segment);
-    const pictureNumbers = new Map<string, number>();
-    refs.filter((ref) => ref.type === "image").forEach((ref, index) => { if (ref.bindingId) pictureNumbers.set(ref.bindingId, index + 1); });
-    return items.map(({ ref, start, end }) => {
-        const bindingId = ref.bindingId;
-        if (!bindingId) return "";
-        const pictureNumber = pictureNumbers.get(bindingId) || 1;
-        const name = ref.name ? ` · ${ref.name.replace(/[\r\n]+/g, " ")}` : "";
-        return `${formatStoryboardTime(start)}–${formatStoryboardTime(end)} {{ref:${bindingId}}} <Picture ${pictureNumber}>${name}`;
-    }).filter(Boolean).join("\n");
+    const storyboardRefs = storyboardRefsForSegment(segment);
+    const storyboardIds = new Set(storyboardRefs.flatMap((ref) => ref.bindingId ? [ref.bindingId] : []));
+    const parsed = promptShotsOf(content, storyboardIds, refs.filter((ref) => ref.type === "image"));
+    if (!activeItems.length && !parsed.shots.some((shot) => shot.managed)) return content;
+
+    const activeIds = new Set(activeItems.flatMap((item) => item.ref.bindingId ? [item.ref.bindingId] : []));
+    const oldShots = new Map<string, PromptShot>();
+    const assigned = new Set<PromptShot>();
+    for (const shot of parsed.shots) {
+        if (shot.bindingId && activeIds.has(shot.bindingId) && !oldShots.has(shot.bindingId)) {
+            oldShots.set(shot.bindingId, shot);
+            assigned.add(shot);
+        }
+    }
+    // 老提示词常有逐镜描述，但没有绑定稳定引用 ID；首次开启分镜轨时按顺序补齐图片绑定。
+    const unboundShots = parsed.shots.filter((shot) => !assigned.has(shot) && !shot.managed && !shot.bindingId);
+    let unboundIndex = 0;
+    for (const item of activeItems) {
+        const bindingId = item.ref.bindingId;
+        if (!bindingId || oldShots.has(bindingId)) continue;
+        const shot = unboundShots[unboundIndex++];
+        if (!shot) break;
+        oldShots.set(bindingId, shot);
+        assigned.add(shot);
+    }
+
+    const tracked = activeItems.flatMap((item, index) => {
+        const bindingId = item.ref.bindingId;
+        if (!bindingId) return [];
+        const existing = oldShots.get(bindingId);
+        let body = existing ? stripShotTime(existing.body) : "";
+        if (existing) {
+            const pictureIndex = refs.filter((ref) => ref.type === "image").findIndex((ref) => ref.bindingId === bindingId);
+            if (pictureIndex >= 0) body = body.replace(new RegExp(`<Picture\\s+${pictureIndex + 1}>`, "iu"), `{{ref:${bindingId}}}`);
+        }
+        const cuePattern = new RegExp(`Use the approved .+? from \\{\\{ref:${escapeRegExp(bindingId)}\\}\\} as (?:the visual anchor|the target composition reference) for this shot\\.`, "iu");
+        if (!cuePattern.test(body)) body = [canonicalStoryboardCue(bindingId), body].filter(Boolean).join(" ");
+        body = normalizeTransition(body, index > 0);
+        return [formatShot(index, item.start, body)];
+    });
+
+    const remaining = parsed.shots.filter((shot) => !assigned.has(shot)).flatMap((shot, index) => {
+        if (!shot.managed) return [shot.body];
+        const semanticRef = shot.body.match(/Use the approved .+? from \{\{ref:([^{}]+)\}\} as (?:the visual anchor|the target composition reference) for this shot\./iu)?.[1];
+        const bindingId = semanticRef || shot.bindingId;
+        const stillExists = bindingId && refs.some((ref) => ref.bindingId === bindingId);
+        if (bindingId && storyboardIds.has(bindingId)) {
+            let body = stripShotTime(shot.body);
+            const pictureIndex = refs.filter((ref) => ref.type === "image").findIndex((ref) => ref.bindingId === bindingId);
+            if (pictureIndex >= 0) body = body.replace(new RegExp(`<Picture\\s+${pictureIndex + 1}>`, "iu"), `{{ref:${bindingId}}}`);
+            const cuePattern = new RegExp(`Use the approved .+? from \\{\\{ref:${escapeRegExp(bindingId)}\\}\\} as (?:the visual anchor|the target composition reference) for this shot\\.`, "iu");
+            if (!cuePattern.test(body)) body = [canonicalStoryboardCue(bindingId), body].filter(Boolean).join(" ");
+            return [normalizeTransition(body, index > 0)];
+        }
+        let body = stripShotTime(shot.body);
+        if (semanticRef) {
+            const escaped = escapeRegExp(semanticRef);
+            const ordinaryReference = stillExists ? `Use {{ref:${semanticRef}}} as a visual reference for this shot.` : "";
+            body = body.replace(new RegExp(`Use the approved .+? from \\{\\{ref:${escaped}\\}\\} as (?:the visual anchor|the target composition reference) for this shot\\.`, "iu"), ordinaryReference);
+            if (!stillExists) body = body.replace(new RegExp(`\\{\\{ref:${escaped}\\}\\}`, "gu"), "");
+        }
+        body = normalizeTransition(body.replace(/\s+/gu, " ").trim(), index > 0);
+        return body ? [body] : [];
+    });
+
+    const shotBodies = [...tracked, ...remaining.map((body, index) => formatShot(tracked.length + index, undefined, body))];
+    return [parsed.opening, shotBodies.join("\n")].filter(Boolean).join("\n\n");
+}
+
+function escapeRegExp(value: string) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Segment) {
@@ -111,8 +306,14 @@ export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Se
         await document.flush();
         const snapshot = document.getSnapshot();
         if (!snapshot.ready || snapshot.blocked) return false;
+        const prompt = removeLegacyTimelineSection(snapshot.text);
         const enabled = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment) && storyboardRefsForSegment(segment).length > 0;
-        const next = replaceStoryboardPromptSection(snapshot.text, enabled ? storyboardPromptBlock(segment) : "");
+        const mode = String(segment.mode || segment.taskMode || "ref2va");
+        const section = mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description";
+        const sectionText = readPromptSection(prompt, section);
+        const activeItems = enabled ? storyboardTrackItems(segment) : [];
+        const syncedSection = syncPromptShots(sectionText, segment, activeItems);
+        const next = replacePromptSection(prompt, section, syncedSection, mode);
         if (next === snapshot.text) return true;
         return await ctx.replaceText(target, document.getDocumentId(), snapshot.text, next);
     } catch (error) {
@@ -122,9 +323,11 @@ export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Se
 }
 
 function formatStoryboardTime(value: number) {
-    const seconds = Math.max(0, value);
-    const minutes = Math.floor(seconds / 60);
-    return `${String(minutes).padStart(2, "0")}:${(seconds % 60).toFixed(2).padStart(5, "0")}`;
+    const totalMilliseconds = Math.round(Math.max(0, value) * 1000);
+    const minutes = Math.floor(totalMilliseconds / 60000);
+    const seconds = Math.floor((totalMilliseconds % 60000) / 1000);
+    const milliseconds = totalMilliseconds % 1000;
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(milliseconds).padStart(3, "0")}`;
 }
 
 export type { H3Ref };

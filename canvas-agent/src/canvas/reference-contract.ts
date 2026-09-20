@@ -250,7 +250,7 @@ function bindLiteralSubjectsToPictures(
     }
     if (!sources.size) return prompt;
 
-    const sectionPattern = /(^subject_definitions\s*[:：]\s*\r?\n)([\s\S]*?)(?=^\s*(?:summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music)\s*[:：]|$(?![\s\S]))/im;
+    const sectionPattern = /(^subject_definitions\s*[:：]\s*\r?\n)([\s\S]*?)(?=^\s*(?:summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|storyboard_timeline)\s*[:：]|$(?![\s\S]))/im;
     const section = sectionPattern.exec(prompt);
     if (!section) return prompt;
     const labels = [...new Set([...section[2].matchAll(/<Subject\s+(\d+)>/g)].map((match) => Number(match[1])))];

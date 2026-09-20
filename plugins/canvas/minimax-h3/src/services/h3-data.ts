@@ -83,7 +83,7 @@ function reconcileStoryboardTrack(previous: H3Segment, next: H3Segment): H3Segme
     const nextRefs = refsForSegment(next);
     const oldBoards = storyboardRefs(oldRefs);
     const boards = storyboardRefs(nextRefs);
-    if (!boards.length) return { ...next, storyboardModeEnabled: oldBoards.length ? false : next.storyboardModeEnabled ?? previous.storyboardModeEnabled, storyboardDurations: {} };
+    if (!boards.length) return { ...next, storyboardModeEnabled: oldBoards.length ? undefined : next.storyboardModeEnabled ?? previous.storyboardModeEnabled, storyboardDurations: {} };
 
     const durations: Record<string, number> = { ...(next.storyboardDurations || previous.storyboardDurations || {}) };
     const oldIds = new Set(oldBoards.map((ref) => ref.bindingId).filter((id): id is string => Boolean(id)));

@@ -109,7 +109,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                 />
             ) : null}
             <CanvasCollaborativeText
-                projectId={projectId} target={target} chips
+                projectId={projectId} target={target} chips dialogue
                 references={mentionReferences}
                 editorRef={editorRef}
                 onSubmit={submit}
@@ -182,7 +182,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
                     <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={historyReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} onCharacterSelectionChange={onCharacterReferenceChange} />
                     <CanvasCollaborativeText
-                        projectId={projectId} target={target} chips
+                        projectId={projectId} target={target} chips dialogue
                         references={mentionReferences}
                         className="thin-scrollbar h-[52dvh] min-h-80 w-full cursor-text overflow-y-auto rounded-xl border p-4 text-[15px] leading-6 outline-none"
                         style={{ background: "transparent", borderColor: theme.toolbar.border, color: theme.node.text }}

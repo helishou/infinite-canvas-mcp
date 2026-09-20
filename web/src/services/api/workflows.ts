@@ -1,6 +1,6 @@
 // ComfyUI 工作流管理：拉取 / 上传 / 删除 / 详情 / 运行
 // 后端 API：backend/src/workflows/routes.ts
-import { request } from "@/services/backend-api";
+import { request, fetchBackendTask } from "@/services/backend-api";
 
 export type WorkflowItem = {
     name: string;
@@ -117,13 +117,14 @@ export function fetchWorkflowComboOptions(name: string): Promise<{ options: Reco
     return request<{ options: Record<string, Record<string, string[]>> }>("GET", `/api/workflows/${encodeURIComponent(name)}/combo-options`);
 }
 
-export function runWorkflow(name: string, fields: WorkflowRunFields, config?: WorkflowConfig, clientTaskId?: string): Promise<WorkflowRunResult> {
+export function runWorkflow(name: string, fields: WorkflowRunFields, config?: WorkflowConfig, clientTaskId?: string): Promise<{ taskId: string }> {
+    // 后端 /run 现在后台执行、立即返回 taskId；前端用 pollWorkflowTask 轮询结果。
     // config 是 WorkflowExecutor.run 第一个会用到的字段（processImageFields 读
     // config.fields），前端如果漏传会让 executor 立刻崩
     // "Cannot read properties of undefined (reading 'fields')"。
     // 用户后续在 workflows 页面配完字段后，前端传真 config 让
     // processImageFields 能把 image 类型的 dataURL 上传到 ComfyUI。
-    return request<WorkflowRunResult>("POST", `/api/workflows/${encodeURIComponent(name)}/run`, {
+    return request<{ taskId: string }>("POST", `/api/workflows/${encodeURIComponent(name)}/run`, {
         fields,
         clientTaskId,
         config: config ?? {
@@ -134,4 +135,37 @@ export function runWorkflow(name: string, fields: WorkflowRunFields, config?: Wo
             fields: [],
         },
     });
+}
+
+/**
+ * 轮询工作流任务直到终态，返回与旧 runWorkflow 兼容的 WorkflowRunResult。
+ * 用于替代同步长连接：run 端点返回 taskId 后，前端据此轮询任务状态拿媒体结果，
+ * 避免长连接被中断导致 "Failed to fetch"。
+ */
+export async function pollWorkflowTask(
+    taskId: string,
+    options?: { signal?: AbortSignal; intervalMs?: number; timeoutMs?: number },
+): Promise<WorkflowRunResult> {
+    const interval = options?.intervalMs ?? 1500;
+    const timeout = options?.timeoutMs ?? 30 * 60 * 1000;
+    const startedAt = Date.now();
+    for (;;) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        if (Date.now() - startedAt > timeout) throw new Error("工作流任务轮询超时（30 分钟）");
+        const res = await fetchBackendTask(taskId, options?.signal);
+        const task = res.task;
+        if (!task) throw new Error("工作流任务不存在");
+        if (task.status === "succeeded") {
+            const media = (task.result?.media ?? task.result?.images ?? []).map((m) => ({
+                url: m.url,
+                storageKey: m.storageKey,
+                mimeType: m.mimeType,
+                filename: m.filename,
+            }));
+            return { taskId, media: media as WorkflowRunResult["media"], status: { status_str: "success", completed: true } };
+        }
+        if (task.status === "failed") throw new Error(task.error || "工作流执行失败");
+        if (task.status === "cancelled") throw new Error("任务已取消");
+        await new Promise((resolve) => setTimeout(resolve, interval));
+    }
 }

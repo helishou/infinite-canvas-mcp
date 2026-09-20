@@ -1,4 +1,5 @@
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { Image } from "antd";
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { Decoration, EditorView, keymap, placeholder as placeholderExtension, ViewPlugin, WidgetType, type DecorationSet } from "@codemirror/view";
@@ -9,8 +10,308 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { canvasTextKey } from "@/lib/canvas/collaborative-text-session";
 import { getCanvasTextSession } from "@/services/api/canvas-text";
 import { useThemeStore } from "@/stores/use-theme-store";
-import type { CanvasTextEditorProps, CanvasTextReference } from "@/types/canvas-plugin";
+import type { CanvasSpeakerOption, CanvasTextEditorProps, CanvasTextReference } from "@/types/canvas-plugin";
 import { canvasTextPresenceExtension } from "./canvas-text-presence-extension";
+
+const DIALOGUE_PATTERN = /(?:\(S\d\)\s*)?<d>(?:\[[^\]]+\])?[\s\S]*?<\/d>/g;
+const SPEAKER_OPTIONS = ["S1", "S2", "S3", "S4", "S5", "S6"];
+const PROMPT_LINE_ACCENTS = ["#38bdf8", "#34d399", "#c084fc", "#fbbf24", "#fb7185", "#2dd4bf", "#a3e635", "#818cf8"];
+
+function detectDialogueLanguage(text: string) {
+    return /[\u4e00-\u9fff]/.test(text) ? "Chinese" : "English";
+}
+
+function wrapSelectionAsDialogue(view: EditorView) {
+    const { from, to } = view.state.selection.main;
+    const text = view.state.doc.sliceString(from, to).trim();
+    if (!text) return;
+    const insert = `<d>[${detectDialogueLanguage(text)}] ${text}</d>`;
+    view.dispatch({ changes: { from, to, insert }, selection: { anchor: from + insert.length }, userEvent: "input" });
+    view.focus();
+}
+
+function enclosingDialogueRange(doc: string, from: number, to: number) {
+    DIALOGUE_PATTERN.lastIndex = 0;
+    for (const match of doc.matchAll(DIALOGUE_PATTERN)) {
+        const start = match.index!, end = start + match[0].length;
+        if (from >= start && to <= end) {
+            const prefix = /^\(S\d\)\s*/i.exec(match[0]);
+            return {
+                from: start, to: end,
+                inner: match[0].replace(/^\(S\d\)\s*/i, "").slice(3, -4).replace(/^\[[^\]]+\]\s*/, ""),
+                speaker: prefix ? { from: start, to: start + prefix[0].length, id: prefix[0].slice(1, 3) } : null,
+            };
+        }
+    }
+    return null;
+}
+
+function unwrapDialogue(view: EditorView, range: { from: number; to: number; inner: string }) {
+    view.dispatch({ changes: { from: range.from, to: range.to, insert: range.inner }, selection: { anchor: range.from + range.inner.length }, userEvent: "input" });
+    view.focus();
+}
+
+function promptLineMapExtension(panelColor: string, markerTargets?: readonly string[]) {
+    const targetLines = markerTargets ? new Set(markerTargets) : null;
+    return ViewPlugin.fromClass(class {
+        decorations: DecorationSet = Decoration.none;
+        private readonly rail: HTMLDivElement;
+        private readonly resizeObserver: ResizeObserver | null;
+        private markerFrame = 0;
+
+        constructor(private readonly view: EditorView) {
+            this.rail = document.createElement("div");
+            this.rail.className = "cm-canvas-line-marker-rail";
+            this.rail.setAttribute("role", "group");
+            this.rail.setAttribute("aria-label", "提示词行位置");
+            this.view.dom.classList.add("cm-canvas-line-map");
+            this.view.dom.append(this.rail);
+            this.resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(this.scheduleMarkers);
+            this.resizeObserver?.observe(view.dom);
+            this.resizeObserver?.observe(view.scrollDOM);
+            this.resizeObserver?.observe(view.contentDOM);
+            this.view.scrollDOM.addEventListener("scroll", this.scheduleMarkers, { passive: true });
+            this.updateDecorations();
+            this.scheduleMarkers();
+        }
+
+        update(update: import("@codemirror/view").ViewUpdate) {
+            if (update.docChanged) this.updateDecorations();
+            if (update.docChanged || update.geometryChanged || update.viewportChanged) this.scheduleMarkers();
+        }
+
+        docViewUpdate() { this.scheduleMarkers(); }
+
+        private updateDecorations() {
+            const ranges = [];
+            for (let number = 1; number <= this.view.state.doc.lines; number += 1) {
+                const line = this.view.state.doc.line(number);
+                if (!line.text.trim()) continue;
+                const accent = PROMPT_LINE_ACCENTS[(number - 1) % PROMPT_LINE_ACCENTS.length];
+                ranges.push(Decoration.line({
+                    attributes: {
+                        class: "cm-canvas-prompt-line",
+                        style: `background-color:color-mix(in srgb,${panelColor} 87%,${accent} 13%)`,
+                    },
+                }).range(line.from));
+            }
+            this.decorations = Decoration.set(ranges, true);
+        }
+
+        private scheduleMarkers = () => {
+            if (this.markerFrame) cancelAnimationFrame(this.markerFrame);
+            this.markerFrame = requestAnimationFrame(() => {
+                this.markerFrame = 0;
+                this.renderMarkers();
+            });
+        };
+
+        private renderMarkers() {
+            const editorRect = this.view.dom.getBoundingClientRect();
+            const scrollerRect = this.view.scrollDOM.getBoundingClientRect();
+            const height = this.view.scrollDOM.clientHeight;
+            const documentLength = Math.max(1, this.view.state.doc.length);
+            const markerInset = 5;
+            this.rail.style.top = `${(scrollerRect.top - editorRect.top) / this.view.scaleY}px`;
+            this.rail.style.height = `${height}px`;
+            this.rail.style.bottom = "auto";
+            const fragment = document.createDocumentFragment();
+            for (let number = 1; number <= this.view.state.doc.lines; number += 1) {
+                const line = this.view.state.doc.line(number);
+                const lineText = line.text.trim();
+                if (!lineText || (targetLines && !targetLines.has(lineText))) continue;
+                const accentIndex = (number - 1) % PROMPT_LINE_ACCENTS.length;
+                const top = markerInset + line.from / documentLength * Math.max(0, height - markerInset * 2);
+                const marker = document.createElement("button");
+                marker.type = "button";
+                marker.className = "cm-canvas-line-marker";
+                marker.style.top = `${top}px`;
+                marker.style.backgroundColor = PROMPT_LINE_ACCENTS[accentIndex];
+                const label = targetLines ? lineText.replace(/:$/, "") : `第 ${number} 行`;
+                marker.title = `跳转到 ${label}`;
+                marker.setAttribute("aria-label", `跳转到 ${label}`);
+                marker.addEventListener("mousedown", (event) => event.preventDefault());
+                marker.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: "center" }) });
+                });
+                fragment.append(marker);
+            }
+            this.rail.replaceChildren(fragment);
+        }
+
+        destroy() {
+            this.resizeObserver?.disconnect();
+            this.view.scrollDOM.removeEventListener("scroll", this.scheduleMarkers);
+            if (this.markerFrame) cancelAnimationFrame(this.markerFrame);
+            this.rail.remove();
+            this.view.dom.classList.remove("cm-canvas-line-map");
+        }
+    }, { decorations: (plugin) => plugin.decorations });
+}
+
+type DialogueMenuOption = { label: string; previewUrl?: string; apply: () => void };
+type DialogueMenuState = { x: number; y: number; options: DialogueMenuOption[] };
+type SpeakerRosterRef = { current: import("@/types/canvas-plugin").CanvasSpeakerOption[] };
+
+/** 说话人菜单选项：名册优先（显示「Sx · 角色名」+ 头像），无名册时回退 S1–S6。 */
+function speakerMenuOptions(
+    view: EditorView,
+    speakers: CanvasSpeakerOption[],
+    insertAt: number,
+    replaceRange: { from: number; to: number } | null,
+    currentId: string | null,
+): DialogueMenuOption[] {
+    const roster: CanvasSpeakerOption[] = speakers.length ? speakers : SPEAKER_OPTIONS.map((id) => ({ id }));
+    return roster
+        .filter((speaker) => speaker.id !== currentId)
+        .map((speaker) => ({
+            label: speaker.name ? `${speaker.id} · ${speaker.name}` : speaker.id,
+            previewUrl: speaker.previewUrl,
+            apply: () => {
+                const insert = `(${speaker.id}) `;
+                if (replaceRange) view.dispatch({ changes: { from: replaceRange.from, to: replaceRange.to, insert }, userEvent: "input" });
+                else view.dispatch({ changes: { from: insertAt, to: insertAt, insert }, userEvent: "input" });
+                view.focus();
+            },
+        }));
+}
+
+class SpeakerBadge extends WidgetType {
+    constructor(readonly id: string, readonly from: number, readonly to: number, readonly open: (x: number, y: number, from: number, to: number) => void) { super(); }
+    eq(other: SpeakerBadge) { return other.id === this.id && other.from === this.from && other.to === this.to; }
+    toDOM() {
+        const span = document.createElement("span");
+        span.className = "cm-canvas-speaker";
+        span.textContent = this.id;
+        span.title = "点击切换说话人";
+        span.addEventListener("click", (event) => {
+            event.preventDefault(); event.stopPropagation();
+            const rect = span.getBoundingClientRect();
+            this.open(rect.left, rect.bottom + 4, this.from, this.to);
+        });
+        return span;
+    }
+}
+
+/** 无说话人台词前的占位徽标：不占文档文本，点击即可绑定说话人。 */
+class SpeakerGhost extends WidgetType {
+    constructor(readonly at: number, readonly open: (x: number, y: number) => void) { super(); }
+    eq(other: SpeakerGhost) { return other.at === this.at; }
+    toDOM() {
+        const span = document.createElement("span");
+        span.className = "cm-canvas-speaker cm-canvas-speaker-ghost";
+        span.textContent = "说话人";
+        span.title = "点击绑定说话人";
+        span.addEventListener("click", (event) => {
+            event.preventDefault(); event.stopPropagation();
+            const rect = span.getBoundingClientRect();
+            this.open(rect.left, rect.bottom + 4);
+        });
+        return span;
+    }
+}
+
+function dialogueHighlightExtension(openMenu: (menu: DialogueMenuState) => void, speakersRef: SpeakerRosterRef) {
+    const build = (view: EditorView) => {
+        const ranges = [];
+        const atomic = [];
+        for (const { from, to } of view.visibleRanges) {
+            const text = view.state.doc.sliceString(from, to);
+            DIALOGUE_PATTERN.lastIndex = 0;
+            for (const match of text.matchAll(DIALOGUE_PATTERN)) {
+                const start = from + match.index!, end = start + match[0].length;
+                const prefix = /^\(S\d\)\s*/i.exec(match[0]);
+                if (prefix) {
+                    const badgeEnd = start + prefix[0].length;
+                    const id = prefix[0].slice(1, 3);
+                    const open = (x: number, y: number, bFrom: number, bTo: number) => openMenu({
+                        x, y,
+                        options: [
+                            ...speakerMenuOptions(view, speakersRef.current, start, { from: bFrom, to: bTo }, id),
+                            { label: "清除说话人", apply: () => { view.dispatch({ changes: { from: bFrom, to: bTo, insert: "" }, userEvent: "delete.forward" }); view.focus(); } },
+                        ],
+                    });
+                    ranges.push(Decoration.replace({ widget: new SpeakerBadge(id, start, badgeEnd, open) }).range(start, badgeEnd));
+                    atomic.push(Decoration.replace({ widget: new SpeakerBadge(id, start, badgeEnd, open) }).range(start, badgeEnd));
+                } else {
+                    const ghost = new SpeakerGhost(start, (x: number, y: number) => openMenu({
+                        x, y,
+                        options: speakerMenuOptions(view, speakersRef.current, start, null, null),
+                    }));
+                    // 零长度插入用 widget 装饰（replace 零长度会导致装饰构建失败、整段高亮消失）。
+                    ranges.push(Decoration.widget({ widget: ghost, side: -1 }).range(start));
+                }
+                ranges.push(Decoration.mark({ class: "cm-canvas-dialogue" }).range(start, end));
+            }
+        }
+        return { decorations: Decoration.set(ranges, true), atomic: Decoration.set(atomic, true) };
+    };
+    return ViewPlugin.fromClass(class {
+        decorations: DecorationSet = Decoration.none;
+        atomic: DecorationSet = Decoration.none;
+        constructor(view: EditorView) { const built = build(view); this.decorations = built.decorations; this.atomic = built.atomic; }
+        update(update: import("@codemirror/view").ViewUpdate) {
+            if (update.docChanged || update.viewportChanged) { const built = build(update.view); this.decorations = built.decorations; this.atomic = built.atomic; }
+        }
+    }, {
+        decorations: (plugin) => plugin.decorations,
+        provide: (plugin) => EditorView.atomicRanges.of((view) => view.plugin(plugin)?.atomic || Decoration.none),
+    });
+}
+
+function dialogueContextMenuExtension(openMenu: (menu: DialogueMenuState) => void, speakersRef: SpeakerRosterRef) {
+    return EditorView.domEventHandlers({
+        contextmenu: (event, view) => {
+            const selection = view.state.selection.main;
+            const probeFrom = selection.empty ? selection.head : selection.from;
+            const probeTo = selection.empty ? selection.head : selection.to;
+            const inside = enclosingDialogueRange(view.state.doc.toString(), probeFrom, probeTo);
+            if (!inside) {
+                if (selection.empty) return false;
+                event.preventDefault();
+                // CodeMirror 的 domEventHandlers 返回 true 只 preventDefault，不会阻断冒泡；
+                // 不 stopPropagation 会一路冒到节点 onContextMenu，弹出节点级 复制/删除 菜单。
+                event.stopPropagation();
+                openMenu({ x: event.clientX, y: event.clientY, options: [{ label: "转为台词", apply: () => wrapSelectionAsDialogue(view) }] });
+                return true;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            const speaker = inside.speaker;
+            openMenu({
+                x: event.clientX, y: event.clientY,
+                options: [
+                    ...speakerMenuOptions(view, speakersRef.current, inside.from, speaker, speaker?.id ?? null),
+                    ...(speaker ? [{ label: "清除说话人", apply: () => { view.dispatch({ changes: { from: speaker.from, to: speaker.to, insert: "" }, userEvent: "delete.forward" }); view.focus(); } }] : []),
+                    { label: "取消台词", apply: () => unwrapDialogue(view, inside) },
+                ],
+            });
+            return true;
+        },
+    });
+}
+
+function DialogueContextMenu({ menu, onClose, theme }: { menu: DialogueMenuState; onClose: () => void; theme: (typeof canvasThemes)[keyof typeof canvasThemes] }) {
+    // 画布节点容器带 transform（平移/缩放），祖先有 transform 时 position:fixed 会退化成相对该祖先定位，
+    // 菜单会飞到左上角。portal 到 body 后 fixed 坐标恢复按视口解释。
+    return createPortal(<>
+        <div style={{ position: "fixed", inset: 0, zIndex: 1099 }} onMouseDown={onClose} onContextMenu={(event) => { event.preventDefault(); onClose(); }} />
+        <div style={{ position: "fixed", left: menu.x, top: menu.y, zIndex: 1100, minWidth: 128, maxWidth: 260, padding: 4, borderRadius: 8, border: `1px solid ${theme.toolbar.border}`, background: theme.toolbar.panel, boxShadow: "0 4px 16px rgba(0,0,0,.18)" }}>
+            {menu.options.map((option) => (
+                <button key={option.label} type="button" onClick={() => { option.apply(); onClose(); }}
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "6px 10px", border: "none", borderRadius: 6, background: "transparent", color: theme.node.text, font: "inherit", fontSize: 13, textAlign: "left", cursor: "pointer", whiteSpace: "nowrap" }}
+                    onMouseEnter={(event) => { event.currentTarget.style.background = theme.toolbar.activeBg; }}
+                    onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}
+                >
+                    {option.previewUrl ? <img src={option.previewUrl} alt="" draggable={false} style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover", flex: "0 0 auto" }} /> : null}
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{option.label}</span>
+                </button>
+            ))}
+        </div>
+    </>, document.body);
+}
 
 class ReferenceChip extends WidgetType {
     constructor(readonly reference: CanvasTextReference, readonly preview: (url: string) => void) { super(); }
@@ -162,22 +463,27 @@ export function CanvasCollaborativeText(props: CanvasTextEditorProps) {
 }
 
 function CanvasStandaloneText(props: CanvasTextEditorProps) {
-    const { placeholder = "请输入文本", references = [], chips = false, editorRef, className, style, autoFocus = false } = props;
+    const { placeholder = "请输入文本", references = [], chips = false, dialogue = false, lineMap = false, lineMapTargets, editorRef, className, style, autoFocus = false, autoHeight = false } = props;
     const parent = useRef<HTMLDivElement>(null);
     const editor = useRef<EditorView | null>(null);
     const applyingValue = useRef(false);
     const callbacks = useRef(props);
     callbacks.current = props;
+    const speakersRef = useRef<CanvasSpeakerOption[]>(props.speakers || []);
+    speakersRef.current = props.speakers || [];
     const [imagePreview, setImagePreview] = useState<string | null>(null);
+    const [dialogueMenu, setDialogueMenu] = useState<DialogueMenuState | null>(null);
     const appearance = useMemo(() => new Compartment(), []);
     const mentions = useMemo(() => new Compartment(), []);
+    const lineMapCompartment = useMemo(() => new Compartment(), []);
     const colorTheme = useThemeStore((state) => state.theme);
     const theme = canvasThemes[colorTheme];
+    const lineMapExtension = useMemo(() => lineMap ? promptLineMapExtension(theme.node.fill, lineMapTargets) : [], [lineMap, lineMapTargets, theme.node.fill]);
     const themeExtension = useMemo(() => EditorView.theme({
-        "&": { height: "100%", color: theme.node.text, backgroundColor: "transparent", fontSize: "inherit" },
+        "&": { height: autoHeight ? "auto" : "100%", color: theme.node.text, backgroundColor: "transparent", fontSize: "inherit" },
         "&.cm-focused": { outline: "none" },
-        ".cm-scroller": { fontFamily: "inherit", overflow: "auto" },
-        ".cm-content": { minHeight: "80px", caretColor: theme.node.text },
+        ".cm-scroller": { fontFamily: "inherit", overflow: autoHeight ? "visible" : "auto" },
+        ".cm-content": { minHeight: "80px", ...(autoHeight ? { height: "auto" } : {}), caretColor: theme.node.text },
         ".cm-placeholder": { color: theme.node.placeholder },
         ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { backgroundColor: theme.canvas.selectionFill },
         ".cm-tooltip": { color: theme.node.text, backgroundColor: theme.toolbar.panel, borderColor: theme.toolbar.border },
@@ -187,7 +493,10 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
         ".cm-canvas-reference-error": { border: `1px solid ${colorTheme === "dark" ? "#f87171" : "#dc2626"}`, color: colorTheme === "dark" ? "#fca5a5" : "#b91c1c", backgroundColor: colorTheme === "dark" ? "rgba(248,113,113,.12)" : "rgba(220,38,38,.08)" },
         ".cm-canvas-reference img": { width: "24px", height: "24px", objectFit: "cover", borderRadius: "4px", cursor: "pointer" },
         ".cm-canvas-reference-label": { minWidth: "0", overflow: "hidden", textOverflow: "ellipsis" },
-    }, { dark: colorTheme === "dark" }), [theme, colorTheme]);
+        ".cm-canvas-dialogue": { backgroundColor: colorTheme === "dark" ? "rgba(168,85,247,.18)" : "rgba(147,51,234,.10)", borderRadius: "3px", boxDecorationBreak: "clone", textDecoration: "underline", textDecorationColor: colorTheme === "dark" ? "#a855f7" : "#9333ea", textDecorationThickness: "2px", textUnderlineOffset: "3px" },
+        ".cm-canvas-speaker": { display: "inline-flex", alignItems: "center", padding: "0 6px", margin: "0 2px", borderRadius: "6px", backgroundColor: colorTheme === "dark" ? "rgba(168,85,247,.25)" : "rgba(147,51,234,.14)", color: colorTheme === "dark" ? "#d8b4fe" : "#7e22ce", fontWeight: "600", fontSize: "0.92em", cursor: "pointer", userSelect: "none" },
+        ".cm-canvas-speaker-ghost": { backgroundColor: "transparent", border: `1px dashed ${colorTheme === "dark" ? "rgba(168,85,247,.5)" : "rgba(147,51,234,.45)"}`, color: colorTheme === "dark" ? "rgba(216,180,254,.75)" : "rgba(126,34,206,.65)", fontWeight: "500", fontSize: "0.82em" },
+    }, { dark: colorTheme === "dark" }), [theme, colorTheme, autoHeight]);
 
     useImperativeHandle(editorRef, () => ({
         focus: () => editor.current?.focus(),
@@ -216,9 +525,11 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
                 EditorView.lineWrapping,
                 placeholderExtension(placeholder),
                 appearance.of(themeExtension),
+                lineMapCompartment.of(lineMapExtension),
                 history(),
                 keymap.of([...defaultKeymap, ...historyKeymap]),
                 mentions.of(mentionExtensions(references, chips, setImagePreview)),
+                ...(dialogue ? [dialogueHighlightExtension(setDialogueMenu, speakersRef), dialogueContextMenuExtension(setDialogueMenu, speakersRef)] : []),
                 EditorView.updateListener.of((update) => {
                     if (update.docChanged && !applyingValue.current) callbacks.current.onChange?.(update.state.doc.toString());
                 }),
@@ -241,16 +552,18 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
     }, [props.value]);
     useEffect(() => { editor.current?.dispatch({ effects: appearance.reconfigure(themeExtension) }); }, [appearance, themeExtension]);
     useEffect(() => { editor.current?.dispatch({ effects: mentions.reconfigure(mentionExtensions(references, chips, setImagePreview)) }); }, [mentions, references, chips]);
+    useEffect(() => { editor.current?.dispatch({ effects: lineMapCompartment.reconfigure(lineMapExtension) }); }, [lineMapCompartment, lineMapExtension]);
 
     return <div className={className} style={style} data-canvas-shortcuts-ignore onKeyDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
-        <div ref={parent} style={{ height: "100%", minHeight: 80 }} />
+        <div ref={parent} style={{ height: autoHeight ? "auto" : "100%", minHeight: 80 }} />
+        {dialogueMenu ? <DialogueContextMenu menu={dialogueMenu} onClose={() => setDialogueMenu(null)} theme={theme} /> : null}
         {imagePreview ? <Image style={{ display: "none" }} src={imagePreview} preview={{ visible: true, onVisibleChange: (visible) => { if (!visible) setImagePreview(null); } }} /> : null}
     </div>;
 }
 
 /** 不接受受控全文：Yjs binding 负责远端增量、输入法、光标与本地撤销。 */
 function CanvasYjsText(props: CanvasTextEditorProps) {
-    const { projectId, target, placeholder = "请输入文本", references = [], chips = false, editorRef, className, style, autoFocus = false } = props;
+    const { projectId, target, placeholder = "请输入文本", references = [], chips = false, dialogue = false, lineMap = false, lineMapTargets, editorRef, className, style, autoFocus = false } = props;
     const targetKey = canvasTextKey(target);
     const session = useMemo(() => getCanvasTextSession(projectId, target), [projectId, targetKey]);
     const status = useSyncExternalStore(session.subscribe, session.getSnapshot);
@@ -260,10 +573,14 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
     const editor = useRef<EditorView | null>(null);
     const callbacks = useRef(props);
     callbacks.current = props;
+    const speakersRef = useRef<CanvasSpeakerOption[]>(props.speakers || []);
+    speakersRef.current = props.speakers || [];
     const [imagePreview, setImagePreview] = useState<string | null>(null);
+    const [dialogueMenu, setDialogueMenu] = useState<DialogueMenuState | null>(null);
     const appearance = useMemo(() => new Compartment(), []);
     const editable = useMemo(() => new Compartment(), []);
     const mentions = useMemo(() => new Compartment(), []);
+    const lineMapCompartment = useMemo(() => new Compartment(), []);
     const themeExtension = useMemo(() => EditorView.theme({
         "&": { height: "100%", color: theme.node.text, backgroundColor: "transparent", fontSize: "inherit" },
         "&.cm-focused": { outline: "none" },
@@ -280,7 +597,11 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
         ".cm-canvas-reference-label": { minWidth: "0", overflow: "hidden", textOverflow: "ellipsis" },
         ".cm-canvas-peer-caret": { position: "relative", display: "inline", borderLeft: "2px solid", marginLeft: "-1px", marginRight: "-1px", pointerEvents: "none" },
         ".cm-canvas-peer-label": { position: "absolute", bottom: "1em", left: "-1px", whiteSpace: "nowrap", fontSize: "10px", lineHeight: "14px", padding: "0 3px", border: "1px solid", borderRadius: "3px", backgroundColor: theme.toolbar.panel, color: theme.node.text, zIndex: "2" },
+        ".cm-canvas-dialogue": { backgroundColor: colorTheme === "dark" ? "rgba(168,85,247,.18)" : "rgba(147,51,234,.10)", borderRadius: "3px", boxDecorationBreak: "clone", textDecoration: "underline", textDecorationColor: colorTheme === "dark" ? "#a855f7" : "#9333ea", textDecorationThickness: "2px", textUnderlineOffset: "3px" },
+        ".cm-canvas-speaker": { display: "inline-flex", alignItems: "center", padding: "0 6px", margin: "0 2px", borderRadius: "6px", backgroundColor: colorTheme === "dark" ? "rgba(168,85,247,.25)" : "rgba(147,51,234,.14)", color: colorTheme === "dark" ? "#d8b4fe" : "#7e22ce", fontWeight: "600", fontSize: "0.92em", cursor: "pointer", userSelect: "none" },
+        ".cm-canvas-speaker-ghost": { backgroundColor: "transparent", border: `1px dashed ${colorTheme === "dark" ? "rgba(168,85,247,.5)" : "rgba(147,51,234,.45)"}`, color: colorTheme === "dark" ? "rgba(216,180,254,.75)" : "rgba(126,34,206,.65)", fontWeight: "500", fontSize: "0.82em" },
     }, { dark: colorTheme === "dark" }), [theme, colorTheme]);
+    const lineMapExtension = useMemo(() => lineMap ? promptLineMapExtension(theme.node.fill, lineMapTargets) : [], [lineMap, lineMapTargets, theme.node.fill]);
 
     useImperativeHandle(editorRef, () => ({
         focus: () => editor.current?.focus(),
@@ -308,6 +629,7 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
             state: EditorState.create({ doc: session.text.toString(), extensions: [
                 yCollab(session.text, undefined, { undoManager: session.undo }),
                 canvasTextPresenceExtension(projectId, target, session),
+                lineMapCompartment.of(lineMapExtension),
                 keymap.of([...yUndoManagerKeymap, { key: "Enter", run: (view) => {
                     if (!callbacks.current.onSubmit || view.composing) return false;
                     callbacks.current.onSubmit(); return true;
@@ -316,6 +638,7 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
                 keymap.of(defaultKeymap),
                 editable.of(EditorView.editable.of(!status.blocked)),
                 mentions.of(mentionExtensions(references, chips, setImagePreview)),
+                ...(dialogue ? [dialogueHighlightExtension(setDialogueMenu, speakersRef), dialogueContextMenuExtension(setDialogueMenu, speakersRef)] : []),
                 EditorView.contentAttributes.of({ "aria-label": placeholder }),
                 EditorView.domEventHandlers({ blur: () => { callbacks.current.onBlur?.(); } }),
             ] }),
@@ -327,10 +650,12 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
     useEffect(() => { editor.current?.dispatch({ effects: appearance.reconfigure(themeExtension) }); }, [appearance, themeExtension]);
     useEffect(() => { editor.current?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(!status.blocked)) }); }, [editable, status.blocked]);
     useEffect(() => { editor.current?.dispatch({ effects: mentions.reconfigure(mentionExtensions(references, chips, setImagePreview)) }); }, [mentions, references, chips]);
+    useEffect(() => { editor.current?.dispatch({ effects: lineMapCompartment.reconfigure(lineMapExtension) }); }, [lineMapCompartment, lineMapExtension]);
 
     return <div className={className} style={style} data-canvas-shortcuts-ignore onKeyDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
         <div ref={parent} style={{ height: "100%", minHeight: 80 }} />
         {!status.ready && !status.error ? <small style={{ color: theme.node.muted }}>正在读取协作文档…</small> : null}
+        {dialogueMenu ? <DialogueContextMenu menu={dialogueMenu} onClose={() => setDialogueMenu(null)} theme={theme} /> : null}
         {status.error ? <div role="status" className="mt-1 text-xs" style={{ color: theme.node.muted }}>
             文本尚未同步：{status.error}
             <button type="button" className="ml-2 hover:underline" onClick={() => void session.reconnect(true)}>重试同步</button>

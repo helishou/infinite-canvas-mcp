@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
+import { message } from "antd";
 import type { H3CharacterGroup, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
@@ -7,7 +8,8 @@ import { applyCharacterGroupEdits, refsForSegment, removeCharacterGroup, resultU
 import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
-import { setStoryboardMode, storyboardRefsForSegment, supportsStoryboardTrack, syncStoryboardPrompt } from "../services/h3-storyboard-track";
+import { h3ThemeVars } from "../h3-theme";
+import { setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
@@ -184,7 +186,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             if (!hasStoryboards && !Object.keys(segment.storyboardDurations || {}).length) return segment;
             const normalized = hasStoryboards
                 ? withSegmentRefs(segment, refsForSegment(segment))
-                : { ...segment, storyboardModeEnabled: false, storyboardDurations: {} };
+                : { ...segment, storyboardModeEnabled: undefined, storyboardDurations: {} };
             const missingIds = storyboardRefsForSegment(segment).some((ref) => !ref.bindingId);
             if (!missingIds && normalized.storyboardModeEnabled === segment.storyboardModeEnabled
                 && JSON.stringify(normalized.storyboardDurations) === JSON.stringify(segment.storyboardDurations)) return segment;
@@ -197,14 +199,23 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const commitSegmentChange = useCallback((updated: H3Segment, select = false) => {
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = segmentsFor(liveMetadata);
-        if (!current.some((item) => item.id === updated.id)) return;
+        const previous = current.find((item) => item.id === updated.id);
+        if (!previous) return;
+        const previousIds = new Set(storyboardRefsForSegment(previous).map((ref) => ref.bindingId));
+        const addedStoryboards = storyboardTrackItems(updated).filter((item) => item.ref.bindingId && !previousIds.has(item.ref.bindingId));
+        if (storyboardRefsForSegment(previous).length && addedStoryboards.some((item) => item.duration < 0.5)) {
+            message.warning("末张分镜时长不足 1 秒，无法再平分新增分镜。");
+            return;
+        }
         ctx.updateMetadata({ ...(select ? { selectedSegmentId: updated.id } : {}), segments: current.map((item) => item.id === updated.id ? updated : item) });
         void syncStoryboardPrompt(ctx, updated);
     }, [ctx, metadata]);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => {
         if (!selected) return;
         if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardRefsForSegment(selected).length) {
-            const updated = withSegmentRefs({ ...selected, ...patch }, refsForSegment(selected));
+            const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
+            const latest = segmentsFor(liveMetadata).find((item) => item.id === selected.id) || selected;
+            const updated = withSegmentRefs({ ...latest, ...patch }, refsForSegment(latest));
             commitSegmentChange(updated);
             return;
         }
@@ -249,7 +260,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     };
     const requestCanvasStoryboardPick = (segmentId: string) => {
         const segment = segments.find((item) => item.id === segmentId);
-        if (!segment || !supportsStoryboardTrack(segment)) return;
+        if (!segment || !supportsStoryboardTrack(segment) || (pickingRef?.segmentId === segmentId && pickingRef.storyboard)) return;
         setPickingRef({ segmentId, slotIndex: -1, types: ["image"], storyboard: true });
         window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { nodeId: ctx.node.id } }));
     };
@@ -262,8 +273,13 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         if (!segment) return;
         if (pick.storyboard) {
             const image = h3RefCandidates([node], ctx.node.id).map((item) => item.ref).find((ref) => ref.type === "image");
-            if (!image || refsForSegment(segment).some((ref) => sameRef(ref, image))) return;
-            const refs = [...refsForSegment(segment), { ...image, role: "storyboard" as const }];
+            if (!image) return;
+            const current = refsForSegment(segment);
+            const existing = current.find((ref) => sameRef(ref, image));
+            if (existing?.role === "storyboard") return;
+            const refs = existing
+                ? current.map((ref) => ref === existing ? { ...ref, role: "storyboard" as const } : ref)
+                : [...current, { ...image, role: "storyboard" as const }];
             commitSegmentChange(withSegmentRefs({ ...segment, storyboardModeEnabled: true }, refs), true);
             return;
         }
@@ -437,19 +453,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     };
     const nextSegment = segments.slice(selectedIndex + 1).find((item) => Boolean(resultUrl(item.result)));
     const nextUrl = nextSegment ? resultUrl(nextSegment.result) : undefined;
-    const themeStyle = {
-        "--h3-panel": ctx.theme.node.panel,
-        "--h3-fill": ctx.theme.node.fill,
-        "--h3-border": ctx.theme.node.stroke,
-        "--h3-text": ctx.theme.node.text,
-        "--h3-muted": ctx.theme.node.muted,
-        "--h3-faint": ctx.theme.node.faint,
-        "--h3-active": ctx.theme.node.activeStroke,
-        "--h3-toolbar": ctx.theme.toolbar.panel,
-        "--h3-hover": ctx.theme.toolbar.itemHover,
-        "--h3-active-bg": ctx.theme.toolbar.activeBg,
-        "--h3-active-text": ctx.theme.toolbar.activeText,
-    } as React.CSSProperties;
+    const themeStyle = h3ThemeVars(ctx.theme);
     return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
         <H3Runner key="runner" ctx={ctx} />
         <H3PaneHandles key="pane-handles" ctx={ctx} />

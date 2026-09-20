@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { Button, Empty, Input, Spin, Tabs, Tag, message, Select, Switch } from "antd";
 import { Upload as UploadIcon, Upload, Download, Play, Trash2, Settings2, Workflow, Code, History } from "lucide-react";
 import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs, uploadBackendMedia, backendMediaUrl } from "@/services/backend-api";
-import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, type WorkflowPackage } from "@/services/api/workflows";
+import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, pollWorkflowTask, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
 import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
 import "../../styles/workflow-graph.css";
@@ -22,13 +22,7 @@ type WorkflowDetail = {
     builtin: boolean;
 };
 
-type TaskResult = {
-    taskId: string;
-    promptId: string;
-    media: Array<{ url: string; mimeType: string; filename: string; storageKey?: string }>;
-    status: { status_str: string; completed: boolean };
-    error?: string;
-};
+type TaskResult = WorkflowRunResult;
 
 export default function WorkflowsPage() {
     const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
@@ -148,10 +142,8 @@ export default function WorkflowsPage() {
         setRunning(true);
         setTaskResult(null);
         try {
-            const result = await request<TaskResult>("POST", `/api/workflows/${encodeURIComponent(selected.name)}/run`, {
-                fields,
-                config: selected.config,
-            });
+            const { taskId } = await runWorkflow(selected.name, fields, selected.config);
+            const result = await pollWorkflowTask(taskId);
             setTaskResult(result);
             if (result.status.status_str === "success") {
                 message.success("工作流执行完成");

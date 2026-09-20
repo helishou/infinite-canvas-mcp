@@ -223,14 +223,22 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onW
         } else {
             const inputOptions = comboOptions[nodeId]?.[inputKey];
             const hasComboOptions = Array.isArray(inputOptions) && inputOptions.length > 0;
-            const type = hasComboOptions ? "dropdown" : guessType(rawValue, inputKey);
+            // LoadImage/LoadAudio/LoadVideo 的输入是 COMBO（文件列表），必须按媒体类型处理，
+            // 不能因为有下拉选项就判成 dropdown；媒体字段一律不带默认值（显式传入）。
+            const classType = String((workflow[nodeId] as { class_type?: unknown } | undefined)?.class_type || "");
+            const mediaType: WorkflowField["type"] | null =
+                classType === "LoadImage" ? "image"
+                : classType === "LoadAudio" ? "audio"
+                : /(?:^|_)LoadVideo/.test(classType) ? "video"
+                : null;
+            const type = mediaType ?? (hasComboOptions ? "dropdown" : guessType(rawValue, inputKey));
             const newField: WorkflowField = {
                 id: `f_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                 node: nodeId,
                 input: inputKey,
                 name: friendlyInputName(inputKey),
                 type,
-                default: typeof rawValue === "object" ? null : rawValue as any,
+                default: mediaType || typeof rawValue === "object" ? undefined : rawValue as any,
             };
             if (type === "number" || type === "slider") {
                 if (typeof rawValue === "number") {
@@ -485,6 +493,8 @@ function InputRow({
                                     updates.max = undefined;
                                     updates.step = undefined;
                                 }
+                                // 媒体类型必须显式传入，不带默认值
+                                if (type === "image" || type === "audio" || type === "video") updates.default = undefined;
                                 if (type !== "text") updates.isPrompt = false;
                                 onUpdate(updates);
                             }}
@@ -560,18 +570,7 @@ function InputRow({
                         </div>
                     )}
 
-                    {/* 图片类型 */}
-                    {field.type === "image" && (
-                        <div>
-                            <label className="mb-0.5 block text-[10px] text-stone-500">默认图片 URL（可选）</label>
-                            <input
-                                value={String(field.default ?? "")}
-                                onChange={(e) => onUpdate({ default: e.target.value })}
-                                className="w-full rounded border border-stone-200 px-2 py-1 text-xs dark:border-stone-700 dark:bg-stone-900"
-                                placeholder="http://..."
-                            />
-                        </div>
-                    )}
+                    {/* 图片/音频/视频类型：必须显式传入，不提供默认值 */}
 
                     {/* 下拉选项 */}
                     {field.type === "dropdown" && (

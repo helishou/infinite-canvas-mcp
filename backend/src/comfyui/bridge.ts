@@ -540,7 +540,7 @@ export class ComfyUiBackend {
             const startedAt = Date.now();
             const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(60 * 60 * 1000, Number(params.maxExecutionMs) || 30 * 60 * 1000));
             const stallTimeoutMs = params.stallTimeoutMs === undefined
-                ? 90 * 1000
+                ? 900 * 1000
                 : Math.max(0, Number(params.stallTimeoutMs) || 0);
             lastActivityAt = startedAt;
             let missingHistoryCount = 0;

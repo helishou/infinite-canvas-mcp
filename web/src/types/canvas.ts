@@ -246,6 +246,7 @@ export type SelectionBox = {
     currentLocalY: number;
     additive: boolean;
     initialSelectedNodeIds: string[];
+    excludeNodeIds?: string[];
 };
 
 export type ContextMenuState =

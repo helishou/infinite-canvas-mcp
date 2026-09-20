@@ -284,15 +284,26 @@ export type CanvasTextEditorHandle = {
     focus: () => void;
 };
 export type CanvasTextReference = { label: string; displayLabel?: string; title?: string; insert?: string; tokens?: string[]; previewUrl?: string; active?: boolean; suggestible?: boolean; kind?: string };
+export type CanvasSpeakerOption = { id: string; name?: string; previewUrl?: string };
 export type CanvasTextEditorProps = {
     projectId: string; target: CanvasTextTarget; placeholder?: string;
     references?: CanvasTextReference[]; chips?: boolean;
+    /** 台词说话人名册：菜单/徽标按此显示角色名与头像；省略时回退 S1–S6。 */
+    speakers?: CanvasSpeakerOption[];
     /** Local rich text editor for transient fields that are persisted through their owning document. */
     standalone?: boolean; value?: string; onChange?: (text: string) => void;
+    /** Standalone editor grows with its content instead of owning an internal scroll area. */
+    autoHeight?: boolean;
     className?: string; style?: import("react").CSSProperties;
     editorRef?: import("react").Ref<CanvasTextEditorHandle>;
     onSubmit?: () => void; onBlur?: () => void; onEscape?: () => void;
     autoFocus?: boolean;
+    /** 启用台词（<d>…</d>）内联高亮与右键「转为台词/取消台词」。 */
+    dialogue?: boolean;
+    /** 为每个非空实际换行添加主题着色与可点击滚动刻度。 */
+    lineMap?: boolean;
+    /** 仅为匹配这些完整行文本的行显示跳转刻度；省略时显示所有非空行。 */
+    lineMapTargets?: string[];
 };
 
 export type CanvasNodeContext = {

@@ -20,7 +20,7 @@ import { deleteStoredImages, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import { resolveComfyImageSize } from "@/services/api/comfyui";
-import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow, workflowRequiresPrompt } from "@/services/api/workflows";
+import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow, pollWorkflowTask, workflowRequiresPrompt } from "@/services/api/workflows";
 import type { WorkflowDetail } from "@/services/api/workflows";
 import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
 import type { ReferenceImage } from "@/types/image";
@@ -479,8 +479,8 @@ export default function ImagePage() {
                 for (const [id, value] of Object.entries(customFieldValues)) {
                     workflowFields[id] = value;
                 }
-                const run = await runWorkflow(workflowName, workflowFields, detail.config);
-                if (run.error) throw new Error(run.error);
+                const { taskId } = await runWorkflow(workflowName, workflowFields, detail.config);
+                const run = await pollWorkflowTask(taskId);
                 const first = run.media?.[0];
                 if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");
                 result = { url: first.url };

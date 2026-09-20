@@ -9,16 +9,28 @@ type PromptSubject = { id: string; name: string; englishName?: string; aliases: 
 type PromptReference = { tag: string; bindingId: string; type: "image" | "video" | "audio"; role: string; label: string; description: string; subjectId?: string; subjectIds?: string[]; subjectName?: string; speakerId?: string; usage?: string; retentionLevel?: "fully_preserved" | "partially_preserved" | "attribute_transfer" | "weak_reference"; shotNumbers: number[] };
 type PromptShot = { description: string; referenceIds?: string[] };
 
-const TRANSITIONS: Record<Transition, string> = {
-    continuous: "continue the same uninterrupted shot; preserve camera movement, action, and spatial relationships without a cut or reset",
-    cut: "hard cut from the preceding shot into this shot",
-    dissolve: "cross-dissolve from the preceding shot into this shot",
-    fade_black: "fade out from the preceding shot to black, then fade in to this shot",
+const SHOT_TRANSITION_LEADIN: Record<Transition, string> = {
+    continuous: "the shot continues",
+    cut: "the shot hard-cuts",
+    dissolve: "the shot cross-dissolves",
+    fade_black: "the shot fades out to black, then fades in",
 };
-const SECTION_END = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description):/mi;
+const SECTION_END = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description|storyboard_timeline):/mi;
 
 function record(value: unknown): RecordValue { return value && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : {}; }
 function string(value: unknown) { return typeof value === "string" ? value.trim() : ""; }
+function formatShotTimestamp(raw: string) {
+    const value = raw.trim();
+    if (!value) return "";
+    if (/^\d{1,2}:\d{2}(?:\.\d{1,3})?$/.test(value)) return value;
+    const seconds = Number(value.replace(/s$/i, ""));
+    if (!Number.isFinite(seconds) || seconds < 0) return "";
+    const totalMs = Math.round(seconds * 1000);
+    const mm = Math.floor(totalMs / 60000);
+    const ss = Math.floor((totalMs % 60000) / 1000);
+    const ms = totalMs % 1000;
+    return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${String(ms).padStart(3, "0")}`;
+}
 function promptModeOf(segment: RecordValue) {
     const mode = string(segment.mode || segment.taskMode || "ref2va");
     return ["ref2va", "t2v", "i2v", "fl2v"].includes(mode) ? mode : "ref2va";
@@ -64,16 +76,18 @@ function pictureDescription(ref: RecordValue, catalog: ReturnType<typeof referen
         .replace(/[|·:：]+/gu, " ")
         .replace(/\s+/gu, " ")
         .replace(/^[\s,，.;。_-]+|[\s,，.;。_-]+$/gu, "");
-    return [summary, tags, asset?.label || "", ref.name].map((value) => clean(String(value || ""))).find((value) => value && !/^(?:the|a|an|for|of)$/iu.test(value))?.slice(0, 140) || "";
+    const details = inferReferenceRole(ref) === "storyboard" ? [summary, tags] : [summary, tags, asset?.label || "", ref.name];
+    return details.map((value) => clean(String(value || ""))).find((value) => value && !/^(?:the|a|an|for|of)$/iu.test(value))?.slice(0, 140) || "";
 }
 
 function promptForShots(input: StoryboardInput, refs: RecordValue[], catalog: ReturnType<typeof referenceCatalogOf>) {
     const byId = new Map(refs.map((ref) => [String(ref.bindingId || ""), ref]));
     const details = input.shots.map((shot, index) => {
         const transitionType = shot.transitionType || "cut";
-        if (!(transitionType in TRANSITIONS)) throw new Error(`分镜 ${index + 1} 的切换方式无效：${transitionType}`);
-        const transition = index ? ` [Transition: ${TRANSITIONS[transitionType]}]` : "";
-        const time = index && string(shot.switchTime) ? ` At ${string(shot.switchTime)},` : "";
+        if (!(transitionType in SHOT_TRANSITION_LEADIN)) throw new Error(`分镜 ${index + 1} 的切换方式无效：${transitionType}`);
+        const transition = index ? ` ${SHOT_TRANSITION_LEADIN[transitionType]}.` : "";
+        const timestamp = index ? formatShotTimestamp(string(shot.switchTime)) : "";
+        const time = timestamp ? ` At ${timestamp},` : "";
         const pictureId = string(shot.pictureBindingId);
         let picture = "";
         if (pictureId) {
@@ -265,7 +279,7 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
             const characterNode = group?.characterNodeId ? nodeById.get(string(group.characterNodeId)) : id === sourceCharacterId ? sourceNode : nodeById.get(id);
             const metadata = record(characterNode?.metadata);
             const isCharacter = Boolean(group || characterNode?.type === "character" || role === "character_identity" || role === "character_turnaround");
-            const name = string(group?.characterName || metadata.characterName || characterNode?.title || (isCharacter ? ref.name : asset?.label || ref.name || subjectId));
+            const name = string(group?.characterName || metadata.characterName || characterNode?.title || (isCharacter ? ref.name : role === "storyboard" ? subjectId : asset?.label || ref.name || subjectId));
             const englishName = string(metadata.characterEnglishName);
             const profile = [string(metadata.characterDescription), role === "storyboard" && anchor ? "" : referenceDescription].filter((value, index, all) => value && all.indexOf(value) === index).join("; ");
             const entry = subjects.get(subjectId) || { id: subjectId, name, englishName: englishName || undefined, aliases: new Set<string>(), shotMarkers: new Set<string>(), profile, outfits: new Set<string>(), pictures: [], role };

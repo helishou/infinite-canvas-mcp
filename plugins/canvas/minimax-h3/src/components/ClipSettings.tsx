@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { InputNumber, Switch, Select } from "antd";
 import { h3LoraOptions, h3ModelOptions } from "../constants";
@@ -24,11 +24,20 @@ const dlssModes = ["关闭", "图像批次超分", "视频超分"];
 const dlssUpscaleModes = ["1× (DLAA / native)", "1.5× (Quality)", "1.724× (Balanced)", "2× (Performance)", "3× (Ultra Performance)"];
 const dlssEngines = ["Auto", "Native DLSSG", "Cascade"];
 const dlssCodecs = ["H.264", "H.264 (NVIDIA NVENC)", "H.265", "H.265 (NVIDIA NVENC)", "AV1", "AV1 (NVIDIA NVENC)", "ProRes Proxy"];
+const h3SelectValueStyle: CSSProperties = { display: "block", minWidth: 0, overflow: "hidden", color: "#f3f7fb", fontSize: 28, fontWeight: 700, lineHeight: "46px", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+const h3SelectStyles = {
+    content: h3SelectValueStyle,
+    item: h3SelectValueStyle,
+    itemContent: h3SelectValueStyle,
+    input: { fontSize: 28, lineHeight: "46px" },
+    placeholder: { fontSize: 28, lineHeight: "46px" },
+};
+const renderH3SelectLabel = ({ label, value }: { label?: ReactNode; value?: string | number }) => <span style={h3SelectValueStyle}>{label ?? value}</span>;
 
 function H3Dropdown({ values, value, onChange, placeholder, allowClear = false, format, searchable = false, listId = "nfh3-options" }: { values: Array<string | number>; value?: string | number; onChange: (value: string | number) => void; placeholder?: string; allowClear?: boolean; format?: (value: string | number) => string; searchable?: boolean; listId?: string }) {
     const selected = value === undefined || value === null ? undefined : String(value);
     const options = values.map((item) => ({ value: String(item), label: format ? format(item) : String(item) }));
-    return <Select size="small" showSearch={searchable} allowClear={allowClear} value={selected} placeholder={placeholder} optionFilterProp="label" options={options} onChange={(v) => { onChange(v as string); }} onMouseDown={(event) => event.stopPropagation()} style={{ width: "100%" }} popupMatchSelectWidth={false} />;
+    return <Select className="nfh3-select" size="middle" showSearch={searchable} allowClear={allowClear} value={selected} placeholder={placeholder} optionFilterProp="label" options={options} labelRender={renderH3SelectLabel} styles={h3SelectStyles} onChange={(v) => { onChange(v as string); }} onMouseDown={(event) => event.stopPropagation()} style={{ width: "100%" }} popupMatchSelectWidth={false} />;
 }
 
 export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
@@ -210,7 +219,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         {section("faceRefine", "生成后人脸精修", segment.faceRefineEnabled ? enabledSummary("已启用") : "默认关闭", <div className="nfh3-control-grid">
             {control("一采确认模式", <Switch checked={segment.confirmationMode === true} onChange={(checked) => patch({ confirmationMode: checked })} />)}
             {control("启用生成后精修", <Switch checked={segment.faceRefineEnabled === true} onChange={(checked) => patch({ faceRefineEnabled: checked })} />)}
-            {control("检测器", <Select size="small" showSearch allowClear value={segment.faceRefineDetector} placeholder="face_yolov8m.pt" options={[{ value: "face_yolov8m.pt", label: "face_yolov8m.pt" }]} onChange={(value) => patch({ faceRefineDetector: value || undefined })} onMouseDown={(event) => event.stopPropagation()} style={field} />)}
+            {control("检测器", <Select className="nfh3-select" size="middle" showSearch allowClear value={segment.faceRefineDetector} placeholder="face_yolov8m.pt" options={[{ value: "face_yolov8m.pt", label: "face_yolov8m.pt" }]} labelRender={renderH3SelectLabel} styles={h3SelectStyles} onChange={(value) => patch({ faceRefineDetector: value || undefined })} onMouseDown={(event) => event.stopPropagation()} style={field} />)}
             {control("检测置信度", <InputNumber style={field} min={0.05} max={0.95} step={0.05} value={segment.faceRefineConfidence != null ? Number(segment.faceRefineConfidence) : undefined} placeholder="0.35" onChange={(value) => patch({ faceRefineConfidence: value ?? undefined })} />)}
             {control("裁剪倍率", <InputNumber style={field} min={1.2} max={8} step={0.1} value={segment.faceRefineCropFactor != null ? Number(segment.faceRefineCropFactor) : undefined} placeholder="2.5" onChange={(value) => patch({ faceRefineCropFactor: value ?? undefined })} />)}
             {control("精修画布", <InputNumber style={field} min={128} max={1344} step={32} value={segment.faceRefineCanvasSize != null ? Number(segment.faceRefineCanvasSize) : undefined} placeholder="768" onChange={(value) => patch({ faceRefineCanvasSize: value ?? undefined })} />)}

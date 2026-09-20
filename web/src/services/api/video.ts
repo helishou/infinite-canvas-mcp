@@ -8,7 +8,7 @@ import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, modelWorkflowMissingMessage, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, resolveModelWorkflow, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
 import { runModelPlugin } from "./model-plugin";
 import { runComfyTask, resolveComfyEndpoint, type LocalReference } from "./comfyui";
-import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow } from "./workflows";
+import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow, pollWorkflowTask } from "./workflows";
 import type { ReferenceImage } from "@/types/image";
 
 type VideoResponse = { id: string; status?: string; error?: { message?: string }; url?: string; result_url?: string; video_url?: string; content?: { video_url?: string; url?: string } | null };
@@ -82,8 +82,8 @@ async function runComfyVideoGeneration(config: AiConfig, selectedModel: string, 
         const dataUrl = await imageToDataUrl(reference);
         if (dataUrl) workflowFields[imageFields[index].id] = dataUrl;
     }
-    const run = await runWorkflow(workflowName, workflowFields, detail.config);
-    if (run.error) throw new Error(run.error);
+    const { taskId } = await runWorkflow(workflowName, workflowFields, detail.config);
+    const run = await pollWorkflowTask(taskId);
     const first = run.media?.[0];
     if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");
     return { url: first.url, mimeType: first.mimeType || "video/mp4" };

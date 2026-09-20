@@ -279,7 +279,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     return (
         <div
             data-node-id={data.id}
-            className={`node-element group/node absolute flex select-none overflow-hidden ${isH3 ? "rounded-lg border" : "rounded-3xl border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"}`}
+            className={`node-element group/node absolute flex select-none overflow-hidden rounded-3xl ${isH3 ? "border" : "border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"}`}
             style={{
                 transform: `translate(${position.x}px, ${position.y}px)`,
                 width,
@@ -301,6 +301,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
                 if (event.button === 0) onSelectCapture?.(event, data.id);
             }}
             onMouseDown={(event) => {
+                if (event.defaultPrevented) return;
                 event.stopPropagation();
                 onMouseDown(event, data.id);
             }}
@@ -718,13 +719,14 @@ export const CanvasNode = React.memo(function CanvasNode({
                     return;
                 }
                 onSelectCapture?.(event, data.id);
+                if (event.defaultPrevented) return;
                 // H3 节点内容几乎全是交互控件，且其根 div 在冒泡阶段 stopPropagation 挡掉了普通的
                 // body 拖拽路径，只能走这里。若沿用全量黑名单（button/input/textarea/select/video），
                 // 节点上几乎任何可见区域都命中被排除，导致“拖不动”。故对 H3 仅屏蔽纯文本编辑控件，
                 // H3 只允许从自己的标题栏拖动，其他区域全部保留给控件和内容交互。
                 const target = event.target as HTMLElement;
                 const isH3 = data.type === "minimax-h3:video";
-                const interactive = isH3 ? target.closest("button, input, textarea, select, video") : target.closest("button, input, textarea, select, video");
+                const interactive = target.closest("button, input, textarea, select, video, .ant-select-dropdown");
                 const isH3DragHandle = target.closest("[data-canvas-node-drag-handle]");
                 // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
                 // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
@@ -798,10 +800,9 @@ export const CanvasNode = React.memo(function CanvasNode({
 
             <div
                 data-character-drop={data.type === CanvasNodeType.Character ? "true" : undefined}
-                className={`relative h-full w-full overflow-visible ${data.type === "minimax-h3:video" ? "rounded-lg border" : "rounded-3xl border-2"}`}
+                className={`relative h-full w-full overflow-visible rounded-3xl ${data.type === "minimax-h3:video" ? "border" : "border-2"}`}
                 style={{
                     background: isGroup || data.type === "minimax-h3:video" ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || hasSceneContent || transparentBg ? "transparent" : theme.node.fill,
-                    borderRadius: data.type === "minimax-h3:video" ? 8 : undefined,
                     borderColor: nodeBorderColor,
                     borderStyle: isGroup ? "dashed" : "solid",
                     borderWidth: isGroup ? 3 : undefined,
@@ -874,7 +875,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 }}
             >
                 <div
-                    className={`relative flex h-full w-full items-center justify-center ${data.type === "minimax-h3:video" ? "rounded-lg" : "rounded-[inherit]"} ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
+                    className={`relative flex h-full w-full items-center justify-center rounded-[inherit] ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
                     style={
                         {
                             background: isGroup ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || hasSceneContent || transparentBg ? "transparent" : theme.node.fill,

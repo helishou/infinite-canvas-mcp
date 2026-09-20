@@ -173,7 +173,7 @@ export class CanvasImageDispatcher {
           platform: "canvas-image",
           workflow: plan.workflow || "",
           model: normalized.model,
-          taskMode: "i2v", // 占位：图生图/文生图统一记为 i2v；分类由 platform + model 表达
+          taskMode: normalized.references?.length ? "i2i" : "t2i",
           prompt: normalized.prompt,
           references:
             normalized.references?.map((reference) => ({

@@ -241,7 +241,12 @@ async function startBackendHttpServer() {
   app.use("/agent", agent.app);
   const mcpHttp = registerBackendMcpHttpRoutes(app, config, stores.mcpObservability);
   // Backend 重启后继续观察已提交但尚未结束的 ComfyUI 任务；绑定信息在 SQLite 中。
-  for (const task of stores.tasks.list()) {
+  // 注意：stores.tasks.list() 默认按 created_at DESC LIMIT 500，仅含最近任务；
+  // 老任务（含孤儿）会被截断，必须用 status 过滤才能覆盖全部 running/queued。
+  for (const task of [
+    ...stores.tasks.list({ status: "running" }),
+    ...stores.tasks.list({ status: "queued" }),
+  ]) {
     if (
       ["queued", "running"].includes(task.status) &&
       task.kind === "canvas-image"
@@ -317,11 +322,66 @@ async function startBackendHttpServer() {
       task.kind.startsWith("comfyui:")
     )
       runtime.comfy.resume(task.id);
-    if (
-      ["queued", "running"].includes(task.status) &&
-      task.kind === "runninghub:minimax-h3"
-    )
-      runningHub.resume(task.id);
+      if (
+        ["queued", "running"].includes(task.status) &&
+        task.kind === "runninghub:minimax-h3"
+      )
+        runningHub.resume(task.id);
+  }
+  // ── 孤儿任务回收（防僵尸堆积）───────────────────────────────────
+  // backend 重启（tsx --watch 源码热更、崩溃等）会杀掉内存中的执行循环，遗留
+  // status=running/queued 的任务永远无人跟踪。上面的 resume 循环只恢复了
+  // 特定类型、且确实提交到 ComfyUI（有 promptId）的任务；其余（如 workflow 类型、
+  // 有处理器但从未提交的 comfyui 任务、无恢复处理器的画布任务）是僵尸任务，
+  // 会在列表里无限堆积。此处（尚未监听端口、不会有新任务）统一置为 failed。
+  for (const task of [
+    ...stores.tasks.list({ status: "running" }),
+    ...stores.tasks.list({ status: "queued" }),
+  ]) {
+    if (task.status !== "queued" && task.status !== "running") continue;
+    const hasHandler =
+      task.kind === "canvas-image" ||
+      task.kind === "canvas-text" ||
+      task.kind === "canvas-video" ||
+      task.kind === "canvas-audio" ||
+      task.kind === CANVAS_BROWSER_TASK_KIND ||
+      task.kind === "direct-video" ||
+      task.kind === "direct-audio" ||
+      task.kind === "canvas-h3-run" ||
+      task.kind.startsWith("comfyui:") ||
+      task.kind === "runninghub:minimax-h3";
+    if (!hasHandler) {
+      // 无恢复处理器（例如 workflow 类型，启动循环未为其调用 resume）→ 必然僵尸
+      stores.tasks.update(task.id, {
+        status: "failed",
+        error:
+          "backend 重启后该任务无活跃执行且无对应恢复处理器，已自动置为失败（孤儿任务回收）",
+      });
+      stores.tasks.addEvent(task.id, "status", { status: "failed" });
+      continue;
+    }
+    // comfyui / runninghub 类型必须依赖 ComfyUI promptId 才能恢复；没有则说明从未提交，
+    // 重启后无法恢复 → 置失败。有 promptId 的已由上面的 resume 循环挂上观察循环，跳过。
+    if (task.kind.startsWith("comfyui:") || task.kind === "runninghub:minimax-h3") {
+      const promptId = stores.tasks
+        .events(task.id)
+        .find((e) => e.type === "submitted")?.payload?.promptId;
+      const createdTs = task.createdAt ? new Date(task.createdAt).getTime() : 0;
+      // 超过 24 小时的 ComfyUI 任务，其 history 早被 ComfyUI 清理，resume 观察必然超时失败，
+      // 与其让其挂在 running 里最多 1 小时，不如直接置失败（孤儿任务回收）。
+      const tooOld = createdTs > 0 && Date.now() - createdTs > 24 * 60 * 60 * 1000;
+      if (typeof promptId !== "string" || !promptId || tooOld) {
+        stores.tasks.update(task.id, {
+          status: "failed",
+          error:
+            tooOld && promptId
+              ? "backend 重启后该 ComfyUI 任务已超过 24 小时，history 已不可恢复，已自动置为失败（孤儿任务回收）"
+              : "backend 重启后该 ComfyUI 任务从未提交到 ComfyUI（无 promptId），已自动置为失败（孤儿任务回收）",
+        });
+        stores.tasks.addEvent(task.id, "status", { status: "failed" });
+      }
+    }
+    // canvas-*/direct-* 类型：上面的 resume 循环已尝试恢复，此处不再处理
   }
   const canvasRealtime = new CanvasRealtimeHub(config, db, events);
   app.get("/canvas/projects/:id/collaboration", (req, res) => {
