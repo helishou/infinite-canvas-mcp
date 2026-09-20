@@ -765,10 +765,11 @@ export function H3PromptSection({
       if (!segment) throw new Error("当前 Clip 已不存在，无法生成提示词。");
       const generation = storyboardGenerationContext(ctx, segment, fields, shots, referenceCatalog, storyboardRetentionLevelsRef.current);
       const fingerprint = await storyboardPromptFingerprint(generation.content);
-      if (segment.storyboardPromptCache?.version === 10 && segment.storyboardPromptCache.fingerprint === fingerprint) return true;
       const subjectBefore = readPromptSection(before.text, "subject_definitions");
       const retentionBefore = readPromptSection(before.text, "retention_analysis");
       const generated = buildStoryboardPromptSections(generation.subjects, generation.references, generation.shots);
+      const cacheMatchesPrompt = subjectBefore === generated.subjectDefinitions && retentionBefore === generated.retentionAnalysis;
+      if (segment.storyboardPromptCache?.version === 10 && segment.storyboardPromptCache.fingerprint === fingerprint && cacheMatchesPrompt) return true;
 
       await document.flush();
       const latest = document.getSnapshot();

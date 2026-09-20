@@ -421,7 +421,7 @@ export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue
     const generated = buildPromptSections(project, segment, input, bindings);
     const cache = record(segment.storyboardPromptCache);
     const promptMode = promptModeOf(segment);
-    if (promptMode === "ref2va" && cache.version === 10 && cache.fingerprint === generated.fingerprint) return { ...generated, unchanged: true as const };
+    if (promptMode === "ref2va" && cache.version === 10 && cache.fingerprint === generated.fingerprint && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
     if (promptMode !== "ref2va" && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
     return {
         ...generated,

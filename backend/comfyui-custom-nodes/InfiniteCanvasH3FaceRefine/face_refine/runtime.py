@@ -95,8 +95,11 @@ def apply_face_refine(
     canvas_w, canvas_h = transform["canvas"]
     sample_length = _align_frame_count(crops.shape[0])
     crop_input = _pad_frames(crops, sample_length)
+    # ComfyUI 的 MiniMaxH3ReferenceToVideo ref_images 槽位从 0 开始；
+    # 节点 UI 为了保持 reference_1...reference_9 的用户命名，从 1 开始收集，
+    # 这里必须在进入原生 H3 节点前转换为 ref_image_0...ref_image_8。
     ref_images = {
-        f"ref_image_{index}": reference[:1]
+        f"ref_image_{index - 1}": reference[:1]
         for index, reference in references
     } or None
 
