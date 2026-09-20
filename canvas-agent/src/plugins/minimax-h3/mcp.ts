@@ -3,6 +3,7 @@ import { normalizeH3GenerationSettings, normalizePlannedSegment, validateVideoPl
 import { compileReferenceSubmission, inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf, assertReferenceCompilation } from "../../canvas/reference-contract.js";
 import { validateH3CharacterGroups } from "../../canvas/character-reference-contract.js";
 import { buildCharacterGroupFromExistingNode } from "./character-groups.js";
+import { writeStoryboardPrompt } from "./storyboard-write.js";
 
 // H3 片段(节点 metadata.segments 中的元素)
 type H3Segment = Record<string, unknown>;
@@ -115,6 +116,39 @@ const TOOLS: PluginMcpToolWire[] = [
         name: "H3 应用结构化视频计划",
         description: "把按镜号拆分的结构化中文视频计划写入 H3 节点，并按角色化参考清单生成最终提示词。",
         inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, replaceSegments: { type: "boolean" }, language: { type: "string", enum: ["zh-CN"] }, segments: { type: "array", items: { type: "object" } } }, required: ["projectId", "nodeId", "segments"] },
+    },
+    {
+        id: "h3_write_storyboard_prompt",
+        version: "1.1.0",
+        name: "H3 写入结构化分镜提示词",
+        description: "按分镜编辑器的新结构写入单个 Clip：开场总体描述、逐镜描述/切换时间/切换方式/已绑定分镜图、声景和配乐；Ref2VA 模式另写 summary，并由当前人物引用按规则生成 subject_definitions 与 retention_analysis，使用共享 SHA-256 缓存。",
+        inputJsonSchema: {
+            type: "object",
+            properties: {
+                projectId: { type: "string", description: "画布项目 id" },
+                nodeId: { type: "string", description: "H3 节点 id" },
+                segmentId: { type: "string", description: "目标 Clip 的稳定 id" },
+                summary: { type: "string", description: "Ref2VA 模式的摘要；其他模式忽略" },
+                openingDescription: { type: "string", description: "detailed_description 开头的非分镜总体描述" },
+                shots: {
+                    type: "array",
+                    minItems: 1,
+                    items: {
+                        type: "object",
+                        properties: {
+                            description: { type: "string", description: "分镜描述，可包含 {{subject:人物节点id}} 引用" },
+                            switchTime: { type: "string", description: "本镜头相对 Clip 开始的切换时间；第一镜忽略" },
+                            transitionType: { type: "string", enum: ["continuous", "cut", "dissolve", "fade_black"], description: "从上一镜到本镜的方式：连续镜头不切镜、硬切、叠化、淡出至黑场再淡入；第一镜忽略" },
+                            pictureBindingId: { type: "string", description: "当前 Clip 中已绑定的 storyboard 图片 binding id" },
+                        },
+                        required: ["description"],
+                    },
+                },
+                overallSoundscape: { type: "string" },
+                nonDiegeticMusic: { type: "string" },
+            },
+            required: ["projectId", "nodeId", "segmentId", "openingDescription", "shots", "overallSoundscape", "nonDiegeticMusic"],
+        },
     },
     {
         id: "h3_get_task",
@@ -542,6 +576,25 @@ export const pluginMcp: PluginMcpModule = {
                 // 节点级元数据（status/runProgress/errorDetails）走 update_node（不带 segments）。
                 await context.updateCanvasNode(nodeId, {}, { status: "idle", errorDetails: "", runProgress: 0 });
                 return { ok: true, projectId, nodeId, count: next.length, segments: next };
+            },
+            h3_write_storyboard_prompt: async (input) => {
+                const projectId = String(input.projectId || "");
+                const nodeId = String(input.nodeId || "");
+                const segmentId = String(input.segmentId || "");
+                await assertProjectNode(context, projectId, nodeId);
+                const project = (await context.backend.listCanvasProjects()).find((item) => String(item.id || "") === projectId);
+                const node = await context.getCanvasNode(nodeId);
+                if (!project || !node) throw new Error(`找不到画布或节点：${projectId}/${nodeId}`);
+                if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
+                const segment = segmentsOf(node).find((item) => String(item.id || "") === segmentId);
+                if (!segment) throw new Error(`找不到片段:${segmentId}`);
+                const generated = writeStoryboardPrompt(project, segment, input);
+                if (generated.unchanged) return { ok: true, unchanged: true, projectId, nodeId, segmentId, fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, prompt: segment.prompt || "" };
+                await context.updateH3Segment(nodeId, segmentId, { prompt: generated.prompt, ...(generated.cache ? { storyboardPromptCache: generated.cache } : {}) });
+                const refreshed = await context.getCanvasNode(nodeId);
+                const updated = refreshed && segmentsOf(refreshed).find((item) => String(item.id || "") === segmentId);
+                if (!updated) throw new Error(`分镜提示词写入后读取失败:${segmentId}`);
+                return { ok: true, unchanged: false, projectId, nodeId, segmentId, fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, segment: updated };
             },
             h3_list_models: async () => {
                 const catalog = await context.comfyUi.models();

@@ -15,6 +15,7 @@ import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { useExportCanvas } from "@/hooks/use-export-canvas";
+import { acquireCanvasTransfer, releaseCanvasTransfer, useCanvasTransfer } from "@/lib/canvas/canvas-transfer";
 import { hasAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
 import { fetchBackendDramaEpisodes, uploadBackendMedia } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -23,7 +24,8 @@ import { cn } from "@/lib/utils";
 const UNFILED_FOLDER = "__unfiled__";
 
 export default function CanvasPage() {
-    const exportCanvasProjects = useExportCanvas();
+    const { exportCanvasProjects, exporting } = useExportCanvas();
+    const transfer = useCanvasTransfer();
     const { message } = App.useApp();
     const { t } = useTranslation();
     const navigate = useNavigate();
@@ -110,6 +112,11 @@ export default function CanvasPage() {
     const createAndEnter = () => enterProject(createProject(t("canvas.defaultTitle", { count: projects.length + 1 })));
     const importCanvas = async (file?: File) => {
         if (!file) return;
+        if (!acquireCanvasTransfer("import")) {
+            message.info(t("canvas.transferBusy"));
+            if (inputRef.current) inputRef.current.value = "";
+            return;
+        }
         try {
             const zip = await readZip(file);
             const projectFile = zip.get("projects.json");
@@ -140,6 +147,7 @@ export default function CanvasPage() {
         } catch {
             message.error(t("canvas.importFailed"));
         } finally {
+            releaseCanvasTransfer("import");
             if (inputRef.current) inputRef.current.value = "";
         }
     };
@@ -204,7 +212,7 @@ export default function CanvasPage() {
                             <div className="flex flex-wrap items-center justify-end gap-2">
                                 {selectedIds.length ? (
                                     <>
-                                        <Button disabled={!hydrated} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `${t("canvas.title")}-${selectedIds.length}`)}>
+                                        <Button loading={exporting} disabled={!hydrated || transfer !== null} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `${t("canvas.title")}-${selectedIds.length}`)}>
                                             {t("canvas.exportSelected")}
                                         </Button>
                                         {folders.length ? (
@@ -219,7 +227,7 @@ export default function CanvasPage() {
                                     </>
                                 ) : null}
                                 <CanvasDraftsButton />
-                                <Button disabled={!hydrated} icon={<FileUp className="size-4" />} onClick={() => inputRef.current?.click()}>{t("canvas.import")}</Button>
+                                <Button loading={transfer === "import"} disabled={!hydrated || transfer !== null} icon={<FileUp className="size-4" />} onClick={() => inputRef.current?.click()}>{t("canvas.import")}</Button>
                                 <Button disabled={!hydrated} type="primary" icon={<Plus className="size-4" />} onClick={createAndEnter}>{t("canvas.create")}</Button>
                             </div>
                         </header>

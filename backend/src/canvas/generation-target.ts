@@ -50,9 +50,10 @@ export function prepareCanvasGenerationTarget(
 
 function prepareSmartMedia(project: CanvasProject, source: Record<string, any>, command: CanvasGenerationCommand): PreparedCanvasGenerationTarget {
     const metadata = record(source.metadata);
+    const imageSlotIds = new Set(records(metadata.images).map((image) => String(image.id || "")));
     const legacyResultIds = [...new Set([
         ...(Array.isArray(metadata.generatedResultIds) ? metadata.generatedResultIds.map(String) : []),
-        ...(metadata.primaryImageId ? [String(metadata.primaryImageId)] : []),
+        ...(metadata.primaryImageId && !imageSlotIds.has(String(metadata.primaryImageId)) ? [String(metadata.primaryImageId)] : []),
         ...(Array.isArray(metadata.generatedTextResultIds) ? metadata.generatedTextResultIds.map(String) : []),
         ...(metadata.primaryTextNodeId ? [String(metadata.primaryTextNodeId)] : []),
     ].filter((id) => id && id !== String(source.id)))];
@@ -64,8 +65,8 @@ function prepareSmartMedia(project: CanvasProject, source: Record<string, any>, 
             {
                 type: "update_node",
                 id: String(source.id),
-                metadata: { prompt: String(command.prompt || ""), model: command.model, generationMode: command.mode },
-                metadataDelete: ["content", "storageKey", "mimeType", "bytes", "naturalWidth", "naturalHeight", "durationMs", "images", "primaryImageId", "texts", "primaryTextId", "generatedTextResultIds", "primaryTextNodeId", "errorDetails", "runProgress"],
+                metadata: { prompt: String(command.prompt || ""), model: command.model, generationMode: command.mode, activeImageHistoryExplicit: false },
+                metadataDelete: ["content", "storageKey", "mimeType", "bytes", "naturalWidth", "naturalHeight", "durationMs", "errorDetails", "runProgress"],
             },
         ],
         targetSize: { width: Number(source.width || defaultSize(command.mode).width), height: Number(source.height || defaultSize(command.mode).height) },
@@ -91,14 +92,26 @@ function prepareImage(project: CanvasProject, source: Record<string, any>, comma
     const count = countOf(command);
     if (useExisting) {
         const imageIds = command.imageIds?.length ? command.imageIds : Array.from({ length: count }, () => `image-slot-${crypto.randomUUID()}`);
+        const imageSlotIds = new Set(records(metadata.images).map((image) => String(image.id || "")));
         const legacyResultIds = useSmartNode
             ? [...new Set([
                 ...(Array.isArray(metadata.generatedResultIds) ? metadata.generatedResultIds.map(String) : []),
-                ...(metadata.primaryImageId ? [String(metadata.primaryImageId)] : []),
+                ...(metadata.primaryImageId && !imageSlotIds.has(String(metadata.primaryImageId)) ? [String(metadata.primaryImageId)] : []),
                 ...(Array.isArray(metadata.generatedTextResultIds) ? metadata.generatedTextResultIds.map(String) : []),
                 ...(metadata.primaryTextNodeId ? [String(metadata.primaryTextNodeId)] : []),
             ].filter((id) => id && id !== String(source.id)))]
             : [];
+        const historySnapshot = useSmartNode ? imageGenerationSnapshot(metadata, command, count) : undefined;
+        const newImages = imageIds.map((id) => ({
+            id,
+            status: "idle",
+            content: "",
+            naturalWidth: 0,
+            naturalHeight: 0,
+            bytes: 0,
+            mimeType: "",
+            ...(historySnapshot ? { generationSnapshot: historySnapshot } : {}),
+        }));
         const createOperations: CanvasOperation[] = [
             ...legacyResultIds.map((id) => ({ type: "delete_node", id })),
             ...(command.imageIds?.length || writeBackToTarget ? [] : [{
@@ -110,9 +123,10 @@ function prepareImage(project: CanvasProject, source: Record<string, any>, comma
                     generationMode: "image",
                     count,
                     generationType: command.references?.length ? "edit" : "generation",
-                    images: imageIds.map((id) => ({ id, status: "idle", content: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" })),
+                    images: [...(useSmartNode ? records(metadata.images) : []), ...newImages],
+                    ...(useSmartNode ? { primaryImageId: imageIds[0], activeImageHistoryId: imageIds[0], activeImageHistoryExplicit: false } : {}),
                 },
-                    ...(useSmartNode ? { metadataDelete: ["generatedResultIds", "primaryImageId", "generatedTextResultIds", "primaryTextNodeId"] } : {}),
+                    ...(useSmartNode ? { metadataDelete: ["generatedResultIds", "generatedTextResultIds", "primaryTextNodeId"] } : {}),
             }]),
         ];
         return {
@@ -195,6 +209,39 @@ function findResultPosition(project: CanvasProject, source: Record<string, any>,
 function defaultSize(mode: CanvasGenerationCommand["mode"]) {
     return mode === "audio" ? { width: 320, height: 140 } : { width: 340, height: 190 };
 }
+
+function imageGenerationSnapshot(metadata: Record<string, any>, command: CanvasGenerationCommand, count: number) {
+    const history = record((command as unknown as Record<string, unknown>).historySnapshot);
+    const references = records(command.references).flatMap((reference, index) => {
+        const storageKey = String(reference.storageKey || "");
+        const rawUrl = String(reference.url || reference.dataUrl || "");
+        const url = rawUrl && !/^(data:|blob:)/i.test(rawUrl) ? rawUrl : "";
+        if (!storageKey && !url) return [];
+        return [{
+            id: String(reference.id || `reference-${index + 1}`),
+            name: String(reference.name || `参考图 ${index + 1}`),
+            type: String(reference.type || reference.mimeType || "image/png"),
+            ...(url ? { url } : {}),
+            ...(storageKey ? { storageKey } : {}),
+        }];
+    });
+    const background = history.background ?? metadata.background;
+    const params = record(command.params);
+    return {
+        createdAt: new Date().toISOString(),
+        prompt: String(history.prompt ?? metadata.composerContent ?? metadata.prompt ?? command.prompt ?? ""),
+        effectivePrompt: String(command.prompt || ""),
+        model: String(command.model || ""),
+        ...(history.size || command.size ? { size: String(history.size || command.size) } : {}),
+        ...(command.quality ? { quality: String(command.quality) } : {}),
+        ...(typeof background === "string" ? { background } : {}),
+        count,
+        ...(Object.keys(params).length ? { params: structuredClone(params) } : {}),
+        references,
+        ...(command.maskEdit || history.maskEdit ? { maskEdit: true } : {}),
+    };
+}
+
 function countOf(command: CanvasGenerationCommand) { return Math.max(1, Math.min(4, Math.floor(Number(command.count || 1)))); }
 function modeLabel(mode: CanvasGenerationCommand["mode"]) { return mode === "image" ? "图片" : mode === "video" ? "视频" : mode === "audio" ? "音频" : "文本"; }
 function records(value: unknown): Array<Record<string, any>> { return Array.isArray(value) ? value.filter((item) => item && typeof item === "object" && !Array.isArray(item)) : []; }

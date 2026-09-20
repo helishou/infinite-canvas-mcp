@@ -18,6 +18,7 @@
       "h3_update_clip",
       "h3_prepare_clip",
       "h3_bind_existing_character_groups",
+      "h3_write_storyboard_prompt",
       "h3_run_all_clips",
       "canvas_list_reference_assets",
       "canvas_update_reference_asset",

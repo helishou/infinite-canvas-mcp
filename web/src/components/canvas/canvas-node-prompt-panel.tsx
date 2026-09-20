@@ -59,9 +59,15 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     const [expanded, setExpanded] = useState(false);
     const [imagePromptRequired, setImagePromptRequired] = useState(false);
     const promptRequired = mode !== "image" || imagePromptRequired;
-    // 本次会带上的参考图数量（连接来的图片节点 + 提示词里 @ 到的图片）：
-    // 决定输入场景（0 = 文生 / 1 = 单图 / ≥2 = 多图），进而决定参数字段读哪个工作流。
-    const referenceCount = connectedNodes.filter((item) => item.type === CanvasNodeType.Image).length + mentionReferences.filter((item) => item.kind === "image").length;
+    const activeHistoryImage = mode === "image" && node.metadata?.activeImageHistoryExplicit === true && node.metadata?.activeImageHistoryId
+        ? node.metadata.images?.find((image) => image.id === node.metadata?.activeImageHistoryId)
+        : undefined;
+    const historyReferences = activeHistoryImage?.generationSnapshot?.references;
+    // 当前版本已恢复时按该版本的图片数路由工作流，否则按实时连接和 @ 引用计算。
+    const referenceCount = historyReferences !== undefined
+        ? historyReferences.length
+        : connectedNodes.filter((item) => item.type === CanvasNodeType.Image).length + mentionReferences.filter((item) => item.kind === "image").length;
+    const clearHistoryReferences = () => onConfigChange(node.id, { activeImageHistoryId: null, activeImageHistoryExplicit: false });
 
     const updatePrompt = (value: string) => editorRef.current?.replace(value);
 
@@ -85,7 +91,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
             onDoubleClick={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
         >
-            <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} onDisconnect={onDisconnectReference} onStartSelection={onStartReferenceSelection} onCharacterSelectionChange={onCharacterReferenceChange} />
+            <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={historyReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={onStartReferenceSelection} onCharacterSelectionChange={onCharacterReferenceChange} />
             {isSmartGenerationNode ? (
                 <Segmented
                     className="mb-2 w-full"
@@ -174,7 +180,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
             </div>
             <Modal title={t("canvas.promptPanel.editorTitle")} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
-                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} onCharacterSelectionChange={onCharacterReferenceChange} />
+                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={historyReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} onCharacterSelectionChange={onCharacterReferenceChange} />
                     <CanvasCollaborativeText
                         projectId={projectId} target={target} chips
                         references={mentionReferences}

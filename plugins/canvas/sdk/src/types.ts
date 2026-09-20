@@ -283,10 +283,12 @@ export type CanvasTextEditorHandle = {
     replace: (text: string) => void;
     focus: () => void;
 };
-export type CanvasTextReference = { label: string; title?: string; insert?: string; previewUrl?: string; active?: boolean; kind?: string };
+export type CanvasTextReference = { label: string; displayLabel?: string; title?: string; insert?: string; tokens?: string[]; previewUrl?: string; active?: boolean; suggestible?: boolean; kind?: string };
 export type CanvasTextEditorProps = {
     projectId: string; target: CanvasTextTarget; placeholder?: string;
     references?: CanvasTextReference[]; chips?: boolean;
+    /** Local rich text editor for transient fields that are persisted through their owning document. */
+    standalone?: boolean; value?: string; onChange?: (text: string) => void;
     className?: string; style?: import("react").CSSProperties;
     editorRef?: import("react").Ref<CanvasTextEditorHandle>;
     onSubmit?: () => void; onBlur?: () => void; onEscape?: () => void;

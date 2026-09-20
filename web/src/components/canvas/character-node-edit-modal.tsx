@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Image as AntImage, Modal, Input, Button, message } from "antd";
+import { Image as AntImage, Modal, Input, Button, message, Select } from "antd";
 import { ImagePlus, Save, Trash2, Upload as UploadIcon, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -11,6 +11,11 @@ import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 import { CanvasNodeType } from "@/types/canvas";
 
 type CharacterImage = NonNullable<CanvasNodeMetadata["characterImages"]>[number];
+
+const IMAGE_ROLE_KEYS = [
+    "character_identity", "character_turnaround", "storyboard", "scene", "blocking", "keyframe",
+    "motion_reference", "style", "palette", "prop", "other",
+] as const;
 
 type Props = {
     open: boolean;
@@ -36,6 +41,7 @@ type Props = {
 /** 角色节点双击打开的完整编辑面板：标题/描述/参考图/声线。 */
 export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImagePick, node, onClose, onPickCanvasImage, onSave }: Props) {
     const { t } = useTranslation();
+    const imageRoleOptions = IMAGE_ROLE_KEYS.map((role) => ({ value: role, label: t(`canvas.character.imageRoles.${role}`) }));
     const assets = useAssetStore((state) => state.assets);
     const audioAssets = useMemo(() => assets.filter((asset): asset is AudioAsset => asset.kind === "audio"), [assets]);
     const [title, setTitle] = useState("");
@@ -117,7 +123,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
             title: title.trim() || t("canvas.nodeTypes.character"),
             characterName: title.trim(),
             characterDescription: description.trim(),
-            characterImages: images,
+            characterImages: images.map((image) => ({ ...image, role: image.role || "character_turnaround" })),
             characterPrimaryIndex: Math.min(primaryIndex, images.length - 1),
             characterVoiceUrl: voiceUrl,
             characterVoiceName: resolveCharacterVoiceName(voiceName),
@@ -196,6 +202,16 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
                                         onChange={(e) => updateImage(idx, { outfit: e.target.value })}
                                         placeholder={t("assets.character.outfitPlaceholder")}
                                     />
+                                    <label className="block space-y-1">
+                                        <span className="text-xs text-stone-500">{t("canvas.character.imageRole")}</span>
+                                        <Select
+                                            size="small"
+                                            className="w-full"
+                                            value={image.role || "character_turnaround"}
+                                            options={imageRoleOptions}
+                                            onChange={(role) => updateImage(idx, { role })}
+                                        />
+                                    </label>
                                     <Input.TextArea
                                         size="small"
                                         rows={2}

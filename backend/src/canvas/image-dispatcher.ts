@@ -41,6 +41,7 @@ export type CanvasImageGenerationInput = {
   sourceNodeId?: string;
   segmentId?: string;
   maskEdit?: boolean;
+  referenceNodeIds?: string[];
   model: string;
   prompt: string;
   references?: CanvasImageReference[];

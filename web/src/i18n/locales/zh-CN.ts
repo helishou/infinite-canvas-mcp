@@ -381,6 +381,7 @@ export default {
         title: "无限画布",
         imported: "已导入 {{count}} 个画布",
         importFailed: "导入失败，请选择有效的画布压缩包",
+        transferBusy: "画布正在导入或导出，请稍后再试",
         opening: "正在打开画布...",
         loading: "正在加载画布...",
         exportSelected: "导出选中",
@@ -457,6 +458,11 @@ export default {
             saveNameRequired: "请先在节点标题填写角色名",
             imageReference: "生图引用",
             imagePreview: "放大预览",
+            imageRole: "主要职责",
+            imageRoles: {
+                character_identity: "人物形象", character_turnaround: "人物四视图", storyboard: "分镜图", scene: "场景基准",
+                blocking: "站位 / 轴线", keyframe: "关键帧", motion_reference: "动作参考", style: "风格参考", palette: "色卡", prop: "道具", other: "其他",
+            },
         },
         scene: {
             empty: "空场景节点",

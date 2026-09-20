@@ -2,6 +2,8 @@ import { useEffect, useRef } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { useH3RunEvents } from "../hooks/useH3RunEvents";
 import { segmentsFor } from "../hooks/useH3Segments";
+import { refsForSegment, withSegmentRefs } from "../services/h3-data";
+import { refreshSmartImageReference } from "../services/h3-refs";
 
 function bindingSignature(value: unknown) {
     if (!Array.isArray(value)) return "[]";
@@ -60,7 +62,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 if (childId) {
                     const child = childKind === "runninghub:minimax-h3" ? await ctx.ai.getRunningHubH3Task(childId) : await ctx.ai.getLocalH3Task(childId);
                     if (!stopped && child.preview?.dataUrl && typeof window !== "undefined") {
-                        window.dispatchEvent(new CustomEvent("minimax-h3-preview", { detail: { taskId: childId, url: child.preview.dataUrl, mime: child.preview.mime, promptId: child.preview.promptId, step: child.preview.step, total: child.preview.total } }));
+                        window.dispatchEvent(new CustomEvent("minimax-h3-preview", { detail: { parentTaskId: taskId, sourceTaskId: childId, url: child.preview.dataUrl, mime: child.preview.mime, promptId: child.preview.promptId, step: child.preview.step, total: child.preview.total } }));
                     }
                 }
             } catch { /* Backend SSE 负责状态；短暂查询失败只跳过本轮预览。 */ }
@@ -75,10 +77,33 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         runInFlight.current = true;
         try {
             const metadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
-            const segments = segmentsFor(metadata);
+            let segments = segmentsFor(metadata);
             if (!segments.length) throw new Error("当前节点没有可生成的 Clip");
             const selectedId = String(metadata.selectedSegmentId || segments[0].id || "");
             if (!selectedId) throw new Error("当前节点没有可定位的 Clip");
+            const changedAssets = new Map<string, NonNullable<(typeof segments)[number]["referenceBindings"]>[number]>();
+            let referencesChanged = false;
+            segments = segments.map((segment) => {
+                const refs = refsForSegment(segment);
+                const refreshed = refs.map((ref) => {
+                    const next = ref.nodeId ? refreshSmartImageReference(ref, ctx.getNode(ref.nodeId)) : ref;
+                    if (next !== ref) referencesChanged = true;
+                    return next;
+                });
+                if (refreshed.every((ref, index) => ref === refs[index])) return segment;
+                const nextSegment = withSegmentRefs(segment, refreshed);
+                refreshed.forEach((ref, index) => {
+                    if (ref === refs[index]) return;
+                    const binding = nextSegment.referenceBindings?.find((item) => item.id === ref.bindingId);
+                    if (binding) changedAssets.set(binding.assetId, binding);
+                });
+                return nextSegment;
+            });
+            if (referencesChanged) {
+                update({ segments });
+                await ctx.flush();
+                await Promise.all(Array.from(changedAssets.values(), (binding) => ctx.references.upsert({ id: binding.assetId, label: binding.label, mediaType: binding.mediaType || "image", role: binding.role, tags: binding.tags || [], url: binding.url, storageKey: binding.storageKey, mimeType: binding.mimeType, sourceNodeId: binding.sourceNodeId, subjectId: binding.subjectId })));
+            }
             await ctx.flush();
             const validation = await ctx.references.validate(ctx.node.id, selectedId);
             const localBindings = segments.find((segment) => segment.id === selectedId)?.referenceBindings;

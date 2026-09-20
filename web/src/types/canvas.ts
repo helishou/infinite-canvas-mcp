@@ -34,6 +34,28 @@ export type CanvasNodeStatus = "idle" | "queued" | "success" | "loading" | "erro
 export type CanvasImageGenerationType = "generation" | "edit";
 export type CanvasGenerationEngine = "cloud" | "comfyui" | "video-concat" | "backend";
 
+export type CanvasImageReferenceSnapshot = {
+    id: string;
+    name: string;
+    type: string;
+    url?: string;
+    storageKey?: string;
+};
+
+export type CanvasImageGenerationSnapshot = {
+    createdAt: string;
+    prompt: string;
+    effectivePrompt: string;
+    model: string;
+    size?: string;
+    quality?: string;
+    background?: string;
+    count: number;
+    params?: Record<string, unknown>;
+    references: CanvasImageReferenceSnapshot[];
+    maskEdit?: boolean;
+};
+
 export type CanvasNodeImage = {
     id: string;
     status: CanvasNodeStatus;
@@ -44,6 +66,7 @@ export type CanvasNodeImage = {
     naturalHeight: number;
     bytes: number;
     mimeType: string;
+    generationSnapshot?: CanvasImageGenerationSnapshot;
 };
 
 export type CanvasNodeText = {
@@ -110,6 +133,10 @@ export type CanvasNodeMetadata = {
     freeResize?: boolean;
     images?: CanvasNodeImage[];
     primaryImageId?: string;
+    /** 当前显示的智能图片历史版本。 */
+    activeImageHistoryId?: string | null;
+    /** 只有用户主动选中历史版本时，才用该版本的参考图快照覆盖实时连线。 */
+    activeImageHistoryExplicit?: boolean;
     storageKey?: string;
     mimeType?: string;
     bytes?: number;
@@ -124,7 +151,7 @@ export type CanvasNodeMetadata = {
     characterName?: string;
     characterEnglishName?: string;
     characterDescription?: string;
-    characterImages?: Array<{ url: string; storageKey?: string; name: string; outfit: string; outfitDescription: string; width: number; height: number; bytes: number; mimeType: string }>;
+    characterImages?: Array<{ url: string; storageKey?: string; name: string; outfit: string; outfitDescription: string; role?: string; width: number; height: number; bytes: number; mimeType: string }>;
     characterPrimaryIndex?: number;
     // 拖入角色节点的声线（音频）：从音频节点/音频资产/音频文件拖入后记录，存入资产库映射到 CharacterAsset.voice*。
     characterVoiceName?: string;

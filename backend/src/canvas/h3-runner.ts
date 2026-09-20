@@ -7,7 +7,7 @@ import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { RunningHubBackend } from "../runtime/runninghub.js";
 import type { Stores } from "../stores/types.js";
 import { writeBackH3Task } from "./h3-task-writeback.js";
-import { h3ClipCacheFingerprint, h3ConfirmationPhaseParams } from "./h3-cache.js";
+import { h3ClipCacheFingerprint, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, stableH3Fingerprint } from "./h3-cache.js";
 
 type H3RunInput = {
     projectId: string;
@@ -180,7 +180,8 @@ export class CanvasH3Runner {
             if (completed.has(key)) continue;
             const cache = this.clipCacheState(input.projectId, plan, input.params || {}, effectiveFingerprints);
             effectiveFingerprints.set(key, cache.fingerprint);
-            if (input.params?.confirmSecondPass === true && cache.segment.firstPassFingerprint !== cache.fingerprint) throw new Error(`Clip ${plan.segmentIndex + 1} 的生成参数或上游已变化，请重新生成一采后再确认精修`);
+            const firstPassFingerprint = String(cache.segment.firstPassFingerprint || "");
+            if (input.params?.confirmSecondPass === true && (!firstPassFingerprint || ![cache.fingerprint, cache.legacyFingerprint, cache.loggedLegacyFingerprint].includes(firstPassFingerprint))) throw new Error(`Clip ${plan.segmentIndex + 1} 的生成参数或上游已变化，请重新生成一采后再确认精修`);
             if (cache.output) {
                 outputs.push(cache.output);
                 completed.add(key);
@@ -239,15 +240,28 @@ export class CanvasH3Runner {
         const compilation = compileReferenceSubmission(project, { ...segment, taskMode: normalizeTaskMode(params.taskMode || segment.taskMode) });
         const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
         const previousFingerprint = previous ? fingerprints.get(`${plan.nodeId}:${String(previous.id || "")}`) || String(previous.cacheFingerprint || "") : "";
-        const fingerprint = h3ClipCacheFingerprint({ segment: { ...segment, previousTailFrameContinuation: previous?.tailFrameContinuation === true }, params, references: compilation.references, compiledPrompt: compilation.compiledPrompt, previousFingerprint });
         const confirming = override.confirmSecondPass === true;
+        const firstPassReferences = confirming
+            ? firstPassReferencesFromLog(this.stores.logs.list({ projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, limit: 500 }), segment)
+            : null;
+        const useFirstPassReferences = firstPassReferences
+            && stableH3Fingerprint(stableReferenceInputs(firstPassReferences)) === stableH3Fingerprint(stableReferenceInputs(compilation.references));
+        const segmentFingerprintInput = { ...segment, previousTailFrameContinuation: previous?.tailFrameContinuation === true };
+        const fingerprintInput = { segment: segmentFingerprintInput, params: h3ConfirmationFingerprintParams(segment, params), compiledPrompt: compilation.compiledPrompt, previousFingerprint };
+        const fingerprint = h3ClipCacheFingerprint({ ...fingerprintInput, references: referenceFingerprintInputs(compilation.references) });
+        // v1 first-pass caches were fingerprinted from the raw params and complete
+        // CompiledReference objects. Keep both exact historical inputs and the
+        // log-backed reference snapshot so settings/timestamp normalization updates
+        // do not invalidate an otherwise unchanged first pass.
+        const legacyFingerprint = confirming ? h3ClipCacheFingerprint({ segment: segmentFingerprintInput, params, references: compilation.references, compiledPrompt: compilation.compiledPrompt, previousFingerprint }) : undefined;
+        const loggedLegacyFingerprint = confirming && useFirstPassReferences ? h3ClipCacheFingerprint({ segment: segmentFingerprintInput, params, references: firstPassReferences, compiledPrompt: compilation.compiledPrompt, previousFingerprint }) : undefined;
         const output = !confirming && segment.result && segment.cacheFingerprint === fingerprint ? {
             url: String(segment.result),
             ...(segment.resultStorageKey ? { storageKey: String(segment.resultStorageKey) } : {}),
             mimeType: "video/mp4",
             cacheFingerprint: fingerprint,
         } : null;
-        return { fingerprint, output, segment };
+        return { fingerprint, legacyFingerprint, loggedLegacyFingerprint, output, segment };
     }
 
     private patchSegment(projectId: string, nodeId: string, segmentId: string, patch: Record<string, unknown>) {
@@ -384,6 +398,7 @@ export class CanvasH3Runner {
         const childInput = confirmingSecondPass ? {
             prompt,
             video: cachedFirstPassPath,
+            ...(images.length ? { references: images } : {}),
         } : {
             prompt, references: images, audios,
             // video（单数）保留给 RunningHub / 旧分拆图读取；videos（复数）给南风 V10 原生构造器，
@@ -597,6 +612,34 @@ function mediaStorageKey(url: string) {
         const parsed = new URL(url, "http://local");
         return parsed.pathname.startsWith("/media/") ? decodeURIComponent(parsed.pathname.slice(7)).split("/")[0] : "";
     } catch { return ""; }
+}
+
+function stableReferenceInputs(references: unknown[]) {
+    return references.map((value) => Object.fromEntries(Object.entries(recordOf(value)).filter(([key]) => !["createdAt", "updatedAt", "analysis", "type", "name", "resolved"].includes(key))));
+}
+
+function referenceFingerprintInputs(references: unknown[]) {
+    return references.map((value) => Object.fromEntries(Object.entries(recordOf(value)).filter(([key]) => !["createdAt", "updatedAt", "analysis"].includes(key))));
+}
+
+function firstPassReferencesFromLog(logs: ReturnType<Stores["logs"]["list"]>, segment: H3Segment) {
+    const storageKey = String(segment.firstPassStorageKey || mediaStorageKey(String(segment.firstPassResult || "")));
+    if (!storageKey) return null;
+    const log = logs.find((item) => item.outputs.some((output) => String(output.storageKey || "") === storageKey));
+    if (!log) return null;
+    const submission = recordOf(recordOf(log.params).submission);
+    const bindingMap = Array.isArray(submission.bindingMap) ? submission.bindingMap as Array<Record<string, unknown>> : [];
+    const actualReferences = Array.isArray(submission.actualReferences) ? submission.actualReferences as Array<Record<string, unknown>> : [];
+    if (!bindingMap.length || !actualReferences.length) return null;
+    const byId = new Map(actualReferences.map((reference) => [String(reference.id || ""), reference]));
+    const references = bindingMap.map((binding) => {
+        const reference = byId.get(String(binding.id || ""));
+        if (!reference) return null;
+        const compiledReference = { ...reference };
+        for (const key of ["type", "name", "resolved", "runtime", "sourceSegmentId"]) delete compiledReference[key];
+        return compiledReference;
+    });
+    return references.every(Boolean) ? references as Array<Record<string, unknown>> : null;
 }
 
 function appendTailFramePrompt(prompt: string, fromClip: string) {

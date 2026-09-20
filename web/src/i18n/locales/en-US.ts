@@ -381,6 +381,7 @@ export default {
         title: "Infinite Canvas",
         imported: "Imported {{count}} canvases",
         importFailed: "Import failed. Select a valid canvas package.",
+        transferBusy: "A canvas import or export is already running. Try again when it finishes.",
         opening: "Opening canvas...",
         loading: "Loading canvases...",
         exportSelected: "Export selected",
@@ -457,6 +458,11 @@ export default {
             saveNameRequired: "Set a character name in the node title first",
             imageReference: "Image ref",
             imagePreview: "Preview image",
+            imageRole: "Primary role",
+            imageRoles: {
+                character_identity: "Character identity", character_turnaround: "Character turnaround", storyboard: "Storyboard", scene: "Scene reference",
+                blocking: "Blocking / axis", keyframe: "Keyframe", motion_reference: "Motion reference", style: "Style reference", palette: "Palette", prop: "Prop", other: "Other",
+            },
         },
         scene: {
             empty: "Empty scene node",

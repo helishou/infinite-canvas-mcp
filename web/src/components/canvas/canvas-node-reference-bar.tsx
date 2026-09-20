@@ -9,13 +9,13 @@ import { characterReferenceKey, getGroupResourceNodes, isAudioGenerationNode, is
 import { CanvasCharacterReferenceModal } from "./canvas-character-reference-modal";
 import type { CanvasNodeResource } from "@/types/canvas-plugin";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
+import { CanvasNodeType, type CanvasImageReferenceSnapshot, type CanvasNodeData } from "@/types/canvas";
 import { ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews } from "@/services/image-storage";
 import { useBackendStore } from "@/stores/use-backend-store";
 
 type ReferenceEntry = { node: CanvasNodeData; sourceNodeId: string; resource?: CanvasNodeResource; index: number; character?: boolean };
 
-export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, onDisconnect, onStartSelection, onCharacterSelectionChange }: { nodeId: string; nodes: CanvasNodeData[]; connectedNodes: CanvasNodeData[]; onDisconnect?: (fromNodeId: string, toNodeId: string) => void; onStartSelection?: (nodeId: string) => void; onCharacterSelectionChange?: (sourceNodeId: string, selection: CanvasCharacterReferenceSelection) => void }) {
+export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyReferences, onClearHistoryReferences, onDisconnect, onStartSelection, onCharacterSelectionChange }: { nodeId: string; nodes: CanvasNodeData[]; connectedNodes: CanvasNodeData[]; historyReferences?: CanvasImageReferenceSnapshot[]; onClearHistoryReferences?: () => void; onDisconnect?: (fromNodeId: string, toNodeId: string) => void; onStartSelection?: (nodeId: string) => void; onCharacterSelectionChange?: (sourceNodeId: string, selection: CanvasCharacterReferenceSelection) => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [editingCharacterNodeId, setEditingCharacterNodeId] = useState<string | null>(null);
@@ -30,7 +30,9 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, onDiscon
         <div className="mb-2">
             <div className="mb-1.5 text-[11px] font-medium" style={{ color: theme.node.muted }}>{t("canvas.references.title")}</div>
             <div className="thin-scrollbar flex min-h-12 gap-2 overflow-x-auto pb-1">
-                {references.map((reference) => reference.character ? (
+                {historyReferences !== undefined ? historyReferences.map((reference, index) => (
+                    <HistoryImageReference key={`${reference.id}:${index}`} reference={reference} onClear={onClearHistoryReferences} />
+                )) : references.map((reference) => reference.character ? (
                     <CharacterReferenceItem
                         key={`${reference.sourceNodeId}:${reference.node.id}:character`}
                         node={reference.node}
@@ -44,11 +46,34 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, onDiscon
                 ) : (
                     <ReferenceItem key={`${reference.sourceNodeId}:${reference.node.id}:${reference.index}`} node={reference.node} resource={reference.resource!} onRemove={() => onDisconnect?.(reference.sourceNodeId, nodeId)} />
                 ))}
-                <button type="button" className="grid size-12 shrink-0 place-items-center rounded-xl border bg-transparent transition hover:opacity-70" style={{ borderColor: theme.toolbar.border, color: theme.node.muted }} title={t("canvas.references.select")} onClick={() => onStartSelection?.(nodeId)}>
+                <button type="button" className="grid size-12 shrink-0 place-items-center rounded-xl border bg-transparent transition hover:opacity-70" style={{ borderColor: theme.toolbar.border, color: theme.node.muted }} title={t("canvas.references.select")} onClick={() => { if (historyReferences !== undefined) onClearHistoryReferences?.(); onStartSelection?.(nodeId); }}>
                     <Plus className="size-4" />
                 </button>
             </div>
             {editingCharacterNode && onCharacterSelectionChange ? <CanvasCharacterReferenceModal node={editingCharacterNode} selection={characterSelections[editingCharacterNode.id]} hideVoiceOption={isImageGenerationNode(targetNode) || isTextGenerationNode(targetNode)} onApply={(selection) => onCharacterSelectionChange(editingCharacterNode.id, selection)} onClose={() => setEditingCharacterNodeId(null)} /> : null}
+        </div>
+    );
+}
+
+function HistoryImageReference({ reference, onClear }: { reference: CanvasImageReferenceSnapshot; onClear?: () => void }) {
+    const { t } = useTranslation();
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+    const [url, setUrl] = useState("");
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
+    useEffect(() => {
+        let cancelled = false;
+        if (!reference.storageKey && !reference.url) { setUrl(""); return; }
+        void ensureImagePreview(reference.storageKey);
+        void resolveImageUrl(reference.storageKey, reference.url || "").then((resolved) => { if (!cancelled) setUrl(resolved || reference.url || ""); }).catch(() => { if (!cancelled) setUrl(reference.url || ""); });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, reference.storageKey, reference.url]);
+    const imageUrl = previewUrlFor(reference.storageKey) || url;
+    return (
+        <div className="group relative size-12 shrink-0 overflow-hidden rounded-xl border" style={{ borderColor: theme.toolbar.border, background: theme.node.panel }} title={reference.name}>
+            {imageUrl ? <img src={imageUrl} alt={reference.name} className="size-full object-cover" draggable={false} /> : <div className="grid size-full place-items-center"><ImageIcon className="size-5 opacity-35" /></div>}
+            {onClear ? <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-bl-md opacity-0 transition-opacity group-hover:opacity-100" style={{ background: theme.toolbar.panel, color: theme.node.text }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onClick={(event) => { event.stopPropagation(); onClear(); }}><X className="size-3" /></button> : null}
         </div>
     );
 }

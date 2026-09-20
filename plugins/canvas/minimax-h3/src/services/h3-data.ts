@@ -6,7 +6,7 @@ export function refsForSegment(segment: H3Segment) {
         return segment.referenceBindings.filter((binding) => binding.enabled !== false && (binding.url || binding.storageKey)).map((binding) => ({
             url: binding.url || "", type: binding.mediaType || inferRefType(binding.mimeType || binding.url || binding.label), name: binding.label,
             storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId, role: binding.role,
-            subjectId: binding.subjectId, storyboardSubjectIds: binding.storyboardSubjectIds, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, enabled: binding.enabled, usage: binding.usage,
+            subjectId: binding.subjectId, storyboardSubjectIds: binding.storyboardSubjectIds, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, enabled: binding.enabled, usage: binding.usage, retentionLevel: binding.retentionLevel,
             groupId: binding.groupId, outfitId: binding.outfitId,
         } as H3Ref));
     }
@@ -51,7 +51,7 @@ export function inferReferenceRole(ref: Pick<H3Ref, "name" | "role" | "type">): 
 }
 
 function refToBinding(ref: H3Ref): H3ReferenceBinding {
-    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], enabled: ref.enabled !== false, usage: ref.usage || "reference", subjectId: ref.subjectId, storyboardSubjectIds: ref.storyboardSubjectIds, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId, groupId: ref.groupId, outfitId: ref.outfitId };
+    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], enabled: ref.enabled !== false, usage: ref.usage || "reference", retentionLevel: ref.retentionLevel, subjectId: ref.subjectId, storyboardSubjectIds: ref.storyboardSubjectIds, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId, groupId: ref.groupId, outfitId: ref.outfitId };
 }
 
 function ensureReferenceIdentity(ref: H3Ref, index: number): H3Ref {
@@ -70,7 +70,73 @@ function inferRefType(value: string): H3Ref["type"] {
 }
 
 export function withSegmentRefs(segment: H3Segment, refs: H3Ref[]): H3Segment {
-    return { ...segment, ...segmentRefsPatch(refs) };
+    const next = { ...segment, ...segmentRefsPatch(refs) };
+    return reconcileStoryboardTrack(segment, next);
+}
+
+function storyboardRefs(refs: H3Ref[]) {
+    return refs.filter((ref) => ref.type === "image" && inferReferenceRole(ref) === "storyboard");
+}
+
+function reconcileStoryboardTrack(previous: H3Segment, next: H3Segment): H3Segment {
+    const oldRefs = refsForSegment(previous).map((ref, index) => ensureReferenceIdentity(ref, index));
+    const nextRefs = refsForSegment(next);
+    const oldBoards = storyboardRefs(oldRefs);
+    const boards = storyboardRefs(nextRefs);
+    if (!boards.length) return { ...next, storyboardModeEnabled: oldBoards.length ? false : next.storyboardModeEnabled ?? previous.storyboardModeEnabled, storyboardDurations: {} };
+
+    const durations: Record<string, number> = { ...(next.storyboardDurations || previous.storyboardDurations || {}) };
+    const oldIds = new Set(oldBoards.map((ref) => ref.bindingId).filter((id): id is string => Boolean(id)));
+    const nextIds = new Set(boards.map((ref) => ref.bindingId).filter((id): id is string => Boolean(id)));
+    const validDuration = (id?: string) => id && Number.isFinite(Number(durations[id])) && Number(durations[id]) > 0 ? Number(durations[id]) : 0;
+
+    // 旧数据没有时间分配时，先依照引用顺序平均初始化。
+    if (!oldBoards.length && !Object.keys(durations).length) {
+        const share = Math.max(0.5, Number(previous.duration || next.duration || 1)) / boards.length;
+        for (const ref of boards) if (ref.bindingId) durations[ref.bindingId] = share;
+    } else {
+        // 被移除或改成普通引用的分镜时长并入相邻分镜；末张并入上一张。
+        for (const [index, ref] of oldBoards.entries()) {
+            const id = ref.bindingId;
+            if (!id || nextIds.has(id)) continue;
+            const remaining = oldBoards.slice(index + 1).find((item) => item.bindingId && nextIds.has(item.bindingId))
+                || oldBoards.slice(0, index).reverse().find((item) => item.bindingId && nextIds.has(item.bindingId));
+            const recipient = remaining?.bindingId;
+            if (recipient) durations[recipient] = validDuration(recipient) + validDuration(id);
+            delete durations[id];
+        }
+        // 通过角色编辑/普通 refs 添加的新分镜沿用新增入口语义，与相邻分镜平分时长。
+        for (const [index, ref] of boards.entries()) {
+            const id = ref.bindingId;
+            if (!id || oldIds.has(id) || validDuration(id)) continue;
+            const donor = boards.slice(0, index).reverse().find((item) => item.bindingId && validDuration(item.bindingId))
+                || boards.slice(index + 1).find((item) => item.bindingId && validDuration(item.bindingId));
+            const donorId = donor?.bindingId;
+            if (donorId) {
+                const half = validDuration(donorId) / 2;
+                durations[donorId] = half;
+                durations[id] = half;
+            }
+        }
+        // 部分旧数据缺少绑定 ID 时，均分缺失项后再整体按比例归一。
+        const missing = boards.filter((ref) => ref.bindingId && !validDuration(ref.bindingId));
+        if (missing.length) {
+            const assigned = boards.reduce((sum, ref) => sum + validDuration(ref.bindingId), 0);
+            const remaining = Math.max(0, Number(previous.duration || next.duration || 1) - assigned);
+            for (const ref of missing) if (ref.bindingId) durations[ref.bindingId] = remaining > 0 ? remaining / missing.length : 1;
+        }
+    }
+
+    const normalized = Object.fromEntries(boards.flatMap((ref) => ref.bindingId ? [[ref.bindingId, validDuration(ref.bindingId) || 1]] : []));
+    const sum = Object.values(normalized).reduce((value, duration) => value + duration, 0);
+    const targetDuration = Math.max(0.5, Number(next.duration || previous.duration || 1));
+    const ratio = sum > 0 ? targetDuration / sum : 1;
+    for (const id of Object.keys(normalized)) normalized[id] *= ratio;
+    return {
+        ...next,
+        storyboardModeEnabled: next.storyboardModeEnabled ?? previous.storyboardModeEnabled ?? true,
+        storyboardDurations: normalized,
+    };
 }
 
 // ---- 角色组：拖入角色资产/角色节点时建组，ref 槽里 image/audio ref 都标 groupId ----
@@ -152,7 +218,7 @@ export function refsFromCharacterGroup(group: H3CharacterGroup): H3Ref[] {
             storageKey: outfit.storageKey,
             mimeType: outfit.mimeType,
             nodeId: group.characterNodeId,
-            role: "character_turnaround",
+            role: outfit.role || "character_turnaround",
             subjectId,
             groupId: group.id,
             outfitId: outfit.id,
@@ -186,7 +252,10 @@ function rewriteRefsWithGroups(segment: H3Segment, groups: Record<string, H3Char
             // audio ref 没有 outfitId：用 group.voiceEnabled 决定是否保留
             const isAudioRef = ref.type === "audio";
             const stillEnabled = isAudioRef ? Boolean(group?.voiceEnabled) && Boolean(group?.voice?.url) : Boolean(matchingOutfit?.enabled);
-            if (stillEnabled) fromGroups.push(ref);
+            const sourceRef = refsFromCharacterGroup(group).find((item) => isAudioRef
+                ? item.type === "audio"
+                : item.type === ref.type && item.outfitId === ref.outfitId);
+            if (stillEnabled && sourceRef) fromGroups.push({ ...ref, ...sourceRef, bindingId: ref.bindingId, assetId: ref.assetId, order: ref.order, retentionLevel: ref.retentionLevel });
         } else if (ref.groupId) {
             // group 已被删，对应的 ref 一并丢弃
         } else {
@@ -208,7 +277,7 @@ export function setSegmentCharacterGroups(segment: H3Segment, groups: Record<str
     return withSegmentRefs(next, rewriteRefsWithGroups(next, groups));
 }
 
-type CharacterOutfitInput = { url: string; name: string; storageKey?: string; mimeType?: string };
+type CharacterOutfitInput = { url: string; name: string; storageKey?: string; mimeType?: string; role?: H3ReferenceRole };
 
 type UpsertCharacterGroupInput = {
     characterName: string;
@@ -245,6 +314,7 @@ function mergeOutfitCatalog(existing: H3CharacterOutfit[], incoming: CharacterOu
             name: item.name,
             storageKey: item.storageKey,
             mimeType: item.mimeType,
+            role: item.role || previous?.role || "character_turnaround",
             enabled: selected ?? previous?.enabled ?? true,
         };
     });
@@ -289,6 +359,52 @@ export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterG
     if (!nextGroup.outfits.some((outfit) => outfit.enabled)) return segment;
     groups[id] = nextGroup;
     return setSegmentCharacterGroups(segment, groups);
+}
+
+/** 用源角色节点的完整目录刷新已绑定角色组，保留仍存在服装的选择状态和稳定 ID。 */
+export function syncCharacterGroupFromSource(
+    segment: H3Segment,
+    groupId: string,
+    source: { characterName: string; characterAssetId?: string; characterNodeId: string; outfits: CharacterOutfitInput[]; voice?: H3CharacterVoice },
+): H3Segment {
+    const existing = segment.h3CharacterGroups?.[groupId];
+    if (!existing || existing.characterNodeId !== source.characterNodeId) return segment;
+    if (!source.outfits.length) return removeCharacterGroup(segment, groupId);
+
+    const previousByKey = new Map(existing.outfits.map((outfit) => [outfitKey(outfit), outfit]));
+    const outfits = source.outfits.map((outfit) => {
+        const previous = previousByKey.get(outfitKey(outfit));
+        return {
+            id: previous?.id || genOutfitId(),
+            ...outfit,
+            enabled: previous?.enabled ?? true,
+        };
+    });
+    const voice = source.voice;
+    const nextGroup = fitCharacterGroupToCapacity(segment, {
+        ...existing,
+        characterName: source.characterName || existing.characterName,
+        characterAssetId: source.characterAssetId || existing.characterAssetId,
+        characterNodeId: source.characterNodeId,
+        subjectId: existing.subjectId || source.characterNodeId,
+        voice,
+        outfits,
+        voiceEnabled: voice ? (existing.voice ? existing.voiceEnabled : true) : false,
+    });
+    const sameOutfits = existing.outfits.length === nextGroup.outfits.length && existing.outfits.every((outfit, index) => {
+        const next = nextGroup.outfits[index];
+        return outfit.id === next.id && outfit.url === next.url && outfit.name === next.name
+            && outfit.storageKey === next.storageKey && outfit.mimeType === next.mimeType && outfit.role === next.role && outfit.enabled === next.enabled;
+    });
+    if (existing.characterName === nextGroup.characterName
+        && existing.characterAssetId === nextGroup.characterAssetId
+        && existing.characterNodeId === nextGroup.characterNodeId
+        && existing.subjectId === nextGroup.subjectId
+        && JSON.stringify(existing.voice) === JSON.stringify(nextGroup.voice)
+        && existing.voiceEnabled === nextGroup.voiceEnabled
+        && sameOutfits) return segment;
+
+    return setSegmentCharacterGroups(segment, { ...(segment.h3CharacterGroups || {}), [groupId]: nextGroup });
 }
 
 export function removeCharacterGroup(segment: H3Segment, groupId: string): H3Segment {

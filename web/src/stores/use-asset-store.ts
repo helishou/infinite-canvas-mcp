@@ -25,6 +25,7 @@ export type CharacterImage = {
     mimeType: string;
     outfit: string;
     outfitDescription: string;
+    role?: string;
 };
 export type CharacterAsset = AssetBase<"character"> & {
     data: {

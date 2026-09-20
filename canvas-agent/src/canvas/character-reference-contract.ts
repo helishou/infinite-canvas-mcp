@@ -9,6 +9,7 @@ export type CharacterGroupValidationIssue = {
 };
 
 type JsonRecord = Record<string, unknown>;
+const CHARACTER_IMAGE_ROLES = new Set(["character_identity", "character_turnaround", "storyboard", "scene", "blocking", "keyframe", "motion_reference", "style", "palette", "prop", "other"]);
 
 function recordOf(value: unknown): JsonRecord {
     return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : {};
@@ -21,6 +22,11 @@ function arrayOf(value: unknown): JsonRecord[] {
 function mediaKey(value: JsonRecord) {
     const key = String(value.storageKey || value.url || "").trim();
     return key || undefined;
+}
+
+function characterImageRole(image: JsonRecord | undefined) {
+    const role = String(image?.role || "");
+    return CHARACTER_IMAGE_ROLES.has(role) ? role : "character_turnaround";
 }
 
 function nodeMetadata(node: JsonRecord) {
@@ -75,6 +81,11 @@ export function validateH3CharacterGroups(project: Record<string, unknown>, segm
 
         const sourceImages = arrayOf(sourceMetadata.characterImages);
         const sourceKeys = sourceImages.map(mediaKey).filter((key): key is string => Boolean(key));
+        const sourceImagesByKey = new Map<string, JsonRecord>();
+        sourceImages.forEach((image) => {
+            const key = mediaKey(image);
+            if (key) sourceImagesByKey.set(key, image);
+        });
         const outfitItems = arrayOf(group.outfits);
         const outfitsByKey = new Map<string, JsonRecord>();
         for (const outfit of outfitItems) {
@@ -115,8 +126,10 @@ export function validateH3CharacterGroups(project: Record<string, unknown>, segm
             if (String(binding.sourceNodeId || "") !== characterNodeId) {
                 issues.push(issue("character_group_binding_source_mismatch", `角色组“${String(group.characterName || groupId)}”的 binding 没有绑定源角色节点`, { groupId, characterNodeId, outfitKey: key, bindingId: String(binding.id || "") }));
             }
-            if (String(binding.role || "") !== "character_turnaround") {
-                issues.push(issue("character_group_binding_role_mismatch", `角色组“${String(group.characterName || groupId)}”的 binding 不是 character_turnaround`, { groupId, characterNodeId, outfitKey: key, bindingId: String(binding.id || "") }));
+            const sourceImage = sourceImagesByKey.get(key);
+            const expectedRole = characterImageRole(sourceImage);
+            if (String(outfit.role || "character_turnaround") !== expectedRole || String(binding.role || "") !== expectedRole) {
+                issues.push(issue("character_group_binding_role_mismatch", `角色组“${String(group.characterName || groupId)}”的图片职责与源角色节点不一致`, { groupId, characterNodeId, outfitKey: key, bindingId: String(binding.id || "") }));
             }
             if (String(binding.subjectId || "") !== expectedSubjectId) {
                 issues.push(issue("character_group_binding_subject_mismatch", `角色组“${String(group.characterName || groupId)}”的 binding subjectId 不一致`, { groupId, characterNodeId, outfitKey: key, bindingId: String(binding.id || "") }));

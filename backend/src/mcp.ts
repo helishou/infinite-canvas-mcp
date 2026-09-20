@@ -35,6 +35,10 @@ import type { CanvasImageGenerationInput } from "./canvas/image-dispatcher.js";
 import type { CanvasTextGenerationInput } from "./canvas/text-dispatcher.js";
 import { splitImageBuffer } from "./canvas/image-split.js";
 import {
+  effectiveCanvasNodeType,
+  resolveCanvasImageReferenceNode,
+} from "./canvas/image-references.js";
+import {
   backendComfyUi,
   createBackendClient,
 } from "@basketikun/canvas-agent/runtime/comfy-client";
@@ -1611,7 +1615,7 @@ export function buildCanvasImageRequest(
     referencedIds.add(match[1]);
   for (const connection of incomingConnections) {
     const node = nodeById.get(String(connection.fromNodeId));
-    if (node && ["image", "character"].includes(String(node.type)))
+    if (node && ["image", "character", "scene"].includes(effectiveCanvasNodeType(node)))
       referencedIds.add(String(node.id));
   }
   if (
@@ -1630,44 +1634,11 @@ export function buildCanvasImageRequest(
     .trim();
   if (!prompt) throw new Error("画布图片提示词为空");
 
+  const addedReferenceIds = new Set<string>();
   const references = [...referencedIds].flatMap((id) => {
     const node = nodeById.get(id);
     if (!node) return [];
-    const nodeMetadata = recordOf(node.metadata);
-    if (String(node.type) === "character") {
-      const images = Array.isArray(nodeMetadata.characterImages)
-        ? nodeMetadata.characterImages as Array<Record<string, unknown>>
-        : [];
-      if (!images.length) return [];
-      const characterReferences = recordOf(metadata.characterReferences);
-      const selection = recordOf(characterReferences[id]);
-      const selectedKeys = Array.isArray(selection.imageKeys) ? new Set(selection.imageKeys.map(String)) : undefined;
-      return images.flatMap((image, index) => {
-        const key = String(image.storageKey || image.url || image.name || `image-${index}`);
-        if (selectedKeys && !selectedKeys.has(key)) return [];
-        const content = String(image.url || "");
-        if (!content && !image.storageKey) return [];
-        return [{
-          id: `${id}:character-image:${key}`,
-          name: String(image.name || node.title || id),
-          storageKey: String(image.storageKey || "") || undefined,
-          dataUrl: content.startsWith("data:") ? content : undefined,
-          url: content && !content.startsWith("data:") ? content : undefined,
-          mimeType: String(image.mimeType || "image/png"),
-        }];
-      });
-    }
-    if (String(node.type) !== "image") return [];
-    return [{
-      id,
-      name: `${String(node.title || id).replace(/[^\w\u4e00-\u9fff-]+/g, "-")}.png`,
-      storageKey: String(nodeMetadata.storageKey || "") || undefined,
-      dataUrl: String(nodeMetadata.content || "").startsWith("data:")
-        ? String(nodeMetadata.content)
-        : undefined,
-      url: String(nodeMetadata.content || nodeMetadata.url || "") || undefined,
-      mimeType: String(nodeMetadata.mimeType || "image/png"),
-    }];
+    return resolveCanvasImageReferenceNode(node, source, addedReferenceIds);
   });
   const params = {
     ...recordOf(metadata.params || metadata.customFieldValues),
@@ -1678,6 +1649,7 @@ export function buildCanvasImageRequest(
   return {
     projectId: String(project.id || "") || undefined,
     nodeId: String(source.id || "") || undefined,
+    referenceNodeIds: explicitReferenceIds.length ? explicitReferenceIds : undefined,
     model,
     prompt,
     references,

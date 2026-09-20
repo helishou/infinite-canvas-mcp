@@ -8,7 +8,7 @@ import type { NodeGenerationInput } from "@/components/canvas/canvas-node-genera
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
 import type { ReferenceImage } from "@/types/image";
-import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
+import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasImageReferenceSnapshot, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
 
 export function imageExtension(dataUrl: string) {
     return dataUrl.match(/^data:image[/]([^;]+)/)?.[1] || dataUrl.match(/image[/]([^;]+)/)?.[1] || "png";
@@ -41,6 +41,17 @@ export async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
         }),
     );
     return references.every(Boolean) ? (references as ReferenceImage[]) : null;
+}
+
+export function resolveImageGenerationReferences(references: CanvasImageReferenceSnapshot[]): ReferenceImage[] {
+    return references.map((reference, index) => ({
+        id: reference.id || String(index),
+        name: reference.name || `reference-${index + 1}.png`,
+        type: reference.type || "image/png",
+        dataUrl: reference.url || "",
+        ...(reference.url ? { url: reference.url } : {}),
+        ...(reference.storageKey ? { storageKey: reference.storageKey } : {}),
+    }));
 }
 
 export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Bot, Download, FileText, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
+import { BookOpen, Bot, Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
 import { Button, Dropdown, Modal, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -30,6 +30,8 @@ export function CanvasTopBar({
     onCreateProject,
     onDeleteProject,
     onExportProject,
+    exporting,
+    transferBusy,
     onImportImage,
     onOpenPlugins,
     onUndo,
@@ -56,6 +58,8 @@ export function CanvasTopBar({
     onCreateProject: () => void;
     onDeleteProject: () => void;
     onExportProject: () => void;
+    exporting: boolean;
+    transferBusy: boolean;
     onImportImage: () => void;
     onOpenPlugins: () => void;
     onUndo: () => void;
@@ -111,7 +115,7 @@ export function CanvasTopBar({
                                 { key: "delete", danger: true, icon: <Trash2 className="size-4" />, label: t("canvas.deleteCurrent"), onClick: onDeleteProject },
                                 { type: "divider" },
                                 { key: "import", icon: <Upload className="size-4" />, label: t("canvas.importAsset"), onClick: onImportImage },
-                                { key: "export", icon: <Download className="size-4" />, label: t("canvas.exportCurrent"), onClick: onExportProject },
+                                { key: "export", disabled: transferBusy, icon: exporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />, label: exporting ? t("canvas.projectPage.exporting") : t("canvas.exportCurrent"), onClick: onExportProject },
                                 { type: "divider" },
                                 { key: "undo", disabled: !canUndo, icon: <Undo2 className="size-4" />, label: <MenuLabel text={t("canvas.undo")} shortcut="⌘ Z" />, onClick: onUndo },
                                 { key: "redo", disabled: !canRedo, icon: <Redo2 className="size-4" />, label: <MenuLabel text={t("canvas.redo")} shortcut="⌘ ⇧ Z / ⌘ Y" />, onClick: onRedo },

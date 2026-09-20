@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { h3ClipCacheFingerprint, h3ClipDependsOnPrevious, h3ConfirmationPhaseParams, planH3CacheReuse, stableH3Fingerprint } from "./h3-cache.js";
+import { h3ClipCacheFingerprint, h3ClipDependsOnPrevious, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, planH3CacheReuse, stableH3Fingerprint } from "./h3-cache.js";
 
 const base = { id: "c1", prompt: "shot", seed: 7, result: "/media/a", resultStorageKey: "a" };
 const fingerprint = (segment: Record<string, unknown>, previousFingerprint?: string) => h3ClipCacheFingerprint({
@@ -54,4 +54,27 @@ test("confirmation phase A excludes every expensive postpass and phase B selects
     assert.equal(phaseB.postGenerationOnly, true);
     assert.equal(phaseB.confirmSecondPass, true);
     assert.equal(phaseB.motionContextEnabled, false);
+});
+
+test("confirmation fingerprint ignores phase-B-only postpass settings", () => {
+    const segment = { ...base, confirmationMode: true };
+    const firstPass = {
+        steps: 6, modelName: "h3/model", faceRefineEnabled: false, faceRefineDetector: "old.pt", faceRefineConfidence: 0.35,
+        rtxEnabled: false, rtxScale: 1, rtxQuality: "HIGH", latentUpscaleEnabled: false, latentUpscaleModel: "old.safetensors",
+        latentUpscaleMegapixels: 1, dlssUpscaleMode: "关闭", dlssFrameInterpolationEnabled: false, dlssVideoUpscaleMode: "关闭",
+        seamFaceFadeFrames: 0,
+    };
+    const secondPass = {
+        ...firstPass, confirmSecondPass: true, postGenerationOnly: true, faceRefineEnabled: true, faceRefineDetector: "new.pt",
+        faceRefineConfidence: 0.8, rtxEnabled: true, rtxScale: 2, rtxQuality: "ULTRA", latentUpscaleEnabled: true,
+        latentUpscaleModel: "new.safetensors", latentUpscaleMegapixels: 2, dlssUpscaleMode: "视频超分",
+        dlssFrameInterpolationEnabled: true, dlssVideoUpscaleMode: "超分", seamFaceFadeFrames: 12,
+    };
+    const firstFingerprintParams = h3ConfirmationFingerprintParams(segment, firstPass);
+    const secondFingerprintParams = h3ConfirmationFingerprintParams(segment, secondPass);
+    assert.deepEqual(secondFingerprintParams, firstFingerprintParams);
+    assert.equal(
+        h3ClipCacheFingerprint({ segment, params: secondFingerprintParams, references: [{ storageKey: "ref-a" }], compiledPrompt: "shot" }),
+        h3ClipCacheFingerprint({ segment, params: firstFingerprintParams, references: [{ storageKey: "ref-a" }], compiledPrompt: "shot" }),
+    );
 });

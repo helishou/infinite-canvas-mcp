@@ -30,11 +30,12 @@ function builtinResource(node: CanvasNodeData): CanvasNodeResource | null | Canv
     if (node.type === CanvasNodeType.Audio && node.metadata?.content) return { kind: "audio", url: node.metadata.content };
     if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) return { kind: "text", text: node.metadata.content || node.metadata.prompt };
     if (node.type === CanvasNodeType.Character) {
-        // 角色节点被拖到下游 ref 槽时，展开为每张参考图一个 image 资源
+        // 角色节点被拖到下游 ref 槽或从画布点选时，展开为每张参考图一个 image 资源。
+        // 角色素材可以只有 storageKey；URL 由预览和 H3 资源读取路径按需解析。
         const images = node.metadata?.characterImages || [];
         return images
-            .filter((image) => image.url)
-            .map((image) => ({ kind: "image", url: image.url, storageKey: image.storageKey, text: image.outfit || image.name }));
+            .filter((image) => image.url || image.storageKey)
+            .map((image) => ({ kind: "image", url: image.url || undefined, storageKey: image.storageKey, text: image.outfit || image.name }));
     }
     if (node.type === CanvasNodeType.Scene) {
         const sceneImage = node.metadata?.sceneImage;

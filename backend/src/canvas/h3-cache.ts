@@ -56,6 +56,30 @@ export function h3ConfirmationPhaseParams(segment: Record<string, unknown>, para
     };
 }
 
+// These values are only consumed by the decoded-video postpass. They must not
+// invalidate the phase-A cache when the user configures phase B before confirming.
+const CONFIRMATION_POSTPASS_KEYS = [
+    "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise",
+    "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation",
+    "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs",
+    "h3FirstSteps", "h3SecondSteps", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
+    "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
+    "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity",
+    "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask",
+    "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename",
+    "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine",
+    "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode",
+] as const;
+
+export function h3ConfirmationFingerprintParams(segment: Record<string, unknown>, params: Record<string, unknown>): Record<string, unknown> {
+    const normalized = h3ConfirmationPhaseParams(segment, params, false);
+    delete normalized.confirmSecondPass;
+    delete normalized.postGenerationOnly;
+    if (segment.confirmationMode !== true) return normalized;
+    for (const key of CONFIRMATION_POSTPASS_KEYS) delete normalized[key];
+    return normalized;
+}
+
 export function planH3CacheReuse(rows: Array<{
     segment: Record<string, unknown>;
     fingerprint: string;

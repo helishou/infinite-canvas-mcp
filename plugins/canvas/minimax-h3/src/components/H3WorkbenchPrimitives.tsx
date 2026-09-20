@@ -58,9 +58,46 @@ export function resetH3Run(ctx: CanvasNodeContext) {
 }
 
 export function H3StatusBadge({ status, error, onRetry }: { status: string; error: string; onRetry: () => void }) {
+    const [copiedError, setCopiedError] = useState(false);
     if (!status || status === "idle") return null;
     const label = status === "queued" ? "排队中…" : status === "loading" ? "生成中…" : status === "success" ? "已完成" : status === "cancelled" ? "已取消" : status === "error" ? `失败：${error || "未知错误"}` : status;
-    return <div className={`minimax-status-badge ${status}`}><span>{label}</span>{status === "error" ? <button type="button" onClick={(event) => { event.stopPropagation(); onRetry(); }}>重试</button> : null}</div>;
+    const copyError = async () => {
+        const text = error || "未知错误";
+        let copied = false;
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(text);
+                copied = true;
+            }
+        } catch { /* fall back to execCommand */ }
+        if (!copied) {
+            const textarea = document.createElement("textarea");
+            textarea.value = text;
+            textarea.style.position = "fixed";
+            textarea.style.opacity = "0";
+            document.body.appendChild(textarea);
+            textarea.select();
+            try { copied = document.execCommand("copy"); } catch { /* clipboard unavailable */ }
+            textarea.remove();
+        }
+        if (!copied) return;
+        setCopiedError(true);
+        window.setTimeout(() => setCopiedError(false), 1500);
+    };
+    return <div className={`minimax-status-badge ${status}`}><span
+        role={status === "error" ? "button" : undefined}
+        tabIndex={status === "error" ? 0 : undefined}
+        title={status === "error" ? "点击复制完整错误信息" : undefined}
+        style={status === "error" ? { cursor: "copy", userSelect: "text" } : undefined}
+        onClick={status === "error" ? (event) => { event.stopPropagation(); void copyError(); } : undefined}
+        onKeyDown={status === "error" ? (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                event.stopPropagation();
+                void copyError();
+            }
+        } : undefined}
+    >{copiedError ? "错误已复制到剪贴板" : label}</span>{status === "error" ? <button type="button" onClick={(event) => { event.stopPropagation(); onRetry(); }}>重试</button> : null}</div>;
 }
 
 // 时间轴轨道按固定 100px/秒 铺（ruler tick 用 time*50px 定位，可横向滚动），

@@ -67,7 +67,29 @@ test("智能生成节点把图片结果槽直接绑定到自身", (t) => {
     assert.equal(prepared.command.sourceNodeId, undefined);
     assert.equal(prepared.command.imageIds?.length, 2);
     assert.deepEqual(prepared.createOperations.map((operation) => operation.type), ["delete_node", "update_node"]);
-    assert.deepEqual((prepared.createOperations[1] as any).metadataDelete, ["generatedResultIds", "primaryImageId", "generatedTextResultIds", "primaryTextNodeId"]);
+    assert.deepEqual((prepared.createOperations[1] as any).metadataDelete, ["generatedResultIds", "generatedTextResultIds", "primaryTextNodeId"]);
+});
+
+test("智能节点重生成不写入位置或尺寸布局", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    const position = { x: 7696.817739973209, y: -128.17954001649002 };
+    const size = { width: 140.69976076555025, height: 211.04964114832538 };
+    db.createCanvasProject({ id: "p", nodes: [{ id: "smart", type: "config", position, ...size,
+        metadata: { smart: true, generationMode: "image", runtimeTaskId: "task-1", images: [{ id: "slot", status: "idle" }] } }], connections: [] });
+    const task = { id: "task-1", status: "succeeded", progress: 1, input: {}, params: { imageTargetSize: size }, result: null,
+        error: null, createdAt: "", updatedAt: "", outputs: [] } as any;
+    const written = db.writeBackCanvasImageTask(task, { projectId: "p", nodeId: "smart", prompt: "重生成", model: "gpt-image-2", imageIds: ["slot"] },
+        [{ url: "image.png", storageKey: "image:generated", mimeType: "image/png", width: 1024, height: 1536, bytes: 1 }]);
+    assert.ok(written);
+    const node = (written as any).project.nodes.find((item: any) => item.id === "smart") as any;
+    assert.deepEqual(node.position, position);
+    assert.deepEqual({ width: node.width, height: node.height }, size);
+    const update = written!.operations.find((operation: any) => operation.type === "update_node" && operation.id === "smart") as any;
+    assert.ok(update);
+    assert.equal(update.patch?.position, undefined);
+    assert.equal(update.patch?.width, undefined);
+    assert.equal(update.patch?.height, undefined);
 });
 
 test("智能生成节点切换到音频、视频或文本时仍复用自身，不创建输出节点", (t) => {

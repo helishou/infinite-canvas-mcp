@@ -8,6 +8,11 @@ export const H3_RUNTIME_REF_LIMITS: Record<H3Ref["type"], number> = { image: 9, 
 
 // H3 节点自身的节点类型（画布插件 id + 节点名），用于把上游 H3 节点的 Clip 成品当参考。
 const H3_NODE_TYPE = "minimax-h3:video";
+const CHARACTER_IMAGE_ROLES = ["character_identity", "character_turnaround", "storyboard", "scene", "blocking", "keyframe", "motion_reference", "style", "palette", "prop", "other"] as const;
+
+function characterImageRole(value: unknown): H3Ref["role"] {
+    return CHARACTER_IMAGE_ROLES.includes(value as typeof CHARACTER_IMAGE_ROLES[number]) ? value as H3Ref["role"] : "character_turnaround";
+}
 
 function storageKeyOf(value: Record<string, unknown>) {
     const nested = value.assetRef;
@@ -52,6 +57,20 @@ function inferredRole(type: string, title?: string): H3Ref["role"] | undefined {
 
 export type H3RefCandidate = { key: string; nodeId: string; nodeTitle: string; nodeType: string; ref: H3Ref };
 
+export function refreshSmartImageReference(ref: H3Ref, node: CanvasNodeData | null): H3Ref {
+    if (!node || node.id !== ref.nodeId || node.type !== "config" || node.metadata?.smart !== true || (node.metadata.generationMode || "image") !== "image" || ref.type !== "image") return ref;
+    const metadata = node.metadata;
+    const images = Array.isArray(metadata.images) ? metadata.images.map(imageRecordOf) : [];
+    const primary = images.find((image) => image.id === metadata.primaryImageId && (image.content || image.storageKey)) || images.find((image) => image.content || image.storageKey);
+    if (!primary && !metadata.content && !metadata.storageKey) return ref;
+    const url = String(primary?.content || metadata.content || "");
+    const storageKey = String((primary ? primary.storageKey : metadata.storageKey) || "") || undefined;
+    const mimeType = String(primary?.mimeType || metadata.mimeType || ref.mimeType || "") || undefined;
+    return ref.url === url && ref.storageKey === storageKey && ref.mimeType === mimeType
+        ? ref
+        : { ...ref, url, storageKey, mimeType };
+}
+
 function imageRecordOf(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" ? value as Record<string, unknown> : {};
 }
@@ -91,12 +110,14 @@ export function h3RefCandidates(nodes: CanvasNodeData[], selfId: string): H3RefC
             }
             continue;
         }
-        const url = String(metadata.content || metadata.url || metadata.localUrl || metadata.sourceUrl || "").trim();
+        const images = node.type === "config" && metadata.smart === true && (metadata.generationMode || "image") === "image" && Array.isArray(metadata.images) ? metadata.images.map(imageRecordOf) : [];
+        const primary = images.find((image) => image.id === metadata.primaryImageId && (image.content || image.storageKey)) || images.find((image) => image.content || image.storageKey);
+        const url = String(primary?.content || metadata.content || metadata.url || metadata.localUrl || metadata.sourceUrl || "").trim();
         if (!url) continue;
         const mime = String(metadata.mimeType || "");
         const type: H3Ref["type"] = mime.startsWith("video/") || node.type === "video" ? "video" : mime.startsWith("audio/") || node.type === "audio" ? "audio" : "image";
         const role = inferredRole(String(node.type || ""), node.title);
-        push(node, { url, type, name: node.title || type, storageKey: storageKeyOf(metadata), mimeType: mime || undefined, ...(role ? { role } : {}) });
+        push(node, { url, type, name: node.title || type, storageKey: storageKeyOf(primary || metadata), mimeType: primary?.mimeType ? String(primary.mimeType) : mime || undefined, ...(role ? { role } : {}) });
     }
     return out.filter((item, index, all) => all.findIndex((other) => sameRef(other.ref, item.ref)) === index);
 }
@@ -152,7 +173,7 @@ export function readCharacterImagesFromDrop(event: React.DragEvent<HTMLElement> 
         const ref = image as Record<string, unknown>;
         const url = String(ref.url || ref.dataUrl || ref.localUrl || ref.originalLocalUrl || ref.sourceUrl || ref.path || "").trim();
         if (!url) return [];
-        return [{ url, type: "image" as const, name: `${characterName} · ${String(ref.outfit || ref.name || "outfit")}`, storageKey: storageKeyOf(ref), mimeType: String(ref.mimeType || "") || undefined }];
+        return [{ url, type: "image" as const, name: `${characterName} · ${String(ref.outfit || ref.name || "outfit")}`, storageKey: storageKeyOf(ref), mimeType: String(ref.mimeType || "") || undefined, role: characterImageRole(ref.role), usage: "reference" as const }];
     });
 }
 
@@ -162,7 +183,9 @@ export function readCharacterGroupFromDrop(event: React.DragEvent<HTMLElement> |
     characterName: string;
     characterAssetId?: string;
     characterNodeId: string;
-    outfits: Array<{ url: string; name: string; storageKey?: string; mimeType?: string }>;
+    outfits: Array<{ url: string; name: string; storageKey?: string; mimeType?: string; role?: H3Ref["role"] }>;
+    selectedOutfitKeys?: string[];
+    defaultVoiceEnabled?: boolean;
     voice?: { url: string; name: string; description?: string; storageKey?: string; assetId?: string };
 } | null {
     const transfer = event.dataTransfer;
@@ -183,7 +206,7 @@ export function readCharacterGroupFromDrop(event: React.DragEvent<HTMLElement> |
         const ref = image as Record<string, unknown>;
         const url = String(ref.url || ref.dataUrl || ref.localUrl || ref.originalLocalUrl || ref.sourceUrl || ref.path || "").trim();
         if (!url) return [];
-        return [{ url, name: String(ref.outfit || ref.name || "outfit"), storageKey: typeof ref.storageKey === "string" ? ref.storageKey : undefined, mimeType: typeof ref.mimeType === "string" ? ref.mimeType : undefined }];
+        return [{ url, name: String(ref.outfit || ref.name || "outfit"), storageKey: typeof ref.storageKey === "string" ? ref.storageKey : undefined, mimeType: typeof ref.mimeType === "string" ? ref.mimeType : undefined, role: characterImageRole(ref.role) }];
     });
     if (!outfits.length) return null;
     // voice 字段兼容：老 payload 用 characterVoice*，新 payload 用 voice*；character 节点 metadata 也用 characterVoice*
@@ -193,29 +216,36 @@ export function readCharacterGroupFromDrop(event: React.DragEvent<HTMLElement> |
     const voiceStorageKey = typeof value.characterVoiceStorageKey === "string" ? value.characterVoiceStorageKey : (typeof value.voiceStorageKey === "string" ? value.voiceStorageKey : undefined);
     const voiceAssetId = typeof value.characterVoiceAssetId === "string" ? value.characterVoiceAssetId : (typeof value.voiceAssetId === "string" ? value.voiceAssetId : undefined);
     const voice = voiceUrl ? { url: voiceUrl, name: voiceName, description: voiceDescription || undefined, storageKey: voiceStorageKey, assetId: voiceAssetId } : undefined;
-    return { characterName, characterAssetId, characterNodeId, outfits, voice };
+    const selectedOutfitKeys = Array.isArray(value.selectedOutfitKeys)
+        ? value.selectedOutfitKeys.filter((key): key is string => typeof key === "string")
+        : undefined;
+    const defaultVoiceEnabled = typeof value.defaultVoiceEnabled === "boolean" ? value.defaultVoiceEnabled : undefined;
+    return { characterName, characterAssetId, characterNodeId, outfits, selectedOutfitKeys, defaultVoiceEnabled, voice };
 }
 
 // 从画布上的角色节点读同一份角色组入参（字段口径与上面拖拽 payload 一致），
 // 用于「点空 ref 槽 → 在画布上选节点作参考」这条不做拖拽的路径。
 export function readCharacterGroupFromNode(node: CanvasNodeData): {
     characterName: string;
+    characterAssetId?: string;
     characterNodeId: string;
-    outfits: Array<{ url: string; name: string; storageKey?: string; mimeType?: string }>;
+    outfits: Array<{ url: string; name: string; storageKey?: string; mimeType?: string; role?: H3Ref["role"] }>;
     voice?: { url: string; name: string; description?: string; storageKey?: string; assetId?: string };
 } | null {
     const metadata = (node.metadata || {}) as Record<string, unknown>;
-    const outfits = (Array.isArray(metadata.characterImages) ? metadata.characterImages : []).flatMap((raw) => {
+    if (!Array.isArray(metadata.characterImages)) return null;
+    const outfits = metadata.characterImages.flatMap((raw) => {
         if (!raw || typeof raw !== "object") return [];
         const image = raw as Record<string, unknown>;
         const url = String(image.url || image.dataUrl || image.localUrl || "").trim();
-        if (!url) return [];
-        return [{ url, name: String(image.outfit || image.name || "outfit"), storageKey: storageKeyOf(image), mimeType: String(image.mimeType || "") || undefined }];
+        const storageKey = storageKeyOf(image);
+        if (!url && !storageKey) return [];
+        return [{ url, name: String(image.outfit || image.name || "outfit"), storageKey, mimeType: String(image.mimeType || "") || undefined, role: characterImageRole(image.role) }];
     });
-    if (!outfits.length) return null;
     const voiceUrl = String(metadata.characterVoiceUrl || "").trim();
     return {
         characterName: String(metadata.characterName || node.title || "角色"),
+        characterAssetId: typeof metadata.characterAssetId === "string" ? metadata.characterAssetId : undefined,
         characterNodeId: node.id,
         outfits,
         voice: voiceUrl ? {

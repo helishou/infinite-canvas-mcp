@@ -40,7 +40,7 @@ export class CanvasRealtimeHub {
         });
         this.heartbeat = setInterval(() => {
             for (const [socket, peer] of this.sockets) {
-                if (peer.missedPongs >= 2) { socket.terminate(); continue; }
+                if (peer.missedPongs >= 2) { socket.close(1001, "heartbeat timeout"); continue; }
                 peer.missedPongs++;
                 if (socket.readyState === WebSocket.OPEN) socket.ping();
             }
@@ -60,7 +60,7 @@ export class CanvasRealtimeHub {
         this.unsubscribe();
         clearInterval(this.heartbeat);
         clearTimeout(this.flushTimer);
-        for (const socket of this.sockets.keys()) socket.terminate();
+        for (const socket of this.sockets.keys()) socket.close(1001, "server shutting down");
         this.wss.close();
     }
 

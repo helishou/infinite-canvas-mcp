@@ -13,7 +13,7 @@ test("稳定引用按 binding id 编译，重排后提示词编号自动更新",
         { id: "bind-a", assetId: "a", label: "人物", role: "character_identity", tags: [], enabled: true, usage: "reference" },
     ] };
     const result = compileReferenceSubmission(project, segment);
-    assert.equal(result.compiledPrompt, "<Subject 2> 对照 <Picture 1>");
+    assert.equal(result.compiledPrompt, "<Subject 1> 对照 <Picture 1>");
     assert.deepEqual(result.references.map((ref) => ref.role), ["storyboard", "character_identity"]);
     assert.equal(result.issues.filter((issue) => issue.severity === "error").length, 0);
 });

@@ -9,7 +9,7 @@ import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { hasAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
 
 export function CanvasProjectCard({ project }: { project: CanvasProject }) {
-    const exportCanvasProjects = useExportCanvas();
+    const { exportCanvasProjects, exporting, busy } = useExportCanvas();
     const { i18n, t } = useTranslation();
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
@@ -76,7 +76,7 @@ export function CanvasProjectCard({ project }: { project: CanvasProject }) {
                         </>
                     ) : (
                         <>
-                            <Button type="text" size="small" shape="circle" icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects([project], project.title || t("canvas.title"))} aria-label={t("canvas.project.export")} />
+                            <Button type="text" size="small" shape="circle" loading={exporting} disabled={busy} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects([project], project.title || t("canvas.title"))} aria-label={t("canvas.project.export")} />
                             {folders.length ? (
                                 <Dropdown
                                     trigger={["click"]}

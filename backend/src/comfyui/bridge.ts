@@ -412,14 +412,15 @@ export class ComfyUiBackend {
         // closeWs 仍处于 TDZ（const 尚未初始化）而抛出 "closeWs is not defined"，掩盖真实错误。
         let capturedPromptId: string | null = null;
         let ws: any = null;
-        let wsExecuted = false;
-        let wsExecutedAt = 0;
+        let wsExecutionDone = false;
+        let wsCompletedAt = 0;
         let wsError: Error | null = null;
         let wsOutputs: any = null;
         let wsExecutionSuccessOutputs: any = null;
         let wsExecutionSuccessAt = 0;
         let wsClosed = false;
         let wsCloseError: Error | null = null;
+        let warnedWsFallback = false;
         let lastActivityAt = Date.now();
         let lastProgress = 0.05;
         let closeWs: () => void = () => {};
@@ -483,15 +484,19 @@ export class ComfyUiBackend {
                                 lastActivityAt = Date.now();
                             }
                             if (msg.type === "executing" || msg.type === "executed" || msg.type === "execution_error" || msg.type === "execution_success") lastActivityAt = Date.now();
+                            if ((msg.type === "executing" && msg.data?.node === null) || msg.type === "execution_success") {
+                                // `executed` is emitted per node, not when the whole prompt finishes.
+                                // ComfyUI's global completion signal is `executing` with node=null.
+                                wsExecutionDone = true;
+                                wsCompletedAt = Date.now();
+                            }
                             if (msg.type === "executed" || msg.type === "execution_success") {
-                                wsExecuted = true; wsExecutedAt = Date.now();
                                 // 多输出节点的工作流（如 Z-Image 的 PreviewImage + rgthree Image Comparer）
                                 // 每个节点都会发 executed；若直接覆盖，后执行节点的 outputs 会顶掉先执行的，
-                                // 若最后执行的节点用非标准键（rgthree 用 a_images/b_images）就会得到空媒体。
+                                // 若最后执行节点用非标准键（rgthree 用 a_images/b_images）就会得到空媒体。
                                 // 这里按节点合并而非覆盖（execution_success 在当前 ComfyUI 只带 prompt_id，无 output）。
                                 if (msg.data?.output && typeof msg.data.output === "object") wsOutputs = { ...(wsOutputs || {}), ...(msg.data.output as Record<string, unknown>) };
-                                // execution_success（v1.5+）payload 才是整个 graph 的 outputs，executed 只是单节点。
-                                // 同时记录一份合并视图，优先用 execution_success 的 outputs。
+                                // 兼容会在 execution_success 中附带整图 outputs 的服务端；标准 ComfyUI 通常只发 prompt_id。
                                 if (msg.type === "execution_success" && msg.data?.output && typeof msg.data.output === "object") {
                                     wsExecutionSuccessOutputs = msg.data.output;
                                     wsExecutionSuccessAt = Date.now();
@@ -581,9 +586,9 @@ export class ComfyUiBackend {
                     throw new Error(stalledMessage);
                 }
                 if (wsError) { closeWs(); throw wsError; }
-                // WebSocket 已确认任务完成：优先用 execution_success 事件（v1.5+ 推送的整个 graph outputs），
-                // 没有就退回 executed 单节点 outputs；都没有再回 /history；
-                if (wsExecuted) {
+                // WebSocket 已确认整条 prompt 完成：优先用 execution_success 的整图 outputs（若服务端提供），
+                // 否则使用逐节点 executed 输出；仍无可用媒体时回查 /history。
+                if (wsExecutionDone) {
                     // 优先用 execution_success（whole-graph）outputs，回退到 executed（单节点）outputs
                     const useOutputs = (wsExecutionSuccessOutputs && typeof wsExecutionSuccessOutputs === "object" && Object.keys(wsExecutionSuccessOutputs).length > 0)
                         ? wsExecutionSuccessOutputs
@@ -617,7 +622,7 @@ export class ComfyUiBackend {
                         throw new Error(`ComfyUI ${reason}；目标 promptId ${body.prompt_id} 的 history 与 WebSocket 输出均不可用。未写入任何媒体，可从 ComfyUI 输出目录按 promptId 手动恢复。`);
                     }
                     // executed 没带 outputs 且 history 也取不到：再等一会，但不再走慢速 missing 计数
-                    if (Date.now() - wsExecutedAt > 60000) { closeWs(); throw new Error(`ComfyUI 已在 WebSocket 中报告目标 promptId ${body.prompt_id} 完成，但 history 与 WebSocket 输出均不可用；未写入任何媒体。`); }
+                    if (Date.now() - wsCompletedAt > 60000) { closeWs(); throw new Error(`ComfyUI 已在 WebSocket 中报告目标 promptId ${body.prompt_id} 完成，但 history 与 WebSocket 输出均不可用；未写入任何媒体。`); }
                     await new Promise((resolve) => setTimeout(resolve, 1500));
                     continue;
                 }
@@ -625,7 +630,8 @@ export class ComfyUiBackend {
                 // 而是退回 /history 轮询——ComfyUI 可能已完成但 WS 因代理超时/负载高等原因提前断开，
                 // 任务本身仍在执行或已完成，结果在 /history 或 /output 里。
                 // 仅在 /history 也长期无果时才最终 fail，避免"ComfyUI 实际跑完了但前端收不到结果"。
-                if (wsClosed && !wsExecuted) {
+                if (wsClosed && !wsExecutionDone && !warnedWsFallback) {
+                    warnedWsFallback = true;
                     const reason = (wsCloseError as Error | null)?.message || "WebSocket 已关闭但未收到 executed 事件";
                     console.warn(`[comfyui] WS 提前断开，退回 /history 轮询：${reason}`);
                     // 不再 throw，继续走下面的 /history 轮询
@@ -1028,8 +1034,8 @@ function withNoTextConstraint(prompt: string): string {
 /** 正常路径：交给南风 V15 主节点内部 GraphBuilder 展开，保留其原生释放/加载依赖。 */
 export async function buildNativeNanFengV15Workflow(input: Record<string, unknown>, params: Record<string, unknown>, upload: (file: string) => Promise<string>, _comfyUrl: string, signal: AbortSignal): Promise<Record<string, any>> {
     if (signal.aborted) throw new Error("任务已取消");
-    if (params.postGenerationOnly === true) return buildDecodedH3SecondPassWorkflow(input, params, upload, signal);
     const mode = normalizeNanFengMode(params.mode ?? params.taskMode ?? (typeof input.video === "string" ? "ref2va" : "t2v"));
+    if (params.postGenerationOnly === true) return buildDecodedH3SecondPassWorkflow(input, params, upload, signal);
     const refs = Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : [];
     const videos = (Array.isArray(input.videos) ? input.videos.map(String).filter(Boolean) : typeof input.video === "string" ? [input.video] : []).slice(0, 3);
     const audios = Array.isArray(input.audios) ? input.audios.map(String).filter(Boolean).slice(0, 3) : [];
@@ -1095,8 +1101,19 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
         graph.face_video_vae = { class_type: "VAELoader", inputs: { vae_name: String(inputs["视频VAE"]) } };
         graph.face_audio_vae = { class_type: "VAELoader", inputs: { vae_name: String(inputs["音频VAE"]) } };
         graph.face_refine = { class_type: "MiniMaxH3PostGenerationFaceRefine", inputs: {
-            images: ["nf_v15", 0], audio: ["nf_v15", 1], model: faceModel, vae: ["face_video_vae", 0], audio_vae: ["face_audio_vae", 0], clip: ["face_clip", 0],
-            prompt: String(inputs["提示词"]), seed: Number(inputs["随机种子"]), detector: String(value("faceRefineDetector", "face_yolov8m.pt")), confidence: Number(value("faceRefineConfidence", 0.35)), crop_factor: Number(value("faceRefineCropFactor", 2.5)), canvas_size: Number(value("faceRefineCanvasSize", 768)), denoise: Number(value("faceRefineDenoise", 0.4)), steps: Number(value("faceRefineSteps", 8)), sampler: String(value("faceRefineSampler", "euler")), scheduler: String(value("faceRefineScheduler", "simple")), paste_region: String(value("faceRefinePasteRegion", "face_only")), mask_dilation: Number(value("faceRefineMaskDilation", 16)), feather: Number(value("faceRefineFeather", 24)), colour_match: Number(value("faceRefineColourMatch", 1)), blend: Number(value("faceRefineBlend", 1)), seam_fade_frames: Number(value("seamFaceFadeFrames", 0)), seam_colour_match: Number(value("seamColourMatch", 0)), audio_crossfade_ms: Number(value("seamAudioCrossfadeMs", 0)),
+            images: ["nf_v15", 0], audio: ["nf_v15", 1], model: faceModel,
+            vae: ["face_video_vae", 0], audio_vae: ["face_audio_vae", 0], clip: ["face_clip", 0],
+            prompt: String(inputs["提示词"]), seed: Number(inputs["随机种子"]),
+            cfg: Number(params.faceRefineCfg ?? 1), shift_video: Number(params.videoSigmaShift ?? 12), shift_audio: Number(params.audioSigmaShift ?? 3),
+            detector: String(params.faceRefineDetector || "face_yolov8m.pt"), confidence: Number(params.faceRefineConfidence ?? 0.35),
+            crop_factor: Number(params.faceRefineCropFactor ?? 2.5), canvas_size: Number(params.faceRefineCanvasSize ?? 768),
+            denoise: Number(params.faceRefineDenoise ?? 0.4), steps: Number(params.faceRefineSteps ?? 8),
+            sampler: String(params.faceRefineSampler || "euler"), scheduler: String(params.faceRefineScheduler || "simple"),
+            paste_region: String(params.faceRefinePasteRegion || "face_only"), mask_dilation: Number(params.faceRefineMaskDilation ?? 16),
+            feather: Number(params.faceRefineFeather ?? 24), colour_match: Number(params.faceRefineColourMatch ?? 1),
+            blend: Number(params.faceRefineBlend ?? 1), ref_image_size: String(params.refImageSize || "match"),
+            seam_fade_frames: Number(value("seamFaceFadeFrames", 0)), seam_colour_match: Number(value("seamColourMatch", 0)),
+            audio_crossfade_ms: Number(value("seamAudioCrossfadeMs", 0)),
         } };
         if (previousVideo && (Number(value("seamFaceFadeFrames", 0)) > 0 || Number(value("seamColourMatch", 0)) > 0 || Number(value("seamAudioCrossfadeMs", 0)) > 0)) {
             graph.seam_previous_video = { class_type: "LoadVideo", inputs: { file: previousVideo } };
@@ -1111,7 +1128,7 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     return graph;
 }
 
-/** Phase B: decode the durable first-pass MP4 and run a real full-frame H3 resample. */
+/** Phase B: decode the durable first-pass MP4 and run the configured post-generation refinement. */
 export async function buildDecodedH3SecondPassWorkflow(input: Record<string, unknown>, params: Record<string, unknown>, upload: (file: string) => Promise<string>, signal: AbortSignal): Promise<Record<string, any>> {
     if (signal.aborted) throw new Error("任务已取消");
     const source = String(input.video || "").trim();
@@ -1134,21 +1151,54 @@ export async function buildDecodedH3SecondPassWorkflow(input: Record<string, unk
         graph[id] = { class_type: "LoraLoaderModelOnly", inputs: { model, lora_name: String(slot.name).trim(), strength_model: Number(slot.strength ?? 1) } };
         model = [id, 0];
     });
-    graph.full_frame_refine = { class_type: "MiniMaxH3PostGenerationFullFrameRefine", inputs: {
-        images: ["cached_parts", 0], audio: ["cached_parts", 1], model, vae: ["refine_video_vae", 0], audio_vae: ["refine_audio_vae", 0], clip: ["refine_clip", 0],
-        prompt: withNoTextConstraint(String(input.prompt || "")), seed: Number.isFinite(Number(params.seed)) ? Number(params.seed) : 0,
-        steps: Number(params.h3SecondSteps ?? params.secondPassSteps ?? 4), denoise: Number(params.secondPassDenoise ?? params.denoise ?? 0.28), sampler: String(params.secondPassSampler || params.sampler || "res_multistep"), scheduler: String(params.secondPassScheduler || params.scheduler || "simple"), target_megapixels: Number(params.latentUpscaleMegapixels ?? params.secondPassMegapixels ?? params.megapixels ?? 0.4),
-    } };
-    let images: [string, number] = ["full_frame_refine", 0];
-    let audio: [string, number] = ["full_frame_refine", 1];
+    let images: [string, number] = ["cached_parts", 0];
+    let audio: [string, number] = ["cached_parts", 1];
     if (params.faceRefineEnabled === true) {
-        graph.face_refine = { class_type: "MiniMaxH3PostGenerationFaceRefine", inputs: {
-            images, audio, model, vae: ["refine_video_vae", 0], audio_vae: ["refine_audio_vae", 0], clip: ["refine_clip", 0], prompt: String(input.prompt || ""), seed: Number(params.seed || 0), detector: String(params.faceRefineDetector || "face_yolov8m.pt"), confidence: Number(params.faceRefineConfidence ?? 0.35), crop_factor: Number(params.faceRefineCropFactor ?? 2.5), canvas_size: Number(params.faceRefineCanvasSize ?? 768), denoise: Number(params.faceRefineDenoise ?? 0.4), steps: Number(params.faceRefineSteps ?? 8), sampler: String(params.faceRefineSampler || "euler"), scheduler: String(params.faceRefineScheduler || "simple"), paste_region: String(params.faceRefinePasteRegion || "face_only"), mask_dilation: Number(params.faceRefineMaskDilation ?? 16), feather: Number(params.faceRefineFeather ?? 24), colour_match: Number(params.faceRefineColourMatch ?? 1), blend: Number(params.faceRefineBlend ?? 1), seam_fade_frames: Number(params.seamFaceFadeFrames ?? 0), seam_colour_match: Number(params.seamColourMatch ?? 0), audio_crossfade_ms: 0,
-        } };
+        const uploadedRefs = await Promise.all((Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : []).map(upload));
+        addH3FaceRefineNode(graph, "face_refine", {
+            images, audio, model, vae: ["refine_video_vae", 0], audio_vae: ["refine_audio_vae", 0], clip: ["refine_clip", 0],
+        }, params, uploadedRefs, withNoTextConstraint(String(input.prompt || "")), Number(params.seed || 0));
         images = ["face_refine", 0]; audio = ["face_refine", 1];
+    } else {
+        graph.full_frame_refine = { class_type: "MiniMaxH3PostGenerationFullFrameRefine", inputs: {
+            images, audio, model, vae: ["refine_video_vae", 0], audio_vae: ["refine_audio_vae", 0], clip: ["refine_clip", 0],
+            prompt: withNoTextConstraint(String(input.prompt || "")), seed: Number.isFinite(Number(params.seed)) ? Number(params.seed) : 0,
+            steps: Number(params.h3SecondSteps ?? params.secondPassSteps ?? 4), denoise: Number(params.secondPassDenoise ?? params.denoise ?? 0.28), sampler: String(params.secondPassSampler || params.sampler || "res_multistep"), scheduler: String(params.secondPassScheduler || params.scheduler || "simple"), target_megapixels: Number(params.latentUpscaleMegapixels ?? params.secondPassMegapixels ?? params.megapixels ?? 0.4),
+        } };
+        images = ["full_frame_refine", 0]; audio = ["full_frame_refine", 1];
     }
     graph.nf_output = { class_type: NANFENG_VHS_CLASS, inputs: { images, audio, filename_prefix: "NanFeng_H3_Confirmed", frame_rate: 24, format: "video/h264-mp4", loop_count: 0, pingpong: false, save_output: true } };
     return graph;
+}
+
+function addH3FaceRefineNode(
+    graph: Record<string, any>,
+    id: string,
+    baseInputs: Record<string, any>,
+    params: Record<string, unknown>,
+    uploadedRefs: string[],
+    prompt: string,
+    seed: number,
+) {
+    const referenceInputs: Record<string, [string, number]> = {};
+    uploadedRefs.forEach((file, index) => {
+        const imageId = `${id}_reference_${index + 1}`;
+        graph[imageId] = { class_type: "LoadImage", inputs: { image: file } };
+        referenceInputs[`reference_${index + 1}`] = [imageId, 0];
+    });
+    graph[id] = { class_type: "InfiniteCanvasH3FaceRefine", inputs: {
+        ...baseInputs,
+        ...referenceInputs,
+        prompt, seed,
+        cfg: Number(params.faceRefineCfg ?? 1), shift_video: Number(params.videoSigmaShift ?? 12), shift_audio: Number(params.audioSigmaShift ?? 3),
+        detector: String(params.faceRefineDetector || "face_yolov8m.pt"), confidence: Number(params.faceRefineConfidence ?? 0.35),
+        crop_factor: Number(params.faceRefineCropFactor ?? 2.5), canvas_size: Number(params.faceRefineCanvasSize ?? 768),
+        denoise: Number(params.faceRefineDenoise ?? 0.4), steps: Number(params.faceRefineSteps ?? 8),
+        sampler: String(params.faceRefineSampler || "euler"), scheduler: String(params.faceRefineScheduler || "simple"),
+        paste_region: String(params.faceRefinePasteRegion || "face_only"), mask_dilation: Number(params.faceRefineMaskDilation ?? 16),
+        feather: Number(params.faceRefineFeather ?? 24), colour_match: Number(params.faceRefineColourMatch ?? 1),
+        blend: Number(params.faceRefineBlend ?? 1), ref_image_size: String(params.refImageSize || "match"),
+    } };
 }
 
 /** 备用：此前的分拆 API 图，保留用于定位原生 V10 节点异常。 */
@@ -1511,10 +1561,17 @@ async function resolveH3ModelParams(comfyUrl: string, params: Record<string, unk
 
 function normalizeH3AspectRatio(value: string) {
     const aliases: Record<string, string> = {
+        // 短形式
         "16:9": "16:9 (Widescreen)", "9:16": "9:16 (Portrait Widescreen)", "1:1": "1:1 (Square)",
         "4:3": "4:3 (Standard)", "3:4": "3:4 (Portrait Standard)", "2:3": "2:3 (Portrait Photo)", "3:2": "3:2 (Photo)",
+        // H3 端 ClipSettings 选项里曾经使用的简称（已落库 segment.aspectRatio 可能是这些值）
+        "9:16 (Portrait)": "9:16 (Portrait Widescreen)",
+        "4:3 (Standard)": "4:3 (Standard)", "3:4 (Portrait)": "3:4 (Portrait Standard)",
+        "3:2 (Photo)": "3:2 (Photo)", "2:3 (Portrait)": "2:3 (Portrait Photo)",
     };
-    return aliases[value] || value;
+    const normalized = aliases[value] || value;
+    console.warn("[H3 normalizeAspectRatio]", { input: value, output: normalized, hit: value in aliases });
+    return normalized;
 }
 
 /** 带重试的 fetch：ComfyUI 刚执行完时输出文件可能还在落盘，瞬时 404 应重试而非放弃。 */
@@ -1550,13 +1607,13 @@ export async function collectOutputMedia(outputs: Record<string, any>, baseUrl: 
         if (Array.isArray(value)) { value.forEach(visit); return; }
         if (typeof value !== "object") return;
         if (typeof value.filename === "string" && value.filename) {
-            // LoadImage/LoadVideo 等节点会把输入素材以 type=input 写进 history outputs，
-            // 但部分 H3 VHS 输出也会落在 `infinite-canvas/output` 并错误标成 input。
-            // 只排除普通输入目录，保留明确位于 output 子目录的生成视频。
+            // LoadImage/LoadVideo 等节点会把输入素材以 type=input 写进 history outputs。
+            // 一采缓存也位于 input/infinite-canvas-cache/output，不能因目录名含 output 就当成精修结果；
+            // 只保留确实来自 H3 VHS `infinite-canvas/output` 子目录的特殊输出。
             const outputType = String(value.type || "").trim().toLowerCase();
             const subfolder = String(value.subfolder || "");
-            const isVideoOutput = /\.(mp4|webm|mov|m4v|mkv)$/i.test(String(value.filename)) && /(^|[\\/])output([\\/]|$)/i.test(subfolder);
-            if (outputType === "input" && !isVideoOutput) return;
+            const isH3VideoOutput = /\.(mp4|webm|mov|m4v|mkv)$/i.test(String(value.filename)) && /(^|[\\/])infinite-canvas[\\/]output([\\/]|$)/i.test(subfolder);
+            if (outputType === "input" && !isH3VideoOutput) return;
             const key = `${value.filename}|${value.subfolder || ""}|${value.type || ""}`;
             if (!seen.has(key)) { seen.add(key); items.push(value); }
             return;

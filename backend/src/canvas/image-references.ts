@@ -10,6 +10,56 @@ export type ResolvedCanvasImageReference = {
 };
 
 /**
+ * 配置节点只是智能节点的持久化外壳；真正参与参考图解析的类型由
+ * metadata.generationMode 决定。不要把它当作字面上的 config 丢弃。
+ */
+export function effectiveCanvasNodeType(node: Record<string, unknown>) {
+    const type = String(node.type || "");
+    const metadata = recordOf(node.metadata);
+    if (type === "config" && metadata.smart === true) {
+        const mode = String(metadata.generationMode || "").trim();
+        if (["text", "image", "video", "audio"].includes(mode)) return mode;
+    }
+    return type;
+}
+
+/** 把单个节点按其有效类型展开成真正能交给 provider 的图片输入。 */
+export function resolveCanvasImageReferenceNode(
+    node: Record<string, unknown>,
+    referenceTarget: Record<string, unknown> = node,
+    added: Set<string> = new Set(),
+) {
+    const references: ResolvedCanvasImageReference[] = [];
+    const effectiveType = effectiveCanvasNodeType(node);
+    if (effectiveType === "image") {
+        if (String(node.type || "") === "config") addSmartImageReferences(node, references, added);
+        else addImageReference(node, references, added);
+    } else if (effectiveType === "character") {
+        addCharacterImageReferences(node, referenceTarget, references, added);
+    } else if (effectiveType === "scene") {
+        addSceneImageReferences(node, references, added);
+    }
+    return references;
+}
+
+/** 按调用方明确给出的节点 ID 展开参考图，保留用户选择顺序。 */
+export function resolveCanvasImageReferencesByIds(
+    project: CanvasProject,
+    targetNodeId: string,
+    referenceNodeIds: string[],
+) {
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+    const nodeById = new Map(nodes.map((node) => [String(node.id || ""), node]));
+    const target = nodeById.get(targetNodeId);
+    if (!target) return [];
+    const added = new Set<string>();
+    return referenceNodeIds.flatMap((id) => {
+        const node = nodeById.get(String(id));
+        return node ? resolveCanvasImageReferenceNode(node, target, added) : [];
+    });
+}
+
+/**
  * 从画布图谱解析图片生成的参考图。
  * sourceNodeId 是本次生成的源节点：配置节点直接读入边；生成结果节点
  * 先沿父级配置节点回溯，再把自身作为改图源，顺序与前端展示顺序一致。
@@ -31,8 +81,7 @@ export function resolveCanvasImageReferences(project: CanvasProject, sourceNodeI
         const incoming = incomingNodes(sourceNodeId, connections, nodeById);
         for (const node of incoming) {
             if (isMaskOverlayNode(node)) continue;
-            if (String(node.type || "") === "image") addImageReference(node, references, added);
-            if (String(node.type || "") === "config" && recordOf(node.metadata).smart === true) addSmartImageReferences(node, references, added);
+            if (effectiveCanvasNodeType(node) === "image") references.push(...resolveCanvasImageReferenceNode(node, source, added));
         }
         for (const node of incoming) {
             if (String(node.type || "") === "image" && isMaskOverlayNode(node)) addImageReference(node, references, added);
@@ -46,10 +95,7 @@ export function resolveCanvasImageReferences(project: CanvasProject, sourceNodeI
             || incomingNodes(sourceNodeId, connections, nodeById).find((node) => String(node.type || "") === "config");
     const referenceTarget = inputNode || source;
     for (const node of incomingNodes(String(referenceTarget.id || ""), connections, nodeById)) {
-        if (String(node.type || "") === "image") addImageReference(node, references, added);
-        if (String(node.type || "") === "config" && recordOf(node.metadata).smart === true) addSmartImageReferences(node, references, added);
-        if (String(node.type || "") === "character") addCharacterImageReferences(node, referenceTarget, references, added);
-        if (String(node.type || "") === "scene") addSceneImageReferences(node, references, added);
+        references.push(...resolveCanvasImageReferenceNode(node, referenceTarget, added));
     }
     return references;
 }

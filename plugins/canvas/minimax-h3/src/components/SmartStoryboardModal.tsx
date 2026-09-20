@@ -105,7 +105,7 @@ export function SmartStoryboardModal({
         }
         onReorder={reorder}
       />
-      <div style={{ marginTop: 10, color: ctx.theme.node.muted, fontSize: 11, lineHeight: 1.5 }}>
+      <div style={{ marginTop: 10, color: ctx.theme.node.muted, fontSize: 12, lineHeight: 1.5 }}>
         看图 API、语言模型和 Skill 沿用当前默认配置；未上传图片时使用当前节点上游图片（
         {upstream.filter((ref) => ref.type === "image").length} 张），不会把上一段生成的视频当参考。
       </div>

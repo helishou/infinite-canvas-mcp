@@ -8,7 +8,11 @@ import type { RunningHubBackend } from "../runtime/runninghub.js";
 import { CanvasH3Runner } from "./h3-runner.js";
 import { CanvasImageDispatcher, type CanvasImageGenerationInput } from "./image-dispatcher.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
-import { isMaskOverlayNode, resolveCanvasImageReferences } from "./image-references.js";
+import {
+    isMaskOverlayNode,
+    resolveCanvasImageReferences,
+    resolveCanvasImageReferencesByIds,
+} from "./image-references.js";
 import { CanvasTextDispatcher, type CanvasTextGenerationInput } from "./text-dispatcher.js";
 import { CanvasVideoDispatcher } from "./video-dispatcher.js";
 import { CanvasAudioDispatcher } from "./audio-dispatcher.js";
@@ -117,6 +121,19 @@ export class CanvasGenerationService {
         if (!sourceNodeId) return command;
         const sourceNode = nodes.find((node) => String(node.id || "") === sourceNodeId);
         const sourceMetadata = recordOf(sourceNode?.metadata);
+        const commandMetadata = recordOf(command);
+        const explicitReferenceNodeIds = Array.isArray(commandMetadata.referenceNodeIds)
+            ? commandMetadata.referenceNodeIds.map(String)
+            : [];
+        if (explicitReferenceNodeIds.length) {
+            const explicitReferences = resolveCanvasImageReferencesByIds(project, sourceNodeId, explicitReferenceNodeIds);
+            // 先用当前画布快照重新解析，避免调用方传入的旧媒体句柄；若快照尚未
+            // 落库，则保留调用方已整理好的 references，不能静默丢掉明确选择。
+            if (explicitReferences.length || !command.references?.length) {
+                return { ...command, references: explicitReferences };
+            }
+            return command;
+        }
         // 局部修改的参考图挂在目标结果节点上（原图/智能生成节点 + 蒙版标注两条入边），
         // 不在源节点上。调用方未标记 maskEdit 时（旧页面、MCP、Agent）仍按目标节点解析，
         // 否则会拿源节点（常是智能节点）回溯上游角色/场景图，把原图和蒙版一起换掉。

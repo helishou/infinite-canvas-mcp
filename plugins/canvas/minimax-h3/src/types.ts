@@ -1,6 +1,7 @@
 export type H3ReferenceRole = "character_identity" | "character_turnaround" | "storyboard" | "scene" | "blocking" | "keyframe" | "motion_reference" | "audio_reference" | "character_voice" | "style" | "palette" | "prop" | "other";
 export type H3ReferenceUsage = "reference" | "first_frame" | "last_frame";
-export type H3ReferenceBinding = { id: string; assetId: string; label: string; role: H3ReferenceRole; tags: string[]; enabled: boolean; usage: H3ReferenceUsage; subjectId?: string; storyboardSubjectIds?: string[]; mediaType?: "image" | "video" | "audio"; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string; groupId?: string; outfitId?: string };
+export type H3ReferenceRetention = "fully_preserved" | "partially_preserved" | "attribute_transfer" | "weak_reference";
+export type H3ReferenceBinding = { id: string; assetId: string; label: string; role: H3ReferenceRole; tags: string[]; enabled: boolean; usage: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; subjectId?: string; storyboardSubjectIds?: string[]; mediaType?: "image" | "video" | "audio"; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string; groupId?: string; outfitId?: string };
 
 export type H3CharacterOutfit = {
     id: string;
@@ -8,6 +9,7 @@ export type H3CharacterOutfit = {
     name: string;
     storageKey?: string;
     mimeType?: string;
+    role?: H3ReferenceRole;
     enabled: boolean;
 };
 
@@ -31,7 +33,7 @@ export type H3CharacterGroup = {
     voiceEnabled: boolean;
 };
 
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; enabled?: boolean; usage?: H3ReferenceUsage };
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown> };
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
@@ -122,6 +124,7 @@ export type H3Segment = {
     firstPassStorageKey?: string;
     firstPassFingerprint?: string;
     firstPassReady?: boolean;
+    storyboardPromptCache?: { version: 10; fingerprint: string; subjectDefinitions: string; retentionAnalysis: string };
     seamFaceFadeFrames?: number;
     seamColourMatch?: number;
     seamAudioCrossfadeMs?: number;
@@ -229,6 +232,10 @@ export type H3Segment = {
     refs?: { image?: H3Ref[]; video?: H3Ref[]; audio?: H3Ref[] };
     refItems?: H3Ref[];
     referenceBindings?: H3ReferenceBinding[];
+    /** 当前 Clip 是否把 storyboard 图片作为时间轨显示；每段独立保存。 */
+    storyboardModeEnabled?: boolean;
+    /** 以稳定 reference binding ID 为键的 Clip 本地分镜时长（秒）。 */
+    storyboardDurations?: Record<string, number>;
     h3CharacterGroups?: Record<string, H3CharacterGroup>;
     aspectRatio?: string;
     megapixels?: number;

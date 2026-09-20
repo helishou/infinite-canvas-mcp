@@ -7,16 +7,13 @@ import { formatBytes } from "@/lib/image-utils";
 import { pickImageSource } from "@/lib/image-thumbnail";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
-import { isImageGenerationNode } from "@/lib/canvas/canvas-resource-references";
-import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { CanvasCollaborativeText } from "./canvas-collaborative-text";
 import { useParams } from "react-router-dom";
-import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position } from "@/types/canvas";
+import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
-import { characterReferenceKey } from "@/lib/canvas/canvas-resource-references";
 import { ensureImagePreview, getImagePreviewRevisionFor, previewUrlFor, resolveImageUrl, subscribeImagePreview } from "@/services/image-storage";
 import { useTranslation } from "react-i18next";
 import { useCanvasNodePreview } from "@/lib/canvas/canvas-drag-preview";
@@ -30,8 +27,6 @@ const NODE_DETAIL_MODE_ENTER_SCREEN_SIZE = 180;
 const NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE = 100;
 const emptyPluginView: Record<string, unknown> = {};
 const subscribeNoPluginView = () => () => undefined;
-const EMPTY_NODES: CanvasNodeData[] = [];
-const EMPTY_CONNECTIONS: CanvasConnection[] = [];
 
 export type CanvasNodeProps = {
     projectId: string;
@@ -486,6 +481,7 @@ export const CanvasNode = React.memo(function CanvasNode({
 }: CanvasNodeProps) {
     const { t } = useTranslation();
     const [hovered, setHovered] = useState(false);
+    const pickedReferenceOnMouseDown = useRef(false);
     const definition = getNodeDefinition(data.type);
     const pluginContext = useMemo<CanvasNodeContext | null>(() => (pluginHost ? buildNodeContext(pluginHost, data, theme, scale, isSelected) : null), [pluginHost, data, theme, scale, isSelected]);
     const [isEditingContent, setIsEditingContent] = useState(false);
@@ -712,29 +708,46 @@ export const CanvasNode = React.memo(function CanvasNode({
                 onHoverEnd(data.id);
             }}
             onMouseDownCapture={(event) => {
-                if (!referenceSelectionState) onSelectCapture?.(event, data.id);
-                if (!referenceSelectionState) {
-                    // H3 节点内容几乎全是交互控件，且其根 div 在冒泡阶段 stopPropagation 挡掉了普通的
-                    // body 拖拽路径，只能走这里。若沿用全量黑名单（button/input/textarea/select/video），
-                    // 节点上几乎任何可见区域都命中被排除，导致“拖不动”。故对 H3 仅屏蔽纯文本编辑控件，
-                    // H3 只允许从自己的标题栏拖动，其他区域全部保留给控件和内容交互。
-                    const target = event.target as HTMLElement;
-                    const isH3 = data.type === "minimax-h3:video";
-                    const interactive = isH3 ? target.closest("button, input, textarea, select, video") : target.closest("button, input, textarea, select, video");
-                    const isH3DragHandle = target.closest("[data-canvas-node-drag-handle]");
-                    // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
-                    // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
-                    // onMouseDown（冒泡阶段）无法执行，缩放被拖拽彻底劫持。故需显式排除缩放手柄。
-                    const onResizeHandle = target.closest("[data-resize-handle]");
-                    // 连线手柄（ConnectionHandleDot）与缩放手柄同理：纯 div 会命中拖拽分支，
-                    // capture 阶段触发 handleNodeMouseDown 的 stopPropagation 会掐断其自身
-                    // onMouseDown（onConnectStart，冒泡阶段），导致无法连线、反而变成拖拽。需显式排除。
-                    const onConnectionHandle = target.closest("[data-connection-handle]");
-                    // 节点下方的面板（提示词/参考内容等）是纯交互区：面板已在冒泡阶段 stopPropagation，
-                    // 但 capture 先于冒泡执行，会先在这里触发拖拽。命中面板时跳过拖拽，把交互留给面板自身。
-                    const onNodePanel = target.closest("[data-canvas-node-panel]");
-                    if (!interactive && !onResizeHandle && !onConnectionHandle && !onNodePanel && (!isH3 || isH3DragHandle)) onMouseDown(event, data.id);
+                if (referenceSelectionState) {
+                    event.stopPropagation();
+                    if (referenceSelectionState === "available" && event.button === 0) {
+                        event.preventDefault();
+                        pickedReferenceOnMouseDown.current = true;
+                        onSelectReference?.(data.id);
+                    }
+                    return;
                 }
+                onSelectCapture?.(event, data.id);
+                // H3 节点内容几乎全是交互控件，且其根 div 在冒泡阶段 stopPropagation 挡掉了普通的
+                // body 拖拽路径，只能走这里。若沿用全量黑名单（button/input/textarea/select/video），
+                // 节点上几乎任何可见区域都命中被排除，导致“拖不动”。故对 H3 仅屏蔽纯文本编辑控件，
+                // H3 只允许从自己的标题栏拖动，其他区域全部保留给控件和内容交互。
+                const target = event.target as HTMLElement;
+                const isH3 = data.type === "minimax-h3:video";
+                const interactive = isH3 ? target.closest("button, input, textarea, select, video") : target.closest("button, input, textarea, select, video");
+                const isH3DragHandle = target.closest("[data-canvas-node-drag-handle]");
+                // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
+                // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
+                // onMouseDown（冒泡阶段）无法执行，缩放被拖拽彻底劫持。故需显式排除缩放手柄。
+                const onResizeHandle = target.closest("[data-resize-handle]");
+                // 连线手柄（ConnectionHandleDot）与缩放手柄同理：纯 div 会命中拖拽分支，
+                // capture 阶段触发 handleNodeMouseDown 的 stopPropagation 会掐断其自身
+                // onMouseDown（onConnectStart，冒泡阶段），导致无法连线、反而变成拖拽。需显式排除。
+                const onConnectionHandle = target.closest("[data-connection-handle]");
+                // 节点下方的面板（提示词/参考内容等）是纯交互区：面板已在冒泡阶段 stopPropagation，
+                // 但 capture 先于冒泡执行，会先在这里触发拖拽。命中面板时跳过拖拽，把交互留给面板自身。
+                const onNodePanel = target.closest("[data-canvas-node-panel]");
+                if (!interactive && !onResizeHandle && !onConnectionHandle && !onNodePanel && (!isH3 || isH3DragHandle)) onMouseDown(event, data.id);
+            }}
+            onClickCapture={(event) => {
+                if (!referenceSelectionState && !pickedReferenceOnMouseDown.current) return;
+                event.preventDefault();
+                event.stopPropagation();
+                if (pickedReferenceOnMouseDown.current) {
+                    pickedReferenceOnMouseDown.current = false;
+                    return;
+                }
+                if (referenceSelectionState === "available") onSelectReference?.(data.id);
             }}
             onContextMenu={(event) => {
                 if (referenceSelectionState) event.preventDefault();
@@ -798,16 +811,15 @@ export const CanvasNode = React.memo(function CanvasNode({
                     const target = event.target as HTMLElement;
                     const isH3 = data.type === "minimax-h3:video";
                     if (!referenceSelectionState && (!isH3 || target.closest("[data-canvas-node-drag-handle]"))) onMouseDown(event, data.id);
-                    else if (event.button === 0 && referenceSelectionState === "available") {
-                        event.stopPropagation();
-                        onSelectReference?.(data.id);
-                    }
                 }}
                 onDoubleClick={(event) => {
                     if (referenceSelectionState) {
                         event.stopPropagation();
                         return;
                     }
+                    // 节点内的按钮/输入控件自己消费双击：click 上的 stopPropagation 拦不住独立的 dblclick 事件，
+                    // 不判断落点会让「下载 / 创建副本 / 张数」这类工具条按钮的双击冒泡到节点，误触发预览或编辑。
+                    if (event.target instanceof Element && event.target.closest("button, [role='button'], input, textarea, select")) return;
                     if (definition?.onDoubleClick && pluginContext) {
                         if (definition.onDoubleClick(pluginContext)) event.stopPropagation();
                         return;
@@ -1309,48 +1321,8 @@ function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     );
 }
 
-/** 角色节点被图像类生成节点引用时，用选中的参考图作为节点背景的栅格展示：
- *  1 张图 → 栅格 1 列（占 1 格方形，铺满节点）；2 张图 → 栅格 2 列（横向并排占 2 格的矩形）；不显示声线。 */
-type CharacterImage = NonNullable<NonNullable<CanvasNodeData["metadata"]>["characterImages"]>[number];
-type CharacterReferenceCell = { image: CharacterImage; index: number };
-
-function CharacterReferenceCellView({ node, theme, refs, thumbUrls }: { node: CanvasNodeData; theme: CanvasTheme; refs: CharacterReferenceCell[]; thumbUrls: Record<number, string> }) {
-    const { t } = useTranslation();
-    const urlFor = (image: CharacterImage, index: number) => previewUrlFor(image.storageKey) || thumbUrls[index] || image.url || "";
-    const cols = refs.length === 1 ? 1 : 2;
-    return (
-        <div className="relative h-full w-full overflow-hidden" style={{ background: theme.node.panel }}>
-            {/* 背景栅格：1 列 / 2 列，每格用所选图铺满 */}
-            <div className="absolute inset-0 grid gap-0.5 p-0.5" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
-                {refs.map(({ image, index }) => {
-                    const url = urlFor(image, index);
-                    return (
-                        <div key={index} className="relative min-h-0 min-w-0 overflow-hidden rounded-md">
-                            {url ? (
-                                <img src={url} alt={image.outfit || image.name || ""} className="size-full object-cover" draggable={false} />
-                            ) : (
-                                <div className="flex size-full items-center justify-center" style={{ background: theme.node.fill }}>
-                                    <User className="size-6 opacity-30" />
-                                </div>
-                            )}
-                            {image.outfit ? (
-                                <div className="absolute bottom-1 left-1 max-w-[calc(100%-8px)] truncate rounded bg-black/55 px-1.5 py-0.5 text-[10px] font-medium text-white">{image.outfit}</div>
-                            ) : null}
-                        </div>
-                    );
-                })}
-            </div>
-            {/* 顶部信息条：浮动叠加在背景图上，半透明压暗保证可读 */}
-            <div className="absolute inset-x-0 top-0 flex shrink-0 items-center gap-1.5 border-b border-white/15 bg-black/35 px-2 py-1.5 text-[10px] backdrop-blur-[1px]">
-                <User className="size-3 shrink-0 text-white/90" />
-                <span className="min-w-0 truncate font-medium text-white">{node.metadata?.characterName || node.title || "角色"}</span>
-                <span className="ml-auto shrink-0 rounded bg-white/25 px-1 py-0.5 text-white">{t("canvas.character.imageReference")}</span>
-            </div>
-        </div>
-    );
-}
-
-/** 角色节点：主图（大）+ 底部 outfit 缩略图条；多图时像多图片输出节点一样可横向展开，点缩略图或“设为主图”切换主图。 */
+/** 角色节点：主图（大）+ 底部 outfit 缩略图条；多图时像多图片输出节点一样可横向展开，点缩略图或“设为主图”切换主图。
+ *  角色封面始终由 metadata.characterPrimaryIndex 决定；引用它的生成节点选了哪张参考图，只在生成节点自己的参考卡上体现。 */
 function CharacterNodeContent(props: NodeContentRendererProps) {
     const { node, theme, scale, batchExpanded, onToggleBatch, onSetBatchPrimary, onDeleteBatchImage, onViewBatchImage } = props;
     const { t } = useTranslation();
@@ -1360,31 +1332,6 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
     const voiceUrl = node.metadata?.characterVoiceUrl || "";
     const voiceName = node.metadata?.characterVoiceName || "";
     const voiceDescription = node.metadata?.characterVoiceDescription || "";
-    // 角色节点被「图像类生成节点」（生图 / 智能选生图）引用时，用选中的参考图作为背景栅格展示：
-    // 1 张占 1 格（方形），2 张并排成横向矩形占 2 格；该模式下不显示声线。
-    // 注意：所选参考图保存在「引用本角色的生成节点」上：genNode.metadata.characterReferences[characterNodeId] = { imageKeys, voiceEnabled }。
-    const { id: projectId = "" } = useParams();
-    const upstreamNodes = useCanvasStore((state) => state.projects.find((project) => project.id === projectId)?.nodes || EMPTY_NODES);
-    const upstreamConnections = useCanvasStore((state) => state.projects.find((project) => project.id === projectId)?.connections || EMPTY_CONNECTIONS);
-    const imageGenReference = useMemo<{ image: CharacterImage; index: number }[] | null>(() => {
-        const genNode =
-            upstreamNodes.find((n) => isImageGenerationNode(n) && Boolean(n.metadata?.characterReferences?.[node.id])) ||
-            (() => {
-                for (const conn of upstreamConnections) {
-                    if (conn.fromNodeId !== node.id) continue;
-                    const n = upstreamNodes.find((m) => m.id === conn.toNodeId);
-                    if (isImageGenerationNode(n) && n?.metadata?.characterReferences?.[node.id]) return n;
-                }
-                return undefined;
-            })();
-        if (!genNode) return null;
-        const selection = genNode.metadata?.characterReferences?.[node.id];
-        const keys = selection?.imageKeys ? new Set(selection.imageKeys) : null;
-        const selected = keys
-            ? images.map((image, index) => ({ image, index })).filter(({ image, index }) => keys.has(characterReferenceKey(image, index)))
-            : images.map((image, index) => ({ image, index }));
-        return selected.length ? selected : null;
-    }, [node.id, images, upstreamNodes, upstreamConnections]);
     const [primaryUrl, setPrimaryUrl] = useState<string | null>(null);
     const [thumbUrls, setThumbUrls] = useState<Record<number, string>>({});
     const urlCache = useRef<Record<string, string>>({});
@@ -1467,10 +1414,6 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
                 <span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.character.empty")}</span>
             </div>
         );
-    }
-
-    if (imageGenReference) {
-        return <CharacterReferenceCellView node={node} theme={theme} refs={imageGenReference} thumbUrls={thumbUrls} />;
     }
 
     const visibleThumbs = images.slice(0, 5);
@@ -1636,7 +1579,10 @@ function ExpandedCharacterImageCard({
                 <ImageSlotStatus />
             )}
             {image.url ? (
-                <div className="pointer-events-none absolute inset-x-2 top-2 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100">
+                <div
+                    className="pointer-events-none absolute inset-x-2 top-2 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100"
+                    onDoubleClick={(event) => event.stopPropagation()}
+                >
                     <button
                         type="button"
                         className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
@@ -1801,7 +1747,10 @@ function ImageContent({
             </div>
             {primaryImage?.status === "error" ? <BatchImageFailureActions placement="left" onRetry={() => onRetryBatchImage?.(primaryImage.id)} onDelete={() => onDeleteBatchImage?.(primaryImage.id)} /> : null}
             {primaryImage?.content ? (
-                <div className="pointer-events-none absolute left-2.5 top-2.5 z-30 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100">
+                <div
+                    className="pointer-events-none absolute left-2.5 top-2.5 z-30 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100"
+                    onDoubleClick={(event) => event.stopPropagation()}
+                >
                     <button
                         type="button"
                         className="flex h-8 min-w-0 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
@@ -1810,7 +1759,7 @@ function ImageContent({
                         onClick={(event) => (event.stopPropagation(), onDownloadBatchImage?.(primaryImage.id))}
                     >
                         <Download className="size-3 shrink-0" />
-                        <span className="truncate">{t("common.download")}</span>
+                        {node.width >= 200 ? <span className="truncate">{t("common.download")}</span> : null}
                     </button>
                     <button
                         type="button"
@@ -1820,15 +1769,16 @@ function ImageContent({
                         onClick={(event) => (event.stopPropagation(), onDuplicateBatchImage?.(primaryImage.id))}
                     >
                         <Copy className="size-3 shrink-0" />
-                        <span className="truncate">{t("canvas.node.createCopy")}</span>
+                        {node.width >= 200 ? <span className="truncate">{t("canvas.node.createCopy")}</span> : null}
                     </button>
                 </div>
             ) : null}
             {isBatchRoot ? (
                 <button
                     type="button"
-                    className="absolute right-2.5 top-2.5 z-30 flex h-8 items-center justify-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                    className={`absolute right-2.5 top-2.5 z-30 flex h-8 items-center justify-center rounded-full border text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02] ${node.width >= 200 ? "gap-1.5 px-3" : "w-8 tabular-nums"}`}
                     style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
+                    title={batchExpanded ? t("canvas.node.batchExpanded") : t("canvas.node.batchCollapsed")}
                     aria-label={batchExpanded ? t("canvas.node.batchExpanded") : t("canvas.node.batchCollapsed")}
                     onClick={(event) => {
                         event.stopPropagation();
@@ -1837,8 +1787,14 @@ function ImageContent({
                     onMouseDown={(event) => event.stopPropagation()}
                     onPointerDown={(event) => event.stopPropagation()}
                 >
-                    <span className="leading-none">{t("canvas.controls.images", { count: batchCount })}</span>
-                    <ChevronRight className={`size-3.5 opacity-80 transition-transform ${batchExpanded ? "rotate-90" : ""}`} />
+                    {node.width >= 200 ? (
+                        <>
+                            <span className="leading-none">{t("canvas.controls.images", { count: batchCount })}</span>
+                            <ChevronRight className={`size-3.5 opacity-80 transition-transform ${batchExpanded ? "rotate-90" : ""}`} />
+                        </>
+                    ) : (
+                        <span className="leading-none">{batchCount}</span>
+                    )}
                 </button>
             ) : null}
         </BatchFrame>
@@ -1929,7 +1885,10 @@ function ExpandedImageCard({
         >
             {source ? <img src={source} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
             {image.content ? (
-                <div className="pointer-events-none absolute inset-x-2 top-2 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100">
+                <div
+                    className="pointer-events-none absolute inset-x-2 top-2 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100"
+                    onDoubleClick={(event) => event.stopPropagation()}
+                >
                     <button
                         type="button"
                         className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
@@ -1938,7 +1897,7 @@ function ExpandedImageCard({
                         onClick={(event) => (event.stopPropagation(), onDownload())}
                     >
                         <Download className="size-3 shrink-0" />
-                        <span className="truncate">{t("common.download")}</span>
+                        {node.width >= 200 ? <span className="truncate">{t("common.download")}</span> : null}
                     </button>
                     <button
                         type="button"
@@ -1948,7 +1907,7 @@ function ExpandedImageCard({
                         onClick={(event) => (event.stopPropagation(), onDuplicate())}
                     >
                         <Copy className="size-3 shrink-0" />
-                        <span className="truncate">{t("canvas.node.createCopy")}</span>
+                        {node.width >= 200 ? <span className="truncate">{t("canvas.node.createCopy")}</span> : null}
                     </button>
                     <button
                         type="button"
@@ -1958,7 +1917,7 @@ function ExpandedImageCard({
                         onClick={(event) => (event.stopPropagation(), onSetPrimary())}
                     >
                         <Star className="size-3 shrink-0" style={{ color: selectionBlue }} />
-                        <span className="truncate">{t("canvas.node.setPrimary")}</span>
+                        {node.width >= 200 ? <span className="truncate">{t("canvas.node.setPrimary")}</span> : null}
                     </button>
                 </div>
             ) : null}

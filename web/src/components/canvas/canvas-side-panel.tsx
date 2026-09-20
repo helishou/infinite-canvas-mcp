@@ -149,6 +149,27 @@ function nodePreviewText(node: CanvasNodeData) {
     return getNodeDefinition(node.type)?.title || node.type;
 }
 
+function matchesNodeTypeFilter(node: CanvasNodeData, typeFilter: string) {
+    if (typeFilter === "all" || node.type === typeFilter) return true;
+    return node.type === CanvasNodeType.Config
+        && node.metadata?.smart === true
+        && (node.metadata.generationMode || "image") === typeFilter;
+}
+
+function imageCoverForNode(node: CanvasNodeData) {
+    if (node.type === CanvasNodeType.Config && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image") {
+        const images = node.metadata.images || [];
+        const primary = images.find((image) => image.id === node.metadata?.primaryImageId) || images[0];
+        const content = primary?.content || node.metadata.content || "";
+        const storageKey = primary?.storageKey || node.metadata.storageKey;
+        return content || storageKey ? { content, storageKey } : undefined;
+    }
+    if (node.type === CanvasNodeType.Image && (node.metadata?.content || node.metadata?.storageKey)) {
+        return { content: node.metadata.content || "", storageKey: node.metadata.storageKey };
+    }
+    return undefined;
+}
+
 const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
@@ -162,7 +183,7 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
-        return nodes.filter((node) => (typeFilter === "all" || node.type === typeFilter) && (!query || [node.title, node.metadata?.content, node.metadata?.prompt].filter(Boolean).join(" ").toLowerCase().includes(query)));
+        return nodes.filter((node) => matchesNodeTypeFilter(node, typeFilter) && (!query || [node.title, node.metadata?.content, node.metadata?.prompt].filter(Boolean).join(" ").toLowerCase().includes(query)));
     }, [nodes, keyword, typeFilter]);
     const treeRows = useMemo(() => {
         const filteredIds = new Set(filtered.map((node) => node.id));
@@ -242,8 +263,10 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                     <div className="relative w-full" style={{ height: rowVirtualizer.getTotalSize() }}>
                         {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                             const { node, depth, hasChildren } = treeRows[virtualRow.index];
-                            const Icon = NODE_TYPE_ICON[node.type] || FileText;
+                            const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart === true ? node.metadata.generationMode || "image" : undefined;
+                            const Icon = NODE_TYPE_ICON[smartMode || node.type] || FileText;
                             const isImage = node.type === CanvasNodeType.Image && node.metadata?.content;
+                            const hasImageCover = Boolean(imageCoverForNode(node));
                             const isCharacter = node.type === CanvasNodeType.Character;
                             const isScene = node.type === CanvasNodeType.Scene;
                             const isChecked = checked.has(node.id);
@@ -259,7 +282,7 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                                     <button type="button" onClick={() => (selectMode ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.sidePanel.focusNode")}>
                                         {selectMode ? <CheckMark checked={isChecked} theme={theme} /> : null}
                                         <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
-                                            {isImage || isCharacter || isScene ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
+                                            {hasImageCover || isCharacter || isScene ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
                                         </span>
                                         <span className="min-w-0 flex-1 space-y-0.5">
                                             <span className="block truncate text-sm font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
@@ -313,8 +336,9 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     const characterImages = node.metadata?.characterImages || [];
     const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex ?? 0, 0), Math.max(characterImages.length - 1, 0));
     const primaryImage = isCharacter ? characterImages[primaryIndex] || characterImages[0] : undefined;
-    const content = isCharacter ? primaryImage?.url || "" : isScene ? node.metadata?.sceneImage?.url || "" : node.metadata?.content || "";
-    const storageKey = isCharacter ? primaryImage?.storageKey : isScene ? node.metadata?.sceneImage?.storageKey : node.metadata?.storageKey;
+    const imageCover = imageCoverForNode(node);
+    const content = isCharacter ? primaryImage?.url || "" : isScene ? node.metadata?.sceneImage?.url || "" : imageCover?.content || "";
+    const storageKey = isCharacter ? primaryImage?.storageKey : isScene ? node.metadata?.sceneImage?.storageKey : imageCover?.storageKey;
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
 
     useEffect(() => {

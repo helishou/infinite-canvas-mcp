@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Button, Empty, Modal, Segmented, Tag, message } from "antd";
-import { ChevronDown, ChevronUp, Copy, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Maximize2, Trash2 } from "lucide-react";
 
 import { deleteBackendGenerationLogs, fetchBackendGenerationLogs, backendMediaUrl, type BackendGenerationLog as GenerationLog } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -160,12 +160,17 @@ function actualSubmissionText(params: unknown) {
 
 function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }) {
     const [expanded, setExpanded] = useState(false);
+    const [preview, setPreview] = useState<{ url: string; video: boolean; name?: string } | null>(null);
     const copy = async (value: string) => { await navigator.clipboard?.writeText(value); message.success("已复制"); };
     const statusColor = log.status === "success" ? "green" : log.status === "failed" ? "red" : log.status === "running" ? "processing" : "default";
     const references = collectReferences(log);
     const actualSubmission = actualSubmissionText(log.params);
     const kind = logKind(log);
     const typeLabel = kind === "other" ? String(log.platform || "其他") : KIND_LABEL[kind];
+    const openPreview = useCallback((url: string, video: boolean, name?: string) => {
+        if (!url) return;
+        setPreview({ url, video, name });
+    }, []);
     return <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
         <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={KIND_COLOR[kind]}>{typeLabel}</Tag><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
         <div className="mt-2 flex flex-wrap gap-3 text-xs text-stone-500"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span></div>
@@ -173,7 +178,12 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
         {log.prompt ? <ExpandableText label="提示词" value={log.prompt} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.prompt || "")} /> : null}
         {actualSubmission ? <ExpandableText label="实际提交配置" value={actualSubmission} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(actualSubmission)} /> : null}
         {log.error ? <ExpandableText label="错误" value={log.error} expanded={expanded} error onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.error || "")} /> : null}
-        {log.outputs.length ? <div className="mt-3 grid grid-cols-4 gap-2">{log.outputs.map((output, index) => <Output key={`${log.id}-${index}`} output={output} />)}</div> : null}
+        {log.outputs.length ? <div className="mt-3 grid grid-cols-4 gap-2">{log.outputs.map((output, index) => <Output key={`${log.id}-${index}`} output={output} onPreview={openPreview} />)}</div> : null}
+        <Modal open={!!preview} onCancel={() => setPreview(null)} footer={null} width="80%" destroyOnHidden title={preview?.name} centered>
+            {preview?.video
+                ? <video src={preview.url} controls autoPlay playsInline style={{ width: "100%", maxHeight: "70vh", display: "block", background: "#000" }} />
+                : <img src={preview?.url} alt={preview?.name || "preview"} style={{ width: "100%", maxHeight: "70vh", display: "block", objectFit: "contain", background: "#111" }} />}
+        </Modal>
     </div>;
 }
 
@@ -206,12 +216,43 @@ function ExpandableText({ label, value, expanded, error, onToggle, onCopy }: { l
     return <div className={`mt-2 rounded ${error ? "bg-red-50 text-red-600 dark:bg-red-950/30 dark:text-red-300" : ""}`}><div className="flex gap-2 p-2 text-sm"><div className={`min-w-0 flex-1 whitespace-pre-wrap break-words ${collapsible && !expanded ? "line-clamp-5" : ""}`}><span className="mr-1 text-xs text-stone-500">{label}：</span>{value}</div><Button type="text" size="small" icon={<Copy className="size-3.5" />} onClick={onCopy} /></div>{collapsible ? <Button type="text" size="small" className="!h-7 !w-full !text-xs" icon={expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />} onClick={onToggle}>{expanded ? "收起" : "展开"}</Button> : null}</div>;
 }
 
-function Output({ output }: { output: Record<string, unknown> }) {
+function Output({ output, onPreview }: { output: Record<string, unknown>; onPreview?: (url: string, video: boolean, name?: string) => void }) {
     const storageKey = typeof output.storageKey === "string" && output.storageKey ? output.storageKey : "";
     const url = storageKey ? backendMediaUrl(storageKey) : String(output.url || output.localUrl || "");
     const video = String(output.mimeType || output.type || "").startsWith("video");
     const [failed, setFailed] = useState(false);
+    const name = typeof output.name === "string" && output.name.trim() ? output.name.trim() : undefined;
     if (!url) return null;
-    if (failed) return <a href={url} target="_blank" rel="noreferrer" className="block truncate text-xs text-sky-500 hover:underline">{String(output.name || url)}（加载失败，点击新窗口打开）</a>;
-    return video ? <video src={url} controls muted playsInline onError={() => setFailed(true)} className="aspect-video w-full rounded object-cover" /> : <img src={url} alt="output" loading="lazy" decoding="async" onError={() => setFailed(true)} className="aspect-video w-full rounded object-cover" />;
+    if (failed) return <a href={url} target="_blank" rel="noreferrer" className="block truncate text-xs text-sky-500 hover:underline">{name || url}（加载失败，点击新窗口打开）</a>;
+    const openPreview = (event: React.MouseEvent) => {
+        event.stopPropagation();
+        onPreview?.(url, video, name);
+    };
+    const mediaProps = {
+        onError: () => setFailed(true),
+        title: name || "output",
+        className: "aspect-video w-full rounded object-cover",
+    };
+    const previewButton = (
+        <button
+            type="button"
+            onClick={openPreview}
+            aria-label="放大预览"
+            title={name ? `放大预览：${name}` : "放大预览"}
+            className="absolute right-1 top-1 inline-flex size-6 items-center justify-center rounded border border-white/15 bg-black/60 text-white/85 opacity-0 transition hover:border-sky-300 hover:bg-sky-700 hover:text-white group-hover:opacity-100 focus-visible:opacity-100"
+        >
+            <Maximize2 className="size-3.5" />
+        </button>
+    );
+    return video ? (
+        <div className="group relative">
+            <video src={url} controls muted playsInline {...mediaProps} />
+            {previewButton}
+        </div>
+    ) : (
+        <div className="group relative">
+            <img src={url} alt={name || "output"} loading="lazy" decoding="async" {...mediaProps} />
+            {previewButton}
+        </div>
+    );
 }
