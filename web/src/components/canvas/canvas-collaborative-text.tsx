@@ -56,14 +56,26 @@ function promptLineMapExtension(panelColor: string, markerTargets?: readonly str
     return ViewPlugin.fromClass(class {
         decorations: DecorationSet = Decoration.none;
         private readonly rail: HTMLDivElement;
+        private readonly thumb: HTMLDivElement;
         private readonly resizeObserver: ResizeObserver | null;
         private markerFrame = 0;
+        private scrollAnimationFrame = 0;
+        private thumbDrag: { pointerId: number; startY: number; startScrollTop: number; maxScroll: number; travel: number } | null = null;
 
         constructor(private readonly view: EditorView) {
             this.rail = document.createElement("div");
             this.rail.className = "cm-canvas-line-marker-rail";
             this.rail.setAttribute("role", "group");
             this.rail.setAttribute("aria-label", "提示词行位置");
+            this.thumb = document.createElement("div");
+            this.thumb.className = "cm-canvas-line-scroll-thumb";
+            this.thumb.setAttribute("aria-hidden", "true");
+            this.rail.append(this.thumb);
+            this.rail.addEventListener("pointerdown", this.handleRailPointerDown);
+            this.thumb.addEventListener("pointerdown", this.handleThumbPointerDown);
+            this.thumb.addEventListener("pointermove", this.handleThumbPointerMove);
+            this.thumb.addEventListener("pointerup", this.handleThumbPointerEnd);
+            this.thumb.addEventListener("pointercancel", this.handleThumbPointerEnd);
             this.view.dom.classList.add("cm-canvas-line-map");
             this.view.dom.append(this.rail);
             this.resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(this.scheduleMarkers);
@@ -106,15 +118,89 @@ function promptLineMapExtension(panelColor: string, markerTargets?: readonly str
             });
         };
 
+        private cancelScrollAnimation = () => {
+            if (!this.scrollAnimationFrame) return;
+            cancelAnimationFrame(this.scrollAnimationFrame);
+            this.scrollAnimationFrame = 0;
+        };
+
+        private scrollToMarker = (target: number) => {
+            this.cancelScrollAnimation();
+            const start = this.view.scrollDOM.scrollTop;
+            const distance = target - start;
+            if (Math.abs(distance) < 1 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+                this.view.scrollDOM.scrollTop = target;
+                return;
+            }
+            const startedAt = performance.now();
+            const duration = 180;
+            const step = (now: number) => {
+                const progress = Math.min(1, (now - startedAt) / duration);
+                this.view.scrollDOM.scrollTop = start + distance * (1 - Math.pow(1 - progress, 3));
+                if (progress < 1) this.scrollAnimationFrame = requestAnimationFrame(step);
+                else this.scrollAnimationFrame = 0;
+            };
+            this.scrollAnimationFrame = requestAnimationFrame(step);
+        };
+
+        private handleRailPointerDown = (event: PointerEvent) => {
+            if (event.button !== 0 || event.target !== this.rail) return;
+            event.preventDefault();
+            event.stopPropagation();
+            this.cancelScrollAnimation();
+            const height = this.rail.clientHeight;
+            const thumbHeight = this.thumb.offsetHeight;
+            const travel = Math.max(0, height - thumbHeight);
+            const maxScroll = Math.max(0, this.view.scrollDOM.scrollHeight - this.view.scrollDOM.clientHeight);
+            const y = (event.clientY - this.rail.getBoundingClientRect().top) / this.view.scaleY;
+            this.view.scrollDOM.scrollTop = travel ? Math.max(0, Math.min(travel, y - thumbHeight / 2)) / travel * maxScroll : 0;
+        };
+
+        private handleThumbPointerDown = (event: PointerEvent) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            event.stopPropagation();
+            this.cancelScrollAnimation();
+            const maxScroll = Math.max(0, this.view.scrollDOM.scrollHeight - this.view.scrollDOM.clientHeight);
+            this.thumbDrag = {
+                pointerId: event.pointerId,
+                startY: event.clientY,
+                startScrollTop: this.view.scrollDOM.scrollTop,
+                maxScroll,
+                travel: Math.max(0, this.rail.clientHeight - this.thumb.offsetHeight),
+            };
+            this.thumb.setPointerCapture(event.pointerId);
+        };
+
+        private handleThumbPointerMove = (event: PointerEvent) => {
+            const drag = this.thumbDrag;
+            if (!drag || drag.pointerId !== event.pointerId || !drag.travel) return;
+            event.preventDefault();
+            const delta = (event.clientY - drag.startY) / this.view.scaleY;
+            this.view.scrollDOM.scrollTop = Math.max(0, Math.min(drag.maxScroll, drag.startScrollTop + delta / drag.travel * drag.maxScroll));
+        };
+
+        private handleThumbPointerEnd = (event: PointerEvent) => {
+            if (!this.thumbDrag || this.thumbDrag.pointerId !== event.pointerId) return;
+            if (this.thumb.hasPointerCapture(event.pointerId)) this.thumb.releasePointerCapture(event.pointerId);
+            this.thumbDrag = null;
+        };
+
         private renderMarkers() {
             const editorRect = this.view.dom.getBoundingClientRect();
             const scrollerRect = this.view.scrollDOM.getBoundingClientRect();
             const height = this.view.scrollDOM.clientHeight;
             const documentLength = Math.max(1, this.view.state.doc.length);
-            const markerInset = 5;
+            const markerInset = 12;
             this.rail.style.top = `${(scrollerRect.top - editorRect.top) / this.view.scaleY}px`;
             this.rail.style.height = `${height}px`;
             this.rail.style.bottom = "auto";
+            const scrollHeight = Math.max(height, this.view.scrollDOM.scrollHeight);
+            const maxScroll = Math.max(0, scrollHeight - height);
+            const thumbHeight = Math.min(height, Math.max(32, height * height / scrollHeight));
+            const thumbTravel = Math.max(0, height - thumbHeight);
+            this.thumb.style.height = `${thumbHeight}px`;
+            this.thumb.style.top = `${maxScroll ? this.view.scrollDOM.scrollTop / maxScroll * thumbTravel : 0}px`;
             const fragment = document.createDocumentFragment();
             for (let number = 1; number <= this.view.state.doc.lines; number += 1) {
                 const line = this.view.state.doc.line(number);
@@ -126,7 +212,7 @@ function promptLineMapExtension(panelColor: string, markerTargets?: readonly str
                 marker.type = "button";
                 marker.className = "cm-canvas-line-marker";
                 marker.style.top = `${top}px`;
-                marker.style.backgroundColor = PROMPT_LINE_ACCENTS[accentIndex];
+                marker.style.setProperty("--cm-canvas-line-accent", PROMPT_LINE_ACCENTS[accentIndex]);
                 const label = targetLines ? lineText.replace(/:$/, "") : `第 ${number} 行`;
                 marker.title = `跳转到 ${label}`;
                 marker.setAttribute("aria-label", `跳转到 ${label}`);
@@ -134,24 +220,32 @@ function promptLineMapExtension(panelColor: string, markerTargets?: readonly str
                 marker.addEventListener("click", (event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    this.view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: "center" }) });
+                    const targetY = line.from / documentLength * scrollHeight;
+                    this.scrollToMarker(Math.max(0, Math.min(maxScroll, targetY - height / 2)));
                 });
                 fragment.append(marker);
             }
-            this.rail.replaceChildren(fragment);
+            this.rail.querySelectorAll(".cm-canvas-line-marker").forEach((marker) => marker.remove());
+            this.rail.append(fragment);
         }
 
         destroy() {
             this.resizeObserver?.disconnect();
             this.view.scrollDOM.removeEventListener("scroll", this.scheduleMarkers);
+            this.rail.removeEventListener("pointerdown", this.handleRailPointerDown);
+            this.thumb.removeEventListener("pointerdown", this.handleThumbPointerDown);
+            this.thumb.removeEventListener("pointermove", this.handleThumbPointerMove);
+            this.thumb.removeEventListener("pointerup", this.handleThumbPointerEnd);
+            this.thumb.removeEventListener("pointercancel", this.handleThumbPointerEnd);
             if (this.markerFrame) cancelAnimationFrame(this.markerFrame);
+            this.cancelScrollAnimation();
             this.rail.remove();
             this.view.dom.classList.remove("cm-canvas-line-map");
         }
     }, { decorations: (plugin) => plugin.decorations });
 }
 
-type DialogueMenuOption = { label: string; previewUrl?: string; apply: () => void };
+type DialogueMenuOption = { label: string; previewUrl?: string; selected?: boolean; apply: () => void };
 type DialogueMenuState = { x: number; y: number; options: DialogueMenuOption[] };
 type SpeakerRosterRef = { current: import("@/types/canvas-plugin").CanvasSpeakerOption[] };
 
@@ -163,19 +257,22 @@ function speakerMenuOptions(
     replaceRange: { from: number; to: number } | null,
     currentId: string | null,
 ): DialogueMenuOption[] {
-    const roster: CanvasSpeakerOption[] = speakers.length ? speakers : SPEAKER_OPTIONS.map((id) => ({ id }));
-    return roster
-        .filter((speaker) => speaker.id !== currentId)
-        .map((speaker) => ({
-            label: speaker.name ? `${speaker.id} · ${speaker.name}` : speaker.id,
-            previewUrl: speaker.previewUrl,
-            apply: () => {
-                const insert = `(${speaker.id}) `;
-                if (replaceRange) view.dispatch({ changes: { from: replaceRange.from, to: replaceRange.to, insert }, userEvent: "input" });
-                else view.dispatch({ changes: { from: insertAt, to: insertAt, insert }, userEvent: "input" });
-                view.focus();
-            },
-        }));
+    const selectedId = currentId?.toUpperCase() ?? null;
+    const candidates: CanvasSpeakerOption[] = speakers.length ? speakers : SPEAKER_OPTIONS.map((id) => ({ id }));
+    const roster = selectedId && !candidates.some((speaker) => speaker.id.toUpperCase() === selectedId)
+        ? [...candidates, { id: selectedId }]
+        : candidates;
+    return roster.map((speaker) => ({
+        label: speaker.name ? `${speaker.id} · ${speaker.name}` : speaker.id,
+        previewUrl: speaker.previewUrl,
+        selected: speaker.id.toUpperCase() === selectedId,
+        apply: () => {
+            const insert = `(${speaker.id}) `;
+            if (replaceRange) view.dispatch({ changes: { from: replaceRange.from, to: replaceRange.to, insert }, userEvent: "input" });
+            else view.dispatch({ changes: { from: insertAt, to: insertAt, insert }, userEvent: "input" });
+            view.focus();
+        },
+    }));
 }
 
 class SpeakerBadge extends WidgetType {
@@ -301,12 +398,14 @@ function DialogueContextMenu({ menu, onClose, theme }: { menu: DialogueMenuState
         <div style={{ position: "fixed", left: menu.x, top: menu.y, zIndex: 1100, minWidth: 128, maxWidth: 260, padding: 4, borderRadius: 8, border: `1px solid ${theme.toolbar.border}`, background: theme.toolbar.panel, boxShadow: "0 4px 16px rgba(0,0,0,.18)" }}>
             {menu.options.map((option) => (
                 <button key={option.label} type="button" onClick={() => { option.apply(); onClose(); }}
-                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "6px 10px", border: "none", borderRadius: 6, background: "transparent", color: theme.node.text, font: "inherit", fontSize: 13, textAlign: "left", cursor: "pointer", whiteSpace: "nowrap" }}
+                    aria-pressed={option.selected || undefined}
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "6px 10px", border: "none", borderRadius: 6, background: option.selected ? theme.toolbar.activeBg : "transparent", color: option.selected ? theme.toolbar.activeText : theme.node.text, font: "inherit", fontSize: 13, textAlign: "left", cursor: "pointer", whiteSpace: "nowrap" }}
                     onMouseEnter={(event) => { event.currentTarget.style.background = theme.toolbar.activeBg; }}
-                    onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}
+                    onMouseLeave={(event) => { event.currentTarget.style.background = option.selected ? theme.toolbar.activeBg : "transparent"; }}
                 >
                     {option.previewUrl ? <img src={option.previewUrl} alt="" draggable={false} style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover", flex: "0 0 auto" }} /> : null}
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{option.label}</span>
+                    <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{option.label}</span>
+                    {option.selected ? <span style={{ flex: "0 0 auto", fontSize: 11, color: theme.toolbar.activeText }}>✓ 当前</span> : null}
                 </button>
             ))}
         </div>
@@ -346,8 +445,9 @@ class UnresolvedReferenceChip extends WidgetType {
     eq(other: UnresolvedReferenceChip) { return this.token === other.token && this.position === other.position; }
     toDOM() {
         const span = document.createElement("span");
-        const kind = this.token.startsWith("{{subject:") ? "人物" : "素材";
-        const id = this.token.slice(this.token.indexOf(":") + 1, -2);
+        const match = /^<(Subject|Picture|Video|Audio)\s+(\d+)>$/iu.exec(this.token);
+        const kind = match?.[1].toLowerCase() === "subject" ? "人物" : match ? "图片/视频/音频" : "引用";
+        const id = match ? `${match[1]} ${match[2]}` : this.token;
         span.className = "cm-canvas-reference cm-canvas-reference-error";
         span.title = `未找到对应的${kind}引用（${id}），点击后从当前 Clip 引用中重新选择，或删除此标记`;
         span.setAttribute("aria-label", span.title);
@@ -372,6 +472,17 @@ function removeAdjacentReference(view: EditorView, tokens: string[], direction: 
     const text = view.state.doc.toString();
     const ranges: Array<{ from: number; to: number }> = [];
     for (const token of tokens) {
+        if (/^<(?:Subject|Picture|Video|Audio)\s+\d+>$/iu.test(token)) {
+            const matcher = new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu");
+            for (const match of text.matchAll(matcher)) {
+                const from = match.index!;
+                const to = from + match[0].length;
+                const overlapsSelection = !selection.empty && from < selection.to && to > selection.from;
+                const touchesCursor = selection.empty && (from < selection.head && to > selection.head || direction === "backward" && to === selection.head || direction === "forward" && from === selection.head);
+                if (overlapsSelection || touchesCursor) ranges.push({ from, to });
+            }
+            continue;
+        }
         let from = text.indexOf(token);
         while (from >= 0) {
             const to = from + token.length;
@@ -392,13 +503,12 @@ function mentionExtensions(references: CanvasTextReference[], chips: boolean, pr
     const active = references.filter((reference) => reference.active !== false && reference.label);
     const suggestible = active.filter((reference) => reference.suggestible !== false);
     const byToken = new Map<string, CanvasTextReference>();
-    active.forEach((reference) => (reference.tokens?.length ? reference.tokens : [reference.label]).forEach((token) => { if (token) byToken.set(token, reference); }));
+    active.forEach((reference) => (reference.tokens?.length ? reference.tokens : [reference.label]).forEach((token) => { if (token) byToken.set(token.toLocaleLowerCase(), reference); }));
     const tokens = [...byToken.keys()].sort((a, b) => b.length - a.length);
-    const pattern = tokens.length ? new RegExp(tokens.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "gu") : null;
-    const semanticPattern = /\{\{(?:ref|subject):[^{}\s]+\}\}/gu;
+    const pattern = tokens.length ? new RegExp(tokens.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "giu") : null;
     const unresolvedTokens = (text: string) => {
-        semanticPattern.lastIndex = 0;
-        return [...new Set([...text.matchAll(semanticPattern)].map((match) => match[0]).filter((token) => !byToken.has(token)))];
+        const referenceTag = /<(?:Subject|Picture|Video|Audio)\s+\d+>/giu;
+        return [...new Set([...text.matchAll(referenceTag)].map((match) => match[0]).filter((token) => !byToken.has(token.toLocaleLowerCase())))];
     };
     const decorations = (view: EditorView) => {
         if (!chips || view.composing) return Decoration.none;
@@ -408,21 +518,20 @@ function mentionExtensions(references: CanvasTextReference[], chips: boolean, pr
             if (pattern) {
                 pattern.lastIndex = 0;
                 for (const match of visibleText.matchAll(pattern)) {
-                    const reference = byToken.get(match[0]);
+                    const reference = byToken.get(match[0].toLocaleLowerCase());
                     if (reference) ranges.push(Decoration.replace({ widget: new ReferenceChip(reference, preview) }).range(from + match.index!, from + match.index! + match[0].length));
                 }
             }
-            semanticPattern.lastIndex = 0;
-            for (const match of visibleText.matchAll(semanticPattern)) {
-                if (!byToken.has(match[0])) {
-                    const token = match[0];
+            for (const token of unresolvedTokens(visibleText)) {
+                const tokenPattern = new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu");
+                for (const match of visibleText.matchAll(tokenPattern)) {
                     const tokenFrom = from + match.index!;
                     ranges.push(Decoration.replace({ widget: new UnresolvedReferenceChip(token, tokenFrom, () => {
                         if (!view.dom.isConnected) return;
                         view.dispatch({ selection: { anchor: tokenFrom + token.length } });
                         view.focus();
                         startCompletion(view);
-                    }) }).range(tokenFrom, tokenFrom + token.length));
+                    }) }).range(tokenFrom, tokenFrom + match[0].length));
                 }
             }
         }
@@ -430,12 +539,13 @@ function mentionExtensions(references: CanvasTextReference[], chips: boolean, pr
     };
     return [
         autocompletion({ defaultKeymap: false, override: [(context) => {
-            const unresolved = context.matchBefore(/\{\{(?:subject|ref):[^{}\s]+\}\}/u);
-            if (unresolved && !byToken.has(unresolved.text)) {
-                const isSubject = unresolved.text.startsWith("{{subject:");
-                const candidates = suggestible.filter((item) => isSubject ? item.kind === "character" : item.kind !== "character");
+            const unresolved = context.matchBefore(/<(Subject|Picture|Video|Audio)\s+\d+>?/iu);
+            if (unresolved && !byToken.has(unresolved.text.toLocaleLowerCase())) {
+                const expectedKind = unresolved.text.match(/^<(Subject|Picture|Video|Audio)/iu)?.[1].toLowerCase();
+                const tagFor = (item: CanvasTextReference) => item.tokens?.find((token) => token.match(/^<(Subject|Picture|Video|Audio)/iu)?.[1].toLowerCase() === expectedKind);
+                const candidates = suggestible.filter((item) => tagFor(item));
                 return { from: unresolved.from, to: unresolved.to, filter: false, options: candidates.map((item) => ({
-                    label: item.label, detail: item.title, apply: item.insert || item.label,
+                    label: item.label, detail: item.title, apply: tagFor(item) || item.insert || item.label,
                 })) };
             }
             const match = context.matchBefore(/@[^\s@]*/u);

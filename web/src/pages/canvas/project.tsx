@@ -2365,6 +2365,7 @@ function InfiniteCanvasPage() {
                 sceneDescription?: string;
                 sceneImage?: { url: string; storageKey?: string; name: string; width: number; height: number; bytes: number; mimeType: string };
                 sceneColorCard?: { url: string; storageKey?: string; name: string; width: number; height: number; bytes: number; mimeType: string };
+                sceneColorPalette?: string[];
                 sceneColorCardPrompt?: string;
                 voice?: string;
                 voiceName?: string;
@@ -2428,7 +2429,7 @@ function InfiniteCanvasPage() {
                     position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
                     width: spec.width,
                     height: spec.height,
-                    metadata: { status: "success", sceneAssetId: ref.sceneAssetId, sceneName: ref.sceneName, sceneDescription: ref.sceneDescription, sceneImage, sceneColorCard: ref.sceneColorCard, sceneColorCardPrompt: ref.sceneColorCardPrompt },
+                    metadata: { status: "success", sceneAssetId: ref.sceneAssetId, sceneName: ref.sceneName, sceneDescription: ref.sceneDescription, sceneImage, sceneColorCard: ref.sceneColorCard, sceneColorPalette: ref.sceneColorPalette, sceneColorCardPrompt: ref.sceneColorCardPrompt },
                 }]);
                 setSelectedNodeIds(new Set([id]));
                 setSelectedConnectionId(null);
@@ -2695,7 +2696,11 @@ function InfiniteCanvasPage() {
         [projectId],
     );
     const handleNodeResizeEnd = useCallback(
-        (nodeId: string) => {
+        (nodeId: string, boundsOverride?: CanvasResizePreviewBounds) => {
+            if (boundsOverride) {
+                setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, ...boundsOverride } : node)));
+                return;
+            }
             const bounds = resizePreviewBoundsRef.current.get(nodeId);
             if (bounds) {
                 setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, ...bounds } : node)));
@@ -3073,6 +3078,7 @@ function InfiniteCanvasPage() {
                                 mimeType: itemMetadata.mimeType || "image/png",
                             },
                             sceneColorCard: undefined,
+                            sceneColorPalette: undefined,
                             sceneColorCardPrompt: undefined,
                         },
                     };
@@ -3373,12 +3379,12 @@ function InfiniteCanvasPage() {
         setDialogNodeId(null);
     }, [sceneEditNodeId]);
 
-    const saveSceneEdit = useCallback((patch: { title: string; sceneName: string; sceneDescription: string; sceneImage: NonNullable<CanvasNodeMetadata["sceneImage"]>; sceneColorCard?: NonNullable<CanvasNodeMetadata["sceneColorCard"]>; sceneColorCardPrompt: string }) => {
+    const saveSceneEdit = useCallback((patch: { title: string; sceneName: string; sceneDescription: string; sceneImage: NonNullable<CanvasNodeMetadata["sceneImage"]>; sceneColorCard?: NonNullable<CanvasNodeMetadata["sceneColorCard"]>; sceneColorPalette?: string[]; sceneColorCardPrompt: string }) => {
         if (!sceneEditNodeId) return;
         setNodes((prev) => prev.map((item) => item.id === sceneEditNodeId ? {
             ...item,
             title: patch.title,
-            metadata: { ...item.metadata, sceneName: patch.sceneName, sceneDescription: patch.sceneDescription, sceneImage: patch.sceneImage, sceneColorCard: patch.sceneColorCard, sceneColorCardPrompt: patch.sceneColorCardPrompt },
+            metadata: { ...item.metadata, sceneName: patch.sceneName, sceneDescription: patch.sceneDescription, sceneImage: patch.sceneImage, sceneColorCard: patch.sceneColorCard, sceneColorPalette: patch.sceneColorPalette, sceneColorCardPrompt: patch.sceneColorCardPrompt },
         } : item));
     }, [sceneEditNodeId]);
 
@@ -3395,7 +3401,7 @@ function InfiniteCanvasPage() {
             return;
         }
         const existing = useAssetStore.getState().assets.find((asset) => asset.kind === "scene" && (asset.data.name || asset.title) === name);
-        const data = { name, description: node.metadata?.sceneDescription || "", image, colorCard: node.metadata?.sceneColorCard, colorCardPrompt: node.metadata?.sceneColorCardPrompt || "" };
+        const data = { name, description: node.metadata?.sceneDescription || "", image, colorCard: node.metadata?.sceneColorCard, colorPalette: node.metadata?.sceneColorPalette, colorCardPrompt: node.metadata?.sceneColorCardPrompt || "" };
         try {
             const dramaId = await getCurrentCanvasDramaId();
             if (existing) {
@@ -4646,7 +4652,7 @@ function InfiniteCanvasPage() {
                     position: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 },
                     width: spec.width,
                     height: spec.height,
-                    metadata: { status: NODE_STATUS_SUCCESS, sceneAssetId: payload.assetId, sceneName: payload.title, sceneDescription: payload.description, sceneImage: payload.image, sceneColorCard: payload.colorCard, sceneColorCardPrompt: payload.colorCardPrompt },
+                    metadata: { status: NODE_STATUS_SUCCESS, sceneAssetId: payload.assetId, sceneName: payload.title, sceneDescription: payload.description, sceneImage: payload.image, sceneColorCard: payload.colorCard, sceneColorPalette: payload.colorPalette, sceneColorCardPrompt: payload.colorCardPrompt },
                 }]);
                 setSelectedNodeIds(new Set([id]));
             } else {
@@ -4875,12 +4881,6 @@ function InfiniteCanvasPage() {
                                 </div>
                             }
                         />
-                    </div>
-                ) : null}
-
-                {groupConnectionOverview ? (
-                    <div role="status" className="pointer-events-none absolute bottom-[88px] left-1/2 z-40 -translate-x-1/2 rounded-md border px-3 py-1.5 text-xs backdrop-blur" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item }}>
-                        {t("canvas.connectionFocusHint")}
                     </div>
                 ) : null}
 

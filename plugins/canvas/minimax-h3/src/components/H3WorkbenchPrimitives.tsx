@@ -531,7 +531,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     };
     if (!url) return <div className="minimax-player-content"><div className="minimax-player-empty">连接视频和角色参考图</div></div>;
     if (kind === "image") return <div className="minimax-player-content minimax-player-image" draggable onDragStart={handleDragStart}><img src={url} alt="H3 reference" draggable={false} /></div>;
-    if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio ref={(node) => { videosRef.current[0] = node; }} src={url} controls preload="metadata" draggable={false} onPause={(event) => { const m = event.currentTarget; const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity))); ctx.updateMetadata({ playhead: timelineOffset + localTime }); }} /></div></div>;
+    if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio loop={Boolean(url) && !ctx.node.metadata?.h3PlaybackAll} ref={(node) => { videosRef.current[0] = node; }} src={url} controls preload="metadata" draggable={false} onPause={(event) => { const m = event.currentTarget; const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity))); ctx.updateMetadata({ playhead: timelineOffset + localTime }); }} /></div></div>;
     // 视频：双槽交叉淡入续播。两个 video 绝对叠放，active 槽可见且有 controls，另一槽透明且不接收事件；
     // 下一段已在 inactive 槽预载就绪，ended 时切换 active 即可即时续播，无 src 重载间隙。
     // muted 用 state 而不是 JSX 静态属性：rAF tick 触发 onPlayheadTick → 父组件重渲染，
@@ -547,6 +547,10 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                     ref={(node) => { videosRef.current[slot] = node; }}
                     src={slotSrc[slot] ? resultUrl(slotSrc[slot]) : undefined}
                     controls={active === slot}
+                    // 默认单段预览循环：交给浏览器原生 loop 处理，不再在 ended 事件里手动
+                    // 重置 currentTime + play()，避免任何 React state 副作用。连续播放
+                    // 模式下两个槽都不循环，让 ended 事件正常触发交叉淡入续播。
+                    loop={Boolean(slotSrc[slot]) && active === slot && !ctx.node.metadata?.h3PlaybackAll}
                     muted={isMuted}
                     playsInline
                     preload="auto"

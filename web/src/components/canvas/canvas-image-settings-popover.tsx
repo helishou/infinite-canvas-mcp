@@ -9,7 +9,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, type AiConfig } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField, workflowRequiresPrompt, type WorkflowDetail } from "@/services/api/workflows";
-import { reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
+import { migrateWorkflowParams, reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
 
 type CanvasImageSettingsPopoverProps = {
     config: AiConfig;
@@ -37,6 +37,11 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     const [open, setOpen] = useState(false);
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
     const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
+    const workflowDetailRef = useRef<WorkflowDetail | null>(null);
+    const comfyParamsRef = useRef(comfyParams);
+    const onComfyParamsChangeRef = useRef(onComfyParamsChange);
+    comfyParamsRef.current = comfyParams;
+    onComfyParamsChangeRef.current = onComfyParamsChange;
     // 已按哪个「模型 + 场景工作流」把参数落进节点 metadata：切换后要改用渠道配置重新铺一遍，
     // 否则同一字段名（如 steps）会沿用上一个场景的值。
     const appliedWorkflowRef = useRef("");
@@ -80,23 +85,36 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
 
     useEffect(() => {
         if (!workflowName) {
+            workflowDetailRef.current = null;
             setWorkflowDetail(null);
             return;
         }
+        // 首次挂载时加载提示词要求；面板每次打开时重新取字段，避免使用已过期的字段 ID。
+        if (!open && workflowDetailRef.current?.name === workflowName) return;
         let cancelled = false;
         fetchWorkflowDetail(workflowName)
             .then((detail) => {
                 if (cancelled) return;
+                const previous = workflowDetailRef.current;
+                if (previous?.name === detail.name) {
+                    const migrated = migrateWorkflowParams(comfyParamsRef.current, previous.config?.fields || [], detail.config?.fields || []);
+                    if (migrated && migrated !== comfyParamsRef.current) {
+                        comfyParamsRef.current = migrated;
+                        onComfyParamsChangeRef.current?.(migrated);
+                    }
+                }
+                workflowDetailRef.current = detail;
                 setWorkflowDetail(detail);
             })
             .catch(() => {
                 if (cancelled) return;
+                workflowDetailRef.current = null;
                 setWorkflowDetail(null);
             });
         return () => {
             cancelled = true;
         };
-    }, [workflowName]);
+    }, [open, workflowName]);
 
     useEffect(() => {
         onPromptRequiredChange?.(workflowDetail?.name === workflowName && workflowRequiresPrompt(workflowDetail));
@@ -113,8 +131,12 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
         appliedWorkflowRef.current = signature;
         // 模型设置里为当前输入场景配的参数优先于内部实现字段默认值。
         const routedParams = resolveModelWorkflowParams(config, config.model, referenceCount);
-        const next = reconcileWorkflowParams(comfyParams, customFields, routedParams, workflowChanged);
-        if (next && next !== comfyParams) onComfyParamsChange(next);
+        const currentParams = comfyParamsRef.current;
+        const next = reconcileWorkflowParams(currentParams, customFields, routedParams, workflowChanged);
+        if (next && next !== currentParams) {
+            comfyParamsRef.current = next;
+            onComfyParamsChange(next);
+        }
     }, [comfyParams, customFields, onComfyParamsChange, workflowDetail, workflowName, config, referenceCount]);
 
     const panel =
@@ -128,7 +150,11 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                 onConfigChange={onConfigChange}
                 customFields={customFields}
                 customFieldValues={comfyParams}
-                onCustomFieldChange={onComfyParamsChange ? (id, value) => onComfyParamsChange({ ...(comfyParams || {}), [id]: value }) : undefined}
+                onCustomFieldChange={onComfyParamsChange ? (id, value) => {
+                    const next = { ...(comfyParamsRef.current || {}), [id]: value };
+                    comfyParamsRef.current = next;
+                    onComfyParamsChange(next);
+                } : undefined}
                 hideStandardImageOptions={isLocalCustomWorkflow}
             />
         ) : null;

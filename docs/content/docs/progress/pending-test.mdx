@@ -5,9 +5,30 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Canvas image aspect correction
+
+- Open a canvas with image nodes whose stored dimensions do not match their natural aspect ratios. Confirm they are corrected without a resize-preview flash or React maximum-update-depth error; manually resize an aspect-locked image and confirm it still keeps its original ratio.
+
+## H3 storyboard track stability
+
+- Bind a storyboard image to a Clip that has multiple storyboard shots, then confirm the Clip finishes updating without a React maximum-update-depth error. Reopen the Clip and verify the shot durations still sum to the Clip duration and do not keep changing after the image is bound.
+- Give two shots different durations and swap their cards on the storyboard track; confirm images and durations swap together and the total Clip duration stays unchanged. Repeat by swapping two storyboard images in the reference-material row and confirm the storyboard track follows the images without changing their durations.
+
+## H3 storyboard composite submission
+
+- Confirm each Clip has an off-by-default “合并提交分镜图” switch that is disabled until at least two distinct storyboard images are bound to shots. With the switch off, verify reference submission and prompt text keep their existing per-image behavior.
+- Enable it with 2, 3, 4, 5, 6, 7, 8, and 9 bound images. Confirm layouts are respectively 1×2, 1×3, 2×2, 1×5, 2×3, 2×4, 2×4, and 3×3, numbered row-major; repeated shot bindings share one panel in first-use order.
+- Confirm each panel preserves aspect ratio, shares the minimum source short edge, is not cropped or enlarged, and that unbound storyboard images and non-storyboard references remain separate references.
+- Generate the prompt from the editor and MCP and compare panel-to-shot mapping. Submit a Clip and confirm the model receives one composite reference for the bound storyboard images while the original bindings and media remain unchanged. Force a composition failure and confirm the task fails before model submission without falling back to separate images.
+
 ## 智能图片节点转换为角色或场景
 
 - 对已有生成结果的智能图片节点分别使用「转为角色节点」和「转为场景节点」，确认不再提示只能转换图片内容节点，且转换后的角色参考图/场景图与转换前当前显示的图片一致，名称和描述保留；普通图片节点的两种转换也应继续正常。
+
+## Scene color palette prompt
+
+- Confirm scene node and asset editors ask for each swatch's color name and HEX code with an example, with clear wording in light/dark themes and English. Run automatic extraction on raster and SVG color cards and confirm HEX values are produced; names remain user supplied. Edit extracted values, save, reopen, and confirm edits persist; run extraction again and confirm values can be refreshed. Save a scene node to the asset library and insert it again, and edit/reinsert an existing scene asset; confirm the color card, extracted palette, and manual edits round-trip.
+- Connect multiple scenes to regular image generation, video generation, and H3 generation. Confirm palette text is merged in scene-reference order, duplicate references to the same scene are included once, extracted HEX values are deduplicated, and HEX values already stated in that scene's manual prompt are not appended again. Confirm color/HEX guidance appears in the submitted prompt. Color card images must remain preview-only and must not be sent as runtime reference images; the scene image should continue to be referenced as before. If a card is missing or extraction fails, confirm colors can still be entered manually and generation is not blocked.
 
 ## 画布节点复制输入参考
 
@@ -16,6 +37,11 @@ description: Implemented changes that still need manual verification
 ## 工作流异步任务状态轮询
 
 - 运行自定义工作流，确认提交后返回 taskId，前端持续查询 Backend 任务状态并显示最终结果；浏览器控制台和界面不再出现 `Failed to execute 'fetch'` 或 `AbortSignal` 类型错误。
+- 画布智能图片节点选择本地 ComfyUI 自定义工作流生成后点击取消，确认任务从 ComfyUI 队列移除并停止执行；若在 `/prompt` 提交期间取消，也应在取得 `prompt_id` 后补发取消请求。
+
+## 删除自定义工作流后的模型路由
+
+- 删除被本地模型引用的自定义工作流，确认模型仍保留、工作流从其挂载列表移除；原先实际路由到该工作流的文生/单图/多图场景应标记为“不支持”，相关场景参数清除，其他工作流路由保持不变。尝试运行受影响场景时应明确提示不支持，不能回退到其它工作流。
 
 ## Qwen Image 2.1 自定义图像编辑工作流
 
@@ -23,11 +49,11 @@ description: Implemented changes that still need manual verification
 
 ## H3 提示词区块跳转
 
-- In the H3 main prompt editor, confirm non-empty lines still use cycling theme colors, blank lines remain uncolored, and wrapped visual lines keep the same color. The right scrollbar should be about 1.8× wider and share a single track with the quick-jump markers. Markers should align to each H3 section header: `subject_definitions:`, `summary:`, `retention_analysis:`, `detailed_description:`, `integrated_multimodal_description:`, `overall_soundscape:`, `non_diegetic_music:`, and the legacy `storyboard_timeline:`; clicking a marker should center its section in view, with no markers on ordinary body lines. Check edits, paste, newline deletion, collaborative updates, editor resizing, light/dark themes, references, and dialogue markers.
+- In the H3 main prompt editor, confirm non-empty lines still use cycling theme colors, blank lines remain uncolored, and wrapped visual lines keep the same color. The right scrollbar should be about 1.8× wider, with its draggable thumb and quick-jump markers sharing one custom track; dragging the thumb, clicking empty track space, and using the mouse wheel should all scroll normally. Markers should align to each H3 section header: `subject_definitions:`, `summary:`, `retention_analysis:`, `detailed_description:`, `integrated_multimodal_description:`, `overall_soundscape:`, `non_diegetic_music:`, and the legacy `storyboard_timeline:`. Their visible bars should remain slim while their vertical hit areas are larger; clicking should smoothly center the section in about 180 ms, or jump directly when reduced motion is enabled. Ordinary body lines should have no markers. Check edits, paste, newline deletion, collaborative updates, editor resizing, light/dark themes, references, and dialogue markers.
 
 ## H3 分镜图标题与提示词隔离
 
-- 在绑定了有标题的分镜图的 Ref2VA Clip 中保存分镜编辑，确认镜头提示词只保留稳定的 `{{ref:bindingId}}` 引用及图像分析描述，不出现分镜图标题；通过 MCP 写入同一 Clip 后确认一致。旧提示词中的标题应在下一次保存时清理。
+- 在绑定了有标题的分镜图的 Ref2VA Clip 中保存分镜编辑，确认镜头提示词只保留正确编号的 `<Picture N>` 引用及图像分析描述，不出现分镜图标题；通过 MCP 写入同一 Clip 后确认一致。
 
 ## H3 分镜编辑器正文自愈
 
@@ -37,19 +63,22 @@ description: Implemented changes that still need manual verification
 
 ## Ref2VA H3 分镜时间轨
 
-- 在多个 Ref2VA Clip 中分别添加分镜图，确认每个 Clip 独立显示分镜开关；启用或关闭其中一个 Clip 不改变其他 Clip 的开关、refs 或提示词。普通图片、视频和音频 refs 仍显示在分镜行下方；关闭分镜模式后所有 refs 可继续使用。
-- 对旧 Clip 首次启用分镜轨，确认旧分镜图按引用顺序平均分配 Clip 时长；分镜卡片宽度按 100 px/秒显示，所有分镜本地时长之和与 Clip 时长一致。
-- 点击末张卡片右半区选择画布图片，确认新增后与原末张平分时长；无分镜时添加的首张图片占满 Clip 时长；取消画布选择不改变引用、时长或提示词。末张不足 1 秒时只禁用该 Clip 的新增入口。
-- 拖动分镜卡片交换顺序，确认时长仍绑定各自引用；拖动相邻分界线，确认只调整这两张分镜、总时长不变且每张不少于 0.5 秒。将 Clip 时长改大或改小，确认该 Clip 分镜按比例缩放，其他 Clip 不变，自动结果允许低于 0.5 秒。
-- 分别移除中间分镜和末张分镜，确认时长分别并入下一张或上一张；移除最后一张后该 Clip 自动回到普通 refs 模式，并在第一行显示占满 Clip 时长的首张分镜新增入口。修改分镜引用职责后确认分镜行和提示词区块同步变化。
-- 检查开启分镜轨后，现有提示词镜头按引用顺序自动绑定分镜图；打开「分镜编辑」确认各镜图片已选中，无需手动逐镜绑定，并确认原有镜头描述保留。提示词条目仍位于原有 `detailed_description` 分镜区域：后续镜头的 `[Shot N] At MM:SS.mmm,` 显示累计切镜点，稳定引用标记与分镜顺序匹配；3 秒序列化为 `00:03.000`、63.5 秒为 `01:03.500`，已有 `MM:SS` 字符串保持不变。确认切换方式写成自然句且不含 `[Transition: ...]`，并能在「分镜编辑」中往返保留；添加、删除、排序或调时长只更新对应镜头，手写的总体描述和镜头描述保持不变，提示词末尾不新增 `storyboard_timeline` 区块。通过 MCP 更新后再确认时间与转场格式一致。
+- 在多个 Ref2VA Clip 中分别新建分镜，确认每个 Clip 独立显示分镜开关；启用或关闭其中一个 Clip 不改变其他 Clip 的开关、refs 或提示词。普通图片、视频和音频 refs 仍显示在分镜行下方；关闭分镜模式后所有 refs 可继续使用。
+- 对旧 Clip 首次启用分镜轨，确认旧分镜图按引用顺序平均分配 Clip 时长；纯文字分镜不依赖分镜图，卡片宽度按 100 px/秒显示，所有分镜本地时长之和与 Clip 时长一致。
+- 点击末张卡片右半区的「新增」，确认直接创建空分镜并与原末张平分时长，不进入画布选节点模式；无分镜时点击「新建首张分镜」应占满 Clip 时长。末张不足 1 秒时只禁用该 Clip 的新增入口；旧分镜图片可继续显示为可选预览。
+- 拖动分镜卡片交换顺序，确认时长仍绑定各自分镜；拖动相邻分界线，确认只调整这两张分镜、总时长不变且每张不少于 0.5 秒。将 Clip 时长改大或改小，确认该 Clip 分镜按比例缩放，其他 Clip 不变，自动结果允许低于 0.5 秒。
+- 分别移除中间分镜和末张分镜，确认时长分别并入下一张或上一张；移除旧图片分镜后图片仍保留在普通 refs 中；移除最后一张后保留空分镜轨和「新建首张分镜」入口。修改旧图片分镜的引用职责后确认分镜行和提示词区块同步变化。
+- 检查分镜轨写入的镜头按顺序进入原有 `detailed_description` 分镜区域，空分镜无需 `<Picture N>` 仍生成 `[Shot N]`，后续镜头的 `[Shot N] At MM:SS.mmm,` 显示累计切镜点；确认已有镜头描述保留、切换方式自然化且往返编辑一致，添加、删除、排序或调时长不改动手写的总体描述和镜头描述，提示词末尾不新增 `storyboard_timeline` 区块。
 - 确认 I2V、FL2V 和 T2V 继续使用原 refs 槽位限制，且 Ref2VA 分镜轨状态不会改变其他模式或其他 Clip 的引用。
 
-## H3 角色编辑弹窗服装放大预览
+## H3 参考素材职责与角色组统一弹窗
 
-- 在 H3 Clip 的 Refs 行双击角色参考格打开「服装与声线」，确认每套服装缩略图右上角都有放大按钮；点击后灯箱展示完整未裁切的服装图并显示服装名，点遮罩、点关闭按钮、按 Esc 都能关闭。
-- 确认点击缩略图本体仍是切换该套服装的启用状态，点放大按钮既不切换启用状态也不改变「当前启用 N 套」计数。
-- 在浅色与深色画布主题下确认放大按钮在深浅不同的服装图上都清晰可点。
+- 对分镜图片点击预览左上角删除按钮，确认只移除当前 Clip 的图片引用，分镜卡片及其时长保留为空分镜，画布上的原始素材不受影响；「去除素材」仍移除整个当前引用。
+
+- 在 H3 Clip 的 Refs 行双击普通素材、角色参考和分镜素材，确认均打开「参考素材职责」；单击职责标签不再打开弹窗。点击「从画布替换」并选取相同类型素材，确认替换发生在原引用位置且原职责/用途保留；点击「去除素材」只移除当前引用。双击素材卡片左侧预览的放大按钮后，灯箱展示完整图片/视频/音频，点遮罩、点关闭按钮、按 Esc 都能关闭。
+- 双击角色组引用确认仍显示服装目录和声线开关；逐项启用/停用服装、切换声线后应用，确认 Refs 与提交输入同步更新；“从本段移除整组”仍能移除该角色组。
+- 确认每套服装缩略图的放大按钮可查看未裁切原图，点击缩略图切换启用状态、点击放大按钮不会改变启用状态。
+- 角色参考图的职责与提交用途仍由源角色节点控制并固定为普通参考；在浅色与深色主题下确认预览和控制清晰可用。
 
 ## 角色参考图职责
 
@@ -108,10 +137,10 @@ description: Implemented changes that still need manual verification
 - 确认弹框标题、字段标签、文本输入和分镜正文使用适中字号，长提示词可在紧凑布局中连续阅读。
 - 确认 `summary`、`开头总体描述`、每个分镜、`overall_soundscape`/`non_diegetic_music` 各自显示为独立卡片（有边框和底色），卡片之间有明显间距，工具栏、分镜标题和底部说明各有分隔线。
 - 在 Ref2VA 模式分别填写 `summary`、`overall_soundscape`、`non_diegetic_music` 和分镜描述，切回普通编辑器后确认四段各自写回对应位置，角色定义与保留分析未被改写。
-- 新增多个分镜并填写描述，在描述中输入 `@`，确认候选优先列出当前 Clip 引用且职责为分镜图的图片，并保留人物候选；选择图片后插入对应的 `{{ref:bindingId}}` 并显示图片引用块，已有分镜图标记不再显示“素材未找到”，且鼠标可点击候选。
+- 新增多个分镜并填写描述，在描述中输入 `@`，确认候选优先列出当前 Clip 引用且职责为分镜图的图片，并保留人物候选；选择图片后插入对应的 `<Picture N>` 并显示图片缩略图，已有分镜图标记不再显示“素材未找到”，且鼠标可点击候选。
 - 在相邻分镜之间填写切换时间，切回普通编辑器，确认内容写入 `detailed_description`，第二个及后续镜头保留对应时间，其他 H3 段落不变。
-- 为分镜分别选择不同的当前 Clip 分镜图，确认弹框显示所选图缩略图，普通提示词编辑器显示对应引用块，最终提示词每个 `[Shot N]` 都带有正确的 `{{ref:…}}`，提交预检解析为正确的 `<Picture N>`；重开弹框后绑定仍保留。删除绑定素材时原标记应继续提示未匹配，可重新选择或删除。
-- 给分镜图素材保存分析摘要或标签（例如“top-down hand close-up”），绑定后确认 `[Shot N]` 自动写出“the approved top-down hand close-up from {{ref:…}}”类描述；摘要、标签都为空时应使用通用 storyboard frame，不得凭空推断构图。通过素材弹窗的「用模型分析」生成摘要并应用后，确认摘要写入项目引用库。
+- 为分镜分别选择不同的当前 Clip 分镜图，确认弹框显示所选图缩略图，普通提示词编辑器显示对应缩略图，最终提示词每个 `[Shot N]` 都带有正确的 `<Picture N>`；重开弹框后绑定仍保留。删除绑定素材时原标记应继续提示未匹配，可重新选择或删除。
+- 给分镜图素材保存分析摘要或标签（例如“top-down hand close-up”），绑定后确认 `[Shot N]` 自动写出“the approved top-down hand close-up from <Picture N>”类描述；摘要、标签都为空时应使用通用 storyboard frame，不得凭空推断构图。通过素材弹窗的「用模型分析」生成摘要并应用后，确认摘要写入项目引用库。
 - 编辑职责为「分镜图」的图片素材，确认素材职责弹窗不显示标签输入和引用程度；在结构化分镜中为每镜选择分镜图后，应出现截图所示的下拉选择框，可选完整保留、部分保留、属性转移、弱参考。点击「完成」后检查对应 Picture 的 `retention_analysis` 使用所选英文状态及对应说明；`attribute_transfer` 应关联该图勾选的人物（如有）。重复使用同一分镜图的镜头应共享此图片的引用程度；未绑定具体镜头的分镜图仍应生成目标镜头序列的 Picture 定义与保留行。重新打开分镜编辑确认保存状态仍显示；原有标签数据未被误清除。
 - 在相邻镜头间分别选择连续镜头（不切镜）、硬切、叠化和淡出至黑场再淡入，确认提示词明确描述上一镜到当前镜的连接方式；首镜不生成转场，绑定分镜图只作为目标构图参考，不会把连续镜头写成切镜。新建分镜默认硬切。切换时间保留在对应的后续 `[Shot N]`，重开弹框时可还原；只改分镜图摘要/标签、绑定或切换方式等输入时才更新规则生成内容的缓存指纹，自动拼接不触发模型请求。
 - 打开包含 `[Shot 2] 00:03.700：...画面硬切进入...` 和 `[Shot 3] 00:05.900：不切镜，延续上一镜头...` 的提示词，确认边界切换时间、硬切和连续镜头分别被提取；镜头正文内的 `00:00.000—00:01.600` 等动作时间轴仍留在分镜描述中。
@@ -119,7 +148,7 @@ description: Implemented changes that still need manual verification
 - 在 T2V、I2V 或 FL2V 模式确认「分镜编辑」入口不显示且无法打开；切回 Ref2VA 后入口恢复，结构化分镜编辑正常。
 - 编辑分镜后点击右上角叉号、按 Esc 或关闭弹框，再次打开确认所有未提交修改均已丢弃；点击「完成」保存后重新打开并刷新画布，确认分镜描述、切换时间和人物引用可恢复；删除一个分镜后确认剩余镜头重新编号。
 - 在另一个窗口同时修改 `detailed_description`，确认本地保存提示冲突并保留草稿；重新载入后以最新提示词为准。只修改其他提示词段落时，保存分镜不应覆盖那些修改。
-- 在 Ref2VA 分镜编辑中调整镜头、切换时间或人物引用后点「完成」，确认纯规则生成 `subject_definitions` 和 `retention_analysis`，不触发大模型请求；人物主体使用当前 Clip 的 `{{subject:…}}` 标记。只定义人物、场景、服装或风格的图片以内嵌来源标记出现在对应 Subject 定义中，不单独生成 Picture 条目；首尾帧和所有分镜图职责图片生成独立 Picture 定义与保留结算，绑定到镜头的分镜图标注对应镜头，未绑定镜头的分镜图标注目标镜头序列；关键帧仍仅在绑定镜头时单列 Picture。若 Picture 同时关联人物，Subject 定义可同时引用该 Picture。所有有效引用在编辑器显示正确的素材缩略图，提交时转换为正确编号的 `<Subject N>`、`<Picture N>`、`<Video N>` 或 `<Audio N>`。人物声线在定义段写对应 `(Sx)`，并仅作为音色参考；retention 段不带 `(Sx)`，音频引用不误判成人物出镜。分镜图 Picture 的保留结算使用结构化分镜弹窗中为每镜选择的引用程度；其余保留结算只评价定义段声明的身份、外观、服装、构图或声音用途，不把新动作、站位或场景变化写成保真损失；Subject 按显式人物标记、分镜图勾选和镜头描述标注出现镜头，Picture 帧锚点带对应镜头，Video 用剪辑节奏/运动范围结算而不套 Subject 的逐镜 appears 格式，Audio 不附加人物出镜镜头。人物节点描述、服装信息、参考素材分析摘要及音频声线描述均纳入 SHA-256 缓存指纹；旧 v9 缓存应重算一次，之后相同输入复用 v10 缓存。输入不变复用缓存，任一输入变化后重新生成；生成期间发生并发编辑时不得覆盖新内容。字段输入、选择和失焦不会自动写入提示词；未提交时点击叉号应丢弃修改，只有点击「完成」才保存并显示提交加载状态。
+- 在 Ref2VA 分镜编辑中调整镜头、切换时间或人物引用后点「完成」，确认纯规则生成 `subject_definitions` 和 `retention_analysis`，不触发大模型请求；人物主体使用当前 Clip 的 `<Subject N>` 标签。只定义人物、场景、服装或风格的图片以内嵌来源标记出现在对应 Subject 定义中，不单独生成 Picture 条目；首尾帧和所有分镜图职责图片生成独立 Picture 定义与保留结算，绑定到镜头的分镜图标注对应镜头，未绑定镜头的分镜图标注目标镜头序列；关键帧仍仅在绑定镜头时单列 Picture。若 Picture 同时关联人物，Subject 定义可同时引用该 Picture。所有有效引用在编辑器显示正确的素材缩略图，提示词保留正确编号的 `<Subject N>`、`<Picture N>`、`<Video N>` 或 `<Audio N>` 标签。人物声线在定义段写对应 `(Sx)`，并仅作为音色参考；retention 段不带 `(Sx)`，音频引用不误判成人物出镜。分镜图 Picture 的保留结算使用结构化分镜弹窗中为每镜选择的引用程度；其余保留结算只评价定义段声明的身份、外观、服装、构图或声音用途，不把新动作、站位或场景变化写成保真损失；Subject 按显式人物标记、分镜图勾选和镜头描述标注出现镜头，Picture 帧锚点带对应镜头，Video 用剪辑节奏/运动范围结算而不套 Subject 的逐镜 appears 格式，Audio 不附加人物出镜镜头。人物节点描述、服装信息、参考素材分析摘要及音频声线描述均纳入 SHA-256 缓存指纹；旧 v9 缓存应重算一次，之后相同输入复用 v10 缓存。输入不变复用缓存，任一输入变化后重新生成；生成期间发生并发编辑时不得覆盖新内容。字段输入、选择和失焦不会自动写入提示词；未提交时点击叉号应丢弃修改，只有点击「完成」才保存并显示提交加载状态。
 - 通过 MCP 的 `h3_write_storyboard_prompt` 写入一个 Clip，确认 prompt 使用与弹框相同的 section、转场描述、分镜图构图引用、主体定义/保留分析和 `[Shot N]` 格式；可用当前 Clip 中的分镜图 binding id 绑定镜头、保存切换时间与方式，未绑定或非分镜图 binding 应明确报错。将相同 Ref2VA 输入分别通过 UI 和 MCP 写入，确认提示词及 v10 SHA-256 缓存指纹一致，重复提交命中缓存。
 
 ## MiniMax H3 提示词 @ 候选与未匹配标记修复
@@ -132,7 +161,7 @@ description: Implemented changes that still need manual verification
 
 - 在 H3 Clip 中准备至少一个角色组，并让其服装 binding 的 `subjectId` 与角色组不一致；执行生成预检时不应再报 binding subjectId 不一致，生成参考应使用角色组的 `subjectId`（角色组未设置时使用 `characterNodeId`）。
 - 确认自动修正只作用于匹配 `groupId` 和 `outfitId` 的角色组服装 binding，普通参考素材的 `subjectId` 保持不变。
-- 在实际生成中确认同一修正规则生效，提示词里的 `{{subject:…}}` 能解析到正确角色参考。
+- 在实际生成中确认同一修正规则生效，提示词里的 `<Subject N>` 能解析到正确角色参考。
 
 ## H3 节点单选控件字号
 
@@ -140,15 +169,16 @@ description: Implemented changes that still need manual verification
 
 ## MiniMax H3 提示词引用编辑
 
+- 打开已有说话人标签的台词候选菜单，确认当前说话人仍显示在候选项中并标记「当前」；即使编号不在当前角色名册，也应显示该编号。选择其他说话人后标记应随之更新，清除说话人后不应保留当前标记。
 - 在 H3 主提示词编辑区输入多条实际换行的内容，确认非空行按循环主题色区分、空行不着色，自动折行仍保持同一颜色；确认滚动条刻度对应各行位置，点击刻度会跳转到该行。编辑、粘贴、删除换行、调整编辑区尺寸、浅/深主题切换，以及混合素材引用块和台词标记后，高亮与刻度仍应正确。
 - 在 H3 主提示词编辑区确认富文本字号约为此前的 1.3 倍，长文本更易阅读，输入、引用块和滚动编辑仍正常。
-- 打开已有 H3 提示词，确认 `{{ref:…}}` 显示为素材缩略图，服装引用显示服装名称，已匹配的 `{{subject:…}}` 显示人物节点缩略图；普通文字与段落结构不变。
-- 在编辑器输入 `@` 并选择当前 Clip 的人物、图片、视频、音频或服装引用，确认插入到光标位置；人物候选只包含当前 Clip 引用或分镜勾选的人物，人物标记使用与 Backend 相同的绑定 ID，生成时预检通过。
+- 打开 H3 提示词并输入 `<Picture N>`、`<Subject N>`，确认分别显示素材缩略图和人物节点缩略图；服装引用显示服装名称，普通文字与段落结构不变。
+- 在编辑器输入 `@` 并选择当前 Clip 的人物、图片、视频、音频或服装引用，确认插入到光标位置；人物候选只包含当前 Clip 引用或分镜勾选的人物，并插入正确的 `<Subject N>` 标签，生成时预检通过。
 - 用鼠标点击自动补全菜单中的候选项，确认引用插入且不会因此打开 H3 节点面板；候选随当前片段引用变化，不显示画布上未引用的人物节点。
 - 在参考素材编辑弹窗将图片职责设为「分镜图」，确认人物多选列表只显示当前 Clip 已加入引用的角色，不显示画布上未加入引用的人物；勾选并应用后，编辑器应能解析分镜人物 ID，生成预检也应通过。切换为其他职责再应用，确认分镜人物选择被清除；视频/音频参考不显示此项。
-- 点击一个红色未匹配人物标记，确认弹出当前 Clip 人物候选；选中一个人物后原标记替换为可解析的主体 ID，红色提醒消失。点击未匹配素材标记也可从当前素材候选重新选择；取消菜单时原标记保留。
+- 点击一个红色未匹配人物标记，确认弹出当前 Clip 人物候选；选中一个人物后原标记替换为对应的 `<Subject N>`，红色提醒消失。点击未匹配素材标记也可从当前素材候选重新选择；取消菜单时原标记保留。
 - 将光标放在引用块两侧分别按 Backspace、Delete，确认一次删除整个引用标记；选中标记的一部分再删除，也应删除整个标记，不影响相邻普通文字。
-- 手动把人物节点或素材移除后，确认对应的 `{{subject:…}}` / `{{ref:…}}` 显示红色错误块，编辑器上方说明未匹配数量；点击红块后可从当前候选重新选择，按 Backspace/Delete 则整块删除并清除提醒。
+- 手动把人物节点或素材移除后，确认对应的 `<Subject N>` / `<Picture N>` 显示红色错误块，编辑器上方说明未匹配数量；点击红块后可从当前候选重新选择，按 Backspace/Delete 则整块删除并清除提醒。
 - 切换浅色和深色主题，确认引用块跟随画布主题显示。
 
 ## MiniMax H3 Subject / Picture 独立编号
@@ -322,7 +352,7 @@ description: Implemented changes that still need manual verification
 
 ## 场景资产与场景节点
 
-- 新增场景资产时确认场景图为必填项；可选绑定场景描述、场景色卡和色卡提示词，编辑、预览、下载及导入导出后内容保持一致。
+- 新增场景资产时确认场景图为必填项；可选绑定场景描述、场景色卡和色卡提示词；色卡提示词字段明确提示每个色块填写颜色名与 HEX 色号，并给出示例。编辑、预览、下载及导入导出后内容保持一致。
 - 从资产侧栏、顶部工具栏和空白画布创建菜单分别新建场景节点，确认场景图、描述、色卡和色卡提示词都能显示；连接下游时仅以场景主图作为生成参考。
 - 确认从节点拉出连接打开的「引用该节点生成」菜单不显示「场景」，其他生成选项仍正常。
 - 在场景节点编辑器中上传图片或从画布选择图片，确认主场景图必填、色卡可选，保存为场景资产后刷新画布仍可复用；拖入图片到空场景节点后确认场景图可写入。
@@ -1399,3 +1429,4 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 - 打开智能生成节点的图片设置，将工作流参数（如 Aspect ratio）从 `1:1 (Square)` 切换为 `16:9 (Widescreen)`，确认选项可选中、设置值更新，并在生成时生效。
 - 无参考图生成后确认记录模式为 `t2i`，带参考图生成后确认记录模式为 `i2i`，且工作流列显示对应场景的工作流。
+- 工作流字段更新或重新导入后重新打开设置，确认已有参数会按工作流节点和输入名迁移；选择 `16:9 (Widescreen)` 后生成，再选中该生成结果，确认设置不会回到 `1:1 (Square)`。

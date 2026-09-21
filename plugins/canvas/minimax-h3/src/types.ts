@@ -33,7 +33,13 @@ export type H3CharacterGroup = {
     voiceEnabled: boolean;
 };
 
+export type H3CharacterGroupEditPatch = {
+    outfitEnabled?: Record<string, boolean>;
+    voiceEnabled?: boolean;
+};
+
 export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown> };
+export type H3StoryboardShot = { id: string; duration?: number; referenceBindingId?: string };
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
@@ -54,6 +60,7 @@ export type H3Segment = {
     // H3ClipCard 用它显示 hover 提示，避免前端"卡片不更新"的视觉假象。
     errorDetails?: string;
     taskMode?: string;
+    storyboardCompositeEnabled?: boolean;
     seed?: number | string;
     noiseSeedMode?: "random" | "fixed";
     noiseSeed?: number | string;
@@ -124,7 +131,7 @@ export type H3Segment = {
     firstPassStorageKey?: string;
     firstPassFingerprint?: string;
     firstPassReady?: boolean;
-    storyboardPromptCache?: { version: 10; fingerprint: string; subjectDefinitions: string; retentionAnalysis: string };
+    storyboardPromptCache?: { version: 12; fingerprint: string; subjectDefinitions: string; retentionAnalysis: string };
     seamFaceFadeFrames?: number;
     seamColourMatch?: number;
     seamAudioCrossfadeMs?: number;
@@ -232,10 +239,12 @@ export type H3Segment = {
     refs?: { image?: H3Ref[]; video?: H3Ref[]; audio?: H3Ref[] };
     refItems?: H3Ref[];
     referenceBindings?: H3ReferenceBinding[];
-    /** 当前 Clip 是否把 storyboard 图片作为时间轨显示；每段独立保存。 */
+    /** 当前 Clip 是否显示分镜时间轨；每段独立保存。 */
     storyboardModeEnabled?: boolean;
     /** 以稳定 reference binding ID 为键的 Clip 本地分镜时长（秒）。 */
     storyboardDurations?: Record<string, number>;
+    /** 独立于参考图片的分镜项目；referenceBindingId 仅用于兼容旧的图片分镜。 */
+    storyboardShots?: H3StoryboardShot[];
     h3CharacterGroups?: Record<string, H3CharacterGroup>;
     aspectRatio?: string;
     megapixels?: number;

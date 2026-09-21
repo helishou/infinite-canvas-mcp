@@ -475,6 +475,7 @@ export function applyWorkflowFieldDefaults(
 
 export class WorkflowExecutor {
     private readonly controllers = new Map<string, AbortController>();
+    private readonly comfyExecutions = new Map<string, { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> }>();
     constructor(
         private readonly bridge: ComfyUiBackend,
         private readonly tasks: TaskStore,
@@ -682,6 +683,7 @@ export class WorkflowExecutor {
             throw error;
         } finally {
             this.controllers.delete(task.id);
+            this.comfyExecutions.delete(task.id);
         }
     }
 
@@ -727,6 +729,11 @@ export class WorkflowExecutor {
     }
 
     cancel(id: string) {
+        const execution = this.comfyExecutions.get(id);
+        if (execution) {
+            execution.cancelRequested = true;
+            void this.cancelComfyExecution(id, execution);
+        }
         this.controllers.get(id)?.abort();
         this.controllers.delete(id);
         const task = this.tasks.get(id);
@@ -736,6 +743,12 @@ export class WorkflowExecutor {
         return updated;
     }
 
+    private cancelComfyExecution(taskId: string, execution: { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> }) {
+        if (!execution.promptId) return Promise.resolve();
+        execution.cancellation ||= this.bridge.cancelPromptExecution(execution.url, execution.promptId, taskId);
+        return execution.cancellation;
+    }
+
     private async executeWorkflow(
         task: RuntimeTask,
         workflow: Record<string, unknown>,
@@ -743,6 +756,8 @@ export class WorkflowExecutor {
         controller: AbortController,
         clientId: string,
     ) {
+        const activeExecution = { url: comfyUrl, cancelRequested: false } as { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> };
+        this.comfyExecutions.set(task.id, activeExecution);
         const Ctor = (globalThis as any).WebSocket;
         let capturedPromptId: string | null = null;
         let ws: any = null;
@@ -753,6 +768,7 @@ export class WorkflowExecutor {
         let wsExecutionSuccessOutputs: Record<string, unknown> | null = null;
 
         try {
+            if (controller.signal.aborted) throw new Error("任务已取消");
             if (typeof Ctor === "function") {
                 try {
                     const wsBase = comfyUrl.replace(/^http/, "ws");
@@ -786,11 +802,11 @@ export class WorkflowExecutor {
             const promptEndpoint = `${comfyUrl}/prompt`;
             let response: Response;
             try {
+                // 保持提交请求可读到 prompt_id：若此时取消，收到 ID 后再从 ComfyUI 队列移除。
                 response = await fetch(promptEndpoint, {
                     method: "POST",
                     headers: { "content-type": "application/json" },
                     body: JSON.stringify({ prompt: workflow, client_id: task.id }),
-                    signal: controller.signal,
                 });
             } catch (error) {
                 throw workflowRequestError("提交 ComfyUI 工作流", promptEndpoint, error);
@@ -805,12 +821,20 @@ export class WorkflowExecutor {
             }
             const promptId = body.prompt_id;
             capturedPromptId = promptId;
+            activeExecution.promptId = promptId;
             this.tasks.addEvent(task.id, "submitted", { promptId });
+            if (controller.signal.aborted || activeExecution.cancelRequested) {
+                await this.cancelComfyExecution(task.id, activeExecution);
+                throw new Error("任务已取消");
+            }
 
             const startedAt = Date.now();
             const maxExecutionMs = 30 * 60 * 1000;
             for (;;) {
-                if (controller.signal.aborted) throw new Error("任务已取消");
+                if (controller.signal.aborted || activeExecution.cancelRequested) {
+                    await this.cancelComfyExecution(task.id, activeExecution);
+                    throw new Error("任务已取消");
+                }
                 if (Date.now() - startedAt > maxExecutionMs) throw new Error("ComfyUI 任务执行超时（30 分钟）");
                 if (wsError) throw wsError;
 

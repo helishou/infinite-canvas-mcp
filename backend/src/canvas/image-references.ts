@@ -100,6 +100,21 @@ export function resolveCanvasImageReferences(project: CanvasProject, sourceNodeI
     return references;
 }
 
+/** Resolve the directly referenced scene nodes in the same order used for generation image inputs. */
+export function resolveCanvasSceneNodes(project: CanvasProject, sourceNodeId: string) {
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+    const connections = Array.isArray(project.connections) ? project.connections as Array<Record<string, unknown>> : [];
+    const nodeById = new Map(nodes.map((node) => [String(node.id || ""), node]));
+    const source = nodeById.get(sourceNodeId);
+    if (!source) return [];
+    const inputNode = String(source.type || "") === "config"
+        ? source
+        : outgoingNodes(sourceNodeId, connections, nodeById).find((node) => String(node.type || "") === "config")
+            || incomingNodes(sourceNodeId, connections, nodeById).find((node) => String(node.type || "") === "config");
+    return incomingNodes(String((inputNode || source).id || ""), connections, nodeById)
+        .filter((node) => String(node.type || "") === "scene");
+}
+
 function incomingNodes(targetId: string, connections: Array<Record<string, unknown>>, nodeById: Map<string, Record<string, unknown>>) {
     return connections
         .filter((connection) => String(connection.toNodeId || "") === targetId)

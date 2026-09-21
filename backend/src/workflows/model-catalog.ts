@@ -1,15 +1,18 @@
 import type { SettingStore } from "../stores/types.js";
 import type { WorkflowDetail, WorkflowStore } from "./store.js";
+import { WORKFLOW_ROUTE_UNSUPPORTED } from "../canvas/model-workflow.js";
 
 const AI_CONFIG_KEY = "ai.config";
 const PROCESSED_WORKFLOWS_KEY = "workflow.model-catalog.v1";
 
 type ModelCapability = "image" | "video" | "text" | "audio";
+type ModelInputScenario = "text" | "single" | "multi";
 type ChannelModel = {
   name: string;
   capability: ModelCapability;
   workflows?: string[];
-  workflowRouting?: Partial<Record<"text" | "single" | "multi", string>>;
+  workflowRouting?: Partial<Record<ModelInputScenario, string>>;
+  workflowParams?: Partial<Record<ModelInputScenario, Record<string, unknown>>>;
 };
 type ModelChannel = {
   id: string;
@@ -134,6 +137,46 @@ export class WorkflowModelCatalog {
     this.settings.set(PROCESSED_WORKFLOWS_KEY, [...processed]);
     this.settings.set(AI_CONFIG_KEY, config);
     return { changed: true, model: modelName };
+  }
+
+  /** 删除工作流后解除模型引用，并将原本实际路由到它的场景标记为不支持。 */
+  detachDeletedWorkflow(name: string): boolean {
+    const current = this.settings.get(AI_CONFIG_KEY);
+    if (!isRecord(current)) return false;
+    const config = normalizeConfig(current);
+    let changed = false;
+
+    for (const channel of config.channels) {
+      for (const model of channel.models) {
+        const workflows = model.workflows || [];
+        const routing = { ...model.workflowRouting };
+        const params = { ...model.workflowParams };
+        let modelChanged = false;
+
+        for (const scenario of ["text", "single", "multi"] as const) {
+          const routed = routing[scenario] || workflows[0] || "";
+          if (routed !== name) continue;
+          routing[scenario] = WORKFLOW_ROUTE_UNSUPPORTED;
+          delete params[scenario];
+          modelChanged = true;
+        }
+
+        const remaining = workflows.filter((workflow) => workflow !== name);
+        if (remaining.length !== workflows.length) {
+          if (remaining.length) model.workflows = remaining;
+          else delete model.workflows;
+          modelChanged = true;
+        }
+        if (modelChanged) {
+          model.workflowRouting = Object.keys(routing).length ? routing : undefined;
+          model.workflowParams = Object.keys(params).length ? params : undefined;
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) this.settings.set(AI_CONFIG_KEY, config);
+    return changed;
   }
 }
 

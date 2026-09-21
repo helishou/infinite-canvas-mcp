@@ -1,4 +1,4 @@
-import type { H3CharacterGroup, H3CharacterOutfit, H3CharacterVoice, H3Ref, H3ReferenceBinding, H3ReferenceRole, H3Segment } from "../types";
+import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3CharacterOutfit, H3CharacterVoice, H3Ref, H3ReferenceBinding, H3ReferenceRole, H3Segment } from "../types";
 import { sameRef } from "./h3-compatibility";
 
 export function refsForSegment(segment: H3Segment) {
@@ -55,7 +55,7 @@ function refToBinding(ref: H3Ref): H3ReferenceBinding {
 }
 
 function ensureReferenceIdentity(ref: H3Ref, index: number): H3Ref {
-    const identity = ref.storageKey || ref.url || ref.nodeId || `${ref.name}-${index}`;
+    const identity = inferReferenceRole(ref) === "scene" && ref.nodeId ? `scene:${ref.nodeId}` : ref.storageKey || ref.url || ref.nodeId || `${ref.name}-${index}`;
     return { ...ref, bindingId: ref.bindingId || stableId("binding", `${identity}:${index}`), assetId: ref.assetId || stableId("asset", identity), role: inferReferenceRole(ref), tags: ref.tags || [], enabled: ref.enabled !== false, usage: ref.usage || "reference" };
 }
 
@@ -130,7 +130,9 @@ function reconcileStoryboardTrack(previous: H3Segment, next: H3Segment): H3Segme
     const normalized = Object.fromEntries(boards.flatMap((ref) => ref.bindingId ? [[ref.bindingId, validDuration(ref.bindingId) || 1]] : []));
     const sum = Object.values(normalized).reduce((value, duration) => value + duration, 0);
     const targetDuration = Math.max(0.5, Number(next.duration || previous.duration || 1));
-    const ratio = sum > 0 ? targetDuration / sum : 1;
+    // IEEE-754 rounding can leave a tiny sum error after normalization. Treat
+    // sub-microsecond drift as equal so the metadata-normalizing effect settles.
+    const ratio = sum > 0 && Math.abs(sum - targetDuration) > 1e-6 ? targetDuration / sum : 1;
     for (const id of Object.keys(normalized)) normalized[id] *= ratio;
     return {
         ...next,
@@ -415,14 +417,14 @@ export function removeCharacterGroup(segment: H3Segment, groupId: string): H3Seg
 }
 
 /** 在 modal 里编辑后整体写回：outfit.enabled 与 voiceEnabled 变更。 */
-export function applyCharacterGroupEdits(segment: H3Segment, groupId: string, patch: { outfitEnabled?: Record<string, boolean>; voiceEnabled?: boolean }): H3Segment {
+export function applyCharacterGroupEdits(segment: H3Segment, groupId: string, patch: H3CharacterGroupEditPatch): H3Segment {
     const group = segment.h3CharacterGroups?.[groupId];
     if (!group) return segment;
     const nextGroup = fitCharacterGroupToCapacity(segment, {
         ...group,
         outfits: patch.outfitEnabled ? group.outfits.map((outfit) => ({
             ...outfit,
-            enabled: patch.outfitEnabled![outfit.id] ?? outfit.enabled,
+            enabled: patch.outfitEnabled?.[outfit.id] ?? outfit.enabled,
         })) : group.outfits,
         voiceEnabled: patch.voiceEnabled ?? group.voiceEnabled,
     });

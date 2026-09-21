@@ -7,7 +7,8 @@ import type { WorkflowConfig, WorkflowField } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 
 const CUSTOM_SUBDIR = "custom";
-const NAME_RE = /^[a-zA-Z0-9_\u4e00-\u9fff.\-]+\.json$/;
+// 放宽：允许空格、全角符号、生僻字等任意可见字符；仅禁控制字符和路径非法字符（防穿越另由 workflowFilePath 兜底）
+const NAME_RE = /^[^\x00-\x1f\\/:*?"<>|]+\.json$/;
 const MEDIA_INPUT_KEYS = ["image", "video", "audio", "mask", "filename", "file"];
 const MEDIA_EXT_RE = /\.(png|jpe?g|webp|gif|bmp|tiff?|mp4|webm|mov|m4v|avi|mkv|mp3|wav|m4a|aac|ogg|flac)(?:\?|$)/i;
 const BUNDLED_WORKFLOWS = ["IndexTTS-2.5.json", "MiniMax_H3.json", "custom/视频修复FlashVSR1.1.json"];
@@ -88,7 +89,7 @@ function workflowFilePath(name: string): string {
     const parts = name.split('/');
     const basename = parts[parts.length - 1];
     if (!NAME_RE.test(basename)) {
-        throw new Error("工作流名称不合法，请使用中文/英文/数字/_-.");
+        throw new Error('工作流名称不合法：不能含路径符 / \\ : * ? " < > | 或控制字符');
     }
     const fullPath = path.resolve(workflowDir(), ...parts);
     const rootPath = path.resolve(workflowDir());
@@ -189,7 +190,7 @@ export class WorkflowStore {
         const cleanName = path.basename(name.trim());
         const finalName = cleanName.endsWith(".json") ? cleanName : `${cleanName}.json`;
         if (!NAME_RE.test(finalName)) {
-            throw new Error("工作流名称不合法，请使用中文/英文/数字/_-.");
+            throw new Error('工作流名称不合法：不能含路径符 / \\ : * ? " < > | 或控制字符');
         }
         if (typeof workflow !== "object" || workflow === null || Object.keys(workflow).length === 0) {
             throw new Error("工作流 JSON 为空");

@@ -61,6 +61,7 @@
   - 拖 VideoRefs 和 preview 的分界线时：下面的 Output 高度不变，只调 VideoRefs（时间轴）和 preview。
   - 空间不足时由节点自动长高/缩回兜底，不允许出现「拖 A 时 B/C 跟着变」的联动串扰。
 - H3 设置区的 Ant Design Select 使用 `size="middle"`；调整“收起后显示的当前值”时必须作用到 Select 的 `styles.content/item/itemContent` 或 `labelRender`，不能只改下拉选项、外层 `.ant-select` 或 selector 边框。显式字号与行高必须配套，并实际检查文字未被边框裁切。
+- H3 主提示词的滚动条与区块快速跳转刻度必须使用同一条可交互轨道；不要把 DOM 刻度覆盖在浏览器原生滚动条上（原生命中层会吞掉点击），也不要并排拆成两条轨道。区块位置应按完整提示词中的稳定文本偏移计算，不依赖 CodeMirror 对未渲染长行的虚拟高度估算。跳转刻度的命中区必须明显大于可见细条，点击后用短时平滑滚动反馈，同时尊重系统的减少动态效果设置。
 - 画布视口（平移/缩放）性能红线：**高频视口变化不得走 React state**。拖动与滚轮期间只能命令式写容器 `transform`（`writeViewport`），仅当**屏幕位移**超过 `VIEWPORT_CULL_SCREEN_MARGIN`(300px)、缩放幅度超过 `VIEWPORT_CULL_ZOOM_RATIO`(0.35)，或**实际视口将越出已挂载渲染范围的安全带**时才用 `startTransition` 补一次裁剪重算；松手 / 失焦 / 500ms 滚轮静止 / 聚焦动画 / 缩放控件 / 小地图 / 重置视图这类低频入口必须走 `commitViewport`，保证命令式实时值与 React state 一致。请求中的裁剪范围不得当作已经挂载；过期 transition 不得覆盖更新的实时视口。禁止把平移改回逐帧 `setViewport`（实测 33fps → 回退即掉回 30 档），也禁止给 `applyViewportLive` 加节流/防抖（用户会直接感知为「不跟手」）。`web/src/lib/canvas/canvas-viewport.ts` 里的两条硬约束：①**补重算阈值、覆盖安全带与裁剪前瞻都必须按屏幕像素定义，绝不能按世界单位**——拖动的 x/y 是屏幕像素，按世界单位算会被放大 1/k 倍，缩小看全图时（k=0.05）退化成"平移 26px 就重算一次"，而每次重算都要重建全部可见节点的 element 树，直接把 5% 倍率平移压到 26fps；②**`VIEWPORT_RENDER_SCREEN_PADDING` 必须大于 `VIEWPORT_CULL_SCREEN_MARGIN`**（400 > 300，差值即补渲染提前量），改小会导致拖动时露出空白；裁剪外扩用 `viewportRenderPadding(k) = 400 / k` 随缩放反比放大，所以低倍率下会多渲染一圈节点，这是不反复重算的代价。新增任何改变视口的入口时，必须同时接上这两条路径，并补充覆盖范围和缩放锚点验证。
 
 ## 文档规范

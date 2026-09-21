@@ -156,6 +156,8 @@
 .nfh3-storyboard-modal .minimax-collaborative-prompt .cm-content,
 .nfh3-storyboard-modal .minimax-collaborative-prompt .cm-line { font-size:15px !important; line-height:1.45 !important; }
 .nfh3-storyboard-toolbar { display:flex; flex:0 0 auto; align-items:center; justify-content:space-between; gap:8px; padding-bottom:10px; border-bottom:1px solid var(--h3-border); color:var(--h3-muted); font-size:14px; }
+.nfh3-storyboard-composite-toggle { display:inline-flex; flex:0 0 auto; align-items:center; gap:7px; color:var(--h3-text); }
+.nfh3-storyboard-composite-hint { color:var(--h3-muted); font-size:12px; }
 .nfh3-storyboard-toolbar button,.nfh3-storyboard-item-head button,.nfh3-storyboard-error button { height:30px; padding:0 10px; border:1px solid var(--h3-border); border-radius:4px; background:transparent; color:var(--h3-text); font-size:14px; cursor:pointer; }
 .nfh3-storyboard-toolbar button:hover,.nfh3-storyboard-item-head button:hover,.nfh3-storyboard-error button:hover { border-color:var(--h3-active); color:var(--h3-active-text); background:var(--h3-hover); }
 .nfh3-storyboard-item-head button:disabled { opacity:.4; cursor:not-allowed; }
@@ -201,11 +203,16 @@
 .minimax-prompt-translate-wrap > textarea,
 .minimax-prompt-translate-wrap > * { flex:1 1 auto; min-height:0; }
 .minimax-prompt-line-map-enabled .cm-editor.cm-canvas-line-map { position:relative; box-sizing:border-box; }
-.minimax-prompt-line-map-enabled .cm-scroller { scrollbar-width:auto; }
-.minimax-prompt-line-map-enabled .cm-scroller::-webkit-scrollbar { width:13px; }
-.minimax-prompt-line-map-enabled .cm-canvas-line-marker-rail { position:absolute; z-index:3; top:0; right:0; width:13px; overflow:hidden; pointer-events:none; }
-.minimax-prompt-line-map-enabled .cm-canvas-line-marker { position:absolute; right:0; display:block; width:13px; min-width:0; height:9px; min-height:0; padding:0; border:0; border-radius:4px; transform:translateY(-50%); opacity:.9; cursor:pointer; line-height:0; pointer-events:auto; }
-.minimax-prompt-line-map-enabled .cm-canvas-line-marker:hover { opacity:1; filter:brightness(1.18); }
+.minimax-prompt-line-map-enabled .cm-scroller { scrollbar-width:none; }
+.minimax-prompt-line-map-enabled .cm-scroller::-webkit-scrollbar { width:0; height:0; }
+.minimax-prompt-line-map-enabled .cm-content { padding-right:13px; }
+.minimax-prompt-line-map-enabled .cm-canvas-line-marker-rail { position:absolute; z-index:3; top:0; right:0; width:13px; overflow:hidden; border-radius:7px; background:color-mix(in srgb,var(--h3-fill) 72%,transparent); cursor:pointer; touch-action:none; }
+.minimax-prompt-line-map-enabled .cm-canvas-line-scroll-thumb { position:absolute; z-index:1; left:1px; right:1px; min-height:32px; border-radius:7px; background:color-mix(in srgb,var(--h3-muted) 48%,transparent); cursor:ns-resize; }
+.minimax-prompt-line-map-enabled .cm-canvas-line-scroll-thumb:hover { background:color-mix(in srgb,var(--h3-muted) 72%,transparent); }
+.minimax-prompt-line-map-enabled .cm-canvas-line-marker { position:absolute; z-index:2; right:0; display:block; width:13px; min-width:0; height:24px; min-height:0; padding:0; border:0; background:transparent; transform:translateY(-50%); opacity:.9; cursor:pointer; line-height:0; }
+.minimax-prompt-line-map-enabled .cm-canvas-line-marker::after { content:""; position:absolute; left:0; right:0; top:50%; height:7px; border-radius:4px; background:var(--cm-canvas-line-accent); transform:translateY(-50%); transition:height .12s ease,filter .12s ease; }
+.minimax-prompt-line-map-enabled .cm-canvas-line-marker:hover { opacity:1; }
+.minimax-prompt-line-map-enabled .cm-canvas-line-marker:hover::after { height:9px; filter:brightness(1.18); }
 .minimax-prompt-line-map-enabled .cm-canvas-line-marker:focus-visible { outline:2px solid var(--h3-active); outline-offset:1px; }
 .minimax-prompt-translate-wrap.has-line-map .minimax-prompt-translate { right:18px; }
 /* TextEditor (CodeMirror) in prompt field — match the textarea rules so the editor actually fills the slot and uses a readable font size. */
@@ -281,6 +288,7 @@
 .minimax-storyboard-card:active { cursor:grabbing; }
 .minimax-storyboard-card-visual { position:relative; width:100%; height:100%; overflow:hidden; border:1px solid var(--h3-border); border-radius:5px; background:var(--h3-panel); }
 .minimax-storyboard-card-visual img { display:block; width:100%; height:100%; object-fit:cover; opacity:.9; }
+.minimax-storyboard-placeholder { display:flex; width:100%; height:100%; align-items:center; justify-content:center; color:var(--h3-muted); font-size:13px; font-weight:700; }
 .minimax-storyboard-time { position:absolute; left:3px; top:3px; padding:1px 3px; border-radius:3px; background:color-mix(in srgb,var(--h3-panel) 86%,transparent); color:var(--h3-text); font-size:10px; line-height:1.2; white-space:nowrap; }
 .minimax-storyboard-role,.minimax-storyboard-remove { position:absolute; z-index:2; top:3px; border:0; border-radius:3px; background:color-mix(in srgb,var(--h3-panel) 88%,transparent); color:var(--h3-text); cursor:pointer; }
 .minimax-storyboard-role { left:3px; bottom:3px; top:auto; max-width:calc(50% - 8px); overflow:hidden; padding:2px 4px; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
@@ -694,11 +702,14 @@
 .minimax-lightbox-close:hover { border-color:rgba(125,211,252,.7); background:#16445b; color:#e0f2fe; }
 .minimax-lightbox-close svg { width:18px; height:18px; }
 
-/* 角色弹窗（H3CharacterRefModal）服装缩略图右上角的放大预览按钮：
+/* H3 参考素材职责弹窗内服装缩略图右上角的放大预览按钮：
    浮在缩略图上，用固定深色浮层配色，保证任意服装图下都清晰可读。 */
 .minimax-outfit-zoom { position:absolute; top:4px; right:4px; z-index:2; width:22px; height:22px; padding:0; display:flex; align-items:center; justify-content:center; border:1px solid rgba(255,255,255,.22); border-radius:6px; background:rgba(15,23,42,.78); color:#e2e8f0; cursor:zoom-in; transition:background .15s ease,border-color .15s ease,color .15s ease; }
 .minimax-outfit-zoom:hover { border-color:rgba(125,211,252,.7); background:#16445b; color:#e0f2fe; }
 .minimax-outfit-zoom svg { width:13px; height:13px; }
+.minimax-outfit-remove { position:absolute; top:4px; left:4px; z-index:2; width:22px; height:22px; padding:0; display:flex; align-items:center; justify-content:center; border:1px solid rgba(255,255,255,.22); border-radius:6px; background:rgba(15,23,42,.78); color:#fecaca; cursor:pointer; transition:background .15s ease,border-color .15s ease,color .15s ease; }
+.minimax-outfit-remove:hover { border-color:rgba(248,113,113,.7); background:#7f1d1d; color:#fff; }
+.minimax-outfit-remove svg { width:13px; height:13px; }
 
 /* 分镜提示词弹窗独立于工作台的大字号主题，避免全局 H3 控件字号污染弹窗。 */
 .nfh3-storyboard-modal .nfh3-storyboard-editor { flex:0 0 auto; min-height:0; font-size:13px; }

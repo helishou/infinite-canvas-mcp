@@ -28,11 +28,14 @@ export function readH3Refs(ctx: CanvasNodeContext): H3Ref[] {
         const subjectId = role === "character_turnaround" ? node.id : undefined;
         // Character 节点是身份/资产节点，不是四视图节点；H3 只接受显式四视图图片。
         if (node.type === "character") return [];
-        const url = String(media.content || media.url || media.localUrl || media.sourceUrl || "").trim();
-        if (!url) return [];
-        const mime = String(media.mimeType || "");
+        const sceneImage = node.type === "scene" && media.sceneImage && typeof media.sceneImage === "object" ? media.sceneImage as Record<string, unknown> : undefined;
+        const source = sceneImage || media;
+        const url = String(source.content || source.url || source.localUrl || source.sourceUrl || "").trim();
+        const storageKey = storageKeyOf(source);
+        if (!url && !storageKey) return [];
+        const mime = String(source.mimeType || "");
         const type = mime.startsWith("video/") || node.type === "video" ? "video" : mime.startsWith("audio/") || node.type === "audio" ? "audio" : "image";
-        return [{ url, type: type as H3Ref["type"], name: node.title || type, storageKey: storageKeyOf(media), mimeType: String(media.mimeType || "") || undefined, ...(role ? { role } : {}), ...(subjectId ? { subjectId } : {}) }];
+        return [{ url, type: type as H3Ref["type"], name: String(media.sceneName || node.title || type), storageKey, mimeType: mime || undefined, ...(role ? { role } : {}), ...(subjectId ? { subjectId } : {}), ...(node.type === "scene" ? { nodeId: node.id } : {}) }];
     });
     const legacy = currentNode.metadata?.h3Refs;
     const legacyRefs = legacy && typeof legacy === "object" ? Object.entries(legacy as Record<string, unknown>).flatMap(([kind, values]) => (Array.isArray(values) ? values : []).flatMap((value) => {
@@ -40,7 +43,7 @@ export function readH3Refs(ctx: CanvasNodeContext): H3Ref[] {
         const item = value as Record<string, unknown>;
         const url = String(item.url || item.dataUrl || item.localUrl || item.originalLocalUrl || item.sourceUrl || item.path || "").trim();
         if (!url) return [];
-        return [{ url, type: (kind === "video" ? "video" : kind === "audio" ? "audio" : "image") as H3Ref["type"], name: String(item.name || `${kind}-ref`), storageKey: storageKeyOf(item), mimeType: String(item.mimeType || "") || undefined, ...(item.role ? { role: String(item.role) as H3Ref["role"] } : {}), ...(item.subjectId ? { subjectId: String(item.subjectId) } : {}) }];
+        return [{ url, type: (kind === "video" ? "video" : kind === "audio" ? "audio" : "image") as H3Ref["type"], name: String(item.name || `${kind}-ref`), storageKey: storageKeyOf(item), mimeType: String(item.mimeType || "") || undefined, ...(item.role ? { role: String(item.role) as H3Ref["role"] } : {}), ...(item.subjectId ? { subjectId: String(item.subjectId) } : {}), ...(item.nodeId ? { nodeId: String(item.nodeId) } : {}) }];
     })) : [];
     return [...connected, ...legacyRefs]
         .filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index)
@@ -91,7 +94,8 @@ export function h3RefCandidates(nodes: CanvasNodeData[], selfId: string): H3RefC
         if (node.type === "scene") {
             const image = imageRecordOf(metadata.sceneImage);
             const url = String(image.url || "").trim();
-            if (url) push(node, { url, type: "image", role: "scene", name: node.title || "场景", storageKey: storageKeyOf(image), mimeType: String(image.mimeType || "") || undefined });
+            const storageKey = storageKeyOf(image);
+            if (url || storageKey) push(node, { url, type: "image", role: "scene", name: node.title || "场景", storageKey, mimeType: String(image.mimeType || "") || undefined });
             continue;
         }
         if (node.type === H3_NODE_TYPE) {

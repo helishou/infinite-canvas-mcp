@@ -62,9 +62,6 @@ export type ReferenceCompilation = {
     migratedLegacyRefs: boolean;
 };
 
-const SEMANTIC_REF = /\{\{ref:([a-zA-Z0-9._:-]+)\}\}/g;
-const SEMANTIC_SUBJECT = /\{\{subject:([a-zA-Z0-9._:-]+)\}\}/g;
-
 export function normalizeReferenceRole(value: unknown, fallback: ReferenceRole = "other"): ReferenceRole {
     return REFERENCE_ROLES.includes(value as ReferenceRole) ? value as ReferenceRole : fallback;
 }
@@ -183,16 +180,13 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         return [{ ...merged, mediaType, ordinal, token }];
     });
     const semanticPrompt = String(segment.prompt || "");
-    const byId = new Map(references.map((reference) => [reference.id, reference]));
     const bySubjectId = new Map<string, { reference: CompiledReference; ordinal: number }>();
-    const subjectOrdinalByReference = new Map<CompiledReference, number>();
     let nextSubjectOrdinal = 1;
     const registerSubject = (reference: CompiledReference, ids: Array<string | undefined>) => {
         const aliases = [...new Set(ids.filter((id): id is string => Boolean(id)))];
         const existing = aliases.map((id) => bySubjectId.get(id)).find(Boolean);
         const subject = existing || { reference, ordinal: nextSubjectOrdinal++ };
         aliases.forEach((id) => { if (!bySubjectId.has(id)) bySubjectId.set(id, subject); });
-        subjectOrdinalByReference.set(reference, subject.ordinal);
     };
     // Assign character/subject IDs first, independently of the image order. Storyboard
     // images can appear before character refs in the input list but must not push
@@ -205,27 +199,9 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
             if (!bySubjectId.has(id)) registerSubject(reference, [id]);
         });
     });
-    const replaceMarker = (kind: "ref" | "subject", id: string) => {
-        const subject = kind === "subject" ? bySubjectId.get(id) : undefined;
-        const reference = subject?.reference || byId.get(id);
-        if (!reference) {
-            issues.push({ severity: "error", code: "prompt_binding_missing", bindingId: id, message: `提示词引用了不存在或已禁用的参考：${id}` });
-            return `{{${kind}:${id}}}`;
-        }
-        if (kind === "subject" && reference.mediaType !== "image") {
-            issues.push({ severity: "error", code: "subject_requires_image", bindingId: id, message: `Subject 只能绑定图片参考：“${reference.label}”不是图片` });
-            return `{{subject:${id}}}`;
-        }
-        if (kind === "subject") {
-            const ordinal = subject?.ordinal || subjectOrdinalByReference.get(reference) || nextSubjectOrdinal++;
-            subjectOrdinalByReference.set(reference, ordinal);
-            return `<Subject ${ordinal}>`;
-        }
-        return reference.token;
-    };
+    validatePromptReferences(semanticPrompt, references, new Set(bySubjectId.values()).size, issues);
     const compiledPrompt = semanticPrompt
-        .replace(SEMANTIC_SUBJECT, (_match, id: string) => replaceMarker("subject", id))
-        .replace(SEMANTIC_REF, (_match, id: string) => replaceMarker("ref", id))
+        .replace(/<(subject|picture|video|audio)\s+(\d+)>/giu, (_marker, kind: string, ordinal: string) => `<${kind[0].toUpperCase()}${kind.slice(1).toLowerCase()} ${ordinal}>`)
         .replace(/(<Subject\s+\d+>)(?=[\p{L}\p{N}(])/gu, "$1 ");
     const promptWithBoundSubjects = bindLiteralSubjectsToPictures(compiledPrompt, references, bySubjectId);
     validateLimits(segment, semanticPrompt, references, issues);
@@ -291,13 +267,32 @@ export function assertReferenceCompilation(compilation: ReferenceCompilation) {
     if (errors.length) throw new Error(errors.map((issue) => issue.message).join("；"));
 }
 
+function validatePromptReferences(prompt: string, references: CompiledReference[], subjectCount: number, issues: ReferenceIssue[]) {
+    const counts = {
+        subject: subjectCount,
+        picture: references.filter((reference) => reference.mediaType === "image").length,
+        video: references.filter((reference) => reference.mediaType === "video").length,
+        audio: references.filter((reference) => reference.mediaType === "audio").length,
+    };
+    const reported = new Set<string>();
+    for (const match of prompt.matchAll(/<(Subject|Picture|Video|Audio)\s+(\d+)>/giu)) {
+        const kind = match[1].toLowerCase() as keyof typeof counts;
+        const ordinal = Number(match[2]);
+        if (ordinal > 0 && ordinal <= counts[kind]) continue;
+        const key = `${kind}:${ordinal}`;
+        if (reported.has(key)) continue;
+        reported.add(key);
+        issues.push({ severity: "error", code: "prompt_reference_missing", message: `提示词引用了不存在或未启用的 ${match[1]} ${ordinal}` });
+    }
+}
+
 function validateLimits(segment: Record<string, unknown>, semanticPrompt: string, references: CompiledReference[], issues: ReferenceIssue[]) {
     const mode = String(segment.taskMode || segment.mode || "ref2va").toLowerCase();
     const images = references.filter((reference) => reference.mediaType === "image");
     const videos = references.filter((reference) => reference.mediaType === "video");
     const audios = references.filter((reference) => reference.mediaType === "audio");
     if (mode === "t2v" && references.length) issues.push({ severity: "warning", code: "t2v_ignores_references", message: "T2V 模式不会提交参考素材" });
-    if (mode === "t2v" && /\{\{(?:ref|subject):[^}]+\}\}|<(?:Picture|Video|Audio)\s+\d+>/i.test(semanticPrompt)) {
+    if (mode === "t2v" && /<(?:Subject|Picture|Video|Audio)\s+\d+>/i.test(semanticPrompt)) {
         issues.push({ severity: "error", code: "t2v_prompt_uses_reference", message: "T2V 提示词不能引用 Picture、Video、Audio 或 Subject；请改用 I2V、FL2V 或 Ref2VA" });
     }
     if (mode === "i2v" && images.length !== 1) issues.push({ severity: "error", code: "i2v_image_count", message: "I2V 必须且只能使用 1 张图片" });

@@ -174,7 +174,7 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
     return <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
         <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={KIND_COLOR[kind]}>{typeLabel}</Tag><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
         <div className="mt-2 flex flex-wrap gap-3 text-xs text-stone-500"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span></div>
-        {references.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">输入 refs：</span>{references.map((reference, index) => <ReferencePreview key={`${log.id}-ref-${index}`} reference={reference} index={index} />)}</div> : null}
+        {references.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">输入 refs：</span>{references.map((reference, index) => <ReferencePreview key={`${log.id}-ref-${index}`} reference={reference} index={index} onPreview={openPreview} />)}</div> : null}
         {log.prompt ? <ExpandableText label="提示词" value={log.prompt} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.prompt || "")} /> : null}
         {actualSubmission ? <ExpandableText label="实际提交配置" value={actualSubmission} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(actualSubmission)} /> : null}
         {log.error ? <ExpandableText label="错误" value={log.error} expanded={expanded} error onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.error || "")} /> : null}
@@ -187,7 +187,7 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
     </div>;
 }
 
-function ReferencePreview({ reference, index }: { reference: Record<string, unknown>; index: number }) {
+function ReferencePreview({ reference, index, onPreview }: { reference: Record<string, unknown>; index: number; onPreview?: (url: string, video: boolean, name?: string) => void }) {
     const storageKey = typeof reference.storageKey === "string" && reference.storageKey ? reference.storageKey : "";
     const url = storageKey ? backendMediaUrl(storageKey) : String(reference.url || "");
     const rawType = String(reference.type || "").toLowerCase();
@@ -196,10 +196,25 @@ function ReferencePreview({ reference, index }: { reference: Record<string, unkn
     const inferred = inferMediaType(rawType, mimeType, url, name);
     const label = `${inferred.label} ${index + 1}`;
     const fallbackName = typeof reference.name === "string" && reference.name.trim() ? reference.name.trim() : undefined;
+    const openPreview = (event: React.MouseEvent) => {
+        event.stopPropagation();
+        onPreview?.(url, inferred.kind === "video", fallbackName || label);
+    };
+    const previewButton = onPreview && (inferred.kind === "image" || inferred.kind === "video") ? (
+        <button
+            type="button"
+            onClick={openPreview}
+            aria-label="放大预览"
+            title={fallbackName ? `放大预览：${fallbackName}` : "放大预览"}
+            className="absolute right-1 top-1 inline-flex size-6 items-center justify-center rounded border border-white/15 bg-black/60 text-white/85 opacity-0 transition hover:border-sky-300 hover:bg-sky-700 hover:text-white group-hover:opacity-100 focus-visible:opacity-100"
+        >
+            <Maximize2 className="size-3.5" />
+        </button>
+    ) : null;
     if (!url) return <Tag title={fallbackName || label}>{fallbackName || label}</Tag>;
     // 固定预览框尺寸，预留布局空间，避免缩略图陆续加载时反复触发重排/重绘
-    if (inferred.kind === "image") return <div style={{ width: 96, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "rgba(120,120,120,0.10)" }}><img src={url} alt={fallbackName || label} title={fallbackName || label} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} /></div>;
-    if (inferred.kind === "video") return <div style={{ width: 112, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "#000" }}><video src={url} title={fallbackName || label} controls muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} /></div>;
+    if (inferred.kind === "image") return <div className="group relative" style={{ width: 96, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "rgba(120,120,120,0.10)" }}><img src={url} alt={fallbackName || label} title={fallbackName || label} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />{previewButton}</div>;
+    if (inferred.kind === "video") return <div className="group relative" style={{ width: 112, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "#000" }}><video src={url} title={fallbackName || label} controls muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} />{previewButton}</div>;
     if (inferred.kind === "audio") return <audio src={url} title={fallbackName || label} controls preload="metadata" className="h-8 w-52" />;
     return <Tag title={fallbackName || label}>{fallbackName || label}</Tag>;
 }

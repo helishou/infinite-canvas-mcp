@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
 
@@ -20,12 +20,11 @@ const REFERENCE_ROLE_LABELS: Record<string, string> = {
 import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
 import { inferReferenceRole, refsForSegment, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
-import { H3_STORYBOARD_MIN_DURATION, isStoryboardModeEnabled, reorderStoryboardRefs, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack } from "../services/h3-storyboard-track";
+import { addStoryboardShot, H3_STORYBOARD_MIN_DURATION, isStoryboardModeEnabled, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences } from "../services/h3-storyboard-track";
 import { sameRef } from "../services/h3-compatibility";
 import { H3_RUNTIME_REF_LIMITS, normalizeDroppedH3Ref, readCharacterGroupFromDrop } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
 import { H3ClipCard } from "./H3ClipCard";
-import { H3PreviewLightbox } from "./H3PreviewLightbox";
 
 type H3TimelineProps = {
     ctx: CanvasNodeContext;
@@ -33,10 +32,8 @@ type H3TimelineProps = {
     selected?: H3Segment;
     total: number;
     onRemoveRef: (segmentId: string, ref: H3Ref) => void;
-    onOpenCharacterGroup: (segmentId: string, groupId: string) => void;
     onEditRef: (segmentId: string, ref: H3Ref) => void;
     onRequestPickRef: (segmentId: string, slotIndex: number) => void;
-    onRequestPickStoryboard: (segmentId: string) => void;
     onSegmentChange: (segment: H3Segment, select?: boolean) => void;
     /** 正在等待画布选节点的槽位（`${segmentId}:${slotIndex}`），用于高亮该格。 */
     pickingKey?: string;
@@ -44,25 +41,17 @@ type H3TimelineProps = {
     fmt: (value: number) => string;
 };
 
-export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpenCharacterGroup, onEditRef, onRequestPickRef, onRequestPickStoryboard, onSegmentChange, pickingKey, onPlayAll, fmt }: H3TimelineProps) {
+export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEditRef, onRequestPickRef, onSegmentChange, pickingKey, onPlayAll, fmt }: H3TimelineProps) {
     const compactMedia = ctx.scale < 0.2;
     const trackScrollRef = useRef<HTMLDivElement | null>(null);
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
     const pendingScrollIdRef = useRef<string | null>(null);
     const restoredRef = useRef(false);
     const scrollPersistRafRef = useRef<number | null>(null);
-    // ref 区域双击预览：普通图片/视频/音频 ref 双击放大，带 groupId 的格子仍走角色组编辑 modal
-    const [previewRef, setPreviewRef] = useState<H3Ref | null>(null);
     const [storyboardResize, setStoryboardResize] = useState<{ segmentId: string; index: number; leftDuration: number } | null>(null);
     const storyboardResizeRef = useRef<{ segmentId: string; index: number; leftDuration: number; startX: number; startDuration: number; pairDuration: number } | null>(null);
     // ref 拖动时高亮目标槽（move / copy 落点），用 `${segmentId}:${refIndex}` 标识。dragend / drop 后清空。
     const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
-    useEffect(() => {
-        if (!previewRef) return;
-        const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setPreviewRef(null); };
-        window.addEventListener("keydown", onKey);
-        return () => window.removeEventListener("keydown", onKey);
-    }, [previewRef]);
     // 时间轴/参考区：鼠标滚轮转为横向滚动（与 Output 区域一致）
     useEffect(() => {
         const el = trackScrollRef.current;
@@ -279,8 +268,19 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         const targetRefs = [...refsForSegment(target)];
         // ref2va 的槽位不设数量上限（图片可无限增加）；i2v / fl2v 的图片槽位是固定语义（首帧 / 首尾帧）才受限。
         const maxImages = mode === "i2v" ? 1 : mode === "fl2v" ? 2 : Number.POSITIVE_INFINITY;
-        // 同 clip 内 reorder：move 语义，drop 到具体槽则插到该位置（无空/已占都能搬），drop 到空白区就追加到末尾
+        // 同 Clip 的普通素材仍按 move 处理；两张分镜图落到彼此槽位时交换图片、分镜记录和时长。
         if (sourceSegment && sourceSegment.id === target.id && sourceIndex >= 0 && sourceIndex < targetRefs.length) {
+            const sourceRef = targetRefs[sourceIndex];
+            const targetRef = targetIndex >= 0 ? targetRefs[targetIndex] : undefined;
+            if (sourceIndex !== targetIndex && sourceRef?.type === "image" && targetRef?.type === "image"
+                && inferReferenceRole(sourceRef) === "storyboard" && inferReferenceRole(targetRef) === "storyboard"
+                && sourceRef.bindingId && targetRef.bindingId) {
+                const swapped = [...targetRefs];
+                [swapped[sourceIndex], swapped[targetIndex]] = [swapped[targetIndex], swapped[sourceIndex]];
+                const updated = swapStoryboardReferences(target, sourceRef.bindingId, targetRef.bindingId);
+                onSegmentChange(withSegmentRefs(updated, swapped));
+                return;
+            }
             const [moved] = targetRefs.splice(sourceIndex, 1);
             const insertAt = targetIndex >= 0 && targetIndex <= targetRefs.length ? targetIndex : targetRefs.length;
             targetRefs.splice(insertAt, 0, moved);
@@ -305,7 +305,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         const previousIndex = selected ? segments.findIndex((segment) => segment.id === selected.id) : -1;
         const previous = previousIndex >= 0 ? segments[previousIndex] : segments[segments.length - 1];
         const inherited = previous ? (() => {
-            const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, referenceBindings, storyboardModeEnabled, storyboardDurations, ...settings } = previous;
+            const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, referenceBindings, storyboardModeEnabled, storyboardDurations, storyboardShots, ...settings } = previous;
             return settings;
         })() : {};
         const nextSegment = {
@@ -332,7 +332,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         const allRefs = refsForSegment(segment);
         const mode = String(segment.mode || segment.taskMode || "ref2va");
         const storyboardMode = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment);
-        const storyboardLaneVisible = supportsStoryboardTrack(segment) && (storyboardMode || !storyboardRefsForSegment(segment).length);
+        const storyboardLaneVisible = supportsStoryboardTrack(segment) && (storyboardMode || !storyboardTrackItems(segment).length);
         const refs = allRefs.map((ref, index) => ({ ref, index })).filter(({ ref }) => !storyboardMode || ref.type !== "image" || inferReferenceRole(ref) !== "storyboard");
         // 多参考模式（ref2va）槽位不设上限：至少铺 9 格，之后每多一个参考就多一格，
         // 最后一格永远是空槽（点击可在画布上选节点，也仍可拖素材进），用来继续加参考。
@@ -364,12 +364,11 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
                 }}
                 onDoubleClick={(event) => {
                     event.stopPropagation();
-                    if (isGrouped && ref?.groupId) onOpenCharacterGroup(segment.id, ref.groupId);
-                    else if (ref) setPreviewRef(ref);
+                    if (ref) onEditRef(segment.id, ref);
                 }}
                 className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isAddSlot ? "is-add-slot" : ""} ${pickingKey === `${segment.id}:${refIndex}` ? "is-picking" : ""} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""} ${overLimit ? "is-over-limit" : ""} ${dropTargetKey === `${segment.id}:${refIndex}` ? "is-drop-target" : ""}`}
-                title={ref ? `${isGrouped ? "双击编辑角色组" : "双击放大预览"}${overLimit ? `（已超出 H3 运行上限：图片最多 ${H3_RUNTIME_REF_LIMITS.image} 张、视频/音频最多 ${H3_RUNTIME_REF_LIMITS.video} 个，运行会报错）` : ""}` : pickingKey === `${segment.id}:${refIndex}` ? "在画布上点选节点作为参考（Esc 取消）" : "点击进入画布选节点模式，挑一个节点作为参考（也可直接拖素材进来）"}
-            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-role" title="编辑参考职责" onClick={(event) => { event.stopPropagation(); onEditRef(segment.id, ref); }}>{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
+                title={ref ? `双击编辑参考素材职责${overLimit ? `（已超出 H3 运行上限：图片最多 ${H3_RUNTIME_REF_LIMITS.image} 张、视频/音频最多 ${H3_RUNTIME_REF_LIMITS.video} 个，运行会报错）` : ""}` : pickingKey === `${segment.id}:${refIndex}` ? "在画布上点选节点作为参考（Esc 取消）" : "点击进入画布选节点模式，挑一个节点作为参考（也可直接拖素材进来）"}
+            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-type"><H3Icon name={ref.type === "image" ? "database" : ref.type === "video" ? "clapperboard" : "output"} /></span><span className="minimax-ref-role" title="参考职责">{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
         })}</div>;
     };
     const renderStoryboardTrack = (segment: H3Segment) => {
@@ -398,34 +397,34 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
                     const canAdd = item.duration >= H3_STORYBOARD_MIN_DURATION * 2;
                     const pairDuration = item.duration + (projected[index + 1]?.duration || 0);
                     return <div
-                        key={item.ref.bindingId || `${segment.id}:${index}`}
+                        key={item.id}
                         className="minimax-storyboard-card"
-                        data-storyboard-id={item.ref.bindingId}
+                        data-storyboard-id={item.id}
                         draggable
                         style={{ left: `${start * 100}px`, width: `${imageWidth}px` }}
-                        title={`${item.ref.name || "分镜图"} · ${item.duration.toFixed(2)} 秒`}
-                        onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-h3-storyboard", item.ref.bindingId || ""); }}
+                        title={`${item.ref?.name || `分镜 ${index + 1}`} · ${item.duration.toFixed(2)} 秒${item.ref ? " · 双击编辑参考素材职责" : ""}`}
+                        onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-h3-storyboard", item.id); }}
                         onDragOver={(event) => { if (event.dataTransfer.types.includes("application/x-h3-storyboard")) { event.preventDefault(); event.stopPropagation(); } }}
                         onDrop={(event) => {
                             const sourceId = event.dataTransfer.getData("application/x-h3-storyboard");
-                            if (!sourceId || !item.ref.bindingId) return;
+                            if (!sourceId || sourceId === item.id) return;
                             event.preventDefault();
                             event.stopPropagation();
-                            onSegmentChange(reorderStoryboardRefs(segment, sourceId, item.ref.bindingId));
+                            onSegmentChange(reorderStoryboardShots(segment, sourceId, item.id));
                         }}
-                        onDoubleClick={(event) => { event.stopPropagation(); setPreviewRef(item.ref); }}
+                        onDoubleClick={(event) => { event.stopPropagation(); if (item.ref) onEditRef(segment.id, item.ref); }}
                     >
                         <div className="minimax-storyboard-card-visual">
-                            <img src={item.ref.url} alt={item.ref.name} draggable={false} />
+                            {item.ref ? <img src={item.ref.url} alt={item.ref.name} draggable={false} /> : <div className="minimax-storyboard-placeholder">分镜 {index + 1}</div>}
                             {index > 0 ? <span className="minimax-storyboard-time" title="切镜点 · 前序分镜累计时长">{start.toFixed(2)}s</span> : null}
-                            <button type="button" className="minimax-storyboard-role" title="编辑分镜引用职责" onClick={(event) => { event.stopPropagation(); onEditRef(segment.id, item.ref); }} onDoubleClick={(event) => event.stopPropagation()}>分镜图</button>
-                            <button type="button" className="minimax-storyboard-remove" title="移除分镜图" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, item.ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button>
+                            {item.ref ? <span className="minimax-storyboard-role" style={{ cursor: "default" }}>分镜 {index + 1}</span> : null}
+                            <button type="button" className="minimax-storyboard-remove" title="移除分镜" onClick={(event) => { event.stopPropagation(); onSegmentChange(removeStoryboardShot(segment, item.id)); }} onDoubleClick={(event) => event.stopPropagation()}>×</button>
                             {index === projected.length - 1 ? <button
                                 type="button"
                                 className="minimax-storyboard-add-half"
                                 disabled={!canAdd}
-                                title={canAdd ? "选择画布图片，并与末张分镜平分时长" : "末张时长不足 1 秒，无法新增分镜"}
-                                onClick={(event) => { event.stopPropagation(); onRequestPickStoryboard(segment.id); }}
+                                title={canAdd ? "新增分镜，并与末张分镜平分时长" : "末张时长不足 1 秒，无法新增分镜"}
+                                onClick={(event) => { event.stopPropagation(); onSegmentChange(addStoryboardShot(segment), true); }}
                                 onDoubleClick={(event) => event.stopPropagation()}
                             ><span>＋</span><small>新增</small></button> : null}
                         </div>
@@ -460,8 +459,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
                             onDoubleClick={(event) => event.stopPropagation()}
                         /> : null}
                     </div>;
-                }) : <button type="button" className={`minimax-storyboard-first-add ${pickingKey === `${segment.id}:-1` ? "is-picking" : ""}`} title={pickingKey === `${segment.id}:-1` ? "在画布上点选分镜图（Esc 取消）" : "选择画布图片作为首张分镜"} onClick={(event) => { event.stopPropagation(); onRequestPickStoryboard(segment.id); }} onDoubleClick={(event) => event.stopPropagation()}>
-                    <H3Icon name="plus" /><span>选择首张分镜图 · 占满 {Number(segment.duration || 1).toFixed(2)} 秒</span>
+                }) : <button type="button" className="minimax-storyboard-first-add" title="新建首张分镜" onClick={(event) => { event.stopPropagation(); onSegmentChange(addStoryboardShot(segment), true); }} onDoubleClick={(event) => event.stopPropagation()}>
+                    <H3Icon name="plus" /><span>新建首张分镜 · 占满 {Number(segment.duration || 1).toFixed(2)} 秒</span>
                 </button>}
             </div> : null}
         </>;
@@ -492,8 +491,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
                 <div className="minimax-ref-row" onDragStart={startRefDrag} onDragOver={onRefRowDragOver} onDrop={addRef}>
                     <div className="minimax-ref-content" style={{ minWidth: timelineMinWidth, width: "100%" }}>
                         <span className="minimax-playhead" style={{ left: `${playhead * 100}px` }} />
-                        {segments.map(renderStoryboardTrack)}
-                        {segments.map(renderRefGrid)}
+                        {segments.map((segment) => <Fragment key={segment.id}>{renderStoryboardTrack(segment)}</Fragment>)}
+                        {segments.map((segment) => <Fragment key={segment.id}>{renderRefGrid(segment)}</Fragment>)}
                     </div>
                 </div>
             </div>
@@ -501,6 +500,5 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onOpen
         <div className="minimax-track-gutter">
             <button type="button" className="minimax-video-add" onClick={addSegment}><H3Icon name="plus" /></button>
         </div>
-        {previewRef ? <H3PreviewLightbox item={previewRef} onClose={() => setPreviewRef(null)} /> : null}
     </div>;
 }

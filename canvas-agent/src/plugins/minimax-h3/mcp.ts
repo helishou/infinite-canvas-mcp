@@ -136,7 +136,7 @@ const TOOLS: PluginMcpToolWire[] = [
                     items: {
                         type: "object",
                         properties: {
-                            description: { type: "string", description: "分镜描述，可包含 {{subject:人物节点id}} 引用" },
+                            description: { type: "string", description: "分镜描述，可包含 <Subject N> 与 <Picture N> 等 H3 引用标签" },
                             switchTime: { type: "string", description: "本镜头相对 Clip 开始的切换时间；第一镜忽略" },
                             transitionType: { type: "string", enum: ["continuous", "cut", "dissolve", "fade_black"], description: "从上一镜到本镜的方式：连续镜头不切镜、硬切、叠化、淡出至黑场再淡入；第一镜忽略" },
                             pictureBindingId: { type: "string", description: "当前 Clip 中已绑定的 storyboard 图片 binding id" },

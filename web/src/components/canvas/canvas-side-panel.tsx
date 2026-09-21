@@ -413,7 +413,7 @@ function buildInsertPayload(asset: Asset): InsertAssetPayload {
         voiceAssetId: asset.data.voiceAssetId || voiceAsset?.id || "",
         };
     }
-    if (asset.kind === "scene") return { kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorCardPrompt: asset.data.colorCardPrompt };
+    if (asset.kind === "scene") return { kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorPalette: asset.data.colorPalette, colorCardPrompt: asset.data.colorCardPrompt };
     return { kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title };
 }
 
@@ -610,7 +610,7 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
             return;
         }
         if (asset.kind === "scene") {
-            const ref = { type: "scene", kind: "scene", name: asset.title, sceneAssetId: asset.id, sceneName: asset.data.name || asset.title, sceneDescription: asset.data.description, sceneImage: asset.data.image, sceneColorCard: asset.data.colorCard, sceneColorCardPrompt: asset.data.colorCardPrompt };
+            const ref = { type: "scene", kind: "scene", name: asset.title, sceneAssetId: asset.id, sceneName: asset.data.name || asset.title, sceneDescription: asset.data.description, sceneImage: asset.data.image, sceneColorCard: asset.data.colorCard, sceneColorPalette: asset.data.colorPalette, sceneColorCardPrompt: asset.data.colorCardPrompt };
             const payload = JSON.stringify(ref);
             event.dataTransfer.effectAllowed = "copy";
             event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);

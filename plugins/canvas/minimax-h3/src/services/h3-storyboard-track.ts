@@ -1,5 +1,6 @@
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
-import type { H3Ref, H3Segment } from "../types";
+import type { H3Ref, H3Segment, H3StoryboardShot } from "../types";
+import { sameRef } from "./h3-compatibility";
 import { inferReferenceRole, refsForSegment, withSegmentRefs } from "./h3-data";
 
 export const H3_STORYBOARD_MIN_DURATION = 0.5;
@@ -14,27 +15,83 @@ export function storyboardRefsForSegment(segment: H3Segment) {
 }
 
 export function isStoryboardModeEnabled(segment: H3Segment) {
-    return segment.storyboardModeEnabled ?? storyboardRefsForSegment(segment).length > 0;
+    return segment.storyboardModeEnabled ?? (segment.storyboardShots !== undefined || storyboardRefsForSegment(segment).length > 0);
 }
 
 export function storyboardTrackItems(segment: H3Segment) {
     const refs = storyboardRefsForSegment(segment);
+    const refsByBindingId = new Map(refs.flatMap((ref) => ref.bindingId ? [[ref.bindingId, ref] as const] : []));
+    const shots: H3StoryboardShot[] = segment.storyboardShots ?? refs.map((ref, index) => ({
+        id: ref.bindingId || `legacy-storyboard-${index}`,
+        referenceBindingId: ref.bindingId,
+        duration: segment.storyboardDurations?.[ref.bindingId || ""],
+    }));
+    const attachedRefs = new Set(shots.flatMap((shot) => shot.referenceBindingId ? [shot.referenceBindingId] : []));
+    const allShots = [...shots, ...refs.filter((ref) => ref.bindingId && !attachedRefs.has(ref.bindingId)).map((ref) => ({
+        id: ref.bindingId!, referenceBindingId: ref.bindingId, duration: segment.storyboardDurations?.[ref.bindingId!],
+    }))];
     const clipDuration = Math.max(0.5, Number(segment.duration || 1));
-    const raw = refs.map((ref) => {
-        const value = Number(segment.storyboardDurations?.[ref.bindingId || ""] || 0);
+    const raw = allShots.map((shot) => {
+        const value = Number(shot.duration || segment.storyboardDurations?.[shot.referenceBindingId || shot.id] || 0);
         return Number.isFinite(value) ? Math.max(0, value) : 0;
     });
     const storedSum = raw.reduce((sum, duration) => sum + duration, 0);
-    const base = raw.map((duration) => duration > 0 ? duration : refs.length ? Math.max(0, clipDuration - storedSum) / refs.filter((_, index) => raw[index] <= 0).length : 0);
+    const base = raw.map((duration) => duration > 0 ? duration : allShots.length ? Math.max(0, clipDuration - storedSum) / allShots.filter((_, index) => raw[index] <= 0).length : 0);
     const baseSum = base.reduce((sum, duration) => sum + duration, 0);
-    const ratio = baseSum > 0 ? clipDuration / baseSum : 0;
+    const ratio = baseSum > 0 && Math.abs(baseSum - clipDuration) > 1e-6 ? clipDuration / baseSum : 1;
     let start = 0;
-    return refs.map((ref, index) => {
+    return allShots.map((shot, index) => {
         const duration = base[index] * ratio;
-        const item = { ref, start, end: start + duration, duration };
+        const item = { ...shot, ref: shot.referenceBindingId ? refsByBindingId.get(shot.referenceBindingId) : undefined, start, end: start + duration, duration };
         start += duration;
         return item;
     });
+}
+
+function shotsFromItems(items: ReturnType<typeof storyboardTrackItems>): H3StoryboardShot[] {
+    return items.map(({ id, ref, duration }) => ({ id, duration, ...(ref?.bindingId ? { referenceBindingId: ref.bindingId } : {}) }));
+}
+
+export function addStoryboardShot(segment: H3Segment) {
+    const items = storyboardTrackItems(segment);
+    const donor = items.at(-1);
+    if (donor && donor.duration < H3_STORYBOARD_MIN_DURATION * 2) return segment;
+    const duration = donor ? donor.duration / 2 : Math.max(0.5, Number(segment.duration || 1));
+    const shots = shotsFromItems(items);
+    if (donor) shots[shots.length - 1] = { ...shots[shots.length - 1], duration };
+    shots.push({ id: `storyboard-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, duration });
+    return { ...segment, storyboardModeEnabled: true, storyboardShots: shots };
+}
+
+export function removeStoryboardShot(segment: H3Segment, shotId: string) {
+    const items = storyboardTrackItems(segment);
+    const target = items.find((item) => item.id === shotId);
+    if (!target) return segment;
+    const targetIndex = items.findIndex((item) => item.id === shotId);
+    const remaining = items.filter((item) => item.id !== shotId);
+    const recipientId = items[targetIndex + 1]?.id || items[targetIndex - 1]?.id;
+    const merged = remaining.map((item) => item.id === recipientId ? { ...item, duration: item.duration + target.duration } : item);
+    const refs = target.ref?.bindingId
+        ? refsForSegment(segment).map((ref) => ref.bindingId === target.ref?.bindingId ? { ...ref, role: "other" as const } : ref)
+        : refsForSegment(segment);
+    const updated = withSegmentRefs(segment, refs);
+    return { ...updated, storyboardModeEnabled: true, storyboardShots: shotsFromItems(merged) };
+}
+
+export function removeStoryboardImageReference(segment: H3Segment, reference: H3Ref) {
+    if (reference.type !== "image" || inferReferenceRole(reference) !== "storyboard") return segment;
+    const refs = refsForSegment(segment);
+    const target = refs.find((ref) => reference.bindingId ? ref.bindingId === reference.bindingId : sameRef(ref, reference));
+    if (!target) return segment;
+    const items = storyboardTrackItems(segment);
+    if (!items.some((item) => item.ref && sameRef(item.ref, target))) return segment;
+    const storyboardShots = items.map(({ id, ref, duration }) => ({
+        id,
+        duration,
+        ...(ref?.bindingId && !sameRef(ref, target) ? { referenceBindingId: ref.bindingId } : {}),
+    }));
+    const updated = withSegmentRefs(segment, refs.filter((ref) => !sameRef(ref, target)));
+    return { ...updated, storyboardModeEnabled: true, storyboardShots };
 }
 
 export function setStoryboardMode(segment: H3Segment, enabled: boolean) {
@@ -48,29 +105,33 @@ export function setStoryboardBoundary(segment: H3Segment, index: number, leftDur
     const right = items[index + 1];
     if (!left || !right || left.duration + right.duration < H3_STORYBOARD_MIN_DURATION * 2) return segment;
     const nextLeft = Math.max(H3_STORYBOARD_MIN_DURATION, Math.min(left.duration + right.duration - H3_STORYBOARD_MIN_DURATION, leftDuration));
-    const storyboardDurations = Object.fromEntries(items.map((item) => [item.ref.bindingId!, item.duration]));
+    const storyboardShots = shotsFromItems(items);
+    storyboardShots[index] = { ...storyboardShots[index], duration: nextLeft };
+    storyboardShots[index + 1] = { ...storyboardShots[index + 1], duration: left.duration + right.duration - nextLeft };
     return {
         ...segment,
-        storyboardDurations: {
-            ...storyboardDurations,
-            [left.ref.bindingId!]: nextLeft,
-            [right.ref.bindingId!]: left.duration + right.duration - nextLeft,
-        },
+        storyboardShots,
     };
 }
 
-export function reorderStoryboardRefs(segment: H3Segment, sourceBindingId: string, targetBindingId: string) {
-    const refs = refsForSegment(segment);
-    const storyboard = storyboardRefsForSegment(segment);
-    const from = storyboard.findIndex((ref) => ref.bindingId === sourceBindingId);
-    const to = storyboard.findIndex((ref) => ref.bindingId === targetBindingId);
+export function reorderStoryboardShots(segment: H3Segment, sourceId: string, targetId: string) {
+    const storyboard = storyboardTrackItems(segment);
+    const from = storyboard.findIndex((item) => item.id === sourceId);
+    const to = storyboard.findIndex((item) => item.id === targetId);
     if (from < 0 || to < 0 || from === to) return segment;
     const reordered = [...storyboard];
-    const [moved] = reordered.splice(from, 1);
-    reordered.splice(to, 0, moved);
-    let cursor = 0;
-    const nextRefs = refs.map((ref) => ref.type === "image" && inferReferenceRole(ref) === "storyboard" ? reordered[cursor++] : ref);
-    return withSegmentRefs(segment, nextRefs);
+    [reordered[from], reordered[to]] = [reordered[to], reordered[from]];
+    return { ...segment, storyboardShots: shotsFromItems(reordered) };
+}
+
+export function swapStoryboardReferences(segment: H3Segment, sourceBindingId: string, targetBindingId: string) {
+    const storyboard = storyboardTrackItems(segment);
+    const from = storyboard.findIndex((item) => item.ref?.bindingId === sourceBindingId);
+    const to = storyboard.findIndex((item) => item.ref?.bindingId === targetBindingId);
+    if (from < 0 || to < 0 || from === to) return segment;
+    const swapped = [...storyboard];
+    [swapped[from], swapped[to]] = [swapped[to], swapped[from]];
+    return { ...segment, storyboardShots: shotsFromItems(swapped) };
 }
 
 const PROMPT_SECTION_END = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description|storyboard_timeline):/mi;
@@ -123,12 +184,10 @@ function promptShotsOf(content: string, storyboardIds: Set<string>, imageRefs: H
     const shots = markers.map((marker, index) => {
         const start = marker.index! + marker[0].length;
         const body = content.slice(start, markers[index + 1]?.index ?? content.length).trim();
-        const refs = [...body.matchAll(/\{\{ref:([^{}]+)\}\}/gu)].map((match) => match[1]);
-        const semanticRef = body.match(/Use the approved .+? from \{\{ref:([^{}]+)\}\} as (?:the visual anchor|the target composition reference) for this shot\./iu)?.[1];
         const pictureNumber = body.match(/<Picture\s+(\d+)>/iu)?.[1];
-        const legacyBinding = pictureNumber ? imageRefs[Number(pictureNumber) - 1]?.bindingId : undefined;
-        const bindingId = refs.find((id) => storyboardIds.has(id)) || semanticRef || (legacyBinding && storyboardIds.has(legacyBinding) ? legacyBinding : undefined);
-        return { body, bindingId, managed: Boolean(bindingId || semanticRef) };
+        const bindingId = pictureNumber ? imageRefs[Number(pictureNumber) - 1]?.bindingId : undefined;
+        const managedBindingId = bindingId && storyboardIds.has(bindingId) ? bindingId : undefined;
+        return { body, bindingId: managedBindingId, managed: Boolean(managedBindingId) };
     });
     return { opening: content.slice(0, markers[0].index).trim(), shots };
 }
@@ -140,8 +199,9 @@ function stripShotTime(body: string) {
         .trim();
 }
 
-function canonicalStoryboardCue(bindingId: string) {
-    return `Use the approved storyboard frame from {{ref:${bindingId}}} as the target composition reference for this shot.`;
+function canonicalStoryboardCue(bindingId: string, imageRefs: H3Ref[]) {
+    const pictureNumber = imageRefs.findIndex((ref) => ref.bindingId === bindingId) + 1;
+    return `Use the approved storyboard frame from <Picture ${pictureNumber}> as the target composition reference for this shot.`;
 }
 
 function formatShot(index: number, start: number | undefined, body: string) {
@@ -166,9 +226,9 @@ function transitionTypeOf(value: string): keyof typeof SHOT_TRANSITION_LEADIN {
 function normalizeTransition(body: string, hasPrecedingShot: boolean) {
     let text = body.trim();
     let transitionType: keyof typeof SHOT_TRANSITION_LEADIN | undefined;
-    const cue = text.match(/Use the approved .+? from \{\{ref:[^{}]+\}\} as (?:the visual anchor|the target composition reference) for this shot\./iu)?.[0] || "";
+    const cue = text.match(/Use the approved .+? from <Picture\s+\d+> as (?:the visual anchor|the target composition reference) for this shot\./iu)?.[0] || "";
     if (cue) text = text.replace(cue, " ").replace(/\s+/gu, " ").trim();
-    const generated = text.match(/The shot transitions to the approved .+? from \{\{ref:[^{}]+\}\} using a (hard cut|cross-dissolve|fade|wipe|match cut)\./iu);
+    const generated = text.match(/The shot transitions to the approved .+? from <Picture\s+\d+> using a (hard cut|cross-dissolve|fade|wipe|match cut)\./iu);
     if (generated) {
         transitionType = transitionTypeOf(generated[1]);
         text = text.replace(generated[0], " ").replace(/\s+/gu, " ").trim();
@@ -204,7 +264,7 @@ function normalizeTransition(body: string, hasPrecedingShot: boolean) {
     }
     // 自愈：旧版解析曾把 lead/cue 成对泄进正文，这里循环剥掉残余副本，避免每次同步继续叠加。
     for (;;) {
-        const residualCue = text.match(/^Use the approved .+? from \{\{ref:[^{}]+\}\} as (?:the visual anchor|the target composition reference) for this shot\.\s*/iu);
+        const residualCue = text.match(/^Use the approved .+? from <Picture\s+\d+> as (?:the visual anchor|the target composition reference) for this shot\.\s*/iu);
         if (residualCue) {
             text = text.slice(residualCue[0].length).replace(/\s+/gu, " ").trim();
             continue;
@@ -230,62 +290,53 @@ function syncPromptShots(content: string, segment: H3Segment, activeItems: Retur
     const parsed = promptShotsOf(content, storyboardIds, refs.filter((ref) => ref.type === "image"));
     if (!activeItems.length && !parsed.shots.some((shot) => shot.managed)) return content;
 
-    const activeIds = new Set(activeItems.flatMap((item) => item.ref.bindingId ? [item.ref.bindingId] : []));
+    const activeIds = new Set(activeItems.map((item) => item.id));
+    const bindingToShotId = new Map(activeItems.flatMap((item) => item.ref?.bindingId ? [[item.ref.bindingId, item.id] as const] : []));
     const oldShots = new Map<string, PromptShot>();
     const assigned = new Set<PromptShot>();
     for (const shot of parsed.shots) {
-        if (shot.bindingId && activeIds.has(shot.bindingId) && !oldShots.has(shot.bindingId)) {
-            oldShots.set(shot.bindingId, shot);
+        const shotId = shot.bindingId ? bindingToShotId.get(shot.bindingId) : undefined;
+        if (shotId && activeIds.has(shotId) && !oldShots.has(shotId)) {
+            oldShots.set(shotId, shot);
             assigned.add(shot);
         }
     }
-    // 老提示词常有逐镜描述，但没有绑定稳定引用 ID；首次开启分镜轨时按顺序补齐图片绑定。
+    // 老提示词常有逐镜描述但没有图片绑定；按顺序关联到当前分镜项目。
     const unboundShots = parsed.shots.filter((shot) => !assigned.has(shot) && !shot.managed && !shot.bindingId);
     let unboundIndex = 0;
     for (const item of activeItems) {
-        const bindingId = item.ref.bindingId;
-        if (!bindingId || oldShots.has(bindingId)) continue;
+        if (oldShots.has(item.id)) continue;
         const shot = unboundShots[unboundIndex++];
         if (!shot) break;
-        oldShots.set(bindingId, shot);
+        oldShots.set(item.id, shot);
         assigned.add(shot);
     }
 
     const tracked = activeItems.flatMap((item, index) => {
-        const bindingId = item.ref.bindingId;
-        if (!bindingId) return [];
-        const existing = oldShots.get(bindingId);
+        const existing = oldShots.get(item.id);
         let body = existing ? stripShotTime(existing.body) : "";
-        if (existing) {
-            const pictureIndex = refs.filter((ref) => ref.type === "image").findIndex((ref) => ref.bindingId === bindingId);
-            if (pictureIndex >= 0) body = body.replace(new RegExp(`<Picture\\s+${pictureIndex + 1}>`, "iu"), `{{ref:${bindingId}}}`);
+        if (item.ref?.bindingId) {
+            const pictureIndex = refs.filter((ref) => ref.type === "image").findIndex((ref) => ref.bindingId === item.ref?.bindingId);
+            const pictureTag = `<Picture ${pictureIndex + 1}>`;
+            const cuePattern = new RegExp(`Use the approved .+? from ${escapeRegExp(pictureTag)} as (?:the visual anchor|the target composition reference) for this shot\\.`, "iu");
+            if (!cuePattern.test(body)) body = [canonicalStoryboardCue(item.ref.bindingId, refs.filter((ref) => ref.type === "image")), body].filter(Boolean).join(" ");
         }
-        const cuePattern = new RegExp(`Use the approved .+? from \\{\\{ref:${escapeRegExp(bindingId)}\\}\\} as (?:the visual anchor|the target composition reference) for this shot\\.`, "iu");
-        if (!cuePattern.test(body)) body = [canonicalStoryboardCue(bindingId), body].filter(Boolean).join(" ");
         body = normalizeTransition(body, index > 0);
         return [formatShot(index, item.start, body)];
     });
 
     const remaining = parsed.shots.filter((shot) => !assigned.has(shot)).flatMap((shot, index) => {
         if (!shot.managed) return [shot.body];
-        const semanticRef = shot.body.match(/Use the approved .+? from \{\{ref:([^{}]+)\}\} as (?:the visual anchor|the target composition reference) for this shot\./iu)?.[1];
-        const bindingId = semanticRef || shot.bindingId;
-        const stillExists = bindingId && refs.some((ref) => ref.bindingId === bindingId);
+        const bindingId = shot.bindingId;
         if (bindingId && storyboardIds.has(bindingId)) {
             let body = stripShotTime(shot.body);
             const pictureIndex = refs.filter((ref) => ref.type === "image").findIndex((ref) => ref.bindingId === bindingId);
-            if (pictureIndex >= 0) body = body.replace(new RegExp(`<Picture\\s+${pictureIndex + 1}>`, "iu"), `{{ref:${bindingId}}}`);
-            const cuePattern = new RegExp(`Use the approved .+? from \\{\\{ref:${escapeRegExp(bindingId)}\\}\\} as (?:the visual anchor|the target composition reference) for this shot\\.`, "iu");
-            if (!cuePattern.test(body)) body = [canonicalStoryboardCue(bindingId), body].filter(Boolean).join(" ");
+            const pictureTag = `<Picture ${pictureIndex + 1}>`;
+            const cuePattern = new RegExp(`Use the approved .+? from ${escapeRegExp(pictureTag)} as (?:the visual anchor|the target composition reference) for this shot\\.`, "iu");
+            if (!cuePattern.test(body)) body = [canonicalStoryboardCue(bindingId, refs.filter((ref) => ref.type === "image")), body].filter(Boolean).join(" ");
             return [normalizeTransition(body, index > 0)];
         }
         let body = stripShotTime(shot.body);
-        if (semanticRef) {
-            const escaped = escapeRegExp(semanticRef);
-            const ordinaryReference = stillExists ? `Use {{ref:${semanticRef}}} as a visual reference for this shot.` : "";
-            body = body.replace(new RegExp(`Use the approved .+? from \\{\\{ref:${escaped}\\}\\} as (?:the visual anchor|the target composition reference) for this shot\\.`, "iu"), ordinaryReference);
-            if (!stillExists) body = body.replace(new RegExp(`\\{\\{ref:${escaped}\\}\\}`, "gu"), "");
-        }
         body = normalizeTransition(body.replace(/\s+/gu, " ").trim(), index > 0);
         return body ? [body] : [];
     });
@@ -307,7 +358,7 @@ export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Se
         const snapshot = document.getSnapshot();
         if (!snapshot.ready || snapshot.blocked) return false;
         const prompt = removeLegacyTimelineSection(snapshot.text);
-        const enabled = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment) && storyboardRefsForSegment(segment).length > 0;
+        const enabled = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment) && storyboardTrackItems(segment).length > 0;
         const mode = String(segment.mode || segment.taskMode || "ref2va");
         const section = mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description";
         const sectionText = readPromptSection(prompt, section);

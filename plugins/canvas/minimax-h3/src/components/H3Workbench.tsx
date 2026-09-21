@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
 import { message } from "antd";
-import type { H3CharacterGroup, H3Ref, H3Segment } from "../types";
+import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
 import { applyCharacterGroupEdits, refsForSegment, removeCharacterGroup, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
@@ -9,7 +9,7 @@ import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, readC
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { h3ThemeVars } from "../h3-theme";
-import { setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, syncStoryboardPrompt } from "../services/h3-storyboard-track";
+import { removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
@@ -18,7 +18,6 @@ import { H3Timeline } from "./H3Timeline";
 import { H3MaterialLibrary } from "./H3MaterialLibrary";
 import { H3Runner } from "./H3Runner";
 import { H3WorkbenchToolbar } from "./H3WorkbenchToolbar";
-import { H3CharacterRefModal } from "./H3CharacterRefModal";
 import { H3ReferenceModal } from "./H3ReferenceModal";
 
 export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
@@ -118,9 +117,9 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         const px = absoluteTime * 100;
         root.querySelectorAll<HTMLElement>(".minimax-playhead").forEach((el) => { el.style.left = `${px}px`; });
     }, []);
-    const [editingGroup, setEditingGroup] = useState<{ segmentId: string; groupId: string } | null>(null);
     const [editingRef, setEditingRef] = useState<{ segmentId: string; ref: H3Ref } | null>(null);
     const editingRefSegment = editingRef ? segments.find((segment) => segment.id === editingRef.segmentId) : undefined;
+    const editingRefGroup = editingRef?.ref.groupId ? editingRefSegment?.h3CharacterGroups?.[editingRef.ref.groupId] : undefined;
     const referencedCharacterIds = new Set((editingRefSegment ? refsForSegment(editingRefSegment) : []).flatMap((ref) => {
         if (ref.enabled === false) return [];
         const nodeId = editingRefSegment?.h3CharacterGroups?.[ref.groupId || ""]?.characterNodeId || ref.nodeId;
@@ -132,9 +131,8 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         const primary = images[Number(metadata.characterPrimaryIndex || 0)] || images[0];
         return { id: node.id, name: String(metadata.characterName || node.title || "人物"), previewUrl: typeof primary?.url === "string" ? primary.url : undefined };
     });
-    // 点击空 ref 槽后进入画布既有的「选节点作参考」模式（与图片节点「从画布选择参考」同一套交互），
-    // 这里只记录待填充的槽位；选中的画布节点通过 canvas-reference-pick 回抛过来再落到该槽。
-    const [pickingRef, setPickingRef] = useState<{ segmentId: string; slotIndex: number; types: H3Ref["type"][]; storyboard?: boolean } | null>(null);
+    // 空 ref 槽添加或在职责弹窗内替换引用时，复用画布既有的「选节点作参考」模式；选中节点通过 canvas-reference-pick 回抛。
+    const [pickingRef, setPickingRef] = useState<{ segmentId: string; slotIndex: number; types: H3Ref["type"][]; replaceRef?: H3Ref } | null>(null);
     const catalogSyncedRef = useRef(new Map<string, string>());
     useEffect(() => {
         const syncReferences = (changedNodeIds?: Set<string>) => {
@@ -186,7 +184,9 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             if (!hasStoryboards && !Object.keys(segment.storyboardDurations || {}).length) return segment;
             const normalized = hasStoryboards
                 ? withSegmentRefs(segment, refsForSegment(segment))
-                : { ...segment, storyboardModeEnabled: undefined, storyboardDurations: {} };
+                : segment.storyboardShots !== undefined
+                    ? { ...segment, storyboardDurations: {} }
+                    : { ...segment, storyboardModeEnabled: undefined, storyboardDurations: {} };
             const missingIds = storyboardRefsForSegment(segment).some((ref) => !ref.bindingId);
             if (!missingIds && normalized.storyboardModeEnabled === segment.storyboardModeEnabled
                 && JSON.stringify(normalized.storyboardDurations) === JSON.stringify(segment.storyboardDurations)) return segment;
@@ -201,9 +201,10 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         const current = segmentsFor(liveMetadata);
         const previous = current.find((item) => item.id === updated.id);
         if (!previous) return;
-        const previousIds = new Set(storyboardRefsForSegment(previous).map((ref) => ref.bindingId));
-        const addedStoryboards = storyboardTrackItems(updated).filter((item) => item.ref.bindingId && !previousIds.has(item.ref.bindingId));
-        if (storyboardRefsForSegment(previous).length && addedStoryboards.some((item) => item.duration < 0.5)) {
+        const previousItems = storyboardTrackItems(previous);
+        const previousIds = new Set(previousItems.map((item) => item.id));
+        const addedStoryboards = storyboardTrackItems(updated).filter((item) => !previousIds.has(item.id));
+        if (previousItems.length && addedStoryboards.some((item) => item.duration < 0.5)) {
             message.warning("末张分镜时长不足 1 秒，无法再平分新增分镜。");
             return;
         }
@@ -212,7 +213,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     }, [ctx, metadata]);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => {
         if (!selected) return;
-        if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardRefsForSegment(selected).length) {
+        if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardTrackItems(selected).length) {
             const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
             const latest = segmentsFor(liveMetadata).find((item) => item.id === selected.id) || selected;
             const updated = withSegmentRefs({ ...latest, ...patch }, refsForSegment(latest));
@@ -258,29 +259,63 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         setPickingRef({ segmentId, slotIndex, types: mode === "ref2va" ? ["image", "video", "audio"] : ["image"] });
         window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { nodeId: ctx.node.id } }));
     };
-    const requestCanvasStoryboardPick = (segmentId: string) => {
-        const segment = segments.find((item) => item.id === segmentId);
-        if (!segment || !supportsStoryboardTrack(segment) || (pickingRef?.segmentId === segmentId && pickingRef.storyboard)) return;
-        setPickingRef({ segmentId, slotIndex: -1, types: ["image"], storyboard: true });
+    const requestCanvasRefReplace = () => {
+        if (!editingRef) return;
+        const segment = segments.find((item) => item.id === editingRef.segmentId);
+        if (!segment) return;
+        const mode = String(segment.mode || segment.taskMode || "ref2va");
+        const allowedTypes: H3Ref["type"][] = mode === "ref2va" ? ["image", "video", "audio"] : ["image"];
+        if (!allowedTypes.includes(editingRef.ref.type)) return;
+        const refs = refsForSegment(segment);
+        const slotIndex = refs.findIndex((item) => editingRef.ref.bindingId ? item.bindingId === editingRef.ref.bindingId : sameRef(item, editingRef.ref));
+        if (slotIndex < 0) return;
+        setPickingRef({ segmentId: segment.id, slotIndex, types: [editingRef.ref.type], replaceRef: editingRef.ref });
         window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { nodeId: ctx.node.id } }));
     };
     // 画布选中的节点 → 落进被点的槽。角色节点与拖拽路径保持同一口径：建/复用角色组，
     // outfit 拆 image ref、声线拆 audio ref；其余节点按内容展开（场景图 / H3 成品 / 通用媒体）。
-    const applyCanvasPickedNode = (pick: { segmentId: string; slotIndex: number; types: H3Ref["type"][]; storyboard?: boolean }, sourceNodeId: string) => {
+    const applyCanvasPickedNode = (pick: { segmentId: string; slotIndex: number; types: H3Ref["type"][]; replaceRef?: H3Ref }, sourceNodeId: string) => {
         const node = ctx.getNode(sourceNodeId);
         if (!node || node.id === ctx.node.id) return;
         const segment = segments.find((item) => item.id === pick.segmentId);
         if (!segment) return;
-        if (pick.storyboard) {
-            const image = h3RefCandidates([node], ctx.node.id).map((item) => item.ref).find((ref) => ref.type === "image");
-            if (!image) return;
+        if (pick.replaceRef) {
             const current = refsForSegment(segment);
-            const existing = current.find((ref) => sameRef(ref, image));
-            if (existing?.role === "storyboard") return;
-            const refs = existing
-                ? current.map((ref) => ref === existing ? { ...ref, role: "storyboard" as const } : ref)
-                : [...current, { ...image, role: "storyboard" as const }];
-            commitSegmentChange(withSegmentRefs({ ...segment, storyboardModeEnabled: true }, refs), true);
+            const oldIndex = current.findIndex((ref) => pick.replaceRef?.bindingId ? ref.bindingId === pick.replaceRef.bindingId : sameRef(ref, pick.replaceRef!));
+            if (oldIndex < 0) return;
+            const groupReplacementIndex = current.slice(0, oldIndex).filter((ref) => !pick.replaceRef?.groupId || ref.groupId !== pick.replaceRef.groupId).length;
+            if (node.type === "character" && pick.types.includes("image")) {
+                const sourceGroup = readCharacterGroupFromNode(node);
+                if (!sourceGroup?.outfits.length) { message.warning("所选角色节点没有可用参考图，未替换素材"); return; }
+                const withoutOld = pick.replaceRef.groupId
+                    ? removeCharacterGroup(segment, pick.replaceRef.groupId)
+                    : withSegmentRefs(segment, current.filter((ref, index) => index !== oldIndex));
+                const updated = upsertCharacterGroup(withoutOld, sourceGroup);
+                const replacementGroup = Object.values(updated.h3CharacterGroups || {}).find((group) => group.characterNodeId === sourceGroup.characterNodeId);
+                if (!replacementGroup) { message.warning("当前 Clip 无法加入所选角色，未替换素材"); return; }
+                const allRefs = refsForSegment(updated);
+                const inserted = allRefs.filter((ref) => ref.groupId === replacementGroup.id);
+                if (!inserted.length) { message.warning("当前 Clip 没有可用的角色参考图，未替换素材"); return; }
+                const others = allRefs.filter((ref) => ref.groupId !== replacementGroup.id);
+                setEditingRef(null);
+                commitSegmentChange(withSegmentRefs(updated, [...others.slice(0, groupReplacementIndex), ...inserted, ...others.slice(groupReplacementIndex)]), true);
+                return;
+            }
+            const candidates = h3RefCandidates([node], ctx.node.id).map((item) => item.ref).filter((ref) => pick.types.includes(ref.type));
+            if (!candidates.length) { message.warning("所选节点没有相同类型的素材，未替换当前引用"); return; }
+            const withoutOld = pick.replaceRef.groupId
+                ? applyCharacterGroupEdits(segment, pick.replaceRef.groupId, pick.replaceRef.type === "audio"
+                    ? { voiceEnabled: false }
+                    : { outfitEnabled: pick.replaceRef.outfitId ? { [pick.replaceRef.outfitId]: false } : undefined })
+                : withSegmentRefs(segment, current.filter((ref, index) => index !== oldIndex));
+            const baseRefs = refsForSegment(withoutOld);
+            const fresh = candidates
+                .filter((candidate) => !baseRefs.some((ref) => sameRef(ref, candidate)))
+                .map((candidate) => ({ ...candidate, role: pick.replaceRef?.role || candidate.role, usage: pick.replaceRef?.usage || candidate.usage, retentionLevel: pick.replaceRef?.retentionLevel, storyboardSubjectIds: pick.replaceRef?.storyboardSubjectIds }));
+            if (!fresh.length) { message.warning("所选素材已存在于当前 Clip，未替换引用"); return; }
+            const insertIndex = Math.min(oldIndex, baseRefs.length);
+            setEditingRef(null);
+            commitSegmentChange(withSegmentRefs(withoutOld, [...baseRefs.slice(0, insertIndex), ...fresh, ...baseRefs.slice(insertIndex)]), true);
             return;
         }
         if (node.type === "character" && pick.types.includes("image")) {
@@ -293,22 +328,31 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         }
         addNodeRefs(pick.segmentId, pick.slotIndex, h3RefCandidates([node], ctx.node.id).map((item) => item.ref).filter((ref) => pick.types.includes(ref.type)));
     };
-    const openCharacterGroup = (segmentId: string, groupId: string) => setEditingGroup({ segmentId, groupId });
-    const applyReferenceEdit = (nextRef: H3Ref) => {
+    const applyReferenceEdit = (nextRef: H3Ref, characterPatch?: H3CharacterGroupEditPatch) => {
         if (!editingRef) return;
         const segment = segments.find((item) => item.id === editingRef.segmentId);
-        if (segment) commitSegmentChange(withSegmentRefs(segment, refsForSegment(segment).map((item) => (editingRef.ref.bindingId ? item.bindingId === editingRef.ref.bindingId : item.url === editingRef.ref.url) ? nextRef : item)));
+        if (!segment) return;
+        let updated = withSegmentRefs(segment, refsForSegment(segment).map((item) => (editingRef.ref.bindingId ? item.bindingId === editingRef.ref.bindingId : item.url === editingRef.ref.url) ? nextRef : item));
+        if (editingRef.ref.groupId && characterPatch) updated = applyCharacterGroupEdits(updated, editingRef.ref.groupId, characterPatch);
+        commitSegmentChange(updated);
     };
-    const applyCharacterGroupEditsAndClose = (groupId: string, patch: { outfitEnabled?: Record<string, boolean>; voiceEnabled?: boolean }) => {
-        if (!editingGroup) return;
-        const segment = segments.find((item) => item.id === editingGroup.segmentId);
-        if (segment) commitSegmentChange(applyCharacterGroupEdits(segment, groupId, patch));
+    const deleteReferenceGroup = () => {
+        if (!editingRef?.ref.groupId || !editingRefSegment) return;
+        commitSegmentChange(removeCharacterGroup(editingRefSegment, editingRef.ref.groupId));
+        setEditingRef(null);
     };
-    const deleteCharacterGroupAndClose = (groupId: string) => {
-        if (!editingGroup) return;
-        const segment = segments.find((item) => item.id === editingGroup.segmentId);
-        if (segment) commitSegmentChange(removeCharacterGroup(segment, groupId));
-        setEditingGroup(null);
+    const removeEditingReference = () => {
+        if (!editingRef) return;
+        removeTimelineRef(editingRef.segmentId, editingRef.ref);
+        setEditingRef(null);
+    };
+    const removeEditingStoryboardImage = () => {
+        if (!editingRef) return;
+        const segment = segments.find((item) => item.id === editingRef.segmentId);
+        if (!segment) return;
+        const updated = removeStoryboardImageReference(segment, editingRef.ref);
+        if (updated !== segment) commitSegmentChange(updated);
+        setEditingRef(null);
     };
     const addDroppedReference = (event: React.DragEvent<HTMLElement>) => {
         if ((event.target as HTMLElement).closest(".minimax-ref-track")) return;
@@ -460,18 +504,12 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         <H3RulerScrubber key="ruler-scrubber" ctx={ctx} total={total} previewH={effPreviewH} />
         <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} outputs={outputs} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} />
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
-        {editingGroup ? (() => {
-            const segment = segments.find((item) => item.id === editingGroup.segmentId);
-            const group = segment?.h3CharacterGroups?.[editingGroup.groupId];
-            if (!segment || !group) return null;
-            return <H3CharacterRefModal key={`character-ref-modal:${group.id}:${group.outfits.map((outfit) => outfit.id).join("|")}`} ctx={ctx} group={group} onApply={(patch) => applyCharacterGroupEditsAndClose(group.id, patch)} onDelete={() => deleteCharacterGroupAndClose(group.id)} onClose={() => setEditingGroup(null)} />;
-        })() : null}
-        {editingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={editingRef.ref} characters={referencedCharacters} onApply={applyReferenceEdit} onClose={() => setEditingRef(null)} /> : null}
+        {editingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={editingRef.ref} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
         <style key="workbench-style">{`.minimax-canvas-workbench{--minimax-prompt-w:${promptW}px;--minimax-preview-w:${previewW}px;--minimax-preview-h:${effPreviewH}px;--minimax-timeline-h:${effTimelineH}px;--minimax-ref-h:${effRefLaneH}px}`}</style>
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
             <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} /></div>
-            <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onOpenCharacterGroup={openCharacterGroup} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestPickRef={requestCanvasRefPick} onRequestPickStoryboard={requestCanvasStoryboardPick} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
+            <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestPickRef={requestCanvasRefPick} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         </div>

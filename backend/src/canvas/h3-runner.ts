@@ -8,6 +8,8 @@ import type { RunningHubBackend } from "../runtime/runninghub.js";
 import type { Stores } from "../stores/types.js";
 import { writeBackH3Task } from "./h3-task-writeback.js";
 import { h3ClipCacheFingerprint, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, stableH3Fingerprint } from "./h3-cache.js";
+import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
+import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCompositePrompt, storyboardCompositeDirective, storyboardCompositePlan } from "./storyboard-composite.js";
 
 type H3RunInput = {
     projectId: string;
@@ -21,7 +23,7 @@ type H3RunInput = {
 };
 
 type H3Ref = Record<string, unknown> & { url?: string; storageKey?: string; name?: string; label?: string; type?: string; mediaType?: string; role?: string; order?: number };
-type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; referenceBindings?: Record<string, unknown>[]; continuationGroupId?: string; motionContextEnabled?: boolean };
+type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; referenceBindings?: Record<string, unknown>[]; continuationGroupId?: string; motionContextEnabled?: boolean; storyboardCompositeEnabled?: boolean };
 type H3Plan = { nodeId: string; segmentId: string; segmentIndex: number; continuation?: { group: string; index: number } };
 
 const H3_DEFAULTS_KEY = "plugin:minimax-h3:defaults:v1";
@@ -42,6 +44,19 @@ const H3_PARAM_KEYS = [
     "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "teAccel", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
     "referenceVideoPolicy", "trimIn", "trimOut", "motionContextEnabled", "tailFrameContinuation", "previousVideoAsReference", "motionContextNoiseEnabled", "motionContextNoiseAlpha", "motionContextNoiseAlphaEnd", "motionContextNoiseRampFrames", "combatLoraWeight", "cinematicLoraWeight",
 ] as const;
+
+function compileH3Submission(project: Record<string, unknown>, segment: H3Segment, taskMode: string) {
+    const original = compileReferenceSubmission(project, { ...segment, taskMode });
+    const composite = storyboardCompositePlan({ ...segment, taskMode });
+    if (!composite) return { compilation: original, composite: null };
+    const effectiveSegment = { ...segment, taskMode, referenceBindings: composite.bindings };
+    const collapsed = compileReferenceSubmission(project, effectiveSegment);
+    const mappedPrompt = remapCompositePrompt(String(segment.prompt || ""), composite, original.references, collapsed.references);
+    const prompt = mappedPrompt.includes("A single submitted image is a composite storyboard sheet")
+        ? mappedPrompt
+        : appendToSection(mappedPrompt, "detailed_description", storyboardCompositeDirective(composite));
+    return { compilation: compileReferenceSubmission(project, { ...effectiveSegment, prompt }), composite };
+}
 
 export class CanvasH3Runner {
     private readonly currentChildren = new Map<string, string>();
@@ -79,7 +94,10 @@ export class CanvasH3Runner {
             const segments = Array.isArray(recordOf(node.metadata).segments) ? recordOf(node.metadata).segments as H3Segment[] : [];
             for (const plan of this.planNode(node, input)) {
                 const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
-                if (segment) assertReferenceCompilation(compileReferenceSubmission(project, segment));
+                if (segment) {
+                    const taskMode = normalizeTaskMode(input.params?.taskMode || input.params?.mode || segment.taskMode || segment.mode);
+                    assertReferenceCompilation(compileH3Submission(project, segment, taskMode).compilation);
+                }
             }
         }
     }
@@ -197,6 +215,7 @@ export class CanvasH3Runner {
             task = this.update(task.id, { result: { ...recordOf(task.result), currentChildTaskId: child.id, currentChildKind: child.kind, children, media: outputs } });
             child = await this.waitForTerminal(task.id, child.id);
             this.currentChildren.delete(task.id);
+            await cleanupStoryboardCompositeDirectory(recordOf(child.params).storyboardCompositeTempDir);
             const written = await writeBackH3Task(this.stores, this.events, child);
             if (!written) throw new Error(`Clip ${plan.segmentIndex + 1} 终态回写失败：片段可能已被其他任务接管，父任务未标记成功`);
             if (child.status !== "succeeded") throw new Error(child.error || `Clip ${plan.segmentIndex + 1} 生成${child.status === "cancelled" ? "已取消" : "失败"}`);
@@ -237,7 +256,9 @@ export class CanvasH3Runner {
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
         const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const params = extractParams(segment, override, metadata, defaults);
-        const compilation = compileReferenceSubmission(project, { ...segment, taskMode: normalizeTaskMode(params.taskMode || segment.taskMode) });
+        const taskMode = normalizeTaskMode(params.taskMode || params.mode || segment.taskMode || segment.mode);
+        const { compilation } = compileH3Submission(project, segment, taskMode);
+        const scenePrompt = appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
         const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
         const previousFingerprint = previous ? fingerprints.get(`${plan.nodeId}:${String(previous.id || "")}`) || String(previous.cacheFingerprint || "") : "";
         const confirming = override.confirmSecondPass === true;
@@ -247,14 +268,14 @@ export class CanvasH3Runner {
         const useFirstPassReferences = firstPassReferences
             && stableH3Fingerprint(stableReferenceInputs(firstPassReferences)) === stableH3Fingerprint(stableReferenceInputs(compilation.references));
         const segmentFingerprintInput = { ...segment, previousTailFrameContinuation: previous?.tailFrameContinuation === true };
-        const fingerprintInput = { segment: segmentFingerprintInput, params: h3ConfirmationFingerprintParams(segment, params), compiledPrompt: compilation.compiledPrompt, previousFingerprint };
+        const fingerprintInput = { segment: segmentFingerprintInput, params: h3ConfirmationFingerprintParams(segment, params), compiledPrompt: scenePrompt, previousFingerprint };
         const fingerprint = h3ClipCacheFingerprint({ ...fingerprintInput, references: referenceFingerprintInputs(compilation.references) });
         // v1 first-pass caches were fingerprinted from the raw params and complete
         // CompiledReference objects. Keep both exact historical inputs and the
         // log-backed reference snapshot so settings/timestamp normalization updates
         // do not invalidate an otherwise unchanged first pass.
-        const legacyFingerprint = confirming ? h3ClipCacheFingerprint({ segment: segmentFingerprintInput, params, references: compilation.references, compiledPrompt: compilation.compiledPrompt, previousFingerprint }) : undefined;
-        const loggedLegacyFingerprint = confirming && useFirstPassReferences ? h3ClipCacheFingerprint({ segment: segmentFingerprintInput, params, references: firstPassReferences, compiledPrompt: compilation.compiledPrompt, previousFingerprint }) : undefined;
+        const legacyFingerprint = confirming ? h3ClipCacheFingerprint({ segment: segmentFingerprintInput, params, references: compilation.references, compiledPrompt: scenePrompt, previousFingerprint }) : undefined;
+        const loggedLegacyFingerprint = confirming && useFirstPassReferences ? h3ClipCacheFingerprint({ segment: segmentFingerprintInput, params, references: firstPassReferences, compiledPrompt: scenePrompt, previousFingerprint }) : undefined;
         const output = !confirming && segment.result && segment.cacheFingerprint === fingerprint ? {
             url: String(segment.result),
             ...(segment.resultStorageKey ? { storageKey: String(segment.resultStorageKey) } : {}),
@@ -294,6 +315,8 @@ export class CanvasH3Runner {
     }
 
     private async startChild(parent: RuntimeTask, plan: H3Plan, override: Record<string, unknown>) {
+        let compositeTempDir: string | undefined;
+        try {
         const project = this.stores.projects.get(String(parent.input.projectId))!;
         const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId)!;
         const metadata = recordOf(node.metadata);
@@ -308,9 +331,10 @@ export class CanvasH3Runner {
             cachedFirstPassPath = await this.resolveRef({ url: String(segment.firstPassResult), storageKey: segment.firstPassStorageKey ? String(segment.firstPassStorageKey) : undefined, name: `first-pass-${plan.segmentId}.mp4`, type: "video" });
         }
         params = h3ConfirmationPhaseParams(segment, params, confirmingSecondPass);
-        const taskMode = normalizeTaskMode(params.taskMode || segment.taskMode);
-        const compilation = compileReferenceSubmission(project, { ...segment, taskMode });
+        const taskMode = normalizeTaskMode(params.taskMode || params.mode || segment.taskMode || segment.mode);
+        const { compilation, composite } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
+        const scenePrompt = appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
         const refs = compilation.references.map((reference) => ({ ...reference, type: reference.mediaType, name: reference.label } as H3Ref));
         if (params.motionContextEnabled === true && !plan.continuation) throw new Error("Motion Context（V15 潜空间续写）必须使用「运行当前及后续分镜」，不能单独运行一个 Clip。");
         if (plan.continuation) {
@@ -328,7 +352,21 @@ export class CanvasH3Runner {
         if (imageRefs.length > 9) throw new Error("MiniMax H3 最多支持 9 张参考图片");
         if (videoRefs.length > 3) throw new Error("MiniMax H3 最多支持 3 段参考视频");
         if (audioRefs.length > 3) throw new Error("MiniMax H3 最多支持 3 段参考音频");
-        const images = await Promise.all(imageRefs.map((ref) => this.resolveRef(ref)));
+        let compositeImagePath = "";
+        if (composite) {
+            const originalCompilation = compileReferenceSubmission(project, { ...segment, taskMode });
+            const sourcePaths = await Promise.all(composite.panels.map(async (panel) => {
+                const reference = originalCompilation.references.find((item) => item.id === panel.bindingId);
+                if (!reference) throw new Error(`合成分镜图缺少绑定图片: ${panel.bindingId}`);
+                return this.resolveRef({ ...reference, type: reference.mediaType, name: reference.label } as H3Ref);
+            }));
+            const created = await createStoryboardComposite(composite, sourcePaths);
+            compositeTempDir = created.directory;
+            compositeImagePath = created.filePath;
+        }
+        const images = await Promise.all(imageRefs.map((ref) => composite && ref.bindingId === composite.representativeBindingId && compositeImagePath
+            ? compositeImagePath
+            : this.resolveRef(ref)));
         const audios = await Promise.all(audioRefs.map((ref) => this.resolveRef(ref)));
         const videos = await Promise.all(videoRefs.map((ref) => this.resolveRef(ref)));
         const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
@@ -344,9 +382,12 @@ export class CanvasH3Runner {
         const previousPath = (needsPreviousVideo || seamNeedsPrevious) && previous?.result
             ? await this.resolveRef({ url: previous.result, storageKey: previous.resultStorageKey, name: `clip-${plan.segmentIndex}.mp4`, type: "video" })
             : "";
-        let prompt = compilation.compiledPrompt;
+        let prompt = scenePrompt;
+        const submittedImageReferences = imageRefs.map((ref) => composite && ref.bindingId === composite.representativeBindingId
+            ? { ...ref }
+            : ref);
         const actualReferences: Array<Record<string, unknown>> = [
-            ...imageRefs,
+            ...submittedImageReferences,
             ...videoRefs,
             ...audioRefs,
         ];
@@ -385,6 +426,7 @@ export class CanvasH3Runner {
             compiledPrompt: prompt,
             bindingMap: compilation.references.map((reference) => ({ id: reference.id, assetId: reference.assetId, label: reference.label, role: reference.role, mediaType: reference.mediaType, ordinal: reference.ordinal, token: reference.token, usage: reference.usage })),
             actualReferences,
+            ...(composite ? { storyboardComposite: { rows: composite.rows, columns: composite.columns, sourceBindingIds: composite.sourceBindingIds, panels: composite.panels } } : {}),
             warnings: compilation.issues.filter((issue) => issue.severity === "warning"),
             continuation: { tailFrame: useTailFrame, previousVideo: usePreviousAsReference, motionContext: Boolean(plan.continuation) },
         };
@@ -394,7 +436,7 @@ export class CanvasH3Runner {
             prompt, references: actualReferences, inputCounts: { image: images.length, video: referenceVideos.length, audio: audios.length }, startedAt: new Date().toISOString(), durationMs: 0, outputs: [], params: { ...params, submission },
         });
         this.events.publish({ type: "generation-log.created", entityId: log.id, payload: log });
-        const childParams = { ...params, parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id, bindOnStart: false } };
+        const childParams = { ...params, ...(compositeTempDir ? { storyboardCompositeTempDir: compositeTempDir } : {}), parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id, bindOnStart: false } };
         const childInput = confirmingSecondPass ? {
             prompt,
             video: cachedFirstPassPath,
@@ -411,8 +453,26 @@ export class CanvasH3Runner {
         const child = engine === "runninghub"
             ? await this.runningHub.run(childInput, childParams, undefined, bind)
             : await this.comfy.run("minimax-h3", childInput, childParams, undefined, undefined, bind);
+        if (compositeTempDir) {
+            void this.cleanupStoryboardCompositeWhenTerminal(child.id, compositeTempDir);
+            compositeTempDir = undefined;
+        }
         this.stores.tasks.addEvent(parent.id, "child_started", { nodeId: plan.nodeId, segmentId: plan.segmentId, segmentIndex: plan.segmentIndex, childTaskId: child.id, generationLogId: log.id });
         return child;
+        } finally {
+            if (compositeTempDir) await cleanupStoryboardCompositeDirectory(compositeTempDir);
+        }
+    }
+
+    private async cleanupStoryboardCompositeWhenTerminal(taskId: string, directory: string) {
+        while (true) {
+            const task = this.stores.tasks.get(taskId);
+            if (!task || ["succeeded", "failed", "cancelled"].includes(task.status)) {
+                await cleanupStoryboardCompositeDirectory(directory);
+                return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
     }
 
     private bindParent(task: RuntimeTask) {

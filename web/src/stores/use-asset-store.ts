@@ -56,6 +56,7 @@ export type SceneAsset = AssetBase<"scene"> & {
         description: string;
         image: SceneImage;
         colorCard?: SceneImage;
+        colorPalette?: string[];
         colorCardPrompt: string;
     };
 };

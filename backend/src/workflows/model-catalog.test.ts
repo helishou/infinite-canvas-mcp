@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { resolveWorkflowForModel } from "../canvas/model-workflow.js";
 import { WorkflowModelCatalog } from "./model-catalog.js";
 
 function fixtures() {
@@ -159,4 +160,106 @@ test("乱码标题回退为文件名", async () => {
     channels: Array<{ models: Array<{ name: string }> }>;
   };
   assert.equal(config.channels[0].models[0].name, "生图");
+});
+
+test("删除工作流会解除模型引用并把原生效场景标记为不支持", () => {
+  const { values, catalog } = fixtures();
+  values.set("ai.config", {
+    imageModel: "local::模型",
+    channels: [
+      {
+        id: "local",
+        kind: "comfyui",
+        models: [
+          {
+            name: "模型",
+            capability: "image",
+            workflows: ["custom/a.json", "custom/b.json"],
+            workflowRouting: {
+              text: "custom/a.json",
+              single: "custom/b.json",
+            },
+            workflowParams: {
+              text: { seed: 1 },
+              single: { seed: 2 },
+              multi: { seed: 3 },
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(catalog.detachDeletedWorkflow("custom/a.json"), true);
+  const config = values.get("ai.config") as {
+    channels: Array<{
+      models: Array<{
+        workflows?: string[];
+        workflowRouting?: Record<string, string>;
+        workflowParams?: Record<string, Record<string, unknown>>;
+      }>;
+    }>;
+  };
+  const model = config.channels[0].models[0];
+  assert.deepEqual(model.workflows, ["custom/b.json"]);
+  assert.deepEqual(model.workflowRouting, {
+    text: "__unsupported__",
+    single: "custom/b.json",
+    multi: "__unsupported__",
+  });
+  assert.deepEqual(model.workflowParams, { single: { seed: 2 } });
+  assert.deepEqual(resolveWorkflowForModel(config, "local::模型", 0), {
+    ok: false,
+    reason: "unsupported",
+    scenario: "text",
+    channelId: "local",
+    modelName: "模型",
+  });
+  assert.deepEqual(resolveWorkflowForModel(config, "local::模型", 1), {
+    ok: true,
+    workflow: "custom/b.json",
+    scenario: "single",
+    channelId: "local",
+    params: { seed: 2 },
+  });
+  assert.deepEqual(resolveWorkflowForModel(config, "local::模型", 2), {
+    ok: false,
+    reason: "unsupported",
+    scenario: "multi",
+    channelId: "local",
+    modelName: "模型",
+  });
+  assert.equal(catalog.detachDeletedWorkflow("custom/a.json"), false);
+});
+
+test("删除唯一挂载工作流会将未显式路由的所有场景标记为不支持", () => {
+  const { values, catalog } = fixtures();
+  values.set("ai.config", {
+    channels: [
+      {
+        id: "local",
+        kind: "comfyui",
+        models: [
+          { name: "模型", capability: "image", workflows: ["custom/a.json"] },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(catalog.detachDeletedWorkflow("custom/a.json"), true);
+  const config = values.get("ai.config") as {
+    channels: Array<{
+      models: Array<{
+        workflows?: string[];
+        workflowRouting?: Record<string, string>;
+      }>;
+    }>;
+  };
+  const model = config.channels[0].models[0];
+  assert.equal(model.workflows, undefined);
+  assert.deepEqual(model.workflowRouting, {
+    text: "__unsupported__",
+    single: "__unsupported__",
+    multi: "__unsupported__",
+  });
 });

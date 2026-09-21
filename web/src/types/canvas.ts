@@ -166,6 +166,7 @@ export type CanvasNodeMetadata = {
     sceneDescription?: string;
     sceneImage?: { url: string; storageKey?: string; name: string; width: number; height: number; bytes: number; mimeType: string };
     sceneColorCard?: { url: string; storageKey?: string; name: string; width: number; height: number; bytes: number; mimeType: string };
+    sceneColorPalette?: string[];
     sceneColorCardPrompt?: string;
     loopCount?: number;
     loopMode?: "serial" | "parallel";

@@ -696,17 +696,25 @@ export class ComfyUiBackend {
     private async cancelComfyExecution(taskId: string) {
         const execution = this.comfyExecutions.get(taskId);
         if (!execution) return;
-        const { url, promptId } = execution;
-        try {
-            if (promptId) {
-                await fetch(`${url}/queue`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ delete: [promptId] }) });
-            }
-            // ComfyUI uses /interrupt for the currently executing prompt;
-            // queued prompts are handled by the /queue delete above.
-            await fetch(`${url}/interrupt`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-        } catch (error) {
-            this.deps.tasks.addEvent(taskId, "cancel_error", { error: error instanceof Error ? error.message : String(error) });
+        await this.cancelPromptExecution(execution.url, execution.promptId, taskId);
+    }
+
+    async cancelPromptExecution(comfyUrl: string, promptId: string | undefined, taskId: string) {
+        const url = comfyUrl.replace(/\/$/, "");
+        const errors: string[] = [];
+        if (promptId) {
+            try {
+                const response = await fetch(`${url}/queue`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ delete: [promptId] }) });
+                if (!response.ok) errors.push(`/queue HTTP ${response.status}`);
+            } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
         }
+        // ComfyUI uses /interrupt for the currently executing prompt;
+        // queued prompts are handled by the /queue delete above.
+        try {
+            const response = await fetch(`${url}/interrupt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(promptId ? { prompt_id: promptId } : {}) });
+            if (!response.ok) errors.push(`/interrupt HTTP ${response.status}`);
+        } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
+        if (errors.length) this.deps.tasks.addEvent(taskId, "cancel_error", { promptId, errors });
     }
 
     public async upload(file: string, signal: AbortSignal, comfyUrl = this.url) {

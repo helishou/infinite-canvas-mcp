@@ -3,17 +3,17 @@ import assert from "node:assert/strict";
 
 import { compileReferenceSubmission } from "./reference-contract.js";
 
-test("稳定引用按 binding id 编译，重排后提示词编号自动更新", () => {
+test("提示词使用公开编号标签，主体定义补入对应图片引用", () => {
     const project = { referenceCatalog: [
         { id: "a", label: "人物", mediaType: "image", role: "character_identity", tags: [], storageKey: "image:a" },
         { id: "b", label: "分镜", mediaType: "image", role: "storyboard", tags: [], storageKey: "image:b" },
     ] };
-    const segment = { taskMode: "ref2va", prompt: "{{subject:bind-a}} 对照 {{ref:bind-b}}", referenceBindings: [
+    const segment = { taskMode: "ref2va", prompt: "subject_definitions:\n<subject 1> 人物定义\nsummary:\n对照 <picture 1>", referenceBindings: [
         { id: "bind-b", assetId: "b", label: "分镜", role: "storyboard", tags: [], enabled: true, usage: "reference" },
-        { id: "bind-a", assetId: "a", label: "人物", role: "character_identity", tags: [], enabled: true, usage: "reference" },
+        { id: "bind-a", assetId: "a", label: "人物", role: "character_identity", tags: [], enabled: true, usage: "reference", subjectId: "person-a" },
     ] };
     const result = compileReferenceSubmission(project, segment);
-    assert.equal(result.compiledPrompt, "<Subject 1> 对照 <Picture 1>");
+    assert.equal(result.compiledPrompt, "subject_definitions:\n<Subject 1> 人物定义 The source appearance and costume are referenced from <Picture 2>.\nsummary:\n对照 <Picture 1>");
     assert.deepEqual(result.references.map((ref) => ref.role), ["storyboard", "character_identity"]);
     assert.equal(result.issues.filter((issue) => issue.severity === "error").length, 0);
 });
@@ -26,9 +26,14 @@ test("旧 refs 首次读取可归一化为 bindings，色卡只警告不阻断",
     assert.ok(result.issues.some((issue) => issue.code === "palette_as_runtime_reference" && issue.severity === "warning"));
 });
 
-test("语义提示词引用缺失 binding 时预检报错", () => {
-    const result = compileReferenceSubmission({}, { taskMode: "ref2va", prompt: "{{ref:missing}}", referenceBindings: [] });
-    assert.ok(result.issues.some((issue) => issue.code === "prompt_binding_missing" && issue.severity === "error"));
+test("公开编号标签规范化为 H3 接口大小写", () => {
+    const result = compileReferenceSubmission({}, { taskMode: "ref2va", prompt: "<subject 1> from <picture 2>", referenceBindings: [] });
+    assert.equal(result.compiledPrompt, "<Subject 1> from <Picture 2>");
+});
+
+test("公开编号标签引用未启用的素材时预检报错", () => {
+    const result = compileReferenceSubmission({}, { taskMode: "ref2va", prompt: "<Picture 1>", referenceBindings: [] });
+    assert.ok(result.issues.some((issue) => issue.code === "prompt_reference_missing" && issue.severity === "error"));
 });
 
 test("T2V 提示词引用参考素材时预检阻断", () => {
@@ -38,7 +43,7 @@ test("T2V 提示词引用参考素材时预检阻断", () => {
 
 test("Clip 绑定职责覆盖项目资产默认职责，但媒体读取项目资产最新版本", () => {
     const project = { referenceCatalog: [{ id: "asset-1", label: "项目素材", mediaType: "image", role: "scene", tags: ["项目标签"], storageKey: "image:new" }] };
-    const segment = { taskMode: "ref2va", prompt: "{{ref:binding-1}}", referenceBindings: [{ id: "binding-1", assetId: "asset-1", label: "旧快照", role: "blocking", tags: ["本镜站位"], enabled: true, usage: "reference", storageKey: "image:old" }] };
+    const segment = { taskMode: "ref2va", prompt: "<picture 1>", referenceBindings: [{ id: "binding-1", assetId: "asset-1", label: "旧快照", role: "blocking", tags: ["本镜站位"], enabled: true, usage: "reference", storageKey: "image:old" }] };
     const result = compileReferenceSubmission(project, segment);
 
     assert.equal(result.references[0].role, "blocking");

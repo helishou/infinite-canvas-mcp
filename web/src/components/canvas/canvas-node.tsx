@@ -62,7 +62,7 @@ export type CanvasNodeProps = {
     onConnectStart: (event: React.MouseEvent, nodeId: string, handleType: "source" | "target") => void;
     onResizeStart: (nodeId: string) => void;
     onResize: (nodeId: string, width: number, height: number, position?: Position) => void;
-    onResizeEnd: (nodeId: string) => void;
+    onResizeEnd: (nodeId: string, bounds?: { width: number; height: number; position: Position }) => void;
     // 角色节点双击标题：打开完整编辑面板（名字/描述/参考图/声线）
     onEditCharacter?: (node: CanvasNodeData) => void;
     // 拖入图片/音频到角色节点
@@ -369,13 +369,15 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
         const width = adaptiveImageWidth * scale;
         const height = adaptiveImageHeight * scale;
         if (Math.abs(width - props.data.width) < 0.5 && Math.abs(height - props.data.height) < 0.5) return;
-        props.onResizeStart(props.data.id);
-        props.onResize(props.data.id, width, height, {
-            x: props.data.position.x + (props.data.width - width) / 2,
-            y: props.data.position.y + (props.data.height - height) / 2,
+        props.onResizeEnd(props.data.id, {
+            width,
+            height,
+            position: {
+                x: props.data.position.x + (props.data.width - width) / 2,
+                y: props.data.position.y + (props.data.height - height) / 2,
+            },
         });
-        props.onResizeEnd(props.data.id);
-    }, [adaptiveImageHeight, adaptiveImageWidth, props.data.height, props.data.id, props.data.position.x, props.data.position.y, props.data.width, props.onResize, props.onResizeEnd, props.onResizeStart]);
+    }, [adaptiveImageHeight, adaptiveImageWidth, props.data.height, props.data.id, props.data.position.x, props.data.position.y, props.data.width, props.onResizeEnd]);
     const screenShortSide = Math.min(resolvedProps.data.width, resolvedProps.data.height) * resolvedProps.scale;
     const detailModeRef = useRef(screenShortSide > NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE);
     if (screenShortSide >= NODE_DETAIL_MODE_ENTER_SCREEN_SIZE) detailModeRef.current = true;

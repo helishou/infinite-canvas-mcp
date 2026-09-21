@@ -11,7 +11,9 @@ import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-sto
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { cn } from "@/lib/utils";
 import { VoiceAssetSelect } from "@/components/assets/voice-asset-select";
+import { SceneColorPaletteEditor } from "@/components/canvas/scene-color-palette-editor";
 import { findCharacterVoiceAsset, hasCharacterVoiceSource, resolveCharacterVoiceName } from "@/lib/character-voice";
+import { extractSceneColorPalette, normalizeSceneColorPalette } from "@/lib/canvas/scene-color-palette";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAssetStore, type Asset, type AssetKind, type CharacterAsset, type CharacterImage, type ImageAsset, type VideoAsset, type AudioAsset, type SceneAsset, type SceneImage } from "@/stores/use-asset-store";
 import { exportAssets, exportCharacterImages, readAssetPackage } from "./asset-transfer";
@@ -79,12 +81,29 @@ export default function AssetsPage() {
     const [characterVoice, setCharacterVoice] = useState<{ url: string; name: string; description: string; storageKey?: string; assetId: string }>({ url: "", name: "", description: "", assetId: "" });
     const [sceneImageDraft, setSceneImageDraft] = useState<SceneImage | null>(null);
     const [sceneColorCardDraft, setSceneColorCardDraft] = useState<SceneImage | null>(null);
+    const [sceneColorPaletteDraft, setSceneColorPaletteDraft] = useState<string[]>([]);
+    const [extractingScenePalette, setExtractingScenePalette] = useState(false);
+    const scenePaletteExtractionIdRef = useRef(0);
     const coverUrl = Form.useWatch("coverUrl", form) || "";
     const title = Form.useWatch("title", form) || "";
     const tags = Form.useWatch("tags", form) || [];
     const content = Form.useWatch("content", form) || "";
     const characterCoverUrl = characterImages[Math.min(Math.max(characterPrimaryIndex, 0), Math.max(0, characterImages.length - 1))]?.url || "";
     const sceneCoverUrl = sceneImageDraft?.url || "";
+    const extractColorCardPalette = useCallback(async (card: SceneImage) => {
+        const extractionId = ++scenePaletteExtractionIdRef.current;
+        setExtractingScenePalette(true);
+        try {
+            const palette = await extractSceneColorPalette(card);
+            if (extractionId !== scenePaletteExtractionIdRef.current) return;
+            setSceneColorPaletteDraft(palette);
+            if (!palette.length) message.info(t("canvas.scene.colorPaletteEmptyResult"));
+        } catch {
+            if (extractionId === scenePaletteExtractionIdRef.current) message.warning(t("canvas.scene.colorPaletteExtractFailed"));
+        } finally {
+            if (extractionId === scenePaletteExtractionIdRef.current) setExtractingScenePalette(false);
+        }
+    }, [message, t]);
     const validAssets = useMemo(() => assets.filter((asset) => asset.kind === "text" || asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "character" || asset.kind === "scene"), [assets]);
     const audioAssets = useMemo(() => assets.filter((asset): asset is AudioAsset => asset.kind === "audio"), [assets]);
     const dramaOptions = useMemo(() => [
@@ -266,6 +285,9 @@ export default function AssetsPage() {
             setCharacterVoice({ url: "", name: "", description: "", assetId: "" });
             setSceneImageDraft(null);
             setSceneColorCardDraft(null);
+            setSceneColorPaletteDraft([]);
+            scenePaletteExtractionIdRef.current++;
+            setExtractingScenePalette(false);
             setFormKind("text");
             form.setFieldsValue({ kind: "text", title: "", coverUrl: "", tags: [], source: t("assets.manual"), note: "", content: "", sceneColorCardPrompt: "", dramaId: dropDramaId || UNASSIGNED_DRAMA });
         setIsAssetOpen(true);
@@ -279,6 +301,9 @@ export default function AssetsPage() {
         setAudioDraft(asset.kind === "audio" ? asset.data as AudioAsset["data"] : null);
         setSceneImageDraft(asset.kind === "scene" ? asset.data.image : null);
         setSceneColorCardDraft(asset.kind === "scene" ? asset.data.colorCard || null : null);
+        setSceneColorPaletteDraft(asset.kind === "scene" ? asset.data.colorPalette || [] : []);
+        scenePaletteExtractionIdRef.current++;
+        setExtractingScenePalette(false);
         setCharacterImages(asset.kind === "character" ? asset.data.images : []);
         if (asset.kind === "character") {
             const coverIndex = asset.data.images.findIndex((image) => image.url === asset.coverUrl);
@@ -357,11 +382,13 @@ export default function AssetsPage() {
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         } else if (values.kind === "scene") {
             if (!sceneImageDraft) { message.error(t("assets.sceneRequireImage")); return; }
+            const colorPalette = normalizeSceneColorPalette(sceneColorPaletteDraft);
             const sceneData: SceneAsset["data"] = {
                 name: values.title.trim(),
                 description: (values.content || "").trim(),
                 image: sceneImageDraft,
                 colorCard: sceneColorCardDraft || undefined,
+                colorPalette: colorPalette.length ? colorPalette : undefined,
                 colorCardPrompt: (values.sceneColorCardPrompt || "").trim(),
             };
             const asset = { ...base, kind: "scene" as const, data: sceneData, coverUrl: sceneImageDraft.url };
@@ -396,7 +423,11 @@ export default function AssetsPage() {
         const uploaded = await uploadImage(file, { category: "library" });
         const draft: SceneImage = { url: uploaded.url, storageKey: uploaded.storageKey, name: file.name, width: uploaded.width, height: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
         if (slot === "image") setSceneImageDraft(draft);
-        else setSceneColorCardDraft(draft);
+        else {
+            setSceneColorCardDraft(draft);
+            setSceneColorPaletteDraft([]);
+            void extractColorCardPalette(draft);
+        }
         if (!form.getFieldValue("title")) form.setFieldValue("title", file.name);
     };
 
@@ -917,6 +948,15 @@ export default function AssetsPage() {
                                         {sceneColorCardDraft ? <Typography.Text type="secondary" className="ml-3 text-xs">{sceneColorCardDraft.width}x{sceneColorCardDraft.height} · {formatBytes(sceneColorCardDraft.bytes)}</Typography.Text> : <Typography.Text type="secondary" className="ml-3 text-xs">{t("assets.noSceneColorCardSelected")}</Typography.Text>}
                                     </div>
                                 </Form.Item>
+                                <div className="px-1 pb-2">
+                                    <SceneColorPaletteEditor
+                                        colors={sceneColorPaletteDraft}
+                                        onChange={setSceneColorPaletteDraft}
+                                        onReextract={() => { if (sceneColorCardDraft) void extractColorCardPalette(sceneColorCardDraft); }}
+                                        reextracting={extractingScenePalette}
+                                        hasColorCard={Boolean(sceneColorCardDraft)}
+                                    />
+                                </div>
                                 <Form.Item name="sceneColorCardPrompt" label={t("assets.fields.sceneColorCardPrompt")}>
                                     <Input.TextArea rows={3} placeholder={t("assets.fields.sceneColorCardPromptPlaceholder")} />
                                 </Form.Item>

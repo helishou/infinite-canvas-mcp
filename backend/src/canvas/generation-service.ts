@@ -12,7 +12,9 @@ import {
     isMaskOverlayNode,
     resolveCanvasImageReferences,
     resolveCanvasImageReferencesByIds,
+    resolveCanvasSceneNodes,
 } from "./image-references.js";
+import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { CanvasTextDispatcher, type CanvasTextGenerationInput } from "./text-dispatcher.js";
 import { CanvasVideoDispatcher } from "./video-dispatcher.js";
 import { CanvasAudioDispatcher } from "./audio-dispatcher.js";
@@ -109,6 +111,24 @@ export class CanvasGenerationService {
     }
 
     private resolveImageReferences(command: CanvasGenerationCommand): CanvasGenerationCommand {
+        const resolved = this.resolveImageReferencesOnly(command);
+        if (command.mode !== "image" && command.mode !== "video") return resolved;
+        if (!command.projectId) return resolved;
+        const project = this.stores.projects.get(command.projectId);
+        if (!project) return resolved;
+        const sourceNodeId = command.sourceNodeId || command.nodeId;
+        if (!sourceNodeId) return resolved;
+        const explicitReferenceNodeIds = Array.isArray(recordOf(command).referenceNodeIds)
+            ? (recordOf(command).referenceNodeIds as unknown[]).map(String)
+            : [];
+        const scenes = explicitReferenceNodeIds.length
+            ? sceneNodesByIds(project as unknown as Record<string, unknown>, explicitReferenceNodeIds)
+            : resolveCanvasSceneNodes(project, sourceNodeId);
+        if (!scenes.length) return resolved;
+        return { ...resolved, prompt: appendScenePalettePrompt(String(resolved.prompt || ""), scenes) };
+    }
+
+    private resolveImageReferencesOnly(command: CanvasGenerationCommand): CanvasGenerationCommand {
         // 蒙版局部修改的参考图由调用方按提示词顺序给定（图片1=原图、图片2=蒙版），
         // 必须原样透传：源节点常是智能节点（type=config），图谱回溯会把它上游的
         // 角色/场景/站位图当成参考图，把原图和蒙版一起换掉。

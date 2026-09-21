@@ -26,6 +26,11 @@ export function useCanvasDocument(projectId: string) {
         if (!before || before.summary) return;
         const value = typeof action === "function" ? (action as (value: CanvasProject[K]) => CanvasProject[K])(before[field]) : action;
         if (Object.is(before[field], value)) return;
+        // 函数式 action（map/filter/concat）每次都返回新数组引用，绕过 Object.is；
+        // 如果内容实际未变仍调 updateProject，会在 React 18 StrictMode dev 模式
+        // 或 zustand 通知顺序中反复 setState，最终报 Maximum update depth exceeded。
+        // 节点 / 连线 / 会话字段都是纯 JSON 数据，浅 JSON 比对即可。
+        if (typeof action === "function" && JSON.stringify(before[field]) === JSON.stringify(value)) return;
         store.updateProject(projectId, { [field]: value });
         const after = useCanvasStore.getState().projects.find((item) => item.id === projectId)!;
         if (!diffCanvasProject(before, after).length) return;

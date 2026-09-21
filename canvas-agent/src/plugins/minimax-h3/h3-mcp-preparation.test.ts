@@ -67,7 +67,7 @@ test("h3_prepare_clip 一次原子写入继承参数、角色组和已有节点�
         projectId: "project-1",
         nodeId: "h3-1",
         segmentId: "s2",
-        patch: { sourceShotId: "S01-04~S01-06", title: "第二段", duration: 9, prompt: "{{subject:shen-zhao}}\n第二段动作" },
+        patch: { sourceShotId: "S01-04~S01-06", title: "第二段", duration: 9, prompt: "<Subject 1>\n第二段动作" },
         characters: [{ characterNodeId: "character-1", subjectId: "shen-zhao", selectedOutfitStorageKeys: ["image:1"], voiceEnabled: false }],
     });
 
@@ -98,7 +98,7 @@ test("h3_prepare_clip 预检失败时不写入部分状态", async () => {
         projectId: "project-1",
         nodeId: "h3-1",
         segmentId: "s2",
-        patch: { prompt: "{{subject:character-1}}" },
+        patch: { prompt: "<Subject 1>" },
         characters: [{ characterNodeId: "character-1", selectedOutfitStorageKeys: ["image:1"] }],
     }), /characterAssetId/);
     assert.equal(calls.length, 0);

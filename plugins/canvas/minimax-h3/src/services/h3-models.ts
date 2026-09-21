@@ -41,5 +41,6 @@ export function compatibleH3Settings(segment: H3Segment, fallbackModel: string, 
 }
 
 export function sameRef(left: H3Ref, right: H3Ref) {
+    if (left.role === "scene" && right.role === "scene" && left.nodeId && right.nodeId) return left.nodeId === right.nodeId;
     return Boolean(left.storageKey && right.storageKey) ? left.storageKey === right.storageKey : left.url === right.url;
 }

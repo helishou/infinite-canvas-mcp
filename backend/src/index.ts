@@ -212,6 +212,14 @@ async function startBackendHttpServer() {
           payload: { synced: true },
         });
     },
+    (name) => {
+      if (workflowModels.detachDeletedWorkflow(name))
+        runtime.events.publish({
+          type: "settings.updated",
+          entityId: "ai.config",
+          payload: { synced: true },
+        });
+    },
   );
   registerCanvasGenerationRoutes(app, canvasGeneration);
   registerCanvasBrowserScriptRoutes(app, canvasBrowserScriptDispatcher);

@@ -13,7 +13,7 @@ export type InsertAssetPayload =
     | { kind: "video"; url: string; title: string; storageKey?: string; width?: number; height?: number }
     | { kind: "audio"; url: string; title: string; storageKey?: string; bytes: number; mimeType: string; durationMs?: number }
     | { kind: "character"; assetId: string; title: string; description: string; images: CharacterImage[]; primaryIndex: number; voice: string; voiceName: string; voiceDescription: string; voiceStorageKey?: string; voiceAssetId: string }
-    | { kind: "scene"; assetId: string; title: string; description: string; image: SceneImage; colorCard?: SceneImage; colorCardPrompt: string };
+    | { kind: "scene"; assetId: string; title: string; description: string; image: SceneImage; colorCard?: SceneImage; colorPalette?: string[]; colorCardPrompt: string };
 
 type Props = {
     open: boolean;
@@ -117,7 +117,7 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
                 voiceAssetId: asset.data.voiceAssetId || voiceAsset?.id || "",
             });
         } else if (asset.kind === "scene") {
-            onInsert({ kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorCardPrompt: asset.data.colorCardPrompt });
+            onInsert({ kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorPalette: asset.data.colorPalette, colorCardPrompt: asset.data.colorCardPrompt });
         } else {
             onInsert({ kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title });
         }

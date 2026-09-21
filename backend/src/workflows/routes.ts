@@ -16,6 +16,7 @@ export function registerWorkflowRoutes(
   executor: WorkflowExecutor,
   comfy?: ComfyUiBackend,
   onImported?: (name: string) => void | Promise<void>,
+  onDeleted?: (name: string) => void | Promise<void>,
 ) {
   // 媒体字段（图片/音频/视频）必须显式传入，不允许带默认值（存量配置里
   // 可能残留工作流现成文件名当 default，运行时会当成已提供图片导致报错）。
@@ -173,6 +174,7 @@ export function registerWorkflowRoutes(
     try {
       const name = decodeURIComponent(req.params.name as string);
       const result = await store.delete(name);
+      await onDeleted?.(name);
       res.json(result);
     } catch (error) {
       res
