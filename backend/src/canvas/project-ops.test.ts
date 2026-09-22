@@ -78,6 +78,42 @@ test("add_h3_segment：按 id 追加新段到末尾，重复 id 抛错", () => {
     ]), /已存在/);
 });
 
+test("add_h3_segment：可按 beforeSegmentId / afterSegmentId 插入并保留完整段字段", () => {
+    const project = makeProject([makeH3Node({
+        segments: [
+            { id: "s1", prompt: "开场", referenceBindings: [{ id: "r1" }] },
+            { id: "s2", prompt: "中段", referenceBindings: [{ id: "r2" }] },
+        ],
+    })]);
+    const before = applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_h3_segment", nodeId: "h3-1", beforeSegmentId: "s2", segment: { id: "s1b", prompt: "插入前", referenceBindings: [{ id: "rb" }] } },
+    ]);
+    assert.equal(before[0].insertedSegmentIndex, 1);
+    let segments = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
+    assert.deepEqual(segments.map((segment) => segment.id), ["s1", "s1b", "s2"]);
+    assert.deepEqual(segments[1].referenceBindings, [{ id: "rb" }]);
+
+    const after = applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_h3_segment", nodeId: "h3-1", afterSegmentId: "s1b", segment: { id: "s1c", prompt: "插入后" } },
+    ]);
+    assert.equal(after[0].insertedSegmentIndex, 2);
+    segments = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
+    assert.deepEqual(segments.map((segment) => segment.id), ["s1", "s1b", "s1c", "s2"]);
+});
+
+test("add_h3_segment：插入定位参数互斥且必须命中已有段", () => {
+    const project = makeProject([makeH3Node()]);
+    assert.throws(() => applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_h3_segment", nodeId: "h3-1", beforeSegmentId: "s1", afterSegmentId: "s2", segment: { id: "s3" } },
+    ]), /不能同时指定/);
+    assert.throws(() => applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_h3_segment", nodeId: "h3-1", beforeSegmentId: "missing", segment: { id: "s3" } },
+    ]), /beforeSegmentId 不存在/);
+    assert.throws(() => applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_h3_segment", nodeId: "h3-1", afterSegmentId: "missing", segment: { id: "s4" } },
+    ]), /afterSegmentId 不存在/);
+});
+
 test("delete_h3_segment：按 id 删除；远端已无该段视为 skipped", () => {
     const project = makeProject([makeH3Node()]);
     const results = applyCanvasProjectOperations(project as Record<string, unknown>, [
@@ -123,6 +159,18 @@ test("replace_h3_segments：完全替换；id 集合变化是允许的", () => {
     assert.deepEqual(results[0].createdSegmentIds?.sort(), ["x1", "x2"]);
     const segments = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
     assert.deepEqual(segments.map((s) => s.id), ["x1", "x2"]);
+});
+
+test("replace_h3_segments：禁止遗漏已有参考字段导致静默清空", () => {
+    const project = makeProject([makeH3Node()]);
+    const segments = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
+    segments[0].refs = { image: [{ storageKey: "image:keep" }], video: [], audio: [] };
+    segments[0].refItems = [{ storageKey: "image:keep" }];
+    segments[0].referenceBindings = [{ id: "binding-keep", assetId: "asset-keep" }];
+    assert.throws(() => applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "replace_h3_segments", nodeId: "h3-1", segments: [{ id: "s1", prompt: "重排但丢了 refs" }, { id: "s2", prompt: "保留" }] },
+    ]), /必须显式携带 refs、refItems、referenceBindings/);
+    assert.equal((segments[0].referenceBindings as unknown[]).length, 1);
 });
 
 test("update_node.metadata.segments 严格校验：id 集合不一致时抛错", () => {

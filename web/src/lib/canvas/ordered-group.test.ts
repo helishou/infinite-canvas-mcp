@@ -28,6 +28,17 @@ test("ordered group removes stale empty slots when a member leaves", () => {
     assert.deepEqual(result, ["a", "b"]);
 });
 
+test("ordered group slots are the membership record, not the group rectangle or groupId", () => {
+    const target = group(["a"]);
+    const recordedBySlot = member("a");
+    const visuallyInside = { ...member("mcp-node"), position: { x: 120, y: 100 } };
+    const explicitlyRecorded = { ...member("recorded"), position: { x: 240, y: 100 } };
+    assert.deepEqual(orderedGroupSlots(target, [target, recordedBySlot, visuallyInside, explicitlyRecorded]), ["a"]);
+    assert.deepEqual(orderedGroupSlots({ ...target, metadata: { ...target.metadata, groupSlots: ["recorded"] } }, [target, recordedBySlot, visuallyInside, explicitlyRecorded]), ["recorded"]);
+    assert.deepEqual(orderedGroupSlots({ ...target, metadata: { ...target.metadata, groupSlots: [] } }, [target, { ...recordedBySlot, metadata: { groupId: "g" } }, visuallyInside, explicitlyRecorded]), ["a"]);
+    assert.deepEqual(orderedGroupSlots({ ...target, metadata: { orderedGroup: true } }, [target, { ...recordedBySlot, metadata: { groupId: "g" } }]), ["a"]);
+});
+
 test("ordered group automatically completes the last row and adds a fresh row when full", () => {
     assert.deepEqual(orderedGroupDisplaySlots(["a", "b", "c"]), ["a", "b", "c", null]);
     assert.deepEqual(orderedGroupDisplaySlots(["a", "b", "c", "d"]), ["a", "b", "c", "d", null, null, null, null]);

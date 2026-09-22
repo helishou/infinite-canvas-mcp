@@ -51,7 +51,7 @@ export function findGroupDropTarget(movedIds: Set<string>, nodes: CanvasNodeData
     const groups = candidates?.groups || nodes;
     for (let index = groups.length - 1; index >= 0; index -= 1) {
         const group = groups[index];
-        if (!candidates && (group.type !== CanvasNodeType.Group || movedIds.has(group.id) || group.metadata?.groupLocked)) continue;
+        if (group.type !== CanvasNodeType.Group || group.metadata?.orderedGroup || (!candidates && (movedIds.has(group.id) || group.metadata?.groupLocked))) continue;
         if (movingNodes.some((node) => containsCenter(group, node, previewPositions))) return group;
     }
     return null;
@@ -77,7 +77,7 @@ export function snapNodesIntoGroup(movedIds: Set<string>, nodes: CanvasNodeData[
 export function findContainingGroupId(node: CanvasNodeData, nodes: CanvasNodeData[]) {
     for (let index = nodes.length - 1; index >= 0; index -= 1) {
         const group = nodes[index];
-        if (group.type === CanvasNodeType.Group && group.id !== node.id && containsCenter(group, node)) return group.id;
+        if (group.type === CanvasNodeType.Group && !group.metadata?.orderedGroup && group.id !== node.id && containsCenter(group, node)) return group.id;
     }
     return undefined;
 }

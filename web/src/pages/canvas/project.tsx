@@ -1909,9 +1909,10 @@ function InfiniteCanvasPage() {
             currentNodes.forEach((node) => {
                 if (!nextSelected.has(node.id)) return;
                 if (node.type === CanvasNodeType.Group) {
-                    currentNodes.forEach((child) => {
-                        if (child.metadata?.groupId === node.id) dragIds.add(child.id);
-                    });
+                    const childIds = node.metadata?.orderedGroup
+                        ? orderedGroupSlots(node, currentNodes)
+                        : currentNodes.filter((child) => child.metadata?.groupId === node.id).map((child) => child.id);
+                    childIds.forEach((childId) => dragIds.add(childId));
                 }
             });
             const movedNodes = currentNodes.filter((node) => dragIds.has(node.id));
@@ -2119,15 +2120,24 @@ function InfiniteCanvasPage() {
                         const position = initial ? previewPositions.get(node.id) || { x: initial.x + dx, y: initial.y + dy } : null;
                         return position ? { ...node, position } : node;
                     });
-                    const targetGroup = findGroupDropTarget(movedIds, moved);
-                    const grouped = targetGroup
-                        ? snapNodesIntoGroup(movedIds, moved, targetGroup)
-                        : moved.map((node) => {
-                              if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
-                              const groupId = findContainingGroupId(node, moved);
-                              if (node.metadata?.groupId === groupId) return node;
-                              return { ...node, metadata: { ...node.metadata, groupId } };
-                          });
+                    const movingGroup = moved.some((node) => movedIds.has(node.id) && node.type === CanvasNodeType.Group);
+                    const targetGroup = movingGroup ? null : findGroupDropTarget(movedIds, moved);
+                    // 组拖动只移动已记录的组和成员，不重新按矩形命中关系改写成员归属；
+                    // 否则有序组移动到普通组附近时，会把成员从 groupSlots 中错误移走。
+                    const grouped = movingGroup
+                        ? moved.map((node) => {
+                              if (node.type !== CanvasNodeType.Group || !node.metadata?.orderedGroup) return node;
+                              // 兼容 MCP/旧快照只写 groupId 的有序组：首次拖动时把解析出的成员固化为 slots。
+                              return { ...node, metadata: { ...node.metadata, groupSlots: orderedGroupSlots(node, prev) } };
+                          })
+                        : targetGroup
+                          ? snapNodesIntoGroup(movedIds, moved, targetGroup)
+                          : moved.map((node) => {
+                                if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
+                                const groupId = findContainingGroupId(node, moved);
+                                if (node.metadata?.groupId === groupId) return node;
+                                return { ...node, metadata: { ...node.metadata, groupId } };
+                            });
                     const movedOutOfOrderedGroups = new Map<string, Set<string>>();
                     prev.forEach((node) => {
                         if (!movedIds.has(node.id) || !node.metadata?.groupId) return;

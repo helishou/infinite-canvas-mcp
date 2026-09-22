@@ -216,25 +216,6 @@ const TOOLS: PluginMcpToolWire[] = [
             required: ["projectId"],
         },
     },
-    {
-        id: "h3_prepare_clip",
-        version: "1.0.0",
-        name: "H3 原子准备片段",
-        description: "一次性继承已完成片段参数、更新剧情/分镜/参考和已有角色组，编译并返回最终提交快照；预检失败不写入。",
-        inputJsonSchema: {
-            type: "object",
-            properties: {
-                projectId: { type: "string" },
-                nodeId: { type: "string" },
-                segmentId: { type: "string" },
-                inheritFromSegmentId: { type: "string", description: "已验证来源片段；省略则取目标之前最近完成片段" },
-                patch: { type: "object", description: "剧情字段和明确要覆盖的 H3 参数；不得包含 h3CharacterGroups/referenceBindings" },
-                referenceBindings: { type: "array", items: { type: "object" }, description: "完整替换后的参考绑定列表" },
-                characters: { type: "array", items: { type: "object", properties: { characterNodeId: { type: "string" }, subjectId: { type: "string", description: "提示词使用的稳定 subjectId；将同步写入角色组和全部角色参考绑定" }, selectedOutfitStorageKeys: { type: "array", items: { type: "string" } }, voiceEnabled: { type: "boolean" } }, required: ["characterNodeId", "selectedOutfitStorageKeys"] } },
-            },
-            required: ["projectId", "nodeId", "segmentId", "patch"],
-        },
-    },
     { id: "canvas_list_reference_assets", version: "1.0.0", name: "列出项目参考资产", description: "列出项目级参考资产库及其主要职责、标签和媒体句柄。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" } }, required: ["projectId"] } },
     { id: "canvas_update_reference_asset", version: "1.0.0", name: "更新项目参考资产", description: "新增或更新项目参考资产；职责只保存一个 primary role，补充语义放 tags。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, asset: { type: "object" } }, required: ["projectId", "asset"] } },
     { id: "canvas_analyze_reference_asset", version: "1.0.0", name: "记录参考资产分析", description: "把模型对参考素材的职责、标签和摘要写入项目资产；调用方应先实际查看素材再提交分析。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, assetId: { type: "string" }, role: { type: "string" }, tags: { type: "array", items: { type: "string" } }, summary: { type: "string" }, model: { type: "string" } }, required: ["projectId", "assetId", "role", "tags", "summary"] } },
@@ -402,7 +383,7 @@ async function assertProjectNode(context: PluginMcpContext, projectId: string, n
 
 export const pluginMcp: PluginMcpModule = {
     id: "minimax-h3",
-    version: "1.5.0",
+    version: "1.5.1",
     tools: TOOLS,
     createHandler(context: PluginMcpContext): Record<string, McpToolHandler> {
         return {
@@ -618,7 +599,12 @@ export const pluginMcp: PluginMcpModule = {
                 // 计划只描述剧情字段；节点上的生成参数（模型/LoRA/采样等）必须继承下来，
                 // 否则前端 H3Runner 会按 segment 缺省值静默回退到错误模型。
                 const inherited = inheritedH3Params(node);
-                const next = rawSegments.map((item) => ({ ...inherited, ...normalizePlannedSegment(item) }));
+                const next = rawSegments.map((item) => {
+                    const normalized = normalizePlannedSegment(item) as Record<string, unknown>;
+                    const previous = existing.find((segment) => String(segment.id || "") === String(normalized.id || ""));
+                    const preservedReferences = previous ? Object.fromEntries(["refs", "refItems", "referenceBindings"].filter((key) => normalized[key] === undefined && previous[key] !== undefined).map((key) => [key, previous[key]])) : {};
+                    return { ...inherited, ...preservedReferences, ...normalized };
+                });
                 if (input.replaceSegments === false) {
                     // append 路径：每个新段都走细粒度 add_h3_segment，避免一次写整数组触发冲突。
                     for (const segment of next) {

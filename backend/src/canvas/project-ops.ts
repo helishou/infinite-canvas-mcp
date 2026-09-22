@@ -13,6 +13,7 @@ export type CanvasOperationResult = {
     createdSegmentIds?: string[];
     updatedSegmentIds?: string[];
     deletedSegmentIds?: string[];
+    insertedSegmentIndex?: number;
     skipped?: boolean;
 };
 
@@ -160,11 +161,26 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             if (findSegmentIndex(segments, String(incoming.id)) >= 0) {
                 throw new Error(`segment id ${String(incoming.id)} 已存在`);
             }
-            segments.push(incoming);
+            const beforeSegmentId = String(operation.beforeSegmentId || "").trim();
+            const afterSegmentId = String(operation.afterSegmentId || "").trim();
+            if (beforeSegmentId && afterSegmentId) {
+                throw new Error("add_h3_segment 不能同时指定 beforeSegmentId 和 afterSegmentId");
+            }
+            let insertIndex = segments.length;
+            if (beforeSegmentId) {
+                insertIndex = findSegmentIndex(segments, beforeSegmentId);
+                if (insertIndex < 0) throw new Error(`beforeSegmentId 不存在：${beforeSegmentId}`);
+            } else if (afterSegmentId) {
+                const afterIndex = findSegmentIndex(segments, afterSegmentId);
+                if (afterIndex < 0) throw new Error(`afterSegmentId 不存在：${afterSegmentId}`);
+                insertIndex = afterIndex + 1;
+            }
+            segments.splice(insertIndex, 0, incoming);
             const metadata = recordOf(node.metadata);
             metadata.segments = segments;
             node.metadata = metadata;
             result.createdSegmentIds = [String(incoming.id)];
+            result.insertedSegmentIndex = insertIndex;
         } else if (operation.type === "replace_h3_segments") {
             // 完全替换 segments（plan 重排等场景）。显式 op 走细粒度通道，绕过 update_node.metadata.segments 的「同 id 集合」严格校验。
             const nodeId = String(operation.nodeId || "");
@@ -183,6 +199,19 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const previousSegments = segmentsOf(node);
             const previousIds = previousSegments.map((segment) => String(segment.id || ""));
             const incomingIds = incoming.map((segment) => String(segment.id || ""));
+            // replace_h3_segments 是整数组替换；遗漏参考字段会把已有参考静默清空。
+            // 参考应通过细粒度绑定工具显式修改，重排/计划替换必须完整携带三组字段。
+            const referenceFields = ["refs", "refItems", "referenceBindings"] as const;
+            for (const segment of incoming) {
+                const id = String(segment.id || "");
+                const previous = previousSegments.find((item) => String(item.id || "") === id);
+                if (!previous) continue;
+                const hadReferences = referenceFields.some((field) => previous[field] !== undefined);
+                const carriesReferences = referenceFields.every((field) => Object.prototype.hasOwnProperty.call(segment, field));
+                if (hadReferences && !carriesReferences) {
+                    throw new Error(`replace_h3_segments 拒绝覆盖 ${nodeId}/${id}：必须显式携带 refs、refItems、referenceBindings，避免清空已有参考`);
+                }
+            }
             result.deletedSegmentIds = previousIds.filter((id) => !incomingIds.includes(id));
             result.createdSegmentIds = incomingIds.filter((id) => !previousIds.includes(id));
             const metadata = recordOf(node.metadata);

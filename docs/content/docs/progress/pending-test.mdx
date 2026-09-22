@@ -5,9 +5,17 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Ordered group membership records
+
+- Create an ordered group, then use MCP to create nodes inside the group frame without adding them to `groupSlots`; move the ordered group and confirm those nodes do not move with it or become members merely because their coordinates are inside the frame. Explicitly drop a node into an ordered-group slot, then confirm it is recorded and follows the group after reload.
+
 ## H3 MCP 输出瘦身
 
-- 调用 `h3_write_storyboard_prompt`、`h3_apply_video_plan`、`h3_update_clip`、参考绑定及 H3 任务工具，确认成功响应只返回标识、计数、变更字段或任务结果摘要。调用 `h3_get_clip` 确认只返回轻量总览，再分别用 `h3_get_clip_prompt`、`h3_get_clip_references`、`h3_get_clip_runtime` 按需读取详细内容；生成预检和准备 Clip 仍能返回完整诊断快照。
+- 调用 `h3_write_storyboard_prompt`、`h3_apply_video_plan`、`h3_update_clip`、参考绑定及 H3 任务工具，确认成功响应只返回标识、计数、变更字段或任务结果摘要。调用 `h3_get_clip` 确认只返回轻量总览，再分别用 `h3_get_clip_prompt`、`h3_get_clip_references`、`h3_get_clip_runtime` 按需读取详细内容；工具列表中不再出现 `h3_prepare_clip`。
+
+## H3 Clip 重排参考保护
+
+- 对已有参考图的 H3 Clip 执行整体重排或视频计划替换，确认缺少 `refs`、`refItems`、`referenceBindings` 时后端拒绝写入并保留原参考；通过合法 H3 视频计划重排时确认原 Clip 的参考字段被继承。
 
 ## 本地 IndexTTS 2.5 配音
 

@@ -51,7 +51,7 @@ export type PluginMcpContext = {
     updateCanvasNode: (id: string, patch: Partial<AgentCanvasNode>, metadataPatch?: Record<string, unknown>) => Promise<void>;
     /** H3 单段原子更新；可选 nodeMetadataPatch 用于把当前面板配置同步到节点级投影。 */
     updateH3Segment: (nodeId: string, segmentId: string, patch: Record<string, unknown>, nodeMetadataPatch?: Record<string, unknown>) => Promise<void>;
-    addH3Segment: (nodeId: string, segment: Record<string, unknown>) => Promise<void>;
+    addH3Segment: (nodeId: string, segment: Record<string, unknown>, placement?: { beforeSegmentId?: string; afterSegmentId?: string }) => Promise<void>;
     deleteH3Segment: (nodeId: string, segmentId: string) => Promise<void>;
     /** 完全替换 H3 节点的 segments（plan 重排等场景）。 */
     replaceH3Segments: (nodeId: string, segments: Array<Record<string, unknown>>) => Promise<void>;
@@ -145,11 +145,11 @@ export function buildPluginMcpContext(config: CanvasAgentConfig, backend: Plugin
             if (nodeMetadataPatch && Object.keys(nodeMetadataPatch).length) operations.push({ type: "update_node", id: nodeId, metadata: nodeMetadataPatch });
             await backend.applyCanvasOperations(String(target.id), operations, Number(target.revision || 0));
         },
-        addH3Segment: async (nodeId, segment) => {
+        addH3Segment: async (nodeId, segment, placement) => {
             const projects = await backend.listCanvasProjects() as Array<{ id?: string; revision?: number; nodes?: AgentCanvasNode[] }>;
             const target = projects.find((project) => Array.isArray(project.nodes) && project.nodes.some((node) => node.id === nodeId));
             if (!target) throw new Error(`找不到画布节点：${nodeId}`);
-            const op = { type: "add_h3_segment", nodeId, segment };
+            const op = { type: "add_h3_segment", nodeId, segment, ...(placement || {}) };
             await backend.applyCanvasOperations(String(target.id), [op], Number(target.revision || 0));
         },
         deleteH3Segment: async (nodeId, segmentId) => {
