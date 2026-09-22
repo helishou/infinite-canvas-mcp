@@ -147,6 +147,10 @@ export type CanvasNodeMetadata = {
     generationResultsByMode?: Partial<Record<CanvasGenerationMode, CanvasNodeModeResult>>;
     groupId?: string;
     groupLocked?: boolean;
+    /** 有序组：只持久化紧凑的成员顺序；尾部空格由布局自动派生。 */
+    orderedGroup?: boolean;
+    groupSlots?: string[];
+    orderedGroupColumns?: number;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
     // 角色节点：characterAssetId 关联到资产库里的 CharacterAsset；characterImages 是节点自带的角色图谱快照（来自资产库或本地编辑）。
     characterAssetId?: string;
@@ -259,6 +263,7 @@ export type ContextMenuState =
           y: number;
           nodeId: string;
       }
+
     | {
           type: "connection";
           x: number;

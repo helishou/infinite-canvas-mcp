@@ -13,6 +13,9 @@ import { buildStoryboardPromptSections, storyboardPromptFingerprint } from "../s
 import { extractDialogues, stripDialogueSpeakers, injectDialogueSpeakers, parseSubjectSpeakerMap, collectSpeakerIds } from "../services/storyboard-dialogue";
 import { h3ThemeVars } from "../h3-theme";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
+import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
+import { formatShotTimestamp, stripDuplicateTransition, validatePromptReferences, validateShotTimeline, visualReferenceTags } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
+import type { H3PromptSection, H3PromptSectionValues } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import baseReference from "../storyboard-assets/references/base-en.txt?raw";
 import refReference from "../storyboard-assets/references/ref-en.txt?raw";
 
@@ -127,7 +130,7 @@ type MentionItem = { ref: H3Ref; ordinal: number };
 type StoryboardTransition = "continuous" | "cut" | "dissolve" | "fade_black";
 type StoryboardShot = { id: string; description: string; switchTime: string; transitionType: StoryboardTransition; pictureBindingId?: string; dialogueSpeakers?: string[] };
 type StoryboardCompositeLayout = { rows: number; columns: number; panels: Array<{ bindingId: string; index: number; row: number; column: number; shotNumbers: number[] }> };
-type PromptSection = "subject_definitions" | "summary" | "retention_analysis" | "detailed_description" | "integrated_multimodal_description" | "overall_soundscape" | "non_diegetic_music";
+type PromptSection = H3PromptSection;
 
 const STORYBOARD_TRANSITIONS: Array<{ value: StoryboardTransition; label: string; prompt: string }> = [
   { value: "continuous", label: "连续镜头（不切镜）", prompt: "continue the same uninterrupted shot; preserve camera movement, action, and spatial relationships without a cut or reset" },
@@ -150,7 +153,7 @@ function storyboardPictureAsset(ref: H3Ref, assets: CanvasReferenceAsset[]) {
 function storyboardPictureDescription(ref: H3Ref, assets: CanvasReferenceAsset[]) {
   const asset = storyboardPictureAsset(ref, assets);
   const summary = typeof asset?.analysis?.summary === "string" ? asset.analysis.summary.trim() : typeof ref.analysis?.summary === "string" ? ref.analysis.summary.trim() : "";
-  const tags = [...new Set([...(asset?.tags || []), ...(ref.tags || [])].map((tag) => tag.trim()).filter(Boolean))].join(", ");
+  const tags = visualReferenceTags([...(asset?.tags || []), ...(ref.tags || [])]).join(", ");
   const clean = (value: string) => value
     .split(/\r?\n/u)[0]
     .replace(/\bep\d{1,3}[-_ ]s\d{1,3}[-_ ]\d{1,3}\b/giu, " ")
@@ -187,7 +190,7 @@ function storyboardCompositeLayout(enabled: boolean, shots: StoryboardShot[], re
   shots.forEach((shot, index) => {
     const ids = [...new Set([
       ...(shot.pictureBindingId ? [shot.pictureBindingId] : []),
-      ...Array.from(shot.description.matchAll(/<Picture\s+(\d+)>/giu), (match) => imageRefs[Number(match[1]) - 1]?.bindingId).filter((id): id is string => Boolean(id)),
+      ...pictureBindingIdsInDescription(shot.description, imageRefs),
     ])];
     ids.filter((id) => available.has(id)).forEach((id) => shotUses.set(id, [...(shotUses.get(id) || []), index + 1]));
   });
@@ -216,6 +219,26 @@ function isStoryboardPictureRef(ref: H3Ref) {
   return ref.type === "image" && ref.enabled !== false && inferReferenceRole(ref) === "storyboard";
 }
 
+function referenceTagForBindingId(bindingId: string, refs: H3Ref[]) {
+  const ref = refs.find((item) => item.bindingId === bindingId);
+  if (!ref) return "";
+  const ordinal = refs.filter((item) => item.type === ref.type).findIndex((item) => item.bindingId === bindingId) + 1;
+  if (ordinal < 1) return "";
+  const kind = ref.type === "image" ? "Picture" : ref.type === "video" ? "Video" : "Audio";
+  return `<${kind} ${ordinal}>`;
+}
+
+function normalizeLegacyReferenceTokens(text: string, refs: H3Ref[]) {
+  return text.replace(/\{\{\s*ref:\s*([^{}]+?)\s*\}\}/gu, (marker, rawId: string) => referenceTagForBindingId(rawId.trim(), refs) || marker);
+}
+
+function pictureBindingIdsInDescription(description: string, imageRefs: H3Ref[]) {
+  return [...new Set([
+    ...Array.from(description.matchAll(/<Picture\s+(\d+)>/giu), (match) => imageRefs[Number(match[1]) - 1]?.bindingId),
+    ...Array.from(description.matchAll(/\{\{\s*ref:\s*([^{}]+?)\s*\}\}/gu), (match) => imageRefs.find((ref) => ref.bindingId === match[1].trim())?.bindingId),
+  ].filter((id): id is string => Boolean(id)))];
+}
+
 function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment, fields: { openingDescription: string; summary: string; soundscape: string; music: string }, shots: StoryboardShot[], referenceCatalog: CanvasReferenceAsset[], retentionLevels: Record<string, H3ReferenceRetention> = {}) {
   const originalRefs = refsForSegment(segment).map((ref) => ref.bindingId && retentionLevels[ref.bindingId] ? { ...ref, retentionLevel: retentionLevels[ref.bindingId] } : ref);
   const composite = storyboardCompositeLayout(segment.storyboardCompositeEnabled === true, shots, originalRefs);
@@ -232,7 +255,7 @@ function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment,
   const imageReferences = originalRefs.filter((ref) => ref.type === "image");
   const shotReferenceIds = new Set(shots.flatMap((shot) => [
     ...(shot.pictureBindingId ? [shot.pictureBindingId] : []),
-    ...Array.from(shot.description.matchAll(/<Picture\s+(\d+)>/giu), (match) => imageReferences[Number(match[1]) - 1]?.bindingId).filter((id): id is string => Boolean(id)),
+    ...pictureBindingIdsInDescription(shot.description, imageReferences),
   ]));
   const isPictureAnchor = (ref: H3Ref, role: string) => ref.type === "image" && (
     ref.usage === "first_frame" || ref.usage === "last_frame" ||
@@ -283,7 +306,7 @@ function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment,
         const characterImages = Array.isArray(metadata.characterImages) ? metadata.characterImages as Array<Record<string, unknown>> : [];
         const image = characterImages.find((item) => String(item.outfit || item.name || "") === outfit?.name);
         const outfitDescription = typeof image?.outfitDescription === "string" ? image.outfitDescription.trim() : "";
-        if (outfit && (outfit.name || outfitDescription)) entry.outfits.add([outfit.name, outfitDescription].filter(Boolean).join(": "));
+        if (outfitDescription) entry.outfits.add(outfitDescription);
       }
       const pictureMarker = tag;
       if (!entry.pictures.includes(pictureMarker) && ref.type === "image") entry.pictures.push(pictureMarker);
@@ -363,14 +386,15 @@ function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment,
     pictures: subject.pictures,
     role: subject.role,
   }));
+  validatePromptReferences([fields.summary, fields.openingDescription, ...shots.map((shot) => shot.description), fields.soundscape, fields.music].join("\n"), originalRefs, subjectManifest.length);
   const normalizedShots = shots.map((shot) => ({
-    description: shot.description.trim(),
+    description: normalizeLegacyReferenceTokens(shot.description.trim(), originalRefs),
     switchTime: shot.switchTime.trim(),
     transitionType: shot.transitionType || "cut",
     pictureBindingId: shot.pictureBindingId && compositeSourceIds.has(shot.pictureBindingId) ? representativeBindingId || shot.pictureBindingId : shot.pictureBindingId || "",
     pictureDescription: shot.pictureBindingId ? storyboardPictureDescription(refs.find((ref) => ref.bindingId === shot.pictureBindingId) || { name: "", url: "", type: "image", bindingId: shot.pictureBindingId }, referenceCatalog) : "",
     referenceIds: [...new Set([
-      ...Array.from(shot.description.matchAll(/\{\{ref:([^{}]+)\}\}/gu), (match) => match[1]),
+      ...pictureBindingIdsInDescription(shot.description, imageReferences),
       ...(shot.pictureBindingId ? [shot.pictureBindingId] : []),
     ].map((id) => compositeSourceIds.has(id) ? representativeBindingId || id : id))],
   }));
@@ -393,62 +417,24 @@ function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment,
   return { content, subjects: subjectManifest, shots: normalizedShots, references: finalReferences };
 }
 
-const H3_PROMPT_SECTION_END = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description|storyboard_timeline):/mi;
-
-function promptSectionHeader(section: PromptSection) {
-  return new RegExp(`^${section}:[ \\t]*`, "mi");
-}
-
-function storyboardBodyStart(prompt: string, header: RegExpExecArray) {
-  let start = header.index + header[0].length;
-  if (prompt[start] === "\r") start += 1;
-  if (prompt[start] === "\n") start += 1;
-  return start;
-}
-
 function readPromptSection(prompt: string, section: PromptSection) {
-  const header = promptSectionHeader(section).exec(prompt);
-  if (!header) return "";
-  const bodyStart = storyboardBodyStart(prompt, header);
-  const body = prompt.slice(bodyStart);
-  const next = H3_PROMPT_SECTION_END.exec(body);
-  return body.slice(0, next?.index ?? body.length).trim();
+  return readH3PromptSection(prompt, section);
 }
 
-function replacePromptSection(prompt: string, section: PromptSection, content: string, promptMode: keyof typeof H3_PROMPT_MODE_CONFIG) {
-  const header = promptSectionHeader(section).exec(prompt);
-  if (!header) {
-    const order: PromptSection[] = promptMode === "ref2va"
-      ? ["subject_definitions", "summary", "retention_analysis", "detailed_description", "overall_soundscape", "non_diegetic_music"]
-      : ["integrated_multimodal_description", "overall_soundscape", "non_diegetic_music"];
-    const sectionIndex = order.indexOf(section);
-    const nextSection = order.slice(sectionIndex + 1).find((name) => promptSectionHeader(name).test(prompt));
-    const next = nextSection ? promptSectionHeader(nextSection).exec(prompt) : null;
-    const sectionText = `${section}:\n${content}`;
-    if (next) return `${prompt.slice(0, next.index).trimEnd()}\n\n${sectionText}\n\n${prompt.slice(next.index)}`;
-    return `${prompt.trimEnd()}${prompt.trim() ? "\n\n" : ""}${sectionText}`;
-  }
-  const bodyStart = storyboardBodyStart(prompt, header);
-  const remainder = prompt.slice(bodyStart);
-  const next = H3_PROMPT_SECTION_END.exec(remainder);
-  const bodyEnd = bodyStart + (next?.index ?? remainder.length);
-  const prefix = `${prompt.slice(0, header.index)}${section}:\n`;
-  const suffix = prompt.slice(bodyEnd).replace(/^(?:\r?\n)+/, "");
-  return `${prefix}${content}${suffix ? "\n\n" : content ? "\n" : ""}${suffix}`;
-}
 
-function parseStoryboardDescription(description: string, imageRefs: H3Ref[]) {
-  const markers = [...description.matchAll(/\[Shot\s+(\d+)\](?:\s+At\s+(\d{1,2}:\d{2}(?:\.\d{1,3})?)[,，]?)?/giu)];
+function parseStoryboardDescription(description: string, imageRefs: H3Ref[], allRefs = imageRefs) {
+  const normalizedDescription = normalizeLegacyReferenceTokens(description, allRefs);
+  const markers = [...normalizedDescription.matchAll(/\[Shot\s+(\d+)\](?:\s+At\s+(\d{1,2}:\d{2}(?:\.\d{1,3})?)[,，]?)?/giu)];
   if (!markers.length) return {
-    openingDescription: description.trim(),
+    openingDescription: normalizedDescription.trim(),
     shots: [{ id: crypto.randomUUID(), description: "", switchTime: "", transitionType: "cut" as const }],
   };
   return {
-    openingDescription: description.slice(0, markers[0].index!).trim(),
+    openingDescription: normalizedDescription.slice(0, markers[0].index!).trim(),
     shots: markers.map((marker, index) => {
       const start = marker.index! + marker[0].length;
-      const end = markers[index + 1]?.index ?? description.length;
-      let body = description.slice(start, end).trim();
+      const end = markers[index + 1]?.index ?? normalizedDescription.length;
+      let body = normalizedDescription.slice(start, end).trim();
       let transitionType: StoryboardTransition = "cut";
       let switchTime = marker[2] || "";
       const boundaryTime = body.match(/^(\d{1,2}:\d{2}(?:\.\d{1,3})?)\s*[:：]\s*/u);
@@ -471,8 +457,8 @@ function parseStoryboardDescription(description: string, imageRefs: H3Ref[]) {
           { pattern: /^the shot (?:transitions|changes|switches) to\s*/iu, value: "cut" },
           { pattern: /^(?:the (?:shot|image) )?cross[- ]dissolves? to\s*/iu, value: "dissolve" },
           { pattern: /^(?:the (?:shot|image) )?fades? (?:to|into)\s*/iu, value: "fade_black" },
-          { pattern: /^the shot hard-cuts[.,]?\s*/iu, value: "cut" },
-          { pattern: /^the shot cross-dissolves[.,]?\s*/iu, value: "dissolve" },
+          { pattern: /^the shot hard-cuts(?:\s+to\s+|[.,]\s*)/iu, value: "cut" },
+          { pattern: /^the shot cross-dissolves(?:\s+to\s+|[.,]\s*)/iu, value: "dissolve" },
           { pattern: /^the shot fades out to black, then fades in[.,]?\s*/iu, value: "fade_black" },
           { pattern: /^the shot continues[.,]?\s*/iu, value: "continuous" },
         ];
@@ -532,9 +518,9 @@ function parseStoryboardDescription(description: string, imageRefs: H3Ref[]) {
           body = body.slice(compositePanelCue[0].length);
           continue;
         }
-        const residualLead = body.match(/^the shot (?:hard-cuts|cross-dissolves|continues|fades out to black, then fades in)[.,]?\s*/iu);
-        if (residualLead) {
-          body = body.slice(residualLead[0].length);
+        const withoutTransition = stripDuplicateTransition(body, transitionType);
+        if (withoutTransition !== body) {
+          body = withoutTransition;
           continue;
         }
         break;
@@ -551,52 +537,43 @@ function parseStoryboardDescription(description: string, imageRefs: H3Ref[]) {
   };
 }
 
-function alignStoryboardShotsToReferences(shots: StoryboardShot[], imageRefs: H3Ref[]) {
+export function alignStoryboardShotsToReferences(shots: StoryboardShot[], imageRefs: H3Ref[]) {
   const pictures = imageRefs.filter((ref) => isStoryboardPictureRef(ref) && ref.bindingId);
   if (!pictures.length) return { shots, changed: false };
 
   const pictureIds = new Set(pictures.map((ref) => ref.bindingId!));
-  const byPicture = new Map<string, StoryboardShot>();
+  const bound = new Map<string, StoryboardShot>();
+  const ordered: StoryboardShot[] = [];
   const unbound: StoryboardShot[] = [];
   let changed = false;
   for (const shot of shots) {
     const id = shot.pictureBindingId;
-    if (id && pictureIds.has(id) && !byPicture.has(id)) byPicture.set(id, shot);
-    else {
+    if (id && pictureIds.has(id) && !bound.has(id)) {
+      // 分镜轨是镜头顺序的权威来源。不要因为参考图槽位仍保持旧顺序，
+      // 把轨道交换后的已绑定镜头重新排回去。
+      bound.set(id, shot);
+      ordered.push(shot);
+    } else {
       if (id) changed = true;
       unbound.push(id ? { ...shot, pictureBindingId: undefined } : shot);
     }
   }
 
   let unboundIndex = 0;
-  const ordered = pictures.map((ref) => {
+  for (const ref of pictures) {
     const id = ref.bindingId!;
-    const existing = byPicture.get(id);
-    if (existing) return existing;
+    if (bound.has(id)) continue;
     const shot = unbound[unboundIndex++];
     changed = true;
     const next = shot || { id: crypto.randomUUID(), description: "", switchTime: "", transitionType: "cut" as const };
-    const bound = { ...next, pictureBindingId: id };
-    byPicture.set(id, bound);
-    return bound;
-  });
+    const nextBound = { ...next, pictureBindingId: id };
+    bound.set(id, nextBound);
+    ordered.push(nextBound);
+  }
+
   const aligned = [...ordered, ...unbound.slice(unboundIndex)];
   if (aligned.some((shot, index) => shots[index]?.id !== shot.id)) changed = true;
   return { shots: aligned, changed };
-}
-
-function formatShotTimestamp(raw: string): string {
-  const value = (raw || "").trim();
-  if (!value) return "";
-  // 已经是 MM:SS(.mmm) 形式 → 原样保留（解析器也接受该形式）。
-  if (/^\d{1,2}:\d{2}(?:\.\d{1,3})?$/.test(value)) return value;
-  const seconds = Number(value.replace(/s$/i, ""));
-  if (!Number.isFinite(seconds) || seconds < 0) return "";
-  const totalMs = Math.round(seconds * 1000);
-  const mm = Math.floor(totalMs / 60000);
-  const ss = Math.floor((totalMs % 60000) / 1000);
-  const ms = totalMs % 1000;
-  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${String(ms).padStart(3, "0")}`;
 }
 
 // 官方 H3 切镜写法：用自然句而非 [Transition:] 方括号标签。
@@ -615,8 +592,9 @@ function serializeStoryboardShots(shots: StoryboardShot[], imageRefs: H3Ref[], r
     const lead = index > 0 ? SHOT_TRANSITION_LEADIN[shot.transitionType] || SHOT_TRANSITION_LEADIN.cut : "";
     const transitionClause = lead ? ` ${lead}.` : "";
     const picture = storyboardFrameCue(shot, imageRefs, referenceCatalog, composite);
-    const compiledDescription = injectDialogueSpeakers(shot.description.trim(), shot.dialogueSpeakers || []);
-    const extraPanels = composite ? [...new Set(Array.from(shot.description.matchAll(/\{\{ref:([^{}]+)\}\}/gu), (match) => match[1]))]
+    const normalizedDescription = normalizeLegacyReferenceTokens(index ? stripDuplicateTransition(shot.description, shot.transitionType) : shot.description.trim(), imageRefs);
+    const compiledDescription = injectDialogueSpeakers(normalizedDescription, shot.dialogueSpeakers || []);
+    const extraPanels = composite ? pictureBindingIdsInDescription(normalizedDescription, imageRefs)
       .filter((id) => id !== shot.pictureBindingId).map((id) => composite.panels.find((panel) => panel.bindingId === id)).filter(Boolean)
       .map((panel) => `This shot uses composite storyboard Panel ${panel!.index} (row ${panel!.row}, column ${panel!.column}).`).join(" ") : "";
     return `[Shot ${index + 1}]${transition}${transitionClause}${picture ? ` ${picture}` : ""}${extraPanels ? ` ${extraPanels}` : ""}${compiledDescription ? ` ${compiledDescription}` : ""}`;
@@ -730,7 +708,7 @@ export function H3PromptSection({
   promptRef.current = { prompt, segmentId: selected?.id };
   const loadStoryboardPrompt = (sourcePrompt: string) => {
     const summary = promptMode === "ref2va" ? readPromptSection(sourcePrompt, "summary") : "";
-    const { openingDescription, shots: parsedShots } = parseStoryboardDescription(readPromptSection(sourcePrompt, storyboardSection), imageRefs);
+    const { openingDescription, shots: parsedShots } = parseStoryboardDescription(readPromptSection(sourcePrompt, storyboardSection), imageRefs, [...imageRefs, ...videoRefs, ...audioRefs]);
     const aligned = alignStoryboardShotsToReferences(parsedShots, imageRefs);
     const shots = aligned.shots;
     const soundscape = readPromptSection(sourcePrompt, "overall_soundscape");
@@ -799,11 +777,17 @@ export function H3PromptSection({
         setStoryboardError("结构化字段在其他位置也被修改。请重新载入最新提示词后再编辑，避免覆盖他人的修改。");
         return false;
       }
-      let nextPrompt = latestPrompt;
-      if (promptMode === "ref2va") nextPrompt = replacePromptSection(nextPrompt, "summary", fields.summary, promptMode);
-      nextPrompt = replacePromptSection(nextPrompt, storyboardSection, serializeStoryboardDescription(fields.openingDescription, shots, imageRefs, referenceCatalog, compositeEnabled), promptMode);
-      nextPrompt = replacePromptSection(nextPrompt, "overall_soundscape", fields.soundscape, promptMode);
-      nextPrompt = replacePromptSection(nextPrompt, "non_diegetic_music", fields.music, promptMode);
+      const sections: H3PromptSectionValues = {
+        ...(promptMode === "ref2va" ? {
+          subject_definitions: readPromptSection(latestPrompt, "subject_definitions"),
+          summary: fields.summary,
+          retention_analysis: readPromptSection(latestPrompt, "retention_analysis"),
+        } : {}),
+        overall_soundscape: fields.soundscape,
+        non_diegetic_music: fields.music,
+      };
+      sections[storyboardSection] = serializeStoryboardDescription(fields.openingDescription, shots, imageRefs, referenceCatalog, compositeEnabled);
+      const nextPrompt = assembleH3Prompt(promptMode, sections);
       if (nextPrompt === latestPrompt) {
         storyboardBasePromptRef.current = latestPrompt;
         if (version === storyboardVersionRef.current) {
@@ -950,6 +934,7 @@ export function H3PromptSection({
       const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
       const segment = segmentsFor(liveMetadata).find((item) => item.id === segmentId);
       if (!segment) throw new Error("当前 Clip 已不存在，无法生成提示词。");
+      validateShotTimeline(shots, Number(segment.duration));
       const expectedDescription = serializeStoryboardDescription(fields.openingDescription, shots, imageRefs, referenceCatalog, segment.storyboardCompositeEnabled === true);
       if (
         readPromptSection(before.text, "summary") !== fields.summary.trim() ||
@@ -963,7 +948,16 @@ export function H3PromptSection({
       const subjectBefore = readPromptSection(before.text, "subject_definitions");
       const retentionBefore = readPromptSection(before.text, "retention_analysis");
       const generated = buildStoryboardPromptSections(generation.subjects, generation.references, generation.shots);
-      const cacheMatchesPrompt = subjectBefore === generated.subjectDefinitions && retentionBefore === generated.retentionAnalysis;
+      const generatedSections: H3PromptSectionValues = {
+        subject_definitions: generated.subjectDefinitions,
+        summary: fields.summary,
+        retention_analysis: generated.retentionAnalysis,
+        detailed_description: expectedDescription,
+        overall_soundscape: fields.soundscape,
+        non_diegetic_music: fields.music,
+      };
+      const generatedPrompt = assembleH3Prompt(promptMode, generatedSections);
+      const cacheMatchesPrompt = subjectBefore === generated.subjectDefinitions && retentionBefore === generated.retentionAnalysis && before.text === generatedPrompt;
       if (segment.storyboardPromptCache?.version === 12 && segment.storyboardPromptCache.fingerprint === fingerprint && cacheMatchesPrompt) return true;
 
       await document.flush();
@@ -986,8 +980,7 @@ export function H3PromptSection({
         readPromptSection(latest.text, "retention_analysis") !== retentionBefore
       ) throw new Error("提示词在生成过程中被其他位置修改，未覆盖已有内容；请重新确认分镜后重试。");
 
-      let nextPrompt = replacePromptSection(latest.text, "subject_definitions", generated.subjectDefinitions, promptMode);
-      nextPrompt = replacePromptSection(nextPrompt, "retention_analysis", generated.retentionAnalysis, promptMode);
+      const nextPrompt = generatedPrompt;
       if (nextPrompt !== latest.text && !await ctx.replaceText(target, document.getDocumentId(), latest.text, nextPrompt)) {
         throw new Error("生成结果写入时发生并发修改，请重试。");
       }
@@ -1029,6 +1022,14 @@ export function H3PromptSection({
     if (!storyboardMode || mode !== "ref2va" || storyboardCompleting) return;
     setStoryboardCompleting(true);
     try {
+      validateShotTimeline(storyboardShotsRef.current, selected?.duration);
+      const refs = selected ? refsForSegment(selected) : [];
+      validatePromptReferences([storyboardSummaryRef.current, storyboardOpeningDescriptionRef.current, ...storyboardShotsRef.current.map((shot) => shot.description), storyboardSoundscapeRef.current, storyboardMusicRef.current].join("\n"), refs);
+      for (const [index, shot] of storyboardShotsRef.current.entries()) {
+        if (shot.pictureBindingId && !refs.some((ref) => ref.bindingId === shot.pictureBindingId && isStoryboardPictureRef(ref) && (ref.url || ref.storageKey))) {
+          throw new Error(`分镜 ${index + 1} 绑定的分镜图已失效，请重新选择。`);
+        }
+      }
       const expected = serializeStoryboardDescription(storyboardOpeningDescriptionRef.current, storyboardShotsRef.current, imageRefs, referenceCatalog, storyboardCompositeEnabledRef.current);
       if ((storyboardDirtyRef.current || readPromptSection(prompt, storyboardSection) !== expected) && !await saveStoryboard()) return;
       if (!persistStoryboardReferenceRetentions(storyboardShotsRef.current)) return;
@@ -1036,6 +1037,8 @@ export function H3PromptSection({
       storyboardDirtyRef.current = false;
       setStoryboardDirty(false);
       setStoryboardMode(false);
+    } catch (error) {
+      setStoryboardError(error instanceof Error ? error.message : String(error));
     } finally {
       setStoryboardCompleting(false);
     }
@@ -1258,6 +1261,7 @@ export function H3PromptSection({
       const subjectOrdinal = subjectId ? subjectOrdinalById.get(subjectId) : undefined;
       const referenceTag = item.ref.type === "image" ? `<Picture ${item.ordinal}>` : item.ref.type === "video" ? `<Video ${item.ordinal}>` : `<Audio ${item.ordinal}>`;
       const subjectTag = item.ref.type === "image" && subjectOrdinal ? `<Subject ${subjectOrdinal}>` : undefined;
+      const legacyReferenceTag = item.ref.bindingId ? `{{ref:${item.ref.bindingId}}}` : "";
       references.push({
         label,
         displayLabel: isOutfit ? label : item.ref.name || label,
@@ -1265,7 +1269,7 @@ export function H3PromptSection({
         kind: item.ref.type,
         previewUrl: item.ref.url,
         insert: subjectTag ? `${subjectTag} is the visual content referenced from ${referenceTag}` : referenceTag,
-        tokens: [referenceTag],
+        tokens: [referenceTag, legacyReferenceTag].filter(Boolean),
       });
     });
     return references;
@@ -1309,7 +1313,7 @@ export function H3PromptSection({
         kind: "image",
         previewUrl: ref.url,
         insert: pictureTag,
-        tokens: [pictureTag],
+        tokens: [pictureTag, `{{ref:${ref.bindingId}}}`],
       };
     }),
     ...characterReferences,
@@ -1317,7 +1321,7 @@ export function H3PromptSection({
 
   const boundStoryboardImageCount = new Set(storyboardShots.flatMap((shot) => [
     ...(shot.pictureBindingId ? [shot.pictureBindingId] : []),
-    ...Array.from(shot.description.matchAll(/<Picture\s+(\d+)>/giu), (match) => imageRefs[Number(match[1]) - 1]?.bindingId).filter((id): id is string => Boolean(id)),
+    ...pictureBindingIdsInDescription(shot.description, imageRefs),
   ]).filter((id) => imageRefs.some((ref) => isStoryboardPictureRef(ref) && ref.bindingId === id))).size;
 
   return (

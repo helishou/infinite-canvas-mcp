@@ -143,6 +143,11 @@ function TabButton({ label, active, theme, onClick }: { label: string; active: b
 // ---------------------------------------------------------------------------
 
 const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Loop, CanvasNodeType.Character, CanvasNodeType.Scene, CanvasNodeType.Group];
+const H3_NODE_TYPES = new Set(["minimax-h3:video", "smart-minimax", "minimax", "minimax-h3"]);
+
+function isVideoCanvasNode(node: CanvasNodeData) {
+    return node.type === CanvasNodeType.Video || H3_NODE_TYPES.has(node.type);
+}
 
 function nodePreviewText(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt || "";
@@ -150,7 +155,7 @@ function nodePreviewText(node: CanvasNodeData) {
 }
 
 function matchesNodeTypeFilter(node: CanvasNodeData, typeFilter: string) {
-    if (typeFilter === "all" || node.type === typeFilter) return true;
+    if (typeFilter === "all" || node.type === typeFilter || (typeFilter === CanvasNodeType.Video && isVideoCanvasNode(node))) return true;
     return node.type === CanvasNodeType.Config
         && node.metadata?.smart === true
         && (node.metadata.generationMode || "image") === typeFilter;

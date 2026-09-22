@@ -1,5 +1,8 @@
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment, H3StoryboardShot } from "../types";
+import { readH3PromptSection, replaceH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
+import type { H3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
+import { stripDuplicateTransition } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
 import { sameRef } from "./h3-compatibility";
 import { inferReferenceRole, refsForSegment, withSegmentRefs } from "./h3-data";
 
@@ -147,36 +150,15 @@ function removeLegacyTimelineSection(prompt: string) {
     return `${before}${before && after ? "\n\n" : ""}${after}`;
 }
 
-function readPromptSection(prompt: string, section: string) {
-    const header = new RegExp(`^${section}:[ \\t]*(?:\\r?\\n)?`, "mi").exec(prompt);
-    if (!header) return "";
-    const bodyStart = header.index + header[0].length;
-    const remainder = prompt.slice(bodyStart);
-    const next = PROMPT_SECTION_END.exec(remainder);
-    return remainder.slice(0, next?.index ?? remainder.length).trim();
-}
-
-function replacePromptSection(prompt: string, section: string, content: string, mode: string) {
-    const headerPattern = new RegExp(`^${section}:[ \\t]*(?:\\r?\\n)?`, "mi");
-    const header = headerPattern.exec(prompt);
-    if (!header) {
-        if (!content.trim()) return prompt;
-        const order = mode === "ref2va"
-            ? ["subject_definitions", "summary", "retention_analysis", "detailed_description", "overall_soundscape", "non_diegetic_music"]
-            : ["integrated_multimodal_description", "overall_soundscape", "non_diegetic_music"];
-        const nextSection = order.slice(order.indexOf(section) + 1).find((name) => new RegExp(`^${name}:[ \\t]*`, "mi").test(prompt));
-        const next = nextSection ? new RegExp(`^${nextSection}:[ \\t]*`, "mi").exec(prompt) : null;
-        const text = `${section}:\n${content.trim()}`;
-        return next ? `${prompt.slice(0, next.index).trimEnd()}\n\n${text}\n\n${prompt.slice(next.index)}` : `${prompt.trimEnd()}${prompt.trim() ? "\n\n" : ""}${text}`;
-    }
-    const bodyStart = header.index + header[0].length;
-    const remainder = prompt.slice(bodyStart);
-    const next = PROMPT_SECTION_END.exec(remainder);
-    const suffix = prompt.slice(bodyStart + (next?.index ?? remainder.length)).replace(/^(?:\r?\n)+/, "");
-    return `${prompt.slice(0, header.index)}${section}:\n${content.trimEnd()}${suffix ? `\n\n${suffix}` : ""}`;
-}
-
 type PromptShot = { body: string; bindingId?: string; managed: boolean };
+
+function normalizeLegacyPictureTokens(content: string, imageRefs: H3Ref[]) {
+    return content.replace(/\{\{\s*ref:\s*([^{}]+?)\s*\}\}/gu, (marker, rawId: string) => {
+        const id = rawId.trim();
+        const ordinal = imageRefs.findIndex((ref) => ref.bindingId === id) + 1;
+        return ordinal > 0 ? `<Picture ${ordinal}>` : marker;
+    });
+}
 
 function promptShotsOf(content: string, storyboardIds: Set<string>, imageRefs: H3Ref[]): { opening: string; shots: PromptShot[] } {
     const markers = [...content.matchAll(/\[Shot\s+\d+\]/giu)];
@@ -239,8 +221,8 @@ function normalizeTransition(body: string, hasPrecedingShot: boolean) {
         text = text.slice(bracket[0].length);
     } else {
         const natural = [
-            [/^the shot hard-cuts[.,]?\s*/iu, "cut"],
-            [/^the shot cross-dissolves[.,]?\s*/iu, "dissolve"],
+            [/^the shot hard-cuts(?:\s+to\s+|[.,]\s*)/iu, "cut"],
+            [/^the shot cross-dissolves(?:\s+to\s+|[.,]\s*)/iu, "dissolve"],
             [/^the shot fades out to black, then fades in[.,]?\s*/iu, "fade_black"],
             [/^the shot continues[.,]?\s*/iu, "continuous"],
         ] as const;
@@ -269,9 +251,9 @@ function normalizeTransition(body: string, hasPrecedingShot: boolean) {
             text = text.slice(residualCue[0].length).replace(/\s+/gu, " ").trim();
             continue;
         }
-        const residualLead = text.match(/^the shot (?:hard-cuts|cross-dissolves|continues|fades out to black, then fades in)[.,]?\s*/iu);
-        if (residualLead) {
-            text = text.slice(residualLead[0].length).replace(/\s+/gu, " ").trim();
+        const withoutTransition = stripDuplicateTransition(text, transitionType || "cut");
+        if (withoutTransition !== text) {
+            text = withoutTransition;
             continue;
         }
         break;
@@ -360,11 +342,14 @@ export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Se
         const prompt = removeLegacyTimelineSection(snapshot.text);
         const enabled = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment) && storyboardTrackItems(segment).length > 0;
         const mode = String(segment.mode || segment.taskMode || "ref2va");
-        const section = mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description";
-        const sectionText = readPromptSection(prompt, section);
+        const section = (mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description") as H3PromptSection;
+        const sectionText = readH3PromptSection(prompt, section);
+        const refs = refsForSegment(segment);
+        const imageRefs = refs.filter((ref) => ref.type === "image");
+        const normalizedSection = normalizeLegacyPictureTokens(sectionText, imageRefs);
         const activeItems = enabled ? storyboardTrackItems(segment) : [];
-        const syncedSection = syncPromptShots(sectionText, segment, activeItems);
-        const next = replacePromptSection(prompt, section, syncedSection, mode);
+        const syncedSection = syncPromptShots(normalizedSection, segment, activeItems);
+        const next = replaceH3PromptSection(prompt, section, syncedSection, mode);
         if (next === snapshot.text) return true;
         return await ctx.replaceText(target, document.getDocumentId(), snapshot.text, next);
     } catch (error) {

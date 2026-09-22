@@ -428,6 +428,7 @@ export class ComfyUiBackend {
             const uploadFn = preset === "minimax-h3"
                 ? (file: string) => this.localH3Input(file, controller.signal, comfyUrl)
                 : (file: string) => this.upload(file, controller.signal, comfyUrl);
+            if (preset === "minimax-h3") await refreshNanFengCatalog(comfyUrl, controller.signal);
             const workflow = preset === "minimax-h3"
                 ? await buildNativeNanFengV15Workflow(prepared.input, params, uploadFn, comfyUrl, controller.signal)
                 : await buildWorkflow(preset, prepared.input, params, uploadFn);
@@ -540,7 +541,7 @@ export class ComfyUiBackend {
             const startedAt = Date.now();
             const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(60 * 60 * 1000, Number(params.maxExecutionMs) || 30 * 60 * 1000));
             const stallTimeoutMs = params.stallTimeoutMs === undefined
-                ? 900 * 1000
+                ? 9000 * 1000
                 : Math.max(0, Number(params.stallTimeoutMs) || 0);
             lastActivityAt = startedAt;
             let missingHistoryCount = 0;
@@ -735,8 +736,11 @@ export class ComfyUiBackend {
         const direct = this.localH3DirectConfig();
         if (!direct.ready) throw new Error("H3 本地输入未就绪；请检查 ComfyUI 根目录，并确保画布媒体库独立于 ComfyUI 安装目录。");
         signal.throwIfAborted();
-        const name = await copyComfyInput(file, MEDIA_DIR, direct.rootDir);
-        const query = new URLSearchParams({ filename: path.basename(name), subfolder: path.posix.dirname(name), type: "input" });
+        // 南风 V15 的图片/视频/音频 COMBO 在 INPUT_TYPES 中只枚举
+        // os.listdir(ComfyUI/input)，因此不能提交 infinite-canvas-cache/input/...。
+        // 这里保持媒体库独立，只把执行副本平铺到 ComfyUI/input，行为与 /upload/image 一致。
+        const name = await copyComfyInput(file, MEDIA_DIR, direct.rootDir, true);
+        const query = new URLSearchParams({ filename: name, subfolder: "", type: "input" });
         const response = await fetch(`${comfyUrl}/view?${query}`, { method: "HEAD", signal });
         if (!response.ok) throw new Error(`H3 输入副本不可读：ComfyUI 未暴露 ${name}（HTTP ${response.status}）。请检查 ComfyUI input 目录。`);
         return name;
@@ -1044,6 +1048,7 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     if (signal.aborted) throw new Error("任务已取消");
     const mode = normalizeNanFengMode(params.mode ?? params.taskMode ?? (typeof input.video === "string" ? "ref2va" : "t2v"));
     if (params.postGenerationOnly === true) return buildDecodedH3SecondPassWorkflow(input, params, upload, signal);
+    params = await resolveNanFengWorkflowParams(_comfyUrl, params, signal);
     const refs = Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : [];
     const videos = (Array.isArray(input.videos) ? input.videos.map(String).filter(Boolean) : typeof input.video === "string" ? [input.video] : []).slice(0, 3);
     const audios = Array.isArray(input.audios) ? input.audios.map(String).filter(Boolean).slice(0, 3) : [];
@@ -1531,6 +1536,77 @@ function normalizeH3WorkflowModel(value: string) {
     };
     const key = requested.toLowerCase().replace(/^.*[\\/]/, "");
     return aliases[key] || requested;
+}
+
+function normalizeComfyChoiceKey(value: string) {
+    return value.toLowerCase().replace(/[\\/_\s-]/g, "");
+}
+
+function comfyChoiceBasename(value: string) {
+    return value.replace(/^[\\/]+/, "").split(/[\\/]/).pop()?.toLowerCase() || value.toLowerCase();
+}
+
+/** 将旧画布里保存的路径对齐到重装后南风节点当前的 COMBO 选项。 */
+function resolveComfyChoice(value: unknown, choices: string[], fallbackToFirst = false) {
+    const requested = String(value ?? "").trim();
+    if (!requested || !choices.length) return requested;
+    const direct = choices.find((choice) => choice === requested);
+    if (direct) return direct;
+    const key = normalizeComfyChoiceKey(requested);
+    const normalized = choices.filter((choice) => normalizeComfyChoiceKey(choice) === key);
+    if (normalized.length === 1) return normalized[0];
+    const filename = comfyChoiceBasename(requested);
+    const suffix = choices.filter((choice) => comfyChoiceBasename(choice) === filename);
+    if (suffix.length === 1) return suffix[0];
+    if (fallbackToFirst) return choices[0];
+    return requested;
+}
+
+async function refreshNanFengCatalog(comfyUrl: string, signal: AbortSignal) {
+    // V15 自带的 refresh route 清掉了 folder_paths 的模型缓存；/refresh
+    // 并不是所有 ComfyUI 版本都提供，保留它作为旧安装的兼容回退。
+    for (const route of ["/nanfeng/v15/h3/refresh-models", "/refresh"]) {
+        try {
+            const response = await fetch(`${comfyUrl}${route}`, { signal });
+            if (response.ok) return true;
+        } catch {}
+    }
+    return false;
+}
+
+async function resolveNanFengWorkflowParams(comfyUrl: string, params: Record<string, unknown>, signal: AbortSignal) {
+    let resolved = await resolveH3ModelParams(comfyUrl, params, signal);
+    try {
+        const response = await fetch(`${comfyUrl}/object_info/${encodeURIComponent(NANFENG_H3_CLASS)}`, { signal });
+        if (!response.ok) return resolved;
+        const body = await response.json() as Record<string, any>;
+        const required = body[NANFENG_H3_CLASS]?.input?.required || {};
+        const choices = (name: string) => Array.isArray(required[name]?.[0]) ? required[name][0].map(String) : [];
+        const pathFields: Array<[string, string]> = [
+            ["modelName", "模型"], ["textEncoder", "文本编码器"], ["videoVae", "视频VAE"],
+            ["audioVae", "音频VAE"], ["latentUpscaleModel", "H3潜空间放大模型"],
+        ];
+        const next = { ...resolved };
+        for (const [paramName, inputName] of pathFields) {
+            const available = choices(inputName);
+            if (!available.length) continue;
+            const configuredDefault = String(required[inputName]?.[1]?.default || available[0]);
+            const current = String(next[paramName] || "").trim();
+            next[paramName] = current ? resolveComfyChoice(current, available, inputName !== "模型") : configuredDefault;
+        }
+        if (Array.isArray(next.loraSlots)) {
+            next.loraSlots = next.loraSlots.map((slot: any, index: number) => {
+                const available = choices(`LoRA${index + 1}`);
+                if (!available.length || !slot || String(slot.name || "").trim() === "") return slot;
+                const name = resolveComfyChoice(slot.name, available, false);
+                return { ...slot, name: available.includes(name) ? name : "未选择", enabled: available.includes(name) && slot.enabled !== false };
+            });
+        }
+        resolved = next;
+    } catch {
+        // object_info 不可达时保留旧兼容值；/prompt 会继续返回 ComfyUI 的具体校验错误。
+    }
+    return resolved;
 }
 
 async function resolveH3ModelParams(comfyUrl: string, params: Record<string, unknown>, signal: AbortSignal) {

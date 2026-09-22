@@ -19,6 +19,7 @@ import { useTranslation } from "react-i18next";
 import { useCanvasNodePreview } from "@/lib/canvas/canvas-drag-preview";
 import { ensureVideoPreview, getVideoPreviewRevision, subscribeVideoPreview, videoPreviewUrlFor } from "@/lib/canvas/canvas-video-frame";
 import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
+import { orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupLayout } from "@/lib/canvas/ordered-group";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
@@ -1048,12 +1049,31 @@ function EmptyLoopContent({ node, theme }: NodeContentRendererProps) {
 
 function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererProps) {
     const { t } = useTranslation();
+    const ordered = node.metadata?.orderedGroup === true;
+    const occupiedSlots = ordered ? (node.metadata?.groupSlots || []).filter((slot): slot is string => typeof slot === "string") : [];
+    const slots = ordered ? orderedGroupDisplaySlots(occupiedSlots, orderedGroupColumnCount(node)) : [];
+    const cells = orderedGroupLayout(node, slots.length);
     return (
-        <div className="pointer-events-none flex h-full w-full p-3">
+        <div className="relative h-full w-full p-3">
+            {ordered
+                ? cells.map((cell) => (
+                      <div
+                          key={cell.index}
+                          className="pointer-events-auto absolute rounded-xl border border-dashed opacity-70"
+                          style={{ left: cell.x, top: cell.y, width: cell.width, height: cell.height, borderColor: theme.node.typeStroke.group, background: slots[cell.index] ? `${theme.node.typeStroke.group}08` : `${theme.node.typeStroke.group}14` }}
+                      >
+                          {!slots[cell.index] ? (
+                              <span className="pointer-events-none grid h-full place-items-center text-[11px]" style={{ color: theme.node.muted }}>
+                                  空格
+                              </span>
+                          ) : null}
+                      </div>
+                  ))
+                : null}
             <div className="flex h-7 max-w-full items-center gap-2 px-1 text-xs font-medium" style={{ color: theme.node.text }}>
                 <span className="truncate">{node.title || t("canvas.node.group")}</span>
                 <span className="shrink-0 text-[11px] font-normal" style={{ color: theme.node.muted }}>
-                    {t("canvas.node.nodeCount", { count: groupChildCount })}
+                    {ordered ? `有序 · ${Math.ceil(slots.length / orderedGroupColumnCount(node))}×${orderedGroupColumnCount(node)} · ${slots.filter(Boolean).length}/${slots.length}` : t("canvas.node.nodeCount", { count: groupChildCount })}
                 </span>
             </div>
         </div>
@@ -1291,8 +1311,16 @@ function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
             return;
         }
         void ensureImagePreview(image.storageKey);
-        resolveImageUrl(image.storageKey, image.url).then((url) => { if (!cancelled) setImageUrl(url); }).catch(() => { if (!cancelled) setImageUrl(""); });
-        return () => { cancelled = true; };
+        resolveImageUrl(image.storageKey, image.url)
+            .then((url) => {
+                if (!cancelled) setImageUrl(url);
+            })
+            .catch(() => {
+                if (!cancelled) setImageUrl("");
+            });
+        return () => {
+            cancelled = true;
+        };
     }, [backendConnected, backendToken, image?.storageKey, image?.url]);
 
     useEffect(() => {
@@ -1302,22 +1330,44 @@ function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
             return;
         }
         void ensureImagePreview(colorCard.storageKey);
-        resolveImageUrl(colorCard.storageKey, colorCard.url).then((url) => { if (!cancelled) setColorCardUrl(url); }).catch(() => { if (!cancelled) setColorCardUrl(""); });
-        return () => { cancelled = true; };
+        resolveImageUrl(colorCard.storageKey, colorCard.url)
+            .then((url) => {
+                if (!cancelled) setColorCardUrl(url);
+            })
+            .catch(() => {
+                if (!cancelled) setColorCardUrl("");
+            });
+        return () => {
+            cancelled = true;
+        };
     }, [backendConnected, backendToken, colorCard?.storageKey, colorCard?.url]);
 
-    if (!image) return <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}><MapPinned className="size-9 opacity-30" /><span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.scene.empty")}</span></div>;
+    if (!image)
+        return (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
+                <MapPinned className="size-9 opacity-30" />
+                <span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.scene.empty")}</span>
+            </div>
+        );
     const source = imageUrl ? pickImageSource({ previewUrl: previewUrlFor(image.storageKey), originalUrl: imageUrl, naturalWidth: image.width, naturalHeight: image.height, renderedWidth: node.width, renderedHeight: node.height, scale }) : "";
     return (
         <div className="flex h-full w-full flex-col overflow-hidden rounded-[inherit]">
             <div className="relative min-h-0 flex-1 overflow-hidden" style={{ background: theme.node.panel }}>
-                {source ? <img src={source} alt={node.title} className="size-full object-cover" draggable={false} /> : <div className="flex size-full items-center justify-center"><MapPinned className="size-9 opacity-30" /></div>}
+                {source ? (
+                    <img src={source} alt={node.title} className="size-full object-cover" draggable={false} />
+                ) : (
+                    <div className="flex size-full items-center justify-center">
+                        <MapPinned className="size-9 opacity-30" />
+                    </div>
+                )}
                 {node.metadata?.sceneDescription ? <div className="absolute inset-x-2 bottom-2 line-clamp-2 rounded-md bg-black/55 px-2 py-1 text-[10px] leading-4 text-white">{node.metadata.sceneDescription}</div> : null}
             </div>
-            {(colorCardUrl || node.metadata?.sceneColorCardPrompt) ? (
+            {colorCardUrl || node.metadata?.sceneColorCardPrompt ? (
                 <div className="flex shrink-0 items-center gap-2 border-t px-2 py-1.5" style={{ borderColor: theme.node.stroke, background: theme.node.fill }}>
                     {colorCardUrl ? <img src={previewUrlFor(colorCard?.storageKey) || colorCardUrl} alt={t("canvas.scene.colorCard")} className="size-8 shrink-0 rounded object-cover" draggable={false} /> : null}
-                    <span className="min-w-0 truncate text-[10px]" style={{ color: theme.node.muted }} title={node.metadata?.sceneColorCardPrompt}>{node.metadata?.sceneColorCardPrompt || t("canvas.scene.colorCard")}</span>
+                    <span className="min-w-0 truncate text-[10px]" style={{ color: theme.node.muted }} title={node.metadata?.sceneColorCardPrompt}>
+                        {node.metadata?.sceneColorCardPrompt || t("canvas.scene.colorCard")}
+                    </span>
                 </div>
             ) : null}
         </div>

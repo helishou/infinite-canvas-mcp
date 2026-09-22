@@ -13,11 +13,14 @@ const presence = z.object({
     type: z.literal("presence"), cursor: point.nullish(), selectedNodeIds: z.array(z.string()),
     drag: z.array(z.object({ nodeId: z.string(), position: point })).optional(),
     textSelection: z.object({ target: textTargetSchema, documentId: z.string().min(1), anchor: z.string().min(1), head: z.string().min(1) }).nullish(),
+    // 焦点只用于选择 MCP 的默认画布，不写入项目快照或 revision。
+    focused: z.boolean().optional(),
 });
 type CanvasPeer = {
     projectId: string; clientId: string; connectionId: string; label: string; color: string;
     selectedNodeIds: string[]; cursor?: z.infer<typeof point>; drag?: z.infer<typeof presence>["drag"];
     textSelection?: z.infer<typeof presence>["textSelection"];
+    focused: boolean; focusSequence: number;
     revision: number; missedPongs: number;
 };
 const colors = ["#0f766e", "#b45309", "#be123c", "#1d4ed8", "#6d28d9", "#3f6212"];
@@ -30,6 +33,7 @@ export class CanvasRealtimeHub {
     private readonly unsubscribe: () => void;
     private readonly pendingPeers = new Set<CanvasPeer>();
     private flushTimer?: ReturnType<typeof setTimeout>;
+    private focusSequence = 0;
 
     constructor(private readonly config: ResolvedConfig, private readonly db: BackendDatabase, events: BackendEventBus) {
         this.unsubscribe = events.subscribe((event) => {
@@ -53,7 +57,17 @@ export class CanvasRealtimeHub {
     }
 
     participants(projectId: string) {
-        return [...this.sockets.values()].filter((peer) => peer.projectId === projectId).map(({ missedPongs: _, ...peer }) => peer);
+        return [...this.sockets.values()].filter((peer) => peer.projectId === projectId).map((peer) => this.publicPeer(peer));
+    }
+
+    /** 浏览器当前打开且最近聚焦的画布；这是临时默认上下文，不属于 MCP 会话状态。 */
+    focusedProjectId() {
+        const peers = [...this.sockets.values()];
+        const focused = peers.filter((peer) => peer.focused);
+        const focusedProject = focused.sort((a, b) => b.focusSequence - a.focusSequence)[0]?.projectId;
+        if (focusedProject) return focusedProject;
+        const connectedProjects = [...new Set(peers.map((peer) => peer.projectId))];
+        return connectedProjects.length === 1 ? connectedProjects[0] : null;
     }
 
     close() {
@@ -70,13 +84,13 @@ export class CanvasRealtimeHub {
         const projectId = url.searchParams.get("projectId") || "";
         const clientId = url.searchParams.get("clientId") || "";
         const denied = request.headers.origin && !this.config.origins.includes(request.headers.origin);
-        const status = denied ? 403 : url.searchParams.get("token") !== this.config.token ? 401 : !projectId || !clientId ? 400 : !this.db.getCanvasProject(projectId) ? 404 : 0;
+        const status = denied ? 403 : url.searchParams.get("token") !== this.config.token ? 401 : !projectId || !clientId ? 400 : this.db.getCanvasProjectRevision(projectId) === null ? 404 : 0;
         if (status) {
             socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\n\r\n`);
             return;
         }
         const hash = [...clientId].reduce((value, char) => (value * 31 + char.charCodeAt(0)) | 0, 0);
-        const peer: CanvasPeer = { projectId, clientId, connectionId: randomUUID(), label: url.searchParams.get("label") || "浏览器画布", color: colors[Math.abs(hash) % colors.length], selectedNodeIds: [], revision: 0, missedPongs: 0 };
+        const peer: CanvasPeer = { projectId, clientId, connectionId: randomUUID(), label: url.searchParams.get("label") || "浏览器画布", color: colors[Math.abs(hash) % colors.length], selectedNodeIds: [], focused: false, focusSequence: 0, revision: 0, missedPongs: 0 };
         this.wss.handleUpgrade(request, socket, head, (ws) => this.connect(ws, peer));
     }
 
@@ -91,7 +105,7 @@ export class CanvasRealtimeHub {
         });
         socket.on("error", () => socket.terminate());
         this.send(socket, { type: "presence", projectId: peer.projectId, participants: this.participants(peer.projectId) });
-        this.broadcast(peer.projectId, { type: "presence.peer", projectId: peer.projectId, peer }, socket);
+        this.broadcast(peer.projectId, { type: "presence.peer", projectId: peer.projectId, peer: this.publicPeer(peer) }, socket);
     }
 
     private receive(socket: WebSocket, data: RawData) {
@@ -107,7 +121,7 @@ export class CanvasRealtimeHub {
             return;
         }
         if (record.type === "ack" && Number.isSafeInteger(record.revision) && Number(record.revision) >= peer.revision) {
-            peer.revision = Math.min(Number(record.revision), Number(this.db.getCanvasProject(peer.projectId)?.revision || 0));
+            peer.revision = Math.min(Number(record.revision), this.db.getCanvasProjectRevision(peer.projectId) ?? 0);
             return;
         }
         const parsed = presence.safeParse(message);
@@ -116,16 +130,24 @@ export class CanvasRealtimeHub {
         peer.selectedNodeIds = parsed.data.selectedNodeIds;
         peer.drag = parsed.data.drag;
         peer.textSelection = parsed.data.textSelection || undefined;
+        if (parsed.data.focused !== undefined) {
+            peer.focused = parsed.data.focused;
+            if (peer.focused) peer.focusSequence = ++this.focusSequence;
+        }
         this.pendingPeers.add(peer);
         if (!this.flushTimer) this.flushTimer = setTimeout(() => {
             this.flushTimer = undefined;
-            for (const changed of this.pendingPeers) this.broadcast(changed.projectId, { type: "presence.peer", projectId: changed.projectId, peer: changed });
+            for (const changed of this.pendingPeers) this.broadcast(changed.projectId, { type: "presence.peer", projectId: changed.projectId, peer: this.publicPeer(changed) });
             this.pendingPeers.clear();
         }, 50);
     }
 
     private send(socket: WebSocket, payload: unknown) {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+    }
+
+    private publicPeer({ missedPongs: _, focusSequence: __, ...peer }: CanvasPeer) {
+        return peer;
     }
 
     private broadcast(projectId: string, payload: unknown, except?: WebSocket) {

@@ -48,6 +48,16 @@ function summarizeChildren(children: BackendRuntimeTask[]): string {
     return parts.join(" · ");
 }
 
+/** 总进度只增不减；父任务正式成功前最多显示 99%，成功后才显示 100%。 */
+export function taskProgress(parent: BackendRuntimeTask, children: BackendRuntimeTask[], previousProgress = 0): number {
+    const currentProgress = children.length
+        ? children.reduce((total, child) => total + (child.progress || 0), 0) / children.length
+        : parent.progress || 0;
+    const monotonicProgress = Math.max(previousProgress, currentProgress);
+    if (parent.status === "succeeded" || previousProgress >= 1) return 1;
+    return Math.min(0.99, monotonicProgress);
+}
+
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 
 function statusColor(status: BackendRuntimeTask["status"]) {
@@ -68,6 +78,7 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
     const [tasks, setTasks] = useState<BackendRuntimeTask[]>([]);
     const [status, setStatus] = useState<string>("");
     const [loading, setLoading] = useState(false);
+    const [progressHistory, setProgressHistory] = useState<Record<string, number>>({});
     // expanded 记录当前展开的父任务 id；userCollapsed 记录用户主动折叠的父任务 id，
     // 自动展开规则会跳过它们，避免用户折叠后被自动逻辑重新撑开
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -100,6 +111,21 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
     }, [open, projectId, status]);
 
     const groups = useMemo(() => groupTasks(tasks), [tasks]);
+
+    useEffect(() => {
+        setProgressHistory((current) => {
+            let changed = false;
+            const next = { ...current };
+            for (const group of groups) {
+                const progress = taskProgress(group.parent, group.children, current[group.parent.id]);
+                if (next[group.parent.id] !== progress) {
+                    next[group.parent.id] = progress;
+                    changed = true;
+                }
+            }
+            return changed ? next : current;
+        });
+    }, [groups]);
 
     // 自动展开：父或子任务处于运行/排队时默认展开；用户手动折叠的保留折叠
     useEffect(() => {
@@ -141,6 +167,7 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
             {groups.map((group) => {
                 const { parent, children } = group;
                 const hasChildren = children.length > 0;
+                const progress = taskProgress(parent, children, progressHistory[parent.id]);
                 const isExpanded = expanded.has(parent.id);
                 const terminal = TERMINAL_STATUSES.has(parent.status);
                 return <div key={parent.id} className="rounded-lg border border-stone-200 dark:border-stone-700">
@@ -162,7 +189,7 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
                                 {!terminal ? <Button danger type="text" size="small" icon={<Square className="size-3.5" />} onClick={() => void cancel(parent.id)}>取消</Button> : null}
                             </div>
                         </div>
-                        <Progress percent={Math.round((parent.progress || 0) * 100)} size="small" status={progressStatus(parent.status)} />
+                        <Progress percent={Math.round(progress * 100)} size="small" status={progressStatus(parent.status)} />
                         <div className="flex flex-wrap gap-3 text-xs text-stone-500">
                             <span>节点：{parent.nodeId || "-"}</span>
                             <span>Clip：{parent.segmentId || "-"}</span>

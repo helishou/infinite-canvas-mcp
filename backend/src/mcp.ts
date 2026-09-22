@@ -29,7 +29,7 @@ import {
   buildCanvasToolRequest,
   sanitizeCanvasPrompt,
 } from "@basketikun/canvas-agent/operations";
-import { createH3NodeMetadata, readH3Layout } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { createH3NodeMetadata, isH3NodeType, readH3Layout } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasImageGenerationInput } from "./canvas/image-dispatcher.js";
 import type { CanvasTextGenerationInput } from "./canvas/text-dispatcher.js";
@@ -45,7 +45,13 @@ import {
 import { createLogger } from "./logger.js";
 import type { McpObservabilityStore } from "./stores/types.js";
 
-type McpSessionState = { activeProjectId: string | null; clientId: string };
+type McpProjectSource = "browser" | "session";
+type BrowserActiveProjectResolver = () => string | null;
+type McpSessionState = {
+  activeProjectId: string | null;
+  activeProjectSource: McpProjectSource;
+  clientId: string;
+};
 type BackendMcpInstance = { server: McpServer; registry: PluginMcpRegistry };
 type McpEventRecorder = (event: McpObservabilityEventInput) => void | Promise<void>;
 const logger = createLogger("mcp-http");
@@ -68,9 +74,11 @@ export async function startBackendMcpServer() {
 async function createBackendMcpInstance(
   config: ResolvedConfig,
   recordEvent: McpEventRecorder = (event) => postMcpObservabilityEvent(config, event),
+  getBrowserActiveProjectId?: BrowserActiveProjectResolver,
 ): Promise<BackendMcpInstance> {
   const state: McpSessionState = {
     activeProjectId: null,
+    activeProjectSource: "browser",
     clientId: `mcp:${crypto.randomUUID()}`,
   };
   // 插件 MCP（尤其 H3）只通过常驻 Backend API 访问画布、任务、媒体和设置，
@@ -101,7 +109,7 @@ async function createBackendMcpInstance(
     version: "0.1.0",
   });
   installMcpToolObservability(server, state, recordEvent);
-  registerDirectCanvasTools(server, config, backendApi, state, recordEvent);
+  registerDirectCanvasTools(server, config, backendApi, state, recordEvent, getBrowserActiveProjectId);
   registerDirectComfyTools(server, backendApi);
   registerBrowserCompatibilityTools(server, config);
   const context = buildPluginMcpContext(
@@ -109,7 +117,7 @@ async function createBackendMcpInstance(
     directBackend,
     backendComfy,
     (name, input) =>
-      executeDirectCanvasTool(config, backendApi, state, name, input),
+      executeDirectCanvasTool(config, backendApi, state, name, input, getBrowserActiveProjectId),
   );
   const registry = new PluginMcpRegistry(server, context);
   await registry.apply(await loadPluginMcpDeclarationsFromBackend(backendApi));
@@ -133,12 +141,14 @@ type HttpMcpSession = {
 
 /**
  * 在常驻 Backend 进程内提供共享 Streamable HTTP MCP。
- * 客户端各自拥有 MCP 会话和 activeProjectId，但复用同一个 Node 进程、模块缓存与 Backend 生命周期。
+ * 客户端各自拥有 MCP 会话和 activeProjectId，但复用同一个 Node 进程、模块缓存与 Backend 生命周期；
+ * 未被会话手动锁定时，默认目标来自浏览器实时协作连接当前聚焦的画布。
  */
 export function registerBackendMcpHttpRoutes(
   app: Express,
   config: ResolvedConfig,
   observability?: McpObservabilityStore,
+  getBrowserActiveProjectId?: BrowserActiveProjectResolver,
 ) {
   const sessions = new Map<string, HttpMcpSession>();
   let declarationSync: ReturnType<typeof setInterval> | null = null;
@@ -216,6 +226,7 @@ export function registerBackendMcpHttpRoutes(
               observability.record(event);
             }
           : undefined,
+        getBrowserActiveProjectId,
       );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
@@ -337,12 +348,52 @@ const DIRECT_TOOL_NAMES = new Set<string>([
   "models_list",
 ]);
 
+const EXISTING_CANVAS_STATE_TOOLS = new Set<ToolName>([
+  "canvas_apply_ops",
+  "canvas_create_image_prompt_flow",
+  "canvas_create_generation_flow",
+  "canvas_generate_text",
+  "canvas_generate_image",
+  "canvas_generate_video",
+  "canvas_generate_audio",
+  "canvas_set_generation_references",
+  "canvas_update_node",
+  "canvas_update_node_text",
+  "canvas_move_nodes",
+  "canvas_resize_node",
+  "canvas_delete_nodes",
+  "canvas_connect_nodes",
+  "canvas_select_nodes",
+  "canvas_run_generation",
+]);
+
+function resolveMcpProjectId(
+  state: McpSessionState,
+  rawProjectId: unknown,
+  getBrowserActiveProjectId?: BrowserActiveProjectResolver,
+) {
+  const explicit = String(rawProjectId || "").trim();
+  if (explicit) return { projectId: explicit, source: "explicit-input" as const };
+  if (state.activeProjectSource === "session" && state.activeProjectId)
+    return { projectId: state.activeProjectId, source: "session-pinned" as const };
+  const browserProjectId = String(getBrowserActiveProjectId?.() || "").trim();
+  if (browserProjectId) {
+    state.activeProjectId = browserProjectId;
+    state.activeProjectSource = "browser";
+    return { projectId: browserProjectId, source: "browser-focused" as const };
+  }
+  state.activeProjectId = null;
+  state.activeProjectSource = "browser";
+  return { projectId: "", source: "none" as const };
+}
+
 async function executeDirectCanvasTool(
   config: ResolvedConfig,
   backendApi: ReturnType<typeof createBackendClient>,
   state: McpSessionState,
   name: ToolName,
   input: Record<string, unknown>,
+  getBrowserActiveProjectId?: BrowserActiveProjectResolver,
 ) {
   if (name === "canvas_list_projects") {
     // v7: 画布不再直接归属剧目；按分集过滤用 episodeId。
@@ -383,10 +434,11 @@ async function executeDirectCanvasTool(
   }
   if (name === "generation_get_status" || name === "canvas_task_status") {
     const taskId = String(input.taskId || "");
+    const target = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId);
     const query = {
       ...input,
-      ...(!taskId && !input.projectId && state.activeProjectId
-        ? { projectId: state.activeProjectId }
+      ...(!taskId && !input.projectId && target.projectId
+        ? { projectId: target.projectId }
         : {}),
       ...(name === "canvas_task_status" && input.nodeId
         ? { nodeIds: [String(input.nodeId)] }
@@ -436,7 +488,7 @@ async function executeDirectCanvasTool(
     return { models };
   }
   if (name === "canvas_generate_image_batch") {
-    const projectId = String(input.projectId || state.activeProjectId || "");
+    const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
     if (!projectId) throw new Error("缺少 projectId；请先选择活动画布");
     const items = Array.isArray(input.items)
       ? (input.items as Array<Record<string, unknown>>)
@@ -544,8 +596,8 @@ async function executeDirectCanvasTool(
     };
   }
   if (name === "canvas_inspect")
-    return inspectCanvasContext(config, backendApi, state, input);
-  const projectId = String(input.projectId || state.activeProjectId || "");
+    return inspectCanvasContext(config, backendApi, state, input, getBrowserActiveProjectId);
+  const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
   const project = await fetchCurrentCanvasProject(config, projectId);
   const projectState = project as Record<string, unknown>;
   if (name === "canvas_get_state" || name === "canvas_export_snapshot")
@@ -565,6 +617,7 @@ async function executeDirectCanvasTool(
     name === "canvas_create_node"
       ? await applyNodeFactoryDefaults(generationInput, backendApi)
       : generationInput;
+  preflightExistingCanvasState(name, toolInput, projectState);
   const request = buildCanvasToolRequest(name, toolInput, {
     nodes: nodesOf(projectState) as never,
     connections: connectionsOf(projectState) as never,
@@ -574,7 +627,7 @@ async function executeDirectCanvasTool(
     : [];
   const ops = await Promise.all(
     rawOps.map(async (op) =>
-      op.type === "add_node" && String(op.nodeType || "") === "minimax-h3:video"
+      op.type === "add_node" && isH3NodeType(op.nodeType)
         ? await applyNodeFactoryDefaults(op, backendApi)
         : op,
     ),
@@ -720,6 +773,7 @@ function registerDirectCanvasTools(
   backendApi: ReturnType<typeof createBackendClient>,
   state: McpSessionState,
   recordEvent: McpEventRecorder,
+  getBrowserActiveProjectId?: BrowserActiveProjectResolver,
 ) {
   for (const name of toolNames.filter(isCollaborationTool)) {
     server.registerTool(
@@ -746,7 +800,12 @@ function registerDirectCanvasTools(
     // making OpenAI tool-use guess at fields like items/tags/x-vs-dx.
     server.registerTool(
       name,
-      { description: toolDescriptions[name], inputSchema: schema },
+      {
+        description: EXISTING_CANVAS_STATE_TOOLS.has(name)
+          ? `${toolDescriptions[name]} 操作已有节点前先调用一次 canvas_inspect；创建新节点无需调用。`
+          : toolDescriptions[name],
+        inputSchema: schema,
+      },
       async (rawInput: Record<string, unknown>) => {
         const traceId = crypto.randomUUID();
         const startedAt = Date.now();
@@ -768,6 +827,7 @@ function registerDirectCanvasTools(
             state,
             name,
             input,
+            getBrowserActiveProjectId,
           );
           const context = mcpToolResultContext(value, input, state, name);
           await recordMcpObservabilityEvent(recordEvent, {
@@ -820,7 +880,7 @@ function registerDirectCanvasTools(
         segmentId?: string;
         limit?: number;
       };
-      const projectId = String(input.projectId || state.activeProjectId || "");
+      const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
       if (!projectId)
         throw new Error(
           "缺少 projectId（先调用 canvas_set_active_project 或显式传入）",
@@ -950,7 +1010,7 @@ function registerDirectCanvasTools(
         Math.min(12, Math.floor(Number(rawInput.columns ?? 2))),
       );
       const gap = Number(rawInput.gap ?? 24);
-      const projectId = rawInput.projectId ? String(rawInput.projectId) : "";
+      const projectId = resolveMcpProjectId(state, rawInput.projectId, getBrowserActiveProjectId).projectId;
       const project = await fetchCurrentCanvasProject(config, projectId);
       const node = nodesOf(project).find((item) => String(item.id) === nodeId);
       if (!node) throw new Error(`画布上找不到节点：${nodeId}`);
@@ -1092,6 +1152,7 @@ function registerDirectCanvasTools(
       };
       const saved = await saveCanvasProject(config, project);
       state.activeProjectId = id;
+      state.activeProjectSource = "session";
       return textResult({
         ok: true,
         id: saved.id,
@@ -1278,7 +1339,10 @@ function registerDirectCanvasTools(
     async (rawInput: Record<string, unknown>) => {
       const id = String(rawInput.id);
       const deleted = await deleteCanvasProject(config, id);
-      if (state.activeProjectId === id) state.activeProjectId = null;
+      if (state.activeProjectId === id) {
+        state.activeProjectId = null;
+        state.activeProjectSource = "browser";
+      }
       return textResult({ ok: true, deleted: deleted > 0 });
     },
   );
@@ -1286,7 +1350,7 @@ function registerDirectCanvasTools(
     "canvas_set_active_project",
     {
       description:
-        "设置当前活动画布（后续 MCP 操作目标）。不传 id 则清空；存在多个画布时不会自动挑选目标。",
+        "设置当前活动画布（后续 MCP 操作目标）。传 id 会固定本 MCP 会话的目标；不传 id 则解除固定并恢复跟随浏览器当前聚焦画布。",
       inputSchema: z.object({ id: z.string().optional() }).shape,
     },
     async (rawInput: Record<string, unknown>) => {
@@ -1297,12 +1361,18 @@ function registerDirectCanvasTools(
         );
         if (!project) throw new Error(`画布不存在: ${id}`);
         state.activeProjectId = id;
+        state.activeProjectSource = "session";
       } else {
         state.activeProjectId = null;
+        state.activeProjectSource = "browser";
       }
       return textResult({
         ok: true,
-        activeProjectId: state.activeProjectId || null,
+        activeProjectId:
+          state.activeProjectId ||
+          getBrowserActiveProjectId?.() ||
+          null,
+        source: state.activeProjectId ? state.activeProjectSource : "browser",
       });
     },
   );
@@ -1511,7 +1581,7 @@ async function applyNodeFactoryDefaults(
   input: Record<string, unknown>,
   backend: ReturnType<typeof createBackendClient>,
 ) {
-  if (String(input.nodeType || "") !== "minimax-h3:video") return input;
+  if (!isH3NodeType(input.nodeType)) return input;
   const defaults = await backend.getH3Defaults();
   const metadata = recordOf(input.metadata);
   // 默认参数里的 layout 是「设为默认参数」一并保存的布局快照：
@@ -1962,25 +2032,36 @@ async function inspectCanvasContext(
   backend: ReturnType<typeof createBackendClient>,
   state: McpSessionState,
   input: Record<string, unknown>,
+  getBrowserActiveProjectId?: BrowserActiveProjectResolver,
 ) {
   const projects = await fetchCanvasProjects(config);
   const requestedId = String(input.projectId || "");
-  const selectedId = requestedId || state.activeProjectId || "";
+  const target = resolveMcpProjectId(state, requestedId, getBrowserActiveProjectId);
+  const selectedId = target.projectId;
   let project = selectedId
     ? projects.find((item) => item.id === selectedId)
-    : projects.length === 1
-      ? projects[0]
-      : undefined;
+      : projects.length === 1
+        ? projects[0]
+        : undefined;
   if (requestedId && !project) throw new Error(`画布不存在: ${requestedId}`);
-  if (state.activeProjectId && !project && !requestedId) {
+  if (selectedId && !project && !requestedId) {
     state.activeProjectId = null;
-    if (projects.length === 1) project = projects[0];
+    state.activeProjectSource = "browser";
+    const browserProjectId = String(getBrowserActiveProjectId?.() || "").trim();
+    if (browserProjectId) {
+      state.activeProjectId = browserProjectId;
+      project = projects.find((item) => item.id === browserProjectId);
+    }
+    if (!project && projects.length === 1) project = projects[0];
   }
   if (!project) {
     return {
       ok: true,
       ready: false,
-      currentState: { activeProjectId: state.activeProjectId },
+      currentState: {
+        activeProjectId: state.activeProjectId,
+        source: state.activeProjectSource,
+      },
       projects: projects.map(projectSummary),
       suggestedAction: projects.length
         ? {
@@ -1993,8 +2074,10 @@ async function inspectCanvasContext(
           },
     };
   }
-  if (!state.activeProjectId && projects.length === 1)
+  if (!state.activeProjectId && projects.length === 1 && !getBrowserActiveProjectId) {
     state.activeProjectId = project.id;
+    state.activeProjectSource = "session";
+  }
   const projectState = project as Record<string, unknown>;
   const nodes = nodesOf(projectState);
   const selectedIds = new Set(
@@ -2012,6 +2095,7 @@ async function inspectCanvasContext(
     currentState: {
       activeProjectId: state.activeProjectId,
       targetProjectId: project.id,
+      source: requestedId ? "explicit-input" : target.source,
       project: projectSummary(project),
     },
     selection: summaries.filter((node) => selectedIds.has(node.id)),
@@ -2154,6 +2238,138 @@ async function fetchCurrentCanvasProject(
   return projects[0];
 }
 
+/**
+ * 用本次写操作已经读取到的最新项目快照做轻量预检。
+ * 不再额外调用完整 canvas_get_state，也不阻断幂等删除竞态。
+ */
+function preflightExistingCanvasState(
+  name: ToolName,
+  input: Record<string, unknown>,
+  project: Record<string, unknown>,
+) {
+  if (!EXISTING_CANVAS_STATE_TOOLS.has(name)) return;
+
+  const existingNodeIds = new Set(nodesOf(project).map((node) => String(node.id || "")).filter(Boolean));
+  const missingNodeIds = new Set<string>();
+  const requireNode = (value: unknown) => {
+    const id = String(value || "").trim();
+    if (id && !existingNodeIds.has(id)) missingNodeIds.add(id);
+  };
+
+  const referenceNodeIds = Array.isArray(input.referenceNodeIds)
+    ? input.referenceNodeIds
+    : [];
+  switch (name) {
+    case "canvas_apply_ops": {
+      const knownNodeIds = new Set(existingNodeIds);
+      const ops = Array.isArray(input.ops) ? input.ops : [];
+      for (const item of ops) {
+        const op = recordOf(item);
+        const type = String(op.type || "");
+        if (type === "add_node") {
+          const id = String(op.id || "").trim();
+          if (id) knownNodeIds.add(id);
+          continue;
+        }
+        if (type === "update_node" || type === "run_generation") {
+          const id = String(op.id || op.nodeId || "").trim();
+          if (id && !knownNodeIds.has(id)) missingNodeIds.add(id);
+          const refs = Array.isArray(op.referenceNodeIds) ? op.referenceNodeIds : [];
+          for (const ref of refs) {
+            const refId = String(ref || "").trim();
+            if (refId && !knownNodeIds.has(refId)) missingNodeIds.add(refId);
+          }
+          continue;
+        }
+        if (type === "update_h3_segment" || type === "add_h3_segment" || type === "replace_h3_segments") {
+          const id = String(op.nodeId || "").trim();
+          if (id && !knownNodeIds.has(id)) missingNodeIds.add(id);
+          continue;
+        }
+        if (type === "connect_nodes") {
+          const fromNodeId = String(op.fromNodeId || "").trim();
+          const toNodeId = String(op.toNodeId || "").trim();
+          if (fromNodeId && !knownNodeIds.has(fromNodeId)) missingNodeIds.add(fromNodeId);
+          if (toNodeId && !knownNodeIds.has(toNodeId)) missingNodeIds.add(toNodeId);
+          continue;
+        }
+        if (type === "select_nodes") {
+          for (const id of Array.isArray(op.ids) ? op.ids : []) {
+            const nodeId = String(id || "").trim();
+            if (nodeId && !knownNodeIds.has(nodeId)) missingNodeIds.add(nodeId);
+          }
+          continue;
+        }
+        // delete_node/delete_connections are intentionally not preflighted:
+        // the collaboration protocol defines missing delete targets as idempotent no-ops.
+        if (type === "delete_node") {
+          const ids = [
+            ...(op.id ? [String(op.id)] : []),
+            ...(Array.isArray(op.ids) ? op.ids.map(String) : []),
+          ];
+          for (const id of ids) knownNodeIds.delete(id);
+        }
+      }
+      break;
+    }
+    case "canvas_update_node":
+    case "canvas_update_node_text":
+    case "canvas_resize_node":
+      requireNode(input.id);
+      break;
+    case "canvas_move_nodes":
+      for (const item of Array.isArray(input.items) ? input.items : []) requireNode(recordOf(item).id);
+      break;
+    case "canvas_connect_nodes":
+      for (const item of Array.isArray(input.connections) ? input.connections : []) {
+        const connection = recordOf(item);
+        requireNode(connection.fromNodeId);
+        requireNode(connection.toNodeId);
+      }
+      break;
+    case "canvas_select_nodes":
+      for (const id of Array.isArray(input.ids) ? input.ids : []) requireNode(id);
+      break;
+    case "canvas_run_generation":
+      requireNode(input.nodeId);
+      for (const id of referenceNodeIds) requireNode(id);
+      break;
+    case "canvas_set_generation_references":
+      requireNode(input.nodeId);
+      for (const id of referenceNodeIds) requireNode(id);
+      break;
+    case "canvas_create_image_prompt_flow":
+    case "canvas_create_generation_flow":
+    case "canvas_generate_text":
+    case "canvas_generate_image":
+    case "canvas_generate_video":
+    case "canvas_generate_audio":
+      for (const id of referenceNodeIds) requireNode(id);
+      break;
+  }
+
+  if (!missingNodeIds.size) return;
+  const nodes = nodesOf(project);
+  const summaries = nodes.slice(0, 100).map(nodeSummary);
+  const preflight = {
+    project: projectSummary(project as CanvasProject),
+    missingNodeIds: [...missingNodeIds],
+    nodes: summaries,
+    referenceCandidates: summaries.filter((node) => node.type !== "config"),
+    truncated: nodes.length > summaries.length,
+  };
+  const firstMissingNodeId = [...missingNodeIds][0];
+  throw Object.assign(
+    new Error(`当前画布状态已变化，找不到节点：${firstMissingNodeId}；请先调用 canvas_inspect 后重新组织操作`),
+    {
+      code: "NODE_NOT_FOUND",
+      projectId: String(project.id || ""),
+      nodeId: firstMissingNodeId,
+      preflight,
+    },
+  );
+}
+
 function nodesOf(project: Record<string, unknown>) {
   return Array.isArray(project.nodes)
     ? (project.nodes as Array<Record<string, unknown>>)
@@ -2288,6 +2504,7 @@ function mcpToolErrorContext(
   const value = error && typeof error === "object"
     ? error as Record<string, unknown>
     : {};
+  const preflight = recordOf(value.preflight);
   const revision = ["revision", "expectedRevision", "actualRevision"]
     .map((key) => [key, value[key] as unknown] as const)
     .filter(([, item]) => typeof item === "number")
@@ -2307,6 +2524,7 @@ function mcpToolErrorContext(
       message: safeErrorMessage(error),
       createdTaskIds: taskIds,
       waitsForTasks: input.waitForCompletion === true || Array.isArray(input.taskIds),
+      ...(Object.keys(preflight).length ? { preflight } : {}),
       ...(revision ? { ...revision } : {}),
     },
   };

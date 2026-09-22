@@ -247,7 +247,13 @@ async function startBackendHttpServer() {
   });
   runtime.agent = agent;
   app.use("/agent", agent.app);
-  const mcpHttp = registerBackendMcpHttpRoutes(app, config, stores.mcpObservability);
+  const canvasRealtime = new CanvasRealtimeHub(config, db, events);
+  const mcpHttp = registerBackendMcpHttpRoutes(
+    app,
+    config,
+    stores.mcpObservability,
+    () => canvasRealtime.focusedProjectId(),
+  );
   // Backend 重启后继续观察已提交但尚未结束的 ComfyUI 任务；绑定信息在 SQLite 中。
   // 注意：stores.tasks.list() 默认按 created_at DESC LIMIT 500，仅含最近任务；
   // 老任务（含孤儿）会被截断，必须用 status 过滤才能覆盖全部 running/queued。
@@ -391,7 +397,6 @@ async function startBackendHttpServer() {
     }
     // canvas-*/direct-* 类型：上面的 resume 循环已尝试恢复，此处不再处理
   }
-  const canvasRealtime = new CanvasRealtimeHub(config, db, events);
   app.get("/canvas/projects/:id/collaboration", (req, res) => {
     const project = db.getCanvasProject(req.params.id);
     if (!project)

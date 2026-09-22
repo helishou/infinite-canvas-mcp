@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { App, Input, Modal, Segmented, Tooltip } from "antd";
-import { Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, Lock, MapPinned, MessageSquare, Minus, Music2, Plus, RefreshCw, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
+import { Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, Lock, MapPinned, MessageSquare, Minus, Music2, Plus, RefreshCw, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -42,6 +42,7 @@ type CanvasNodeHoverToolbarProps = {
     onSaveSceneToAsset: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
     onArrangeGroup: (node: CanvasNodeData) => void;
+    onToggleOrderedGroup: (node: CanvasNodeData) => void;
     onToggleGroupLock: (node: CanvasNodeData) => void;
     onDelete: (node: CanvasNodeData) => void;
     extraTools?: CanvasNodeToolbarItem[];
@@ -85,6 +86,7 @@ export function CanvasNodeHoverToolbar({
     onSaveSceneToAsset,
     onToggleFreeResize,
     onArrangeGroup,
+    onToggleOrderedGroup,
     onToggleGroupLock,
     onDelete,
     extraTools = [],
@@ -144,6 +146,7 @@ export function CanvasNodeHoverToolbar({
     const baseToolbarTools: ToolbarTool[] = [
         { id: "info", title: t("canvas.nodeToolbar.infoTitle"), label: t("canvas.nodeToolbar.info"), icon: <Info className="size-4" />, onClick: () => onInfo(node) },
         ...(isGroup ? [{ id: "arrangeGroup", title: t("canvas.nodeToolbar.arrangeGroupTitle"), label: t("canvas.nodeToolbar.arrangeGroup"), icon: <LayoutGrid className="size-4" />, onClick: () => onArrangeGroup(node) }] : []),
+        ...(isGroup ? [{ id: "toggleOrderedGroup", title: node.metadata?.orderedGroup ? "转成无序组" : "转成有序组", label: node.metadata?.orderedGroup ? "转成无序组" : "转成有序组", icon: <ListOrdered className="size-4" />, onClick: () => onToggleOrderedGroup(node), active: Boolean(node.metadata?.orderedGroup) }] : []),
         { id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true },
         ...(isGroup ? [{ id: "groupLock", title: node.metadata?.groupLocked ? "解锁组" : "锁定组", label: node.metadata?.groupLocked ? "解锁组" : "锁定组", icon: node.metadata?.groupLocked ? <Unlock className="size-4" /> : <Lock className="size-4" />, onClick: () => onToggleGroupLock(node), active: Boolean(node.metadata?.groupLocked) }] : []),
     ];

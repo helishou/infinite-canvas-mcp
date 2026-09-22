@@ -120,3 +120,38 @@ test("MCP 任务统计按 taskId 去重并保留批量与等待口径", async ()
         rmSync(dir, { recursive: true, force: true });
     }
 });
+
+test("canvas_wait_tasks 的历史事件即使缺少等待标记也不污染普通延迟", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "infinite-canvas-mcp-observability-wait-legacy-"));
+    const database = new BackendDatabase(path.join(dir, "runtime.sqlite"));
+    const stores = createStores(database);
+    const { app } = startServer(database, { url: "http://127.0.0.1", token: "test-token", port: 0, origins: [] }, { stores });
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const request = (pathname: string, init?: RequestInit) => fetch(`http://127.0.0.1:${port}${pathname}`, {
+        ...init,
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json", ...init?.headers },
+    });
+    const record = (body: Record<string, unknown>) => request("/mcp/observability/events", { method: "POST", body: JSON.stringify(body) });
+
+    try {
+        await record({ sessionId: "session-wait-legacy", traceId: "trace-wait-legacy", event: "tool.succeeded", tool: "canvas_wait_tasks", durationMs: 196244, outputSummary: {} });
+        for (let index = 0; index < 5; index += 1) {
+            await record({ sessionId: "session-wait-legacy", traceId: `trace-normal-${index}`, event: "tool.succeeded", tool: "canvas_inspect", durationMs: 6001, outputSummary: {} });
+        }
+
+        const response = await request("/mcp/observability/report");
+        const report = (await response.json() as { report: Record<string, any> }).report;
+        assert.deepEqual(report.latency.waiting, { calls: 1, averageDurationMs: 196244, maxDurationMs: 196244, p95DurationMs: 196244 });
+        assert.deepEqual(report.latency.ordinary, { calls: 5, averageDurationMs: 6001, maxDurationMs: 6001, p95DurationMs: 6001 });
+        const waitMetric = report.byTool.find((item: { tool: string }) => item.tool === "canvas_wait_tasks");
+        assert.equal(waitMetric.ordinaryP95DurationMs, null);
+        assert.ok(!report.diagnostics.some((item: { code: string; tool?: string }) => item.code === "TOOL_LATENCY_HOTSPOT" && item.tool === "canvas_wait_tasks"));
+        assert.ok(report.diagnostics.some((item: { code: string; tool?: string }) => item.code === "TOOL_LATENCY_HOTSPOT" && item.tool === "canvas_inspect"));
+    } finally {
+        await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        database.close();
+        rmSync(dir, { recursive: true, force: true });
+    }
+});

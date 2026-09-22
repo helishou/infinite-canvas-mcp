@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf } from "../../canvas/reference-contract.js";
+import { assembleH3Prompt } from "./prompt-sections.js";
+import { formatShotTimestamp, promptDetails, stripDuplicateTransition, validateDefinitionCoverage, validatePromptReferences, validateShotTimeline, visualReferenceTags } from "./prompt-rules.js";
 
 type RecordValue = Record<string, unknown>;
 type Transition = "continuous" | "cut" | "dissolve" | "fade_black";
@@ -17,22 +19,8 @@ const SHOT_TRANSITION_LEADIN: Record<Transition, string> = {
     dissolve: "the shot cross-dissolves",
     fade_black: "the shot fades out to black, then fades in",
 };
-const SECTION_END = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description|storyboard_timeline):/mi;
-
 function record(value: unknown): RecordValue { return value && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : {}; }
 function string(value: unknown) { return typeof value === "string" ? value.trim() : ""; }
-function formatShotTimestamp(raw: string) {
-    const value = raw.trim();
-    if (!value) return "";
-    if (/^\d{1,2}:\d{2}(?:\.\d{1,3})?$/.test(value)) return value;
-    const seconds = Number(value.replace(/s$/i, ""));
-    if (!Number.isFinite(seconds) || seconds < 0) return "";
-    const totalMs = Math.round(seconds * 1000);
-    const mm = Math.floor(totalMs / 60000);
-    const ss = Math.floor((totalMs % 60000) / 1000);
-    const ms = totalMs % 1000;
-    return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${String(ms).padStart(3, "0")}`;
-}
 
 const COMPOSITE_LAYOUTS: Record<number, { rows: number; columns: number }> = {
     2: { rows: 1, columns: 2 }, 3: { rows: 1, columns: 3 }, 4: { rows: 2, columns: 2 },
@@ -62,35 +50,15 @@ function promptModeOf(segment: RecordValue) {
     return ["ref2va", "t2v", "i2v", "fl2v"].includes(mode) ? mode : "ref2va";
 }
 
-function replaceSection(prompt: string, section: string, content: string, promptMode: string) {
-    const header = new RegExp(`^${section}:`, "mi").exec(prompt);
-    if (!header) {
-        const order = promptMode === "ref2va"
-            ? ["subject_definitions", "summary", "retention_analysis", "detailed_description", "overall_soundscape", "non_diegetic_music"]
-            : ["integrated_multimodal_description", "overall_soundscape", "non_diegetic_music"];
-        const nextSection = order.slice(order.indexOf(section) + 1).find((name) => new RegExp(`^${name}:`, "mi").test(prompt));
-        const next = nextSection ? new RegExp(`^${nextSection}:`, "mi").exec(prompt) : null;
-        const text = `${section}:\n${content}`;
-        if (next) return `${prompt.slice(0, next.index).trimEnd()}\n\n${text}\n\n${prompt.slice(next.index)}`;
-        return `${prompt.trimEnd()}${prompt.trim() ? "\n\n" : ""}${text}`;
-    }
-    const bodyStart = header.index + header[0].length;
-    const remainder = prompt.slice(bodyStart);
-    const next = SECTION_END.exec(remainder);
-    const bodyEnd = bodyStart + (next?.index ?? remainder.length);
-    const suffix = prompt.slice(bodyEnd).replace(/^(?:\r?\n)+/, "");
-    return `${prompt.slice(0, header.index)}${section}:\n${content}${suffix ? "\n\n" : content ? "\n" : ""}${suffix}`;
-}
-
 function pictureDescription(ref: RecordValue, catalog: ReturnType<typeof referenceCatalogOf>) {
     const asset = catalog.find((item) => item.id === ref.assetId || Boolean(ref.storageKey && item.storageKey === ref.storageKey) || Boolean(ref.url && item.url === ref.url));
     const analysis = record(asset?.analysis);
     const refAnalysis = record(ref.analysis);
     const summary = string(analysis.summary || refAnalysis.summary);
-    const tags = [...new Set([
+    const tags = visualReferenceTags([
         ...(Array.isArray(asset?.tags) ? asset.tags : []),
         ...(Array.isArray(ref.tags) ? ref.tags : []),
-    ].map((tag) => String(tag).trim()).filter(Boolean))].join(", ");
+    ].map(String)).join(", ");
     const clean = (value: string) => value
         .split(/\r?\n/u)[0]
         .replace(/\bep\d{1,3}[-_ ]s\d{1,3}[-_ ]\d{1,3}\b/giu, " ")
@@ -115,6 +83,10 @@ function promptForShots(input: StoryboardInput, refs: RecordValue[], catalog: Re
         const finalId = compositeSourceIds.has(id) ? composite?.panels[0]?.bindingId : id;
         return references.find((reference) => reference.bindingId === finalId)?.tag || "<Picture 1>";
     };
+    const normalizeLegacyReferences = (description: string) => description.replace(/\{\{\s*ref:\s*([^{}]+?)\s*\}\}/gu, (marker, rawId: string) => {
+        const id = rawId.trim();
+        return originalPictureRefs.some((ref) => String(ref.bindingId || "") === id) ? pictureTagForId(id) : marker;
+    });
     const remapDescription = (description: string) => description.replace(/<Picture\s+(\d+)>/giu, (marker, ordinal: string) => {
         const id = String(originalPictureRefs[Number(ordinal) - 1]?.bindingId || "");
         return id ? pictureTagForId(id) : marker;
@@ -136,11 +108,12 @@ function promptForShots(input: StoryboardInput, refs: RecordValue[], catalog: Re
             const position = panel ? ` In the composite storyboard image, this is Panel ${panel.index} (row ${panel.row}, column ${panel.column}), shared by ${panel.shotNumbers.map((number) => `[Shot ${number}]`).join(", ")}.` : "";
             picture = ` Use the approved ${pictureDescription(binding, catalog) || "storyboard frame"} from ${pictureTagForId(pictureId)} as the target composition reference for this shot.${position}`;
         }
-        const extraPanelIds = [...new Set(Array.from(string(shot.description).matchAll(/<Picture\s+(\d+)>/giu), (match) => originalPictureRefs[Number(match[1]) - 1]?.bindingId).filter((id): id is string => Boolean(id)))];
+        const normalizedDescription = normalizeLegacyReferences(index ? stripDuplicateTransition(string(shot.description), transitionType) : string(shot.description));
+        const extraPanelIds = [...new Set(Array.from(normalizedDescription.matchAll(/<Picture\s+(\d+)>/giu), (match) => originalPictureRefs[Number(match[1]) - 1]?.bindingId).filter((id): id is string => Boolean(id)))];
         const extraPanels = composite ? extraPanelIds
             .filter((id) => id !== pictureId).map((id) => composite.panels.find((panel) => panel.bindingId === id)).filter(Boolean)
             .map((panel) => `This shot uses composite storyboard Panel ${panel!.index} (row ${panel!.row}, column ${panel!.column}).`).join(" ") : "";
-        return `[Shot ${index + 1}]${time}${transition}${picture}${extraPanels ? ` ${extraPanels}` : ""}${string(shot.description) ? ` ${remapDescription(string(shot.description))}` : ""}`;
+        return `[Shot ${index + 1}]${time}${transition}${picture}${extraPanels ? ` ${extraPanels}` : ""}${normalizedDescription ? ` ${remapDescription(normalizedDescription)}` : ""}`;
     });
     return [string(input.openingDescription), details.join("\n")].filter(Boolean).join("\n\n");
 }
@@ -172,7 +145,7 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
     const subjectMarker = (subject: PromptSubject) => `<Subject ${subjectOrdinalById.get(subject.id) || 1}>`;
     const subjectDefinitions = subjects.map((subject) => {
         const identity = [subject.name, subject.englishName && subject.englishName !== subject.name ? subject.englishName : ""].filter(Boolean).join(" / ");
-        const details = [subject.profile, ...subject.outfits].map((value) => value.trim()).filter(Boolean);
+        const details = promptDetails([subject.profile, ...subject.outfits]);
         if (subject.pictures.length) details.unshift(`visual identity defined by reference(s) ${subject.pictures.join(", ")}`);
         if (!details.length) details.push("visual features follow the linked reference");
         return `${subjectMarker(subject)} is ${identity || subject.id}. ${details.join("; ")}.`;
@@ -267,7 +240,9 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
             : "";
         return `${reference.tag}${frameScope ? ` (${frameScope})` : ""}: ${level} - ${details[level]}.${panelMap}`;
     }).join("\n");
-    return { subjectDefinitions: [subjectDefinitions, referenceDefinitions].filter(Boolean).join("\n"), retentionAnalysis: [retentionAnalysis, referenceRetention].filter(Boolean).join("\n") };
+    const result = { subjectDefinitions: [subjectDefinitions, referenceDefinitions].filter(Boolean).join("\n"), retentionAnalysis: [retentionAnalysis, referenceRetention].filter(Boolean).join("\n") };
+    validateDefinitionCoverage(subjects, references, result.subjectDefinitions, result.retentionAnalysis);
+    return result;
 }
 function buildPromptSections(project: RecordValue, segment: RecordValue, input: StoryboardInput, bindings: ReturnType<typeof referenceBindingsOf>["bindings"]) {
     const promptMode = promptModeOf(segment);
@@ -359,7 +334,7 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
                 const images = Array.isArray(metadata.characterImages) ? metadata.characterImages.map(record) : [];
                 const image = images.find((item) => String(item.outfit || item.name || "") === outfit?.name);
                 const outfitDescription = string(image?.outfitDescription);
-                if (outfit && (outfit.name || outfitDescription)) entry.outfits.add([outfit.name, outfitDescription].filter(Boolean).join(": "));
+                if (outfitDescription) entry.outfits.add(outfitDescription);
             }
             const pictureMarker = tag;
             if (!entry.pictures.includes(pictureMarker) && type === "image") entry.pictures.push(pictureMarker);
@@ -440,17 +415,26 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
         pictures: subject.pictures,
         role: subject.role,
     }));
-    const normalizedShots = input.shots.map((shot) => ({
-        description: string(shot.description),
-        switchTime: string(shot.switchTime),
-        transitionType: shot.transitionType || "cut",
-        pictureBindingId: compositeSourceIds.has(string(shot.pictureBindingId)) ? representativeBindingId : string(shot.pictureBindingId),
-        pictureDescription: string(shot.pictureBindingId) ? pictureDescription(allRefs.find((ref) => ref.bindingId === shot.pictureBindingId) || { name: "", url: "", type: "image", bindingId: shot.pictureBindingId }, catalog) : "",
-        referenceIds: [...new Set([
-            ...Array.from(string(shot.description).matchAll(/<Picture\s+(\d+)>/giu), (match) => pictureBindings[Number(match[1]) - 1]?.bindingId).filter((id): id is string => Boolean(id)),
-            ...(string(shot.pictureBindingId) ? [string(shot.pictureBindingId)] : []),
-        ].map((id) => compositeSourceIds.has(id) ? representativeBindingId : id))],
-    }));
+    validatePromptReferences([input.summary, input.openingDescription, ...input.shots.map((shot) => shot.description), input.overallSoundscape, input.nonDiegeticMusic].join("\n"), allRefs.map((ref) => ({ type: string(ref.type), bindingId: string(ref.bindingId) })), subjectManifest.length);
+    const normalizeLegacyReferences = (description: string) => description.replace(/\{\{\s*ref:\s*([^{}]+?)\s*\}\}/gu, (marker, rawId: string) => {
+        const id = rawId.trim();
+        const finalId = compositeSourceIds.has(id) ? representativeBindingId : id;
+        return referencesWithSpeakers.find((reference) => reference.bindingId === finalId)?.tag || marker;
+    });
+    const normalizedShots = input.shots.map((shot) => {
+        const description = normalizeLegacyReferences(string(shot.description));
+        return {
+            description,
+            switchTime: string(shot.switchTime),
+            transitionType: shot.transitionType || "cut",
+            pictureBindingId: compositeSourceIds.has(string(shot.pictureBindingId)) ? representativeBindingId : string(shot.pictureBindingId),
+            pictureDescription: string(shot.pictureBindingId) ? pictureDescription(allRefs.find((ref) => ref.bindingId === shot.pictureBindingId) || { name: "", url: "", type: "image", bindingId: shot.pictureBindingId }, catalog) : "",
+            referenceIds: [...new Set([
+                ...Array.from(description.matchAll(/<Picture\s+(\d+)>/giu), (match) => pictureBindings[Number(match[1]) - 1]?.bindingId).filter((id): id is string => Boolean(id)),
+                ...(string(shot.pictureBindingId) ? [string(shot.pictureBindingId)] : []),
+            ].map((id) => compositeSourceIds.has(id) ? representativeBindingId : id))],
+        };
+    });
     const finalReferences = referencesWithSpeakers.map((reference) => ({
         ...reference,
         shotNumbers: normalizedShots.flatMap((shot, index) => shot.referenceIds.includes(reference.bindingId) ? [index + 1] : []),
@@ -485,21 +469,23 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
     };
     const generated = buildPromptText(subjectManifest, finalReferences, normalizedShots);
     const fingerprint = createHash("sha256").update(JSON.stringify(content)).digest("hex");
-    let prompt = String(segment.prompt || "");
-    if (ref2va) {
-        prompt = replaceSection(prompt, "subject_definitions", generated.subjectDefinitions, promptMode);
-        prompt = replaceSection(prompt, "summary", string(input.summary), promptMode);
-        prompt = replaceSection(prompt, "retention_analysis", generated.retentionAnalysis, promptMode);
-    }
-    prompt = replaceSection(prompt, storyboardSection, promptForShots(input, allRefs, catalog, composite, finalReferences), promptMode);
-    prompt = replaceSection(prompt, "overall_soundscape", string(input.overallSoundscape), promptMode);
-    prompt = replaceSection(prompt, "non_diegetic_music", string(input.nonDiegeticMusic), promptMode);
+    const prompt = assembleH3Prompt(promptMode, {
+        ...(ref2va ? {
+            subject_definitions: generated.subjectDefinitions,
+            summary: string(input.summary),
+            retention_analysis: generated.retentionAnalysis,
+        } : {}),
+        [storyboardSection]: promptForShots(input, allRefs, catalog, composite, finalReferences),
+        overall_soundscape: string(input.overallSoundscape),
+        non_diegetic_music: string(input.nonDiegeticMusic),
+    });
     return { prompt, fingerprint, subjectDefinitions: generated.subjectDefinitions, retentionAnalysis: generated.retentionAnalysis, subjectCount: subjectManifest.length, shotCount: input.shots.length, content };
 }
 
 export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue, rawInput: RecordValue) {
     const input = rawInput as StoryboardInput;
     if (!Array.isArray(input.shots) || !input.shots.length) throw new Error("分镜至少需要一镜");
+    validateShotTimeline(input.shots, segment.duration === undefined ? undefined : Number(segment.duration));
     const bindings = referenceBindingsOf(segment).bindings;
     const generated = buildPromptSections(project, segment, input, bindings);
     const cache = record(segment.storyboardPromptCache);

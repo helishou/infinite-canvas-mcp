@@ -69,6 +69,7 @@ import { buildCanvasGraphIndex, createMentionReferenceSelector, getGroupResource
 import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
+import { arrangeOrderedGroupMembers, insertOrderedGroupSlot, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupMemberPosition, orderedGroupMemberSize, orderedGroupResizeLayout, orderedGroupSlots, swapOrderedGroupSlot } from "@/lib/canvas/ordered-group";
 import { clearCanvasDragPreview, clearCanvasResizePreview, writeCanvasDragPreview, writeCanvasResizePreview, type CanvasResizePreviewBounds } from "@/lib/canvas/canvas-drag-preview";
 import {
     audioExtension,
@@ -843,6 +844,15 @@ function InfiniteCanvasPage() {
             const metadata = type === CanvasNodeType.Config ? { model: effectiveConfig.imageModel || effectiveConfig.model, size: effectiveConfig.size, count: getGenerationCount(effectiveConfig.count || effectiveConfig.canvasImageCount) } : undefined;
             const newNode = createCanvasNode(type, pending.position, metadata);
             if (pending.connection) {
+                const sourceNode = nodesRef.current.find((node) => node.id === pending.connection?.nodeId);
+                if (sourceNode) {
+                    newNode.width = sourceNode.width;
+                    newNode.height = sourceNode.height;
+                    newNode.position = {
+                        x: pending.position.x - sourceNode.width / 2,
+                        y: pending.position.y - sourceNode.height / 2,
+                    };
+                }
                 const connection = normalizeConnection(pending.connection.nodeId, newNode.id, [...nodesRef.current, newNode], pending.connection.handleType);
                 if (!connection) {
                     message.warning(t("canvas.projectPage.configConnection"));
@@ -1356,11 +1366,42 @@ function InfiniteCanvasPage() {
         else createNode(CanvasNodeType.Group);
     }, [createNode, groupSelectedNodes, groupableSelectedCount]);
 
+    const toggleOrderedGroup = useCallback((groupId: string) => {
+        setNodes((prev) => {
+            const group = prev.find((item) => item.id === groupId && item.type === CanvasNodeType.Group);
+            if (!group) return prev;
+            if (group.metadata?.orderedGroup) {
+                return prev.map((item) => {
+                    if (item.id !== groupId) return item;
+                    const { orderedGroup: _orderedGroup, groupSlots: _groupSlots, orderedGroupColumns: _orderedGroupColumns, ...metadata } = item.metadata || {};
+                    return { ...item, metadata };
+                });
+            }
+            const slots = orderedGroupSlots(group, prev).filter((id): id is string => typeof id === "string");
+            const orderedGroup = { ...group, metadata: { ...group.metadata, orderedGroup: true, groupSlots: slots } };
+            const layout = arrangeOrderedGroupMembers(orderedGroup, prev.map((item) => item.id === groupId ? orderedGroup : item));
+            return prev.map((item) => {
+                if (item.id === groupId) return { ...orderedGroup, position: layout.position, width: layout.width, height: layout.height, metadata: { ...orderedGroup.metadata, orderedGroupColumns: layout.columns } };
+                const position = layout.members.get(item.id);
+                return position ? { ...item, position } : item;
+            });
+        });
+    }, []);
+
     // 组节点工具栏「整理」：把组内成员的尺寸收成相近档位（图片/视频等比缩放，宽高比不变），
     // 按视觉顺序铺进组框范围内。组框本身不动 —— 用户要的是「排列到组的范围里」。
     const arrangeGroupNodes = useCallback((node: CanvasNodeData) => {
         const group = nodesRef.current.find((item) => item.id === node.id);
         if (!group) return;
+        if (group.metadata?.orderedGroup) {
+            const layout = arrangeOrderedGroupMembers(group, nodesRef.current);
+            setNodes((prev) => prev.map((item) => {
+                if (item.id === group.id) return { ...item, position: layout.position, width: layout.width, height: layout.height, metadata: { ...item.metadata, orderedGroupColumns: layout.columns } };
+                const position = layout.members.get(item.id);
+                return position ? { ...item, position } : item;
+            }));
+            return;
+        }
         const layout = arrangeGroupMembers(group, nodesRef.current);
         if (!layout.size) return;
         setNodes((prev) =>
@@ -1940,6 +1981,75 @@ function InfiniteCanvasPage() {
         [projectId],
     );
 
+    const applyOrderedGroupDrop = useCallback((draggedId: string, point: Position, pointerPoint: Position = point) => {
+        const current = nodesRef.current;
+        const dragged = current.find((item) => item.id === draggedId);
+        if (!dragged || dragged.type === CanvasNodeType.Group) return false;
+        const targetGroup = current.find((item) => item.type === CanvasNodeType.Group && item.metadata?.orderedGroup && pointerPoint.x >= item.position.x && pointerPoint.x <= item.position.x + item.width && pointerPoint.y >= item.position.y && pointerPoint.y <= item.position.y + item.height);
+        if (!targetGroup) return false;
+        setNodes((prev) => {
+            const sourceGroup = prev.find((item) => item.id === draggedId ? false : item.id === dragged.metadata?.groupId && item.metadata?.orderedGroup);
+            const target = prev.find((item) => item.id === targetGroup.id);
+            if (!target) return prev;
+            const sourceSlots = sourceGroup ? orderedGroupSlots(sourceGroup, prev) : null;
+            const targetSlots = orderedGroupSlots(target, prev);
+            const targetDisplaySlots = orderedGroupDisplaySlots(targetSlots, orderedGroupColumnCount(target));
+            const targetLayouts = orderedGroupLayout(target, targetDisplaySlots.length);
+            const slotAreas = targetLayouts.flatMap((cell, index) => {
+                const memberId = targetDisplaySlots[index];
+                if (!memberId) return [{ ...cell, x: target.position.x + cell.x, y: target.position.y + cell.y }];
+                const member = prev.find((item) => item.id === memberId);
+                return member ? [{ index, x: member.position.x, y: member.position.y, width: member.width, height: member.height }] : [];
+            });
+            const dropPoint = sourceGroup ? point : pointerPoint;
+            const drop = orderedGroupDropTarget(target, targetDisplaySlots.length, dropPoint, slotAreas);
+            if (!drop) return prev;
+            const sourceIndex = sourceSlots?.indexOf(draggedId) ?? -1;
+            const targetIndex = Math.max(0, Math.min(drop.index, targetSlots.length));
+            let nextTargetSlots = [...targetSlots];
+            let nextSourceSlots = sourceSlots ? [...sourceSlots] : null;
+            if (sourceGroup?.id === target.id && sourceIndex >= 0) {
+                if (drop.kind === "slot" && nextTargetSlots[targetIndex] && nextTargetSlots[targetIndex] !== draggedId) {
+                    nextTargetSlots = swapOrderedGroupSlot(nextTargetSlots, sourceIndex, targetIndex);
+                } else {
+                    nextTargetSlots = insertOrderedGroupSlot(nextTargetSlots, draggedId, targetIndex);
+                }
+            } else {
+                if (nextSourceSlots && sourceIndex >= 0) nextSourceSlots = nextSourceSlots.filter((id) => id !== draggedId);
+                if (drop.kind === "slot" && targetIndex < nextTargetSlots.length) {
+                    nextTargetSlots = insertOrderedGroupSlot(nextTargetSlots, draggedId, targetIndex);
+                } else {
+                    nextTargetSlots = insertOrderedGroupSlot(nextTargetSlots, draggedId, targetIndex);
+                }
+            }
+            const targetSlotIndex = nextTargetSlots.indexOf(draggedId);
+            const sourceSlotMap = new Map((nextSourceSlots || []).map((id, index) => [id, index]));
+            const targetSlotMap = new Map(nextTargetSlots.map((id, index) => [id, index]));
+            const targetDisplayCount = orderedGroupDisplaySlots(nextTargetSlots, orderedGroupColumnCount(target)).length;
+            const sourceDisplayCount = orderedGroupDisplaySlots(nextSourceSlots || [], sourceGroup ? orderedGroupColumnCount(sourceGroup) : 4).length;
+            return prev.map((item) => {
+                if (item.id === target.id) return { ...item, metadata: { ...item.metadata, orderedGroup: true, groupSlots: nextTargetSlots } };
+                if (sourceGroup && item.id === sourceGroup.id && sourceGroup.id !== target.id) return { ...item, metadata: { ...item.metadata, groupSlots: nextSourceSlots || [] } };
+                if (item.id === draggedId) {
+                    const size = orderedGroupMemberSize(target, targetSlotIndex, item, targetDisplayCount);
+                    return { ...item, metadata: { ...item.metadata, groupId: target.id }, position: orderedGroupMemberPosition(target, targetSlotIndex, item, targetDisplayCount), width: size.width, height: size.height };
+                }
+                const targetSlot = targetSlotMap.get(item.id);
+                if (targetSlot !== undefined) {
+                    const size = orderedGroupMemberSize(target, targetSlot, item, targetDisplayCount);
+                    return { ...item, metadata: { ...item.metadata, groupId: target.id }, position: orderedGroupMemberPosition(target, targetSlot, item, targetDisplayCount), width: size.width, height: size.height };
+                }
+                const sourceSlot = sourceSlotMap.get(item.id);
+                if (sourceGroup && sourceGroup.id !== target.id && sourceSlot !== undefined) {
+                    const size = orderedGroupMemberSize(sourceGroup, sourceSlot, item, sourceDisplayCount);
+                    return { ...item, position: orderedGroupMemberPosition(sourceGroup, sourceSlot, item, sourceDisplayCount), width: size.width, height: size.height };
+                }
+                return item;
+            });
+        });
+        return true;
+    }, []);
+
     const finishNodeDrag = useCallback(
         (clientX?: number, clientY?: number) => {
             const pendingClick = pendingNodeClickRef.current;
@@ -1982,7 +2092,13 @@ function InfiniteCanvasPage() {
                 writeCanvasDragPreview(projectId, EMPTY_DRAG_PREVIEW);
             } else if (dragRef.current.hasMoved && clientX != null && clientY != null) {
                 const movedIds = dragRef.current.movedIds;
-                setNodes((prev) => {
+                const draggedId = movedIds.size === 1 ? [...movedIds][0] : undefined;
+                const draggedNode = draggedId ? nodesRef.current.find((node) => node.id === draggedId) : undefined;
+                const draggedInitialPosition = draggedId ? initialPositions.get(draggedId) || draggedNode?.position : undefined;
+                const pointerPoint = screenToCanvas(clientX, clientY);
+                const orderedDropPoint = draggedNode && draggedInitialPosition ? orderedGroupDraggedCenter(draggedInitialPosition, { x: dx, y: dy }, draggedNode) : pointerPoint;
+                const orderedHandled = draggedId ? applyOrderedGroupDrop(draggedId, orderedDropPoint, pointerPoint) : false;
+                if (!orderedHandled) setNodes((prev) => {
                     const moved = prev.map((node) => {
                         const initial = initialPositions.get(node.id);
                         const position = initial ? previewPositions.get(node.id) || { x: initial.x + dx, y: initial.y + dy } : null;
@@ -1997,7 +2113,33 @@ function InfiniteCanvasPage() {
                               if (node.metadata?.groupId === groupId) return node;
                               return { ...node, metadata: { ...node.metadata, groupId } };
                           });
-                    return keepNodesInLockedGroups(movedIds, prev, grouped);
+                    const movedOutOfOrderedGroups = new Map<string, Set<string>>();
+                    prev.forEach((node) => {
+                        if (!movedIds.has(node.id) || !node.metadata?.groupId) return;
+                        const group = prev.find((item) => item.id === node.metadata?.groupId);
+                        if (group?.metadata?.orderedGroup && grouped.find((item) => item.id === node.id)?.metadata?.groupId !== group.id) {
+                            const ids = movedOutOfOrderedGroups.get(group.id) || new Set<string>();
+                            ids.add(node.id);
+                            movedOutOfOrderedGroups.set(group.id, ids);
+                        }
+                    });
+                    const constrained = keepNodesInLockedGroups(movedIds, prev, grouped);
+                    const orderedReflows = new Map([...movedOutOfOrderedGroups].flatMap(([groupId, movedOut]) => {
+                        const group = prev.find((item) => item.id === groupId);
+                        if (!group) return [];
+                        const slots = orderedGroupSlots(group, prev).filter((id) => typeof id === "string" && !movedOut.has(id));
+                        return [[groupId, { group, slots, displayCount: orderedGroupDisplaySlots(slots, orderedGroupColumnCount(group)).length }] as const];
+                    }));
+                    return constrained.map((node) => {
+                        const ownReflow = orderedReflows.get(node.id);
+                        if (ownReflow) return { ...node, metadata: { ...node.metadata, groupSlots: ownReflow.slots } };
+                        const memberReflow = node.metadata?.groupId ? orderedReflows.get(node.metadata.groupId) : undefined;
+                        if (!memberReflow) return node;
+                        const slotIndex = memberReflow.slots.indexOf(node.id);
+                        if (slotIndex < 0) return node;
+                        const size = orderedGroupMemberSize(memberReflow.group, slotIndex, node, memberReflow.displayCount);
+                        return { ...node, position: orderedGroupMemberPosition(memberReflow.group, slotIndex, node, memberReflow.displayCount), width: size.width, height: size.height };
+                    });
                 });
                 dragPreviewPositionsRef.current = EMPTY_DRAG_PREVIEW;
                 writeCanvasDragPreview(projectId, EMPTY_DRAG_PREVIEW);
@@ -2026,7 +2168,7 @@ function InfiniteCanvasPage() {
                 }
             }
         },
-        [projectId, publishRealtimeDrag, updateDropTargetGroupId],
+        [applyOrderedGroupDrop, projectId, publishRealtimeDrag, screenToCanvas, updateDropTargetGroupId],
     );
 
     const handleGlobalMouseMove = useCallback(
@@ -2681,6 +2823,9 @@ function InfiniteCanvasPage() {
             const bounds = { width, height, position: position || node.position };
             const next = new Map(resizePreviewBoundsRef.current);
             next.set(nodeId, bounds);
+            if (node.type === CanvasNodeType.Group && node.metadata?.orderedGroup) {
+                orderedGroupResizeLayout(node, bounds, nodesRef.current).forEach((memberBounds, memberId) => next.set(memberId, memberBounds));
+            }
             resizePreviewBoundsRef.current = next;
             writeCanvasResizePreview(projectId, next);
         },
@@ -2697,13 +2842,18 @@ function InfiniteCanvasPage() {
     );
     const handleNodeResizeEnd = useCallback(
         (nodeId: string, boundsOverride?: CanvasResizePreviewBounds) => {
-            if (boundsOverride) {
-                setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, ...boundsOverride } : node)));
-                return;
-            }
-            const bounds = resizePreviewBoundsRef.current.get(nodeId);
-            if (bounds) {
-                setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, ...bounds } : node)));
+            const previewBounds = boundsOverride || resizePreviewBoundsRef.current.get(nodeId);
+            if (previewBounds) {
+                setNodes((prev) => {
+                    const resizedNode = prev.find((node) => node.id === nodeId);
+                    if (!resizedNode?.metadata?.orderedGroup || resizedNode.type !== CanvasNodeType.Group) return prev.map((node) => (node.id === nodeId ? { ...node, ...previewBounds } : node));
+                    const memberBounds = orderedGroupResizeLayout(resizedNode, previewBounds, prev);
+                    return prev.map((node) => {
+                        if (node.id === nodeId) return { ...node, ...previewBounds };
+                        const bounds = memberBounds.get(node.id);
+                        return bounds ? { ...node, ...bounds } : node;
+                    });
+                });
             }
             resizePreviewBoundsRef.current = EMPTY_RESIZE_PREVIEW;
             writeCanvasResizePreview(projectId, EMPTY_RESIZE_PREVIEW);
@@ -5092,6 +5242,7 @@ function InfiniteCanvasPage() {
                     onRetry={(node) => void handleRetryNode(node)}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
                     onArrangeGroup={arrangeGroupNodes}
+                    onToggleOrderedGroup={(node) => toggleOrderedGroup(node.id)}
                     onToggleGroupLock={(node) => setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, groupLocked: !item.metadata?.groupLocked } } : item)))}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                 />
@@ -5136,6 +5287,7 @@ function InfiniteCanvasPage() {
                         menu={contextMenu}
                         canCaptureVideoFrame={contextMenuNode?.type === CanvasNodeType.Video && Boolean(contextMenuNode.metadata?.content)}
                         canGroup={contextMenu.type === "node" && selectedNodeIds.has(contextMenu.nodeId) && groupableSelectedCount > 1}
+
                         onClose={() => setContextMenu(null)}
                         onCaptureVideoFrame={(position) => {
                             if (contextMenu.type !== "node") return;
@@ -5145,6 +5297,7 @@ function InfiniteCanvasPage() {
                             groupSelectedNodes();
                             setContextMenu(null);
                         }}
+
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);

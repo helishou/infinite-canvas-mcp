@@ -140,7 +140,10 @@ async function mockBackend(t: import("node:test").TestContext, onMcpEvent?: (eve
   return `http://127.0.0.1:${address.port}`;
 }
 
-async function mockGenerationBackend(t: import("node:test").TestContext) {
+async function mockGenerationBackend(
+  t: import("node:test").TestContext,
+  options: { conflictOnOps?: boolean } = {},
+) {
   const app = express();
   app.use(express.json());
   app.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
@@ -156,6 +159,7 @@ async function mockGenerationBackend(t: import("node:test").TestContext) {
   let singleTaskRequests = 0;
   let bulkTaskRequests = 0;
   let aiConfigRequests = 0;
+  let opsRequests = 0;
   const taskRecord = (id: string) => ({
     id,
     kind: "canvas-image",
@@ -180,6 +184,11 @@ async function mockGenerationBackend(t: import("node:test").TestContext) {
     });
   });
   app.post("/canvas/projects/:id/ops", (req, res) => {
+    opsRequests += 1;
+    if (options.conflictOnOps) {
+      res.status(409).json({ ok: false, code: "REVISION_CONFLICT", error: "revision conflict" });
+      return;
+    }
     const operations = Array.isArray(req.body.operations) ? req.body.operations : [];
     const nodes = [...(project.nodes as Array<Record<string, unknown>> || [])];
     const connections = [...(project.connections as Array<Record<string, unknown>> || [])];
@@ -237,6 +246,7 @@ async function mockGenerationBackend(t: import("node:test").TestContext) {
     url: `http://127.0.0.1:${address.port}`,
     generationCommand: () => generationCommand,
     project: () => project,
+    opsRequestCount: () => opsRequests,
     taskRequestCounts: () => ({ single: singleTaskRequests, bulk: bulkTaskRequests }),
     aiConfigRequestCount: () => aiConfigRequests,
   };
@@ -386,6 +396,46 @@ test("direct canvas tools return recoverable structured errors", async (t) => {
   assert.equal(payload.error.recoverable, true);
   assert.equal(payload.currentState.requestedProjectId, "missing-canvas");
   assert.equal(payload.suggestedAction.tool, "canvas_list_projects");
+});
+
+test("existing-node tools reject stale node IDs before submitting operations", async (t) => {
+  const backend = await mockGenerationBackend(t);
+  const client = await mcpClient(t, await fixture(t, backend.url));
+  const result = await client.callTool({
+    name: "canvas_update_node",
+    arguments: {
+      projectId: "canvas-generate",
+      id: "stale-node",
+      patch: { title: "不应写入" },
+    },
+  });
+  const payload = textPayload(result);
+
+  assert.equal(result.isError, true);
+  assert.equal(payload.error.code, "NODE_NOT_FOUND");
+  assert.deepEqual(payload.errorContext.preflight.missingNodeIds, ["stale-node"]);
+  assert.deepEqual(payload.errorContext.preflight.nodes, []);
+  assert.equal(payload.suggestedAction.tool, "canvas_inspect");
+  assert.equal(backend.opsRequestCount(), 0);
+});
+
+test("revision conflicts are returned without automatic replay", async (t) => {
+  const backend = await mockGenerationBackend(t, { conflictOnOps: true });
+  const client = await mcpClient(t, await fixture(t, backend.url));
+  const result = await client.callTool({
+    name: "canvas_apply_ops",
+    arguments: {
+      projectId: "canvas-generate",
+      ops: [{ type: "add_node", id: "new-node", nodeType: "text", title: "保留冲突" }],
+    },
+  });
+  const payload = textPayload(result);
+
+  assert.equal(result.isError, true);
+  assert.equal(payload.error.code, "REVISION_CONFLICT");
+  assert.equal(payload.suggestedAction.tool, "canvas_inspect");
+  assert.equal(backend.opsRequestCount(), 1);
+  assert.equal((backend.project().nodes as Array<unknown>).length, 0);
 });
 
 test("canvas_generate_image resolves the configured default model and returns the next wait call", async (t) => {

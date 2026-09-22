@@ -16,7 +16,11 @@ export class CanvasReferenceService {
         const now = new Date().toISOString();
         const id = String(input.id || `reference-${crypto.randomUUID()}`);
         const existing = referenceCatalogOf(project).find((asset) => asset.id === id);
-        const merged = { ...existing, ...input };
+        // subjectId belongs to the binding context. One project asset can be reused
+        // by clips that map the same media to different character subjects; do not
+        // let those bindings overwrite each other in the shared catalog.
+        const subjectId = existing?.subjectId || (typeof input.subjectId === "string" ? input.subjectId.trim() : "") || undefined;
+        const merged = { ...existing, ...input, ...(subjectId ? { subjectId } : {}) };
         const asset: ProjectReferenceAsset = {
             ...merged,
             id,
@@ -27,6 +31,7 @@ export class CanvasReferenceService {
             createdAt: existing?.createdAt || now,
             updatedAt: now,
         } as ProjectReferenceAsset;
+        if (existing && sameReferenceAsset(existing, asset)) return existing;
         this.stores.projects.applyOperations(projectId, undefined, [{ type: "upsert_reference_asset", asset }], { source: { clientId: "system:references", kind: "system", label: "参考资产" } });
         return asset;
     }
@@ -54,6 +59,19 @@ export class CanvasReferenceService {
         return project;
     }
 
+}
+
+function sameReferenceAsset(left: ProjectReferenceAsset, right: ProjectReferenceAsset) {
+    const keys = new Set([...Object.keys(left), ...Object.keys(right)].filter((key) => key !== "createdAt" && key !== "updatedAt"));
+    return [...keys].every((key) => sameValue((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key]));
+}
+
+function sameValue(left: unknown, right: unknown) {
+    if (Object.is(left, right)) return true;
+    if ((left && typeof left === "object") || (right && typeof right === "object")) {
+        try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
+    }
+    return String(left ?? "") === String(right ?? "");
 }
 
 function recordOf(value: unknown): Record<string, unknown> {

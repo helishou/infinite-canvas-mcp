@@ -136,16 +136,18 @@ export function resolveH3PaneSizes(metadata: Record<string, unknown> | null | un
 
 // 行高布局常量（拖拽侧与读取侧共用的唯一口径，此前散在三处导致互相打架）：
 // wb-body 自身 padding+gap 合计 36；Output 行保底 80；
-// 时间轴面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110 + 余量 ≈ 190 + Refs 行高。
+// 时间轴面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110 + 余量 ≈ 190；Refs 行另有最小高度。
 export const H3_BODY_CHROME = 36;
 export const H3_OUTPUT_MIN = 80;
 export const H3_PREVIEW_MIN = 130;
 export const H3_REF_MIN = 60;
 export const H3_TIMELINE_CHROME = 190;
+export const H3_TIMELINE_MIN = H3_TIMELINE_CHROME + H3_REF_MIN;
 export const H3_NODE_MAX = 4000;
 
 // 高度预算求解：节点在画布上被手动压小、行1+行2+Output 装不下时，按
-// 「预览先让(到 130 下限) → 时间轴再让(到 max(250, 190+Refs) 下限)」连续收敛，Output 始终保底 80。
+// 「预览先让(到 130 下限) → 时间轴再让(到固定内容下限)」连续收敛，Output 始终保底 80；
+// 时间轴收缩时 Refs 行同步压到 60px 下限，避免高 Refs 默认值锁死 Output 分界线。
 // 全程单调连续（脱离挤压态时恰好等于输入值），边界无跳变。拖拽侧与读取侧共用。
 export function h3SolveRows(bodyH: number, p: number, t: number, r: number) {
     const avail = Math.max(0, bodyH - H3_BODY_CHROME - H3_OUTPUT_MIN);
@@ -156,7 +158,7 @@ export function h3SolveRows(bodyH: number, p: number, t: number, r: number) {
         const dp = Math.min(over, Math.max(0, ep - H3_PREVIEW_MIN));
         ep -= dp;
         const rest = over - dp;
-        if (rest > 0) et -= Math.min(rest, Math.max(0, et - Math.max(250, H3_TIMELINE_CHROME + r)));
+        if (rest > 0) et -= Math.min(rest, Math.max(0, et - H3_TIMELINE_MIN));
     }
     return { p: Math.round(ep), t: Math.round(et), r: Math.round(Math.max(H3_REF_MIN, Math.min(r, et - H3_TIMELINE_CHROME))) };
 }
@@ -188,14 +190,14 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
             const metadata = ctxRef.current.node.metadata || {};
             const r = Math.max(H3_REF_MIN, Math.min(900, Number(metadata.minimaxRefLaneH) || 150));
             const p = Math.max(H3_PREVIEW_MIN, Math.min(2000, Number(metadata.minimaxPreviewH) || 220));
-            const t = Math.max(H3_TIMELINE_CHROME + r, Math.min(2000, Number(metadata.minimaxTimelineH) || 320));
+            const t = Math.max(H3_TIMELINE_MIN, Math.min(2000, Number(metadata.minimaxTimelineH) || 320));
             let next: { p: number; t: number; r: number };
             if (prev > 36 && bodyH > 36 && prev !== bodyH) {
                 // 节点高度变化：以上一次的实际视觉行高为基准等比缩放（Output 是余量，随总空间自然同比）
                 const base = h3SolveRows(prev, p, t, r);
                 const k = (bodyH - H3_BODY_CHROME) / (prev - H3_BODY_CHROME);
                 const np = Math.max(H3_PREVIEW_MIN, Math.round(base.p * k));
-                const nt = Math.max(250, Math.round(base.t * k));
+            const nt = Math.max(H3_TIMELINE_MIN, Math.round(base.t * k));
                 const nr = Math.max(H3_REF_MIN, Math.min(nt - H3_TIMELINE_CHROME, Math.round(base.r * k)));
                 next = h3SolveRows(bodyH, np, nt, nr);
             } else {
@@ -259,9 +261,10 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
             const host = hostRef.current?.parentElement;
             // 快照直接取 metadata 真值（钳制与 bounds 一致）。历史 bug 源：这里曾钳到 900，
             // 而行高/节点早已允许 2000，超 900 的节点一抓手就先跳回 900。
-            const refLane0 = Math.max(H3_REF_MIN, Math.min(900, Number(metadata.minimaxRefLaneH) || 150));
+            const refLaneStored = Math.max(H3_REF_MIN, Math.min(900, Number(metadata.minimaxRefLaneH) || 150));
             const p0 = Math.max(H3_PREVIEW_MIN, Math.min(2000, Number(metadata.minimaxPreviewH) || 220));
-            const t0 = Math.max(H3_TIMELINE_CHROME + refLane0, Math.min(2000, Number(metadata.minimaxTimelineH) || 320));
+            const t0 = Math.max(H3_TIMELINE_MIN, Math.min(2000, Number(metadata.minimaxTimelineH) || 320));
+            const refLane0 = Math.max(H3_REF_MIN, Math.min(refLaneStored, t0 - H3_TIMELINE_CHROME));
             const bodyH = host?.querySelector<HTMLElement>(".minimax-wb-body")?.clientHeight || 0;
             const library = host?.querySelector<HTMLElement>(".minimax-library");
             const outputH = library && library.offsetHeight > 0 ? library.offsetHeight : Math.max(H3_OUTPUT_MIN, bodyH - H3_BODY_CHROME - p0 - t0);
@@ -285,12 +288,11 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
         if (!state) return;
         const meta = H3_PANE_META[state.key];
         let [min, max] = H3_PANE_BOUNDS[state.key];
-        // 时间轴面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110 + Refs 行 refLaneH，
-        // timelineH 低于它行与行就会互相挤压裁切；两把行高手柄互相约束下限/上限。
+        // 时间轴面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110；
+        // Refs 行在时间轴收缩时可压到 H3_REF_MIN，两把行高手柄互相约束下限/上限。
         const metadataNow = ctx.node.metadata || {};
-        const refLaneNow = Math.max(H3_REF_MIN, Math.min(900, Number(metadataNow.minimaxRefLaneH) || 150));
-        const timelineNow = Math.max(H3_TIMELINE_CHROME + refLaneNow, Math.min(2000, Number(metadataNow.minimaxTimelineH) || 320));
-        if (state.key === "timelineH") min = H3_TIMELINE_CHROME + refLaneNow;
+        const timelineNow = Math.max(H3_TIMELINE_MIN, Math.min(2000, Number(metadataNow.minimaxTimelineH) || 320));
+        if (state.key === "timelineH") min = H3_TIMELINE_MIN;
         if (state.key === "refLaneH") max = Math.min(max, timelineNow - H3_TIMELINE_CHROME);
         const factor = scale();
         const delta = (meta.axis === "y" ? event.clientY : event.clientX) / factor - (meta.axis === "y" ? state.y : state.x);
@@ -298,7 +300,7 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
         // Output 压到 80 保底后继续下拉 → 节点自动长高，反向拖回时节点单调缩回。
         if (state.key === "timelineH") {
             const t0 = state.timelineH || 320;
-            const minT = H3_TIMELINE_CHROME + refLaneNow;
+            const minT = H3_TIMELINE_MIN;
             const capT = t0 + ((state.outputH || H3_OUTPUT_MIN) - H3_OUTPUT_MIN); // 节点不变时时间轴的物理上限
             const desiredT = t0 + meta.sign * delta;
             if (state.nodeH) ctx.updateNode({ height: Math.round(Math.min(H3_NODE_MAX, state.nodeH + Math.max(0, desiredT - capT))) });
@@ -321,11 +323,11 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
             return;
         }
         // 规则②（VideoRefs↔preview 分界线，AGENTS.md 定案）：Output 高度不变；预览与时间轴此消彼长；
-        // 时间轴压到下限(190+Refs行高)后继续下拉 → 节点自动长高（预览吃增量、时间轴/Output 不变）；反向拖回节点缩回。
+        // 时间轴压到固定内容下限后继续下拉 → 节点自动长高（预览吃增量、时间轴/Output 不变）；反向拖回节点缩回。
         if (state.key === "previewH" && state.timelineH !== undefined) {
             const t0 = state.timelineH;
             const p0 = Math.max(H3_PREVIEW_MIN, state.value);
-            const minT = H3_TIMELINE_CHROME + refLaneNow;
+            const minT = H3_TIMELINE_MIN;
             const maxP = p0 + (t0 - minT);                                // 节点/Output 不变时预览的物理上限
             const desiredP = p0 + delta;
             if (state.nodeH) ctx.updateNode({ height: Math.round(Math.min(H3_NODE_MAX, state.nodeH + Math.max(0, desiredP - maxP))) });

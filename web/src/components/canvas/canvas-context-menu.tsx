@@ -8,7 +8,28 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import type { ContextMenuState } from "@/types/canvas";
 import type { VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
 
-export function CanvasNodeContextMenu({ menu, canCaptureVideoFrame, canGroup, onClose, onCaptureVideoFrame, onGroup, onDuplicate, onDelete }: { menu: ContextMenuState; canCaptureVideoFrame: boolean; canGroup: boolean; onClose: () => void; onCaptureVideoFrame: (position: VideoFramePosition) => void; onGroup: () => void; onDuplicate: () => void; onDelete: () => void }) {
+export function CanvasNodeContextMenu({
+    menu,
+    canCaptureVideoFrame,
+    canGroup,
+    onClose,
+    onCaptureVideoFrame,
+    onGroup,
+
+    onDuplicate,
+    onDelete,
+}: {
+    menu: ContextMenuState;
+    canCaptureVideoFrame: boolean;
+    canGroup: boolean;
+
+    onClose: () => void;
+    onCaptureVideoFrame: (position: VideoFramePosition) => void;
+    onGroup: () => void;
+
+    onDuplicate: () => void;
+    onDelete: () => void;
+}) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
 
@@ -42,6 +63,7 @@ export function CanvasNodeContextMenu({ menu, canCaptureVideoFrame, canGroup, on
                     <div className="my-1 border-t" style={{ borderColor: theme.toolbar.border }} />
                 </>
             ) : null}
+
             {menu.type === "node" ? <MenuButton icon={<Plus className="size-4" />} label={t("canvas.controls.duplicate")} onClick={onDuplicate} /> : null}
             <MenuButton icon={<Trash2 className="size-4" />} label={t("canvas.controls.delete")} onClick={onDelete} danger />
         </div>

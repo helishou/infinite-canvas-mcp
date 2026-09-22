@@ -1531,6 +1531,11 @@ export class BackendDatabase {
         try { return stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject; } catch { return null; }
     }
 
+    getCanvasProjectRevision(id: string): number | null {
+        const row = this.db.prepare("SELECT CASE WHEN json_valid(data_json) THEN COALESCE(json_extract(data_json, '$.revision'), 0) END AS revision FROM canvas_projects WHERE id = ?").get(id) as { revision?: number | null } | undefined;
+        return row?.revision === undefined || row.revision === null ? null : Number(row.revision);
+    }
+
     listPluginDeclarations(): PluginDeclaration[] {
         const rows = this.db.prepare("SELECT * FROM plugin_declarations ORDER BY id").all() as Array<Record<string, unknown>>;
         return rows.flatMap((row) => {
@@ -1985,11 +1990,11 @@ export class BackendDatabase {
             WHERE event IN ('tool.succeeded', 'tool.failed') AND duration_ms IS NOT NULL
         `).all() as Array<Record<string, unknown>>;
         const allLatency = summarizeDurations(terminalDurationRows);
-        const ordinaryLatency = summarizeDurations(terminalDurationRows.filter((row) => !waitsForTasks(row.output_summary_json)));
-        const waitingLatency = summarizeDurations(terminalDurationRows.filter((row) => waitsForTasks(row.output_summary_json)));
+        const ordinaryLatency = summarizeDurations(terminalDurationRows.filter((row) => !waitsForTasks(row.output_summary_json, row.tool)));
+        const waitingLatency = summarizeDurations(terminalDurationRows.filter((row) => waitsForTasks(row.output_summary_json, row.tool)));
         const ordinaryByTool = new Map<string, Array<Record<string, unknown>>>();
         for (const row of terminalDurationRows) {
-            if (waitsForTasks(row.output_summary_json)) continue;
+            if (waitsForTasks(row.output_summary_json, row.tool)) continue;
             const tool = String(row.tool || "");
             const rows = ordinaryByTool.get(tool) || [];
             rows.push(row);
@@ -2416,8 +2421,8 @@ function mcpObservabilityEventFromRow(row: Record<string, unknown>): McpObservab
     };
 }
 
-function waitsForTasks(value: unknown) {
-    return parseJsonObject(value).waitsForTasks === true;
+function waitsForTasks(value: unknown, tool?: unknown) {
+    return String(tool || "") === "canvas_wait_tasks" || parseJsonObject(value).waitsForTasks === true;
 }
 
 function summarizeDurations(rows: Array<Record<string, unknown>>) {

@@ -36,6 +36,11 @@ const NODE_LEVEL_KEYS = [
 /** H3 工作台各模块区域的布局键：与画布手柄拖拽写入的 metadata minimax* 键一一对应。 */
 export const H3_LAYOUT_PANE_KEYS = ["minimaxPreviewH", "minimaxPreviewW", "minimaxPromptW", "minimaxTimelineH", "minimaxRefLaneH"] as const;
 
+/** H3 节点类型（含历史别名和插件名形式）。 */
+export function isH3NodeType(type: unknown): boolean {
+    return /^(?:minimax|smart-minimax)/i.test(String(type || ""));
+}
+
 export type H3LayoutSnapshot = { width?: number; height?: number; panes: Record<string, number> };
 
 const positiveInt = (value: unknown) => {

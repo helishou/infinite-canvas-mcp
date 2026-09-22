@@ -1,3 +1,5 @@
+import { promptDetails, validateDefinitionCoverage } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
+
 export type StoryboardPromptSubject = {
     id: string;
     name: string;
@@ -84,7 +86,7 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
     const subjectMarker = (subject: StoryboardPromptSubject) => `<Subject ${subjectOrdinalById.get(subject.id) || 1}>`;
     const subjectDefinitions = subjects.map((subject) => {
         const identity = [subject.name, subject.englishName && subject.englishName !== subject.name ? subject.englishName : ""].filter(Boolean).join(" / ");
-        const details = [subject.profile, ...subject.outfits].map((value) => value.trim()).filter(Boolean);
+        const details = promptDetails([subject.profile, ...subject.outfits]);
         if (subject.pictures.length) details.unshift(`visual identity defined by reference(s) ${subject.pictures.join(", ")}`);
         if (!details.length) details.push("visual features follow the linked reference");
         return `${subjectMarker(subject)} is ${identity || subject.id}. ${details.join("; ")}.`;
@@ -169,5 +171,7 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
         return `${referenceMarker}${frameScope ? ` (${frameScope})` : ""}: ${level} - ${details[level]}.${panelMap}`;
     }).join("\n");
 
-    return { subjectDefinitions: [subjectDefinitions, referenceDefinitions].filter(Boolean).join("\n"), retentionAnalysis: [retentionAnalysis, referenceRetention].filter(Boolean).join("\n") };
+    const result = { subjectDefinitions: [subjectDefinitions, referenceDefinitions].filter(Boolean).join("\n"), retentionAnalysis: [retentionAnalysis, referenceRetention].filter(Boolean).join("\n") };
+    validateDefinitionCoverage(subjects, references, result.subjectDefinitions, result.retentionAnalysis);
+    return result;
 }

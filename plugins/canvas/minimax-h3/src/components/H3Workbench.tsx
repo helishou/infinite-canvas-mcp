@@ -10,7 +10,7 @@ import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { h3ThemeVars } from "../h3-theme";
 import { removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
-import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
+import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, H3_TIMELINE_MIN, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
 import { H3ClipSettingsPanel } from "./H3ClipSettingsPanel";
@@ -76,10 +76,10 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const previewW = Math.max(280, Math.min(1400, Number(metadata.minimaxPreviewW || 960)));
     // 行高模型：行1(预览+当前Clip) 与 行2(时间轴) 固定 px，行3(Output 素材库) 吃剩余高度；
     // Refs 行高可独立调节；时间轴面板高度下限联动 Refs 行高：
-    // 面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110 + Refs 行高 + 余量，
-    // 低于该值时 Refs 被压扁、刻度被裁、行与行重叠（历史 metadata 里的过小值会自动抬升）。
+    // 面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110；
+    // 时间轴收缩时 Refs 行可压到最小高度，避免高 Refs 默认值锁死 Output。
     const refLaneRaw = Math.max(60, Math.min(900, Number(metadata.minimaxRefLaneH || 150)));
-    const timelineH = Math.max(190 + refLaneRaw, Math.min(2000, Number(metadata.minimaxTimelineH || 320)));
+    const timelineH = Math.max(H3_TIMELINE_MIN, Math.min(2000, Number(metadata.minimaxTimelineH || 320)));
     const refLaneH = Math.min(refLaneRaw, timelineH - 190);
     // 行高预算：节点被画布手动压小、行1+行2+Output 装不下时连续收敛
     //（预览先让到 130 → 时间轴再让到 max(250, 190+Refs) 下限，Output 始终保底 80）。

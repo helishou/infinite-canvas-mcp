@@ -9,8 +9,9 @@ export type CanvasPeer = {
     cursor?: { x: number; y: number }; selectedNodeIds: string[];
     drag?: Array<{ nodeId: string; position: { x: number; y: number } }>;
     textSelection?: CanvasTextSelection | null;
+    focused?: boolean;
 };
-export type CanvasPresenceInput = Pick<CanvasPeer, "cursor" | "selectedNodeIds" | "drag" | "textSelection">;
+export type CanvasPresenceInput = Pick<CanvasPeer, "cursor" | "selectedNodeIds" | "drag" | "textSelection" | "focused">;
 
 export function connectCanvasRealtime(projectId: string, onPeers: (peers: CanvasPeer[]) => void, onError: (error: string) => void) {
     const client = getCanvasCollaborationClient();
@@ -22,7 +23,14 @@ export function connectCanvasRealtime(projectId: string, onPeers: (peers: Canvas
     let acknowledgedRevision = -1;
     let peers = new Map<string, CanvasPeer>();
     const textPresence = getCanvasTextPresence(projectId);
-    let presence: CanvasPresenceInput = { selectedNodeIds: [], textSelection: textPresence.getLocal() };
+    // 切到 Codex 或其他应用时页面仍是用户打开的画布；只有标签页/窗口不可见时才取消默认目标。
+    const isVisible = () =>
+        typeof document !== "undefined" && document.visibilityState === "visible";
+    let presence: CanvasPresenceInput = {
+        selectedNodeIds: [],
+        textSelection: textPresence.getLocal(),
+        focused: isVisible(),
+    };
     const emitPeers = () => {
         const values = [...peers.values()];
         textPresence.receive(values.filter((peer) => peer.clientId !== client.clientId));
@@ -32,6 +40,14 @@ export function connectCanvasRealtime(projectId: string, onPeers: (peers: Canvas
         sendTimer = undefined;
         if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "presence", ...presence }));
     };
+    const syncFocus = (forceFocused = false) => {
+        const focused = forceFocused || isVisible();
+        if (presence.focused === focused && !forceFocused) return;
+        presence = { ...presence, focused };
+        if (!sendTimer) sendTimer = setTimeout(flush, 0);
+    };
+    const onWindowFocus = () => { if (isVisible()) syncFocus(true); };
+    const onVisibilityChange = () => syncFocus();
     const acknowledge = () => {
         const revision = getCanvasAcknowledgedRevision(projectId);
         if (socket?.readyState === WebSocket.OPEN && revision !== acknowledgedRevision) {
@@ -44,6 +60,8 @@ export function connectCanvasRealtime(projectId: string, onPeers: (peers: Canvas
         presence = { ...presence, textSelection: textPresence.getLocal() };
         if (!sendTimer) sendTimer = setTimeout(flush, 50);
     });
+    window.addEventListener("focus", onWindowFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     const retry = () => {
         if (disposed) return;
         const delay = retryDelay * (0.8 + Math.random() * 0.2);
@@ -126,6 +144,8 @@ export function connectCanvasRealtime(projectId: string, onPeers: (peers: Canvas
             disposed = true;
             unsubscribe();
             unsubscribeText();
+            window.removeEventListener("focus", onWindowFocus);
+            document.removeEventListener("visibilitychange", onVisibilityChange);
             clearTimeout(retryTimer); clearTimeout(sendTimer);
             socket?.close(); peers.clear(); emitPeers();
         },

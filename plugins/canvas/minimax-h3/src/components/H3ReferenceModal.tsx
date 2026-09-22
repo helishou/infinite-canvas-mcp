@@ -118,7 +118,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                     </div>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>主要职责</span><Select value={role} options={ROLE_OPTIONS} disabled={characterReference} onChange={setRole} /></label>
+                    {!characterReference ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>主要职责</span><Select value={role} options={ROLE_OPTIONS} onChange={setRole} /></label> : null}
                     {group ? <div style={{ display: "grid", gap: 8 }}>
                         <div style={{ fontSize: 13, opacity: 0.65 }}>角色参考图（{group.characterName}）</div>
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))", gap: 8, maxHeight: 180, overflowY: "auto" }}>
@@ -159,9 +159,10 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                         </Checkbox.Group> : <span style={{ fontSize: 13, opacity: 0.6 }}>当前 Clip 尚未引用人物角色</span>}
                         <span style={{ fontSize: 12, opacity: 0.6 }}>列表只显示当前 Clip 已加入引用的人物；勾选后标记为此分镜中出现的人物。</span>
                     </div> : null}
-                    <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>提交用途</span><Select value={usage} disabled={Boolean(group)} onChange={setUsage} options={[{ value: "reference", label: "普通参考" }, { value: "first_frame", label: "首帧" }, { value: "last_frame", label: "尾帧" }]} /></label>
-                    {characterReference ? <span style={{ marginTop: -8, fontSize: 12, opacity: 0.6 }}>角色参考图职责由角色节点设置，提交用途固定为普通参考。</span> : null}
-                    {!isStoryboardImage ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>标签（逗号分隔）</span><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="例如：苏晚、雾蓝开衫、哭泣" /></label> : null}
+                    {!characterReference ? <>
+                        <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>提交用途</span><Select value={usage} onChange={setUsage} options={[{ value: "reference", label: "普通参考" }, { value: "first_frame", label: "首帧" }, { value: "last_frame", label: "尾帧" }]} /></label>
+                        {!isStoryboardImage ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>标签（逗号分隔）</span><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="例如：苏晚、雾蓝开衫、哭泣" /></label> : null}
+                    </> : null}
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}><Button type="text" loading={analyzing} onClick={() => void analyze()}>用模型分析</Button><span style={{ minWidth: 0, fontSize: 13, opacity: 0.6 }}>{analysis}</span></div>
                     {group && onDeleteGroup ? <Button type="text" danger size="small" style={{ alignSelf: "flex-start", paddingInline: 0 }} onClick={onDeleteGroup}>从本段移除整组</Button> : null}
                 </div>
