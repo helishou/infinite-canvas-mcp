@@ -237,6 +237,10 @@ export function upsertProjectReferenceAsset(projectId: string, asset: Record<str
     return request<{ ok: boolean; asset: import("@/types/canvas-plugin").CanvasReferenceAsset }>("POST", `/canvas/projects/${encodeURIComponent(projectId)}/reference-assets`, asset);
 }
 
+export function upsertProjectReferenceAssets(projectId: string, assets: Array<Record<string, unknown>>) {
+    return request<{ ok: boolean; assets: import("@/types/canvas-plugin").CanvasReferenceAsset[] }>("POST", `/canvas/projects/${encodeURIComponent(projectId)}/reference-assets/batch`, { assets });
+}
+
 export function deleteProjectReferenceAsset(projectId: string, assetId: string) {
     return request<{ ok: boolean; deleted: number }>("DELETE", `/canvas/projects/${encodeURIComponent(projectId)}/reference-assets/${encodeURIComponent(assetId)}`);
 }

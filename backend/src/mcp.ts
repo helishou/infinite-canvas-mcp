@@ -34,6 +34,7 @@ import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generatio
 import type { CanvasImageGenerationInput } from "./canvas/image-dispatcher.js";
 import type { CanvasTextGenerationInput } from "./canvas/text-dispatcher.js";
 import { splitImageBuffer } from "./canvas/image-split.js";
+import { cropImageBuffer, parseAspectRatio, type CropAnchor } from "./canvas/image-crop.js";
 import {
   effectiveCanvasNodeType,
   resolveCanvasImageReferenceNode,
@@ -405,7 +406,7 @@ async function executeDirectCanvasTool(
       .trim()
       .toLowerCase();
     const all = (
-      await fetchCanvasProjects(config, episodeId ? { episodeId } : undefined)
+      await fetchCanvasProjects(config, episodeId ? { episodeId } : undefined, { summary: true })
     )
       .filter(
         (project) =>
@@ -418,10 +419,8 @@ async function executeDirectCanvasTool(
         id: project.id,
         title: project.title,
         updatedAt: project.updatedAt,
-        nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0,
-        connectionCount: Array.isArray(project.connections)
-          ? project.connections.length
-          : 0,
+        nodeCount: Number((project as Record<string, unknown>).nodeCount || 0),
+        connectionCount: Number((project as Record<string, unknown>).connectionCount || 0),
       }));
     const pageSize = Math.max(1, Math.min(100, Number(input.pageSize || 20)));
     const page = Math.max(1, Number(input.page || 1));
@@ -493,12 +492,13 @@ async function executeDirectCanvasTool(
     const items = Array.isArray(input.items)
       ? (input.items as Array<Record<string, unknown>>)
       : [];
-    const defaultModel = items.some((item) => !String(item.model || "").trim())
+    const batchDefaults = recordOf(input.defaults);
+    const defaultModel = items.some((item) => !String(item.model || batchDefaults.model || "").trim())
       ? String(
           (
             await applyGenerationDefaults(
               "canvas_generate_image",
-              { projectId },
+              { projectId, ...batchDefaults },
               backendApi,
             )
           ).model || "",
@@ -512,7 +512,7 @@ async function executeDirectCanvasTool(
         const { key: _key, ...generationInput } = item;
         const resolvedGenerationInput = await applyGenerationDefaults(
           "canvas_generate_image",
-          { projectId, ...generationInput },
+          { projectId, ...batchDefaults, ...generationInput },
           backendApi,
           defaultModel,
         );
@@ -726,23 +726,40 @@ async function executeDirectCanvasTool(
   }
   if (canBatchSubmitIndependentImages && directTasks.length)
     withLoadingState = await fetchCurrentCanvasProject(config, project.id);
-  return {
+  const response: Record<string, unknown> = {
     ok: true,
     intent: name.startsWith("canvas_generate_")
       ? name.replace("canvas_generate_", "generate_")
       : undefined,
     projectId: withLoadingState.id,
+    revision: operationResponse.revision,
     operationId: operationResponse.operationId,
     operationResults,
+    affectedNodeIds: affectedNodeIds(ops),
     directTasks,
     next:
       directTasks.length === 1
         ? waitTasksAction([directTasks[0].taskId])
         : directTasks.length > 1
-          ? waitTasksAction(directTasks.map((task) => task.taskId))
-          : undefined,
-    state: compactProject(withLoadingState as Record<string, unknown>),
+        ? waitTasksAction(directTasks.map((task) => task.taskId))
+        : undefined,
   };
+  return response;
+}
+
+function affectedNodeIds(operations: Array<Record<string, unknown>>) {
+  const ids = new Set<string>();
+  for (const operation of operations) {
+    for (const key of ["id", "nodeId", "fromNodeId", "toNodeId"]) {
+      const value = String(operation[key] || "").trim();
+      if (value) ids.add(value);
+    }
+    for (const value of Array.isArray(operation.ids) ? operation.ids : []) {
+      const id = String(value || "").trim();
+      if (id) ids.add(id);
+    }
+  }
+  return [...ids];
 }
 
 function buildCanvasAudioRequest(source: Record<string, unknown>, _project: Record<string, unknown>, projectId: string, op: Record<string, unknown>): CanvasGenerationCommand {
@@ -801,9 +818,7 @@ function registerDirectCanvasTools(
     server.registerTool(
       name,
       {
-        description: EXISTING_CANVAS_STATE_TOOLS.has(name)
-          ? `${toolDescriptions[name]} 操作已有节点前先调用一次 canvas_inspect；创建新节点无需调用。`
-          : toolDescriptions[name],
+        description: toolDescriptions[name],
         inputSchema: schema,
       },
       async (rawInput: Record<string, unknown>) => {
@@ -1115,6 +1130,150 @@ function registerDirectCanvasTools(
         count: created.length,
         created,
         revision: applied.revision,
+      });
+    },
+  );
+  server.registerTool(
+    "canvas_crop_image",
+    {
+      description:
+        "按指定画幅比例裁切画布图片节点，默认严格 9:16。只抽取源图像素，不拉伸、不覆盖原图；生成新的图片媒体和新节点，并保留源节点。支持 nodeId 或 nodeIds 批量裁切，anchor 可选 center/top/bottom/left/right，也可传精确 cropRect 像素矩形。",
+      inputSchema: z.object({
+        projectId: z.string().optional(),
+        nodeId: z.string().optional(),
+        nodeIds: z.array(z.string()).min(1).optional(),
+        aspectRatio: z.string().optional(),
+        anchor: z.enum(["center", "top", "bottom", "left", "right"]).optional(),
+        cropRect: z.object({
+          left: z.number(),
+          top: z.number(),
+          width: z.number(),
+          height: z.number(),
+        }).optional(),
+        gap: z.number().optional(),
+      }).shape,
+    },
+    async (rawInput: Record<string, unknown>) => {
+      const projectId = resolveMcpProjectId(state, rawInput.projectId, getBrowserActiveProjectId).projectId;
+      if (!projectId) throw new Error("缺少 projectId；请先选择活动画布");
+      const nodeIds = [
+        ...(rawInput.nodeId ? [String(rawInput.nodeId)] : []),
+        ...(Array.isArray(rawInput.nodeIds) ? rawInput.nodeIds.map(String) : []),
+      ].filter(Boolean);
+      const uniqueNodeIds = [...new Set(nodeIds)];
+      if (!uniqueNodeIds.length) throw new Error("nodeId 或 nodeIds 至少传一个");
+
+      const ratio = parseAspectRatio(String(rawInput.aspectRatio || "9:16"));
+      const anchor = String(rawInput.anchor || "center") as CropAnchor;
+      const rawRect = rawInput.cropRect;
+      const cropRect = rawRect && typeof rawRect === "object" && !Array.isArray(rawRect)
+        ? {
+            left: Number((rawRect as Record<string, unknown>).left),
+            top: Number((rawRect as Record<string, unknown>).top),
+            width: Number((rawRect as Record<string, unknown>).width),
+            height: Number((rawRect as Record<string, unknown>).height),
+          }
+        : undefined;
+      const gap = Math.max(0, Number(rawInput.gap ?? 96));
+      const project = await fetchCurrentCanvasProject(config, projectId);
+      const projectNodes = nodesOf(project);
+      const operations: Array<Record<string, unknown>> = [];
+      const created: Array<Record<string, unknown>> = [];
+
+      for (let index = 0; index < uniqueNodeIds.length; index += 1) {
+        const nodeId = uniqueNodeIds[index];
+        const node = projectNodes.find((item) => String(item.id) === nodeId);
+        if (!node) throw new Error(`画布上找不到节点：${nodeId}`);
+        const meta = (node.metadata || {}) as Record<string, unknown>;
+        const storageKey = meta.storageKey ? String(meta.storageKey) : "";
+        if (!storageKey) throw new Error(`节点 ${nodeId} 没有 storageKey（不是图片结果节点？）`);
+
+        const source = await fetchMediaBuffer(config, storageKey);
+        const cropped = await cropImageBuffer(source, {
+          aspectWidth: ratio.width,
+          aspectHeight: ratio.height,
+          anchor,
+          cropRect,
+        });
+        const media = await uploadMediaBinary(config, cropped.data, {
+          name: `crop_${String(nodeId).replace(/[^\\w.-]/g, "_")}_${ratio.width}x${ratio.height}.png`,
+          mimeType: "image/png",
+          category: "output",
+          width: cropped.width,
+          height: cropped.height,
+        });
+
+        const sourcePosition = (node.position || {}) as Record<string, number>;
+        const sourceWidth = Number(node.width || 0) || 340;
+        const canvasWidth = Math.max(160, Math.round(sourceWidth));
+        const canvasHeight = Math.max(160, Math.round(canvasWidth * ratio.height / ratio.width));
+        const id = `image-${crypto.randomUUID()}`;
+        const title = `${String(node.title || "图片")} · crop ${ratio.width}:${ratio.height}`;
+        const position = {
+          x: (Number(sourcePosition.x || 0) + sourceWidth + gap),
+          y: Number(sourcePosition.y || 0) + index * (canvasHeight + gap),
+        };
+        operations.push({
+          type: "add_node",
+          nodeType: "image",
+          id,
+          title,
+          position,
+          width: canvasWidth,
+          height: canvasHeight,
+          metadata: {
+            content: media.url,
+            storageKey: media.storageKey,
+            status: "success",
+            naturalWidth: cropped.width,
+            naturalHeight: cropped.height,
+            bytes: media.bytes,
+            mimeType: "image/png",
+            cropSourceNodeId: nodeId,
+            cropSourceStorageKey: storageKey,
+            cropAspectRatio: `${ratio.width}:${ratio.height}`,
+            cropRect: {
+              left: cropped.left,
+              top: cropped.top,
+              width: cropped.width,
+              height: cropped.height,
+            },
+            ...(meta.prompt ? { prompt: meta.prompt } : {}),
+          },
+        });
+        operations.push({ type: "connect_nodes", fromNodeId: nodeId, toNodeId: id, role: "derived" });
+        created.push({
+          id,
+          sourceNodeId: nodeId,
+          sourceStorageKey: storageKey,
+          storageKey: media.storageKey,
+          url: media.url,
+          sourceWidth: cropped.sourceWidth,
+          sourceHeight: cropped.sourceHeight,
+          left: cropped.left,
+          top: cropped.top,
+          width: cropped.width,
+          height: cropped.height,
+          aspectRatio: `${cropped.width}:${cropped.height}`,
+        });
+      }
+
+      const applied = await applyBackendCanvasOperations(
+        config,
+        project.id,
+        Number(project.revision || 0),
+        operations,
+        state.clientId,
+      );
+      return textResult({
+        ok: true,
+        projectId: project.id,
+        sourceNodeIds: uniqueNodeIds,
+        requestedAspectRatio: `${ratio.width}:${ratio.height}`,
+        count: created.length,
+        created,
+        revision: applied.revision,
+        originalNodesPreserved: true,
       });
     },
   );
@@ -1932,7 +2091,7 @@ async function listTasksFromBackend(
         return false;
       return true;
     })
-    .slice(0, Math.max(1, Math.min(500, Number(input.limit || 100))))
+    .slice(0, Math.max(1, Math.min(500, Number(input.limit || 10))))
     .map(toCanvasTask);
   return { tasks };
 }
@@ -2208,9 +2367,11 @@ function summarizeCanvasTasks(
 async function fetchCanvasProjects(
   config: ReturnType<typeof loadConfig>,
   filter?: { episodeId?: string },
+  options: { summary?: boolean } = {},
 ): Promise<CanvasProject[]> {
   const params = new URLSearchParams();
   if (filter?.episodeId) params.set("episodeId", filter.episodeId);
+  if (options.summary) params.set("summary", "true");
   params.set("token", config.token);
   const url = `${config.url.replace(/\/$/, "")}/canvas/projects?${params.toString()}`;
   const response = await fetch(url);
@@ -2391,7 +2552,7 @@ function compactProject(project: Record<string, unknown>) {
 
 function textResult(value: unknown) {
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+    content: [{ type: "text" as const, text: JSON.stringify(value) }],
   };
 }
 
@@ -2423,8 +2584,6 @@ function toolErrorResult(
             errorContext: mcpToolErrorContext(error, input, state).outputSummary,
             suggestedAction,
           },
-          null,
-          2,
         ),
       },
     ],
@@ -2781,7 +2940,7 @@ function withTraceIdInToolResult(result: unknown, traceId: string) {
       attached = true;
       return {
         ...item,
-        text: JSON.stringify(withTraceId(value, traceId), null, 2),
+        text: JSON.stringify(withTraceId(value, traceId)),
       };
     } catch {
       return entry;
@@ -2805,6 +2964,7 @@ function summarizeMcpToolInput(input: Record<string, unknown>) {
   );
   return {
     parameterKeys: Object.keys(input).sort(),
+    inputChars: serializedChars(input),
     hasProjectId: Boolean(input.projectId),
     hasNodeId: Boolean(input.nodeId || input.id),
     hasTaskId: Boolean(input.taskId),
@@ -2848,6 +3008,7 @@ function mcpToolResultContext(
     taskId: optionalText(firstTask.taskId || result.taskId),
     outputSummary: {
       ok: result.ok !== false,
+      outputChars: serializedChars(value),
       taskCount: createdTaskIds.length || (result.taskId ? 1 : 0),
       createdTaskIds,
       waitsForTasks: tool === "canvas_wait_tasks" || Boolean(result.wait) || input.waitForCompletion === true,
@@ -2856,6 +3017,14 @@ function mcpToolResultContext(
       ready: typeof result.ready === "boolean" ? result.ready : undefined,
     },
   };
+}
+
+function serializedChars(value: unknown) {
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return 0;
+  }
 }
 
 async function recordMcpObservabilityEvent(

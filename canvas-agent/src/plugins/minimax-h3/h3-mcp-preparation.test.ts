@@ -58,7 +58,8 @@ function fixture() {
         getCanvasNode: async (id: string) => project.nodes.find((node: any) => node.id === id) || null,
         getCanvasNodes: async () => project.nodes,
     };
-    return { project, calls, handler: pluginMcp.createHandler(context).h3_prepare_clip! };
+    const handlers = pluginMcp.createHandler(context);
+    return { project, calls, handlers, handler: handlers.h3_prepare_clip! };
 }
 
 test("h3_prepare_clip 一次原子写入继承参数、角色组和已有节点连接", async () => {
@@ -103,4 +104,23 @@ test("h3_prepare_clip 预检失败时不写入部分状态", async () => {
     }), /characterAssetId/);
     assert.equal(calls.length, 0);
     assert.equal(project.nodes[0].metadata.segments[1].prompt, "旧草稿");
+});
+
+test("h3_get_clip 默认只返回总览，详细内容由定向工具读取", async () => {
+    const { handlers } = fixture();
+    const input = { projectId: "project-1", nodeId: "h3-1", segmentId: "s2" };
+    const overview: any = await handlers.h3_get_clip!(input);
+    assert.equal(overview.segment.id, "s2");
+    assert.equal(overview.prompt.semanticLength, 3);
+    assert.equal(overview.runtimeFieldCount > 0, true);
+    assert.equal("snapshot" in overview, false);
+    assert.equal("runtime" in overview, false);
+    assert.equal("references" in overview, false);
+
+    const prompt: any = await handlers.h3_get_clip_prompt!(input);
+    assert.equal(prompt.prompt.semantic, "旧草稿");
+    const runtime: any = await handlers.h3_get_clip_runtime!(input);
+    assert.equal(runtime.runtime.modelName, "wrong-draft");
+    const references: any = await handlers.h3_get_clip_references!(input);
+    assert.deepEqual(references.references, []);
 });

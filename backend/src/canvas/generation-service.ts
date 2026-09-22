@@ -219,6 +219,18 @@ export class CanvasGenerationService {
     private startAudio(command: CanvasGenerationCommand) {
         if (!this.audio) throw new Error("画布音频执行器未初始化");
         if (!command.model) throw new Error("画布音频生成缺少 model");
+        const config = recordOf(this.stores.settings?.get?.("ai.config"));
+        const channels = Array.isArray(config.channels) ? config.channels.map(recordOf) : [];
+        const decoded = decodeChannelModel(command.model);
+        const model = modelOptionName(command.model);
+        const channel = decoded
+            ? channels.find((item) => String(item.id || "") === decoded.channelId)
+            : channels.find((item) => (Array.isArray(item.models) ? item.models.map(recordOf) : []).some((entry) => String(entry.name || "") === model));
+        const isComfy = String(channel?.kind || "api") === "comfyui";
+        const audioReference = Array.isArray(command.audioReferences) ? recordOf(command.audioReferences[0]) : {};
+        const storageKey = String(audioReference.storageKey || "");
+        const referenceAudio = storageKey ? this.stores.media.meta(storageKey)?.filePath : String(audioReference.path || "");
+        if (isComfy && !referenceAudio) throw new Error("IndexTTS 2.5 需要连接一条已保存的参考音频");
         const result = this.audio.start({
             projectId: command.projectId,
             nodeId: command.nodeId,
@@ -229,6 +241,7 @@ export class CanvasGenerationService {
             format: String(command.params?.format || ""),
             speed: String(command.params?.speed || ""),
             instructions: String(command.params?.instructions || ""),
+            ...(isComfy ? { executor: "comfyui" as const, referenceAudio, params: command.params || {} } : {}),
             ...(command.clientTaskId ? { clientTaskId: command.clientTaskId } : {}),
         });
         return { ...result, task: this.stores.tasks.get(result.taskId) || undefined };
@@ -292,7 +305,7 @@ function requiresBrowserProvider(value: unknown, command: CanvasGenerationComman
     const apiFormat = String(channel.apiFormat || config.apiFormat || "openai");
     if (command.mode === "image") return kind !== "comfyui" && (apiFormat === "gemini" || !/^gpt-image(?:-|$)/i.test(model));
     if (command.mode === "text") return kind === "comfyui" || !["openai", "openai-chat"].includes(apiFormat);
-    if (command.mode === "audio") return kind === "comfyui" || apiFormat !== "openai";
+    if (command.mode === "audio") return kind !== "comfyui" && apiFormat !== "openai";
     if (command.mode === "video") return kind !== "comfyui" && apiFormat !== "openai";
     return false;
 }

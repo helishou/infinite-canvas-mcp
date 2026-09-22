@@ -240,6 +240,7 @@ export type CanvasReferenceValidation = { semanticPrompt: string; compiledPrompt
 export type CanvasReferenceService = {
     list: () => Promise<CanvasReferenceAsset[]>;
     upsert: (asset: Partial<CanvasReferenceAsset> & { label: string }) => Promise<CanvasReferenceAsset>;
+    upsertMany: (assets: Array<Partial<CanvasReferenceAsset> & { label: string }>) => Promise<CanvasReferenceAsset[]>;
     remove: (assetId: string) => Promise<void>;
     validate: (nodeId: string, segmentId: string) => Promise<CanvasReferenceValidation>;
 };

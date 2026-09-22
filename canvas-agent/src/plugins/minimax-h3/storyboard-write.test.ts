@@ -59,7 +59,7 @@ test("h3_write_storyboard_prompt 将旧版分镜引用占位符归一化为 Pict
     assert.equal(generated.prompt.includes("{{ref:"), false);
     assert.equal(generated.prompt.startsWith("subject_definitions:"), true);
     assert.equal(generated.prompt.includes("主体定义："), false);
-    assert.match(generated.prompt, /detailed_description:\n\[Shot 1\].*<Picture 1>/s);
+    assert.match(generated.prompt, /detailed_description:[\s\S]*\[Shot 1\].*<Picture 1>/s);
     assert.doesNotMatch(generated.prompt, /character-group|character_turnaround/);
 });
 
@@ -129,4 +129,46 @@ test("MCP 编译拒绝失效引用和非法时间，合法输入只生成一次�
     assert.throws(() => writeStoryboardPrompt({}, segment, { ...input, shots: [{ description: "<Picture 1>" }] }), /引用/u);
     assert.throws(() => writeStoryboardPrompt({}, segment, { ...input, shots: [{ description: "Snow." }, { ...input.shots[1], switchTime: "10" }] }), /Clip 时长/u);
     assert.throws(() => writeStoryboardPrompt({}, segment, { ...input, shots: [{ description: "Snow." }, { ...input.shots[1], switchTime: "bad" }] }), /切换时间无效/u);
+});
+
+test("分镜帧不污染 Subject 身份，摘要和持续时长从分镜轨道统一生成", () => {
+    const storyboardA = { id: "storyboard-a", assetId: "asset-storyboard-a", label: "分镜图 A", role: "storyboard", enabled: true, usage: "reference", mediaType: "image", url: "https://example.test/a.png", subjectId: "subject-1" };
+    const storyboardB = { id: "storyboard-b", assetId: "asset-storyboard-b", label: "分镜图 B", role: "storyboard", enabled: true, usage: "reference", mediaType: "image", url: "https://example.test/b.png", subjectId: "subject-1" };
+    const identity = { id: "identity-1", assetId: "asset-identity-1", label: "人物身份", role: "character_identity", enabled: true, usage: "reference", mediaType: "image", url: "https://example.test/identity.png", subjectId: "subject-1" };
+    const voice = { id: "voice-1", assetId: "asset-voice-1", label: "人物声音", role: "character_voice", enabled: true, usage: "reference", mediaType: "audio", url: "https://example.test/voice.wav", subjectId: "subject-1" };
+    const generated = writeStoryboardPrompt({
+        nodes: [{ id: "character-1", type: "character", metadata: { characterName: "谢临渊", characterDescription: "年轻男子，黑发。" } }],
+    }, {
+        id: "segment-1",
+        mode: "ref2va",
+        duration: 7.5,
+        referenceBindings: [storyboardA, storyboardB, identity, voice],
+        h3CharacterGroups: { "group-1": { id: "group-1", characterNodeId: "character-1", subjectId: "subject-1", characterName: "谢临渊", outfits: [] } },
+    }, {
+        summary: "一段连续动作。",
+        openingDescription: "The axis is locked.",
+        shots: [
+            { description: "谢临渊站在门前。", pictureBindingId: storyboardA.id },
+            { switchTime: "5", description: "谢临渊抬头。", pictureBindingId: storyboardB.id },
+        ],
+        overallSoundscape: "Wind.",
+        nonDiegeticMusic: "N/A",
+    });
+
+    assert.match(generated.prompt, /\[keyframe completion \+ reference generation \+ audio reference\]/u);
+    assert.match(generated.prompt, /<Subject 1> is 谢临渊\./u);
+    assert.doesNotMatch(generated.prompt, /<Subject 1> is[\s\S]*visual identity defined by reference\(s\) <Picture 1>/u);
+    assert.match(generated.prompt, /Storyboard images establish shot-entry keyframes, not frozen poses/u);
+    assert.match(generated.prompt, /can perform naturally while the camera remains stable/u);
+    assert.deepEqual(generated.storyboardDurations, { "storyboard-a": 5, "storyboard-b": 2.5 });
+});
+
+test("拒绝不完整的分镜图引用句，避免生成 to the approved 残句", () => {
+    assert.throws(() => writeStoryboardPrompt({}, { mode: "ref2va", duration: 5 }, {
+        summary: "",
+        openingDescription: "",
+        shots: [{ description: "Use the approved storyboard frame from <Picture 1> as the visual anchor for this shot. to the next pose." }],
+        overallSoundscape: "",
+        nonDiegeticMusic: "N/A",
+    }), /malformed reference instruction/u);
 });

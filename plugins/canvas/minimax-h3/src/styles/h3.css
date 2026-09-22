@@ -195,6 +195,7 @@
 .minimax-prompt-field .nfh3-shot-editor { flex:0 0 auto; border:1px solid var(--h3-border); border-radius:5px; background:var(--h3-panel); overflow:visible; }
 .nfh3-storyboard-modal .nfh3-shot-editor .cm-scroller { overflow:visible !important; }
 .nfh3-storyboard-transition { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:2px; padding:10px 0 0; border-top:1px dashed var(--h3-border); }
+.nfh3-storyboard-transition .nfh3-storyboard-precise-cut { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
 .nfh3-storyboard-transition input { width:132px; min-width:0; height:32px; padding:0 8px; border:1px solid var(--h3-border); border-radius:4px; outline:none; background:var(--h3-panel); color:var(--h3-text); font:inherit; font-size:14px; }
 .nfh3-storyboard-transition input:focus { border-color:var(--h3-active); }
 .nfh3-storyboard-error { display:flex; flex:0 0 auto; align-items:center; justify-content:space-between; gap:8px; padding:7px 9px; border:1px solid #dc2626; border-radius:5px; background:color-mix(in srgb,#dc2626 10%,transparent); color:#ef4444; font-size:14px; }

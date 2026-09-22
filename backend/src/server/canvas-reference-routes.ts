@@ -7,6 +7,17 @@ export function registerCanvasReferenceRoutes(router: Router, service: CanvasRef
         try { res.json({ ok: true, assets: service.list(String(req.params.id || "")) }); }
         catch (error) { res.status(400).json({ ok: false, error: messageOf(error) }); }
     });
+    router.get("/canvas/projects/:id/reference-write-monitor", (req: Request, res: Response) => {
+        try { res.json({ ok: true, monitor: service.monitor(String(req.params.id || "")) }); }
+        catch (error) { res.status(400).json({ ok: false, error: messageOf(error) }); }
+    });
+    router.post("/canvas/projects/:id/reference-assets/batch", (req: Request, res: Response) => {
+        try {
+            const body = recordOf(req.body);
+            const assets = Array.isArray(body.assets) ? body.assets.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))) : [];
+            res.status(201).json({ ok: true, assets: service.upsertMany(String(req.params.id || ""), assets) });
+        } catch (error) { res.status(400).json({ ok: false, error: messageOf(error) }); }
+    });
     router.post("/canvas/projects/:id/reference-assets", (req: Request, res: Response) => {
         try { res.status(201).json({ ok: true, asset: service.upsert(String(req.params.id || ""), recordOf(req.body)) }); }
         catch (error) { res.status(400).json({ ok: false, error: messageOf(error) }); }

@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, ListChecks, RefreshCw, Square } from "lucide
 import { cancelBackendTask, fetchBackendTasks, retryBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
 import { useRunningTaskCount } from "@/hooks/use-running-task-count";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { taskProgress } from "@/lib/canvas/task-progress";
 import { useThemeStore } from "@/stores/use-theme-store";
 
 type TaskGroup = {
@@ -46,16 +47,6 @@ function summarizeChildren(children: BackendRuntimeTask[]): string {
     if (counts.failed) parts.push(`${counts.failed} 失败`);
     if (counts.cancelled) parts.push(`${counts.cancelled} 取消`);
     return parts.join(" · ");
-}
-
-/** 总进度只增不减；父任务正式成功前最多显示 99%，成功后才显示 100%。 */
-export function taskProgress(parent: BackendRuntimeTask, children: BackendRuntimeTask[], previousProgress = 0): number {
-    const currentProgress = children.length
-        ? children.reduce((total, child) => total + (child.progress || 0), 0) / children.length
-        : parent.progress || 0;
-    const monotonicProgress = Math.max(previousProgress, currentProgress);
-    if (parent.status === "succeeded" || previousProgress >= 1) return 1;
-    return Math.min(0.99, monotonicProgress);
 }
 
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
@@ -240,13 +231,20 @@ export function CanvasTaskCenterButton({ projectId }: { projectId: string }) {
     const colorTheme = useThemeStore((state) => state.theme);
     const theme = canvasThemes[colorTheme];
     const [open, setOpen] = useState(false);
-    const { running, queued, active } = useRunningTaskCount(projectId);
-    const tip = active ? `任务中心 · 运行中 ${running} · 排队 ${queued}` : "任务中心";
+    const { running, queued, active, runningProgresses } = useRunningTaskCount(projectId);
+    const runningProgress = runningProgresses.length ? `（${runningProgresses.map((progress) => `${Math.round(progress * 100)}%`).join("、")}）` : "";
+    const overallRunningProgress = runningProgresses.length
+        ? runningProgresses.reduce((total, progress) => total + progress, 0) / runningProgresses.length
+        : 0;
+    const tip = active ? `任务中心 · 运行中 ${running}${runningProgress} · 排队 ${queued}` : "任务中心";
     return <>
         <Tooltip title={tip}>
             <button type="button" aria-label={tip} className="relative grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={() => setOpen(true)}>
                 <ListChecks className="size-4" />
                 {active ? <span className="absolute right-0 top-0.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-semibold leading-none text-white" style={{ background: "#ff4d4f" }}>{active > 99 ? "99+" : active}</span> : null}
+                {runningProgresses.length ? <span className="absolute bottom-0 left-1/2 h-0.5 w-5 -translate-x-1/2 overflow-hidden rounded-full" style={{ background: theme.node.stroke }} aria-hidden="true">
+                    <span className="block h-full rounded-full transition-[width] duration-300" style={{ width: `${Math.round(overallRunningProgress * 100)}%`, background: theme.node.linkActive }} />
+                </span> : null}
             </button>
         </Tooltip>
         <CanvasTaskCenter open={open} projectId={projectId} onClose={() => setOpen(false)} />

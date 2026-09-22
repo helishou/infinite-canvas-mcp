@@ -96,6 +96,8 @@
 
 ## 项目注意事项
 
+- H3 参考库自动同步必须按节点内的 `segmentId + bindingId` 保存已提交快照，不能只按 `assetId` 去重；同一素材可在不同 Clip 中具有不同名称、职责、标签和主体。排查重复写入须覆盖这些字段差异及复制 Clip 后相同 binding ID 的情况；SQLite 时间统计使用与 `created_at` 一致的 ISO 时间参数，不能把无效的 `datetime('-60 seconds')` 查询结果当作零写入证据。
+
 - Codex、Hermes 等外部 MCP 客户端默认必须连接常驻 Backend 的 `/mcp` Streamable HTTP 端点，禁止恢复成每个会话执行 `backend/dist/index.js mcp` 的 stdio 配置；stdio 入口只保留兼容用途。共享端点中的 `activeProjectId` 等客户端上下文必须按 MCP session 隔离，插件声明轮询只能由 Backend 统一维护一份。
 - 画布媒体库必须独立于 ComfyUI 安装目录。设置 ComfyUI 路径只影响任务执行缓存，不得迁移或改写 `MEDIA_DIR`；输入按需复制到 ComfyUI，输出归档回 Backend 媒体库。迁出已有耦合目录时先备份数据库、复制并校验文件，再切换索引，保留原文件。
 - 画布图片 WebP 缩略图只能作为浏览器本地、可丢弃的渲染缓存：不得写入节点数据、Backend 媒体记录、导出文件或模型参考图；下载、编辑、生成和导出必须始终解析原始 `storageKey`。

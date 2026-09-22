@@ -20,7 +20,9 @@ export const BASE_H3_NODE_METADATA: Record<string, unknown> = {
     rtxResizeMode: "倍数缩放", rtxQuality: "ULTRA", realtimePreviewEnabled: true,
     realtimePreviewLongEdge: 512, realtimePreviewFrames: 12, realtimePreviewFps: 8, realtimePreviewJpegQuality: 75,
     uniBlockSwapBlocks: 1, h3FirstSteps: 6, h3SecondSteps: 4, latentUpscaleMegapixels: 1, latentUpscaleAlign: 2,
-    latentUpscalePrecision: "bf16", seed: 0, noiseSeed: 0, noiseSeedMode: "random", constantTriggerWord: "",
+    // Random mode owns the effective seed at submit time; zero is only a
+    // legacy placeholder and must not be shown as the value being submitted.
+    latentUpscalePrecision: "bf16", seed: undefined, noiseSeed: undefined, noiseSeedMode: "random", constantTriggerWord: "",
     noDub: true, noCaption: true, audioMode: "native", audioDenoiseStrength: 1, addSourceAsReference: false,
     strictPromptTags: true, referenceVideoPolicy: "official_2_to_15s", latentUpscaleEnabled: false,
     slaEnabled: false, uniBlockSwapEnabled: false, rtxEnabled: false, teAccel: false, lockAudio: false, audioDrive: false,

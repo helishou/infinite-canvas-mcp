@@ -12,9 +12,12 @@ test("统一时间格式，拒绝非法秒位、倒序及超出片长的切镜",
     assert.equal(formatShotTimestamp("0:05.2"), "00:05.200");
     assert.equal(formatShotTimestamp("5s"), "00:05.000");
     assert.equal(formatShotTimestamp("00:65"), "");
-    for (const time of ["", "bad", "0", "10", "11"]) {
+    assert.doesNotThrow(() => validateShotTimeline([{}, { switchTime: "" }], 10));
+    assert.throws(() => validateShotTimeline([{}, { switchTime: "", preciseCut: true }], 10), /精准切镜/u);
+    for (const time of ["bad", "0", "10", "11"]) {
         assert.throws(() => validateShotTimeline([{}, { switchTime: time }], 10));
     }
+    assert.doesNotThrow(() => validateShotTimeline([{}, {}, { switchTime: "5" }], 10));
     assert.throws(() => validateShotTimeline([{}, { switchTime: "5" }, { switchTime: "4" }], 10));
     assert.throws(() => validateShotTimeline([{}, { switchTime: "5" }, { switchTime: "5" }], 10));
     assert.doesNotThrow(() => validateShotTimeline([{}, { switchTime: "5" }], 10));

@@ -48,9 +48,10 @@ test("H3 audit summary reads the submitted API graph instead of raw UI fields", 
     assert.equal(graph.nf_v15.inputs["H3专用注意力"], "H3专用Sage加速");
     const summary = summarizeH3Workflow(graph, promptA);
     assert.deepEqual(summary, {
-        promptId: promptA, seed: 272289703718811, frames: 141, width: 960, height: 544,
+        promptId: promptA, seed: 272289703718811, seedMode: "fixed", frames: 141, width: 960, height: 544,
+        steps: 3, sampler: "res_multistep", scheduler: "simple",
         loras: [{ name: "minimax/turbo.safetensors", strength: 1 }, { name: "minimax/cinematic.safetensors", strength: 0.7 }],
-        attention: "auto", sigma: "手动：1.0, 0.8, 0.5, 0.0",
+        attention: "H3专用Sage加速", sigma: "手动：1.0, 0.8, 0.5, 0.0",
         // 审计必须把真正落到图片/视频/音频槽位的媒体记下来，否则「上一段成品被当成视频1 塞进来」
         // 这类隐式注入在日志里完全不可见（正是这次修复要防的盲点）。
         mediaInputs: { images: ["uploaded-reference.png"], videos: [], audios: [] },
@@ -67,9 +68,43 @@ test("H3 audit reports scheduler Sigma and 192-frame graph values", async () => 
     const summary = summarizeH3Workflow(graph, promptB);
     assert.equal(summary.frames, 192);
     assert.equal(summary.seed, 792393709737869);
+    assert.equal(summary.seedMode, "fixed");
+    assert.equal(summary.steps, 20);
     assert.equal(summary.attention, "disabled");
     assert.equal(summary.sigma, "调度器：simple / 20 步");
     assert.deepEqual(summary.mediaInputs, { images: ["uploaded-reference.png"], videos: [], audios: [] });
+});
+
+test("H3 random seed and legacy LoRA aliases become the values submitted to V15", async () => {
+    const graph = await buildNativeNanFengV15Workflow(
+        { prompt: "@图片1", references: ["reference.png"] },
+        {
+            mode: "ref2va", duration: 5, noiseSeedMode: "random", noiseSeed: 0, seed: 0,
+            loraSlots: [], loraName: "Minimax\\minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors", loraStrength: 0.75,
+            realtimePreviewEnabled: false,
+        }, upload, "http://comfy.local", new AbortController().signal,
+    );
+    const submittedSeed = Number(graph.nf_v15.inputs["随机种子"]);
+    assert.ok(submittedSeed > 0);
+    assert.equal(graph.nf_v15.inputs["固定随机种子"], false);
+    assert.equal(graph.nf_v15.inputs["启用LoRA"], true);
+    assert.equal(graph.nf_v15.inputs.LoRA1, "Minimax\\minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors");
+    assert.equal(graph.nf_v15.inputs["LoRA1强度"], 0.75);
+    assert.equal(graph.nf_v15.inputs["LoRA1启用"], true);
+    const summary = summarizeH3Workflow(graph, promptA);
+    assert.equal(summary.seed, submittedSeed);
+    assert.equal(summary.seedMode, "random");
+    assert.deepEqual(summary.loras, [{ name: "Minimax\\minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors", strength: 0.75 }]);
+});
+
+test("H3 TE acceleration uses a graph that contains the visible TE patcher", async () => {
+    const graph = await buildNativeNanFengV15Workflow(
+        { prompt: "@图片1", references: ["reference.png"] },
+        { mode: "ref2va", teAccel: true, seed: 123, realtimePreviewEnabled: false },
+        upload, "http://comfy.local", new AbortController().signal,
+    );
+    assert.equal(graph.nf_v15, undefined);
+    assert.equal(Object.values(graph).some((node: any) => node.class_type === "TESpeedMiniMaxH3"), true);
 });
 
 test("H3 V15 native workflow does not submit removed model-cache input", async () => {

@@ -10,6 +10,7 @@ import { writeBackH3Task } from "./h3-task-writeback.js";
 import { h3ClipCacheFingerprint, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, stableH3Fingerprint } from "./h3-cache.js";
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCompositePrompt, storyboardCompositeDirective, storyboardCompositePlan } from "./storyboard-composite.js";
+import { normalizeH3Params } from "./h3-params.js";
 
 type H3RunInput = {
     projectId: string;
@@ -95,7 +96,7 @@ export class CanvasH3Runner {
             for (const plan of this.planNode(node, input)) {
                 const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
                 if (segment) {
-                    const taskMode = normalizeTaskMode(input.params?.taskMode || input.params?.mode || segment.taskMode || segment.mode);
+                    const taskMode = normalizeTaskMode(input.params?.mode || input.params?.taskMode || segment.mode || segment.taskMode);
                     assertReferenceCompilation(compileH3Submission(project, segment, taskMode).compilation);
                 }
             }
@@ -196,6 +197,7 @@ export class CanvasH3Runner {
             const plan = plans[planIndex];
             const key = `${plan.nodeId}:${plan.segmentId}`;
             if (completed.has(key)) continue;
+            this.ensureCanonicalSegmentSubmission(input.projectId, plan, input.params || {});
             const cache = this.clipCacheState(input.projectId, plan, input.params || {}, effectiveFingerprints);
             effectiveFingerprints.set(key, cache.fingerprint);
             const firstPassFingerprint = String(cache.segment.firstPassFingerprint || "");
@@ -256,7 +258,7 @@ export class CanvasH3Runner {
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
         const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const params = extractParams(segment, override, metadata, defaults);
-        const taskMode = normalizeTaskMode(params.taskMode || params.mode || segment.taskMode || segment.mode);
+        const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
         const { compilation } = compileH3Submission(project, segment, taskMode);
         const scenePrompt = appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
         const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
@@ -314,6 +316,35 @@ export class CanvasH3Runner {
         });
     }
 
+    /**
+     * Persist the values that the UI actually means before fingerprinting or
+     * submitting a clip. This migrates legacy seed/LoRA aliases in-place so
+     * the canvas, task snapshot and Comfy prompt cannot disagree.
+     */
+    private ensureCanonicalSegmentSubmission(projectId: string, plan: H3Plan, override: Record<string, unknown>) {
+        const project = this.stores.projects.get(projectId);
+        const node = project && (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId);
+        const metadata = node ? recordOf(node.metadata) : {};
+        const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+        const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
+        if (!segment) return;
+        const normalized = normalizeH3Params({
+            ...recordOf(metadata.comfyParams),
+            ...metadata,
+            ...segment,
+            ...override,
+            mode: override.mode ?? segment.mode ?? segment.taskMode ?? metadata.mode ?? metadata.taskMode,
+        }, true);
+        const mode = normalizeTaskMode(override.mode ?? override.taskMode ?? segment.mode ?? segment.taskMode ?? metadata.mode ?? metadata.taskMode);
+        normalized.mode = mode;
+        normalized.taskMode = mode;
+        const patch: Record<string, unknown> = {};
+        for (const key of ["mode", "taskMode", "noiseSeedMode", "seed", "noiseSeed", "loraSlots"] as const) {
+            if (JSON.stringify(segment[key]) !== JSON.stringify(normalized[key])) patch[key] = normalized[key];
+        }
+        if (Object.keys(patch).length) this.patchSegment(projectId, plan.nodeId, plan.segmentId, patch);
+    }
+
     private async startChild(parent: RuntimeTask, plan: H3Plan, override: Record<string, unknown>) {
         let compositeTempDir: string | undefined;
         try {
@@ -331,7 +362,7 @@ export class CanvasH3Runner {
             cachedFirstPassPath = await this.resolveRef({ url: String(segment.firstPassResult), storageKey: segment.firstPassStorageKey ? String(segment.firstPassStorageKey) : undefined, name: `first-pass-${plan.segmentId}.mp4`, type: "video" });
         }
         params = h3ConfirmationPhaseParams(segment, params, confirmingSecondPass);
-        const taskMode = normalizeTaskMode(params.taskMode || params.mode || segment.taskMode || segment.mode);
+        const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
         const { compilation, composite } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
         const scenePrompt = appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
@@ -628,7 +659,9 @@ function normalizeInput(input: H3RunInput): H3RunInput {
     const projectId = String(input.projectId || "");
     if (!projectId) throw new Error("projectId 必填");
     if (!input.nodeId && !input.nodeIds?.length) throw new Error("nodeId 或 nodeIds 必填");
-    return { ...input, projectId, nodeId: input.nodeId ? String(input.nodeId) : undefined, nodeIds: input.nodeIds?.map(String), segmentId: input.segmentId ? String(input.segmentId) : undefined, params: recordOf(input.params) };
+    const rawParams = recordOf(input.params);
+    const hasCanonicalizableOverride = ["mode", "taskMode", "noiseSeedMode", "noiseSeed", "seed", "loraSlots", "loraName", "loraStrength"].some((key) => Object.prototype.hasOwnProperty.call(rawParams, key));
+    return { ...input, projectId, nodeId: input.nodeId ? String(input.nodeId) : undefined, nodeIds: input.nodeIds?.map(String), segmentId: input.segmentId ? String(input.segmentId) : undefined, params: hasCanonicalizableOverride ? normalizeH3Params(rawParams, true) : rawParams };
 }
 
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
@@ -645,7 +678,9 @@ export function collectH3Refs(segment: H3Segment, project: Record<string, unknow
 
 function normalizeTaskMode(value: unknown) {
     const mode = String(value || "").toLowerCase();
-    return ["t2v", "i2v", "fl2v", "ref2va"].includes(mode) ? mode : "ref2va";
+    if (["t2v", "i2v", "fl2v", "ref2va"].includes(mode)) return mode;
+    // Legacy canvas values all mean the native H3 reference-to-video/audio path.
+    return "ref2va";
 }
 
 function extractParams(segment: H3Segment, override: Record<string, unknown>, metadata: Record<string, unknown>, defaults: Record<string, unknown>): Record<string, unknown> {
@@ -659,7 +694,12 @@ function extractParams(segment: H3Segment, override: Record<string, unknown>, me
     delete params.videoSteps;
     const result = { ...params, ...override };
     delete result.videoSteps;
-    return result;
+    const normalized = normalizeH3Params(result, false);
+    const requestedMode = override.mode ?? override.taskMode ?? normalized.mode ?? normalized.taskMode;
+    const mode = normalizeTaskMode(requestedMode);
+    normalized.mode = mode;
+    normalized.taskMode = mode;
+    return normalized;
 }
 
 function resultVideo(task: RuntimeTask) {

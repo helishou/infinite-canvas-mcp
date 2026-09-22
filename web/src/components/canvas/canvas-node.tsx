@@ -746,7 +746,6 @@ export const CanvasNode = React.memo(function CanvasNode({
             }}
             onClickCapture={(event) => {
                 if (!referenceSelectionState && !pickedReferenceOnMouseDown.current) return;
-                event.preventDefault();
                 event.stopPropagation();
                 if (pickedReferenceOnMouseDown.current) {
                     pickedReferenceOnMouseDown.current = false;

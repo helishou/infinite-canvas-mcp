@@ -37,7 +37,8 @@ export function AgentPanel() {
         window.addEventListener("pointerup", onUp);
     };
 
-    if (!panelMounted) return null;
+    // SSE 连接不能依赖侧栏是否曾经打开；外部 MCP 也需要始终能找到当前网页。
+    if (!panelMounted) return <LocalAgentPanel headless autoConnect />;
 
     return (
         <motion.div

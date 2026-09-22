@@ -5,7 +5,7 @@ import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { CanvasGenerationService } from "./generation-service.js";
 
-function serviceWith(overrides: { image?: Record<string, unknown>; h3?: Record<string, unknown>; comfy?: Record<string, unknown>; stores?: Record<string, unknown>; video?: Record<string, unknown>; browser?: Record<string, unknown> } = {}) {
+function serviceWith(overrides: { image?: Record<string, unknown>; h3?: Record<string, unknown>; comfy?: Record<string, unknown>; stores?: Record<string, unknown>; video?: Record<string, unknown>; audio?: Record<string, unknown>; browser?: Record<string, unknown> } = {}) {
     return new CanvasGenerationService(
         (overrides.image || {}) as never,
         (overrides.h3 || {}) as never,
@@ -15,10 +15,27 @@ function serviceWith(overrides: { image?: Record<string, unknown>; h3?: Record<s
         {} as never,
         undefined,
         overrides.video as never,
-        undefined,
+        overrides.audio as never,
         overrides.browser as never,
     );
 }
+
+test("本地 ComfyUI 音频进入音频执行器并解析参考音频路径", async () => {
+    let received: unknown;
+    const task = { id: "audio-local", kind: "canvas-audio", status: "queued", progress: 0, input: {}, params: {}, createdAt: "", updatedAt: "" };
+    const service = serviceWith({
+        audio: { start: (input: unknown) => { received = input; return { taskId: task.id, executor: "comfyui" }; } },
+        browser: { start: () => { throw new Error("不应进入浏览器音频执行器"); } },
+        stores: {
+            settings: { get: () => ({ channels: [{ id: "local", kind: "comfyui", models: [{ name: "IndexTTS 2.5 配音", capability: "audio" }] }] }) },
+            media: { meta: (key: string) => key === "audio:key" ? { filePath: "C:/media/reference.wav" } : null },
+            tasks: { get: () => task },
+        },
+    });
+    const result = await service.start({ mode: "audio", model: "local::IndexTTS 2.5 配音", prompt: "你好", audioReferences: [{ storageKey: "audio:key" }], params: { speed: "1.2" } });
+    assert.equal(result.executor, "comfyui");
+    assert.deepEqual(received, { projectId: undefined, nodeId: undefined, sourceNodeId: undefined, model: "local::IndexTTS 2.5 配音", prompt: "你好", voice: "", format: "", speed: "1.2", instructions: "", executor: "comfyui", referenceAudio: "C:/media/reference.wav", params: { speed: "1.2" } });
+});
 
 test("挂载自定义脚本的模型先进入 Backend 浏览器任务而不是模式直连分支", async () => {
     let received: unknown;

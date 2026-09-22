@@ -15,17 +15,85 @@ export function formatShotTimestamp(raw: string) {
     const value = raw.trim();
     const clock = /^(\d{1,2}):([0-5]\d)(?:\.(\d{1,3}))?$/u.exec(value);
     const seconds = clock ? Number(clock[1]) * 60 + Number(clock[2]) + Number(`0.${clock[3] || "0"}`)
-        : /^\d+(?:\.\d{1,3})?s?$/iu.test(value) ? Number(value.replace(/s$/iu, "")) : NaN;
+        : /^(?:\d+(?:\.\d+)?|\.\d+)s?$/iu.test(value) ? Number(value.replace(/s$/iu, "")) : NaN;
     if (!Number.isFinite(seconds)) return "";
     const ms = Math.round(seconds * 1000);
     return `${String(Math.floor(ms / 60000)).padStart(2, "0")}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}.${String(ms % 1000).padStart(3, "0")}`;
 }
 
-export function validateShotTimeline(shots: Array<{ switchTime?: string }>, duration?: number) {
+type StoryboardTimelineShot = {
+    id?: unknown;
+    pictureBindingId?: unknown;
+    switchTime?: unknown;
+};
+
+function shotTimestampSeconds(value: unknown): number | null {
+    const normalized = formatShotTimestamp(String(value ?? ""));
+    if (!normalized) return null;
+    const match = /^(\d{2}):(\d{2})\.(\d{3})$/u.exec(normalized);
+    if (!match) return null;
+    const [, minutes, seconds, milliseconds] = match;
+    return Number(minutes) * 60 + Number(seconds) + Number(milliseconds) / 1000;
+}
+
+/** Derive persisted storyboard durations from the same timeline rendered into the prompt. */
+export function deriveStoryboardDurations(shots: StoryboardTimelineShot[], totalDuration: unknown) {
+    const duration = Number(totalDuration);
+    if (!shots.length || !Number.isFinite(duration) || duration <= 0) return {};
+    const starts = shots.map((shot, index) => index === 0 ? 0 : shotTimestampSeconds(shot.switchTime));
+    if (starts.some((start) => start === null || !Number.isFinite(start))) return {};
+
+    const result: Record<string, number> = {};
+    shots.forEach((shot, index) => {
+        const key = String(shot.pictureBindingId ?? shot.id ?? "").trim();
+        const start = starts[index];
+        const end = index + 1 < starts.length ? starts[index + 1] : duration;
+        if (!key || start === null || end === null || end <= start || start >= duration) return;
+        result[key] = Math.round((Math.min(end, duration) - start) * 1000) / 1000;
+    });
+    return result;
+}
+
+export function normalizeRef2vaSummary(summary: unknown, options: {
+    hasStoryboardFrames?: boolean;
+    hasReferenceImages?: boolean;
+    hasAudioReference?: boolean;
+} = {}) {
+    const raw = String(summary ?? "").trim();
+    const match = /^\s*\[([^\]]+)\]\s*([\s\S]*)$/u.exec(raw);
+    const existing = match
+        ? match[1].split(/\s*\+\s*/u).map((item) => item.trim().toLowerCase()).filter(Boolean)
+        : [];
+    const required = [
+        ...(options.hasStoryboardFrames ? ["keyframe completion"] : []),
+        ...(options.hasReferenceImages ? ["reference generation"] : []),
+        ...(options.hasAudioReference ? ["audio reference"] : []),
+    ];
+    const taskTypes = [...new Set([...existing, ...required])];
+    const body = (match ? match[2] : raw).trim();
+    return taskTypes.length ? `[${taskTypes.join(" + ")}]${body ? ` ${body}` : ""}` : body;
+}
+
+export function validateStoryboardShotDescriptions(shots: Array<{ description?: unknown }>) {
+    shots.forEach((shot, index) => {
+        const description = String(shot.description ?? "").trim();
+        if (
+            /Use the approved[\s\S]{0,240}?for this shot\.\s*(?:to|into)\b/iu.test(description)
+            || /^\s*(?:to|into)\s+the approved\b/iu.test(description)
+        ) {
+            throw new Error(`Shot ${index + 1} contains a malformed reference instruction; rewrite it as a complete sentence.`);
+        }
+    });
+}
+
+export function validateShotTimeline(shots: Array<{ switchTime?: string; preciseCut?: boolean }>, duration?: number) {
     let previous = 0;
     shots.forEach((shot, index) => {
         if (!index) return;
-        const time = formatShotTimestamp(shot.switchTime || "");
+        const raw = String(shot.switchTime || "").trim();
+        if (shot.preciseCut === true && !raw) throw new Error(`分镜 ${index + 1} 已开启精准切镜，请填写切换时间。`);
+        if (!raw) return;
+        const time = formatShotTimestamp(raw);
         if (!time) throw new Error(`分镜 ${index + 1} 的切换时间无效，请填写秒数或 MM:SS.mmm。`);
         const [minutes, seconds] = time.split(":").map(Number);
         const current = minutes * 60 + seconds;

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf } from "../../canvas/reference-contract.js";
 import { assembleH3Prompt } from "./prompt-sections.js";
-import { formatShotTimestamp, promptDetails, stripDuplicateTransition, validateDefinitionCoverage, validatePromptReferences, validateShotTimeline, visualReferenceTags } from "./prompt-rules.js";
+import { deriveStoryboardDurations, formatShotTimestamp, normalizeRef2vaSummary, promptDetails, stripDuplicateTransition, validateDefinitionCoverage, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "./prompt-rules.js";
 
 type RecordValue = Record<string, unknown>;
 type Transition = "continuous" | "cut" | "dissolve" | "fade_black";
@@ -19,6 +19,7 @@ const SHOT_TRANSITION_LEADIN: Record<Transition, string> = {
     dissolve: "the shot cross-dissolves",
     fade_black: "the shot fades out to black, then fades in",
 };
+const STORYBOARD_KEYFRAME_GUIDANCE = "Storyboard images establish shot-entry keyframes, not frozen poses for the entire shot. After each keyframe, keep the camera setup and spatial relationship stable while allowing natural breathing, gaze changes, head and shoulder movement, restrained hand gestures, facial reactions, and clothing motion.";
 function record(value: unknown): RecordValue { return value && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : {}; }
 function string(value: unknown) { return typeof value === "string" ? value.trim() : ""; }
 
@@ -106,7 +107,7 @@ function promptForShots(input: StoryboardInput, refs: RecordValue[], catalog: Re
             }
             const panel = composite?.panels.find((item) => item.bindingId === pictureId);
             const position = panel ? ` In the composite storyboard image, this is Panel ${panel.index} (row ${panel.row}, column ${panel.column}), shared by ${panel.shotNumbers.map((number) => `[Shot ${number}]`).join(", ")}.` : "";
-            picture = ` Use the approved ${pictureDescription(binding, catalog) || "storyboard frame"} from ${pictureTagForId(pictureId)} as the target composition reference for this shot.${position}`;
+            picture = ` Use the approved ${pictureDescription(binding, catalog) || "storyboard frame"} from ${pictureTagForId(pictureId)} as the shot-entry keyframe and composition anchor for this shot. After the keyframe, keep the camera setup and spatial relationship stable while allowing natural performance.${position}`;
         }
         const normalizedDescription = normalizeLegacyReferences(index ? stripDuplicateTransition(string(shot.description), transitionType) : string(shot.description));
         const extraPanelIds = [...new Set(Array.from(normalizedDescription.matchAll(/<Picture\s+(\d+)>/giu), (match) => originalPictureRefs[Number(match[1]) - 1]?.bindingId).filter((id): id is string => Boolean(id)))];
@@ -115,7 +116,7 @@ function promptForShots(input: StoryboardInput, refs: RecordValue[], catalog: Re
             .map((panel) => `This shot uses composite storyboard Panel ${panel!.index} (row ${panel!.row}, column ${panel!.column}).`).join(" ") : "";
         return `[Shot ${index + 1}]${time}${transition}${picture}${extraPanels ? ` ${extraPanels}` : ""}${normalizedDescription ? ` ${remapDescription(normalizedDescription)}` : ""}`;
     });
-    return [string(input.openingDescription), details.join("\n")].filter(Boolean).join("\n\n");
+    return [STORYBOARD_KEYFRAME_GUIDANCE, string(input.openingDescription), details.join("\n")].filter(Boolean).join("\n\n");
 }
 
 function subjectAppearsInShot(subject: PromptSubject, shot: PromptShot, subjectOrdinal: number) {
@@ -176,10 +177,10 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
                 : reference.usage === "last_frame"
                     ? `the locked closing frame of ${shotsForReference[shotsForReference.length - 1] || `[Shot ${Math.max(1, shots.length)}]`}`
                     : reference.role === "storyboard"
-                        ? `the approved storyboard frame for ${shotsForReference.join(", ") || "the target shot sequence"}`
+                        ? `the approved storyboard keyframe at the entry of ${shotsForReference.join(", ") || "the target shot sequence"}`
                         : `a keyframe anchoring the composition of ${shotsForReference.join(", ")}`;
             const plan = reference.role === "storyboard"
-                ? "defining viewpoint, subject placement, and shot order"
+                ? "defining the entry viewpoint, subject placement, and shot setup; after the keyframe, the actors can perform naturally while the camera remains stable"
                 : "defining the target composition and visible subject state";
             const showing = subjectToken ? `, showing ${subjectToken}` : "";
             const detail = reference.description ? `: ${reference.description}` : "";
@@ -230,7 +231,9 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
         const subjectTokens = (reference.subjectIds?.length ? reference.subjectIds : reference.subjectId ? [reference.subjectId] : [])
             .flatMap((id) => subjects.filter((subject) => subject.id === id).map(subjectMarker));
         const details: Record<NonNullable<PromptReference["retentionLevel"]>, string> = {
-            fully_preserved: `preserve the defined ${frame} role and its target viewpoint, subject placement, and visual state`,
+            fully_preserved: reference.role === "storyboard"
+                ? `preserve the defined ${frame} entry viewpoint, subject placement, and shot setup, then allow natural performance while the camera remains stable`
+                : `preserve the defined ${frame} role and its target viewpoint, subject placement, and visual state`,
             partially_preserved: `retain the selected visual features of the ${frame} while allowing other source-composition details to change`,
             attribute_transfer: `transfer the defined visual attributes${subjectTokens.length ? ` to ${subjectTokens.join(", ")}` : " to the target shot"} without reproducing the source frame as a whole`,
             weak_reference: `use the ${frame} only as broad visual and composition guidance`,
@@ -337,7 +340,10 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
                 if (outfitDescription) entry.outfits.add(outfitDescription);
             }
             const pictureMarker = tag;
-            if (!entry.pictures.includes(pictureMarker) && type === "image") entry.pictures.push(pictureMarker);
+            // Storyboard frames are concrete shot anchors, not reusable subject identity.
+            // Keeping them out of <Subject> prevents a frame composition from leaking into
+            // every later shot that mentions the same subject.
+            if (!entry.pictures.includes(pictureMarker) && type === "image" && role !== "storyboard") entry.pictures.push(pictureMarker);
             if (!entry.profile && profile) entry.profile = profile;
             if (entry.role === "storyboard" && role !== "storyboard") entry.role = role;
             if (entry.name === entry.id && name !== subjectId) entry.name = name;
@@ -439,12 +445,19 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
         ...reference,
         shotNumbers: normalizedShots.flatMap((shot, index) => shot.referenceIds.includes(reference.bindingId) ? [index + 1] : []),
     }));
+    const summary = ref2va ? normalizeRef2vaSummary(input.summary, {
+        hasStoryboardFrames: finalReferences.some((reference) => reference.type === "image" && reference.role === "storyboard" && reference.shotNumbers.length > 0),
+        hasReferenceImages: finalReferences.some((reference) => reference.type === "image"),
+        hasAudioReference: finalReferences.some((reference) => reference.type === "audio"),
+    }) : string(input.summary);
+    const storyboardDurations = deriveStoryboardDurations(normalizedShots, segment.duration);
     const content = {
         version: 12,
         storyboardComposite: { enabled: segment.storyboardCompositeEnabled === true, ...(composite ? { rows: composite.rows, columns: composite.columns, panels: composite.panels, sourceIdentity: allRefs.filter((ref) => compositeSourceIds.has(string(ref.bindingId))).map((ref) => ({ bindingId: ref.bindingId, assetId: ref.assetId, storageKey: ref.storageKey || "", url: ref.storageKey ? "" : ref.url || "" })) } : {}) },
-        summary: string(input.summary),
+        summary,
         openingDescription: string(input.openingDescription),
         shots: normalizedShots,
+        storyboardDurations,
         overallSoundscape: string(input.overallSoundscape),
         nonDiegeticMusic: string(input.nonDiegeticMusic),
         references: finalReferences,
@@ -472,19 +485,20 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
     const prompt = assembleH3Prompt(promptMode, {
         ...(ref2va ? {
             subject_definitions: generated.subjectDefinitions,
-            summary: string(input.summary),
+            summary,
             retention_analysis: generated.retentionAnalysis,
         } : {}),
         [storyboardSection]: promptForShots(input, allRefs, catalog, composite, finalReferences),
         overall_soundscape: string(input.overallSoundscape),
         non_diegetic_music: string(input.nonDiegeticMusic),
     });
-    return { prompt, fingerprint, subjectDefinitions: generated.subjectDefinitions, retentionAnalysis: generated.retentionAnalysis, subjectCount: subjectManifest.length, shotCount: input.shots.length, content };
+    return { prompt, fingerprint, subjectDefinitions: generated.subjectDefinitions, retentionAnalysis: generated.retentionAnalysis, subjectCount: subjectManifest.length, shotCount: input.shots.length, storyboardDurations, content };
 }
 
 export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue, rawInput: RecordValue) {
     const input = rawInput as StoryboardInput;
     if (!Array.isArray(input.shots) || !input.shots.length) throw new Error("分镜至少需要一镜");
+    validateStoryboardShotDescriptions(input.shots);
     validateShotTimeline(input.shots, segment.duration === undefined ? undefined : Number(segment.duration));
     const bindings = referenceBindingsOf(segment).bindings;
     const generated = buildPromptSections(project, segment, input, bindings);

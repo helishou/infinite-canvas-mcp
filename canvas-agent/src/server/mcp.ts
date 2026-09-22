@@ -28,7 +28,7 @@ function registerCanvasTool(server: McpServer, backend: ReturnType<typeof create
     // every field-level hint, making OpenAI tool-use guess at items/tags etc.
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: schema }, async (input: unknown) => {
         const result = await postCanvasAgentTool(backend, name, schema.parse(input));
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     });
 }
 

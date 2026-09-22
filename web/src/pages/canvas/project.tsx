@@ -69,7 +69,7 @@ import { buildCanvasGraphIndex, createMentionReferenceSelector, getGroupResource
 import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
-import { arrangeOrderedGroupMembers, insertOrderedGroupSlot, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupMemberPosition, orderedGroupMemberSize, orderedGroupResizeLayout, orderedGroupSlots, swapOrderedGroupSlot } from "@/lib/canvas/ordered-group";
+import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, insertOrderedGroupSlot, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupMemberPosition, orderedGroupMemberSize, orderedGroupResizeLayout, orderedGroupSlots, replaceOrderedGroupSlot, swapOrderedGroupSlot, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
 import { clearCanvasDragPreview, clearCanvasResizePreview, writeCanvasDragPreview, writeCanvasResizePreview, type CanvasResizePreviewBounds } from "@/lib/canvas/canvas-drag-preview";
 import {
     audioExtension,
@@ -1987,6 +1987,7 @@ function InfiniteCanvasPage() {
         if (!dragged || dragged.type === CanvasNodeType.Group) return false;
         const targetGroup = current.find((item) => item.type === CanvasNodeType.Group && item.metadata?.orderedGroup && pointerPoint.x >= item.position.x && pointerPoint.x <= item.position.x + item.width && pointerPoint.y >= item.position.y && pointerPoint.y <= item.position.y + item.height);
         if (!targetGroup) return false;
+        let inheritedOutputSourceId: string | undefined;
         setNodes((prev) => {
             const sourceGroup = prev.find((item) => item.id === draggedId ? false : item.id === dragged.metadata?.groupId && item.metadata?.orderedGroup);
             const target = prev.find((item) => item.id === targetGroup.id);
@@ -2008,6 +2009,7 @@ function InfiniteCanvasPage() {
             const targetIndex = Math.max(0, Math.min(drop.index, targetSlots.length));
             let nextTargetSlots = [...targetSlots];
             let nextSourceSlots = sourceSlots ? [...sourceSlots] : null;
+            let displacedId: string | undefined;
             if (sourceGroup?.id === target.id && sourceIndex >= 0) {
                 if (drop.kind === "slot" && nextTargetSlots[targetIndex] && nextTargetSlots[targetIndex] !== draggedId) {
                     nextTargetSlots = swapOrderedGroupSlot(nextTargetSlots, sourceIndex, targetIndex);
@@ -2015,10 +2017,14 @@ function InfiniteCanvasPage() {
                     nextTargetSlots = insertOrderedGroupSlot(nextTargetSlots, draggedId, targetIndex);
                 }
             } else {
-                if (nextSourceSlots && sourceIndex >= 0) nextSourceSlots = nextSourceSlots.filter((id) => id !== draggedId);
                 if (drop.kind === "slot" && targetIndex < nextTargetSlots.length) {
-                    nextTargetSlots = insertOrderedGroupSlot(nextTargetSlots, draggedId, targetIndex);
+                    const replacement = replaceOrderedGroupSlot(nextTargetSlots, draggedId, targetIndex);
+                    nextTargetSlots = replacement.slots;
+                    displacedId = replacement.displacedId;
+                    inheritedOutputSourceId = displacedId;
+                    if (nextSourceSlots && sourceIndex >= 0 && displacedId) nextSourceSlots[sourceIndex] = displacedId;
                 } else {
+                    if (nextSourceSlots && sourceIndex >= 0) nextSourceSlots = nextSourceSlots.filter((id) => id !== draggedId);
                     nextTargetSlots = insertOrderedGroupSlot(nextTargetSlots, draggedId, targetIndex);
                 }
             }
@@ -2034,6 +2040,10 @@ function InfiniteCanvasPage() {
                     const size = orderedGroupMemberSize(target, targetSlotIndex, item, targetDisplayCount);
                     return { ...item, metadata: { ...item.metadata, groupId: target.id }, position: orderedGroupMemberPosition(target, targetSlotIndex, item, targetDisplayCount), width: size.width, height: size.height };
                 }
+                if (item.id === displacedId && !sourceGroup) {
+                    const { groupId: _groupId, ...metadata } = item.metadata || {};
+                    return { ...item, metadata, position: dragged.position };
+                }
                 const targetSlot = targetSlotMap.get(item.id);
                 if (targetSlot !== undefined) {
                     const size = orderedGroupMemberSize(target, targetSlot, item, targetDisplayCount);
@@ -2042,11 +2052,16 @@ function InfiniteCanvasPage() {
                 const sourceSlot = sourceSlotMap.get(item.id);
                 if (sourceGroup && sourceGroup.id !== target.id && sourceSlot !== undefined) {
                     const size = orderedGroupMemberSize(sourceGroup, sourceSlot, item, sourceDisplayCount);
-                    return { ...item, position: orderedGroupMemberPosition(sourceGroup, sourceSlot, item, sourceDisplayCount), width: size.width, height: size.height };
+                    return { ...item, metadata: { ...item.metadata, groupId: sourceGroup.id }, position: orderedGroupMemberPosition(sourceGroup, sourceSlot, item, sourceDisplayCount), width: size.width, height: size.height };
                 }
                 return item;
             });
         });
+        if (inheritedOutputSourceId) {
+            const resources = nodeResourceItems(dragged).map((resource) => ({ ...resource, mimeType: dragged.metadata?.mimeType }));
+            setNodes((prev) => prev.map((node) => transferOrderedGroupH3References(node, inheritedOutputSourceId!, dragged, resources)));
+            setConnections((prev) => inheritOrderedGroupOutputs(prev, inheritedOutputSourceId!, draggedId));
+        }
         return true;
     }, []);
 
@@ -4246,6 +4261,7 @@ function InfiniteCanvasPage() {
                             mode: "audio",
                             model: generationConfig.model,
                             prompt: effectivePrompt,
+                            audioReferences: generationContext.referenceAudios.map((item) => ({ id: item.id, name: item.name, url: item.url, storageKey: item.storageKey, mimeType: item.type })),
                             params: { voice: generationConfig.audioVoice, format: generationConfig.audioFormat, speed: generationConfig.audioSpeed, instructions: generationConfig.audioInstructions },
                             clientTaskId,
                             projectId,
@@ -4561,6 +4577,7 @@ function InfiniteCanvasPage() {
                             mode: "audio",
                             model: generationConfig.model,
                             prompt,
+                            audioReferences: (context?.referenceAudios || []).map((item) => ({ id: item.id, name: item.name, url: item.url, storageKey: item.storageKey, mimeType: item.type })),
                             params: { voice: generationConfig.audioVoice, format: generationConfig.audioFormat, speed: generationConfig.audioSpeed, instructions: generationConfig.audioInstructions },
                             clientTaskId: retryClientTaskId,
                             projectId,

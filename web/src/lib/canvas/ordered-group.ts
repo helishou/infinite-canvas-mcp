@@ -1,4 +1,4 @@
-import type { CanvasNodeData } from "@/types/canvas";
+import type { CanvasConnection, CanvasNodeData } from "@/types/canvas";
 
 export type OrderedGroupSlot = string | null;
 export type OrderedGroupLayout = {
@@ -185,6 +185,59 @@ export function insertOrderedGroupSlot(slots: OrderedGroupSlot[], nodeId: string
     const target = Math.max(0, Math.min(index, next.length));
     next.splice(target, 0, nodeId);
     return next;
+}
+
+export function replaceOrderedGroupSlot(slots: string[], nodeId: string, index: number) {
+    const next = slots.filter((value) => value !== nodeId);
+    const target = Math.max(0, Math.min(index, next.length - 1));
+    const displacedId = next[target];
+    if (displacedId !== undefined) next[target] = nodeId;
+    return { slots: next, displacedId };
+}
+
+export function inheritOrderedGroupOutputs(connections: CanvasConnection[], sourceNodeId: string, targetNodeId: string) {
+    const seen = new Set<string>();
+    return connections.flatMap((connection) => {
+        const next = connection.fromNodeId === sourceNodeId ? { ...connection, fromNodeId: targetNodeId } : connection;
+        if (next.fromNodeId === next.toNodeId) return [];
+        const key = `${next.fromNodeId}\u0000${next.toNodeId}`;
+        if (seen.has(key)) return [];
+        seen.add(key);
+        return [next];
+    });
+}
+
+type OrderedGroupOutputResource = { kind: "image" | "video" | "audio" | "text"; url?: string; storageKey?: string; mimeType?: string };
+
+export function transferOrderedGroupH3References(node: CanvasNodeData, sourceNodeId: string, targetNode: CanvasNodeData, resources: OrderedGroupOutputResource[]) {
+    const metadata = node.metadata as (Record<string, unknown> & { segments?: Array<Record<string, unknown>> }) | undefined;
+    if (!Array.isArray(metadata?.segments)) return node;
+    let changed = false;
+    const transfer = (value: unknown, sourceKey: "sourceNodeId" | "nodeId") => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+        const ref = value as Record<string, unknown>;
+        if (ref[sourceKey] !== sourceNodeId) return value;
+        const kind = String(ref.mediaType || ref.type || "image") as OrderedGroupOutputResource["kind"];
+        const resource = resources.find((item) => item.kind === kind) || resources[0];
+        changed = true;
+        return {
+            ...ref,
+            [sourceKey]: targetNode.id,
+            label: sourceKey === "sourceNodeId" ? targetNode.title : ref.label,
+            name: sourceKey === "nodeId" ? targetNode.title : ref.name,
+            ...(resource ? { url: resource.url || "", storageKey: resource.storageKey, mimeType: resource.mimeType } : {}),
+        };
+    };
+    const segments = metadata.segments.map((segment) => {
+        const next = { ...segment };
+        if (Array.isArray(segment.referenceBindings)) next.referenceBindings = segment.referenceBindings.map((ref) => transfer(ref, "sourceNodeId"));
+        if (Array.isArray(segment.refItems)) next.refItems = segment.refItems.map((ref) => transfer(ref, "nodeId"));
+        if (segment.refs && typeof segment.refs === "object" && !Array.isArray(segment.refs)) {
+            next.refs = Object.fromEntries(Object.entries(segment.refs as Record<string, unknown>).map(([key, refs]) => [key, Array.isArray(refs) ? refs.map((ref) => transfer(ref, "nodeId")) : refs]));
+        }
+        return next;
+    });
+    return changed ? { ...node, metadata: { ...node.metadata, segments } as CanvasNodeData["metadata"] } : node;
 }
 
 export function swapOrderedGroupSlot(slots: string[], sourceIndex: number, targetIndex: number) {

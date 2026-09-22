@@ -126,7 +126,7 @@ async function startBackendHttpServer() {
   const directVideo = new DirectVideoBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
   const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo);
   const directAudio = new DirectAudioBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
-  const canvasAudioDispatcher = new CanvasAudioDispatcher(runtime.stores, directAudio);
+  const canvasAudioDispatcher = new CanvasAudioDispatcher(runtime.stores, directAudio, runtime.comfy);
   const canvasBrowserScriptDispatcher = new CanvasBrowserScriptDispatcher(runtime.stores, runtime.events, canvasTextDispatcher);
   const canvasGeneration = new CanvasGenerationService(
     canvasImageDispatcher,
@@ -140,7 +140,7 @@ async function startBackendHttpServer() {
     canvasAudioDispatcher,
     canvasBrowserScriptDispatcher,
   );
-  const canvasReferences = new CanvasReferenceService(runtime.stores);
+  const canvasReferences = new CanvasReferenceService(runtime.stores, (alert) => logger.warn("疑似参考资产循环写入", alert));
   const { app } = startServer(runtime.db, config, {
     comfy: runtime.comfy,
     events: runtime.events,

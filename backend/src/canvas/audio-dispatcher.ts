@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 
 import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { DirectAudioBackend, DirectAudioInput } from "../runtime/direct-audio.js";
+import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { Stores } from "../stores/types.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
 import type { CanvasOperation } from "./project-ops.js";
@@ -11,20 +12,24 @@ export type CanvasAudioGenerationInput = DirectAudioInput & {
     nodeId?: string;
     sourceNodeId?: string;
     clientTaskId?: string;
+    executor?: "direct-audio" | "comfyui";
+    referenceAudio?: string;
+    params?: Record<string, unknown>;
 };
 
 /** Backend 权威的普通音频任务；配置节点触发时自动创建稳定的音频结果节点。 */
 export class CanvasAudioDispatcher {
     private readonly children = new Map<string, string>();
 
-    constructor(private readonly stores: Stores, private readonly directAudio?: DirectAudioBackend) {}
+    constructor(private readonly stores: Stores, private readonly directAudio?: DirectAudioBackend, private readonly comfy?: ComfyUiBackend) {}
 
     start(raw: CanvasAudioGenerationInput) {
-        if (!this.directAudio) throw new Error("Backend 直连音频执行器未初始化");
         let input = normalize(raw);
+        const executor = input.executor || "direct-audio";
+        if (executor === "comfyui" ? !this.comfy : !this.directAudio) throw new Error(executor === "comfyui" ? "Backend ComfyUI 执行器未初始化" : "Backend 直连音频执行器未初始化");
         const taskId = input.clientTaskId || `canvas-audio-${crypto.randomUUID()}`;
         const existing = this.stores.tasks.get(taskId);
-        if (existing) return { taskId: existing.id, executor: "direct-audio" };
+        if (existing) return { taskId: existing.id, executor };
         const active = this.findActive(input);
         if (active) return { taskId: active.id, executor: String(active.executor || "direct-audio") };
         const prepared = prepareCanvasGenerationTarget(this.stores, { ...input, mode: "audio" }, taskId);
@@ -32,7 +37,7 @@ export class CanvasAudioDispatcher {
         const task = this.stores.tasks.create(taskId, "canvas-audio", input, {
             projectId: input.projectId,
             nodeId: input.nodeId,
-            executor: "direct-audio",
+            executor,
             model: input.model,
             ...(prepared.targetSize ? { audioTargetSize: prepared.targetSize } : {}),
         });
@@ -49,7 +54,7 @@ export class CanvasAudioDispatcher {
             }
         }
         void this.execute(task, input).catch((error) => this.fail(task, input, error));
-        return { taskId: task.id, executor: "direct-audio" };
+        return { taskId: task.id, executor };
     }
 
     retry(task: RuntimeTask) {
@@ -75,7 +80,7 @@ export class CanvasAudioDispatcher {
         const task = this.stores.tasks.get(id);
         if (!task || !["queued", "running"].includes(task.status)) throw new Error(`任务状态 ${task?.status || "unknown"} 不可取消`);
         const child = this.children.get(id);
-        if (child) try { this.directAudio?.cancel(child); } catch {}
+        if (child) try { task.executor === "comfyui" ? this.comfy?.cancel(child) : this.directAudio?.cancel(child); } catch {}
         const cancelled = this.stores.tasks.cancel(id);
         const input = task.input as CanvasAudioGenerationInput;
         if (input.projectId && input.nodeId) this.stores.projects.markCanvasAudioTaskFailed(cancelled, { projectId: input.projectId, nodeId: input.nodeId }, "");
@@ -84,13 +89,15 @@ export class CanvasAudioDispatcher {
 
     private async execute(task: RuntimeTask, input: CanvasAudioGenerationInput) {
         this.stores.tasks.update(task.id, { status: "running", progress: 0.05 });
-        const childId = `audio-direct-child-${task.id}`;
+        const childId = `audio-child-${task.id}`;
         this.children.set(task.id, childId);
         try {
-            const child = this.directAudio!.run(input, childId, { parentTaskId: task.id, channelId: input.channelId });
+            const child = input.executor === "comfyui"
+                ? await this.comfy!.run("indextts-2.5", { prompt: input.prompt, referenceAudio: input.referenceAudio }, { ...(input.params || {}), speed: input.speed }, undefined, childId)
+                : this.directAudio!.run(input, childId, { parentTaskId: task.id, channelId: input.channelId });
             for (;;) {
                 const current = this.stores.tasks.get(child.id);
-                if (!current) throw new Error("直连音频子任务不存在");
+                if (!current) throw new Error("音频子任务不存在");
                 if (current.status === "succeeded") {
                     const media = firstMedia(current);
                     if (input.projectId && input.nodeId) {

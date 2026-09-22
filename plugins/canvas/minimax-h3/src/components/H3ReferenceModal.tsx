@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button, Checkbox, Input, Modal, Select, Switch } from "antd";
-import { ImagePlus, Trash2 } from "lucide-react";
+import { ImagePlus, Play, Trash2 } from "lucide-react";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3Ref, H3ReferenceRole, H3ReferenceUsage } from "../types";
 import { inferReferenceRole } from "../services/h3-data";
@@ -142,6 +142,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                                 <span style={{ display: "block", fontSize: 12, opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.voice.name}</span>
                                 {group.voice.description ? <span style={{ display: "block", marginTop: 2, fontSize: 11, opacity: 0.55 }}>{group.voice.description}</span> : null}
                             </span>
+                            <Button type="text" size="small" icon={<Play className="size-3.5" />} onClick={() => setPreviewItem({ ...group.voice!, type: "audio" })}>试听</Button>
                             <Switch size="small" checked={voiceEnabled} onChange={setVoiceEnabled} />
                         </div> : null}
                     </div> : null}

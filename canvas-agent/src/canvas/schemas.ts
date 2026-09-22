@@ -417,6 +417,10 @@ export const toolInputSchemas = {
     })
     .merge(generationOptionsSchema),
   canvas_generate_image_batch: canvasProjectSchema.extend({
+    defaults: z
+      .record(z.unknown())
+      .optional()
+      .describe("批量公共生成参数；条目字段优先"),
     items: z
       .array(imageBatchItemSchema)
       .min(1)

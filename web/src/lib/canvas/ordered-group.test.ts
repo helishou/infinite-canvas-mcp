@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
-import { arrangeOrderedGroupMembers, insertOrderedGroupSlot, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupResizeLayout, orderedGroupSlots, swapOrderedGroupSlot } from "@/lib/canvas/ordered-group";
+import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, insertOrderedGroupSlot, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupResizeLayout, orderedGroupSlots, replaceOrderedGroupSlot, swapOrderedGroupSlot, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
 
 const group = (slots: Array<string | null>): CanvasNodeData => ({
     id: "g",
@@ -65,6 +65,33 @@ test("ordered group arrange caps columns and stays stable on repeated arrange", 
 test("gap insertion and occupied-slot swap preserve ordered semantics", () => {
     assert.deepEqual(insertOrderedGroupSlot(["a", "b", null], "c", 1), ["a", "c", "b"]);
     assert.deepEqual(swapOrderedGroupSlot(["a", "b", "c"], 0, 2), ["c", "b", "a"]);
+    assert.deepEqual(replaceOrderedGroupSlot(["a", "b", "c"], "outside", 1), { slots: ["a", "outside", "c"], displacedId: "b" });
+});
+
+test("an outside node inherits only the displaced ordered member's outputs", () => {
+    const connections = [
+        { id: "input", fromNodeId: "upstream", toNodeId: "inside" },
+        { id: "output", fromNodeId: "inside", toNodeId: "downstream" },
+        { id: "would-self-connect", fromNodeId: "inside", toNodeId: "outside" },
+        { id: "existing", fromNodeId: "outside", toNodeId: "other" },
+    ];
+    assert.deepEqual(inheritOrderedGroupOutputs(connections, "inside", "outside"), [
+        connections[0],
+        { id: "output", fromNodeId: "outside", toNodeId: "downstream" },
+        connections[3],
+    ]);
+});
+
+test("transferring an ordered member output also retargets H3 clip references", () => {
+    const h3 = member("h3");
+    h3.metadata = { segments: [{ id: "clip-1", referenceBindings: [{ id: "binding", sourceNodeId: "inside", mediaType: "image", url: "old" }], refItems: [{ bindingId: "binding", nodeId: "inside", type: "image", url: "old" }], refs: { image: [{ bindingId: "binding", nodeId: "inside", type: "image", url: "old" }] } }] } as never;
+    const outside = { ...member("outside"), title: "新图片" };
+    const result = transferOrderedGroupH3References(h3, "inside", outside, [{ kind: "image", url: "new", storageKey: "new.webp" }]);
+    const segment = (result.metadata as any).segments[0];
+    assert.equal(segment.referenceBindings[0].sourceNodeId, "outside");
+    assert.equal(segment.referenceBindings[0].url, "new");
+    assert.equal(segment.refItems[0].nodeId, "outside");
+    assert.equal(segment.refs.image[0].nodeId, "outside");
 });
 
 test("drop target distinguishes an occupied member from visual whitespace between members", () => {

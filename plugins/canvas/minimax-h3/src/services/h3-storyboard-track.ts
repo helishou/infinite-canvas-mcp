@@ -150,7 +150,7 @@ function removeLegacyTimelineSection(prompt: string) {
     return `${before}${before && after ? "\n\n" : ""}${after}`;
 }
 
-type PromptShot = { body: string; bindingId?: string; managed: boolean };
+type PromptShot = { body: string; bindingId?: string; managed: boolean; preciseCut: boolean };
 
 function normalizeLegacyPictureTokens(content: string, imageRefs: H3Ref[]) {
     return content.replace(/\{\{\s*ref:\s*([^{}]+?)\s*\}\}/gu, (marker, rawId: string) => {
@@ -169,7 +169,7 @@ function promptShotsOf(content: string, storyboardIds: Set<string>, imageRefs: H
         const pictureNumber = body.match(/<Picture\s+(\d+)>/iu)?.[1];
         const bindingId = pictureNumber ? imageRefs[Number(pictureNumber) - 1]?.bindingId : undefined;
         const managedBindingId = bindingId && storyboardIds.has(bindingId) ? bindingId : undefined;
-        return { body, bindingId: managedBindingId, managed: Boolean(managedBindingId) };
+        return { body, bindingId: managedBindingId, managed: Boolean(managedBindingId), preciseCut: index > 0 && /^At\s+\d{1,2}:\d{2}(?:\.\d{1,3})?\s*,?/iu.test(body) };
     });
     return { opening: content.slice(0, markers[0].index).trim(), shots };
 }
@@ -304,7 +304,7 @@ function syncPromptShots(content: string, segment: H3Segment, activeItems: Retur
             if (!cuePattern.test(body)) body = [canonicalStoryboardCue(item.ref.bindingId, refs.filter((ref) => ref.type === "image")), body].filter(Boolean).join(" ");
         }
         body = normalizeTransition(body, index > 0);
-        return [formatShot(index, item.start, body)];
+        return [formatShot(index, existing?.preciseCut ? item.start : undefined, body)];
     });
 
     const remaining = parsed.shots.filter((shot) => !assigned.has(shot)).flatMap((shot, index) => {

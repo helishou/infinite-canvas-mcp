@@ -320,6 +320,8 @@ test("canvas_inspect returns one actionable canvas context", async (t) => {
   assert.deepEqual(events.map((event) => event.event), ["tool.started", "tool.succeeded"]);
   assert.equal(events[0].traceId, payload.traceId);
   assert.equal((events[0].inputSummary as Record<string, unknown>).textLength, 0);
+  assert.equal(typeof (events[0].inputSummary as Record<string, unknown>).inputChars, "number");
+  assert.equal(typeof (events[1].outputSummary as Record<string, unknown>).outputChars, "number");
 });
 
 test("collaboration tools share the common observability trace wrapper", async (t) => {
@@ -448,6 +450,7 @@ test("canvas_generate_image resolves the configured default model and returns th
   const payload = textPayload(result);
 
   assert.equal(payload.ok, true);
+  assert.equal("state" in payload, false);
   assert.equal(payload.directTasks[0].taskId, "task-generated");
   assert.equal(payload.next.tool, "canvas_wait_tasks");
   assert.deepEqual(payload.next.input.taskIds, ["task-generated"]);

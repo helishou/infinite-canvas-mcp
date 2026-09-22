@@ -13,7 +13,8 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasSpeakerOption, CanvasTextEditorProps, CanvasTextReference } from "@/types/canvas-plugin";
 import { canvasTextPresenceExtension } from "./canvas-text-presence-extension";
 
-const DIALOGUE_PATTERN = /(?:\(S\d\)\s*)?<d>(?:\[[^\]]+\])?[\s\S]*?<\/d>/g;
+const DIALOGUE_PATTERN = /<d>(?:\[[^\]]+\])?[\s\S]*?<\/d>/g;
+const SPEAKER_PATTERN = /\((S\d+)\)/gi;
 const SPEAKER_OPTIONS = ["S1", "S2", "S3", "S4", "S5", "S6"];
 const PROMPT_LINE_ACCENTS = ["#38bdf8", "#34d399", "#c084fc", "#fbbf24", "#fb7185", "#2dd4bf", "#a3e635", "#818cf8"];
 
@@ -34,16 +35,32 @@ function enclosingDialogueRange(doc: string, from: number, to: number) {
     DIALOGUE_PATTERN.lastIndex = 0;
     for (const match of doc.matchAll(DIALOGUE_PATTERN)) {
         const start = match.index!, end = start + match[0].length;
-        if (from >= start && to <= end) {
-            const prefix = /^\(S\d\)\s*/i.exec(match[0]);
+        const speaker = speakerBeforeDialogue(doc, start);
+        const insideDialogue = from >= start && to <= end;
+        const insideSpeaker = speaker && from >= speaker.from && to <= speaker.to;
+        if (insideDialogue || insideSpeaker) {
             return {
                 from: start, to: end,
-                inner: match[0].replace(/^\(S\d\)\s*/i, "").slice(3, -4).replace(/^\[[^\]]+\]\s*/, ""),
-                speaker: prefix ? { from: start, to: start + prefix[0].length, id: prefix[0].slice(1, 3) } : null,
+                inner: match[0].slice(3, -4).replace(/^\[[^\]]+\]\s*/, ""),
+                speaker,
             };
         }
     }
     return null;
+}
+
+/** 同一行（或上一段台词之后）离 <d> 最近的说话人编号属于这句台词。 */
+function speakerBeforeDialogue(doc: string, dialogueStart: number) {
+    const lineStart = doc.lastIndexOf("\n", dialogueStart - 1) + 1;
+    const previousDialogueEnd = doc.lastIndexOf("</d>", dialogueStart - 1);
+    const searchStart = Math.max(lineStart, previousDialogueEnd < 0 ? 0 : previousDialogueEnd + 4);
+    const prefix = doc.slice(searchStart, dialogueStart);
+    SPEAKER_PATTERN.lastIndex = 0;
+    let found: RegExpExecArray | null = null;
+    for (const match of prefix.matchAll(SPEAKER_PATTERN)) found = match;
+    if (!found) return null;
+    const from = searchStart + found.index!;
+    return { from, to: from + found[0].length, id: found[1].toUpperCase() };
 }
 
 function unwrapDialogue(view: EditorView, range: { from: number; to: number; inner: string }) {
@@ -314,34 +331,31 @@ function dialogueHighlightExtension(openMenu: (menu: DialogueMenuState) => void,
     const build = (view: EditorView) => {
         const ranges = [];
         const atomic = [];
-        for (const { from, to } of view.visibleRanges) {
-            const text = view.state.doc.sliceString(from, to);
-            DIALOGUE_PATTERN.lastIndex = 0;
-            for (const match of text.matchAll(DIALOGUE_PATTERN)) {
-                const start = from + match.index!, end = start + match[0].length;
-                const prefix = /^\(S\d\)\s*/i.exec(match[0]);
-                if (prefix) {
-                    const badgeEnd = start + prefix[0].length;
-                    const id = prefix[0].slice(1, 3);
-                    const open = (x: number, y: number, bFrom: number, bTo: number) => openMenu({
-                        x, y,
-                        options: [
-                            ...speakerMenuOptions(view, speakersRef.current, start, { from: bFrom, to: bTo }, id),
-                            { label: "清除说话人", apply: () => { view.dispatch({ changes: { from: bFrom, to: bTo, insert: "" }, userEvent: "delete.forward" }); view.focus(); } },
-                        ],
-                    });
-                    ranges.push(Decoration.replace({ widget: new SpeakerBadge(id, start, badgeEnd, open) }).range(start, badgeEnd));
-                    atomic.push(Decoration.replace({ widget: new SpeakerBadge(id, start, badgeEnd, open) }).range(start, badgeEnd));
-                } else {
-                    const ghost = new SpeakerGhost(start, (x: number, y: number) => openMenu({
-                        x, y,
-                        options: speakerMenuOptions(view, speakersRef.current, start, null, null),
-                    }));
-                    // 零长度插入用 widget 装饰（replace 零长度会导致装饰构建失败、整段高亮消失）。
-                    ranges.push(Decoration.widget({ widget: ghost, side: -1 }).range(start));
-                }
-                ranges.push(Decoration.mark({ class: "cm-canvas-dialogue" }).range(start, end));
+        const doc = view.state.doc.toString();
+        DIALOGUE_PATTERN.lastIndex = 0;
+        for (const match of doc.matchAll(DIALOGUE_PATTERN)) {
+            const start = match.index!, end = start + match[0].length;
+            const speaker = speakerBeforeDialogue(doc, start);
+            if (speaker) {
+                const { from: badgeStart, to: badgeEnd, id } = speaker;
+                const open = (x: number, y: number, bFrom: number, bTo: number) => openMenu({
+                    x, y,
+                    options: [
+                        ...speakerMenuOptions(view, speakersRef.current, start, { from: bFrom, to: bTo }, id),
+                        { label: "清除说话人", apply: () => { view.dispatch({ changes: { from: bFrom, to: bTo, insert: "" }, userEvent: "delete.forward" }); view.focus(); } },
+                    ],
+                });
+                ranges.push(Decoration.replace({ widget: new SpeakerBadge(id, badgeStart, badgeEnd, open) }).range(badgeStart, badgeEnd));
+                atomic.push(Decoration.replace({ widget: new SpeakerBadge(id, badgeStart, badgeEnd, open) }).range(badgeStart, badgeEnd));
+            } else {
+                const ghost = new SpeakerGhost(start, (x: number, y: number) => openMenu({
+                    x, y,
+                    options: speakerMenuOptions(view, speakersRef.current, start, null, null),
+                }));
+                // 零长度插入用 widget 装饰（replace 零长度会导致装饰构建失败、整段高亮消失）。
+                ranges.push(Decoration.widget({ widget: ghost, side: -1 }).range(start));
             }
+            ranges.push(Decoration.mark({ class: "cm-canvas-dialogue" }).range(start, end));
         }
         return { decorations: Decoration.set(ranges, true), atomic: Decoration.set(atomic, true) };
     };
@@ -350,7 +364,7 @@ function dialogueHighlightExtension(openMenu: (menu: DialogueMenuState) => void,
         atomic: DecorationSet = Decoration.none;
         constructor(view: EditorView) { const built = build(view); this.decorations = built.decorations; this.atomic = built.atomic; }
         update(update: import("@codemirror/view").ViewUpdate) {
-            if (update.docChanged || update.viewportChanged) { const built = build(update.view); this.decorations = built.decorations; this.atomic = built.atomic; }
+            if (update.docChanged) { const built = build(update.view); this.decorations = built.decorations; this.atomic = built.atomic; }
         }
     }, {
         decorations: (plugin) => plugin.decorations,
@@ -431,6 +445,19 @@ class ReferenceChip extends WidgetType {
             img.style.flex = "0 0 auto";
             span.append(img);
             span.addEventListener("click", (event) => { event.preventDefault(); this.preview(this.reference.previewUrl!); });
+        }
+        if (this.reference.kind === "audio") {
+            const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+            icon.setAttribute("viewBox", "0 0 24 24");
+            icon.setAttribute("fill", "none");
+            icon.setAttribute("stroke", "currentColor");
+            icon.setAttribute("stroke-width", "2");
+            icon.setAttribute("stroke-linecap", "round");
+            icon.setAttribute("stroke-linejoin", "round");
+            icon.setAttribute("aria-hidden", "true");
+            icon.classList.add("cm-canvas-reference-audio-icon");
+            icon.innerHTML = '<path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>';
+            span.append(icon);
         }
         const label = document.createElement("span");
         label.className = "cm-canvas-reference-label";
@@ -602,6 +629,7 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
         ".cm-canvas-reference-character": { border: `1px solid ${theme.node.stroke}` },
         ".cm-canvas-reference-error": { border: `1px solid ${colorTheme === "dark" ? "#f87171" : "#dc2626"}`, color: colorTheme === "dark" ? "#fca5a5" : "#b91c1c", backgroundColor: colorTheme === "dark" ? "rgba(248,113,113,.12)" : "rgba(220,38,38,.08)" },
         ".cm-canvas-reference img": { width: "24px", height: "24px", objectFit: "cover", borderRadius: "4px", cursor: "pointer" },
+        ".cm-canvas-reference-audio-icon": { width: "16px", height: "16px", flex: "0 0 auto" },
         ".cm-canvas-reference-label": { minWidth: "0", overflow: "hidden", textOverflow: "ellipsis" },
         ".cm-canvas-dialogue": { backgroundColor: colorTheme === "dark" ? "rgba(168,85,247,.18)" : "rgba(147,51,234,.10)", borderRadius: "3px", boxDecorationBreak: "clone", textDecoration: "underline", textDecorationColor: colorTheme === "dark" ? "#a855f7" : "#9333ea", textDecorationThickness: "2px", textUnderlineOffset: "3px" },
         ".cm-canvas-speaker": { display: "inline-flex", alignItems: "center", padding: "0 6px", margin: "0 2px", borderRadius: "6px", backgroundColor: colorTheme === "dark" ? "rgba(168,85,247,.25)" : "rgba(147,51,234,.14)", color: colorTheme === "dark" ? "#d8b4fe" : "#7e22ce", fontWeight: "600", fontSize: "0.92em", cursor: "pointer", userSelect: "none" },
@@ -704,6 +732,7 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
         ".cm-canvas-reference-character": { border: `1px solid ${theme.node.stroke}` },
         ".cm-canvas-reference-error": { border: `1px solid ${colorTheme === "dark" ? "#f87171" : "#dc2626"}`, color: colorTheme === "dark" ? "#fca5a5" : "#b91c1c", backgroundColor: colorTheme === "dark" ? "rgba(248,113,113,.12)" : "rgba(220,38,38,.08)" },
         ".cm-canvas-reference img": { width: "24px", height: "24px", objectFit: "cover", borderRadius: "4px", cursor: "pointer" },
+        ".cm-canvas-reference-audio-icon": { width: "16px", height: "16px", flex: "0 0 auto" },
         ".cm-canvas-reference-label": { minWidth: "0", overflow: "hidden", textOverflow: "ellipsis" },
         ".cm-canvas-peer-caret": { position: "relative", display: "inline", borderLeft: "2px solid", marginLeft: "-1px", marginRight: "-1px", pointerEvents: "none" },
         ".cm-canvas-peer-label": { position: "absolute", bottom: "1em", left: "-1px", whiteSpace: "nowrap", fontSize: "10px", lineHeight: "14px", padding: "0 3px", border: "1px solid", borderRadius: "3px", backgroundColor: theme.toolbar.panel, color: theme.node.text, zIndex: "2" },

@@ -19,3 +19,22 @@ test("配置节点触发音频会创建结果节点并由任务 ops 回写", asy
     assert.equal(output?.metadata?.content, "voice.mp3");
     assert.equal(db.getTask("canvas-audio-1")!.status, "succeeded");
 });
+
+test("本地 IndexTTS 音频通过 ComfyUI 执行且不读取 API Key", async (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "config", type: "config", position: { x: 0, y: 0 }, width: 320, height: 240, metadata: {} }], connections: [] });
+    const stores = createStores(db);
+    let received: unknown;
+    const comfy = { run: async (preset: string, input: unknown, params: unknown, _url: unknown, id: string) => {
+        received = { preset, input, params };
+        stores.tasks.create(id, `comfyui:${preset}`, input as Record<string, unknown>, params as Record<string, unknown>);
+        stores.tasks.update(id, { status: "succeeded", result: { media: [{ url: "voice.mp3", storageKey: "voice:key", mimeType: "audio/mpeg", bytes: 5 }] } });
+        return stores.tasks.get(id)!;
+    }, cancel: () => {} };
+    const dispatcher = new CanvasAudioDispatcher(stores, undefined, comfy as never);
+    dispatcher.start({ projectId: "p", nodeId: "config", model: "local::IndexTTS 2.5 配音", prompt: "你好", speed: "1.25", executor: "comfyui", referenceAudio: "C:/media/reference.wav", clientTaskId: "canvas-audio-local" });
+    for (let index = 0; index < 20 && ["queued", "running"].includes(db.getTask("canvas-audio-local")!.status); index++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(received, { preset: "indextts-2.5", input: { prompt: "你好", referenceAudio: "C:/media/reference.wav" }, params: { speed: "1.25" } });
+    assert.equal(db.getTask("canvas-audio-local")!.status, "succeeded");
+});

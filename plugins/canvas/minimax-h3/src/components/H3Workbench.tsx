@@ -7,6 +7,7 @@ import { useH3LocalView } from "../hooks/useH3LocalView";
 import { applyCharacterGroupEdits, refsForSegment, removeCharacterGroup, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
+import { syncReferenceCatalog } from "../services/h3-reference-sync";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { h3ThemeVars } from "../h3-theme";
 import { removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
@@ -167,15 +168,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         });
     }, [ctx.getNode, ctx.node.id, ctx.node.metadata, ctx.on, ctx.projectId, ctx.updateMetadata]);
     useEffect(() => {
-        const bindings = segments.flatMap((segment) => segment.referenceBindings || []);
-        for (const binding of bindings) {
-            const signature = JSON.stringify([binding.label, binding.mediaType, binding.role, binding.url, binding.storageKey, binding.mimeType, binding.sourceNodeId, binding.subjectId]);
-            if (catalogSyncedRef.current.get(binding.assetId) === signature) continue;
-            catalogSyncedRef.current.set(binding.assetId, signature);
-            void ctx.references.upsert({ id: binding.assetId, label: binding.label, mediaType: binding.mediaType || "image", role: binding.role, tags: binding.tags || [], url: binding.url, storageKey: binding.storageKey, mimeType: binding.mimeType, sourceNodeId: binding.sourceNodeId, subjectId: binding.subjectId }).catch(() => {
-                if (catalogSyncedRef.current.get(binding.assetId) === signature) catalogSyncedRef.current.delete(binding.assetId);
-            });
-        }
+        void syncReferenceCatalog(segments, catalogSyncedRef.current, ctx.references.upsert, ctx.references.upsertMany);
     }, [ctx.references, segments]);
     useEffect(() => {
         let changed = false;

@@ -148,9 +148,10 @@ function actualSubmissionText(params: unknown) {
     };
     return [
         `ComfyUI promptId：${String(value.promptId || "-")}`,
-        `Seed：${String(value.seed ?? "-")}`,
+        `Seed：${String(value.seed ?? "-")}（${value.seedMode === "fixed" ? "固定" : "随机"}）`,
         `帧数：${String(value.frames ?? "-")}`,
         `分辨率：${value.width && value.height ? `${value.width} × ${value.height}` : "-"}`,
+        ...(value.steps !== undefined ? [`采样：${String(value.sampler || "-")} / ${String(value.scheduler || "-")} / ${String(value.steps)} 步`] : []),
         `LoRA：${loras || "无"}`,
         `注意力：${String(value.attention || "-")}`,
         `Sigma：${String(value.sigma || "-")}`,

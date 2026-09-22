@@ -19,7 +19,7 @@ export type GenerateVideoOptions = GenerateOptions & { size?: string; seconds?: 
 export type GenerateVideoResult = { url: string; mimeType: string; width?: number; height?: number; durationMs?: number };
 export type GenerateTextOptions = { signal?: AbortSignal; model?: string; system?: string; references?: Array<{ url: string; name?: string }>; onDelta?: (text: string) => void };
 export type GenerateTextResult = { text: string };
-export type LocalH3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
+export type LocalH3ActualSubmission = { promptId: string; seed?: number; seedMode?: "random" | "fixed"; frames?: number; width?: number; height?: number; steps?: number; sampler?: string; scheduler?: string; teAccel?: boolean; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
 export type LocalH3Result = { url: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; actualSubmission?: LocalH3ActualSubmission; segments?: Array<{ media?: Array<{ url: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Preview = { dataUrl: string; mime?: string; promptId?: string; step?: number; total?: number };
@@ -80,6 +80,7 @@ export type CanvasReferenceValidation = { semanticPrompt: string; compiledPrompt
 export type CanvasReferenceService = {
     list: () => Promise<CanvasReferenceAsset[]>;
     upsert: (asset: Partial<CanvasReferenceAsset> & { label: string }) => Promise<CanvasReferenceAsset>;
+    upsertMany: (assets: Array<Partial<CanvasReferenceAsset> & { label: string }>) => Promise<CanvasReferenceAsset[]>;
     remove: (assetId: string) => Promise<void>;
     validate: (nodeId: string, segmentId: string) => Promise<CanvasReferenceValidation>;
 };

@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { storeGeneratedVideo } from "@/services/api/video";
 import { getLocalH3Task, getRunningHubH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
-import { backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, deleteProjectReferenceAsset, fetchBackendGenerationLogs, fetchProjectReferenceAssets, getBackendUrl, startCanvasGeneration, updateBackendGenerationLog, upsertProjectReferenceAsset, validateProjectReferences } from "@/services/backend-api";
+import { backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, deleteProjectReferenceAsset, fetchBackendGenerationLogs, fetchProjectReferenceAssets, getBackendUrl, startCanvasGeneration, updateBackendGenerationLog, upsertProjectReferenceAsset, upsertProjectReferenceAssets, validateProjectReferences } from "@/services/backend-api";
 import { observeCanvasGenerationTask } from "@/services/api/canvas-generation-task";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
@@ -90,6 +90,7 @@ export function usePluginHost(params: PluginHostParams) {
     const references = useMemo<CanvasReferenceService>(() => ({
         list: async () => (await fetchProjectReferenceAssets(projectId)).assets || [],
         upsert: async (asset) => (await upsertProjectReferenceAsset(projectId, asset)).asset,
+        upsertMany: async (assets) => (await upsertProjectReferenceAssets(projectId, assets)).assets || [],
         remove: async (assetId) => { await deleteProjectReferenceAsset(projectId, assetId); },
         validate: async (nodeId, segmentId) => (await validateProjectReferences(projectId, nodeId, segmentId)).validation,
     }), [projectId]);

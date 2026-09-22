@@ -253,7 +253,7 @@ export class PluginMcpRegistry {
                 ...(tool.annotations ? { annotations: tool.annotations as never } : {}),
             }, async (input: Record<string, unknown>) => {
                 const result = await handler(input, this.context);
-                return { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result, null, 2) }] };
+                return { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result) }] };
             });
         }
         this.server.sendToolListChanged();
