@@ -5,7 +5,7 @@ import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
 import { applyCharacterGroupEdits, refsForSegment, removeCharacterGroup, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
-import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference } from "../services/h3-refs";
+import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { h3ThemeVars } from "../h3-theme";
@@ -301,7 +301,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 commitSegmentChange(withSegmentRefs(updated, [...others.slice(0, groupReplacementIndex), ...inserted, ...others.slice(groupReplacementIndex)]), true);
                 return;
             }
-            const candidates = h3RefCandidates([node], ctx.node.id).map((item) => item.ref).filter((ref) => pick.types.includes(ref.type));
+            const candidates = h3RefCandidates([node], ctx.node.id, ctx.getNodes(), ctx.getConnections()).map((item) => item.ref).filter((ref) => pick.types.includes(ref.type));
             if (!candidates.length) { message.warning("所选节点没有相同类型的素材，未替换当前引用"); return; }
             const withoutOld = pick.replaceRef.groupId
                 ? applyCharacterGroupEdits(segment, pick.replaceRef.groupId, pick.replaceRef.type === "audio"
@@ -311,7 +311,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             const baseRefs = refsForSegment(withoutOld);
             const fresh = candidates
                 .filter((candidate) => !baseRefs.some((ref) => sameRef(ref, candidate)))
-                .map((candidate) => ({ ...candidate, role: pick.replaceRef?.role || candidate.role, usage: pick.replaceRef?.usage || candidate.usage, retentionLevel: pick.replaceRef?.retentionLevel, storyboardSubjectIds: pick.replaceRef?.storyboardSubjectIds }));
+                .map((candidate) => ({ ...candidate, role: pick.replaceRef?.role || candidate.role, usage: pick.replaceRef?.usage || candidate.usage, retentionLevel: pick.replaceRef?.retentionLevel, storyboardSubjectIds: candidate.storyboardSubjectIds || pick.replaceRef?.storyboardSubjectIds }));
             if (!fresh.length) { message.warning("所选素材已存在于当前 Clip，未替换引用"); return; }
             const insertIndex = Math.min(oldIndex, baseRefs.length);
             setEditingRef(null);
@@ -326,7 +326,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 return;
             }
         }
-        addNodeRefs(pick.segmentId, pick.slotIndex, h3RefCandidates([node], ctx.node.id).map((item) => item.ref).filter((ref) => pick.types.includes(ref.type)));
+        addNodeRefs(pick.segmentId, pick.slotIndex, h3RefCandidates([node], ctx.node.id, ctx.getNodes(), ctx.getConnections()).map((item) => item.ref).filter((ref) => pick.types.includes(ref.type)));
     };
     const applyReferenceEdit = (nextRef: H3Ref, characterPatch?: H3CharacterGroupEditPatch) => {
         if (!editingRef) return;
@@ -445,7 +445,9 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         if (!url) return;
         const allowedRoles = new Set<H3Ref["role"]>(["character_identity", "character_turnaround", "storyboard", "scene", "blocking", "keyframe", "motion_reference", "audio_reference", "character_voice", "style", "palette", "prop", "other"]);
         const role = typeof detail.role === "string" && allowedRoles.has(detail.role as H3Ref["role"]) ? detail.role as H3Ref["role"] : undefined;
-        const ref: H3Ref = { url, type: "image", name: String(detail.name || "图片"), storageKey: typeof detail.storageKey === "string" ? detail.storageKey : undefined, mimeType: typeof detail.mimeType === "string" ? detail.mimeType : undefined, ...(role ? { role } : {}), ...(detail.subjectId ? { subjectId: String(detail.subjectId) } : {}) };
+        const sourceNode = typeof detail.nodeId === "string" ? ctx.getNode(detail.nodeId) : null;
+        const storyboardSubjectIds = storyboardSubjectIdsForNode(sourceNode, ctx.getNodes(), ctx.getConnections());
+        const ref: H3Ref = { url, type: "image", name: String(detail.name || "图片"), storageKey: typeof detail.storageKey === "string" ? detail.storageKey : undefined, mimeType: typeof detail.mimeType === "string" ? detail.mimeType : undefined, ...(role ? { role } : {}), ...(detail.subjectId ? { subjectId: String(detail.subjectId) } : {}), ...(storyboardSubjectIds.length ? { storyboardSubjectIds } : {}) };
         const max = targetMode === "i2v" ? 1 : targetMode === "fl2v" ? 2 : Number.POSITIVE_INFINITY;
         const targetRefs = refsForSegment(target);
         if (targetRefs.filter((item) => item.type === "image").length >= max || targetRefs.some((item) => item.url === ref.url)) return;

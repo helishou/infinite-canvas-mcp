@@ -33,3 +33,47 @@ test("角色节点不产生无 groupId 的普通图片候选", () => {
     ], "h3-1");
     assert.equal(candidates.length, 0);
 });
+
+test("分镜候选自动带出生成快照中的参考角色", () => {
+    const storyboard = {
+        id: "storyboard-1",
+        type: "config",
+        title: "候选分镜",
+        metadata: {
+            smart: true,
+            generationMode: "image",
+            primaryImageId: "image-1",
+            images: [{
+                id: "image-1",
+                content: "https://media.test/storyboard.png",
+                generationSnapshot: {
+                    references: [
+                        { id: "character-1-image-0", name: "沈昭宁", type: "image/png" },
+                        { id: "scene-1", name: "雪院", type: "image/png" },
+                    ],
+                },
+            }],
+        },
+    } as never;
+    const candidates = h3RefCandidates([
+        storyboard,
+    ], "h3-1", [
+        storyboard,
+        { id: "character-1", type: "character", title: "沈昭宁", metadata: {} },
+        { id: "character-2", type: "character", title: "谢临渊", metadata: {} },
+    ] as never);
+    assert.deepEqual(candidates[0]?.ref.storyboardSubjectIds, ["character-1"]);
+});
+
+test("旧图片节点没有快照时沿生成输入连线回溯角色", () => {
+    const image = { id: "image-1", type: "image", title: "候选分镜", metadata: { content: "https://media.test/storyboard.png" } } as never;
+    const candidates = h3RefCandidates([image], "h3-1", [
+        image,
+        { id: "character-1", type: "character", title: "沈昭宁", metadata: {} },
+        { id: "config-1", type: "config", title: "生图", metadata: {} },
+    ] as never, [
+        { id: "connection-1", fromNodeId: "character-1", toNodeId: "config-1" },
+        { id: "connection-2", fromNodeId: "config-1", toNodeId: "image-1" },
+    ] as never);
+    assert.deepEqual(candidates[0]?.ref.storyboardSubjectIds, ["character-1"]);
+});

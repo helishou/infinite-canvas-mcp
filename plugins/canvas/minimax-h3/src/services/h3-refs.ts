@@ -1,4 +1,4 @@
-import type { CanvasNodeContext, CanvasNodeData } from "@infinite-canvas/plugin-sdk";
+import type { CanvasConnection, CanvasNodeContext, CanvasNodeData } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref } from "../types";
 import { sameRef } from "./h3-compatibility";
 
@@ -60,6 +60,53 @@ function inferredRole(type: string, title?: string): H3Ref["role"] | undefined {
 
 export type H3RefCandidate = { key: string; nodeId: string; nodeTitle: string; nodeType: string; ref: H3Ref };
 
+/**
+ * 从生图历史快照中找出本次生成实际使用过的 character 节点。
+ * 角色参考图的 ReferenceImage id 由画布生成链路按 `${nodeId}-image-${index}` 生成；
+ * 兼容旧的 `canvas:${nodeId}` 和直接使用 nodeId 的快照。
+ */
+export function storyboardSubjectIdsForNode(node: CanvasNodeData | null, nodes: CanvasNodeData[], connections: CanvasConnection[] = []) {
+    if (!node) return [];
+    const metadata = node.metadata || {};
+    const images = Array.isArray(metadata.images) ? metadata.images.map(imageRecordOf) : [];
+    const selectedId = String(metadata.activeImageHistoryExplicit ? metadata.activeImageHistoryId || metadata.primaryImageId || "" : metadata.primaryImageId || "");
+    const selected = selectedId ? images.find((image) => String(image.id || "") === selectedId) : undefined;
+    const snapshots = (selected ? [selected] : images).flatMap((image) => {
+        const snapshot = image.generationSnapshot;
+        return snapshot && typeof snapshot === "object" ? [snapshot as Record<string, unknown>] : [];
+    });
+    const referenceIds = [
+        ...(Array.isArray(metadata.referenceIds) ? metadata.referenceIds.map(String) : []),
+        ...snapshots.flatMap((snapshot) => Array.isArray(snapshot.references)
+        ? snapshot.references.flatMap((reference) => reference && typeof reference === "object" ? [String((reference as Record<string, unknown>).id || "")] : [])
+        : []),
+    ].filter(Boolean);
+    const characters = nodes.filter((candidate) => candidate.type === "character");
+    const matched = characters
+        .filter((candidate) => candidate.type === "character")
+        .filter((character) => referenceIds.some((referenceId) => referenceId === character.id || referenceId === `canvas:${character.id}` || referenceId.startsWith(`${character.id}-`) || referenceId.includes(`:${character.id}-`)))
+        .map((character) => character.id);
+    if (matched.length || referenceIds.length) return matched;
+
+    // 旧图片节点没有 referenceIds 时，沿当前生成输入连线回溯 character 节点。
+    const incoming = new Map<string, string[]>();
+    connections.forEach((connection) => incoming.set(connection.toNodeId, [...(incoming.get(connection.toNodeId) || []), connection.fromNodeId]));
+    const characterIds = new Set(characters.map((character) => character.id));
+    const found = new Set<string>();
+    const queue = [node.id];
+    const visited = new Set<string>();
+    while (queue.length) {
+        const current = queue.shift()!;
+        if (visited.has(current)) continue;
+        visited.add(current);
+        for (const sourceId of incoming.get(current) || []) {
+            if (characterIds.has(sourceId)) found.add(sourceId);
+            else if (!visited.has(sourceId)) queue.push(sourceId);
+        }
+    }
+    return characters.filter((character) => found.has(character.id)).map((character) => character.id);
+}
+
 export function refreshSmartImageReference(ref: H3Ref, node: CanvasNodeData | null): H3Ref {
     if (!node || node.id !== ref.nodeId || node.type !== "config" || node.metadata?.smart !== true || (node.metadata.generationMode || "image") !== "image" || ref.type !== "image") return ref;
     const metadata = node.metadata;
@@ -81,9 +128,12 @@ function imageRecordOf(value: unknown): Record<string, unknown> {
 // 点击空 ref 槽时用它在画布上「选用节点作为 Ref」。展开口径与拖拽路径（h3-refs.readH3Refs /
 // project.tsx 的 referenceDrag）保持一致：普通节点读 metadata.content，角色节点按 outfit 展开，
 // 场景节点读 sceneImage，H3 节点按 Clip 成品展开。
-export function h3RefCandidates(nodes: CanvasNodeData[], selfId: string): H3RefCandidate[] {
+export function h3RefCandidates(nodes: CanvasNodeData[], selfId: string, allNodes: CanvasNodeData[] = nodes, connections: CanvasConnection[] = []): H3RefCandidate[] {
     const out: H3RefCandidate[] = [];
-    const push = (node: CanvasNodeData, ref: H3Ref) => out.push({ key: `${node.id}:${ref.storageKey || ref.url}`, nodeId: node.id, nodeTitle: node.title || String(node.type || ""), nodeType: String(node.type || ""), ref: { ...ref, nodeId: node.id } });
+    const push = (node: CanvasNodeData, ref: H3Ref) => {
+        const storyboardSubjectIds = storyboardSubjectIdsForNode(node, allNodes, connections);
+        out.push({ key: `${node.id}:${ref.storageKey || ref.url}`, nodeId: node.id, nodeTitle: node.title || String(node.type || ""), nodeType: String(node.type || ""), ref: { ...ref, nodeId: node.id, ...(storyboardSubjectIds.length ? { storyboardSubjectIds } : {}) } });
+    };
     for (const node of nodes) {
         if (node.id === selfId || node.type === "group") continue;
         const metadata = node.metadata || {};

@@ -128,6 +128,8 @@ export type CanvasNodeMetadata = {
     audioSpeed?: string;
     audioInstructions?: string;
     references?: string[];
+    /** 生成时参考资源的稳定输入 ID；用于从结果图反查角色节点等来源。 */
+    referenceIds?: string[];
     naturalWidth?: number;
     naturalHeight?: number;
     freeResize?: boolean;
