@@ -1,10 +1,8 @@
 {
   "mcpServers": {
     "infinite-canvas": {
-      "command": "npx",
-      "args": ["-y", "@basketikun/canvas-agent", "mcp"],
-      "startup_timeout_sec": 20,
-      "tool_timeout_sec": 90
+      "type": "http",
+      "url": "http://127.0.0.1:17370/mcp"
     }
   }
 }

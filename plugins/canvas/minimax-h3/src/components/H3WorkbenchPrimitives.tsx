@@ -405,6 +405,10 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     const activeRef = useRef(0);
     const [active, setActive] = useState(0);
     const [slotSrc, setSlotSrc] = useState<[string, string]>([url || "", ""]);
+    // ⚠️ 必须放在下方所有提前 return（!url / image / audio）之前：hooks 数量在两次渲染间必须一致，
+    // 否则预览源在「视频 ↔ 空/图片/音频」之间切换时（如选中有结果/无结果的 Clip）会直接抛
+    // "Rendered more/fewer hooks than during the previous render"，整棵节点树被错误边界拆掉。
+    const [isMuted, setIsMuted] = useState(true);
     const onEndedRef = useRef(onEnded);
     useEffect(() => { onEndedRef.current = onEnded; }, [onEnded]);
     const nextUrlRef = useRef(nextUrl);
@@ -539,8 +543,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     // muted 用 state 而不是 JSX 静态属性：rAF tick 触发 onPlayheadTick → 父组件重渲染，
     // 如果是 <video muted /> 静态属性，React 会在每次渲染把 muted 重新置为 true，
     // 用户点原生控件取消静音下一帧又被强制回 true，体感就是"老被静音"。
-    // 初始值 true 是为了保住浏览器 autoplay 权限（muted 视频不需要用户手势即可自动播放）。
-    const [isMuted, setIsMuted] = useState(true);
+    // isMuted 的 useState 已提升到组件顶部 hooks 区（见上方注释），不能放在这些 return 之后。
     return (
         <div className="minimax-player-content">
             {[0, 1].map((slot) => (

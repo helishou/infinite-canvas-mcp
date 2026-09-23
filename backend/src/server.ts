@@ -146,6 +146,9 @@ export function startServer(
   app.use((req: Request, res: Response, next: NextFunction) => {
     const url = req.url!.split("?")[0];
     if (url === "/health" || url === "/config") return next();
+    // Codex 插件连接本机共享 MCP 时使用 loopback；该豁免只覆盖 MCP 路由，
+    // 并同时校验 socket、Host 与 Origin，不能被远端请求或本机代理头伪造。
+    if (url === "/mcp" && isLocalConnection(req)) return next();
     // 只读媒体端点免 token：浏览器来源已由上方 CORS 白名单限制，且媒体 URL 内嵌的
     // token 会在 backend 重启后失效，豁免后可避免历史产物在 token 轮换后 401 而“消失”。
     // 仅豁免 GET 读取类端点，写入类（如 POST /runtime/media）仍受 token 保护。

@@ -3,6 +3,7 @@ import { nanoid } from "nanoid";
 import { GROUP_FRAME_PADDING, groupFrameOfMembers } from "@/lib/canvas/canvas-node-geometry";
 import i18n from "@/i18n";
 import { getNodeSpec, isRegisteredNodeType } from "@/lib/canvas/node-registry";
+import { syncOrderedGroupMembership } from "@/lib/canvas/ordered-group";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata, type CanvasNodeTypeId, type ViewportTransform } from "@/types/canvas";
 
 export type CanvasAgentOp =
@@ -785,7 +786,6 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
                 position = resolveFreePosition(nodes, desired, width, height);
             } else {
                 position = { x: anchorX, y: 0 };
-                autoIds.push(nodeId);
             }
             const node: CanvasNodeData = {
                 id: nodeId,
@@ -797,11 +797,16 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
                 metadata: { ...spec.metadata, ...op.metadata },
             };
             nodes = [...nodes, node];
+            nodes = syncOrderedGroupMembership(nodes, node.id);
             selectedNodeIds = [node.id];
+            const isOrderedGroupMember = nodes.some((item) => item.id === node.id && item.metadata?.groupId && nodes.some((group) => group.id === item.metadata?.groupId && group.type === CanvasNodeType.Group && group.metadata?.orderedGroup));
+            if (!isOrderedGroupMember && !(op.position || op.x !== undefined || op.y !== undefined)) autoIds.push(nodeId);
         }
         if (op.type === "update_node") {
             if (!op.id) return;
+            const previousGroupId = nodes.find((node) => node.id === op.id)?.metadata?.groupId;
             nodes = nodes.map((node) => (node.id === op.id ? { ...node, ...op.patch, metadata: { ...node.metadata, ...op.patch?.metadata, ...op.metadata } } : node));
+            nodes = syncOrderedGroupMembership(nodes, op.id, previousGroupId);
         }
         if (op.type === "delete_node") {
             const ids = new Set(op.ids || (op.id ? [op.id] : op.nodeType ? nodes.filter((node) => node.type === op.nodeType).map((node) => node.id) : []));

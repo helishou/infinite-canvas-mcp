@@ -33,7 +33,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const sourceRole = refItem.role || "character_turnaround";
     const [role, setRole] = useState<H3ReferenceRole>(characterReference ? sourceRole : inferReferenceRole(refItem));
     const [usage, setUsage] = useState<H3ReferenceUsage>(characterReference ? "reference" : refItem.usage || "reference");
-    const [tags, setTags] = useState((refItem.tags || []).join("，"));
+    const [description, setDescription] = useState(refItem.description || "");
     const [storyboardSubjectIds, setStoryboardSubjectIds] = useState<string[]>(refItem.storyboardSubjectIds || []);
     const [outfitEnabled, setOutfitEnabled] = useState<Record<string, boolean>>({});
     const [voiceEnabled, setVoiceEnabled] = useState(group?.voiceEnabled ?? false);
@@ -46,7 +46,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     useEffect(() => {
         setRole(characterReference ? sourceRole : inferReferenceRole(refItem));
         setUsage(characterReference ? "reference" : refItem.usage || "reference");
-        setTags((refItem.tags || []).join("，"));
+        setDescription(refItem.description || "");
         setStoryboardSubjectIds(refItem.storyboardSubjectIds || []);
         setOutfitEnabled(Object.fromEntries((group?.outfits || []).map((outfit) => [outfit.id, outfit.enabled])));
         setVoiceEnabled(group?.voiceEnabled ?? false);
@@ -64,14 +64,13 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         return () => { cancelled = true; };
     }, [characterReference, ctx.references, group, refItem, sourceRole]);
 
-    const parsedTags = tags.split(/[,，]/).map((item) => item.trim()).filter(Boolean);
     const isStoryboardImage = role === "storyboard" && refItem.type === "image";
     const canRemoveStoryboardImage = refItem.type === "image" && inferReferenceRole(refItem) === "storyboard";
     const apply = async () => {
         const nextAnalysis = analysisSummary.trim() ? { ...analysisMetadata, summary: analysisSummary.trim() } : analysisMetadata;
         const appliedRole = characterReference ? sourceRole : role;
         const appliedUsage = characterReference ? "reference" : usage;
-        const next = { ...refItem, role: appliedRole, usage: appliedUsage, tags: isStoryboardImage ? refItem.tags || [] : parsedTags, enabled: true, ...(Object.keys(nextAnalysis).length ? { analysis: nextAnalysis } : {}) };
+        const next = { ...refItem, role: appliedRole, usage: appliedUsage, description: characterReference ? refItem.description : description.trim() || undefined, enabled: true, ...(Object.keys(nextAnalysis).length ? { analysis: nextAnalysis } : {}) };
         if (appliedRole !== "storyboard" || refItem.type !== "image") delete next.retentionLevel;
         if (appliedRole === "storyboard" && refItem.type === "image") next.storyboardSubjectIds = storyboardSubjectIds.filter((id) => characters.some((character) => character.id === id));
         else delete next.storyboardSubjectIds;
@@ -86,14 +85,14 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         try {
             const result = await ctx.ai.generateText([
                 "分析这份视频生成参考素材，只返回 JSON：",
-                '{"role":"角色枚举","tags":["标签"],"summary":"一句话说明素材职责"}',
+                '{"role":"角色枚举","description":"一句话说明素材职责与用法"}',
                 `角色枚举：${ROLE_OPTIONS.map((item) => item.value).join(", ")}`,
                 `素材名：${refItem.name}；媒体类型：${refItem.type}。不要编造画面中看不到的信息。`,
             ].join("\n"), { references: refItem.type === "image" && refItem.url ? [{ url: refItem.url, name: refItem.name }] : undefined });
-            const value = JSON.parse(result.text.replace(/^```(?:json)?\s*|\s*```$/g, "")) as { role?: H3ReferenceRole; tags?: string[]; summary?: string };
+            const value = JSON.parse(result.text.replace(/^```(?:json)?\s*|\s*```$/g, "")) as { role?: H3ReferenceRole; description?: string; summary?: string };
             if (!characterReference && ROLE_OPTIONS.some((item) => item.value === value.role)) setRole(value.role!);
-            if (!isStoryboardImage && Array.isArray(value.tags)) setTags(value.tags.join("，"));
-            const summary = String(value.summary || "");
+            const summary = String(value.description || value.summary || "");
+            if (!characterReference && summary && !description.trim()) setDescription(summary);
             setAnalysisSummary(summary);
             if (summary) setAnalysisMetadata((current) => ({ ...current, summary }));
             setAnalysis(summary || "分析完成");
@@ -108,7 +107,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         <Modal open title="参考素材职责" onCancel={onClose} onOk={() => void apply()} okText="应用到当前 Clip" cancelText="取消" width={560} destroyOnHidden keyboard={!previewItem}>
             <div style={{ display: "grid", gridTemplateColumns: "144px 1fr", gap: 18, paddingTop: 8 }}>
                 <div style={{ position: "relative", alignSelf: "start", border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 8, overflow: "hidden", background: ctx.theme.node.panel, minHeight: 110 }}>
-                    {refItem.type === "image" ? <img src={refItem.url} alt={refItem.name} style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }} /> : <div style={{ display: "grid", placeItems: "center", height: 110, fontSize: 12, opacity: 0.65 }}>{refItem.type === "video" ? "视频参考" : "音频参考"}</div>}
+                    {refItem.type === "image" ? <img src={refItem.url} alt={refItem.name} style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }} /> : refItem.type === "video" && refItem.url ? <video src={`${refItem.url}${refItem.url.includes("?") ? "&" : "?"}t=0.001`} preload="metadata" muted playsInline style={{ width: "100%", height: 110, objectFit: "cover", display: "block", background: "#000" }} /> : <div style={{ display: "grid", placeItems: "center", height: 110, fontSize: 12, opacity: 0.65 }}>{refItem.type === "video" ? "视频参考" : "音频参考"}</div>}
                     {refItem.url ? <button type="button" className="minimax-outfit-zoom" title="放大预览" aria-label={`放大预览 ${refItem.name}`} onClick={openPreview}><H3Icon name="zoom" /></button> : null}
                     {canRemoveStoryboardImage ? <button type="button" className="minimax-outfit-remove" title="删除分镜图，保留分镜" aria-label={`删除分镜图 ${refItem.name}，保留分镜`} onClick={onRemoveStoryboardImage}><Trash2 /></button> : null}
                     <div style={{ padding: "7px 8px", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{refItem.name}</div>
@@ -162,7 +161,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                     </div> : null}
                     {!characterReference ? <>
                         <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>提交用途</span><Select value={usage} onChange={setUsage} options={[{ value: "reference", label: "普通参考" }, { value: "first_frame", label: "首帧" }, { value: "last_frame", label: "尾帧" }]} /></label>
-                        {!isStoryboardImage ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>标签（逗号分隔）</span><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="例如：苏晚、雾蓝开衫、哭泣" /></label> : null}
+                        {!isStoryboardImage ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>描述</span><Input.TextArea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述这份参考素材的职责与用法，生成时会作为参考说明进入提示词" autoSize={{ minRows: 2, maxRows: 5 }} /></label> : null}
                     </> : null}
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}><Button type="text" loading={analyzing} onClick={() => void analyze()}>用模型分析</Button><span style={{ minWidth: 0, fontSize: 13, opacity: 0.6 }}>{analysis}</span></div>
                     {group && onDeleteGroup ? <Button type="text" danger size="small" style={{ alignSelf: "flex-start", paddingInline: 0 }} onClick={onDeleteGroup}>从本段移除整组</Button> : null}

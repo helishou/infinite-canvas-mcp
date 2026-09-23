@@ -77,4 +77,5 @@ unexpectedReferences / missingReferences / staleMetadataReferences
 - 本轮需要的角色、时代服装、场景和道具都有精确节点与版本。
 - 每个参考只有一个清楚职责，缺失和意外参考均为零或已有明确豁免。
 - 资产已完成上述视觉与结构验收，未把生成成功误记为通过。
+- 当前采用资产及其 nodeId、assetId、storageKey 和状态已登记在制作目录的 `assets.md` 与 `progress.md`。
 - 未进入镜头设计或生成阶段。

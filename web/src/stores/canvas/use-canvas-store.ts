@@ -11,6 +11,7 @@ import { useBackendStore } from "@/stores/use-backend-store";
 import { getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId } from "@/services/backend-api";
 import { CanvasCommandQueue, type CanvasCommand } from "@/lib/canvas/canvas-command-queue";
 import { canvasDraftPersistence } from "@/lib/canvas/canvas-draft-persistence";
+import { syncOrderedGroupMembership } from "@/lib/canvas/ordered-group";
 import { CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS, H3_LOCAL_VIEW_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { flushCanvasTexts, onCanvasTextCommit, prepareCanvasTextWith, receiveCanvasTextEvent } from "@/services/api/canvas-text";
 
@@ -967,7 +968,7 @@ function adoptRemoteProject(remote: CanvasProject) {
 /** 将 Backend 的 canvas.updated 差量应用到一个远端基线；视口始终不在操作集合内。 */
 export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<Record<string, unknown>>, revision: number, updatedAt?: string): CanvasProject {
     const changedIds = new Set(operations.filter((operation) => operation.type === "update_node" || String(operation.type).includes("h3_segment")).map((operation) => String(operation.nodeId || operation.id || "")));
-    const nodes = base.nodes.map((node) => changedIds.has(node.id) ? { ...node, metadata: node.metadata ? { ...node.metadata } : node.metadata } : node);
+    let nodes = base.nodes.map((node) => changedIds.has(node.id) ? { ...node, metadata: node.metadata ? { ...node.metadata } : node.metadata } : node);
     const connections = [...base.connections];
     const projectPatch: Record<string, unknown> = {};
     for (const operation of operations) {
@@ -984,9 +985,12 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
                 height: Number(operation.height || 240),
                 metadata: (operation.metadata && typeof operation.metadata === "object" ? operation.metadata : {}) as CanvasNodeData["metadata"],
             });
+            const added = nodes.find((node) => node.id === id);
+            if (added) nodes = syncOrderedGroupMembership(nodes, id);
         } else if (type === "update_node") {
             const node = nodes.find((item) => item.id === String(operation.id || ""));
             if (!node) continue;
+            const previousGroupId = node.metadata?.groupId;
             Object.assign(node, operation.patch || {});
             if (operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)) node.metadata = { ...((node.metadata || {}) as Record<string, unknown>), ...(operation.metadata as Record<string, unknown>) } as CanvasNodeData["metadata"];
             if (Array.isArray(operation.metadataDelete)) {
@@ -994,6 +998,7 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
                 for (const key of operation.metadataDelete.map(String)) delete metadata[key];
                 node.metadata = metadata as CanvasNodeData["metadata"];
             }
+            nodes = syncOrderedGroupMembership(nodes, node.id, previousGroupId);
         } else if (type === "delete_node") {
             const ids = new Set((Array.isArray(operation.ids) ? operation.ids : [operation.id]).filter(Boolean).map(String));
             for (let index = nodes.length - 1; index >= 0; index--) if (ids.has(nodes[index].id)) nodes.splice(index, 1);

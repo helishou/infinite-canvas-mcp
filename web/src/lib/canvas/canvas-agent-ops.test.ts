@@ -583,6 +583,19 @@ test("生成组：组框包住所有被选中的节点，成员的 groupId 指�
     assert.ok(next.findIndex((item) => item.id === group!.id) < memberIndex, "组应排在自己的成员之前（渲染在成员下面）");
 });
 
+test("MCP 新节点写入有序组时立即追加槽位并落到组内", () => {
+    const group = {
+        ...node("g1", "group", 0, 0, 760, 480),
+        metadata: { orderedGroup: true, groupSlots: ["old"] },
+    } as CanvasNodeData;
+    const old = { ...node("old", "image", 24, 52, 240, 160), metadata: { groupId: "g1" } } as CanvasNodeData;
+    const next = applyOps([group, old], [{ type: "add_node", id: "new", nodeType: "image", position: { x: 1600, y: 900 }, metadata: { groupId: "g1" } }]);
+    const updatedGroup = next.nodes.find((item) => item.id === "g1")!;
+    const added = next.nodes.find((item) => item.id === "new")!;
+    assert.deepEqual(updatedGroup.metadata?.groupSlots, ["old", "new"]);
+    assert.ok(added.position.x < group.position.x + group.width && added.position.y < group.position.y + group.height, "新节点应立即落在有序组框内");
+});
+
 test("生成组：成员离开旧组后，旧组按剩余成员收紧，成员被搬空则删除旧组", () => {
     const { group, members } = groupFixture();
     const nodes = [group, ...members, node("free", "text", 1800, 1080, 280, 160)];
@@ -769,5 +782,4 @@ test("组内整理：重复执行结果不变（幂等），非画面节点不�
         assert.equal(b.height, a.height, `${member.id} 第二次整理高度应不变`);
     });
 });
-
 

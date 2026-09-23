@@ -1,7 +1,7 @@
 {
   "id": "minimax-h3",
   "name": "MiniMax H3",
-  "version": "1.5.1",
+  "version": "1.5.4",
   "trust": "first-party",
   "entries": {
     "browser": "/plugins/minimax-h3.js",
@@ -19,6 +19,7 @@
       "h3_get_task",
       "h3_cancel_task",
       "h3_update_clip",
+      "h3_move_clip",
       "h3_bind_existing_character_groups",
       "h3_write_storyboard_prompt",
       "h3_run_all_clips",

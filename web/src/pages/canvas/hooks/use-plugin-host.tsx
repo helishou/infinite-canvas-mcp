@@ -133,11 +133,29 @@ export function usePluginHost(params: PluginHostParams) {
                 const config = { ...buildGenerationConfig(effectiveConfig, undefined, "text"), ...(options?.model ? { model: options.model } : {}) };
                 ensureReady(config);
                 const references = (options?.references || []).map((reference, index) => ({ id: `plugin-ref-${index}`, name: reference.name || `ref-${index}.png`, mimeType: "image/png", ...(reference.url.startsWith("data:") ? { dataUrl: reference.url } : { url: reference.url }) }));
-                const task = await observeCanvasGenerationTask({ mode: "text", projectId, model: config.model, prompt, references, count: 1, params: { ...(options?.system ? { systemPrompt: options.system } : {}), reasoningEffort: config.reasoningEffort } }, signal(options?.signal), "插件文本");
-                const text = String(task.result?.texts?.[0]?.content || "");
-                if (!text) throw new Error("插件文本任务成功但没有返回文本");
-                options?.onDelta?.(text);
-                return { text };
+                // 传入 log 时登记生成日志（platform=canvas-text，进「生文」筛选）；节点/Clip 写进任务 params，任务中心按其展示归属。
+                const logMeta = options?.log;
+                const startedAtMs = Date.now();
+                const log = logMeta ? await generationLogs.create({
+                    projectId, platform: "canvas-text", status: "running", model: config.model,
+                    prompt: logMeta.prompt ?? prompt, nodeId: logMeta.nodeId, segmentId: logMeta.segmentId, taskMode: logMeta.taskMode,
+                    references: logMeta.references || [], inputCounts: {}, startedAt: new Date().toISOString(), durationMs: 0, outputs: [], params: {},
+                }).catch(() => null) : null;
+                try {
+                    const task = await observeCanvasGenerationTask({ mode: "text", projectId, model: config.model, prompt, references, count: 1, params: { ...(options?.system ? { systemPrompt: options.system } : {}), ...(logMeta?.nodeId ? { nodeId: logMeta.nodeId } : {}), ...(logMeta?.segmentId ? { segmentId: logMeta.segmentId } : {}), reasoningEffort: config.reasoningEffort } }, signal(options?.signal), "插件文本");
+                    const text = String(task.result?.texts?.[0]?.content || "");
+                    if (!text) throw new Error("插件文本任务成功但没有返回文本");
+                    options?.onDelta?.(text);
+                    if (log) void generationLogs.update(log.id, { status: "success", finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAtMs, runtimeTaskId: task.id, outputs: [{ type: "text", text }] }).catch(() => { });
+                    return { text, taskId: task.id };
+                } catch (error) {
+                    if (log) void generationLogs.update(log.id, {
+                        status: options?.signal?.aborted ? "cancelled" : "failed",
+                        finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAtMs,
+                        error: error instanceof Error ? error.message : String(error),
+                    }).catch(() => { });
+                    throw error;
+                }
             },
             runCanvasGeneration: async (command: CanvasGenerationCommand) => {
                 const data = await startCanvasGeneration(command);
@@ -182,7 +200,7 @@ export function usePluginHost(params: PluginHostParams) {
             listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: decodeChannelModel(value)?.model || value })),
             defaultModel: (capability) => buildGenerationConfig(effectiveConfig, undefined, capability).model,
         };
-    }, [effectiveConfig, isAiConfigReady, openConfigDialog, projectId, t]);
+    }, [effectiveConfig, generationLogs, isAiConfigReady, openConfigDialog, projectId, t]);
 
     const pluginHost = useMemo<CanvasPluginHost>(
         () => ({

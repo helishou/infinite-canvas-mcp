@@ -123,5 +123,6 @@
 - 用户自定义模型脚本不得搬到 Node Backend 用 `new Function`/`vm` 执行，避免把浏览器脚本权限扩大到本机文件和进程。自定义脚本以及 Backend 尚不能无头执行的浏览器渠道都必须先创建权威 `canvas-browser-script` 任务并绑定节点，再由浏览器以窗口唯一 workerId 原子认领；浏览器只返回已归档媒体 key 或文本，最终终态与画布结果仍由 Backend 校验绑定后回写。Backend 重启后不得自动重跑已认领任务，避免重复调用和扣费；画布组件不得因此恢复模型直连和本地结果回填分支。
 - 画布增量同步里的 `delete_node`、`delete_connections` 和 `delete_h3_segment` 必须保持幂等：目标已不存在时返回 `skipped`，不能用 400 表示竞态后的正常 no-op。其余确定性 400 对同一个不可变项目快照只能提交一次，必须熔断自动重试并记录脱敏的操作类型、目标 ID 和拒绝原因；禁止在 SSE/store 更新后无限重放同一请求。
 - H3 任务状态与媒体产出由 Backend 独占：前端 `diffCanvasProject` 不得提交 H3 节点/片段的 `runtimeTaskId`、运行状态、进度、结果、结果历史等字段；页面本地旧快照只能提交提示词、参考图和布局等用户编辑字段，避免后台回写被覆盖。
+- 用户说借鉴某段 Clip 的提示词写作方法时，只参考文字结构、逐镜动作、对白节奏和声景写法；除非用户明确要求复用其媒体，禁止把该 Clip 的视频或音频绑定为目标 Clip 输入，也禁止在目标提示词中引用对应的 `<Video N>` / `<Audio N>`。
 - 复制标签页会继承 sessionStorage，不能把其中的草稿 owner 直接当作独占窗口身份。应用与测试入口必须先完成草稿会话认领，再导入读取 outbox 的 Store/编辑器；恢复其他会话前必须再次检查排他权限。未取得排他权限时保留记录、禁止自动重放，不靠时间长短推断原窗口已关闭。
 - React StrictMode dev 模式会用 useEffect 双跑 / 模拟 unmount-remount，**useRef 形式的"首次跳过"防自动播放 / 自动副作用机制在 dev 模式下会被破坏**（第一次跑把 ref 置为 false，第二次跑 skip 已失效，加上 metadata 残留值就触发了）。需要"用户真正发起才触发"的副作用（自动播放、自动提交、自动跳转等），必须用 **useState 计数器 / 本地 trigger**（如 H3 的 `playToken`），由用户交互路径显式递增，effect 依赖本地 trigger 而非 metadata 字段。metadata 只用于持久化"上一次状态"，不能兼任 trigger 角色。

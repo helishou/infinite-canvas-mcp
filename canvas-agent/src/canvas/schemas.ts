@@ -127,6 +127,16 @@ export const canvasOpSchema = z.discriminatedUnion("type", [
     .passthrough(),
   z
     .object({
+      type: z.literal("move_h3_segment"),
+      nodeId: z.string().describe("目标 H3 节点 ID，必填"),
+      segmentId: z.string().describe("要移动的 Clip 稳定 ID，必填"),
+      beforeSegmentId: z.string().optional().describe("移动到此 Clip 前面；与 afterSegmentId 二选一"),
+      afterSegmentId: z.string().optional().describe("移动到此 Clip 后面；与 beforeSegmentId 二选一"),
+    })
+    .passthrough()
+    .describe("按稳定 ID 原子调整 H3 Clip 顺序；省略 beforeSegmentId/afterSegmentId 时移动到末尾。"),
+  z
+    .object({
       type: z.literal("delete_node"),
       id: z.string().optional().describe("单个节点 ID；与 ids 二选一"),
       ids: z
@@ -590,7 +600,7 @@ export const toolInputSchemas = {
       .array(z.string())
       .optional()
       .describe("仅对 H3 节点：按分镜 ID 过滤"),
-    limit: z.number().optional().describe("每来源最多返回多少条，默认 10"),
+    limit: z.number().optional().describe("每来源最多返回多少条，默认 5"),
   }),
   mcp_observability_report: z.object({
     traceId: z.string().optional().describe("可选；传入后返回该次调用的完整脱敏事件链，不传则返回累计聚合报告"),
@@ -753,7 +763,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_get_selection: "读取当前网页画布选中的节点。",
   canvas_export_snapshot: "导出当前画布快照，用于理解布局。",
   canvas_apply_ops:
-    "批量操作当前网页画布。ops 支持 add_node、update_node、delete_node、delete_connections、connect_nodes、select_nodes、run_generation；需要替换生成节点参考图时使用 canvas_set_generation_references，避免旧媒体输入残留。",
+    "批量操作画布。ops 支持 add_node、update_node、move_h3_segment、delete_node、delete_connections、connect_nodes、select_nodes、run_generation。H3 Clip 内容请使用专用 h3_update_clip 或 h3_apply_video_plan；move_h3_segment 按 beforeSegmentId/afterSegmentId 调整 Clip 顺序。运行状态与结果仍由 Backend 管理。需要替换生成节点参考图时使用 canvas_set_generation_references，避免旧媒体输入残留。",
   canvas_create_node:
     "创建任意类型节点：text、image、config、video、audio。适合创建占位图、媒体占位、配置节点或自定义 metadata 节点。",
   canvas_create_attachment_nodes:

@@ -66,6 +66,19 @@ export function addStoryboardShot(segment: H3Segment) {
     return { ...segment, storyboardModeEnabled: true, storyboardShots: shots };
 }
 
+export function insertStoryboardShotAfter(segment: H3Segment, afterId: string) {
+    const items = storyboardTrackItems(segment);
+    const index = items.findIndex((item) => item.id === afterId);
+    if (index < 0) return segment;
+    const donor = items[index];
+    if (donor.duration < H3_STORYBOARD_MIN_DURATION * 2) return segment;
+    const duration = donor.duration / 2;
+    const shots = shotsFromItems(items);
+    shots[index] = { ...shots[index], duration };
+    shots.splice(index + 1, 0, { id: `storyboard-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, duration });
+    return { ...segment, storyboardModeEnabled: true, storyboardShots: shots };
+}
+
 export function removeStoryboardShot(segment: H3Segment, shotId: string) {
     const items = storyboardTrackItems(segment);
     const target = items.find((item) => item.id === shotId);
@@ -135,6 +148,23 @@ export function swapStoryboardReferences(segment: H3Segment, sourceBindingId: st
     const swapped = [...storyboard];
     [swapped[from], swapped[to]] = [swapped[to], swapped[from]];
     return { ...segment, storyboardShots: shotsFromItems(swapped) };
+}
+
+// 给空分镜绑定一张参考图：图片记为 storyboard 职责并补 bindingId，分镜记下 referenceBindingId。
+// 同一素材已在本 Clip 其它参考里时直接改绑复用，不重复添加。
+export function assignStoryboardShotRef(segment: H3Segment, shotId: string, ref: H3Ref) {
+    const items = storyboardTrackItems(segment);
+    if (!items.some((item) => item.id === shotId)) return segment;
+    const refs = refsForSegment(segment);
+    const existing = refs.find((item) => item.type === "image" && (ref.bindingId ? item.bindingId === ref.bindingId : item.url === ref.url));
+    const bindingId = existing?.bindingId || `binding-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const nextRefs = existing
+        ? refs.map((item) => item === existing ? { ...item, role: "storyboard" as const, ...(item.bindingId ? {} : { bindingId }) } : item)
+        : [...refs, { ...ref, type: "image" as const, role: "storyboard" as const, bindingId }];
+    const storyboardShots = items.map((item) => item.id === shotId
+        ? { id: item.id, duration: item.duration, referenceBindingId: bindingId }
+        : { id: item.id, duration: item.duration, ...(item.ref?.bindingId ? { referenceBindingId: item.ref.bindingId } : {}) });
+    return { ...withSegmentRefs(segment, nextRefs), storyboardModeEnabled: true, storyboardShots };
 }
 
 const PROMPT_SECTION_END = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description|storyboard_timeline):/mi;

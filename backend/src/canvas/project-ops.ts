@@ -92,11 +92,15 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 height,
                 metadata: operation.metadata || {},
             });
+            syncOrderedGroupMembership(nodes, id);
+            const createdNode = nodes.find((node) => String(node.id) === id);
+            if (createdNode?.metadata && orderedGroupForMember(nodes, createdNode)) operation.position = createdNode.position;
             result.createdNodeIds = [id];
         } else if (operation.type === "update_node") {
             const id = String(operation.id || "");
             const node = nodes.find((item) => String(item.id) === id);
             if (!node) throw new Error(`找不到节点：${id}`);
+            const previousGroupId = String(recordOf(node.metadata).groupId || "");
             Object.assign(node, operation.patch || {});
             if (operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)) {
                 const metadata = recordOf(node.metadata);
@@ -117,6 +121,10 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 const metadata = recordOf(node.metadata);
                 for (const key of operation.metadataDelete.map(String)) delete metadata[key];
                 node.metadata = metadata;
+            }
+            const nextGroupId = String(recordOf(node.metadata).groupId || "");
+            if (previousGroupId !== nextGroupId) {
+                syncOrderedGroupMembership(nodes, id, previousGroupId || undefined, Boolean((operation.patch as Record<string, unknown> | undefined)?.position));
             }
         } else if (operation.type === "update_h3_segment") {
             const nodeId = String(operation.nodeId || "");
@@ -236,6 +244,41 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 node.metadata = metadata;
                 result.deletedSegmentIds = [segmentId];
             }
+        } else if (operation.type === "move_h3_segment") {
+            const nodeId = String(operation.nodeId || "");
+            const segmentId = String(operation.segmentId || "");
+            const beforeSegmentId = String(operation.beforeSegmentId || "").trim();
+            const afterSegmentId = String(operation.afterSegmentId || "").trim();
+            if (!nodeId) throw new Error("move_h3_segment 缺少 nodeId");
+            if (!segmentId) throw new Error("move_h3_segment 缺少 segmentId");
+            if (beforeSegmentId && afterSegmentId) throw new Error("move_h3_segment 不能同时指定 beforeSegmentId 和 afterSegmentId");
+            if (segmentId === beforeSegmentId || segmentId === afterSegmentId) throw new Error("不能将 Clip 移动到自身相邻位置");
+            const node = nodes.find((item) => String(item.id) === nodeId);
+            if (!node) throw new Error(`找不到节点：${nodeId}`);
+            if (!isH3CanvasNode(node)) throw new Error(`节点 ${nodeId} 不是 H3 节点，不能使用 move_h3_segment`);
+            const segments = segmentsOf(node);
+            const fromIndex = findSegmentIndex(segments, segmentId);
+            if (fromIndex < 0) throw new Error(`节点 ${nodeId} 上找不到 segment ${segmentId}`);
+            const [segment] = segments.splice(fromIndex, 1);
+            let toIndex = segments.length;
+            if (beforeSegmentId) {
+                toIndex = findSegmentIndex(segments, beforeSegmentId);
+                if (toIndex < 0) throw new Error(`beforeSegmentId 不存在：${beforeSegmentId}`);
+            } else if (afterSegmentId) {
+                const afterIndex = findSegmentIndex(segments, afterSegmentId);
+                if (afterIndex < 0) throw new Error(`afterSegmentId 不存在：${afterSegmentId}`);
+                toIndex = afterIndex + 1;
+            }
+            if (toIndex === fromIndex) {
+                result.skipped = true;
+            } else {
+                segments.splice(toIndex, 0, segment);
+                const metadata = recordOf(node.metadata);
+                metadata.segments = segments;
+                node.metadata = metadata;
+                result.updatedSegmentIds = [segmentId];
+                result.insertedSegmentIndex = toIndex;
+            }
         } else if (operation.type === "delete_node") {
             const ids = new Set(Array.isArray(operation.ids) ? operation.ids.map(String) : [String(operation.id || "")]);
             if (!ids.size || ids.has("")) throw new Error("delete_node 需要提供 id 或 ids");
@@ -326,6 +369,48 @@ function connectionsOf(project: Record<string, unknown>) {
 
 function recordOf(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function orderedGroupForMember(nodes: Array<Record<string, unknown>>, member: Record<string, unknown>) {
+    const groupId = String(recordOf(member.metadata).groupId || "");
+    return nodes.find((node) => String(node.id) === groupId && recordOf(node.metadata).orderedGroup === true);
+}
+
+/** MCP/协作新增或转入节点时同步有序组槽位；已有槽位顺序和调用方明确给出的位置优先。 */
+function syncOrderedGroupMembership(nodes: Array<Record<string, unknown>>, nodeId: string, previousGroupId?: string, preservePosition = false) {
+    const member = nodes.find((node) => String(node.id) === nodeId);
+    if (!member || String(member.type || "") === "group") return;
+    const nextGroupId = String(recordOf(member.metadata).groupId || "");
+    const groupIds = new Set([previousGroupId || "", nextGroupId].filter(Boolean));
+    groupIds.forEach((groupId) => {
+        const group = nodes.find((node) => String(node.id) === groupId && recordOf(node.metadata).orderedGroup === true);
+        if (!group) return;
+        const metadata = recordOf(group.metadata);
+        const knownIds = new Set(nodes.filter((node) => String(node.id) !== String(group.id) && String(node.type || "") !== "group").map((node) => String(node.id)));
+        const legacyMemberIds = nodes.filter((node) => String(recordOf(node.metadata).groupId || "") === groupId && knownIds.has(String(node.id))).map((node) => String(node.id));
+        const rawSlots = Array.isArray(metadata.groupSlots) ? metadata.groupSlots.map(String) : [];
+        const slots = rawSlots.length ? rawSlots.filter((id, index, all) => knownIds.has(id) && all.indexOf(id) === index) : legacyMemberIds;
+        const nextSlots = nextGroupId === groupId ? (slots.includes(nodeId) ? slots : [...slots, nodeId]) : slots.filter((id) => id !== nodeId);
+        metadata.groupSlots = nextSlots;
+        group.metadata = metadata;
+        if (nextGroupId !== groupId || preservePosition) return;
+
+        const columns = Math.max(1, Math.min(12, Math.round(Number(metadata.orderedGroupColumns)) || 4));
+        const displayCount = nextSlots.length % columns === 0 ? nextSlots.length + columns : nextSlots.length + (columns - nextSlots.length % columns);
+        const groupPosition = recordOf(group.position);
+        const groupWidth = Number(group.width || 0);
+        const groupHeight = Number(group.height || 0);
+        const gap = 14;
+        const padding = { left: 24, right: 24, top: 52, bottom: 24 };
+        const rows = Math.ceil(Math.max(displayCount, 1) / columns);
+        const cellWidth = Math.max(80, (groupWidth - padding.left - padding.right - gap * (columns - 1)) / columns);
+        const cellHeight = Math.max(80, (groupHeight - padding.top - padding.bottom - gap * (rows - 1)) / rows);
+        const slotIndex = nextSlots.indexOf(nodeId);
+        member.position = {
+            x: Number(groupPosition.x || 0) + padding.left + (slotIndex % columns) * (cellWidth + gap) + (cellWidth - Number(member.width || 0)) / 2,
+            y: Number(groupPosition.y || 0) + padding.top + Math.floor(slotIndex / columns) * (cellHeight + gap) + (cellHeight - Number(member.height || 0)) / 2,
+        };
+    });
 }
 
 function sameValue(left: unknown, right: unknown) {

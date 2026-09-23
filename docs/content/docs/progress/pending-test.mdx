@@ -5,9 +5,65 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
-## Ordered group membership records
+## H3 空分镜双击绑图
 
-- Create an ordered group, then use MCP to create nodes inside the group frame without adding them to `groupSlots`; move the ordered group and confirm those nodes do not move with it or become members merely because their coordinates are inside the frame. Explicitly drop a node into an ordered-group slot, then confirm it is recorded and follows the group after reload.
+- 双击空分镜卡（占位「分镜 N · 双击绑图」）后画布进入「选节点作参考」模式，该分镜卡高亮；点选一个含图片的节点后，图片以分镜职责直接绑定到该分镜（卡片出图、角色标为「分镜 N」）；按 Esc 取消不落任何数据。
+- 把图片素材从画布/素材库直接拖到空分镜卡上也能绑定该分镜。
+- 已在浏览器实测：右键新增空分镜 → 双击 → 选分镜帧图节点 → 绑定成功 → 右键移除分镜 → 移除残留参考，画布数据完全还原。
+
+## H3 时间轴右键分区菜单（Clip 菜单 + 分镜菜单）
+
+- 右键视频行的 Clip 卡片弹出 Clip 菜单（标题「Clip N」），包含「在左边添加 Clip」「在右边添加 Clip」「删除 Clip」；新 Clip 继承被右键 Clip 的模式等设置、内容清空，时间轴自动滚到新 Clip，仅剩一个 Clip 时「删除 Clip」置灰。
+- 右键参考行（分镜轨/分镜卡/参考格）仍弹分镜菜单，行为不变；视频行空白处右键不弹这两种菜单（交回画布默认节点菜单）。
+- 在任一预览状态（有结果/无结果/图片/音频）间切换选中 Clip，节点不崩溃（`H3PreviewPlayer` hooks 顺序修复）。
+
+## H3 时间轴自定义横向滚动条
+
+- Clip 较多时确认时间轴底部自定义滚动条高度约 1.5 倍于原生，拖拽滑块与点击轨道空白可正常横向滚动；点击某个 Clip 标记能平滑滚到该 Clip 并选中它，选中标记高亮加粗。内容未溢出时滑块隐藏，仅保留 Clip 标记。
+
+## H3 分镜轨右键菜单新增
+
+- 确认分镜轨末张卡片不再有占半宽的「新增」按钮，空轨不再有整块「新建首张分镜」按钮（改为「右键新建分镜」虚线提示）。
+- 右键分镜轨空白处弹出菜单，可「新建分镜」（平分末张时长）；右键某张分镜弹出菜单，可「在分镜 N 之后插入」（平分该张时长）、「在末尾追加分镜」、「移除分镜 N」，对应按钮在时长不足 1 秒时置灰禁用。
+- 菜单在点击别处、滚轮、按 Esc、再次右键外部时自动关闭；插入/追加/移除后分镜时长与提示词同步正确。
+- 确认菜单始终出现在鼠标点；光标移到窗口右下角附近右键时菜单自动向内收，不会跑到屏幕外。
+- 把画布缩放到非 100%（例如缩小看全图）后右键靠后的 Clip，确认分镜菜单标题显示的是光标下那个 `Clip N`（旧实现按写死的 100px/秒 换算，会解析到靠前的 Clip）。右键参考格、分镜卡同样能弹出分镜菜单；右键某张分镜时标题显示「Clip N · 分镜 K」。
+
+## H3 MCP 读取、写入与等待优化
+
+- 在 217 节点项目上并发调用同一 Clip 的 H3 只读工具，确认同项目并行读取合并为单次精确项目 GET；与历史调用组比较中位数和 P95。修改同一项目后确认 revision 冲突会拒绝旧快照写入。
+- `h3_get_clip` 不传 `include` 时确认原有精简响应不变；分别或组合传 `prompt`、`references`、`runtime` 时确认一次返回对应详情。
+- 对已完成、运行中、失败、取消和不存在的 H3 任务调用 `canvas_wait_tasks`，确认 SSE 终态与精确任务快照一致；断流后确认回退轮询且不重复提交生成。等待响应记录耗时、事件/轮询次数与等待模式，不包含提示词或媒体内容。
+- 继续沿用当前 0.4MP 验证、1.5MP 定稿与单路 GPU 设置；在后续已授权任务中核对提示词编译、协作写入和任务等待耗时，不额外提交 GPU 基准任务。
+
+## H3 视频/音频参考类型识别
+
+- 在 Clip 参考绑定中保留 `video:<id>` 或 `audio:<id>` storageKey，省略 MIME 与 URL；确认提示词编辑器按视频/音频分槽显示，匹配的 `<Video N>` / `<Audio N>` 标记不再报未找到，预检引用类型正确。
+- 对带类型 storageKey 但旧 `mediaType` 错标为 `image` 的绑定，确认编辑器仍按 storageKey 的媒体类型识别；正确的图片、视频、音频绑定继续保持原分类。
+
+## Codex 分页线程恢复
+
+- 恢复一个已分页存储且有多轮消息的 Codex 对话，确认不再报 `paginated threads do not support thread/read(includeTurns=true)`；核对历史消息按轮次和条目顺序显示，并能在原线程继续对话。
+
+## MCP 单一 Backend 服务
+
+- 启动 Backend 后从 Codex 插件和侧边栏 Codex 分别连接 `http://127.0.0.1:17370/mcp`，确认工具列表一致、H3 插件启停可实时更新，且不会启动 Canvas Agent MCP 子进程。确认 MCP token 不出现在 URL；无 token 的远程请求仍被拒绝，本机 loopback MCP 请求可连接。
+
+## H3 Clip MCP 移动
+
+- 调用 `h3_move_clip`，分别将 Clip 移到另一 Clip 前面、后面及末尾；确认返回的 `fromIndex`/`toIndex` 与 H3 节点显示顺序一致，刷新和协作同步后顺序仍保留。目标 ID 无效、同时传入前后目标或指定自身时应报错且不改动顺序。
+
+## MCP 任务状态查询默认条数
+
+- 不传 `limit` 查询生成任务状态时，确认每来源最多返回 5 条；显式传入较小或较大的 `limit` 时仍按请求数量返回并受既有限制约束，精确 `taskId` 查询不受默认条数影响。
+
+## 有序组整理位置保持
+
+- 对包含多张图片的有序组点击“整理”，确认图片归位后不会短暂闪现再消失；把组外图片拖入指定的第六格，确认回写后仍在第六格而非末格；刷新或协作回放后位置仍保持，移入或移出组时槽位成员同步更新。
+
+## Ordered group MCP insertion
+
+- Create an ordered group, then use MCP to create a node with the ordered group's `groupId`; confirm it is immediately appended to `groupSlots`, placed in the next slot, and follows the group after reload. Repeat through a remote/collaborative update and confirm the same result.
 
 ## H3 MCP 输出瘦身
 
@@ -161,6 +217,8 @@ description: Implemented changes that still need manual verification
 - 双击角色组引用确认仍显示服装目录和声线开关；逐项启用/停用服装、切换声线后应用，确认 Refs 与提交输入同步更新；“从本段移除整组”仍能移除该角色组。
 - 确认每套服装缩略图的放大按钮可查看未裁切原图，点击缩略图切换启用状态、点击放大按钮不会改变启用状态。
 - 角色参考图的职责与提交用途仍由源角色节点控制并固定为普通参考；打开角色参考素材编辑时不再显示职责、提交用途说明和标签字段，在浅色与深色主题下确认预览和控制清晰可用。
+- 视频参考在弹窗左侧直接显示视频首帧缩略图（加载真实视频确认首帧可见），点击放大按钮仍打开可播放的灯箱。
+- 弹窗中原「标签（逗号分隔）」字段已替换为「描述」多行文本；填写描述并应用后，重新打开弹窗描述仍在，且描述内容进入生成的视觉参考说明（含分镜图说明组装）。「用模型分析」会自动把分析摘要填入描述（描述已有内容时不覆盖）。
 
 ## 角色参考图职责
 
@@ -1526,3 +1584,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - 打开智能生成节点的图片设置，将工作流参数（如 Aspect ratio）从 `1:1 (Square)` 切换为 `16:9 (Widescreen)`，确认选项可选中、设置值更新，并在生成时生效。
 - 无参考图生成后确认记录模式为 `t2i`，带参考图生成后确认记录模式为 `i2i`，且工作流列显示对应场景的工作流。
 - 工作流字段更新或重新导入后重新打开设置，确认已有参数会按工作流节点和输入名迁移；选择 `16:9 (Widescreen)` 后生成，再选中该生成结果，确认设置不会回到 `1:1 (Square)`。
+
+### H3 MCP 角色组移除
+
+- 调用 H3「绑定或移除 Clip 角色组」工具，仅提供 `removeGroupIds` 移除一个角色组，确认对应组及其角色参考绑定消失、无关手动参考绑定保留，且角色节点和画布连线不被删除；再混合传入 `characters` 与 `removeGroupIds`，确认可在一个原子更新中替换/清理角色组。

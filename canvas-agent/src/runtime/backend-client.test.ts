@@ -101,3 +101,37 @@ test("BackendClient distinguishes network, timeout and invalid responses", async
     },
   );
 });
+
+test("BackendClient reads one project by id without listing every canvas", async () => {
+  let requestedUrl = "";
+  await withFetch(
+    (async (input) => {
+      requestedUrl = String(input);
+      return new Response(JSON.stringify({ ok: true, project: { id: "project/1", revision: 4 } }), { status: 200 });
+    }) as typeof fetch,
+    async () => {
+      const project = await client.getCanvasProject("project/1");
+      assert.deepEqual(project, { id: "project/1", revision: 4 });
+      assert.match(requestedUrl, /\/canvas\/projects\/project%2F1\?/);
+    },
+  );
+});
+
+test("BackendClient parses replayed Backend SSE events and ignores heartbeats", async () => {
+  const encoder = new TextEncoder();
+  await withFetch(
+    (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(": heartbeat\n\nid: instance:1\nevent: task.updated\ndata: {\"id\":\"task-1\",\"type\":\"task.updated\",\"entityId\":\"task-1\",\"payload\":{\"status\":\"running\"}}\n\n"));
+        controller.enqueue(encoder.encode("id: instance:2\nevent: events.sync\ndata: {\"cursor\":\"instance:2\",\"reset\":false}\n\n"));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch,
+    async () => {
+      const events = [];
+      for await (const event of client.streamEvents()) events.push(event);
+      assert.deepEqual(events.map((event) => event.type), ["task.updated", "events.sync"]);
+      assert.equal((events[0].payload as Record<string, unknown>).status, "running");
+    },
+  );
+});

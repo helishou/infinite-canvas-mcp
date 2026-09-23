@@ -282,7 +282,10 @@ export class CanvasTextDispatcher {
         const sourceMetadata = recordOf(source.metadata);
         const previousIds = Array.isArray(sourceMetadata.generatedTextResultIds) ? sourceMetadata.generatedTextResultIds.map(String) : [];
         const operations: Array<Record<string, unknown>> = [];
-        const targetTextNodeId = String(input.params?.targetTextNodeId || "");
+        const sourceNodeId = String(input.sourceNodeId || input.nodeId);
+        const targetTextNodeId = String(input.params?.targetTextNodeId || (
+            source.type === "text" && sourceMetadata.generationEngine === "backend" ? input.nodeId : ""
+        ));
         if ((input.resultPolicy || "replace-active") === "replace-active") {
             for (const id of previousIds) if (id !== targetTextNodeId && nodes.some((node) => String(node.id || "") === id)) operations.push({ type: "delete_node", id });
         }
@@ -292,16 +295,12 @@ export class CanvasTextDispatcher {
                 content: contents[0], prompt: input.prompt, status: "success", fontSize: 14, model, reasoningEffort,
                 textCount: contents.length, texts: textItems, primaryTextId: textItems[0].id, source: "Backend canvas text dispatcher",
             };
-            if (targetTextNodeId === input.nodeId) {
-                operations.push({ type: "update_node", id: input.nodeId, metadata: {
-                    ...resultMetadata, primaryTextNodeId: targetTextNodeId, generatedTextResultIds: [targetTextNodeId], generationTaskId: taskId,
-                }, metadataDelete: ["runtimeTaskId", "errorDetails"] });
-            } else {
-                operations.push({ type: "update_node", id: targetTextNodeId, metadata: resultMetadata, metadataDelete: ["runtimeTaskId", "errorDetails"] });
-                operations.push({ type: "update_node", id: input.nodeId,
-                    metadata: { status: "success", primaryTextNodeId: targetTextNodeId, generatedTextResultIds: [targetTextNodeId], generationTaskId: taskId },
-                    metadataDelete: ["runtimeTaskId", "errorDetails"] });
-            }
+            operations.push({ type: "update_node", id: targetTextNodeId, metadata: targetTextNodeId === sourceNodeId
+                ? { ...resultMetadata, primaryTextNodeId: targetTextNodeId, generatedTextResultIds: [targetTextNodeId], generationTaskId: taskId }
+                : resultMetadata, metadataDelete: ["runtimeTaskId", "errorDetails"] });
+            if (targetTextNodeId !== sourceNodeId) operations.push({ type: "update_node", id: sourceNodeId,
+                metadata: { status: "success", primaryTextNodeId: targetTextNodeId, generatedTextResultIds: [targetTextNodeId], generationTaskId: taskId },
+                metadataDelete: ["runtimeTaskId", "errorDetails"] });
             this.stores.projects.applyOperations(input.projectId, Number(project.revision || 0), operations as never,
                 { runtimeWrite: true, source: { clientId: `task:${taskId}`, kind: "task", label: "文本生成任务" } });
             return true;
@@ -334,7 +333,7 @@ export class CanvasTextDispatcher {
         const generatedTextResultIds = (input.resultPolicy || "replace-active") === "append" ? [...previousIds, id] : [id];
         operations.push({
             type: "update_node",
-            id: input.nodeId,
+            id: sourceNodeId,
             metadata: { status: "success", primaryTextNodeId: id, generatedTextResultIds, generationTaskId: taskId },
             metadataDelete: ["runtimeTaskId", "errorDetails"],
         });
@@ -347,14 +346,15 @@ export class CanvasTextDispatcher {
         const project = this.stores.projects.get(input.projectId);
         if (!project) return;
         const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
-        const source = nodes.find((item) => String(item.id || "") === input.nodeId);
-        if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== taskId) return;
-        this.stores.projects.applyOperations(input.projectId, Number(project.revision || 0), [{
+        const nodeIds = [...new Set([input.nodeId, input.sourceNodeId].filter((id): id is string => Boolean(id)))];
+        const boundIds = nodeIds.filter((id) => nodes.some((node) => String(node.id || "") === id && String(recordOf(node.metadata).runtimeTaskId || "") === taskId));
+        if (!boundIds.length) return;
+        this.stores.projects.applyOperations(input.projectId, Number(project.revision || 0), boundIds.map((id) => ({
             type: "update_node",
-            id: input.nodeId,
+            id,
             metadata: { status: cancelled ? "cancelled" : "error", ...(cancelled ? {} : { errorDetails: error }) },
             metadataDelete: cancelled ? ["runtimeTaskId", "errorDetails"] : ["runtimeTaskId"],
-        }] as never, { runtimeWrite: true, source: { clientId: `task:${taskId}`, kind: "task", label: "文本生成任务" } });
+        })) as never, { runtimeWrite: true, source: { clientId: `task:${taskId}`, kind: "task", label: "文本生成任务" } });
     }
 }
 

@@ -191,6 +191,35 @@ export function insertOrderedGroupSlot(slots: OrderedGroupSlot[], nodeId: string
     return next;
 }
 
+/**
+ * 把通过 MCP/协作增量写入 groupId 的节点同步进有序组的槽位记录，并立即落到对应单元格。
+ * groupSlots 是有序组的顺序真值，不能只依赖普通组使用的 groupId。
+ */
+export function syncOrderedGroupMembership(nodes: CanvasNodeData[], nodeId: string, previousGroupId?: string) {
+    const member = nodes.find((node) => node.id === nodeId);
+    if (!member || member.type === CanvasNodeType.Group) return nodes;
+
+    const nextGroupId = member.metadata?.groupId;
+    const groupIds = new Set([previousGroupId, nextGroupId].filter((id): id is string => Boolean(id)));
+    let nextNodes = nodes;
+    groupIds.forEach((groupId) => {
+        const group = nextNodes.find((node) => node.id === groupId && node.type === CanvasNodeType.Group);
+        if (!group?.metadata?.orderedGroup) return;
+        const slots = orderedGroupSlots(group, nextNodes);
+        const nextSlots = nextGroupId === groupId
+            ? insertOrderedGroupSlot(slots, nodeId, slots.length)
+            : slots.filter((id) => id !== nodeId);
+        const groupWithSlots = { ...group, metadata: { ...group.metadata, groupSlots: nextSlots } };
+        nextNodes = nextNodes.map((node) => node.id === group.id ? groupWithSlots : node);
+        if (nextGroupId !== groupId) return;
+        const slotIndex = nextSlots.indexOf(nodeId);
+        const displayCount = orderedGroupDisplaySlots(nextSlots, orderedGroupColumnCount(groupWithSlots)).length;
+        const position = orderedGroupMemberPosition(groupWithSlots, slotIndex, member, displayCount);
+        nextNodes = nextNodes.map((node) => node.id === nodeId ? { ...node, position } : node);
+    });
+    return nextNodes;
+}
+
 export function replaceOrderedGroupSlot(slots: string[], nodeId: string, index: number) {
     const next = slots.filter((value) => value !== nodeId);
     const target = Math.max(0, Math.min(index, next.length - 1));

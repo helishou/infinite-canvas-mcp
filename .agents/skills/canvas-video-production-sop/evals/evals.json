@@ -48,6 +48,24 @@
       "prompt": "请按现有镜头表生成一张普通双人对话关键帧，使用 Neo Image 2。",
       "expected_output": "路由到分镜关键帧子 Skill，直接使用其中内嵌的六段式、参考职责、防串脸、体位视线、光影和轴线规则；不完整读取 1847 行 Neo Image 规范，只有遇到未覆盖图型时才按精确标题局部查阅。",
       "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "上次 S02-03 的关键帧任务提交后断线了。继续这个短片项目，先告诉我现在做到哪里，再完成已授权的下一镜。",
+      "expected_output": "先读取 Backend dataDir 下该项目的 progress.md 和文字分镜表 storyboard.md；用记录的分镜图有序组 ID 和 groupSlots 核对已采用图片，再按 taskId 查询真实终态、节点、媒体与验收证据，不重复提交断线前的任务。",
+      "files": []
+    },
+    {
+      "id": 10,
+      "prompt": "这个短片刚建好画布，请把剧本和分镜表整理到固定位置，以后能从这里继续做。",
+      "expected_output": "从当前 Backend dataDir 和精确 canvasProjectId 确定 productions/<canvasProjectId>/，只创建缺失的 progress.md、script.md、storyboard.md、assets.md；文字分镜表写入 storyboard.md，分镜图在生成并验收后加入画布有序组，progress.md 记录该组 ID。",
+      "files": []
+    },
+    {
+      "id": 11,
+      "prompt": "S02-03 和 S02-04 是同一房间、同一人物、机位几乎一样的连续镜头，没有跨切点动作或画外对白。分析是否都要分镜图，再用 H3 生成。",
+      "expected_output": "文字分镜表仍保留两镜，可让后镜复用首镜关键帧或不单独生图；Clip 默认拆成两段，因为相同场景、人物和机位不足以合并理由。若用户随后指出存在必须跨镜延续的动作/对白，再按明确依据合并。",
+      "files": []
     }
   ]
 }

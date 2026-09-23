@@ -84,7 +84,9 @@ export function inferReferenceRole(value: { name?: unknown; label?: unknown; rol
     return "other";
 }
 
-export function inferReferenceMediaType(value: { mediaType?: unknown; type?: unknown; kind?: unknown; mimeType?: unknown; url?: unknown; name?: unknown }): ReferenceMediaType {
+export function inferReferenceMediaType(value: { mediaType?: unknown; type?: unknown; kind?: unknown; mimeType?: unknown; url?: unknown; name?: unknown; storageKey?: unknown }): ReferenceMediaType {
+    const storageType = /^(image|video|audio):/i.exec(String(value.storageKey || ""))?.[1]?.toLowerCase();
+    if (storageType === "video" || storageType === "audio" || storageType === "image") return storageType;
     const explicit = String(value.mediaType || value.type || value.kind || "").toLowerCase();
     if (explicit.includes("video")) return "video";
     if (explicit.includes("audio")) return "audio";
@@ -319,7 +321,7 @@ function normalizeBinding(value: unknown): ReferenceBinding | null {
         tags: Array.isArray(item.tags) ? item.tags.map(String) : [], enabled: item.enabled !== false,
         usage: ["first_frame", "last_frame"].includes(String(item.usage)) ? item.usage as ReferenceUsage : "reference",
         ...(["fully_preserved", "partially_preserved", "attribute_transfer", "weak_reference"].includes(String(item.retentionLevel)) ? { retentionLevel: item.retentionLevel as ReferenceRetention } : {}),
-        ...(item.mediaType || item.type || item.kind ? { mediaType: inferReferenceMediaType(item) } : {}),
+        ...(item.mediaType || item.type || item.kind || item.storageKey || item.mimeType || item.url ? { mediaType: inferReferenceMediaType(item) } : {}),
     } as ReferenceBinding;
 }
 

@@ -87,7 +87,9 @@ async function createBackendMcpInstance(
   const backendApi = createBackendClient(config.url);
   const backendComfy = backendComfyUi(backendApi, () => []);
   const directBackend: PluginMcpBackend = {
+    backendUrl: config.url,
     listCanvasProjects: () => backendApi.listCanvasProjects(),
+    getCanvasProject: (projectId) => backendApi.getCanvasProject(projectId),
     applyCanvasOperations: (projectId, operations, expectedRevision) =>
       applyBackendCanvasOperations(
         config,
@@ -110,16 +112,10 @@ async function createBackendMcpInstance(
     version: "0.1.0",
   });
   installMcpToolObservability(server, state, recordEvent);
-  registerDirectCanvasTools(server, config, backendApi, state, recordEvent, getBrowserActiveProjectId);
+  registerBackendCanvasTools(server, config, backendApi, state, recordEvent, getBrowserActiveProjectId);
   registerDirectComfyTools(server, backendApi);
-  registerBrowserCompatibilityTools(server, config);
-  const context = buildPluginMcpContext(
-    { url: config.url, token: config.token, backendUrl: config.url },
-    directBackend,
-    backendComfy,
-    (name, input) =>
-      executeDirectCanvasTool(config, backendApi, state, name, input, getBrowserActiveProjectId),
-  );
+  registerAgentSessionCompatibilityTools(server, config);
+  const context = buildPluginMcpContext(directBackend, backendComfy);
   const registry = new PluginMcpRegistry(server, context);
   await registry.apply(await loadPluginMcpDeclarationsFromBackend(backendApi));
   return { server, registry };
@@ -292,7 +288,8 @@ export function registerBackendMcpHttpRoutes(
   };
 }
 
-const DIRECT_CANVAS_TOOLS = [
+// Backend 是外部 MCP 的执行入口；只有需要当前网页会话的工具才走下方 Agent 兼容转发。
+const BACKEND_CANVAS_TOOLS = [
   "canvas_list_projects",
   "canvas_inspect",
   "canvas_get_state",
@@ -325,8 +322,8 @@ const DIRECT_CANVAS_TOOLS = [
   "mcp_observability_report",
   "models_list",
 ] as ToolName[];
-const DIRECT_TOOL_NAMES = new Set<string>([
-  ...DIRECT_CANVAS_TOOLS,
+const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
+  ...BACKEND_CANVAS_TOOLS,
   "assets_list",
   "assets_add",
   "canvas_split_image",
@@ -784,7 +781,7 @@ function buildCanvasAudioRequest(source: Record<string, unknown>, _project: Reco
   };
 }
 
-function registerDirectCanvasTools(
+function registerBackendCanvasTools(
   server: McpServer,
   config: ResolvedConfig,
   backendApi: ReturnType<typeof createBackendClient>,
@@ -809,7 +806,7 @@ function registerDirectCanvasTools(
         ),
     );
   }
-  for (const name of DIRECT_CANVAS_TOOLS) {
+  for (const name of BACKEND_CANVAS_TOOLS) {
     const schema = toolInputSchemas[name];
     // Pass zod schema (not schema.shape) so MCP SDK walks each property and
     // serializes the .describe() text into JSON Schema "description" fields.
@@ -1954,24 +1951,28 @@ async function waitForCanvasTasks(
   const pollMs = Math.max(250, Math.min(10_000, Number(input.pollMs || 2_000)));
   const startedAt = Date.now();
   const terminal = new Set(["succeeded", "failed", "cancelled", "completed", "missing"]);
-  let pollCount = 0;
+  let pollCount = 1;
+  let eventCount = 0;
+  let waitMode = "poll";
   let tasks: Array<Record<string, unknown>> = [];
+  const initial = (await listTasksFromBackend(backend, { taskIds })).tasks;
+  const initialById = new Map(initial.map((task) => [String(task.taskId || ""), task]));
+  tasks = taskIds.map((taskId) => initialById.get(taskId) || { taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" });
+  if (initial.length === taskIds.length && initial.length > 0 && initial.every((task) => String(task.kind || "").includes("h3"))) {
+    const eventResult = await waitForH3TaskEvents(backend, taskIds, initial, timeoutMs);
+    if (eventResult.connected) {
+      tasks = eventResult.tasks;
+      eventCount = eventResult.eventCount;
+      waitMode = eventResult.usedStream ? "sse" : "snapshot";
+    } else waitMode = "poll-fallback";
+  }
   for (;;) {
-    pollCount += 1;
-    const result = await listTasksFromBackend(backend, { taskIds });
-    const snapshots = new Map(
-      result.tasks.map((task) => [String(task.taskId || ""), task]),
-    );
-    tasks = taskIds.map(
-      (taskId) =>
-        snapshots.get(taskId) || {
-          taskId,
-          status: "missing",
-          progress: 0,
-          outputs: [],
-          error: "任务不存在或已被清理",
-        },
-    );
+    if (!tasks.length || !tasks.every((task) => terminal.has(String(task.status)))) {
+      if (tasks.length) pollCount += 1;
+      const result = await listTasksFromBackend(backend, { taskIds });
+      const snapshots = new Map(result.tasks.map((task) => [String(task.taskId || ""), task]));
+      tasks = taskIds.map((taskId) => snapshots.get(taskId) || { taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" });
+    }
     const complete = tasks.every((task) => terminal.has(String(task.status)));
     const elapsedMs = Date.now() - startedAt;
     if (complete || elapsedMs >= timeoutMs) {
@@ -1983,6 +1984,8 @@ async function waitForCanvasTasks(
         timedOut: !complete,
         elapsedMs,
         pollCount,
+        eventCount,
+        waitMode,
         summary: {
           total: tasks.length,
           complete: tasks.filter((task) => terminal.has(String(task.status))).length,
@@ -1996,7 +1999,67 @@ async function waitForCanvasTasks(
         tasks,
       };
     }
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    if (waitMode === "sse") waitMode = "poll-fallback";
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(1, timeoutMs - elapsedMs))));
+  }
+}
+
+async function waitForH3TaskEvents(
+  backend: ReturnType<typeof createBackendClient>, taskIds: string[], initial: Array<Record<string, unknown>>, timeoutMs: number,
+) {
+  const terminal = new Set(["succeeded", "failed", "cancelled", "completed", "missing"]);
+  const tasks = new Map(initial.map((task) => [String(task.taskId || ""), task]));
+  if ([...tasks.values()].every((task) => terminal.has(String(task.status)))) return { tasks: taskIds.map((id) => tasks.get(id)!), connected: true, eventCount: 0, usedStream: false };
+  if (timeoutMs <= 0) return { tasks: [], connected: false, eventCount: 0 };
+  const controller = new AbortController();
+  let eventCount = 0;
+  let cursor: string | undefined;
+  let reconnects = 0;
+  try {
+    let stream = backend.streamEvents(controller.signal);
+    const first = await withMcpTimeout(stream.next(), Math.min(timeoutMs, 10_000));
+    if (!first || first.done || first.value.type !== "events.sync") throw new Error("SSE sync missing");
+    // Subscribe first, then re-read exact task IDs to close the completion race.
+    const fresh = (await listTasksFromBackend(backend, { taskIds })).tasks;
+    for (const task of fresh) tasks.set(String(task.taskId || ""), task);
+    const deadline = Date.now() + timeoutMs;
+    while (![...tasks.values()].every((task) => terminal.has(String(task.status))) && Date.now() < deadline) {
+      const next = await withMcpTimeout(stream.next().catch(() => ({ done: true as const, value: {} as Record<string, unknown> })), Math.max(1, deadline - Date.now()));
+      if (next === null) break;
+      if (next.done) {
+        if (reconnects++ > 0 || !cursor) throw new Error("SSE disconnected");
+        stream = backend.streamEvents(controller.signal, cursor);
+        const resumed = await stream.next();
+        if (resumed.done || resumed.value.type !== "events.sync") throw new Error("SSE replay failed");
+        cursor = String(resumed.value.id || cursor);
+        const recovered = (await listTasksFromBackend(backend, { taskIds })).tasks;
+        for (const task of recovered) tasks.set(String(task.taskId || ""), task);
+        continue;
+      }
+      const event = next.value;
+      cursor = String(event.id || cursor || "") || undefined;
+      if (!String(event.type || "").startsWith("task.")) continue;
+      eventCount++;
+      if (!taskIds.includes(String(event.entityId || ""))) continue;
+      const payload = recordOf(event.payload);
+      if (!terminal.has(String(payload.status || "")) && !["task.completed", "task.failed"].includes(String(event.type))) continue;
+      const snapshots = (await listTasksFromBackend(backend, { taskIds })).tasks;
+      for (const task of snapshots) tasks.set(String(task.taskId || ""), task);
+    }
+    controller.abort();
+    return { tasks: taskIds.map((id) => tasks.get(id) || { taskId: id, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" }), connected: true, eventCount, usedStream: true };
+  } catch {
+    controller.abort();
+    return { tasks: [], connected: false, eventCount };
+  }
+}
+
+async function withMcpTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); })]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -2091,7 +2154,7 @@ async function listTasksFromBackend(
         return false;
       return true;
     })
-    .slice(0, Math.max(1, Math.min(500, Number(input.limit || 10))))
+    .slice(0, Math.max(1, Math.min(500, Number(input.limit || 5))))
     .map(toCanvasTask);
   return { tasks };
 }
@@ -2144,6 +2207,7 @@ function toCanvasTask(task: {
       : {};
   return {
     taskId: String(task.id || ""),
+    kind: String(task.kind || ""),
     parentTaskId:
       task.parentTaskId ||
       (typeof params.parentTaskId === "string"
@@ -2812,7 +2876,7 @@ function installMcpToolObservability(
   const target = server as unknown as { registerTool: McpToolRegistration };
   const registerTool = target.registerTool.bind(server);
   target.registerTool = (name, options, handler) => {
-    if ((DIRECT_CANVAS_TOOLS as readonly string[]).includes(name))
+    if ((BACKEND_CANVAS_TOOLS as readonly string[]).includes(name))
       return registerTool(name, options, handler);
     return registerTool(name, options, async (rawInput) => {
       const input = recordOf(rawInput);
@@ -3001,6 +3065,7 @@ function mcpToolResultContext(
   const operationResults = Array.isArray(result.operationResults)
     ? result.operationResults
     : [];
+  const timings = Object.fromEntries(Object.entries(recordOf(result.timings)).filter(([key, value]) => /^(projectReadMs|compileMs|applyMs|promptBuildMs|queueMs|modelRunMs|archiveMs|elapsedMs)$/.test(key) && typeof value === "number" && Number.isFinite(value)));
   return {
     projectId: optionalText(result.projectId || input.projectId || state.activeProjectId),
     nodeId: optionalText(firstTask.nodeId || result.nodeId || input.nodeId || input.id),
@@ -3015,6 +3080,11 @@ function mcpToolResultContext(
       operationCount: operationResults.length,
       returnedNodeCount: Array.isArray(result.nodes) ? result.nodes.length : undefined,
       ready: typeof result.ready === "boolean" ? result.ready : undefined,
+      ...(Object.keys(timings).length ? { timings } : {}),
+      ...(typeof result.elapsedMs === "number" ? { elapsedMs: result.elapsedMs } : {}),
+      ...(typeof result.pollCount === "number" ? { pollCount: result.pollCount } : {}),
+      ...(typeof result.eventCount === "number" ? { eventCount: result.eventCount } : {}),
+      ...(typeof result.waitMode === "string" ? { waitMode: result.waitMode } : {}),
     },
   };
 }
@@ -3263,7 +3333,7 @@ function registerDirectComfyTools(
 }
 
 /** 工作台、网页导航和对话工具仍需要当前浏览器会话，保留旧协议兼容入口。 */
-function registerBrowserCompatibilityTools(
+function registerAgentSessionCompatibilityTools(
   server: McpServer,
   config: ReturnType<typeof loadConfig>,
 ) {
@@ -3271,7 +3341,7 @@ function registerBrowserCompatibilityTools(
     (server as unknown as { _registeredTools?: Record<string, unknown> })
       ._registeredTools || {};
   for (const name of toolNames.filter(
-    (item) => !DIRECT_TOOL_NAMES.has(item) && !item.startsWith("h3_"),
+    (item) => !BACKEND_OWNED_TOOL_NAMES.has(item) && !item.startsWith("h3_"),
   )) {
     if (registeredTools[name]) continue;
     const schema = toolInputSchemas[name];

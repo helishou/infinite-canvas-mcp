@@ -134,14 +134,10 @@ Codex CLI <-> canvas-agent MCP <-> 当前网页画布
 用户本机 Codex 配置示例：
 
 ```bash
-codex mcp add infinite-canvas -- npx -y @basketikun/canvas-agent mcp
+codex mcp add infinite-canvas --url http://127.0.0.1:17370/mcp
 ```
 
-本仓库调试时可使用，实际配置建议替换为本机绝对路径：
-
-```bash
-codex mcp add infinite-canvas -- node /path/to/infinite-canvas/canvas-agent/dist/index.js mcp
-```
+Codex 直接连接 Backend 的 Streamable HTTP MCP；Canvas Agent 只负责浏览器连接与对话，不作为 MCP 工具服务端。
 
 网页侧边栏助手另走 Canvas Agent 的对话通道。Canvas Agent 使用官方 `@openai/codex` CLI 的 `codex app-server --stdio` 启动并续用同一个 thread，启动时会注入 `infinite-canvas` MCP 配置并把 `default_tools_approval_mode` 设为 `approve`，避免 Codex 自己的 MCP 审批卡住侧边栏；真正修改画布前由网页侧边栏做二次确认。
 
@@ -187,9 +183,7 @@ Claude Code 侧当前 MVP 先调用本机 Claude Code CLI 的流式 JSON 输出�
 
 如果希望 Claude Code 也能操作当前画布，需要给 Claude Code 配置同一个 MCP：
 
-```bash
-claude mcp add --scope user --transport stdio infinite-canvas -- npx -y @basketikun/canvas-agent mcp
-```
+将 Claude Code 配置为 HTTP MCP，地址为 `http://127.0.0.1:17370/mcp`，与 Codex 共用 Backend 工具服务。
 
 Canvas Agent 调用 Claude Code 时默认允许 `mcp__infinite-canvas__*`，避免 print 模式被工具审批卡住；真正修改画布仍由网页侧边栏确认。
 

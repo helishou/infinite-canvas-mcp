@@ -24,12 +24,14 @@ description: >
 | 资产准备 | 缺角色、场景、道具锚或参考职责不清 | [资产准备](subskills/canvas-video-asset-preparation/SKILL.md) | 本轮需要的资产与版本可被精确引用 |
 | 站位与色彩基准 | 缺色卡、空间拓扑、轴线或站位覆盖 | [站位与色彩基准](subskills/canvas-video-staging-color/SKILL.md) | 色彩真值、空间锚和站位覆盖已确认 |
 | 镜头设计 | 需要拆镜、设计过渡、动作与声音 | [镜头设计](subskills/canvas-video-shot-design/SKILL.md) | 镜头表和逐镜参考计划可执行 |
-| 分镜关键帧 | 需要生成、检查或重做静态分镜图 | [分镜关键帧](subskills/canvas-video-storyboard-frames/SKILL.md) | 目标关键帧已在本阶段验收并可追溯 |
+| 分镜关键帧 | 文字分镜表判定某镜需要新图，或需要检查、重做静态分镜图 | [分镜关键帧](subskills/canvas-video-storyboard-frames/SKILL.md) | 需要的关键帧已验收，跳过镜头有明确依据 |
 | Clip 视频 | 需要编写 H3 提示词，或生成、检查、返修分段视频 | [Clip 视频](subskills/canvas-video-clip-production/SKILL.md) | 目标 Clip 已在本阶段验收且承接成立 |
 
 用户明确指定阶段时直接进入该阶段；不要因为总流程存在就重做已获批上游。若当前阶段的硬输入缺失，停在最早的缺失项并说明缺什么。用户只要求规划、检查、连线、写提示词或试跑一张时，不得自动跨到生成、批量运行或下一阶段。
 
 验收不是独立阶段。每个子 Skill 必须在产出后立即完成本阶段的证据回读、质量检查、状态判断和最小返修；只有本阶段通过，才可进入下游。若用户要求逐项确认，自检通过后仍停在当前阶段等待用户，不能把自检自动升级为用户确认。
+
+文字分镜表逐镜判断是否需要新关键帧，并默认一个文字分镜对应一个 H3 Clip。只有两镜存在明显动作衔接，或对白/画外音需要跨镜连续时才合并成一个 Clip；同场景、同人物、机位接近本身不足以作为合并理由。分镜图有序组只包含实际采用的图片，不要求与文字镜头一一对应。
 
 ## SOP 维护路由
 
@@ -73,22 +75,30 @@ description: >
 - H3 视频提示词使用 `h3-prompt-writer`；视频生成使用 `generate-video` 或项目已有 H3 能力。
 - 静帧阶段所需的 Neo Image 和角色/场景提示词规则已经内嵌在对应子 Skill 中，执行常规流程时不要再完整读取两份大规范。仅当用户要求现有子 Skill 未覆盖的特殊图型时，才按精确标题局部查阅 [Neo Image 图型库](references/neoimage-prompt-engine-公开版.md)；角色或场景遇到未覆盖结构时同理局部查阅 [角色资产与场景生成规范](references/角色资产与场景生成-即梦5或MJ.md)。
 
-## 阶段交接记录
+## 固定制作目录
 
-每完成一个阶段，都更新一份可回读的项目交接记录；没有对应内容的字段可留空，但不得伪造完成状态：
+每个画布项目的制作文档固定放在 `{当前 Backend dataDir}/productions/<canvasProjectId>/`。先通过 Backend 的 `GET /data-dir` 或实际运行配置取得 `dataDir`，不要从仓库位置、Skill 目录或当前终端环境猜路径。使用精确画布项目 ID 作为单级目录名，创建前确认解析后的路径仍位于 `productions` 内；项目标题只写进文件，不用作目录名。
 
 ```text
-项目 ID / 当前范围 / 当前阶段
-用户授权边界 / 人工验收点
-剧情段与时长 / 逐字台词与声音约束
-获批角色、服装、场景、道具、色卡、站位节点 ID
-镜头 ID / 前中后状态 / 轴线 / 参考职责
-关键帧节点、prompt 版本、taskId、storageKey、验收状态
-Clip 节点、模式、时长、taskId、storageKey、验收状态
-未决问题 / 返修范围 / 下一阶段入口条件
+productions/<canvasProjectId>/
+├── progress.md     # 阶段、任务、验收和下一步
+├── script.md       # 剧本及逐字台词
+├── storyboard.md   # 文字版分镜表与镜头过渡
+└── assets.md       # 角色、场景、道具、色卡和站位的引用索引
 ```
 
-阶段切换时，先回读这份记录和画布现状；若二者冲突，以画布真实节点、任务日志和最新用户决定为准，并修正交接记录。
+首次使用时，从本 Skill 的 [进度](assets/production-progress-template.md)、[剧本](assets/script-template.md)、[文字分镜表](assets/storyboard-template.md) 和 [资产索引](assets/asset-register-template.md) 模板创建缺失文件；已有文件先读取，绝不按模板覆盖。没有画布项目 ID 时先记录本轮计划，待项目建立后再创建对应目录。已存在旧“短片制作进度”画布文本节点时，先读取并核对，再将可确认的状态并入 `progress.md`，保留原节点。
+
+`script.md` 与 `storyboard.md` 分别是剧本和文字分镜表的当前版本；用户批准后若要大改，先复制为同目录的 `script.<旧版本>.md` 或 `storyboard.<旧版本>.md`，再更新固定文件名及 `progress.md` 中的版本。画布有序组只收纳分镜图，`progress.md` 记录其精确组 ID；可视分镜图顺序从该组的 `metadata.groupSlots` 回读。画布节点、任务、生成记录和媒体以 Backend 为准；`assets.md` 记录 nodeId、assetId 与 storageKey，不复制图片和视频到制作目录。
+
+## 进度更新与恢复
+
+1. 开始或恢复制作时先读取该项目的 `progress.md`，再读取当前阶段需要的 `script.md`、`storyboard.md` 或 `assets.md`；文字镜头计划以 `storyboard.md` 为准，可视分镜图通过记录的组 ID 和 `metadata.groupSlots` 回读，再核对任务日志。
+2. 确定本轮范围后，记录阶段状态、已验收/目标数、关键资产 ID、镜头/Clip 状态、在途 taskId、未决问题和下一项可执行动作。没有真实结果的字段写“待生成/待核对”。
+3. 阶段产物、任务终态、验收或返修结论、用户授权范围发生变化，或本轮暂停/结束时，更新受影响的文件并回读确认。任务轮询无变化时不重复写入。
+4. 恢复在途任务时先查原 taskId 的终态，不重提生成。若记录的分镜图组 ID 不存在、组不是有序组或成员顺序无法确认，先核实画布，不凭组标题或屏幕位置重建图片顺序。文字分镜表与可视分镜图不一致时保留两边，按最新用户决定核对后修正；不得静默覆盖已批准剧本或分镜内容。
+
+阶段状态用 `未开始 / 进行中 / 待用户确认 / 需返修 / 已验收 / 受阻`；逐镜和逐 Clip 的 `accepted / needs-redo / waiting-user / blocked-upstream` 保留在明细中。完成数量只统计有证据且通过本阶段验收的条目；关键帧目标数只统计文字分镜表中策略为“新生成”的镜头。进度文件只写状态与证据索引，不复制完整 prompt、凭据或大段日志。
 
 ## 通用执行节奏
 

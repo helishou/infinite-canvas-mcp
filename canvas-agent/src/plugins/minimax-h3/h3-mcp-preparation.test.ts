@@ -37,7 +37,9 @@ function fixture() {
     };
     const calls: any[] = [];
     const backend = {
+        backendUrl: "http://backend.test",
         listCanvasProjects: async () => [project],
+        getCanvasProject: async (projectId: string) => projectId === project.id ? project : null,
         applyCanvasOperations: async (_projectId: string, operations: any[], _expectedRevision?: number) => {
             calls.push(operations);
             for (const operation of operations) {
@@ -55,6 +57,7 @@ function fixture() {
     };
     const context: any = {
         backend,
+        getCanvasProject: async (projectId: string) => projectId === project.id ? project : null,
         getCanvasNode: async (id: string) => project.nodes.find((node: any) => node.id === id) || null,
         getCanvasNodes: async () => project.nodes,
     };
@@ -116,6 +119,12 @@ test("h3_get_clip 默认只返回总览，详细内容由定向工具读取", as
     assert.equal("snapshot" in overview, false);
     assert.equal("runtime" in overview, false);
     assert.equal("references" in overview, false);
+
+    const detailed: any = await handlers.h3_get_clip!({ ...input, include: ["prompt", "references", "runtime"] });
+    assert.equal(detailed.prompt.semantic, "旧草稿");
+    assert.deepEqual(detailed.references, []);
+    assert.equal(detailed.runtime.modelName, "wrong-draft");
+    assert.equal(typeof detailed.timings.projectReadMs, "number");
 
     const prompt: any = await handlers.h3_get_clip_prompt!(input);
     assert.equal(prompt.prompt.semantic, "旧草稿");

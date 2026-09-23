@@ -37,7 +37,7 @@ export class CanvasBrowserScriptDispatcher {
         if (active) return { taskId: active.id, executor };
         const prepared = prepareCanvasGenerationTarget(this.stores, input, taskId);
         input = prepared.command as BrowserScriptTaskInput;
-        const project = input.mode === "text" ? this.canvasTarget(input) : prepared.project;
+        const project = prepared.project || (input.mode === "text" ? this.canvasTarget(input) : null);
         const target = project && input.nodeId ? arrayRecords(project.nodes).find((node) => String(node.id || "") === input.nodeId) : undefined;
         const targetSize = prepared.targetSize || (target ? { width: Number(target.width || 0), height: Number(target.height || 0) } : undefined);
         const task = this.stores.tasks.create(taskId, CANVAS_BROWSER_TASK_KIND, input as unknown as Record<string, unknown>, {

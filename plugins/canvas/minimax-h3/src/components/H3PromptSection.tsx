@@ -154,6 +154,7 @@ function storyboardPictureDescription(ref: H3Ref, assets: CanvasReferenceAsset[]
   const asset = storyboardPictureAsset(ref, assets);
   const summary = typeof asset?.analysis?.summary === "string" ? asset.analysis.summary.trim() : typeof ref.analysis?.summary === "string" ? ref.analysis.summary.trim() : "";
   const tags = visualReferenceTags([...(asset?.tags || []), ...(ref.tags || [])]).join(", ");
+  const description = typeof ref.description === "string" ? ref.description.trim() : "";
   const clean = (value: string) => value
     .split(/\r?\n/u)[0]
     .replace(/\bep\d{1,3}[-_ ]s\d{1,3}[-_ ]\d{1,3}\b/giu, " ")
@@ -165,9 +166,9 @@ function storyboardPictureDescription(ref: H3Ref, assets: CanvasReferenceAsset[]
     .replace(/[|·:：]+/gu, " ")
     .replace(/\s+/gu, " ")
     .replace(/^[\s,，.;。_-]+|[\s,，.;。_-]+$/gu, "");
-  // 描述只取视觉分析摘要与标签，禁止兜底到 asset.label / ref.name ——
+  // 描述只取参考描述、视觉分析摘要与标签，禁止兜底到 asset.label / ref.name ——
   // 文件名（如「分镜图·seg07_v38.png」）对视频模型毫无语义，写进 prompt 只会污染。
-  const details = [summary, tags];
+  const details = [description, summary, tags];
   return details.map(clean).find((value) => value && !/^(?:the|a|an|for|of)$/iu.test(value))?.slice(0, 140) || "";
 }
 
@@ -984,7 +985,7 @@ export function H3PromptSection({
       if (latestSelectedId !== segmentId) throw new Error("当前 Clip 已切换，未将生成结果写入其他 Clip。");
       const latestSegment = segmentsFor(latestMetadata).find((item) => item.id === segmentId);
       if (!latestSegment) throw new Error("当前 Clip 已不存在，未应用生成结果。");
-      const latestGeneration = storyboardGenerationContext(ctx, latestSegment, fields, shots, referenceCatalog);
+      const latestGeneration = storyboardGenerationContext(ctx, latestSegment, fields, shots, referenceCatalog, storyboardRetentionLevelsRef.current);
       if (await storyboardPromptFingerprint(latestGeneration.content) !== fingerprint) throw new Error("分镜引用或人物资料在生成过程中发生变化，请确认后重试。");
       if (
         readPromptSection(latest.text, "summary") !== normalizedSummary ||
@@ -1162,15 +1163,12 @@ export function H3PromptSection({
       ];
       if (transitionPlan) userPromptParts.push(`Transition plan (fixed image order; do not reorder):\n${transitionPlan}`);
       const userPrompt = userPromptParts.filter(Boolean).join("\n\n");
+      const refPayload = references.map((ref) => ({ url: ref.url, name: ref.name, storageKey: ref.storageKey, mimeType: ref.mimeType }));
       const result = await ctx.ai.generateText(userPrompt, {
         model,
         system,
-        references: references.map((ref) => ({
-          url: ref.url,
-          name: ref.name,
-          storageKey: ref.storageKey,
-          mimeType: ref.mimeType,
-        })),
+        references: refPayload,
+        log: { taskMode: "增强提示词", nodeId: ctx.node.id, segmentId: targetSegmentId, references: refPayload },
       });
       // 模型未返回内容时（如 Ollama 空响应），requestImageQuestion 现在返回空串，
       // 这里不能把 prompt 覆写成占位符/空串——保留用户原文，并给出明确失败提示。
@@ -1226,6 +1224,7 @@ export function H3PromptSection({
       const result = await ctx.ai.generateText(promptAtCall.trim(), {
         model,
         system: TRANSLATION_SYSTEM_PROMPT,
+        log: { taskMode: "翻译", nodeId: ctx.node.id, segmentId: segmentIdAtCall },
       });
       const text = result.text.trim();
       if (text) {
@@ -1339,8 +1338,9 @@ export function H3PromptSection({
         tokens: [pictureTag, `{{ref:${ref.bindingId}}}`],
       };
     }),
+    ...editorReferences.filter((reference) => reference.kind === "audio" || reference.kind === "video"),
     ...characterReferences,
-  ], [characterReferences, imageRefs]);
+  ], [characterReferences, editorReferences, imageRefs]);
 
   const boundStoryboardImageCount = new Set(storyboardShots.flatMap((shot) => [
     ...(shot.pictureBindingId ? [shot.pictureBindingId] : []),

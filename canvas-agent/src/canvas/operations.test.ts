@@ -24,11 +24,11 @@ test("generation flow reuses referenced nodes when the prompt only mentions them
     assert.equal(runs.length, 1);
 });
 
-test("generation flow still creates a prompt node for prose prompts", () => {
+test("generation flow keeps prose prompts on the smart image node", () => {
     const ops = opsOf("canvas_generate_image", { prompt: "a cat on a roof", referenceNodeIds: ["text-1"], autoRun: true });
-    assert.equal(ops.filter((op) => op.type === "add_node" && op.nodeType === "text").length, 1);
+    assert.equal(ops.filter((op) => op.type === "add_node" && op.nodeType === "text").length, 0);
     const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
-    assert.match(String(config?.metadata?.prompt), /@\[node:text-/);
+    assert.equal(config?.metadata?.prompt, "a cat on a roof");
     assert.equal(config?.metadata?.smart, true);
 });
 
@@ -115,13 +115,9 @@ test("generation flow anchors to the first reference node (same row, x = ref.rig
         ],
     };
     const ops = opsOf("canvas_generate_image", { prompt: "a follow-up shot", referenceNodeIds: ["ref"], autoRun: true }, state);
-    const text = ops.find((op) => op.type === "add_node" && op.nodeType === "text");
     const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
-    // text 起点 = firstReference 右边 + 96、y 与 reference 对齐
-    assert.equal((text as { position: { x: number; y: number } }).position.x, 1000 + 320 + 96);
-    assert.equal((text as { position: { x: number; y: number } }).position.y, 240);
-    // config 在 text 右边 420（保持老间距口径），y 同样与 reference 对齐
-    assert.equal((config as { position: { x: number; y: number } }).position.x, 1000 + 320 + 96 + 420);
+    // 图片生成把提示词直接写进 config，config 贴在 firstReference 同行右侧。
+    assert.equal((config as { position: { x: number; y: number } }).position.x, 1000 + 320 + 96);
     assert.equal((config as { position: { x: number; y: number } }).position.y, 240);
 });
 
@@ -132,10 +128,10 @@ test("generation flow falls back to canvas-far-right + y=0 when no reference is 
         ],
     };
     const ops = opsOf("canvas_generate_image", { prompt: "lone prompt", autoRun: true }, state);
-    const text = ops.find((op) => op.type === "add_node" && op.nodeType === "text");
-    // 没有 reference 时退回到 nextCanvasX（画布全局最右 + 80），y 用 0
-    assert.equal((text as { position: { x: number; y: number } }).position.x, 320 + 80);
-    assert.equal((text as { position: { x: number; y: number } }).position.y, 0);
+    const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
+    // 没有 reference 时，config 退回到 nextCanvasX（画布全局最右 + 80），y 用 0。
+    assert.equal((config as { position: { x: number; y: number } }).position.x, 320 + 80);
+    assert.equal((config as { position: { x: number; y: number } }).position.y, 0);
 });
 
 test("generation flow moves right when the reference row already contains a previous flow", () => {
@@ -147,14 +143,14 @@ test("generation flow moves right when the reference row already contains a prev
         ],
     };
     const ops = opsOf("canvas_generate_image", { prompt: "another shot", referenceNodeIds: ["ref"], autoRun: true }, state);
-    const text = ops.find((op) => op.type === "add_node" && op.nodeType === "text");
-    assert.equal((text as { position: { x: number; y: number } }).position.x, 2252);
-    assert.equal((text as { position: { x: number; y: number } }).position.y, 240);
+    const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
+    assert.equal((config as { position: { x: number; y: number } }).position.x, 2252);
+    assert.equal((config as { position: { x: number; y: number } }).position.y, 240);
 });
 
 test("generation flow handles legacy nodes without dimensions", () => {
     const state = { nodes: [{ id: "legacy", type: "image", position: { x: 100, y: 0 } }] };
     const ops = opsOf("canvas_generate_image", { prompt: "legacy canvas" }, state as any);
-    const text = ops.find((op) => op.type === "add_node" && op.nodeType === "text");
-    assert.equal((text as { position: { x: number; y: number } }).position.x, 500);
+    const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
+    assert.equal((config as { position: { x: number; y: number } }).position.x, 500);
 });

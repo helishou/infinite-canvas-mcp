@@ -10,7 +10,7 @@ import { sameRef } from "../services/h3-compatibility";
 import { syncReferenceCatalog } from "../services/h3-reference-sync";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { h3ThemeVars } from "../h3-theme";
-import { removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
+import { assignStoryboardShotRef, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, H3_TIMELINE_MIN, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
@@ -133,7 +133,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         return { id: node.id, name: String(metadata.characterName || node.title || "人物"), previewUrl: typeof primary?.url === "string" ? primary.url : undefined };
     });
     // 空 ref 槽添加或在职责弹窗内替换引用时，复用画布既有的「选节点作参考」模式；选中节点通过 canvas-reference-pick 回抛。
-    const [pickingRef, setPickingRef] = useState<{ segmentId: string; slotIndex: number; types: H3Ref["type"][]; replaceRef?: H3Ref } | null>(null);
+    const [pickingRef, setPickingRef] = useState<{ segmentId: string; slotIndex: number; types: H3Ref["type"][]; replaceRef?: H3Ref; shotId?: string } | null>(null);
     const catalogSyncedRef = useRef(new Map<string, string>());
     useEffect(() => {
         const syncReferences = (changedNodeIds?: Set<string>) => {
@@ -252,6 +252,13 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         setPickingRef({ segmentId, slotIndex, types: mode === "ref2va" ? ["image", "video", "audio"] : ["image"] });
         window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { nodeId: ctx.node.id } }));
     };
+    // 空分镜双击 → 请画布进入「选节点作参考」模式，选中后把图片绑到该分镜（见 applyCanvasPickedNode 的 shotId 分支）。
+    const requestStoryboardShotPick = (segmentId: string, shotId: string) => {
+        const segment = segments.find((item) => item.id === segmentId);
+        if (!segment) return;
+        setPickingRef({ segmentId, slotIndex: -1, shotId, types: ["image"] });
+        window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { nodeId: ctx.node.id } }));
+    };
     const requestCanvasRefReplace = () => {
         if (!editingRef) return;
         const segment = segments.find((item) => item.id === editingRef.segmentId);
@@ -267,11 +274,20 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     };
     // 画布选中的节点 → 落进被点的槽。角色节点与拖拽路径保持同一口径：建/复用角色组，
     // outfit 拆 image ref、声线拆 audio ref；其余节点按内容展开（场景图 / H3 成品 / 通用媒体）。
-    const applyCanvasPickedNode = (pick: { segmentId: string; slotIndex: number; types: H3Ref["type"][]; replaceRef?: H3Ref }, sourceNodeId: string) => {
+    const applyCanvasPickedNode = (pick: { segmentId: string; slotIndex: number; types: H3Ref["type"][]; replaceRef?: H3Ref; shotId?: string }, sourceNodeId: string) => {
         const node = ctx.getNode(sourceNodeId);
         if (!node || node.id === ctx.node.id) return;
         const segment = segments.find((item) => item.id === pick.segmentId);
         if (!segment) return;
+        // 空分镜绑图：取选中节点的第一张图片（角色节点取主服装图），以 storyboard 职责绑到该分镜
+        if (pick.shotId) {
+            const shotImage = node.type === "character"
+                ? (() => { const group = readCharacterGroupFromNode(node); return group?.outfits[0]; })()
+                : h3RefCandidates([node], ctx.node.id, ctx.getNodes(), ctx.getConnections()).map((item) => item.ref).find((ref) => ref.type === "image");
+            if (!shotImage?.url) { message.warning("所选节点没有可用图片，未绑定分镜"); return; }
+            commitSegmentChange(assignStoryboardShotRef(segment, pick.shotId, { ...shotImage, type: "image" }), true);
+            return;
+        }
         if (pick.replaceRef) {
             const current = refsForSegment(segment);
             const oldIndex = current.findIndex((ref) => pick.replaceRef?.bindingId ? ref.bindingId === pick.replaceRef.bindingId : sameRef(ref, pick.replaceRef!));
@@ -504,7 +520,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
             <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={resultUrl(selected?.result) ? Math.max(0, playhead - Number(selected?.start || 0)) : playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} /></div>
-            <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestPickRef={requestCanvasRefPick} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
+            <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestPickRef={requestCanvasRefPick} onRequestPickStoryboardShot={requestStoryboardShotPick} pickingShotKey={pickingRef?.shotId ? `${pickingRef.segmentId}:${pickingRef.shotId}` : undefined} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         </div>

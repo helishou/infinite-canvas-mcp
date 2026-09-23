@@ -1392,7 +1392,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       console.log(`Connect token: ${config.token}`);
       console.log("Codex MCP is not installed by this command.");
       console.log(
-        "Optional MCP add: codex mcp add infinite-canvas -- npx -y @basketikun/infinite-canvas-backend mcp",
+        "Optional MCP add: codex mcp add infinite-canvas --url http://127.0.0.1:17370/mcp",
       );
       console.log(
         "Remove manually added MCP: codex mcp remove infinite-canvas",

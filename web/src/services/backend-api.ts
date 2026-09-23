@@ -11,6 +11,7 @@ export type BackendMediaResult = {
     storageKey: string;
     url: string;
     mimeType: string;
+    filename?: string;
     bytes: number;
     width: number | null;
     height: number | null;

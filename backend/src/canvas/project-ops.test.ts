@@ -265,6 +265,20 @@ test("add_node：显式坐标仍保持调用方布局，不被自动排布覆盖
     assert.deepEqual(project.nodes[0].position, { x: 120, y: 240 });
 });
 
+test("add_node：写入有序组成员时同步 groupSlots 和节点位置", () => {
+    const project = makeProject([
+        { id: "g1", type: "group", title: "有序组", position: { x: 0, y: 0 }, width: 760, height: 480, metadata: { orderedGroup: true, groupSlots: ["old"] } },
+        { id: "old", type: "image", title: "旧节点", position: { x: 24, y: 52 }, width: 240, height: 160, metadata: { groupId: "g1" } },
+    ]);
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_node", id: "new", nodeType: "image", position: { x: 1600, y: 900 }, width: 240, height: 160, metadata: { groupId: "g1" } },
+    ]);
+    const group = project.nodes.find((node) => node.id === "g1")!;
+    const added = project.nodes.find((node) => node.id === "new")!;
+    assert.deepEqual((group.metadata as Record<string, unknown>).groupSlots, ["old", "new"]);
+    assert.ok((added.position as { x: number }).x < 760 && (added.position as { y: number }).y < 480, "新节点应立即落在有序组框内");
+});
+
 test("run_generation 前的提示词更新会持久化到智能节点", () => {
     const project = makeProject([{ id: "config-1", type: "config", title: "智能生成", position: { x: 0, y: 0 }, width: 320, height: 240, metadata: { smart: true, generationMode: "image" } }]);
     applyCanvasProjectOperations(project as Record<string, unknown>, [

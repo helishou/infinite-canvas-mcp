@@ -4,9 +4,9 @@ import { sameRef } from "./h3-compatibility";
 export function refsForSegment(segment: H3Segment) {
     if (segment.referenceBindings?.length) {
         return segment.referenceBindings.filter((binding) => binding.enabled !== false && (binding.url || binding.storageKey)).map((binding) => ({
-            url: binding.url || "", type: binding.mediaType || inferRefType(binding.mimeType || binding.url || binding.label), name: binding.label,
+            url: binding.url || "", type: inferH3ReferenceMediaType(binding), name: binding.label,
             storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId, role: binding.role,
-            subjectId: binding.subjectId, storyboardSubjectIds: binding.storyboardSubjectIds, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, enabled: binding.enabled, usage: binding.usage, retentionLevel: binding.retentionLevel,
+            subjectId: binding.subjectId, storyboardSubjectIds: binding.storyboardSubjectIds, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, description: binding.description, enabled: binding.enabled, usage: binding.usage, retentionLevel: binding.retentionLevel,
             groupId: binding.groupId, outfitId: binding.outfitId,
         } as H3Ref));
     }
@@ -16,7 +16,7 @@ export function refsForSegment(segment: H3Segment) {
     // persisting an empty refItems array. Treat that empty array as absent;
     // once refItems contains entries it is the canonical ordered list.
     const items = segment.refItems?.length ? segment.refItems : bucketItems;
-    const refs = items.filter((item) => item?.url || item?.storageKey).map((item) => ({ ...item, type: item.type || (item as H3Ref & { kind?: H3Ref["type"] }).kind || "image" as const }));
+    const refs = items.filter((item) => item?.url || item?.storageKey).map((item) => ({ ...item, type: inferH3ReferenceMediaType(item as H3Ref & { kind?: H3Ref["type"] }) }));
     return refs.filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
 }
 
@@ -51,7 +51,7 @@ export function inferReferenceRole(ref: Pick<H3Ref, "name" | "role" | "type">): 
 }
 
 function refToBinding(ref: H3Ref): H3ReferenceBinding {
-    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], enabled: ref.enabled !== false, usage: ref.usage || "reference", retentionLevel: ref.retentionLevel, subjectId: ref.subjectId, storyboardSubjectIds: ref.storyboardSubjectIds, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId, groupId: ref.groupId, outfitId: ref.outfitId };
+    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], description: ref.description, enabled: ref.enabled !== false, usage: ref.usage || "reference", retentionLevel: ref.retentionLevel, subjectId: ref.subjectId, storyboardSubjectIds: ref.storyboardSubjectIds, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId, groupId: ref.groupId, outfitId: ref.outfitId };
 }
 
 function ensureReferenceIdentity(ref: H3Ref, index: number): H3Ref {
@@ -63,6 +63,12 @@ function stableId(prefix: string, value: string) {
     let hash = 2166136261;
     for (const char of value) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
     return `${prefix}-${(hash >>> 0).toString(36)}`;
+}
+
+export function inferH3ReferenceMediaType(value: { storageKey?: unknown; mediaType?: unknown; type?: unknown; kind?: unknown; mimeType?: unknown; url?: unknown; name?: unknown; label?: unknown }): H3Ref["type"] {
+    const storageType = /^(image|video|audio):/i.exec(String(value.storageKey || ""))?.[1]?.toLowerCase();
+    if (storageType === "video" || storageType === "audio" || storageType === "image") return storageType;
+    return inferRefType([value.mediaType, value.type, value.kind, value.mimeType, value.url, value.name, value.label].filter(Boolean).join(" "));
 }
 
 function inferRefType(value: string): H3Ref["type"] {

@@ -171,16 +171,20 @@ export type GenerateVideoResult = {
     durationMs?: number;
 };
 
+// 传入 log 后宿主会把本次调用登记进生成日志（platform=canvas-text），节点/Clip 同时写进运行任务
+export type GenerateTextLogMeta = { taskMode: string; prompt?: string; nodeId?: string; segmentId?: string; references?: Array<Record<string, unknown>> };
 export type GenerateTextOptions = {
     signal?: AbortSignal;
     model?: string;
     system?: string; // 附加系统提示词(拼在宿主系统提示之后)
     references?: Array<{ url: string; name?: string }>;
     onDelta?: (text: string) => void; // 流式增量回调
+    log?: GenerateTextLogMeta;
 };
 
 export type GenerateTextResult = {
     text: string;
+    taskId?: string; // Backend 运行任务 ID（任务中心可查）
 };
 export type LocalH3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
 export type LocalH3Result = { url: string; storageKey?: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; actualSubmission?: LocalH3ActualSubmission; segments?: Array<{ media?: Array<{ url: string; storageKey?: string; mimeType: string }> }> };

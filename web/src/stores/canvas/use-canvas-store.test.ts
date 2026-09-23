@@ -32,6 +32,18 @@ test("增量回放保留无关节点对象，不修改原始基线", () => {
     assert.notEqual(base.nodes[0].title, "changed");
 });
 
+test("Backend 增量回放 MCP 有序组成员时同步槽位和位置", () => {
+    const base = makeProject([
+        { id: "g1", type: "group", title: "有序组", position: { x: 0, y: 0 }, width: 760, height: 480, metadata: { orderedGroup: true, groupSlots: ["old"] } },
+        { id: "old", type: "image", title: "旧节点", position: { x: 24, y: 52 }, width: 240, height: 160, metadata: { groupId: "g1" } },
+    ]);
+    const next = applyBackendCanvasDelta(base, [{ type: "add_node", id: "new", nodeType: "image", position: { x: 1600, y: 900 }, width: 240, height: 160, metadata: { groupId: "g1" } }], 2);
+    const group = next.nodes.find((node) => node.id === "g1")!;
+    const added = next.nodes.find((node) => node.id === "new")!;
+    assert.deepEqual(group.metadata?.groupSlots, ["old", "new"]);
+    assert.ok(added.position.x < 760 && added.position.y < 480, "远端新增节点应立即落在有序组框内");
+});
+
 const VIEWPORT = { x: 0, y: 0, k: 1 };
 
 function makeH3Node(id: string, segments: Array<Record<string, unknown>>, extras: Record<string, unknown> = {}): Record<string, unknown> {

@@ -195,6 +195,19 @@ export class BackendClient {
     return Array.isArray(data.projects) ? data.projects : [];
   }
 
+  async getCanvasProject(projectId: string): Promise<Record<string, unknown>> {
+    const path = `/canvas/projects/${encodeURIComponent(projectId)}`;
+    const data = await this.get<{ ok: boolean; project?: Record<string, unknown> }>(path);
+    if (!data.project)
+      throw new BackendClientError(`Backend ${path} returned no project`, {
+        kind: "invalid_response",
+        method: "GET",
+        path,
+        code: "BACKEND_INVALID_RESPONSE",
+      });
+    return data.project;
+  }
+
   async listDramaEpisodes(dramaId: string) {
     const data = await this.get<{
       ok: boolean;
@@ -468,6 +481,68 @@ export class BackendClient {
         },
       );
     return { task: data.task, events: data.events || [] };
+  }
+
+  async *streamEvents(signal?: AbortSignal, cursor?: string): AsyncGenerator<Record<string, unknown>> {
+    const path = `/events${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`;
+    let response: Response;
+    try {
+      response = await fetch(`${this.backendUrl}${path}`, {
+        headers: { accept: "text/event-stream", authorization: `Bearer ${this.backendToken}` },
+        signal,
+      });
+    } catch (error) {
+      throw new BackendClientError(`Backend GET /events failed`, {
+        kind: isTimeoutError(error) ? "timeout" : "network",
+        method: "GET",
+        path: "/events",
+        cause: error,
+      });
+    }
+    if (!response.ok || !response.body)
+      throw new BackendClientError(`Backend GET /events failed: HTTP ${response.status}`, {
+        kind: "http",
+        method: "GET",
+        path: "/events",
+        status: response.status,
+        code: response.status === 401 || response.status === 403 ? "AUTH_REQUIRED" : undefined,
+      });
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const parseBlock = (block: string) => {
+      const eventType = block.split("\n").find((line) => line.startsWith("event:"))?.slice(6).trim();
+      const eventId = block.split("\n").find((line) => line.startsWith("id:"))?.slice(3).trim();
+      const data = block.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+      if (!data) return undefined;
+      try {
+        const parsed = JSON.parse(data);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+        return { ...parsed as Record<string, unknown>, ...(eventType && !("type" in parsed) ? { type: eventType } : {}), ...(eventId && !("id" in parsed) ? { id: eventId } : {}) };
+      } catch {
+        return undefined;
+      }
+    };
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary >= 0) {
+          const event = parseBlock(buffer.slice(0, boundary));
+          buffer = buffer.slice(boundary + 2);
+          if (event) yield event;
+          boundary = buffer.indexOf("\n\n");
+        }
+      }
+      buffer += decoder.decode();
+      const trailing = parseBlock(buffer);
+      if (trailing) yield trailing;
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
   }
 
   async listTasks(

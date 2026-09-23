@@ -2,11 +2,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, type ZodRawShape, type ZodTypeAny } from "zod";
 
 import { BackendClient } from "../runtime/backend-client.js";
-import { backendComfyUi, createBackendClient, type ComfyUiClient } from "../runtime/comfy-client.js";
-import { loadConfig, type CanvasAgentConfig } from "../config.js";
+import type { ComfyUiClient } from "../runtime/comfy-client.js";
 import { logger } from "../utils/logger.js";
-import type { ToolName } from "../canvas/schemas.js";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult } from "../canvas/generation-contract.js";
+import { H3_PLUGIN_VERSION } from "../plugins/minimax-h3/version.js";
 
 // 画布节点在 Agent 侧的轻量形态(避免与 web 类型耦合)
 export type AgentCanvasNode = {
@@ -36,14 +35,12 @@ export type PluginMcpDeclaration = {
     mcp: { tools: PluginMcpToolWire[]; enabled: boolean };
 };
 
-// ---- Agent 侧注入给插件 handler 的上下文 ----
+// ---- Backend MCP 注入给插件 handler 的上下文 ----
 export type PluginMcpContext = {
-    endpoint: string;
-    token: string;
-    /** 总后台地址（GET /media、/runtime/media-file 免 token，用于把 H3 结果改写成前端可播放地址）。 */
-    backendUrl: string;
     /** 画布/素材/媒体/日志的唯一业务数据源。 */
     backend: PluginMcpBackend;
+    /** Read one authoritative canvas snapshot by id. Concurrent H3 reads share only the in-flight fetch. */
+    getCanvasProject: (projectId: string) => Promise<Record<string, unknown>>;
     /** ComfyUI 能力（Backend 唯一权威；见 comfy-client.ts）。 */
     comfyUi: ComfyUiClient;
     getCanvasNodes: () => Promise<AgentCanvasNode[]>;
@@ -55,13 +52,13 @@ export type PluginMcpContext = {
     deleteH3Segment: (nodeId: string, segmentId: string) => Promise<void>;
     /** 完全替换 H3 节点的 segments（plan 重排等场景）。 */
     replaceH3Segments: (nodeId: string, segments: Array<Record<string, unknown>>) => Promise<void>;
-    /** 插件需要调用通用画布工具时的入口；Backend MCP 注入原生执行器，Agent MCP 注入浏览器桥接。 */
-    callCanvasTool: (name: ToolName, input: Record<string, unknown>) => Promise<unknown>;
 };
 
 /** 插件 MCP 实际使用的最小 Backend 能力。 */
 export type PluginMcpBackend = {
+    backendUrl?: string;
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
+    getCanvasProject(projectId: string): Promise<Record<string, unknown>>;
     applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[] }>;
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
     canvasRunGeneration(input: CanvasGenerationCommand): Promise<{ ok?: boolean } & CanvasGenerationStartResult>;
@@ -74,7 +71,7 @@ export type PluginMcpBackend = {
 
 export type McpToolHandler = (input: Record<string, unknown>, context: PluginMcpContext) => Promise<unknown>;
 
-// 插件 MCP 模块(Agent 侧打包,经 allowlist 加载)
+// 插件 MCP 模块(Backend 侧经 allowlist 加载)
 export type PluginMcpModule = {
     id: string;
     version: string;
@@ -86,7 +83,7 @@ export type PluginMcpModule = {
 type FirstPartyEntry = { version: string; load: () => Promise<PluginMcpModule> };
 export const KNOWN_FIRST_PARTY: Record<string, FirstPartyEntry> = {
     "minimax-h3": {
-        version: "1.5.0",
+        version: H3_PLUGIN_VERSION,
         load: async () => (await import("../plugins/minimax-h3/mcp.js")).pluginMcp,
     },
 };
@@ -112,20 +109,34 @@ export async function savePluginMcpDeclarationsToBackend(backend: Pick<BackendCl
 }
 
 // 构造插件 MCP 运行上下文(Agent 侧)
-export function buildPluginMcpContext(config: CanvasAgentConfig, backend: PluginMcpBackend, comfyUi: ComfyUiClient, callCanvasTool: PluginMcpContext["callCanvasTool"]): PluginMcpContext {
+const inFlightCanvasProjectReads = new Map<string, Promise<Record<string, unknown>>>();
+
+async function readCanvasProjectOnce(backend: PluginMcpBackend, projectId: string) {
+    const key = `${backend.backendUrl || "default"}\u0000${projectId}`;
+    let pending = inFlightCanvasProjectReads.get(key);
+    if (!pending) {
+        let request!: Promise<Record<string, unknown>>;
+        request = backend.getCanvasProject(projectId).finally(() => {
+            if (inFlightCanvasProjectReads.get(key) === request) inFlightCanvasProjectReads.delete(key);
+        });
+        pending = request;
+        inFlightCanvasProjectReads.set(key, request);
+    }
+    const project = await pending;
+    return structuredClone(project);
+}
+
+export function buildPluginMcpContext(backend: PluginMcpBackend, comfyUi: ComfyUiClient): PluginMcpContext {
     const readNodes = async (): Promise<AgentCanvasNode[]> => {
         const projects = await backend.listCanvasProjects() as Array<{ nodes?: AgentCanvasNode[] }>;
         return projects.flatMap((project) => (Array.isArray(project.nodes) ? project.nodes : []) as AgentCanvasNode[]);
     };
     return {
-        endpoint: config.url,
-        token: config.token,
-        backendUrl: config.backendUrl || `http://127.0.0.1:${Number(process.env.INFINITE_CANVAS_BACKEND_PORT) || 17370}`,
         backend,
+        getCanvasProject: (projectId) => readCanvasProjectOnce(backend, projectId),
         comfyUi,
         getCanvasNodes: readNodes,
         getCanvasNode: async (id) => (await readNodes()).find((node) => node.id === id) ?? null,
-        callCanvasTool,
         updateCanvasNode: async (id, patch, metadataPatch) => {
             // updateCanvasNode 只用于普通字段 + 节点级 metadata；H3 的 metadata.segments 走细粒度 op。
             if (metadataPatch && Object.prototype.hasOwnProperty.call(metadataPatch, "segments")) {
@@ -328,22 +339,4 @@ function jsonTypeToZod(node: unknown): ZodTypeAny {
         default:
             return z.any();
     }
-}
-
-/** 构造并接入插件 MCP 注册表(供 startMcpServer 调用)。 */
-export async function startPluginMcp(server: McpServer, callCanvasTool: PluginMcpContext["callCanvasTool"]): Promise<PluginMcpRegistry> {
-    const config = loadConfig(true);
-    const backend = createBackendClient(config.backendUrl || `http://127.0.0.1:17370`);
-    /** ComfyUI 走 backend(总后台权威),MCP 侧不再直连本地 ComfyUI 实例。 */
-    const comfyUi = backendComfyUi(backend, () => []);
-    const context = buildPluginMcpContext(config, backend, comfyUi, callCanvasTool);
-    const registry = new PluginMcpRegistry(server, context);
-    // 冷启动:从 SQLite 读取已启用插件
-    await registry.apply(await loadPluginMcpDeclarationsFromBackend(backend));
-    // 轮询仅用于兼容旧版浏览器通知；声明本身由 Backend 持久化。
-    const timer = setInterval(() => {
-        loadPluginMcpDeclarationsFromBackend(backend).then((declarations) => registry.apply(declarations)).catch((error) => logger.warn("plugin mcp sync failed", error));
-    }, 3000);
-    process.on("beforeExit", () => clearInterval(timer));
-    return registry;
 }

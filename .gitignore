@@ -29,3 +29,4 @@ web/public/plugins
 backend/venv
 artifacts
 tmp
+.codex

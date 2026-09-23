@@ -10,7 +10,7 @@ import { createBackendClient } from "../runtime/comfy-client.js";
 import { logger } from "../utils/logger.js";
 import { field, type JsonRecord, errorMessage } from "../utils/value.js";
 import { codexEventHistory, type CodexEventHistory } from "./codex-event-history.js";
-import type { CodexNotificationParams, CodexPlanUpdate, CodexReasoningEffort, CodexRequestMethod, CodexRequestParams, CodexRequestResult, CodexSkillSelector, CodexTurnInput } from "./codex-protocol.js";
+import type { CodexNotificationParams, CodexPlanUpdate, CodexReasoningEffort, CodexRequestMethod, CodexRequestParams, CodexRequestResult, CodexSkillSelector, CodexThreadItemEntry, CodexTurnInput } from "./codex-protocol.js";
 import type { AgentEmit, AgentPermissionMode } from "./types.js";
 
 type AgentEvent = JsonRecord & { type: string; usage?: unknown };
@@ -163,7 +163,63 @@ export class CodexAppClient {
 
     /** 读取指定 Codex 线程。 */
     readThread(threadId: string, includeTurns = true) {
-        return this.request("thread/read", { threadId, includeTurns });
+        return this.request("thread/read", { threadId, includeTurns }).catch(async (error: unknown) => {
+            if (!includeTurns || !isPaginatedThreadReadError(error)) throw error;
+            logger.info("Reading paginated Codex thread history", { threadId });
+            return await this.readPaginatedThread(threadId);
+        });
+    }
+
+    private async readPaginatedThread(threadId: string) {
+        const { thread } = await this.request("thread/read", { threadId, includeTurns: false });
+        const [turns, itemEntries] = await Promise.all([
+            this.readAllThreadTurns(threadId),
+            this.readAllThreadItems(threadId),
+        ]);
+        const itemsByTurn = new Map<string, CodexThreadItemEntry["item"][]>();
+        for (const entry of itemEntries) {
+            const items = itemsByTurn.get(entry.turnId) || [];
+            items.push(entry.item);
+            itemsByTurn.set(entry.turnId, items);
+        }
+        return {
+            thread: {
+                ...thread,
+                turns: turns.map((turn) => ({ ...turn, items: itemsByTurn.get(turn.id) || [] })),
+            },
+        };
+    }
+
+    private async readAllThreadTurns(threadId: string) {
+        const turns: CodexRequestResult<"thread/turns/list">["data"] = [];
+        const seenCursors = new Set<string>();
+        let cursor: string | null = null;
+        do {
+            const page: CodexRequestResult<"thread/turns/list"> = await this.request("thread/turns/list", {
+                threadId, cursor, limit: 100, sortDirection: "asc", itemsView: "notLoaded",
+            });
+            turns.push(...page.data);
+            cursor = page.nextCursor;
+            if (cursor && seenCursors.has(cursor)) throw new Error("Codex thread turns pagination repeated a cursor");
+            if (cursor) seenCursors.add(cursor);
+        } while (cursor);
+        return turns;
+    }
+
+    private async readAllThreadItems(threadId: string) {
+        const entries: CodexThreadItemEntry[] = [];
+        const seenCursors = new Set<string>();
+        let cursor: string | null = null;
+        do {
+            const page: CodexRequestResult<"thread/items/list"> = await this.request("thread/items/list", {
+                threadId, cursor, limit: 100, sortDirection: "asc",
+            });
+            entries.push(...page.data);
+            cursor = page.nextCursor;
+            if (cursor && seenCursors.has(cursor)) throw new Error("Codex thread items pagination repeated a cursor");
+            if (cursor) seenCursors.add(cursor);
+        } while (cursor);
+        return entries;
     }
 
     /** 归档指定 Codex 线程。 */
@@ -781,8 +837,7 @@ function codexConfig(permissionMode: AgentPermissionMode) {
     const agentConfig = loadConfig();
     const backend = createBackendClient(process.env.INFINITE_CANVAS_BACKEND_URL || agentConfig.backendUrl || "http://127.0.0.1:17370");
     const url = new URL(`${backend.backendUrl}/mcp`);
-    if (backend.backendToken) url.searchParams.set("token", backend.backendToken);
-    return { model_reasoning_summary: "auto", ...(permissionMode === "automatic" ? { approvals_reviewer: "auto_review" } : {}), mcp_servers: { "infinite-canvas": { url: url.toString(), default_tools_approval_mode: "approve", startup_timeout_sec: 20, tool_timeout_sec: 90 } } };
+    return { model_reasoning_summary: "auto", ...(permissionMode === "automatic" ? { approvals_reviewer: "auto_review" } : {}), mcp_servers: { "infinite-canvas": { url: url.toString(), bearer_token_env_var: "INFINITE_CANVAS_BACKEND_TOKEN", default_tools_approval_mode: "approve", startup_timeout_sec: 20, tool_timeout_sec: 90 } } };
 }
 
 function threadSettings(permissionMode: AgentPermissionMode) {
@@ -890,6 +945,10 @@ function parseMaybeJson(value: unknown) {
     } catch {
         return value;
     }
+}
+
+function isPaginatedThreadReadError(error: unknown) {
+    return /paginated threads do not support thread\/read.*includeTurns\s*=\s*true/i.test(errorMessage(error));
 }
 
 /** 定位当前依赖中 Codex CLI 的执行文件。 */

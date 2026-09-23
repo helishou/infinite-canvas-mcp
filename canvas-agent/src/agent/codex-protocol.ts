@@ -4,6 +4,7 @@ export type CodexThread = JsonRecord & { id: string; cwd: string; turns?: CodexT
 export type CodexTurn = JsonRecord & { id: string; error?: CodexTurnError | null; durationMs?: number | null };
 export type CodexTurnError = JsonRecord & { message: string };
 export type CodexItem = JsonRecord & { id: string; type: string; text?: string };
+export type CodexThreadItemEntry = { turnId: string; item: CodexItem };
 export type CodexPlanStep = { step: string; status: "pending" | "inProgress" | "completed" };
 export type CodexPlanUpdate = { threadId: string; turnId: string; explanation?: string | null; plan: CodexPlanStep[]; turnStatus?: string };
 export type CodexMcpStartupStatus = { threadId: string | null; name: string; status: "starting" | "ready" | "failed" | "cancelled"; error: string | null; failureReason: "reauthenticationRequired" | null };
@@ -91,6 +92,14 @@ type CodexRequestSpec = {
     "thread/read": {
         params: { threadId: string; includeTurns: boolean };
         result: { thread: CodexThread };
+    };
+    "thread/turns/list": {
+        params: { threadId: string; cursor?: string | null; limit?: number | null; sortDirection?: "asc" | "desc"; itemsView?: "notLoaded" | "summary" | "full" };
+        result: { data: CodexTurn[]; nextCursor: string | null; backwardsCursor: string | null };
+    };
+    "thread/items/list": {
+        params: { threadId: string; turnId?: string | null; cursor?: string | null; limit?: number | null; sortDirection?: "asc" | "desc" };
+        result: { data: CodexThreadItemEntry[]; nextCursor: string | null; backwardsCursor: string | null };
     };
     "thread/archive": {
         params: { threadId: string };
