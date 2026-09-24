@@ -10,6 +10,7 @@ import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createB
 import { useBackendStore } from "@/stores/use-backend-store";
 import { getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId } from "@/services/backend-api";
 import { CanvasCommandQueue, type CanvasCommand } from "@/lib/canvas/canvas-command-queue";
+import { buildCanvasConflictBaseline, type CanvasConflictBaseline } from "@/lib/canvas/canvas-conflict-baseline";
 import { canvasDraftPersistence } from "@/lib/canvas/canvas-draft-persistence";
 import { syncOrderedGroupMembership } from "@/lib/canvas/ordered-group";
 import { CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS, H3_LOCAL_VIEW_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
@@ -120,7 +121,7 @@ const commandBackend = getBackendUrl();
 const cacheKey = (id: string) => JSON.stringify([commandBackend, draftSessionId, id]);
 const deletionCache = localforage.createInstance({ name: "infinite-canvas-project-deletions" });
 let deletionWrite: Promise<unknown> = Promise.resolve();
-const pendingCommands = new CanvasCommandQueue<CanvasProject>({
+const pendingCommands = new CanvasCommandQueue<CanvasProject | CanvasConflictBaseline>({
     save: (command) => canvasDraftPersistence.save({ key: `command:${command.operationId}`, projectId: command.projectId, label: "画布编辑命令", record: command, write: () => commandOutbox.setItem(command.operationId, command) }),
     remove: (id) => canvasDraftPersistence.save({ key: `command:${id}`, label: "清理已确认命令", record: null, write: () => commandOutbox.removeItem(id) }),
 });
@@ -129,7 +130,7 @@ function captureCanvasAction(before: CanvasProject, after: CanvasProject) {
     const operations = diffCanvasProject(before, after);
     if (!operations.length) return;
     if (getBackendUrl() !== commandBackend) throw new Error("后台地址已改变，请刷新后继续编辑；原后台草稿仍保留");
-    pendingCommands.enqueue({ operationId: nanoid(), projectId: before.id, ownerId: draftSessionId, backend: commandBackend, source: getCanvasCollaborationClient(), order: ++commandOrder, base: before, operations });
+    pendingCommands.enqueue({ operationId: nanoid(), projectId: before.id, ownerId: draftSessionId, backend: commandBackend, source: getCanvasCollaborationClient(), order: ++commandOrder, base: buildCanvasConflictBaseline(before, operations), operations });
 }
 function projectCanvasCommands(remote: CanvasProject) {
     let projection = remote;
@@ -253,7 +254,7 @@ async function hydrateCanvasProjectsFromLocalStore() {
                 captureCanvasAction(submitted, entry.project);
             }
             // v2 缓存是可丢弃投影，只有明确的命令表示未提交编辑。
-            const commandBase = pendingCommands.list(id)[0]?.base;
+            const commandBase = pendingCommands.list(id)[0]?.base as CanvasProject | undefined; // Step 5 换成 isCanvasConflictBaseline 守卫
             const seed = entry.base && !entry.base.summary ? entry.base : commandBase || entry.project;
             if (entry.base?.summary && commandBase && !commandBase.summary) syncBases.set(id, commandBase);
             const projected = { ...projectCanvasCommands(seed).projection, viewport: entry.project.viewport };
@@ -263,8 +264,8 @@ async function hydrateCanvasProjectsFromLocalStore() {
         });
         for (const command of pendingCommands.list()) {
             if (pendingDeletedProjectIds.has(command.projectId) || projects.some((project) => project.id === command.projectId)) continue;
-            projects.push(projectCanvasCommands(command.base).projection);
-            syncBases.set(command.projectId, command.base);
+            projects.push(projectCanvasCommands(command.base as never as CanvasProject).projection); // Step 5 换成 isCanvasConflictBaseline 守卫
+            syncBases.set(command.projectId, command.base as never as CanvasProject); // Step 5 换成 isCanvasConflictBaseline 守卫
         }
         const normalizedProjects = projects.map(normalizeProjectMediaUrls);
         const currentProjects = useCanvasStore.getState().projects;
@@ -291,7 +292,7 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
     for (const project of projects) {
         if (generation !== syncGeneration) return;
         if (useCanvasStore.getState().canvasConflicts[project.id]) continue;
-        let active: CanvasCommand<CanvasProject> | undefined;
+        let active: CanvasCommand<CanvasProject | CanvasConflictBaseline> | undefined;
         try {
             let base = syncBases.get(project.id);
             if (!base) {
@@ -299,7 +300,7 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
                 catch (error) { if (!(error instanceof BackendApiError && error.status === 404)) throw error; }
                 if (!base) {
                     // 创建只写初始种子；其后编辑已经各自入队，不能把含这些编辑的整图重复创建。
-                    const seed = pendingCommands.list(project.id)[0]?.base || project;
+                    const seed = (pendingCommands.list(project.id)[0]?.base || project) as CanvasProject; // Step 5 换成 isCanvasConflictBaseline 守卫
                     base = normalizeProjectMediaUrls((await createBackendProject(seed as unknown as Record<string, unknown>)).project as unknown as CanvasProject);
                 }
                 syncBases.set(project.id, base);
@@ -802,7 +803,20 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
                 const id = String(segment.id || "");
                 if (!id) continue;
                 if (!baseById.has(id)) {
-                    operations.push({ type: "add_h3_segment", nodeId: node.id, segment: segment });
+                    const nextIndex = nextSegments.findIndex((item) => String(item.id || "") === id);
+                    const previousCandidate = nextIndex > 0 ? String(nextSegments[nextIndex - 1]?.id || "") : "";
+                    const nextCandidate = nextIndex + 1 < nextSegments.length ? String(nextSegments[nextIndex + 1]?.id || "") : "";
+                    // 锚点必须命中后端当前已有的段；连续新增段统一在最近的旧段前/后插入。
+                    const previousId = baseById.has(previousCandidate) ? previousCandidate : "";
+                    const nextId = baseById.has(nextCandidate) ? nextCandidate : "";
+                    // 保留 UI 插入位置。后端默认追加；不带锚点会让“在左/右添加 Clip”在
+                    // 回执或 SSE 重放后跑到末尾，看起来像刚添加的 Clip 被还原了。
+                    operations.push({
+                        type: "add_h3_segment",
+                        nodeId: node.id,
+                        segment: segment,
+                        ...(previousId ? { afterSegmentId: previousId } : nextId ? { beforeSegmentId: nextId } : {}),
+                    });
                 } else if (JSON.stringify(baseById.get(id)) !== JSON.stringify(segment)) {
                     // 字段级 patch：只把真正变化的字段放进 patch，减少带宽 / 减少冲突面
                     const baseSegment = baseById.get(id)!;
@@ -865,7 +879,7 @@ function isH3NodeType(type: string): boolean {
  *  - connect_nodes   → 远端已有同 id connection = 冲突（重复 connect）
  *  - delete_connections → 远端已无此 id = no-op
  *  - update_project → 按实际修改字段检查并发 */
-export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>, remote: CanvasProject, base?: CanvasProject, options?: { guardLayout?: boolean }): CanvasConflictTarget[] {
+export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>, remote: CanvasProject, base?: CanvasProject | CanvasConflictBaseline, options?: { guardLayout?: boolean }): CanvasConflictTarget[] {
     const remoteNodeIds = new Set(remote.nodes.map((node) => node.id));
     const remoteConnectionIds = new Set(remote.connections.map((connection) => connection.id));
     const baseNodes = new Map((base?.nodes || []).map((node) => [node.id, node]));
@@ -928,7 +942,11 @@ export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>
             const remoteSeg = remoteSegments.find((s) => String(s.id || "") === segmentId);
             const baseSeg = baseSegments.find((s) => String(s.id || "") === segmentId);
             if (type === "add_h3_segment") {
-                if (remoteSeg) targets.push({ id: `${nodeId}:${segmentId}`, kind: "update", detail: `H3 段「${segmentId}」在远端已存在，重复添加会被覆盖` });
+                // 自己的增量 SSE 可能先于 POST 回执到达；内容一致说明请求已落库，
+                // 不是协作者冲突，等待原命令回执即可。
+                if (remoteSeg && JSON.stringify(remoteSeg) !== JSON.stringify(op.segment)) {
+                    targets.push({ id: `${nodeId}:${segmentId}`, kind: "update", detail: `H3 段「${segmentId}」在远端已存在且内容不同` });
+                }
             } else if (type === "delete_h3_segment") {
                 if (!remoteSeg) continue; // no-op：远端已删
             } else if (type === "update_h3_segment") {
@@ -1017,8 +1035,26 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
             if (!node) continue;
             const metadata = { ...((node.metadata || {}) as Record<string, unknown>) };
             const segments = Array.isArray(metadata.segments) ? metadata.segments.map((segment) => ({ ...segment })) as Array<Record<string, unknown>> : [];
-            if (type === "replace_h3_segments") metadata.segments = Array.isArray(operation.segments) ? operation.segments : [];
-            else if (type === "add_h3_segment" && operation.segment && typeof operation.segment === "object") segments.push({ ...(operation.segment as Record<string, unknown>) });
+            if (type === "replace_h3_segments") {
+                const incoming = Array.isArray(operation.segments) ? operation.segments as Array<Record<string, unknown>> : [];
+                const previousById = new Map(segments.map((segment) => [String(segment.id || ""), segment]));
+                metadata.segments = incoming.map((segment) => ({ ...(previousById.get(String(segment.id || "")) || {}), ...segment }));
+            }
+            else if (type === "add_h3_segment" && operation.segment && typeof operation.segment === "object") {
+                const incoming = { ...(operation.segment as Record<string, unknown>) };
+                if (segments.some((segment) => String(segment.id || "") === String(incoming.id || ""))) {
+                    metadata.segments = segments;
+                    node.metadata = metadata as CanvasNodeData["metadata"];
+                    continue;
+                }
+                const beforeId = String(operation.beforeSegmentId || "");
+                const afterId = String(operation.afterSegmentId || "");
+                const index = beforeId ? segments.findIndex((segment) => String(segment.id || "") === beforeId)
+                    : afterId ? segments.findIndex((segment) => String(segment.id || "") === afterId) + 1
+                        : segments.length;
+                segments.splice(index < 0 ? segments.length : index, 0, incoming);
+                metadata.segments = segments;
+            }
             else if (type === "delete_h3_segment") metadata.segments = segments.filter((segment) => String(segment.id || "") !== String(operation.segmentId || ""));
             else if (type === "update_h3_segment") {
                 const segment = segments.find((item) => String(item.id || "") === String(operation.segmentId || ""));

@@ -138,3 +138,76 @@ test("一个新项目缓存失败不会漏掉其余新项目的内存备份", as
     assert.ok(cache.has(cacheKey(second)));
     useCanvasStore.getState().deleteProjects([first, second]);
 });
+
+test("入队命令的 base 只带作用域内节点，不夹带整图", async () => {
+    const huge = "z".repeat(200_000);
+    const project = {
+        id: "slim", title: "瘦身画布", createdAt: "2026-01-01", updatedAt: "2026-01-01", revision: 1,
+        nodes: [
+            { id: "target", type: "text", title: "要改的", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "旧" } },
+            { id: "blob", type: "image", title: "巨无霸", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: huge } },
+        ],
+        connections: [], chatSessions: [], activeChatId: null, backgroundMode: "lines",
+        showImageInfo: false, globalPrompt: "", viewport: { x: 0, y: 0, k: 1 },
+    } as any;
+    cache.set(cacheKey("slim"), { project, base: project, queueVersion: 2 });
+    useBackendStore.setState({ connected: false });
+    await hydrateCanvasProjects();
+    // 本地快照只在首次 hydrate 读一次；同一测试进程内直接注入画布，等价于"已恢复的草稿"。
+    useCanvasStore.getState().replaceProjects([project]);
+
+    // updateProject 是 store 上真实存在的编辑入口，内部会调用 captureCanvasAction(before, project) → 入队一条命令。
+    useCanvasStore.getState().updateProject("slim", {
+        nodes: project.nodes.map((node: any) => node.id === "target" ? { ...node, metadata: { ...node.metadata, content: "新内容" } } : node),
+    });
+
+    // 入队落盘是异步的，等一次宏任务再读 outbox。
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const outbox = buckets.get("infinite-canvas-command-outbox")!;
+    const command = [...outbox.values()].find((value: any) => value?.projectId === "slim") as any;
+    assert.ok(command, `应有一条待提交命令，实际入队 ${outbox.size} 条，画布 ${useCanvasStore.getState().projects.map((item) => item.id).join(",")}`);
+    assert.equal(JSON.stringify(command.base).includes(huge), false, "命令 base 不得携带无关大节点");
+    assert.equal(command.base.nodes.length, 1, "只应带目标节点");
+    assert.equal(command.base.nodes[0].id, "target");
+    assert.equal(command.base.v, 1, "应带版本标记以便运行时判别");
+    assert.equal(typeof command.base.revision, "number");
+    await flushCanvasSyncNow();
+    useCanvasStore.getState().deleteProjects(["slim"]);
+});
+
+test("作用域基线与完整快照给出完全相同的冲突判定", async () => {
+    const mod = await import("./use-canvas-store");
+    const { buildCanvasConflictBaseline } = await import("../../lib/canvas/canvas-conflict-baseline");
+    const full = {
+        id: "c", title: "画布", revision: 1,
+        nodes: [{ id: "n", type: "config", title: "配置", position: { x: 0, y: 0 }, width: 320, height: 240,
+                  metadata: { prompt: "旧值", composerContent: "旧草稿", images: [{ id: "i", storageKey: "image:a" }],
+                              segments: [{ id: "s", prompt: "段", status: "idle" }] } }],
+        connections: [{ id: "k", fromNodeId: "n", toNodeId: "n", role: "reference", order: 0 }],
+        chatSessions: [], activeChatId: null, backgroundMode: "lines", showImageInfo: false, globalPrompt: "",
+        viewport: { x: 0, y: 0, k: 1 },
+    } as any;
+
+    const cases: Array<{ name: string; ops: any[]; remote: any }> = [
+        { name: "远端改了同一字段", ops: [{ type: "update_node", id: "n", metadata: { prompt: "本地" } }],
+          remote: { ...structuredClone(full), nodes: [{ ...full.nodes[0], metadata: { ...full.nodes[0].metadata, prompt: "远端改过" } }] } },
+        { name: "远端没改（应无冲突）", ops: [{ type: "update_node", id: "n", metadata: { prompt: "本地" } }], remote: structuredClone(full) },
+        { name: "远端删了目标节点", ops: [{ type: "update_node", id: "n", metadata: { prompt: "本地" } }],
+          remote: { ...structuredClone(full), nodes: [] } },
+        { name: "重复 add_node", ops: [{ type: "add_node", id: "n", title: "重名" }], remote: structuredClone(full) },
+        { name: "删连接", ops: [{ type: "delete_connections", ids: ["k"] }],
+          remote: { ...structuredClone(full), connections: [{ id: "k", fromNodeId: "n", toNodeId: "n", role: "reference", order: 9 }] } },
+        { name: "删连接但远端未改（应无冲突）", ops: [{ type: "delete_connections", ids: ["k"] }], remote: structuredClone(full) },
+        { name: "update_project", ops: [{ type: "update_project", patch: { title: "新" } }],
+          remote: { ...structuredClone(full), title: "远端改过" } },
+        { name: "H3 段被远端改过", ops: [{ type: "update_h3_segment", nodeId: "n", segmentId: "s", patch: { prompt: "本地段" } }],
+          remote: { ...structuredClone(full), nodes: [{ ...full.nodes[0], metadata: { ...full.nodes[0].metadata, segments: [{ id: "s", prompt: "远端段", status: "idle" }] } }] } },
+        { name: "H3 段未被远端改（应无冲突）", ops: [{ type: "update_h3_segment", nodeId: "n", segmentId: "s", patch: { prompt: "本地段" } }], remote: structuredClone(full) },
+    ];
+
+    for (const item of cases) {
+        const withFull = mod.detectCanvasConflicts(item.ops, item.remote, full);
+        const withSlim = mod.detectCanvasConflicts(item.ops, item.remote, buildCanvasConflictBaseline(full, item.ops));
+        assert.deepEqual(withSlim, withFull, `场景「${item.name}」判定结果必须一致`);
+    }
+});

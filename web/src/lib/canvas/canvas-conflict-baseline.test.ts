@@ -30,8 +30,8 @@ test("只带 op 作用域内的节点，值原样保留（含 segments 与 gener
     assert.equal(base.nodes.length, 1);
     assert.equal(base.nodes[0].id, "n1");
     // 值原样：segments 结构完整（H3 细粒度 op 要按字段比对）
-    assert.deepEqual(base.nodes[0].metadata.segments, [{ id: "s1", prompt: "段1", status: "idle" }]);
-    assert.equal(base.nodes[0].metadata.images[0].generationSnapshot.big.length, 5000, "作用域内的值不得被改写");
+    assert.deepEqual((base.nodes[0].metadata as any).segments, [{ id: "s1", prompt: "段1", status: "idle" }]);
+    assert.equal((base.nodes[0].metadata as any).images[0].generationSnapshot.big.length, 5000, "作用域内的值不得被改写");
     // 未被 op 触碰的节点绝不出现（体积在这里省下来）
     assert.equal(base.nodes.some((node: any) => node.id === "n2"), false);
     assert.equal(JSON.stringify(base).includes("y".repeat(100)), false);
@@ -53,7 +53,7 @@ test("H3 段 op 带上 nodeId 指向的节点", () => {
     const base = buildCanvasConflictBaseline(project, [{ type: "update_h3_segment", nodeId: "n1", segmentId: "s1", patch: { prompt: "改" } }]);
     assert.equal(base.nodes.length, 1);
     assert.equal(base.nodes[0].id, "n1");
-    assert.deepEqual(base.nodes[0].metadata.segments, [{ id: "s1", prompt: "段1", status: "idle" }]);
+    assert.deepEqual((base.nodes[0].metadata as any).segments, [{ id: "s1", prompt: "段1", status: "idle" }]);
 });
 
 test("add_node / delete_node 也按 op.id 收窄", () => {

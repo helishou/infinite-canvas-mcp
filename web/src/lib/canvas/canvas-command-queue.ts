@@ -1,6 +1,10 @@
+import type { CanvasConflictBaseline } from "./canvas-conflict-baseline";
+
 export type CanvasCommand<T> = {
     operationId: string; projectId: string; ownerId: string; backend: string; order: number;
-    operations: Array<Record<string, unknown>>; base: T;
+    operations: Array<Record<string, unknown>>;
+    /** 冲突判定基线：新代码写 CanvasConflictBaseline；存量草稿仍是完整 CanvasProject，两者都读。 */
+    base: T | CanvasConflictBaseline;
     source?: { clientId: string; kind: "browser"; label: string };
     /** 首次发送前固定；丢回执后不允许改基线或请求内容。 */
     baseRevision?: number;
