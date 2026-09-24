@@ -20,6 +20,7 @@
         "typecheck": "npm run typecheck --workspaces --if-present"
     },
     "devDependencies": {
-        "concurrently": "^9.1.0"
+        "concurrently": "^9.1.0",
+        "@infinite-canvas/plugin-sdk": "file:plugins/canvas/sdk"
     }
 }

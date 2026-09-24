@@ -25,6 +25,7 @@ import {
   type CanvasExecutorId,
 } from "./executor-registry.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
+import { commandFingerprint } from "./collaboration.js";
 
 export type CanvasImageReference = {
   id?: string;
@@ -75,6 +76,7 @@ export type CanvasImageGenerationResult = {
     width?: number | null;
     height?: number | null;
   }>;
+  failure?: Error;
 };
 
 type DispatcherHooks = {
@@ -276,27 +278,44 @@ export class CanvasImageDispatcher {
   }
 
   private findActiveTask(input: CanvasImageGenerationInput) {
-    if (!input.projectId) return null;
+    if (!input.projectId || (!input.sourceNodeId && !input.nodeId)) return null;
     const sourceNodeId = input.sourceNodeId || input.nodeId;
-    if (!sourceNodeId) return null;
+    const fingerprint = commandFingerprint({
+      sourceNodeId,
+      model: input.model,
+      prompt: input.prompt,
+      size: input.size,
+      width: input.width,
+      height: input.height,
+      quality: input.quality,
+      count: input.count,
+      imageIds: input.imageIds,
+      references: input.references,
+      params: input.params,
+      referenceNodeIds: input.referenceNodeIds,
+      maskEdit: input.maskEdit,
+    });
     for (const status of ["running", "queued"] as const) {
-      // nodeId 可能是每次点击新建的结果节点，sourceNodeId 才是同一次生成的稳定身份。
-      // 因此这里不能按结果节点过滤，否则双击会各自创建任务。
-      const active = this.stores.tasks
-        .list({
-          kind: "canvas-image",
-          status,
-          projectId: input.projectId,
-          limit: 500,
-        })
-        .find(
-          (task) =>
-            String(
-              (task.input as CanvasImageGenerationInput).sourceNodeId ||
-                (task.input as CanvasImageGenerationInput).nodeId ||
-                "",
-            ) === sourceNodeId,
-        );
+      const active = this.stores.tasks.list({ kind: "canvas-image", status, projectId: input.projectId, limit: 500 }).find((task) => {
+        const current = task.input as CanvasImageGenerationInput;
+        const currentSource = current.sourceNodeId || current.nodeId;
+        if (currentSource !== sourceNodeId) return false;
+        return commandFingerprint({
+          sourceNodeId: currentSource,
+          model: current.model,
+          prompt: current.prompt,
+          size: current.size,
+          width: current.width,
+          height: current.height,
+          quality: current.quality,
+          count: current.count,
+          imageIds: current.imageIds,
+          references: current.references,
+          params: current.params,
+          referenceNodeIds: current.referenceNodeIds,
+          maskEdit: current.maskEdit,
+        }) === fingerprint;
+      });
       if (active) return active;
     }
     return null;
@@ -379,6 +398,16 @@ export class CanvasImageDispatcher {
     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
     await hooks?.onCompleted?.(result, { ...task, status: "succeeded", progress: 1, result: { media: result.media } });
     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
+    if (result.failure) {
+      this.stores.tasks.update(task.id, { status: "failed", error: result.failure.message });
+      this.stores.tasks.addEvent(task.id, "result", { media: result.media, partial: true, error: result.failure.message });
+      if (logId) this.logs.update(logId, {
+        status: "failed", error: result.failure.message,
+        outputs: result.media.map((media) => ({ url: media.url, storageKey: media.storageKey, mimeType: media.mimeType })),
+        finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAt,
+      });
+      return;
+    }
     this.stores.tasks.update(task.id, {
       status: "succeeded",
       progress: 1,
@@ -484,12 +513,13 @@ export class CanvasImageDispatcher {
           : (() => { throw new Error(`画布图片执行计划不完整：${plan.input.model}`); })();
       return result.media.map((media) => ({ ...media, ...(plan.input.imageIds ? { imageId: plan.input.imageIds[index] } : {}) }));
     }));
+    const rejected = results.filter((result) => result.status === "rejected");
+    if (rejected.length === count) throw rejected[0].status === "rejected" ? rejected[0].reason : new Error("图片批量生成全部失败");
     const media = results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
-    if (!media.length) {
-      const failed = results.find((result) => result.status === "rejected");
-      throw failed?.status === "rejected" ? failed.reason : new Error("生成完成但没有返回图片");
-    }
-    return { taskId, media };
+    const failure = rejected.length
+      ? new Error(rejected.map((result) => result.status === "rejected" ? String(result.reason) : "").filter(Boolean).join("；"))
+      : media.length === count ? undefined : new Error(`图片批量生成只返回了 ${media.length}/${count} 张结果`);
+    return { taskId, media, ...(failure ? { failure } : {}) };
   }
 
   private async dispatchDirect(

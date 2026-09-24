@@ -242,7 +242,9 @@ export function registerBackendMcpHttpRoutes(
       });
       transport.onclose = () => {
         const closedSessionId = transport.sessionId;
+        const closed = closedSessionId ? sessions.get(closedSessionId) : undefined;
         if (closedSessionId) sessions.delete(closedSessionId);
+        void closed?.instance.server.close().catch(() => undefined);
         stopDeclarationSyncIfIdle();
         logger.info("MCP HTTP 会话已断开", {
           sessionId: closedSessionId || null,
@@ -281,10 +283,13 @@ export function registerBackendMcpHttpRoutes(
       if (declarationSync) clearInterval(declarationSync);
       declarationSync = null;
       const active = [...sessions.values()];
-      sessions.clear();
       await Promise.allSettled(
-        active.map(({ instance }) => instance.server.close()),
+        active.map(async ({ instance, transport }) => {
+          await transport.close().catch(() => undefined);
+          await instance.server.close().catch(() => undefined);
+        }),
       );
+      sessions.clear();
     },
   };
 }
@@ -921,12 +926,9 @@ function registerBackendCanvasTools(
         Number(input.limit || 200),
         input.segmentId ? String(input.segmentId) : undefined,
       );
-      return textResult({
-        ok: true,
-        projectId: project.id,
-        nodeId: String(input.nodeId),
-        materials,
-      });
+      const result = { ok: true, projectId: project.id, nodeId: String(input.nodeId), materials };
+      enforceToolOutputLimit("h3_get_node_materials", result);
+      return textResult(result);
     },
   );
   for (const name of ["assets_list", "assets_add", "assets_upsert_batch"] as ToolName[]) {
@@ -3449,11 +3451,15 @@ function registerDirectComfyTools(
       description: "检查本地 ComfyUI 连接和系统状态。",
       inputSchema: z.object({}).shape,
     },
-    async () => ({
-      content: [
-        { type: "text", text: JSON.stringify(await backend.comfyStatus()) },
-      ],
-    }),
+    async () => {
+      const result = await backend.comfyStatus();
+      enforceToolOutputLimit("comfyui_status", result);
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(result) },
+        ],
+      };
+    },
   );
   server.registerTool(
     "comfyui_get_task",
@@ -3463,6 +3469,7 @@ function registerDirectComfyTools(
     },
     async ({ taskId }) => {
       const result = await backend.comfyGetTask(taskId);
+      enforceToolOutputLimit("comfyui_get_task", result);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     },
   );
@@ -3472,14 +3479,18 @@ function registerDirectComfyTools(
       description: "取消 ComfyUI 任务。",
       inputSchema: z.object({ taskId: z.string() }).shape,
     },
-    async ({ taskId }) => ({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(await backend.comfyCancel(taskId)),
-        },
-      ],
-    }),
+    async ({ taskId }) => {
+      const result = await backend.comfyCancel(taskId);
+      enforceToolOutputLimit("comfyui_cancel_task", result);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result),
+          },
+        ],
+      };
+    },
   );
 }
 

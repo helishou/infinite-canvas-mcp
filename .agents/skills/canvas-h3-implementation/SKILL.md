@@ -36,11 +36,6 @@ description: 修改无限画布 H3 插件、Backend 与 MCP 工程实现层；�
 - **antd Select 配置**：UI 选择器使用 `Select(showSearch, allowClear)`，保持 `patchSelected` 等依赖引用稳定，输入允许清空，显示默认值与实际存储/提交值一致。
 - **结构性 JSX 改动后**，立即读取受影响的父子边界并检查 `details`/`div` 成对闭合，再运行插件 typecheck、build、Web typecheck；构建成功不能替代对实际分区结构和交互的检查。
 
-## V15 字段变化提醒
-
-- 南风 V15 的旧字段「单人小脸修复 / 多人小脸修复 / 全局修复」仅保留序列化位置，当前 `h3_generator.py` 明确不读取、不执行；要做真实生成后修脸，必须接实际后处理节点。
-- V10 Python vs MCP TypeScript 的工作流图差异已迁移完毕，原对照笔记归档到 Hermes `~/.hermes/skills/.archive/`（如需历史排查仍可查阅）。
-
 ## 工具脚本
 
 - `scripts/vision_via_api.py` — 通过本地 chatgpt2api 读图（视觉判据绕路，主 vision 通道 502 时使用）

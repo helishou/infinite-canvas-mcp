@@ -7,7 +7,7 @@ function task(id: string, input: Record<string, unknown>, status: "queued" | "ru
     return { id, kind: "canvas-image", status, progress: status === "succeeded" ? 1 : 0, input, params: {}, result: status === "succeeded" ? { media: [] } : null, error: null, createdAt: "", updatedAt: "", executor: "direct-image", outputs: [] };
 }
 
-function dispatcherWith(overrides: { tasks?: Record<string, unknown>; media?: Record<string, unknown>; directImage?: Record<string, unknown> } = {}) {
+function dispatcherWith(overrides: { tasks?: Record<string, unknown>; media?: Record<string, unknown>; directImage?: Record<string, unknown>; projects?: Record<string, unknown> } = {}) {
     return new CanvasImageDispatcher(
         { url: "http://127.0.0.1:17370" } as never,
         {
@@ -15,7 +15,7 @@ function dispatcherWith(overrides: { tasks?: Record<string, unknown>; media?: Re
             media: (overrides.media || {}) as never,
             settings: { get: () => undefined } as never,
             logs: { create: () => { throw new Error("日志不应在此测试中创建"); } } as never,
-            projects: {} as never,
+            projects: (overrides.projects || { get: () => null }) as never,
         } as never,
         {} as never,
         (overrides.directImage || {}) as never,
@@ -72,8 +72,8 @@ test("图片任务只保存参考图媒体句柄，不把 dataUrl 写入任务�
     assert.equal((outer.input.references as Array<Record<string, unknown>>)[0].storageKey, "image:reference-1");
 });
 
-test("同一源节点的运行中任务按 sourceNodeId 去重，不受新结果节点影响", () => {
-    const active = task("active-task", { projectId: "project-1", nodeId: "old-result", sourceNodeId: "source-config" }, "running");
+test("同一源节点相同请求按 sourceNodeId 去重，不受新结果节点影响", () => {
+    const active = task("active-task", { projectId: "project-1", nodeId: "old-result", sourceNodeId: "source-config", model: "gpt-image-2", prompt: "test" }, "running");
     let directCalls = 0;
     const dispatcher = dispatcherWith({
         tasks: {
@@ -89,4 +89,24 @@ test("同一源节点的运行中任务按 sourceNodeId 去重，不受新结果
 
     assert.equal(result.taskId, active.id);
     assert.equal(directCalls, 0);
+});
+
+test("同一源节点的不同提示词不能复用运行中任务", () => {
+    const active = task("active-task", { projectId: "project-1", nodeId: "old-result", sourceNodeId: "source-config", model: "gpt-image-2", prompt: "cat" }, "running");
+    let created = 0;
+    const dispatcher = dispatcherWith({
+        tasks: {
+            get: (id: string) => id === active.id ? active : null,
+            list: () => [active],
+            create: () => { created++; return task(`new-${created}`, {}, "queued"); },
+            update: () => active,
+            addEvent: () => ({}),
+        },
+        media: { meta: () => null },
+        directImage: { supports: () => true, run: () => { throw new Error("测试只验证任务去重边界"); } },
+        projects: { get: () => null },
+    });
+    const result = dispatcher.start({ sourceNodeId: "source-config", model: "gpt-image-2", prompt: "dog" });
+    assert.notEqual(result.taskId, active.id);
+    assert.equal(created, 1);
 });

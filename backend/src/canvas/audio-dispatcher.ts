@@ -99,6 +99,7 @@ export class CanvasAudioDispatcher {
                 const current = this.stores.tasks.get(child.id);
                 if (!current) throw new Error("音频子任务不存在");
                 if (current.status === "succeeded") {
+                    if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
                     const media = firstMedia(current);
                     if (input.projectId && input.nodeId) {
                         const written = this.stores.projects.writeBackCanvasAudioTask({ ...task, status: "succeeded", result: { media: [media] } }, { projectId: input.projectId, nodeId: input.nodeId, prompt: input.prompt, model: input.model }, media);

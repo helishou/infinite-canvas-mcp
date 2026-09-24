@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { registerBackendMcpHttpRoutes } from "./mcp.js";
 import type { ResolvedConfig } from "./config.js";
 
-async function fixture(t: import("node:test").TestContext, backendUrl = "http://127.0.0.1:1") {
+async function fixture(t: import("node:test").TestContext, backendUrl = "http://127.0.0.1:1", onRoutes?: (routes: ReturnType<typeof registerBackendMcpHttpRoutes>) => void) {
   const app = express();
   app.use(express.json());
   const routes = registerBackendMcpHttpRoutes(app, {
@@ -19,6 +19,7 @@ async function fixture(t: import("node:test").TestContext, backendUrl = "http://
     origins: [],
     listenHost: "127.0.0.1",
   } satisfies ResolvedConfig);
+  onRoutes?.(routes);
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(async () => {
@@ -371,6 +372,17 @@ test("MCP HTTP keeps 400 for a non-initialize request without a session", async 
 
   assert.equal(response.status, 400);
   assert.match(await response.text(), /No valid MCP session ID provided/);
+});
+
+test("MCP HTTP closes every transport and clears active sessions", async (t) => {
+  let routes!: ReturnType<typeof registerBackendMcpHttpRoutes>;
+  const backendUrl = await mockBackend(t);
+  const url = await fixture(t, backendUrl, (value) => { routes = value; });
+  const client = await mcpClient(t, url);
+  assert.equal(routes.sessionCount(), 1);
+  await routes.closeAll();
+  assert.equal(routes.sessionCount(), 0);
+  await client.close();
 });
 
 test("canvas_inspect returns one actionable canvas context", async (t) => {

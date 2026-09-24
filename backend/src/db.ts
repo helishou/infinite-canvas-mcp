@@ -1351,7 +1351,7 @@ export class BackendDatabase {
         const project = this.getCanvasProject(input.projectId);
         if (!project) return null;
         const node = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === input.nodeId) as Record<string, any> | undefined;
-        if (!node || String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) return null;
+        if (!node || String(recordOf(node.metadata).runtimeTaskId || "") !== task.id || this.getTask(task.id)?.status === "cancelled") return null;
         const metadata = { status: "success", runProgress: 1, generationTaskId: task.id, content: media.url, storageKey: media.storageKey || "", mimeType: media.mimeType || "audio/mpeg", bytes: media.bytes, durationMs: media.durationMs, prompt: input.prompt, model: input.model };
         const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata, metadataDelete: ["runtimeTaskId", "errorDetails"] }];
         operations.push(...canvasMediaSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success"));

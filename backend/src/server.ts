@@ -155,9 +155,10 @@ export function startServer(
     // token 会在 backend 重启后失效，豁免后可避免历史产物在 token 轮换后 401 而“消失”。
     // 仅豁免 GET 读取类端点，写入类（如 POST /runtime/media）仍受 token 保护。
     if (
-      url === "/media" ||
-      url.startsWith("/media/") ||
-      url.startsWith("/runtime/media-file")
+      req.method === "GET" &&
+      (url === "/media" ||
+        url.startsWith("/media/") ||
+        url.startsWith("/runtime/media-file"))
     )
       return next();
     const token =

@@ -22,13 +22,6 @@ export type CanvasExecutionRequest = {
 
 const modelRegistry: CanvasModelDeclaration[] = [
   {
-    id: "text:*",
-    modes: ["text"],
-    inputRoles: ["prompt", "image"],
-    executor: "direct-text",
-    matches: (model) => Boolean(model),
-  },
-  {
     id: "gpt-image-*",
     modes: ["image"],
     inputRoles: ["prompt", "image"],
@@ -106,6 +99,7 @@ export function resolveCanvasExecutor(
       continue;
     return declaration.executor;
   }
+  if (request.mode === "text" && model) return "direct-text";
   if (preset) return "plugin";
   throw new Error(`没有可用的画布执行器：${model || request.mode}`);
 }
