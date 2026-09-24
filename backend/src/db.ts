@@ -15,7 +15,7 @@ import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, te
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-export type RuntimeTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type RuntimeTaskStatus = "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled";
 export type GenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 
 export type RuntimeTask = {
@@ -2225,6 +2225,29 @@ export class BackendDatabase {
             id,
         );
         return this.getTask(id)!;
+    }
+
+    /** H3 决议与事件必须在同一个 SQLite 事务里落库；状态和版本共同构成 CAS。 */
+    transitionH3Task(id: string, expectedStatus: RuntimeTaskStatus, expectedRevision: number, patch: { status: RuntimeTaskStatus; progress?: number; result: Record<string, unknown>; error?: string | null }, event: { type: string; payload: Record<string, unknown> }): RuntimeTask | null {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const current = this.getTask(id);
+            const confirmation = current?.result?.confirmation;
+            const revision = confirmation && typeof confirmation === "object" && !Array.isArray(confirmation)
+                ? Number((confirmation as Record<string, unknown>).revision || 0) : 0;
+            if (!current || current.kind !== "canvas-h3-run" || current.status !== expectedStatus || revision !== expectedRevision) {
+                this.db.exec("ROLLBACK");
+                return null;
+            }
+            const task = this.updateTask(id, patch);
+            this.addTaskEvent(id, event.type, event.payload);
+            this.addTaskEvent(id, `status:${patch.status}`, { taskId: id, status: patch.status });
+            this.db.exec("COMMIT");
+            return task;
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
     }
 
     getTask(id: string): RuntimeTask | null {

@@ -20,7 +20,7 @@ export type Position = { x: number; y: number };
 export type CanvasBuiltinNodeType = "image" | "text" | "config" | "video" | "audio" | "group";
 export type CanvasNodeTypeId = CanvasBuiltinNodeType | (string & {});
 
-export type CanvasNodeStatus = "idle" | "queued" | "success" | "loading" | "error" | "cancelled";
+export type CanvasNodeStatus = "idle" | "queued" | "loading" | "awaiting_confirmation" | "success" | "error" | "cancelled";
 export type CanvasImageGenerationType = "generation" | "edit";
 
 // 节点 metadata 是扁平可选字段袋;插件自定义字段可直接写入(内容惯例放 content)。
@@ -190,7 +190,7 @@ export type LocalH3ActualSubmission = { promptId: string; seed?: number; frames?
 export type LocalH3Result = { url: string; storageKey?: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; actualSubmission?: LocalH3ActualSubmission; segments?: Array<{ media?: Array<{ url: string; storageKey?: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Preview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
-export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: LocalH3Preview | null; result?: LocalH3Result | null; error?: string | null };
+export type LocalH3Task = { id: string; status: "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: LocalH3Preview | null; result?: (LocalH3Result & { currentChildTaskId?: string; currentChildKind?: string; confirmation?: { pending: Array<{ nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string }> } }) | null; error?: string | null };
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 
 // 一个可选模型:value 传回给 generateXxx({ model }),label 用于展示
@@ -203,6 +203,7 @@ export type CanvasPluginAi = {
     generateVideo: (prompt: string, options?: GenerateVideoOptions) => Promise<GenerateVideoResult>;
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
     runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
+    resolveH3Confirmation: (input: { taskId: string; action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean }) => Promise<LocalH3Task>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;

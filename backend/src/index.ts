@@ -145,6 +145,7 @@ async function startBackendHttpServer() {
     comfy: runtime.comfy,
     events: runtime.events,
     stores: runtime.stores,
+    resolveH3Confirmation: (id, action) => canvasH3Runner.resolveConfirmation(id, action),
     cancelTask: (task) => {
       if (task.kind === "canvas-image")
         return canvasImageDispatcher.cancel(task.id);
@@ -260,6 +261,7 @@ async function startBackendHttpServer() {
   for (const task of [
     ...stores.tasks.list({ status: "running" }),
     ...stores.tasks.list({ status: "queued" }),
+    ...stores.tasks.list({ status: "awaiting_confirmation", kind: "canvas-h3-run" }),
   ]) {
     if (
       ["queued", "running"].includes(task.status) &&
@@ -299,7 +301,7 @@ async function startBackendHttpServer() {
     )
       canvasH3Runner.resume(task);
     if (
-      ["succeeded", "failed", "cancelled"].includes(task.status) &&
+      ["succeeded", "failed", "cancelled", "awaiting_confirmation"].includes(task.status) &&
       task.kind === "canvas-h3-run"
     ) {
       void canvasH3Runner

@@ -31,7 +31,7 @@ async function fixture(t: import("node:test").TestContext, backendUrl = "http://
   return `http://127.0.0.1:${address.port}/mcp`;
 }
 
-async function mockBackend(t: import("node:test").TestContext, onMcpEvent?: (event: Record<string, unknown>) => void) {
+async function mockBackend(t: import("node:test").TestContext, onMcpEvent?: (event: Record<string, unknown>) => void, h3 = false) {
   const app = express();
   app.use(express.json());
   app.post("/mcp/observability/events", (req, res) => {
@@ -96,10 +96,12 @@ async function mockBackend(t: import("node:test").TestContext, onMcpEvent?: (eve
       },
     }),
   );
+  const h3Task = { id: "h3-parent", kind: "canvas-h3-run", status: "awaiting_confirmation", progress: 0.5, input: { projectId: "canvas-1", nodeId: "h3-node" }, result: { confirmation: { pending: [{ nodeId: "h3-node", segmentId: "clip-1", firstPassFingerprint: "fp-1", firstPassResult: "/media/first.mp4" }] } }, createdAt: "2026-09-17T00:00:00.000Z", updatedAt: "2026-09-17T00:00:01.000Z" };
+  app.post("/tasks/:id/h3-confirmation", (req, res) => res.json({ ok: true, task: { ...h3Task, status: "running", result: { ...h3Task.result, phase: "second_pass" }, input: h3Task.input, decision: req.body } }));
   app.get("/tasks", (_req, res) =>
     res.json({
       ok: true,
-      tasks: [
+      tasks: h3 ? [h3Task] : [
         {
           id: "task-1",
           kind: "canvas-image",
@@ -114,6 +116,7 @@ async function mockBackend(t: import("node:test").TestContext, onMcpEvent?: (eve
     }),
   );
   app.get("/tasks/:id", (req, res) =>
+    h3 ? res.json({ ok: true, task: h3Task, events: [] }) :
     res.json({
       ok: true,
       task: {
@@ -435,6 +438,23 @@ test("canvas_task_status defaults to the active canvas and suggests polling", as
   assert.equal(payload.summary.byStatus.running, 1);
   assert.equal(payload.tasks[0].suggestedAction.tool, "canvas_wait_tasks");
   assert.deepEqual(payload.tasks[0].suggestedAction.input.taskIds, ["task-1"]);
+});
+
+test("H3 MCP 暂停态返回待确认 Clip，等待立即返回且确认命令复用父任务", async (t) => {
+  const backendUrl = await mockBackend(t, undefined, true);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const status = textPayload(await client.callTool({ name: "canvas_task_status", arguments: { taskId: "h3-parent" } }));
+  assert.equal(status.tasks[0].status, "awaiting_confirmation");
+  assert.equal(status.tasks[0].confirmation.pending[0].segmentId, "clip-1");
+  assert.equal(status.tasks[0].suggestedAction.tool, "canvas_h3_confirmation");
+  const wait = textPayload(await client.callTool({ name: "canvas_wait_tasks", arguments: { taskIds: ["h3-parent"], timeoutMs: 1000 } }));
+  assert.equal(wait.timedOut, false);
+  assert.equal(wait.summary.needsAction, 1);
+  assert.equal(wait.summary.workflowComplete, 0);
+  assert.equal(wait.next.tool, "canvas_h3_confirmation");
+  const decision = textPayload(await client.callTool({ name: "canvas_h3_confirmation", arguments: { taskId: "h3-parent", segmentIds: ["clip-1"], firstPassFingerprint: "fp-1", action: "keep_first_pass" } }));
+  assert.equal(decision.task.taskId, "h3-parent");
+  assert.equal(decision.task.status, "running");
 });
 
 test("canvas_task_status with taskId ignores unrelated project and node filters", async (t) => {

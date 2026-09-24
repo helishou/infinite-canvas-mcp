@@ -5,6 +5,11 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## H3 first-pass confirmation
+
+- Run a confirmation-mode clip on a test canvas. After the first pass, the original parent task, node, and clip should show `awaiting_confirmation`; the task center should preview the first pass and offer confirm second pass, keep first pass, and discard. Refresh and restart Backend normally, then confirm that the same task ID can continue.
+- In a multi-clip run, later clips must wait for the current decision. A failed second pass should allow an explicit retry or keeping the first pass; discarding should preserve historical media and logs. MCP status and wait tools must not report a paused workflow as successful. Automated tests do not replace a real H3 generation check.
+
 ## 画布草稿瘦身 + MCP 读取工具瘦身
 
 **画布草稿只存作用域基线**

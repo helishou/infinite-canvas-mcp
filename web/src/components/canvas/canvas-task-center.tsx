@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Empty, Modal, Progress, Select, Tag, Tooltip, message } from "antd";
 import { ChevronDown, ChevronRight, ListChecks, RefreshCw, Square } from "lucide-react";
-import { cancelBackendTask, fetchBackendTasks, retryBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
+import { backendMediaUrl, cancelBackendTask, fetchBackendTasks, resolveBackendH3Confirmation, retryBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
 import { useRunningTaskCount } from "@/hooks/use-running-task-count";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { taskProgress } from "@/lib/canvas/task-progress";
@@ -44,6 +44,7 @@ function summarizeChildren(children: BackendRuntimeTask[]): string {
     if (counts.succeeded) parts.push(`${counts.succeeded} 完成`);
     if (counts.running) parts.push(`${counts.running} 运行`);
     if (counts.queued) parts.push(`${counts.queued} 排队`);
+    if (counts.awaiting_confirmation) parts.push(`${counts.awaiting_confirmation} 待确认`);
     if (counts.failed) parts.push(`${counts.failed} 失败`);
     if (counts.cancelled) parts.push(`${counts.cancelled} 取消`);
     return parts.join(" · ");
@@ -56,6 +57,7 @@ function statusColor(status: BackendRuntimeTask["status"]) {
     if (status === "failed") return "red" as const;
     if (status === "running") return "processing" as const;
     if (status === "queued") return "blue" as const;
+    if (status === "awaiting_confirmation") return "orange" as const;
     return "default" as const;
 }
 
@@ -148,10 +150,18 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
 
     const cancel = async (id: string) => { try { await cancelBackendTask(id); await load(); } catch (error) { message.error(error instanceof Error ? error.message : String(error)); } };
     const retry = async (id: string) => { try { await retryBackendTask(id); await load(); message.success("已创建重试任务"); } catch (error) { message.error(error instanceof Error ? error.message : String(error)); } };
+    const resolve = async (task: BackendRuntimeTask, action: "confirm" | "keep_first_pass" | "discard") => {
+        const pending = task.result?.confirmation?.pending?.[0];
+        if (!pending) { message.error("找不到待确认 Clip，请刷新任务"); return; }
+        try {
+            await resolveBackendH3Confirmation(task.id, { action, segmentIds: [pending.segmentId], firstPassFingerprint: pending.firstPassFingerprint, ...(action === "confirm" && task.error ? { retry: true } : {}) });
+            await load();
+        } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+    };
 
     return <Modal title="任务中心" open={open} onCancel={onClose} footer={null} width={900} destroyOnHidden>
         <div className="mb-3 flex items-center justify-between gap-3">
-            <Select value={status} onChange={setStatus} className="w-40" options={[{ value: "", label: "全部状态" }, { value: "queued", label: "排队中" }, { value: "running", label: "运行中" }, { value: "succeeded", label: "已完成" }, { value: "failed", label: "失败" }, { value: "cancelled", label: "已取消" }]} />
+            <Select value={status} onChange={setStatus} className="w-40" options={[{ value: "", label: "全部状态" }, { value: "queued", label: "排队中" }, { value: "running", label: "运行中" }, { value: "awaiting_confirmation", label: "待确认" }, { value: "succeeded", label: "已完成" }, { value: "failed", label: "失败" }, { value: "cancelled", label: "已取消" }]} />
             <Button icon={<RefreshCw className="size-3.5" />} onClick={() => void load()} loading={loading}>刷新</Button>
         </div>
         {!groups.length ? <Empty description={loading ? "加载中…" : "暂无任务"} /> : <div className="max-h-[62vh] space-y-2 overflow-y-auto">
@@ -177,7 +187,8 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
                             </div>
                             <div className="flex shrink-0 gap-1">
                                 {terminal && parent.status !== "succeeded" ? <Button type="text" size="small" icon={<RefreshCw className="size-3.5" />} onClick={() => void retry(parent.id)}>重试</Button> : null}
-                                {!terminal ? <Button danger type="text" size="small" icon={<Square className="size-3.5" />} onClick={() => void cancel(parent.id)}>取消</Button> : null}
+                                {parent.status === "awaiting_confirmation" && parent.kind === "canvas-h3-run" ? <><Button type="text" size="small" onClick={() => void resolve(parent, "confirm")}>确认二采</Button><Button type="text" size="small" onClick={() => void resolve(parent, "keep_first_pass")}>保留一采</Button><Button danger type="text" size="small" onClick={() => void resolve(parent, "discard")}>放弃</Button></> : null}
+                                {!terminal && parent.status !== "awaiting_confirmation" ? <Button danger type="text" size="small" icon={<Square className="size-3.5" />} onClick={() => void cancel(parent.id)}>取消</Button> : null}
                             </div>
                         </div>
                         <Progress percent={Math.round(progress * 100)} size="small" status={progressStatus(parent.status)} />
@@ -187,6 +198,10 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
                             <span>执行器：{parent.executor || "-"}</span>
                             {hasChildren ? <span className="font-medium text-stone-600 dark:text-stone-300">{summarizeChildren(children)}</span> : null}
                         </div>
+                        {parent.status === "awaiting_confirmation" && parent.result?.confirmation?.pending?.[0] ? <div className="mt-2 text-xs">
+                            <div>待确认 Clip：{parent.result.confirmation.pending[0].segmentId}</div>
+                            {parent.result.confirmation.pending[0].firstPassStorageKey ? <video controls preload="metadata" className="mt-1 max-h-48 max-w-xs" src={backendMediaUrl(parent.result.confirmation.pending[0].firstPassStorageKey)} aria-label="H3 一采预览" /> : <span>请在 H3 节点查看一采预览</span>}
+                        </div> : null}
                         {parent.error ? <div className="mt-1 break-words text-xs text-red-500">{parent.error}</div> : null}
                     </div>
                     {hasChildren && isExpanded ? <div className="relative border-t border-stone-200 dark:border-stone-700">
@@ -204,7 +219,7 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
                                     </div>
                                     <div className="flex shrink-0 gap-1">
                                         {childTerminal && child.status !== "succeeded" ? <Button type="text" size="small" icon={<RefreshCw className="size-3.5" />} onClick={() => void retry(child.id)}>重试</Button> : null}
-                                        {!childTerminal ? <Button danger type="text" size="small" icon={<Square className="size-3.5" />} onClick={() => void cancel(child.id)}>取消</Button> : null}
+                                        {!childTerminal && child.status !== "awaiting_confirmation" ? <Button danger type="text" size="small" icon={<Square className="size-3.5" />} onClick={() => void cancel(child.id)}>取消</Button> : null}
                                     </div>
                                 </div>
                                 <Progress percent={Math.round((child.progress || 0) * 100)} size="small" status={progressStatus(child.status)} />
@@ -231,17 +246,18 @@ export function CanvasTaskCenterButton({ projectId }: { projectId: string }) {
     const colorTheme = useThemeStore((state) => state.theme);
     const theme = canvasThemes[colorTheme];
     const [open, setOpen] = useState(false);
-    const { running, queued, active, runningProgresses } = useRunningTaskCount(projectId);
+    const { running, queued, awaiting, active, runningProgresses } = useRunningTaskCount(projectId);
     const runningProgress = runningProgresses.length ? `（${runningProgresses.map((progress) => `${Math.round(progress * 100)}%`).join("、")}）` : "";
     const overallRunningProgress = runningProgresses.length
         ? runningProgresses.reduce((total, progress) => total + progress, 0) / runningProgresses.length
         : 0;
-    const tip = active ? `任务中心 · 运行中 ${running}${runningProgress} · 排队 ${queued}` : "任务中心";
+    const tip = active || awaiting ? `任务中心 · 运行中 ${running}${runningProgress} · 排队 ${queued} · 待确认 ${awaiting}` : "任务中心";
     return <>
         <Tooltip title={tip}>
             <button type="button" aria-label={tip} className="relative grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={() => setOpen(true)}>
                 <ListChecks className="size-4" />
                 {active ? <span className="absolute right-0 top-0.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-semibold leading-none text-white" style={{ background: "#ff4d4f" }}>{active > 99 ? "99+" : active}</span> : null}
+                {awaiting ? <span className="absolute -right-1 bottom-0 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-semibold leading-none text-white" style={{ background: "#fa8c16" }}>{awaiting > 99 ? "99+" : awaiting}</span> : null}
                 {runningProgresses.length ? <span className="absolute bottom-0 left-1/2 h-0.5 w-5 -translate-x-1/2 overflow-hidden rounded-full" style={{ background: theme.node.stroke }} aria-hidden="true">
                     <span className="block h-full rounded-full transition-[width] duration-300" style={{ width: `${Math.round(overallRunningProgress * 100)}%`, background: theme.node.linkActive }} />
                 </span> : null}

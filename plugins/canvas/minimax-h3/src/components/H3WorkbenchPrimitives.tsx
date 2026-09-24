@@ -4,10 +4,10 @@ import type { H3Ref } from "../types";
 import { resultUrl } from "../services/h3-data";
 import { segmentsFor } from "../hooks/useH3Segments";
 
-export function requestH3Run(ctx: CanvasNodeContext, all = false, confirmSecondPass = false) {
+export function requestH3Run(ctx: CanvasNodeContext, all = false) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const metadata = node.metadata || {};
-    if (["queued", "loading"].includes(String(metadata.status || ""))) return;
+    if (["queued", "loading", "awaiting_confirmation"].includes(String(metadata.status || ""))) return;
     const segments = segmentsFor(metadata);
     const selectedId = String(metadata.selectedSegmentId || segments[0]?.id || "");
     const selected = segments.find((segment) => segment.id === selectedId) || segments[0];
@@ -27,12 +27,13 @@ export function requestH3Run(ctx: CanvasNodeContext, all = false, confirmSecondP
         runProgress: 0,
         runStartedAt: 0,
     });
-    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, requestId: runtimeRunId, all, confirmSecondPass });
+    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, requestId: runtimeRunId, all });
 }
 
 export function resetAndRequestH3Run(ctx: CanvasNodeContext, all = false) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const metadata = node.metadata || {};
+    if (metadata.status === "awaiting_confirmation") return;
     const segments = segmentsFor(metadata);
     const selectedId = String(metadata.selectedSegmentId || segments[0]?.id || "");
     const selected = segments.find((segment) => segment.id === selectedId) || segments[0];
@@ -53,6 +54,7 @@ export function resetAndRequestH3Run(ctx: CanvasNodeContext, all = false) {
 
 export function resetH3Run(ctx: CanvasNodeContext) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
+    if (node.metadata?.status === "awaiting_confirmation") return;
     const segments = segmentsFor(node.metadata || {}).map((segment) => ({ ...segment, result: "", results: [], status: "idle", progress: 0, runtimeTaskId: "" }));
     ctx.updateMetadata({ content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, segments, status: "idle", errorDetails: "", runtimeTaskId: "", runtimeRunId: "", runProgress: 0, runRequestId: "", runRequestConsumedId: "", cancelRequested: false, runFinishedAt: undefined });
 }
@@ -60,7 +62,7 @@ export function resetH3Run(ctx: CanvasNodeContext) {
 export function H3StatusBadge({ status, error, onRetry }: { status: string; error: string; onRetry: () => void }) {
     const [copiedError, setCopiedError] = useState(false);
     if (!status || status === "idle") return null;
-    const label = status === "queued" ? "排队中…" : status === "loading" ? "生成中…" : status === "success" ? "已完成" : status === "cancelled" ? "已取消" : status === "error" ? `失败：${error || "未知错误"}` : status;
+    const label = status === "queued" ? "排队中…" : status === "loading" ? "生成中…" : status === "awaiting_confirmation" ? "一采待确认" : status === "success" ? "已完成" : status === "cancelled" ? "已取消" : status === "error" ? `失败：${error || "未知错误"}` : status;
     const copyError = async () => {
         const text = error || "未知错误";
         let copied = false;

@@ -1,4 +1,4 @@
-export type RuntimeTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type RuntimeTaskStatus = "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled";
 
 export type RuntimeTask = {
     id: string;

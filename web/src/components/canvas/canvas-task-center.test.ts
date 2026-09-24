@@ -32,6 +32,12 @@ test("任务中心父任务正式成功后显示 100%", () => {
     assert.equal(taskProgress(task(0, "succeeded"), [task(1)], 0.99), 1);
 });
 
+test("H3 待确认进度以父任务为准，旧进度为 100% 也不能显示已完成", () => {
+    const parent = { ...task(0.5, "awaiting_confirmation"), kind: "canvas-h3-run" } as BackendRuntimeTask;
+    assert.equal(taskProgress(parent, [task(1)]), 0.5);
+    assert.equal(taskProgress(parent, [task(1)], 1), 0.99);
+});
+
 test("任务中心角标按父任务聚合运行中任务", () => {
     const groups = groupActiveTasks([
         activeTask("parent", "running"),

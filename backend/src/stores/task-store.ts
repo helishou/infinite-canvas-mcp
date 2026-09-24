@@ -12,6 +12,7 @@ export function createTaskStore(db: BackendDatabase): TaskStore {
             if (patch.status) db.addTaskEvent(id, `status:${patch.status}`, { taskId: id, status: patch.status });
             return task;
         },
+        transitionH3: (id, expectedStatus, expectedRevision, patch, event) => db.transitionH3Task(id, expectedStatus, expectedRevision, patch, event),
         cancel(id) {
             const task = db.getTask(id);
             if (!task) throw new Error(`Task not found: ${id}`);

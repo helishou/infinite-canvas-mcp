@@ -25,7 +25,7 @@ export type LocalH3ActualSubmission = { promptId: string; seed?: number; seedMod
 export type LocalH3Result = { url: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; actualSubmission?: LocalH3ActualSubmission; segments?: Array<{ media?: Array<{ url: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Preview = { dataUrl: string; mime?: string; promptId?: string; step?: number; total?: number };
-export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: LocalH3Result | null; preview?: LocalH3Preview | null; error?: string | null };
+export type LocalH3Task = { id: string; status: "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled"; progress: number; result?: (LocalH3Result & { currentChildTaskId?: string; currentChildKind?: string; confirmation?: { pending: Array<{ nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string }> } }) | null; preview?: LocalH3Preview | null; error?: string | null };
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 export type PluginModelCapability = "image" | "video" | "text" | "audio";
 export type ModelOption = { value: string; label: string };
@@ -50,6 +50,7 @@ export type CanvasPluginAi = {
     generateVideo: (prompt: string, options?: GenerateVideoOptions) => Promise<GenerateVideoResult>;
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
     runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
+    resolveH3Confirmation: (input: { taskId: string; action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean }) => Promise<LocalH3Task>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;

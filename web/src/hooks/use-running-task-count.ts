@@ -6,11 +6,11 @@ import { useBackendStore } from "@/stores/use-backend-store";
 
 const POLL_INTERVAL_MS = 15000;
 
-type ActiveTaskStatus = "running" | "queued";
+type ActiveTaskStatus = "running" | "queued" | "awaiting_confirmation";
 type ActiveTaskGroup = { parent: BackendRuntimeTask; children: BackendRuntimeTask[] };
 
 function isActiveStatus(status: BackendRuntimeTask["status"]): status is ActiveTaskStatus {
-    return status === "running" || status === "queued";
+    return status === "running" || status === "queued" || status === "awaiting_confirmation";
 }
 
 /** 父任务和子任务只组成一个角标任务，状态与总进度均按父任务展示。 */
@@ -46,14 +46,16 @@ export function useRunningTaskCount(projectId: string) {
         let cancelled = false;
         const sync = async () => {
             try {
-                const [running, queued] = await Promise.all([
+                const [running, queued, awaiting] = await Promise.all([
                     fetchBackendTasks({ projectId, status: "running", limit: 100, offset: 0 }),
                     fetchBackendTasks({ projectId, status: "queued", limit: 100, offset: 0 }),
+                    fetchBackendTasks({ projectId, status: "awaiting_confirmation", limit: 100, offset: 0 }),
                 ]);
                 if (cancelled) return;
                 const next = new Map<string, BackendRuntimeTask>();
                 for (const task of running.tasks || []) next.set(task.id, task);
                 for (const task of queued.tasks || []) next.set(task.id, task);
+                for (const task of awaiting.tasks || []) next.set(task.id, task);
                 setActive(next);
             } catch {
                 // 轮询失败保留上一次结果，避免网络抖动让角标闪烁归零
@@ -99,6 +101,7 @@ export function useRunningTaskCount(projectId: string) {
 
     let running = 0;
     let queued = 0;
+    let awaiting = 0;
     const runningProgresses: number[] = [];
     for (const group of groups) {
         if (group.parent.status === "running") {
@@ -106,7 +109,9 @@ export function useRunningTaskCount(projectId: string) {
             runningProgresses.push(taskProgress(group.parent, group.children, progressHistory[group.parent.id]));
         } else if (group.parent.status === "queued") {
             queued += 1;
+        } else if (group.parent.status === "awaiting_confirmation") {
+            awaiting += 1;
         }
     }
-    return { running, queued, active: running + queued, runningProgresses };
+    return { running, queued, awaiting, active: running + queued, runningProgresses };
 }

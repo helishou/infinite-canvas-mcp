@@ -115,6 +115,7 @@ export type TaskStore = {
     get(id: string): RuntimeTask | null;
     list(filter?: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number }): RuntimeTask[];
     update(id: string, patch: TaskPatch): RuntimeTask;
+    transitionH3(id: string, expectedStatus: RuntimeTaskStatus, expectedRevision: number, patch: TaskPatch & { status: RuntimeTaskStatus; result: Record<string, unknown> }, event: { type: string; payload: Record<string, unknown> }): RuntimeTask | null;
     cancel(id: string): RuntimeTask;
     events(id: string, after?: number): RuntimeTaskEvent[];
     /** 追加一条任务事件（bridge 执行过程上报用）。 */

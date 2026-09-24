@@ -2,7 +2,7 @@ import { useEffect, useRef } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { resetAndRequestH3Run } from "../components/H3WorkbenchPrimitives";
 
-type RunH3 = (runAll?: boolean, confirmSecondPass?: boolean) => void | Promise<void>;
+type RunH3 = (runAll?: boolean) => void | Promise<void>;
 
 export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3, update: (patch: Record<string, unknown>) => void) {
     const runRef = useRef(run);
@@ -16,9 +16,10 @@ export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3, update: (patc
         if (!payload || typeof payload !== "object" || String((payload as Record<string, unknown>).nodeId || "") !== ctx.node.id) return;
         const requestId = String((payload as Record<string, unknown>).requestId || "");
         const current = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        if (current.status === "awaiting_confirmation") return;
         if (!requestId && ["queued", "loading"].includes(String(current.status || ""))) return;
         if (requestId) updateRef.current({ runRequestConsumedId: requestId, status: "loading", errorDetails: "", runProgress: 0 });
-        void runRef.current(Boolean((payload as Record<string, unknown>).all), (payload as Record<string, unknown>).confirmSecondPass === true);
+        void runRef.current(Boolean((payload as Record<string, unknown>).all));
     }), [ctx.node.id]);
 
     useEffect(() => ctx.on("minimax-h3:run-all", (payload) => {

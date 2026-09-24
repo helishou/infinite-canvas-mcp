@@ -4,7 +4,7 @@ import { getBackendTokenShared } from "@/lib/backend-token";
 import { backendConnection } from "@/lib/backend-connection";
 import { nanoid } from "nanoid";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult } from "@basketikun/canvas-agent/generation-contract";
-import { CANVAS_GENERATION_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
+import { CANVAS_GENERATION_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
 import { ensureCanvasDraftLease } from "@/lib/canvas/canvas-draft-session";
 
 export type BackendMediaResult = {
@@ -75,11 +75,11 @@ export type BackendRuntimeTask = {
     segmentId?: string;
     executor?: string;
     model?: string;
-    status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+    status: "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled";
     progress: number;
     input?: Record<string, unknown>;
     params?: Record<string, unknown>;
-    result?: { media?: BackendMediaResult[]; images?: BackendMediaResult[]; texts?: Array<{ index?: number; content: string }> } | null;
+    result?: { media?: BackendMediaResult[]; images?: BackendMediaResult[]; texts?: Array<{ index?: number; content: string }>; confirmation?: { pending: Array<{ nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string; firstPassStorageKey?: string }> } } | null;
     outputs?: Array<Record<string, unknown>>;
     error?: string | null;
     createdAt?: string;
@@ -484,6 +484,10 @@ export async function saveDataDir(dataDir: string): Promise<{ dataDir: string; c
 
 export function fetchBackendTask(id: string, signal?: AbortSignal) {
     return request<{ ok: boolean; task?: BackendRuntimeTask; events?: unknown[] }>("GET", canvasTaskPath(id), undefined, { signal });
+}
+
+export function resolveBackendH3Confirmation(id: string, input: { action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean }) {
+    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", h3ConfirmationPath(id), input);
 }
 
 export function fetchBackendTasks(options: { projectId?: string; nodeIds?: string[]; segmentIds?: string[]; scope?: "all" | "canvas" | "image" | "video"; status?: string; kind?: string; model?: string; taskId?: string; limit?: number; offset?: number } = {}) {

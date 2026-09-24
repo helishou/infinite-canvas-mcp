@@ -12,6 +12,7 @@ import {
   CANVAS_TASKS_PATH,
   canvasTaskActionPath,
   canvasTaskPath,
+  h3ConfirmationPath,
 } from "../canvas/generation-api.js";
 
 export type BackendClientErrorKind =
@@ -616,6 +617,12 @@ export class BackendClient {
     );
     if (!data.task)
       throw new Error(`backend task retry returned no task: ${id}`);
+    return data.task;
+  }
+
+  async resolveH3Confirmation(id: string, request: { action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean }): Promise<RuntimeTask> {
+    const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(h3ConfirmationPath(id), request);
+    if (!data.task) throw new Error(`backend H3 confirmation returned no task: ${id}`);
     return data.task;
   }
 

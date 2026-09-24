@@ -319,6 +319,7 @@ const BACKEND_CANVAS_TOOLS = [
   "canvas_run_generation",
   "canvas_task_status",
   "canvas_wait_tasks",
+  "canvas_h3_confirmation",
   "generation_get_status",
   "mcp_observability_report",
   "models_list",
@@ -592,6 +593,15 @@ async function executeDirectCanvasTool(
       ok: true,
       ...(await waitForCanvasTasks(backendApi, taskIds, input)),
     };
+  }
+  if (name === "canvas_h3_confirmation") {
+    const task = await backendApi.resolveH3Confirmation(String(input.taskId), {
+      action: input.action as "confirm" | "keep_first_pass" | "discard",
+      segmentIds: (input.segmentIds as string[]).map(String),
+      firstPassFingerprint: String(input.firstPassFingerprint),
+      ...(input.retry === true ? { retry: true } : {}),
+    });
+    return { ok: true, task: toCanvasTask(task) };
   }
   if (name === "canvas_inspect")
     return inspectCanvasContext(config, backendApi, state, input, getBrowserActiveProjectId);
@@ -1981,12 +1991,12 @@ async function waitForCanvasTasks(
   );
   const pollMs = Math.max(250, Math.min(10_000, Number(input.pollMs || 2_000)));
   const startedAt = Date.now();
-  const terminal = new Set(["succeeded", "failed", "cancelled", "completed", "missing"]);
+  const terminal = new Set(["succeeded", "failed", "cancelled", "completed", "missing", "awaiting_confirmation"]);
   let pollCount = 1;
   let eventCount = 0;
   let waitMode = "poll";
   let tasks: Array<Record<string, unknown>> = [];
-  const initial = (await listTasksFromBackend(backend, { taskIds })).tasks;
+  const initial = (await listTasksFromBackend(backend, { taskIds, limit: taskIds.length })).tasks;
   const initialById = new Map(initial.map((task) => [String(task.taskId || ""), task]));
   tasks = taskIds.map((taskId) => initialById.get(taskId) || { taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" });
   if (initial.length === taskIds.length && initial.length > 0 && initial.every((task) => String(task.kind || "").includes("h3"))) {
@@ -2000,7 +2010,7 @@ async function waitForCanvasTasks(
   for (;;) {
     if (!tasks.length || !tasks.every((task) => terminal.has(String(task.status)))) {
       if (tasks.length) pollCount += 1;
-      const result = await listTasksFromBackend(backend, { taskIds });
+      const result = await listTasksFromBackend(backend, { taskIds, limit: taskIds.length });
       const snapshots = new Map(result.tasks.map((task) => [String(task.taskId || ""), task]));
       tasks = taskIds.map((taskId) => snapshots.get(taskId) || { taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" });
     }
@@ -2020,13 +2030,17 @@ async function waitForCanvasTasks(
         summary: {
           total: tasks.length,
           complete: tasks.filter((task) => terminal.has(String(task.status))).length,
+          needsAction: tasks.filter((task) => task.status === "awaiting_confirmation").length,
+          workflowComplete: tasks.filter((task) => ["succeeded", "failed", "cancelled", "completed", "missing"].includes(String(task.status))).length,
           byStatus: tasks.reduce<Record<string, number>>((counts, task) => {
             const status = String(task.status || "unknown");
             counts[status] = (counts[status] || 0) + 1;
             return counts;
           }, {}),
         },
-        ...(pendingTaskIds.length ? { next: waitTasksAction(pendingTaskIds) } : {}),
+        ...(tasks.some((task) => task.status === "awaiting_confirmation")
+          ? { next: h3ConfirmationSuggestion(tasks.find((task) => task.status === "awaiting_confirmation")!) }
+          : pendingTaskIds.length ? { next: waitTasksAction(pendingTaskIds) } : {}),
         tasks,
       };
     }
@@ -2038,7 +2052,7 @@ async function waitForCanvasTasks(
 async function waitForH3TaskEvents(
   backend: ReturnType<typeof createBackendClient>, taskIds: string[], initial: Array<Record<string, unknown>>, timeoutMs: number,
 ) {
-  const terminal = new Set(["succeeded", "failed", "cancelled", "completed", "missing"]);
+  const terminal = new Set(["succeeded", "failed", "cancelled", "completed", "missing", "awaiting_confirmation"]);
   const tasks = new Map(initial.map((task) => [String(task.taskId || ""), task]));
   if ([...tasks.values()].every((task) => terminal.has(String(task.status)))) return { tasks: taskIds.map((id) => tasks.get(id)!), connected: true, eventCount: 0, usedStream: false };
   if (timeoutMs <= 0) return { tasks: [], connected: false, eventCount: 0 };
@@ -2074,7 +2088,7 @@ async function waitForH3TaskEvents(
       if (!taskIds.includes(String(event.entityId || ""))) continue;
       const payload = recordOf(event.payload);
       if (!terminal.has(String(payload.status || "")) && !["task.completed", "task.failed"].includes(String(event.type))) continue;
-      const snapshots = (await listTasksFromBackend(backend, { taskIds })).tasks;
+      const snapshots = (await listTasksFromBackend(backend, { taskIds, limit: taskIds.length })).tasks;
       for (const task of snapshots) tasks.set(String(task.taskId || ""), task);
     }
     controller.abort();
@@ -2267,6 +2281,15 @@ function toCanvasTask(task: {
       String(params.model || params.modelName || input.model || "") ||
       undefined,
     status: task.status,
+    ...(task.kind === "canvas-h3-run" && task.status === "awaiting_confirmation" ? {
+      phase: "confirmation",
+      confirmation: {
+        pending: (Array.isArray(recordOf(result.confirmation).pending) ? recordOf(result.confirmation).pending as Array<Record<string, unknown>> : []).map((item) => ({
+          nodeId: String(item.nodeId || ""), segmentId: String(item.segmentId || ""),
+          firstPassFingerprint: String(item.firstPassFingerprint || ""), firstPassResult: String(item.firstPassResult || ""), firstPassStorageKey: String(item.firstPassStorageKey || ""),
+        })),
+      },
+    } : {}),
     progress: Number(task.progress || 0),
     outputs: Array.isArray(task.outputs)
       ? task.outputs
@@ -2452,6 +2475,8 @@ function summarizeCanvasTasks(
       suggestedAction:
         task.status === "queued" || task.status === "running"
           ? waitTasksAction([task.taskId])
+          : task.status === "awaiting_confirmation"
+            ? h3ConfirmationSuggestion(task)
           : task.status === "succeeded"
             ? { tool: "canvas_inspect", input: { projectId: task.projectId } }
             : { action: "检查任务 error 和产物；当前不自动重新提交相同生成请求" },
@@ -2771,6 +2796,17 @@ function inputTaskIds(input: Record<string, unknown>) {
   const ids = Array.isArray(input.taskIds) ? input.taskIds.map(String).filter(Boolean) : [];
   const taskId = typeof input.taskId === "string" ? input.taskId : "";
   return [...new Set(taskId ? [taskId, ...ids] : ids)];
+}
+
+function h3ConfirmationSuggestion(task: Record<string, unknown>) {
+  const pending = recordOf(task.confirmation).pending;
+  const item = Array.isArray(pending) ? recordOf(pending[0]) : {};
+  return {
+    tool: "canvas_h3_confirmation",
+    input: { taskId: String(task.taskId || ""), segmentIds: [String(item.segmentId || "")], firstPassFingerprint: String(item.firstPassFingerprint || "") },
+    actionChoices: ["confirm", "keep_first_pass", "discard"],
+    note: "请先查看一采结果，由用户明确选择 action；此处不会自动确认二采。",
+  };
 }
 
 function waitTasksAction(taskIds: string[]) {

@@ -72,6 +72,7 @@ export const toolNames = [
   "canvas_run_generation",
   "canvas_task_status",
   "canvas_wait_tasks",
+  "canvas_h3_confirmation",
   "generation_get_status",
   "mcp_observability_report",
   "models_list",
@@ -593,6 +594,13 @@ export const toolInputSchemas = {
       .optional()
       .describe("轮询间隔，默认 2000ms"),
   }),
+  canvas_h3_confirmation: z.object({
+    taskId: z.string().min(1).describe("原始 H3 父任务 ID；不创建新父任务"),
+    action: z.enum(["confirm", "keep_first_pass", "discard"]).describe("由用户明确选择：精修二采、保留一采或放弃整个未完成运行"),
+    segmentIds: z.array(z.string().min(1)).length(1).describe("当前待确认的单个 Clip ID"),
+    firstPassFingerprint: z.string().min(1).describe("从 canvas_task_status 返回的当前一采指纹，作为确认快照前提"),
+    retry: z.boolean().optional().describe("仅二采失败后用户明确重试时设为 true"),
+  }),
   generation_get_status: canvasProjectSchema.extend({
     scope: z
       .enum(["all", "canvas", "image", "video"])
@@ -813,7 +821,9 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_task_status:
     "即时查询 MCP 发起的画布生成任务。优先传 taskId 精确查询；传入 taskId 后忽略 projectId/nodeId 等过滤条件。不传 taskId 时默认使用当前活动画布，可用 nodeId 缩小范围。运行中任务建议使用 canvas_wait_tasks 等待收口；本工具用于即时查看，不会提交或重试任务。",
   canvas_wait_tasks:
-    "等待一组 Backend 生成任务进入终态，并按传入顺序返回状态、产物和错误；适合批量生成后一次性收口。超时会返回原 taskId 的下一次等待指引，不会重新提交生成；每次最多传 32 个 taskId，更多任务按返回的分组继续调用。",
+    "等待 Backend 任务进入终态或 H3 人工确认暂停态；awaiting_confirmation 表示等待已经返回，但工作流未完成。此时先查看一采，用户明确选择操作后调用 canvas_h3_confirmation，不要自动确认。",
+  canvas_h3_confirmation:
+    "处理 H3 一采暂停任务：必须先查看一采并由用户明确选择确认二采、保留一采或放弃整个运行。沿用原父 taskId。",
   generation_get_status:
     "查询当前活动网页的生成任务状态。默认返回画布、生图工作台和视频工作台最近任务；可用 scope 过滤来源，用 taskId 查询工作台任务，用 nodeIds 查询画布节点。H3 节点可用 segmentIds 过滤分镜。要看 H3 历史输入快照（prompt/refs/params），用 scope='video' + nodeIds + segmentIds。",
   mcp_observability_report:

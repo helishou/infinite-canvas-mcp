@@ -22,7 +22,7 @@ export async function observeCanvasGenerationTask(input: CanvasGenerationCommand
         for (;;) {
             const { task } = await fetchBackendTask(started.taskId, signal);
             if (!task) throw new Error(`画布${label}任务查询没有返回任务`);
-            if (task.status === "succeeded") return task;
+            if (task.status === "succeeded" || task.status === "awaiting_confirmation") return task;
             if (task.status === "failed" || task.status === "cancelled") throw new Error(task.error || `画布${label}任务${task.status}`);
             await wait(pollMs, signal);
         }

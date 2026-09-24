@@ -47,6 +47,7 @@ import {
   CANVAS_TASK_ROUTE,
   canvasTaskActionRoute,
 } from "@basketikun/canvas-agent/generation-api";
+import type { H3ConfirmationAction } from "./canvas/h3-runner.js";
 import {
   isLocalConnection,
   registerConnectionRoutes,
@@ -63,6 +64,7 @@ export type ServerDeps = {
   stores?: Stores;
   cancelTask?: (task: RuntimeTask) => RuntimeTask;
   retryTask?: (task: RuntimeTask) => RuntimeTask | Promise<RuntimeTask>;
+  resolveH3Confirmation?: (id: string, action: H3ConfirmationAction) => RuntimeTask;
   prepareAiConfig?: (config: unknown) => unknown | Promise<unknown>;
 };
 
@@ -1592,6 +1594,19 @@ export function startServer(
       events: stores.tasks.events(req.params.id, Number(req.query.after || 0)),
     });
   });
+  app.post(`${CANVAS_TASKS_PATH}/:id/h3-confirmation`, (req, res) => {
+    if (!deps.resolveH3Confirmation) return void res.status(501).json({ ok: false, error: "H3 confirmation unavailable" });
+    const body = req.body as Partial<H3ConfirmationAction> | undefined;
+    if (!body || !["confirm", "keep_first_pass", "discard"].includes(String(body.action)) || !Array.isArray(body.segmentIds) || body.segmentIds.length !== 1 || typeof body.segmentIds[0] !== "string" || typeof body.firstPassFingerprint !== "string")
+      return void res.status(400).json({ ok: false, error: "H3 确认需要 action、单个 segmentId 及 firstPassFingerprint" });
+    try {
+      const task = deps.resolveH3Confirmation(String(req.params.id), body as H3ConfirmationAction);
+      res.json({ ok: true, task });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(message.includes("找不到 H3 父任务") ? 404 : 409).json({ ok: false, error: message });
+    }
+  });
   app.post(CANVAS_TASKS_PATH, (req, res) => {
     const body = req.body as {
       kind?: string;
@@ -1601,6 +1616,7 @@ export function startServer(
     };
     if (!body.kind)
       return void res.status(400).json({ ok: false, error: "kind 必填" });
+    if (body.kind === "canvas-h3-run") return void res.status(409).json({ ok: false, error: "H3 父任务只能由编排器创建" });
     const task = body.clientTaskId
       ? stores.tasks.create(
           body.clientTaskId,
@@ -1620,6 +1636,7 @@ export function startServer(
       error?: string | null;
     };
     try {
+      if (stores.tasks.get(req.params.id)?.kind === "canvas-h3-run") return void res.status(409).json({ ok: false, error: "H3 父任务状态只能由编排器更新" });
       const task = stores.tasks.update(req.params.id, patch);
       events.publish({
         type:
