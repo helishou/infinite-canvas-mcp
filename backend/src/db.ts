@@ -1917,7 +1917,14 @@ export class BackendDatabase {
                 SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
                 SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
                 AVG(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN duration_ms END) AS average_duration_ms,
-                MAX(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN duration_ms END) AS max_duration_ms
+                MAX(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN duration_ms END) AS max_duration_ms,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN json_extract(output_summary_json, '$.outputChars') ELSE 0 END) AS total_output_chars,
+                MAX(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN json_extract(output_summary_json, '$.outputChars') END) AS max_output_chars,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN json_extract(input_summary_json, '$.inputChars') ELSE 0 END) AS total_input_chars,
+                MAX(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN json_extract(input_summary_json, '$.inputChars') END) AS max_input_chars,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(output_summary_json, '$.outputChars') IS NOT NULL THEN 1 ELSE 0 END) AS output_sized_calls,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(input_summary_json, '$.inputChars') IS NOT NULL THEN 1 ELSE 0 END) AS input_sized_calls,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(output_summary_json, '$.outputChars') > 100000 THEN 1 ELSE 0 END) AS oversized_calls
             FROM mcp_observability_events
         `).get() as Record<string, unknown>;
         const byTool = this.db.prepare(`
@@ -1934,7 +1941,14 @@ export class BackendDatabase {
                 SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
                 AVG(duration_ms) AS average_duration_ms,
                 MAX(duration_ms) AS max_duration_ms,
-                MAX(CASE WHEN duration_rank = CAST((tool_count * 95 + 99) / 100 AS INTEGER) THEN duration_ms END) AS p95_duration_ms
+                MAX(CASE WHEN duration_rank = CAST((tool_count * 95 + 99) / 100 AS INTEGER) THEN duration_ms END) AS p95_duration_ms,
+                SUM(CASE WHEN json_extract(input_summary_json, '$.inputChars') IS NOT NULL OR json_extract(output_summary_json, '$.outputChars') IS NOT NULL THEN 1 ELSE 0 END) AS sized_calls,
+                SUM(CASE WHEN json_extract(output_summary_json, '$.outputChars') IS NOT NULL THEN 1 ELSE 0 END) AS output_sized_calls,
+                SUM(CASE WHEN json_extract(input_summary_json, '$.inputChars') IS NOT NULL THEN 1 ELSE 0 END) AS input_sized_calls,
+                MAX(json_extract(output_summary_json, '$.outputChars')) AS max_output_chars,
+                SUM(json_extract(output_summary_json, '$.outputChars')) AS total_output_chars,
+                MAX(json_extract(input_summary_json, '$.inputChars')) AS max_input_chars,
+                SUM(json_extract(input_summary_json, '$.inputChars')) AS total_input_chars
             FROM terminal
             GROUP BY tool ORDER BY calls DESC, tool
         `).all() as Array<Record<string, unknown>>;
@@ -2058,6 +2072,18 @@ export class BackendDatabase {
                 : null,
         }));
         const taskOutcomeMetrics = taskOutcomesByTool.map((row) => ({ tool: String(row.tool || ""), status: String(row.status || "unknown"), count: Number(row.count || 0) }));
+        // 单次返回体超过该字符数即视为「会显著占用模型上下文」。实测 canvas_get_state 单次
+        // 可达 2.2M 字符（≈55 万 tokens），阈值取 100k 字符以覆盖严重情形而不误报普通工具。
+        const payloadWarnChars = 100_000;
+        const oversizedCalls = Number(totals.oversized_calls || 0);
+        const payloadTotals = {
+            outputSizedCalls: Number(totals.output_sized_calls || 0),
+            inputSizedCalls: Number(totals.input_sized_calls || 0),
+            totalInputChars: Number(totals.total_input_chars || 0),
+            totalOutputChars: Number(totals.total_output_chars || 0),
+            maxOutputChars: totals.max_output_chars == null ? null : Number(totals.max_output_chars),
+            maxInputChars: totals.max_input_chars == null ? null : Number(totals.max_input_chars),
+        };
         const diagnostics = buildMcpObservabilityDiagnostics({
             started,
             completed,
@@ -2069,6 +2095,8 @@ export class BackendDatabase {
             recoverySucceeded,
             tools: toolMetrics,
             taskOutcomes: taskOutcomeMetrics,
+            payloadWarnChars,
+            oversizedCalls,
         });
         return {
             generatedAt: new Date().toISOString(),
@@ -2111,6 +2139,22 @@ export class BackendDatabase {
             latency: {
                 ordinary: ordinaryLatency,
                 waiting: waitingLatency,
+            },
+            // MCP 输入/输出大小统计：字符数为序列化后的长度，token 为 4 字符≈1 token 的粗估。
+            payload: {
+                outputSizedCalls: payloadTotals.outputSizedCalls,
+                inputSizedCalls: payloadTotals.inputSizedCalls,
+                totalInputChars: payloadTotals.totalInputChars,
+                totalOutputChars: payloadTotals.totalOutputChars,
+                estimatedTotalInputTokens: Math.round(payloadTotals.totalInputChars / 4),
+                estimatedTotalOutputTokens: Math.round(payloadTotals.totalOutputChars / 4),
+                averageOutputChars: payloadTotals.outputSizedCalls ? Math.round(payloadTotals.totalOutputChars / payloadTotals.outputSizedCalls) : null,
+                maxOutputChars: payloadTotals.maxOutputChars,
+                maxOutputTokens: payloadTotals.maxOutputChars == null ? null : Math.round(payloadTotals.maxOutputChars / 4),
+                maxInputChars: payloadTotals.maxInputChars,
+                warnThresholdChars: payloadWarnChars,
+                oversizedCalls,
+                note: "仅统计已记录 inputSummary/outputSummary 的调用；早期事件缺少尺寸字段时不参与均值计算。",
             },
             transitions: transitions.map((row) => ({ fromTool: String(row.from_tool || ""), toTool: String(row.to_tool || ""), count: Number(row.count || 0) })),
             daily: daily.map((row) => {
@@ -2188,6 +2232,8 @@ export class BackendDatabase {
         if (!row) return null;
         const input = parseJsonObject(row.input_json);
         const params = parseJsonObject(row.params_json);
+        // 插件文本等调用把归属节点/Clip 放在 input.params 里（顶层 nodeId 会触发画布回写绑定，不能放）
+        const inputParams = input.params && typeof input.params === "object" && !Array.isArray(input.params) ? input.params as Record<string, unknown> : {};
         const result = row.result_json ? parseJsonObject(row.result_json) : null;
         const binding = params.canvasBinding && typeof params.canvasBinding === "object" && !Array.isArray(params.canvasBinding)
             ? params.canvasBinding as Record<string, unknown> : {};
@@ -2203,8 +2249,8 @@ export class BackendDatabase {
             updatedAt: String(row.updated_at),
             parentTaskId: String(params.parentTaskId || "") || undefined,
             projectId: String(input.projectId || params.projectId || binding.projectId || "") || undefined,
-            nodeId: String(input.nodeId || params.nodeId || binding.nodeId || "") || undefined,
-            segmentId: String(input.segmentId || params.segmentId || binding.segmentId || "") || undefined,
+            nodeId: String(input.nodeId || inputParams.nodeId || params.nodeId || binding.nodeId || "") || undefined,
+            segmentId: String(input.segmentId || inputParams.segmentId || params.segmentId || binding.segmentId || "") || undefined,
             executor: String(params.executor || (String(row.kind).startsWith("comfyui:") ? "comfy" : String(row.kind))) || undefined,
             model: String(params.model || params.modelName || input.model || "") || undefined,
             outputs,
@@ -2468,6 +2514,14 @@ function collectObservedTaskLinks(rows: Array<Record<string, unknown>>) {
 function metricRow(row: Record<string, unknown>) {
     const calls = Number(row.calls || 0);
     const succeeded = Number(row.succeeded || 0);
+    const maxOutputChars = row.max_output_chars == null ? null : Number(row.max_output_chars);
+    const totalOutputChars = row.total_output_chars == null ? null : Number(row.total_output_chars);
+    const maxInputChars = row.max_input_chars == null ? null : Number(row.max_input_chars);
+    const totalInputChars = row.total_input_chars == null ? null : Number(row.total_input_chars);
+    const sizedCalls = Number(row.sized_calls || 0);
+    // 输出/入参均值各自用自己的分母：某次调用只记录了入参时，不应拉低返回体均值。
+    const outputSizedCalls = Number(row.output_sized_calls || 0);
+    const inputSizedCalls = Number(row.input_sized_calls || 0);
     return {
         tool: String(row.tool || ""),
         calls,
@@ -2478,6 +2532,13 @@ function metricRow(row: Record<string, unknown>) {
         maxDurationMs: row.max_duration_ms == null ? null : Number(row.max_duration_ms),
         p95DurationMs: row.p95_duration_ms == null ? null : Number(row.p95_duration_ms),
         ordinaryP95DurationMs: row.ordinary_p95_duration_ms == null ? null : Number(row.ordinary_p95_duration_ms),
+        // 载荷口径：均值只对已记录尺寸的调用求平均；历史事件缺 summary 时不参与，避免把均值算低。
+        sizedCalls,
+        averageOutputChars: outputSizedCalls && totalOutputChars != null ? Math.round(totalOutputChars / outputSizedCalls) : null,
+        maxOutputChars,
+        estimatedOutputTokens: maxOutputChars == null ? null : Math.round(maxOutputChars / 4),
+        averageInputChars: inputSizedCalls && totalInputChars != null ? Math.round(totalInputChars / inputSizedCalls) : null,
+        maxInputChars,
     };
 }
 
@@ -2492,6 +2553,9 @@ function buildMcpObservabilityDiagnostics(input: {
     recoverySucceeded: number;
     tools: Array<ReturnType<typeof metricRow>>;
     taskOutcomes: Array<{ tool: string; status: string; count: number }>;
+    /** 单次返回体字符数阈值：超过即认为会显著占用模型上下文。 */
+    payloadWarnChars: number;
+    oversizedCalls: number;
 }) {
     const diagnostics: Array<{ severity: "success" | "info" | "warning" | "error"; code: string; title: string; detail: string; tool?: string }> = [];
     const incomplete = Math.max(0, input.started - input.completed);
@@ -2505,7 +2569,21 @@ function buildMcpObservabilityDiagnostics(input: {
     for (const tool of input.tools) {
         if (tool.calls >= 5 && tool.failed / tool.calls >= 0.2) diagnostics.push({ severity: "warning", code: "TOOL_FAILURE_HOTSPOT", title: `${tool.tool} 失败率偏高`, detail: `${tool.calls} 次调用中失败 ${tool.failed} 次，优先检查参数说明、前置状态与错误恢复建议。`, tool: tool.tool });
         if (tool.calls >= 5 && tool.ordinaryP95DurationMs != null && tool.ordinaryP95DurationMs > 5000) diagnostics.push({ severity: "warning", code: "TOOL_LATENCY_HOTSPOT", title: `${tool.tool} 尾延迟偏高`, detail: `普通调用 P95 为 ${tool.ordinaryP95DurationMs} ms，已排除任务等待耗时；建议检查远端读取或重复调用路径。`, tool: tool.tool });
+        // 返回体过大会直接挤占模型上下文：给出「最大返回体」实证，而不是泛泛提示省 token。
+        if (tool.maxOutputChars != null && tool.maxOutputChars >= input.payloadWarnChars) diagnostics.push({
+            severity: "warning",
+            code: "TOOL_PAYLOAD_HOTSPOT",
+            title: `${tool.tool} 返回体过大`,
+            detail: `最大一次返回约 ${tool.maxOutputChars.toLocaleString("en-US")} 字符（≈${Math.round(tool.maxOutputChars / 4).toLocaleString("en-US")} tokens，估算），均值约 ${(tool.averageOutputChars ?? 0).toLocaleString("en-US")} 字符。单次调用即可挤占可观的模型上下文，建议改用更小的返回体或摘要型工具。`,
+            tool: tool.tool,
+        });
     }
+    if (input.oversizedCalls > 0) diagnostics.push({
+        severity: input.oversizedCalls >= 10 ? "error" : "warning",
+        code: "OVERSIZED_PAYLOAD_CALLS",
+        title: "存在超大 MCP 返回体",
+        detail: `累计 ${input.oversizedCalls} 次调用返回超过 ${input.payloadWarnChars.toLocaleString("en-US")} 字符；这类工具一次调用就可能挤爆模型上下文，优先改用摘要型替代工具。`,
+    });
     const taskOutcomes = new Map<string, { total: number; failed: number }>();
     for (const outcome of input.taskOutcomes) {
         const metric = taskOutcomes.get(outcome.tool) || { total: 0, failed: 0 };

@@ -12,6 +12,7 @@ import { nanoid } from "nanoid";
 import type { Express, Request, Response } from "express";
 
 import { loadConfig, type ResolvedConfig } from "./config.js";
+import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 import {
   PluginMcpRegistry,
   buildPluginMcpContext,
@@ -597,7 +598,9 @@ async function executeDirectCanvasTool(
   const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
   const project = await fetchCurrentCanvasProject(config, projectId);
   const projectState = project as Record<string, unknown>;
-  if (name === "canvas_get_state" || name === "canvas_export_snapshot")
+  if (name === "canvas_get_state")
+    return compactProjectSummary(projectState, input);
+  if (name === "canvas_export_snapshot")
     return compactProject(projectState);
   if (name === "canvas_get_selection") {
     const ids = new Set(
@@ -842,6 +845,8 @@ function registerBackendCanvasTools(
             getBrowserActiveProjectId,
           );
           const context = mcpToolResultContext(value, input, state, name);
+          // 画布类工具绕过上面的通用包装，因此在这里施加同一道输出上限。
+          enforceToolOutputLimit(name, value);
           await recordMcpObservabilityEvent(recordEvent, {
             sessionId: state.clientId,
             traceId,
@@ -871,6 +876,7 @@ function registerBackendCanvasTools(
             outputSummary: {
               ...recordOf(errorContext.outputSummary),
               errorCode: details.code,
+              ...payloadOverflowSummary(error),
             },
           });
           return toolErrorResult(error, name, rawInput, state, traceId, details);
@@ -920,17 +926,42 @@ function registerBackendCanvasTools(
       { description: toolDescriptions[name], inputSchema: schema.shape },
       async (rawInput: Record<string, unknown>) => {
         const input = schema.parse(rawInput) as Record<string, unknown>;
-        if (name === "assets_list")
-          return textResult(
-            (
-              await backendApi.listAssets({
-                kind:
-                  input.kind && input.kind !== "all"
-                    ? String(input.kind)
-                    : undefined,
+        if (name === "assets_list") {
+          // 以前 kind 之外的参数（keyword/page/pageSize）被静默忽略、永远返回全量；
+          // 全量在资产多时可达 2 MB，会直接撞上输出上限，所以这里把参数真正落地。
+          const all = (
+            await backendApi.listAssets({
+              kind:
+                input.kind && input.kind !== "all"
+                  ? String(input.kind)
+                  : undefined,
+            })
+          ).assets;
+          // 与工具描述一致地剥离内联媒体：单个资产的 coverUrl/data 可能是 2MB 的
+          // base64（实测），不剥离时连 pageSize=1 都过不了输出上限，列表工具直接失效。
+          const redacted = all.map((asset) => redactInlineMedia(asset));
+          const keyword = String(input.keyword ?? "").trim().toLowerCase();
+          const filtered = keyword
+            ? redacted.filter((asset) => {
+                const record = recordOf(asset);
+                return [record.title, record.description, record.content]
+                  .map((field) => String(field ?? ""))
+                  .some((field) => field.toLowerCase().includes(keyword));
               })
-            ).assets,
-          );
+            : redacted;
+          const pageSize = Math.max(0, Number(input.pageSize ?? 0) || 0);
+          const page = Math.max(1, Number(input.page ?? 1) || 1);
+          if (pageSize > 0) {
+            const start = (page - 1) * pageSize;
+            return textResult({
+              total: filtered.length,
+              page,
+              pageSize,
+              items: filtered.slice(start, start + pageSize),
+            });
+          }
+          return textResult(filtered);
+        }
         if (name === "assets_upsert_batch") {
           const now = new Date().toISOString();
           const items = Array.isArray(input.items)
@@ -2614,9 +2645,81 @@ function compactProject(project: Record<string, unknown>) {
   };
 }
 
+/** canvas_get_state 默认只回节点摘要：真实画布的整幅节点 metadata 实测 3.3 MB（≈80 万 token），
+ *  直接进模型上下文会挤爆窗口，也会撞上 0.5 MiB 输出上限（旧实现直接报 OUTPUT_TOO_LARGE）。
+ *  需要某个节点的完整 metadata 时显式传 nodeIds；导出整图请用 canvas_export_snapshot。 */
+function compactProjectSummary(project: Record<string, unknown>, input: Record<string, unknown>) {
+  const nodes = nodesOf(project);
+  const wanted = Array.isArray(input.nodeIds) ? new Set(input.nodeIds.map(String)) : null;
+  const selected = wanted ? nodes.filter((node) => wanted.has(String(node.id))) : nodes;
+  const summaries = wanted ? selected : selected.slice(0, 200).map(nodeSummary);
+  return {
+    ...projectSummary(project as unknown as CanvasProject),
+    nodes: summaries,
+    connections: connectionsOf(project),
+    totalNodes: nodes.length,
+    truncated: wanted ? false : selected.length > summaries.length,
+    hint: '需要某节点的完整 metadata 时传 nodeIds: ["<id>"]；节点级细节也可用 canvas_inspect，导出整图用 canvas_export_snapshot',
+  };
+}
+
 function textResult(value: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value) }],
+  };
+}
+
+/** MCP 工具返回体硬上限（字节）。超过即报错，避免单次调用把模型上下文挤爆：
+ *  实测 canvas_get_state 单次可返回 2.2M 字符（≈55 万 tokens），而 0.5 MiB 约合 13 万 tokens 的上限。
+ *  可用环境变量 MCP_MAX_TOOL_OUTPUT_BYTES 覆盖；设为 0 表示关闭该保护。 */
+const MAX_TOOL_OUTPUT_BYTES = (() => {
+  const raw = Number(process.env.MCP_MAX_TOOL_OUTPUT_BYTES);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 512 * 1024;
+})();
+
+class McpPayloadOverflowError extends Error {
+  readonly code = "OUTPUT_TOO_LARGE";
+  readonly bytes: number;
+  readonly chars: number;
+  readonly limitBytes: number;
+  constructor(bytes: number, chars: number, limitBytes: number, tool: string) {
+    super(
+      `工具 ${tool} 的返回体为 ${bytes} 字节（${chars} 字符），超过单次输出上限 ${limitBytes} 字节。请缩小查询范围后重试（例如指定 nodeIds、更小的 limit，或改用摘要型工具）。`,
+    );
+    this.name = "McpPayloadOverflowError";
+    this.bytes = bytes;
+    this.chars = chars;
+    this.limitBytes = limitBytes;
+  }
+}
+
+/** 测量返回体的 UTF-8 字节数与字符数（字节口径与线上传输一致）。无法序列化时返回 0（不拦截）。 */
+function measureToolResultSize(result: unknown): { bytes: number; chars: number } {
+  try {
+    const text = JSON.stringify(result);
+    return typeof text === "string"
+      ? { bytes: Buffer.byteLength(text, "utf8"), chars: text.length }
+      : { bytes: 0, chars: 0 };
+  } catch {
+    return { bytes: 0, chars: 0 };
+  }
+}
+
+/** 成功返回体超过上限即抛错；调用方位于 try 内，会被统一记为 tool.failed/OUTPUT_TOO_LARGE。 */
+function enforceToolOutputLimit(tool: string, payload: unknown) {
+  if (MAX_TOOL_OUTPUT_BYTES <= 0) return;
+  const { bytes, chars } = measureToolResultSize(payload);
+  if (bytes > MAX_TOOL_OUTPUT_BYTES) throw new McpPayloadOverflowError(bytes, chars, MAX_TOOL_OUTPUT_BYTES, tool);
+}
+
+/** 超限时把「实际多大 / 上限多少」写进 outputSummary，让诊断能显示超了多少。
+ *  注意 outputChars 与既有指标口径一致（字符数），字节数另开 outputBytes 字段。 */
+function payloadOverflowSummary(error: unknown) {
+  if (!(error instanceof McpPayloadOverflowError)) return {};
+  return {
+    outputBytes: error.bytes,
+    outputBytesLimit: error.limitBytes,
+    outputChars: error.chars,
   };
 }
 
@@ -2794,7 +2897,10 @@ function classifyToolError(
   const timeout = backendError.kind === "timeout";
   const networkFailure = backendError.kind === "network";
   const invalidResponse = backendError.kind === "invalid_response";
-  const code = selectionRequired
+  const payloadOverflow = error instanceof McpPayloadOverflowError;
+  const code = payloadOverflow
+    ? "OUTPUT_TOO_LARGE"
+    : selectionRequired
     ? "PROJECT_SELECTION_REQUIRED"
     : missingProject
       ? "PROJECT_NOT_FOUND"
@@ -2821,7 +2927,12 @@ function classifyToolError(
                           : "CANVAS_TOOL_FAILED";
   const taskIds = inputTaskIds(input);
   const projectId = String(input.projectId || state.activeProjectId || "");
-  const suggestedAction = selectionRequired
+  const suggestedAction = payloadOverflow
+    ? {
+        action:
+          "缩小返回体后重试：为查询类工具传更小的 limit / nodeIds，或用 canvas_inspect 代替整图快照工具。",
+      }
+    : selectionRequired
     ? { tool: "canvas_list_projects", input: {} }
     : missingProject
       ? { tool: "canvas_list_projects", input: {} }
@@ -2841,7 +2952,7 @@ function classifyToolError(
           : authFailure
             ? { action: "检查 Backend 地址、Token 和权限后再重试" }
             : { action: "检查 errorContext 后修正输入或连接；不要重复提交完全相同的失败请求" };
-  const recoverable = selectionRequired || missingProject || missingTask || missingNode || missingModel || conflict || timeout;
+  const recoverable = selectionRequired || missingProject || missingTask || missingNode || missingModel || conflict || timeout || payloadOverflow;
   return {
     code,
     message,
@@ -2928,9 +3039,12 @@ function installMcpToolObservability(
             outputSummary: {
               ...recordOf(errorContext.outputSummary),
               errorCode: optionalText(errorRecord.code) || details.code,
+              ...payloadOverflowSummary(error),
             },
           });
         } else {
+          // 成功返回体也受硬上限约束：超限直接抛错，由下面 catch 记为 tool.failed/OUTPUT_TOO_LARGE。
+          enforceToolOutputLimit(name, result);
           await recordMcpObservabilityEvent(recordEvent, {
             sessionId: state.clientId,
             traceId,
@@ -2961,6 +3075,7 @@ function installMcpToolObservability(
           outputSummary: {
             ...recordOf(errorContext.outputSummary),
             errorCode: details.code,
+            ...payloadOverflowSummary(error),
           },
         });
         return toolErrorResult(

@@ -121,6 +121,64 @@ test("MCP 任务统计按 taskId 去重并保留批量与等待口径", async ()
     }
 });
 
+test("MCP 诊断统计每个工具的输入输出大小并标记超大返回体", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "infinite-canvas-mcp-observability-payload-"));
+    const database = new BackendDatabase(path.join(dir, "runtime.sqlite"));
+    const stores = createStores(database);
+    const { app } = startServer(database, { url: "http://127.0.0.1", token: "test-token", port: 0, origins: [] }, { stores });
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const request = (pathname: string, init?: RequestInit) => fetch(`http://127.0.0.1:${port}${pathname}`, {
+        ...init,
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json", ...init?.headers },
+    });
+    const record = (body: Record<string, unknown>) => request("/mcp/observability/events", { method: "POST", body: JSON.stringify(body) });
+
+    try {
+        // 两次大返回体调用（超过阈值）+ 一次小返回体 + 一次未记录尺寸的旧事件
+        await record({ sessionId: "session-payload", traceId: "trace-big-1", event: "tool.succeeded", tool: "canvas_get_state", durationMs: 40, inputSummary: { inputChars: 76 }, outputSummary: { ok: true, outputChars: 2200000 } });
+        await record({ sessionId: "session-payload", traceId: "trace-big-2", event: "tool.succeeded", tool: "canvas_get_state", durationMs: 60, inputSummary: { inputChars: 80 }, outputSummary: { ok: true, outputChars: 1800000 } });
+        await record({ sessionId: "session-payload", traceId: "trace-small", event: "tool.succeeded", tool: "canvas_inspect", durationMs: 10, inputSummary: { inputChars: 50 }, outputSummary: { ok: true, outputChars: 1000 } });
+        await record({ sessionId: "session-payload", traceId: "trace-legacy", event: "tool.succeeded", tool: "canvas_inspect", durationMs: 12, outputSummary: {} });
+
+        const response = await request("/mcp/observability/report");
+        const report = (await response.json() as { report: Record<string, any> }).report;
+
+        // 汇总口径
+        assert.equal(report.payload.totalOutputChars, 4001000);
+        assert.equal(report.payload.maxOutputChars, 2200000);
+        assert.equal(report.payload.maxOutputTokens, 550000);
+        assert.equal(report.payload.oversizedCalls, 2);
+        assert.equal(report.payload.warnThresholdChars, 100000);
+        assert.equal(report.payload.outputSizedCalls, 3, "4 次终态调用中 3 次记录了 outputChars");
+        assert.equal(report.payload.inputSizedCalls, 3, "3 次记录了 inputChars（legacy 事件两者都缺）");
+        assert.equal(report.payload.averageOutputChars, Math.round(4001000 / 3));
+
+        // 分工具口径：均值只对已记录尺寸的调用求平均，不能把缺尺寸的调用算进分母
+        const stateMetric = report.byTool.find((item: { tool: string }) => item.tool === "canvas_get_state");
+        assert.equal(stateMetric.maxOutputChars, 2200000);
+        assert.equal(stateMetric.averageOutputChars, 2000000);
+        assert.equal(stateMetric.estimatedOutputTokens, 550000);
+        assert.equal(stateMetric.maxInputChars, 80);
+        assert.equal(stateMetric.averageInputChars, 78);
+
+        const inspectMetric = report.byTool.find((item: { tool: string }) => item.tool === "canvas_inspect");
+        assert.equal(inspectMetric.maxOutputChars, 1000);
+        assert.equal(inspectMetric.averageOutputChars, 1000, "2 次调用里只有 1 次带 outputChars，均值应为 1000 而不是 500");
+        assert.equal(inspectMetric.sizedCalls, 1, "只有 1 次记录了尺寸");
+
+        // 诊断必须点名超大返回体
+        assert.ok(report.diagnostics.some((item: { code: string; tool?: string }) => item.code === "TOOL_PAYLOAD_HOTSPOT" && item.tool === "canvas_get_state"));
+        assert.ok(report.diagnostics.some((item: { code: string }) => item.code === "OVERSIZED_PAYLOAD_CALLS"));
+        assert.ok(!report.diagnostics.some((item: { code: string; tool?: string }) => item.code === "TOOL_PAYLOAD_HOTSPOT" && item.tool === "canvas_inspect"));
+    } finally {
+        await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        database.close();
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test("canvas_wait_tasks 的历史事件即使缺少等待标记也不污染普通延迟", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "infinite-canvas-mcp-observability-wait-legacy-"));
     const database = new BackendDatabase(path.join(dir, "runtime.sqlite"));

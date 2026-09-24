@@ -312,7 +312,14 @@ export const toolInputSchemas = {
       .optional()
       .describe("最多返回多少个节点摘要，默认 100，最大 500"),
   }),
-  canvas_get_state: canvasProjectSchema.passthrough(),
+  canvas_get_state: canvasProjectSchema.passthrough().extend({
+    nodeIds: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "只取这些节点的完整 metadata；省略时返回全部节点的摘要（整幅 metadata 可达数 MB，会撞输出上限）",
+      ),
+  }),
   canvas_get_selection: canvasProjectSchema.passthrough(),
   canvas_export_snapshot: canvasProjectSchema.passthrough(),
   canvas_apply_ops: canvasProjectSchema.extend({

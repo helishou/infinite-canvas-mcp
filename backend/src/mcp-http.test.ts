@@ -140,6 +140,72 @@ async function mockBackend(t: import("node:test").TestContext, onMcpEvent?: (eve
   return `http://127.0.0.1:${address.port}`;
 }
 
+async function mockOversizedBackend(t: import("node:test").TestContext, onMcpEvent?: (event: Record<string, unknown>) => void) {
+  const app = express();
+  app.use(express.json());
+  app.post("/mcp/observability/events", (req, res) => {
+    onMcpEvent?.(req.body as Record<string, unknown>);
+    res.status(201).json({ ok: true });
+  });
+  // 单个画布节点携带 ~1 MB 文本：canvas_export_snapshot（整图导出）会把它原样放进返回体，触发输出上限。
+  // canvas_get_state 自改为默认回节点摘要后已不会超限，故本用例改用导出工具验证同一道熔断。
+  const oversized = "x".repeat(1024 * 1024);
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  // 素材库同样会超限：声明了 keyword/page/pageSize 但以前被忽略，永远返回全量。
+  // 每个素材的内联 coverUrl 是 ~30KB 的 base64 dataURL（贴近真实：实测有资产是 2MB）。
+  // 剥离后 pageSize=5 只剩几 KB（可正常返回）；不剥离则必然超限。
+  const assetPayload = `data:image/png;base64,${"y".repeat(30 * 1024)}`;
+  app.get("/canvas/assets", (_req, res) =>
+    res.json({
+      ok: true,
+      folders: [],
+      assets: Array.from({ length: 60 }, (_, index) => ({
+        id: `asset-${index}`,
+        kind: "image",
+        title: index === 7 ? "霓虹猫耳少女" : `素材 ${index}`,
+        content: index === 7 ? "oversized-probe" : undefined,
+        coverUrl: assetPayload,
+      })),
+    }),
+  );
+  app.get("/canvas/projects", (_req, res) =>
+    res.json({
+      ok: true,
+      projects: [
+        {
+          id: "canvas-oversized",
+          title: "超大画布",
+          revision: 3,
+          updatedAt: "2026-09-17T00:00:00.000Z",
+          nodes: [
+            {
+              id: "node-huge",
+              type: "text",
+              title: "超大节点",
+              position: { x: 0, y: 0 },
+              metadata: { content: oversized },
+            },
+          ],
+          connections: [],
+          selectedNodeIds: [],
+        },
+      ],
+    }),
+  );
+  app.get("/canvas/projects/:id/collaboration", (req, res) =>
+    res.json({ ok: true, projectId: req.params.id, revision: 3, participants: [] }),
+  );
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => {
+    server.close();
+    await once(server, "close");
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("missing port");
+  return `http://127.0.0.1:${address.port}`;
+}
+
 async function mockGenerationBackend(
   t: import("node:test").TestContext,
   options: { conflictOnOps?: boolean } = {},
@@ -384,6 +450,69 @@ test("canvas_task_status with taskId ignores unrelated project and node filters"
   assert.equal(payload.tasks[0].taskId, "task-1");
 });
 
+test("返回体超过上限时直接报错并给出可恢复建议", async (t) => {
+  const events: Array<Record<string, unknown>> = [];
+  const backendUrl = await mockOversizedBackend(t, (event) => events.push(event));
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const result = await client.callTool({ name: "canvas_export_snapshot", arguments: { projectId: "canvas-oversized" } });
+  const payload = textPayload(result);
+
+  assert.equal(result.isError, true, "超限必须报错而不是把大返回体交给模型");
+  assert.equal(payload.error.code, "OUTPUT_TOO_LARGE");
+  assert.equal(payload.error.recoverable, true);
+  assert.ok(payload.suggestedAction.action, "必须给出缩小返回体的建议");
+  // 返回体本身必须很小：不能为了报错再把大对象带回来
+  assert.ok(JSON.stringify(result).length < 4000, `错误响应应保持精简，实际 ${JSON.stringify(result).length}`);
+
+  // 观测事件应记为失败，并带上实际大小
+  const failed = events.find((event) => event.event === "tool.failed");
+  assert.ok(failed, "应记录 tool.failed 事件");
+  assert.equal(failed.errorCode, "OUTPUT_TOO_LARGE");
+  const outputSummary = failed.outputSummary as Record<string, unknown>;
+  assert.equal(outputSummary.outputBytesLimit, 512 * 1024, "应记录上限字节数");
+  assert.ok(Number(outputSummary.outputBytes) > 512 * 1024, "应记录超限时的实际字节数");
+  assert.ok(
+    Number(outputSummary.outputChars) > 1_000_000 && Number(outputSummary.outputChars) < 1_100_000,
+    `outputChars 必须是字符数口径（约 1.05M），实际 ${outputSummary.outputChars}`,
+  );
+  assert.ok(!events.some((event) => event.event === "tool.succeeded"), "超限不得记为成功");
+});
+
+test("assets_list 剥离内联媒体并支持分页（超限时的退路）", async (t) => {
+  const backendUrl = await mockOversizedBackend(t);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+
+  // 剥离生效后，连「全量列出」都不再超限（修复前这里是必然超限的）
+  const full = await client.callTool({ name: "assets_list", arguments: {} });
+  assert.notEqual(full.isError, true, `剥离内联媒体后全量也不应超限: ${JSON.stringify(textPayload(full)).slice(0, 200)}`);
+  const fullBody = textPayload(full);
+  // 数组返回体会被 withTraceId 包成 { traceId, result: [...] }
+  const fullItems = (Array.isArray(fullBody) ? fullBody : fullBody.result) as unknown[];
+  assert.equal(fullItems.length, 60, "全量应返回 60 条");
+  assert.ok(
+    JSON.stringify(fullItems).length < 100_000,
+    `剥离后体积应很小，实际 ${JSON.stringify(fullItems).length} 字符`,
+  );
+  assert.ok(!JSON.stringify(fullItems).includes("data:image"), "返回体里不应残留任何 dataURL 原文");
+
+  // 分页与 keyword 过滤：声明过的参数必须真正生效
+  const paged = await client.callTool({ name: "assets_list", arguments: { pageSize: 5, page: 1 } });
+  assert.notEqual(paged.isError, true);
+  const pagedBody = textPayload(paged);
+  assert.equal(pagedBody.total, 60, "total 应是过滤后的总数");
+  assert.equal(pagedBody.pageSize, 5);
+  assert.equal((pagedBody.items as unknown[]).length, 5, "应只返回 pageSize 条");
+  // 内联媒体必须被替换成占位符，而不是原始 base64
+  const firstItem = (pagedBody.items as Array<Record<string, unknown>>)[0];
+  assert.equal(firstItem.coverUrl, "[inline-media:image/png]", "内联 coverUrl 应被剥离");
+
+  const searched = await client.callTool({ name: "assets_list", arguments: { keyword: "霓虹猫耳", pageSize: 5 } });
+  assert.notEqual(searched.isError, true);
+  const searchedBody = textPayload(searched);
+  assert.equal(searchedBody.total, 1, "keyword 应真正过滤（此前被静默忽略）");
+  assert.equal((searchedBody.items as Array<Record<string, unknown>>)[0].title, "霓虹猫耳少女");
+});
+
 test("direct canvas tools return recoverable structured errors", async (t) => {
   const backendUrl = await mockBackend(t);
   const client = await mcpClient(t, await fixture(t, backendUrl));
@@ -564,4 +693,33 @@ test("assets_upsert_batch writes complete assets and verifies them by id", async
   assert.equal(payload.count, 1);
   assert.equal(payload.verifiedCount, 1);
   assert.equal(payload.assets[0].id, "asset-scene-1");
+});
+
+test("canvas_get_state 默认回节点摘要，而不是整幅节点 metadata", async (t) => {
+  const backendUrl = await mockBackend(t);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-1" } });
+  const payload = textPayload(result);
+
+  assert.notEqual(result.isError, true, "默认摘要不应报错");
+  assert.ok(Array.isArray(payload.nodes), "应有 nodes 数组");
+  assert.equal(typeof payload.totalNodes, "number", "应报告总数");
+  assert.equal(payload.totalNodes, 2);
+  assert.equal(payload.truncated, false);
+  for (const node of payload.nodes as Array<Record<string, unknown>>) {
+    assert.ok(!("metadata" in node), "摘要节点不得携带完整 metadata");
+  }
+  assert.equal(JSON.stringify(payload).includes("generationSnapshot"), false);
+});
+
+test("canvas_get_state 显式传 nodeIds 时回完整节点", async (t) => {
+  const backendUrl = await mockBackend(t);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-1", nodeIds: ["image-1"] } });
+  const payload = textPayload(result);
+  const nodes = payload.nodes as Array<Record<string, unknown>>;
+
+  assert.equal(nodes.length, 1, "只应回请求的节点");
+  assert.equal(nodes[0].id, "image-1");
+  assert.equal((nodes[0].metadata as Record<string, unknown>).storageKey, "media/image-1.png", "显式索取时应回完整 metadata");
 });
