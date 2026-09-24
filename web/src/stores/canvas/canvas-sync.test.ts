@@ -211,3 +211,59 @@ test("作用域基线与完整快照给出完全相同的冲突判定", async ()
         assert.deepEqual(withSlim, withFull, `场景「${item.name}」判定结果必须一致`);
     }
 });
+
+test("冷启动恢复不回退成作用域基线，投影仍是完整画布", async () => {
+    const { buildCanvasConflictBaseline } = await import("../../lib/canvas/canvas-conflict-baseline");
+    const project = {
+        id: "revive", title: "恢复画布", createdAt: "2026-01-01", updatedAt: "2026-01-01", revision: 1,
+        nodes: [
+            { id: "a", type: "text", title: "A", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "A" } },
+            { id: "b", type: "text", title: "B", position: { x: 200, y: 0 }, width: 100, height: 100, metadata: { content: "B" } },
+        ],
+        connections: [], chatSessions: [], activeChatId: null, backgroundMode: "lines",
+        showImageInfo: false, globalPrompt: "", viewport: { x: 0, y: 0, k: 1 },
+    } as any;
+    // v2 缓存是可丢弃投影，可能没有完整 base；此时恢复种子绝不能退化成"本次编辑的作用域基线"。
+    cache.set(cacheKey("revive"), { project, queueVersion: 2 });
+    const ops = [{ type: "update_node", id: "a", metadata: { content: "A2" } }];
+    buckets.get("infinite-canvas-command-outbox")!.set("op-revive", {
+        operationId: "op-revive", projectId: "revive", ownerId: getCanvasDraftSessionId(), backend: getBackendUrl(),
+        order: 1, base: buildCanvasConflictBaseline(project, ops), operations: ops,
+    });
+    useBackendStore.setState({ connected: false });
+    // 冷启动 = 全新模块实例（本地快照只在实例首次 hydrate 时读取）。
+    const fresh = await import("./use-canvas-store?cold=" + Date.now()) as typeof import("./use-canvas-store");
+    await fresh.hydrateCanvasProjects();
+
+    const restored = fresh.useCanvasStore.getState().projects.find((item) => item.id === "revive") as any;
+    assert.ok(restored, "画布应被恢复");
+    assert.equal(restored.nodes.length, 2, "不得因作用域基线而丢节点");
+    assert.deepEqual(restored.nodes.map((node: any) => node.id).sort(), ["a", "b"]);
+    buckets.get("infinite-canvas-command-outbox")!.delete("op-revive");
+    cache.delete(cacheKey("revive"));
+});
+
+test("只有作用域基线、没有完整画布时，宁可等远端也不造 1 节点假画布", async () => {
+    const { buildCanvasConflictBaseline } = await import("../../lib/canvas/canvas-conflict-baseline");
+    const project = {
+        id: "revive-orphan", title: "孤儿命令画布", createdAt: "2026-01-01", updatedAt: "2026-01-01", revision: 1,
+        nodes: [
+            { id: "a", type: "text", title: "A", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "A" } },
+            { id: "b", type: "text", title: "B", position: { x: 200, y: 0 }, width: 100, height: 100, metadata: { content: "B" } },
+        ],
+        connections: [], chatSessions: [], activeChatId: null, backgroundMode: "lines",
+        showImageInfo: false, globalPrompt: "", viewport: { x: 0, y: 0, k: 1 },
+    } as any;
+    const ops = [{ type: "update_node", id: "a", metadata: { content: "A2" } }];
+    buckets.get("infinite-canvas-command-outbox")!.set("op-orphan", {
+        operationId: "op-orphan", projectId: "revive-orphan", ownerId: getCanvasDraftSessionId(), backend: getBackendUrl(),
+        order: 2, base: buildCanvasConflictBaseline(project, ops), operations: ops,
+    });
+    useBackendStore.setState({ connected: false });
+    const fresh = await import("./use-canvas-store?orphan=" + Date.now()) as typeof import("./use-canvas-store");
+    await fresh.hydrateCanvasProjects();
+
+    const ghost = fresh.useCanvasStore.getState().projects.find((item) => item.id === "revive-orphan") as any;
+    assert.equal(ghost, undefined, "无完整画布可用时应跳过本地投影，等远端加载，而不是造 1 节点画布");
+    buckets.get("infinite-canvas-command-outbox")!.delete("op-orphan");
+});

@@ -10,7 +10,7 @@ import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createB
 import { useBackendStore } from "@/stores/use-backend-store";
 import { getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId } from "@/services/backend-api";
 import { CanvasCommandQueue, type CanvasCommand } from "@/lib/canvas/canvas-command-queue";
-import { buildCanvasConflictBaseline, type CanvasConflictBaseline } from "@/lib/canvas/canvas-conflict-baseline";
+import { buildCanvasConflictBaseline, isCanvasConflictBaseline, type CanvasConflictBaseline } from "@/lib/canvas/canvas-conflict-baseline";
 import { canvasDraftPersistence } from "@/lib/canvas/canvas-draft-persistence";
 import { syncOrderedGroupMembership } from "@/lib/canvas/ordered-group";
 import { CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS, H3_LOCAL_VIEW_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
@@ -248,24 +248,28 @@ async function hydrateCanvasProjectsFromLocalStore() {
             const id = entry.project.id;
             // 无归属的旧共享缓存原样保留，不能静默当作本窗口草稿提交或清理。
             if (key !== cacheKey(id)) return;
-            if (entry.base) syncBases.set(id, entry.base);
-            if (entry.queueVersion !== 2 && entry.base) {
-                const submitted = legacy.find((item) => item.command.submitted.id === id)?.command.submitted || entry.base;
+            const cachedBase = entry.base && !isCanvasConflictBaseline(entry.base) ? entry.base : undefined;
+            if (cachedBase) syncBases.set(id, cachedBase);
+            if (entry.queueVersion !== 2 && cachedBase) {
+                const submitted = legacy.find((item) => item.command.submitted.id === id)?.command.submitted || cachedBase;
                 captureCanvasAction(submitted, entry.project);
             }
             // v2 缓存是可丢弃投影，只有明确的命令表示未提交编辑。
-            const commandBase = pendingCommands.list(id)[0]?.base as CanvasProject | undefined; // Step 5 换成 isCanvasConflictBaseline 守卫
-            const seed = entry.base && !entry.base.summary ? entry.base : commandBase || entry.project;
-            if (entry.base?.summary && commandBase && !commandBase.summary) syncBases.set(id, commandBase);
+            // 但作用域基线只含本次 ops 的目标节点，绝不能当整图投影种子；只有完整 CanvasProject 才有资格。
+            const rawCommandBase = pendingCommands.list(id)[0]?.base;
+            const commandBase = rawCommandBase && !isCanvasConflictBaseline(rawCommandBase) ? rawCommandBase : undefined;
+            const seed = cachedBase && !cachedBase.summary ? cachedBase : commandBase || entry.project;
+            if (cachedBase?.summary && commandBase && !commandBase.summary) syncBases.set(id, commandBase);
             const projected = { ...projectCanvasCommands(seed).projection, viewport: entry.project.viewport };
             projects.push(projected);
             cachedProjects.set(id, projected);
-            cachedBases.set(id, entry.base);
+            cachedBases.set(id, cachedBase);
         });
         for (const command of pendingCommands.list()) {
             if (pendingDeletedProjectIds.has(command.projectId) || projects.some((project) => project.id === command.projectId)) continue;
-            projects.push(projectCanvasCommands(command.base as never as CanvasProject).projection); // Step 5 换成 isCanvasConflictBaseline 守卫
-            syncBases.set(command.projectId, command.base as never as CanvasProject); // Step 5 换成 isCanvasConflictBaseline 守卫
+            if (isCanvasConflictBaseline(command.base)) continue; // 作用域基线无法还原整图投影，等远端加载
+            projects.push(projectCanvasCommands(command.base).projection);
+            syncBases.set(command.projectId, command.base);
         }
         const normalizedProjects = projects.map(normalizeProjectMediaUrls);
         const currentProjects = useCanvasStore.getState().projects;
@@ -299,8 +303,9 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
                 try { base = normalizeProjectMediaUrls((await fetchBackendProject(project.id)).project as unknown as CanvasProject); }
                 catch (error) { if (!(error instanceof BackendApiError && error.status === 404)) throw error; }
                 if (!base) {
-                    // 创建只写初始种子；其后编辑已经各自入队，不能把含这些编辑的整图重复创建。
-                    const seed = (pendingCommands.list(project.id)[0]?.base || project) as CanvasProject; // Step 5 换成 isCanvasConflictBaseline 守卫
+                    // 创建只写初始种子；作用域基线不能当种子，退回完整投影。
+                    const candidate = pendingCommands.list(project.id)[0]?.base;
+                    const seed = candidate && !isCanvasConflictBaseline(candidate) ? candidate : project;
                     base = normalizeProjectMediaUrls((await createBackendProject(seed as unknown as Record<string, unknown>)).project as unknown as CanvasProject);
                 }
                 syncBases.set(project.id, base);
