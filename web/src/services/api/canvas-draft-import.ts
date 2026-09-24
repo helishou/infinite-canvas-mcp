@@ -19,6 +19,10 @@ function target(value: unknown) {
     return object(value) && ["prompt", "content", "composerContent", "globalPrompt"].includes(String(value.field))
         && ["nodeId", "segmentId", "textItemId"].every((key) => value[key] === undefined || string(value[key]));
 }
+/** 画布记录的结构性校验：只认「有 id/title/nodes/connections」。
+ *  它**不要求**完整 CanvasProject —— op 作用域基线（canvas-conflict-baseline，带 `v: 1`）
+ *  只带本次 ops 的目标节点与连线，同样满足这些字段，因此无需额外分支就会被接受。
+ *  不要把它收紧成「必须完整画布」，否则存量/新写的基线草稿会被判为损坏。 */
 function project(value: unknown): value is ObjectValue & { id: string } {
     return object(value) && string(value.id) && typeof value.title === "string" && Array.isArray(value.nodes) && Array.isArray(value.connections);
 }

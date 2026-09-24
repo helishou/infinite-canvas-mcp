@@ -98,3 +98,22 @@ test("导入状态不可读时不认领旧 owner，也不阻止新窗口在线�
         assert.deepEqual(buckets.get(commandStore)?.get(command.operationId), command);
     } finally { failImportRead = false; }
 });
+
+test("导入接受 op 作用域基线：命令与缓存记录都不判为损坏", async () => {
+    const { buildCanvasConflictBaseline } = await import("../../lib/canvas/canvas-conflict-baseline");
+    const full = { id: "p", title: "画布", createdAt: "2026-01-01", updatedAt: "2026-01-01", revision: 3,
+        nodes: [{ id: "n", type: "text", title: "N", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "旧" } }],
+        connections: [], chatSessions: [], activeChatId: null, backgroundMode: "lines", showImageInfo: false, globalPrompt: "", viewport: { x: 0, y: 0, k: 1 } };
+    const slimBase = buildCanvasConflictBaseline(full as never, [{ type: "update_node", id: "n", metadata: { content: "新" } }]);
+    const slimCommand = { operationId: "slim-op", projectId: "p", ownerId, backend, order: 3, base: slimBase,
+        operations: [{ type: "update_node", id: "n", metadata: { content: "新" } }] };
+
+    const fromCommand = parseCanvasDraftImport(JSON.stringify({ format: "canvas-draft-backup", version: 1, records: [{ store: commandStore, key: "slim-op", value: slimCommand }] }));
+    assert.equal(fromCommand.records.length, 1, "作用域基线的命令不应被判为损坏");
+    assert.deepEqual(fromCommand.records[0].value, slimCommand, "基线原文必须原样保留，不猜测旧数据语义");
+
+    const cacheKey = JSON.stringify([backend, ownerId, "p"]);
+    const fromCache = parseCanvasDraftImport(JSON.stringify({ format: "canvas-draft-backup", version: 1,
+        records: [{ store: "infinite-canvas-project-cache", key: cacheKey, value: { project: full, base: slimBase, queueVersion: 2 } }] }));
+    assert.equal(fromCache.records.length, 1, "缓存里的作用域基线不应被判为损坏");
+});
