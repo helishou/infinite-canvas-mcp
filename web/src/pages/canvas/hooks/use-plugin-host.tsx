@@ -4,13 +4,12 @@ import { useTranslation } from "react-i18next";
 import { storeGeneratedVideo } from "@/services/api/video";
 import { getLocalH3Task, getRunningHubH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
-import { backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, resolveBackendH3Confirmation, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
+import { backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, deleteProjectReferenceAsset, fetchBackendGenerationLogs, fetchProjectReferenceAssets, getBackendUrl, startCanvasGeneration, updateBackendGenerationLog, upsertProjectReferenceAsset, upsertProjectReferenceAssets, validateProjectReferences } from "@/services/backend-api";
 import { observeCanvasGenerationTask } from "@/services/api/canvas-generation-task";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
 import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
-import { createCanvasReferenceService } from "@/lib/canvas/reference-service";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
@@ -88,7 +87,13 @@ export function usePluginHost(params: PluginHostParams) {
         },
     }), []);
 
-    const references = useMemo<CanvasReferenceService>(() => createCanvasReferenceService(projectId), [projectId]);
+    const references = useMemo<CanvasReferenceService>(() => ({
+        list: async () => (await fetchProjectReferenceAssets(projectId)).assets || [],
+        upsert: async (asset) => (await upsertProjectReferenceAsset(projectId, asset)).asset,
+        upsertMany: async (assets) => (await upsertProjectReferenceAssets(projectId, assets)).assets || [],
+        remove: async (assetId) => { await deleteProjectReferenceAsset(projectId, assetId); },
+        validate: async (nodeId, segmentId) => (await validateProjectReferences(projectId, nodeId, segmentId)).validation,
+    }), [projectId]);
 
     // Host capabilities available to plugin nodes; methods receive nodeId and are not bound to a specific node.
     const pluginAi = useMemo<CanvasPluginAi>(() => {
@@ -157,7 +162,6 @@ export function usePluginHost(params: PluginHostParams) {
                 if (!data.task) throw new Error("画布生成失败：Backend 未返回任务");
                 return data.task;
             },
-            resolveH3Confirmation: async ({ taskId, ...input }) => (await resolveBackendH3Confirmation(taskId, input)).task as unknown as import("@/types/canvas-plugin").LocalH3Task,
             getLocalH3Task: async (taskId) => {
                 const task = await getLocalH3Task(getBackendUrl(), getBackendTokenShared(), taskId) as Awaited<ReturnType<typeof getLocalH3Task>>;
                 if (task.status === "succeeded" && task.result?.url && !task.result.storageKey) {
