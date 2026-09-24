@@ -32,6 +32,18 @@ test("增量回放保留无关节点对象，不修改原始基线", () => {
     assert.notEqual(base.nodes[0].title, "changed");
 });
 
+test("Backend 增量回放 MCP 有序组成员时同步槽位和位置", () => {
+    const base = makeProject([
+        { id: "g1", type: "group", title: "有序组", position: { x: 0, y: 0 }, width: 760, height: 480, metadata: { orderedGroup: true, groupSlots: ["old"] } },
+        { id: "old", type: "image", title: "旧节点", position: { x: 24, y: 52 }, width: 240, height: 160, metadata: { groupId: "g1" } },
+    ]);
+    const next = applyBackendCanvasDelta(base, [{ type: "add_node", id: "new", nodeType: "image", position: { x: 1600, y: 900 }, width: 240, height: 160, metadata: { groupId: "g1" } }], 2);
+    const group = next.nodes.find((node) => node.id === "g1")!;
+    const added = next.nodes.find((node) => node.id === "new")!;
+    assert.deepEqual(group.metadata?.groupSlots, ["old", "new"]);
+    assert.ok(added.position.x < 760 && added.position.y < 480, "远端新增节点应立即落在有序组框内");
+});
+
 const VIEWPORT = { x: 0, y: 0, k: 1 };
 
 function makeH3Node(id: string, segments: Array<Record<string, unknown>>, extras: Record<string, unknown> = {}): Record<string, unknown> {
@@ -136,6 +148,32 @@ test("H3：新增 segment 产 add_h3_segment；删除产 delete_h3_segment", () 
     assert.equal((add?.segment as Record<string, unknown>).id, "s3");
     assert.equal(del?.nodeId, "h3-1");
     assert.equal(del?.segmentId, "s2");
+});
+
+test("H3：新增 segment 携带插入锚点，回放后保持 UI 顺序", () => {
+    const base = makeProject([makeH3Node("h3-1", [
+        { id: "s1", prompt: "A" },
+        { id: "s2", prompt: "B" },
+    ])]);
+    const next = makeProject([makeH3Node("h3-1", [
+        { id: "s1", prompt: "A" },
+        { id: "s3", prompt: "新 C" },
+        { id: "s2", prompt: "B" },
+    ])]);
+    const [add] = diffCanvasProject(base, next).filter((op) => op.type === "add_h3_segment");
+    assert.equal(add?.afterSegmentId, "s1");
+    const replayed = applyBackendCanvasDelta(base, [add], 1);
+    const replayedSegments = (replayed.nodes[0].metadata as unknown as { segments?: Array<{ id?: string }> } | undefined)?.segments || [];
+    assert.deepEqual(replayedSegments.map((segment) => segment.id), ["s1", "s3", "s2"]);
+});
+
+test("H3：新增 segment 的回执重放幂等，不重复插入同一个 Clip", () => {
+    const base = makeProject([makeH3Node("h3-1", [{ id: "s1", prompt: "A" }])]);
+    const operation = { type: "add_h3_segment", nodeId: "h3-1", afterSegmentId: "s1", segment: { id: "s2", prompt: "B" } };
+    const once = applyBackendCanvasDelta(base, [operation], 1);
+    const twice = applyBackendCanvasDelta(once, [operation], 2);
+    const segments = (twice.nodes[0].metadata as unknown as { segments?: Array<{ id?: string }> } | undefined)?.segments || [];
+    assert.deepEqual(segments.map((segment) => segment.id), ["s1", "s2"]);
 });
 
 test("H3：本地不能删除 Backend 所有的运行字段", () => {
@@ -279,4 +317,18 @@ test("Backend 差量事件支持 metadata 删除和 H3 单段回放", () => {
     assert.deepEqual(metadata.segments, [{ id: "s1", prompt: "新文", status: "success" }]);
     assert.equal(baseMetadata.status, "loading");
     assert.equal(baseMetadata.segments?.[0]?.prompt, "原文");
+});
+
+test("Backend 差量事件增删项目参考资产时不改节点布局", () => {
+    const base = makeProject([{ id: "node-1", type: "image", title: "人物", position: { x: 120, y: 80 }, width: 320, height: 240, metadata: {} } as any], { revision: 2 });
+    const added = applyBackendCanvasDelta(base, [{
+        type: "upsert_reference_asset",
+        asset: { id: "asset-1", label: "苏晚形象", mediaType: "image", role: "character_identity", tags: ["苏晚"], storageKey: "image:asset-1" },
+    }], 3);
+    const removed = applyBackendCanvasDelta(added, [{ type: "delete_reference_asset", assetId: "asset-1" }], 4);
+
+    assert.equal(added.nodes[0].position.x, 120);
+    assert.equal(added.nodes[0].position.y, 80);
+    assert.equal(added.referenceCatalog?.[0]?.id, "asset-1");
+    assert.deepEqual(removed.referenceCatalog, []);
 });

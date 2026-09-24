@@ -27,3 +27,6 @@ web/public/plugins
 **/venv/
 **/.venv/
 backend/venv
+artifacts
+tmp
+.codex

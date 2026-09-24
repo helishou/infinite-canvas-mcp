@@ -1,13 +1,53 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { Button, Empty, Modal, Tag, message } from "antd";
-import { ChevronDown, ChevronUp, Copy, Trash2 } from "lucide-react";
+import { Button, Empty, Modal, Segmented, Tag, message } from "antd";
+import { ChevronDown, ChevronUp, Copy, Maximize2, Trash2 } from "lucide-react";
 
 import { deleteBackendGenerationLogs, fetchBackendGenerationLogs, backendMediaUrl, type BackendGenerationLog as GenerationLog } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
-import { CanvasTaskCenter } from "./canvas-task-center";
 
 const PAGE_SIZE = 30;
 const ESTIMATED_ROW_HEIGHT = 220;
+
+type LogKind = "image" | "video" | "audio" | "text" | "workflow" | "other";
+type LogFilterKind = LogKind | "all";
+
+const KIND_TABS: Array<{ value: LogFilterKind; label: string }> = [
+    { value: "all", label: "全部" },
+    { value: "image", label: "生图" },
+    { value: "video", label: "生视频" },
+    { value: "audio", label: "生音频" },
+    { value: "text", label: "生文" },
+    { value: "workflow", label: "工作流" },
+    { value: "other", label: "其他" },
+];
+
+const KIND_LABEL: Record<LogKind, string> = { image: "生图", video: "生视频", audio: "生音频", text: "生文", workflow: "工作流", other: "其他" };
+const KIND_COLOR: Record<LogKind, string | undefined> = { image: "blue", video: "purple", audio: "orange", text: "cyan", workflow: "geekblue", other: undefined };
+
+/** 归类单条日志：先看 outputs 的实际媒体，再用 platform/model 推断。
+ *  卡片类型标签与筛选按钮共用这一个函数，保证两边永远一致。 */
+function logKind(log: GenerationLog): LogKind {
+    const platform = String(log.platform || "").toLowerCase();
+    const model = String(log.model || "").toLowerCase();
+    if (platform === "workflow" || /\.json$/.test(model)) return "workflow";
+    if (/text|llm|chat|completion/.test(platform)) return "text";
+    const media = outputMediaKind(log.outputs);
+    if (media) return media;
+    if (platform.includes("image")) return "image";
+    if (platform.includes("h3") || platform.includes("video")) return "video";
+    if (platform.includes("audio") || platform.includes("tts") || platform.includes("speech")) return "audio";
+    return "other";
+}
+
+function outputMediaKind(outputs: Array<Record<string, unknown>> | undefined): "image" | "video" | "audio" | "" {
+    for (const output of outputs || []) {
+        const value = `${output?.mimeType || ""} ${output?.type || ""}`.toLowerCase();
+        if (/video|mp4|webm|mov/.test(value)) return "video";
+        if (/audio|mp3|wav|m4a/.test(value)) return "audio";
+        if (/image|png|jpe?g|webp/.test(value)) return "image";
+    }
+    return "";
+}
 
 export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: boolean; projectId: string; onClose: () => void }) {
     const connected = useBackendStore((state) => state.connected);
@@ -15,7 +55,7 @@ export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: 
     const [loading, setLoading] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
     const [hasMore, setHasMore] = useState(false);
-    const [tasksOpen, setTasksOpen] = useState(false);
+    const [kind, setKind] = useState<LogFilterKind>("all");
     const load = useCallback(async () => {
         if (!connected || !projectId) return;
         setLoading(true);
@@ -40,10 +80,20 @@ export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: 
         await deleteBackendGenerationLogs(id ? { id } : { projectId });
         await load();
     };
-    return <><Modal title={`生成日志${logs.length ? ` (${logs.length}${hasMore ? "+" : ""})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
-        <div className="mb-3 flex justify-end gap-2"><Button size="small" onClick={() => setTasksOpen(true)}>任务中心</Button><Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button></div>
-        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? "加载中…" : "暂无生成日志"} /> : <LogList logs={logs} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={(id) => void remove(id)} />}
-    </Modal><CanvasTaskCenter open={tasksOpen} projectId={projectId} onClose={() => setTasksOpen(false)} /></>;
+    // 筛选只作用于视图：logs 始终保留后端已拉取的全量，分页 offset 不受筛选影响
+    const visible = useMemo(() => kind === "all" ? logs : logs.filter((log) => logKind(log) === kind), [kind, logs]);
+    const kindOptions = useMemo(() => {
+        const counts: Record<LogFilterKind, number> = { all: logs.length, image: 0, video: 0, audio: 0, text: 0, workflow: 0, other: 0 };
+        for (const log of logs) counts[logKind(log)] += 1;
+        return KIND_TABS.map((tab) => ({ value: tab.value, label: `${tab.label} ${counts[tab.value]}` }));
+    }, [logs]);
+    return <Modal title={`生成日志${logs.length ? ` (${logs.length}${hasMore ? "+" : ""})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <Segmented size="small" value={kind} options={kindOptions} onChange={(value) => setKind(value as LogFilterKind)} />
+            <Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button>
+        </div>
+        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? "加载中…" : "暂无生成日志"} /> : visible.length ? <LogList logs={visible} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={(id) => void remove(id)} /> : <Empty description="当前筛选下暂无日志">{hasMore ? <Button size="small" loading={loadingMore} onClick={() => void loadMore()}>继续加载更多</Button> : null}</Empty>}
+    </Modal>;
 }
 
 function LogList({ logs, hasMore, loadingMore, onLoadMore, onDelete }: { logs: GenerationLog[]; hasMore: boolean; loadingMore: boolean; onLoadMore: () => void; onDelete: (id: string) => void }) {
@@ -98,9 +148,10 @@ function actualSubmissionText(params: unknown) {
     };
     return [
         `ComfyUI promptId：${String(value.promptId || "-")}`,
-        `Seed：${String(value.seed ?? "-")}`,
+        `Seed：${String(value.seed ?? "-")}（${value.seedMode === "fixed" ? "固定" : "随机"}）`,
         `帧数：${String(value.frames ?? "-")}`,
         `分辨率：${value.width && value.height ? `${value.width} × ${value.height}` : "-"}`,
+        ...(value.steps !== undefined ? [`采样：${String(value.sampler || "-")} / ${String(value.scheduler || "-")} / ${String(value.steps)} 步`] : []),
         `LoRA：${loras || "无"}`,
         `注意力：${String(value.attention || "-")}`,
         `Sigma：${String(value.sigma || "-")}`,
@@ -110,35 +161,37 @@ function actualSubmissionText(params: unknown) {
 
 function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }) {
     const [expanded, setExpanded] = useState(false);
+    const [preview, setPreview] = useState<{ url: string; video: boolean; name?: string } | null>(null);
     const copy = async (value: string) => { await navigator.clipboard?.writeText(value); message.success("已复制"); };
     const statusColor = log.status === "success" ? "green" : log.status === "failed" ? "red" : log.status === "running" ? "processing" : "default";
     const references = collectReferences(log);
     const actualSubmission = actualSubmissionText(log.params);
-    const typeLabel = platformTypeLabel(log.platform, log.model);
-    const typeColor = typeLabel === "生视频" ? "purple" : typeLabel === "生音频" ? "orange" : typeLabel === "工作流" ? "geekblue" : "blue";
+    const kind = logKind(log);
+    // 生文类日志（插件翻译/增强提示词等）把模型输出存进 outputs，这里渲染成可展开的文本段
+    const textOutputs = log.outputs.filter((output) => String(output.type || "") === "text" && String(output.text || "").trim());
+    const typeLabel = kind === "other" ? String(log.platform || "其他") : KIND_LABEL[kind];
+    const openPreview = useCallback((url: string, video: boolean, name?: string) => {
+        if (!url) return;
+        setPreview({ url, video, name });
+    }, []);
     return <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
-        <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={typeColor}>{typeLabel}</Tag><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
+        <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={KIND_COLOR[kind]}>{typeLabel}</Tag><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
         <div className="mt-2 flex flex-wrap gap-3 text-xs text-stone-500"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span></div>
-        {references.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">输入 refs：</span>{references.map((reference, index) => <ReferencePreview key={`${log.id}-ref-${index}`} reference={reference} index={index} />)}</div> : null}
+        {references.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">输入 refs：</span>{references.map((reference, index) => <ReferencePreview key={`${log.id}-ref-${index}`} reference={reference} index={index} onPreview={openPreview} />)}</div> : null}
         {log.prompt ? <ExpandableText label="提示词" value={log.prompt} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.prompt || "")} /> : null}
+        {textOutputs.map((output, index) => <ExpandableText key={`${log.id}-text-${index}`} label="输出文本" value={String(output.text || "")} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(String(output.text || ""))} />)}
         {actualSubmission ? <ExpandableText label="实际提交配置" value={actualSubmission} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(actualSubmission)} /> : null}
         {log.error ? <ExpandableText label="错误" value={log.error} expanded={expanded} error onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.error || "")} /> : null}
-        {log.outputs.length ? <div className="mt-3 grid grid-cols-4 gap-2">{log.outputs.map((output, index) => <Output key={`${log.id}-${index}`} output={output} />)}</div> : null}
+        {log.outputs.length ? <div className="mt-3 grid grid-cols-4 gap-2">{log.outputs.map((output, index) => <Output key={`${log.id}-${index}`} output={output} onPreview={openPreview} />)}</div> : null}
+        <Modal open={!!preview} onCancel={() => setPreview(null)} footer={null} width="80%" destroyOnHidden title={preview?.name} centered>
+            {preview?.video
+                ? <video src={preview.url} controls autoPlay playsInline style={{ width: "100%", maxHeight: "70vh", display: "block", background: "#000" }} />
+                : <img src={preview?.url} alt={preview?.name || "preview"} style={{ width: "100%", maxHeight: "70vh", display: "block", objectFit: "contain", background: "#111" }} />}
+        </Modal>
     </div>;
 }
 
-/** 把后端的 platform 翻译成画布上的高阶「类型」标签（生图/生视频/生音频/工作流）。 */
-function platformTypeLabel(platform: string, model?: string) {
-    const value = String(platform || "").toLowerCase();
-    const modelValue = String(model || "").toLowerCase();
-    if (value === "canvas-image" || value === "image" || value === "direct-image" || value === "gpt-image") return "生图";
-    if (value.includes("h3") || value.includes("video") || value === "minimax-h3" || value === "minimax-h3:video") return "生视频";
-    if (value === "audio" || value.includes("tts") || value.includes("speech")) return "生音频";
-    if (value === "workflow" || /\.json$/i.test(modelValue)) return "工作流";
-    return value || "工作流";
-}
-
-function ReferencePreview({ reference, index }: { reference: Record<string, unknown>; index: number }) {
+function ReferencePreview({ reference, index, onPreview }: { reference: Record<string, unknown>; index: number; onPreview?: (url: string, video: boolean, name?: string) => void }) {
     const storageKey = typeof reference.storageKey === "string" && reference.storageKey ? reference.storageKey : "";
     const url = storageKey ? backendMediaUrl(storageKey) : String(reference.url || "");
     const rawType = String(reference.type || "").toLowerCase();
@@ -147,10 +200,25 @@ function ReferencePreview({ reference, index }: { reference: Record<string, unkn
     const inferred = inferMediaType(rawType, mimeType, url, name);
     const label = `${inferred.label} ${index + 1}`;
     const fallbackName = typeof reference.name === "string" && reference.name.trim() ? reference.name.trim() : undefined;
+    const openPreview = (event: React.MouseEvent) => {
+        event.stopPropagation();
+        onPreview?.(url, inferred.kind === "video", fallbackName || label);
+    };
+    const previewButton = onPreview && (inferred.kind === "image" || inferred.kind === "video") ? (
+        <button
+            type="button"
+            onClick={openPreview}
+            aria-label="放大预览"
+            title={fallbackName ? `放大预览：${fallbackName}` : "放大预览"}
+            className="absolute right-1 top-1 inline-flex size-6 items-center justify-center rounded border border-white/15 bg-black/60 text-white/85 opacity-0 transition hover:border-sky-300 hover:bg-sky-700 hover:text-white group-hover:opacity-100 focus-visible:opacity-100"
+        >
+            <Maximize2 className="size-3.5" />
+        </button>
+    ) : null;
     if (!url) return <Tag title={fallbackName || label}>{fallbackName || label}</Tag>;
     // 固定预览框尺寸，预留布局空间，避免缩略图陆续加载时反复触发重排/重绘
-    if (inferred.kind === "image") return <div style={{ width: 96, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "rgba(120,120,120,0.10)" }}><img src={url} alt={fallbackName || label} title={fallbackName || label} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} /></div>;
-    if (inferred.kind === "video") return <div style={{ width: 112, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "#000" }}><video src={url} title={fallbackName || label} controls muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} /></div>;
+    if (inferred.kind === "image") return <div className="group relative" style={{ width: 96, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "rgba(120,120,120,0.10)" }}><img src={url} alt={fallbackName || label} title={fallbackName || label} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />{previewButton}</div>;
+    if (inferred.kind === "video") return <div className="group relative" style={{ width: 112, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "#000" }}><video src={url} title={fallbackName || label} controls muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} />{previewButton}</div>;
     if (inferred.kind === "audio") return <audio src={url} title={fallbackName || label} controls preload="metadata" className="h-8 w-52" />;
     return <Tag title={fallbackName || label}>{fallbackName || label}</Tag>;
 }
@@ -167,12 +235,43 @@ function ExpandableText({ label, value, expanded, error, onToggle, onCopy }: { l
     return <div className={`mt-2 rounded ${error ? "bg-red-50 text-red-600 dark:bg-red-950/30 dark:text-red-300" : ""}`}><div className="flex gap-2 p-2 text-sm"><div className={`min-w-0 flex-1 whitespace-pre-wrap break-words ${collapsible && !expanded ? "line-clamp-5" : ""}`}><span className="mr-1 text-xs text-stone-500">{label}：</span>{value}</div><Button type="text" size="small" icon={<Copy className="size-3.5" />} onClick={onCopy} /></div>{collapsible ? <Button type="text" size="small" className="!h-7 !w-full !text-xs" icon={expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />} onClick={onToggle}>{expanded ? "收起" : "展开"}</Button> : null}</div>;
 }
 
-function Output({ output }: { output: Record<string, unknown> }) {
+function Output({ output, onPreview }: { output: Record<string, unknown>; onPreview?: (url: string, video: boolean, name?: string) => void }) {
     const storageKey = typeof output.storageKey === "string" && output.storageKey ? output.storageKey : "";
     const url = storageKey ? backendMediaUrl(storageKey) : String(output.url || output.localUrl || "");
     const video = String(output.mimeType || output.type || "").startsWith("video");
     const [failed, setFailed] = useState(false);
+    const name = typeof output.name === "string" && output.name.trim() ? output.name.trim() : undefined;
     if (!url) return null;
-    if (failed) return <a href={url} target="_blank" rel="noreferrer" className="block truncate text-xs text-sky-500 hover:underline">{String(output.name || url)}（加载失败，点击新窗口打开）</a>;
-    return video ? <video src={url} controls muted playsInline onError={() => setFailed(true)} className="aspect-video w-full rounded object-cover" /> : <img src={url} alt="output" loading="lazy" decoding="async" onError={() => setFailed(true)} className="aspect-video w-full rounded object-cover" />;
+    if (failed) return <a href={url} target="_blank" rel="noreferrer" className="block truncate text-xs text-sky-500 hover:underline">{name || url}（加载失败，点击新窗口打开）</a>;
+    const openPreview = (event: React.MouseEvent) => {
+        event.stopPropagation();
+        onPreview?.(url, video, name);
+    };
+    const mediaProps = {
+        onError: () => setFailed(true),
+        title: name || "output",
+        className: "aspect-video w-full rounded object-cover",
+    };
+    const previewButton = (
+        <button
+            type="button"
+            onClick={openPreview}
+            aria-label="放大预览"
+            title={name ? `放大预览：${name}` : "放大预览"}
+            className="absolute right-1 top-1 inline-flex size-6 items-center justify-center rounded border border-white/15 bg-black/60 text-white/85 opacity-0 transition hover:border-sky-300 hover:bg-sky-700 hover:text-white group-hover:opacity-100 focus-visible:opacity-100"
+        >
+            <Maximize2 className="size-3.5" />
+        </button>
+    );
+    return video ? (
+        <div className="group relative">
+            <video src={url} controls muted playsInline {...mediaProps} />
+            {previewButton}
+        </div>
+    ) : (
+        <div className="group relative">
+            <img src={url} alt={name || "output"} loading="lazy" decoding="async" {...mediaProps} />
+            {previewButton}
+        </div>
+    );
 }

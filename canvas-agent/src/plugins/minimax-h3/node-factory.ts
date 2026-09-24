@@ -20,11 +20,13 @@ export const BASE_H3_NODE_METADATA: Record<string, unknown> = {
     rtxResizeMode: "倍数缩放", rtxQuality: "ULTRA", realtimePreviewEnabled: true,
     realtimePreviewLongEdge: 512, realtimePreviewFrames: 12, realtimePreviewFps: 8, realtimePreviewJpegQuality: 75,
     uniBlockSwapBlocks: 1, h3FirstSteps: 6, h3SecondSteps: 4, latentUpscaleMegapixels: 1, latentUpscaleAlign: 2,
-    latentUpscalePrecision: "bf16", seed: 0, noiseSeed: 0, noiseSeedMode: "random", constantTriggerWord: "",
+    // Random mode owns the effective seed at submit time; zero is only a
+    // legacy placeholder and must not be shown as the value being submitted.
+    latentUpscalePrecision: "bf16", seed: undefined, noiseSeed: undefined, noiseSeedMode: "random", constantTriggerWord: "",
     noDub: true, noCaption: true, audioMode: "native", audioDenoiseStrength: 1, addSourceAsReference: false,
     strictPromptTags: true, referenceVideoPolicy: "official_2_to_15s", latentUpscaleEnabled: false,
     slaEnabled: false, uniBlockSwapEnabled: false, rtxEnabled: false, teAccel: false, lockAudio: false, audioDrive: false,
-    combatLoraWeight: 0, cinematicLoraWeight: 0, runtimeReserveEnabled: false, reservedVramGb: 0.6,
+    combatLoraWeight: 0, cinematicLoraWeight: 0, runtimeReserveEnabled: false, reservedVramGb: 0.6, faceRefineEnabled: false,
     loraSlots: [{ name: "", strength: 1, enabled: false }], keepModelCache: true,
 };
 
@@ -33,17 +35,50 @@ const NODE_LEVEL_KEYS = [
     "motionContextEnabled", "motionContextNoiseEnabled", "smartStoryboardCount", "smartStoryboardMode", "smartStoryboardSkill",
 ];
 
+/** H3 工作台各模块区域的布局键：与画布手柄拖拽写入的 metadata minimax* 键一一对应。 */
+export const H3_LAYOUT_PANE_KEYS = ["minimaxPreviewH", "minimaxPreviewW", "minimaxPromptW", "minimaxTimelineH", "minimaxRefLaneH"] as const;
+
+/** H3 节点类型（含历史别名和插件名形式）。 */
+export function isH3NodeType(type: unknown): boolean {
+    return /^(?:minimax|smart-minimax)/i.test(String(type || ""));
+}
+
+export type H3LayoutSnapshot = { width?: number; height?: number; panes: Record<string, number> };
+
+const positiveInt = (value: unknown) => {
+    const parsed = Math.round(Number(value));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+};
+
+/** 解析「设为默认参数」保存的布局快照；非有限正数一律丢弃，避免脏值污染新建节点。 */
+export function readH3Layout(source: unknown): H3LayoutSnapshot {
+    const record = source && typeof source === "object" && !Array.isArray(source) ? source as Record<string, unknown> : {};
+    const rawPanes = record.panes && typeof record.panes === "object" && !Array.isArray(record.panes) ? record.panes as Record<string, unknown> : {};
+    const panes: Record<string, number> = {};
+    for (const key of H3_LAYOUT_PANE_KEYS) {
+        const value = positiveInt(rawPanes[key]);
+        if (value !== undefined) panes[key] = value;
+    }
+    const width = positiveInt(record.width);
+    const height = positiveInt(record.height);
+    return { ...(width === undefined ? {} : { width }), ...(height === undefined ? {} : { height }), panes };
+}
+
 /** 按“节点显式值 > 保存默认值 > 基础默认值”创建完整 H3 metadata。 */
 export function createH3NodeMetadata(stored: Record<string, unknown> = {}, metadata: Record<string, unknown> = {}, panes: Record<string, number> = {}) {
     const storedParams = { ...stored };
+    // layout 是随默认参数一起保存的布局快照：只有各模块区域宽高进节点 metadata，
+    // 节点自身宽高由创建入口消费（前端 defaultLayoutSize / MCP width/height），不留在 metadata 里。
+    const layout = readH3Layout(storedParams.layout);
     delete storedParams.layout;
+    const nodePanes = { ...layout.panes, ...panes };
     const nodeLevel = Object.fromEntries(NODE_LEVEL_KEYS.filter((key) => key in storedParams).map((key) => [key, storedParams[key]]));
     const existingSegments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
     const existing = existingSegments[0] || {};
     const initialSegment = {
         ...BASE_H3_NODE_METADATA,
         ...storedParams,
-        ...panes,
+        ...nodePanes,
         ...existing,
         id: String(existing.id || "segment-1"),
         prompt: existing.prompt ?? metadata.prompt ?? defaultPrompt,
@@ -54,7 +89,7 @@ export function createH3NodeMetadata(stored: Record<string, unknown> = {}, metad
     return {
         ...BASE_H3_NODE_METADATA,
         ...nodeLevel,
-        ...panes,
+        ...nodePanes,
         ...storedParams,
         ...metadata,
         segments: [initialSegment],

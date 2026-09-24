@@ -19,7 +19,7 @@ function loadImage(url: string): Promise<HTMLImageElement> {
 }
 
 export function ImageCompareModal({ open, beforeUrl, afterUrl, title, onClose }: ImageCompareModalProps) {
-    const [sliderPos, setSliderPos] = useState(50);
+    const [sliderPos, setSliderPos] = useState(0);
     // 算出"两张图同高"的统一显示尺寸（高度统一 = 两者中较大自然高度，按视口约束后取整）
     const [displaySize, setDisplaySize] = useState<{ width: number; height: number } | null>(null);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -105,10 +105,10 @@ export function ImageCompareModal({ open, beforeUrl, afterUrl, title, onClose }:
         }
     }, [open, handleMouseMove, handleTouchMove, handleEnd]);
 
-    // 默认 50%（左半 before、右半 after）。需要在 open 切换 *和* 切图（beforeUrl/afterUrl 变）时都重置：
+    // 默认 0%（比较线位于最左侧）。需要在 open 切换 *和* 切图（beforeUrl/afterUrl 变）时都重置：
     // 只挂 [open] 的话，同一 modal 没关就换图就不会 reset，旧的滑块位置会"飘"到下一张图上。
     useEffect(() => {
-        if (open) setSliderPos(50);
+        if (open) setSliderPos(0);
     }, [open, beforeUrl, afterUrl]);
 
     return (
@@ -129,28 +129,19 @@ export function ImageCompareModal({ open, beforeUrl, afterUrl, title, onClose }:
                         onMouseDown={handleMouseDown}
                         onTouchStart={handleTouchStart}
                     >
-                        <img src={afterUrl} alt={title} style={{ display: "block", width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none" }} />
-                        <img
-                            src={beforeUrl}
-                            alt={`${title} (before)`}
-                            style={{
-                                display: "block",
-                                position: "absolute",
-                                top: 0,
-                                left: 0,
-                                width: "100%",
-                                height: "100%",
-                                objectFit: "contain",
-                                clipPath: `inset(0 ${100 - sliderPos}% 0 0)`,
-                                pointerEvents: "none",
-                            }}
-                        />
+                        {/* 标签与对应图片共用裁切层，位置始终相对完整画幅固定。 */}
+                        <div style={{ position: "absolute", inset: 0, clipPath: `inset(0 0 0 ${sliderPos}%)`, pointerEvents: "none" }}>
+                            <img src={afterUrl} alt={title} style={{ display: "block", width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none" }} />
+                            <div style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,0.6)", color: "#fff", padding: "2px 8px", borderRadius: 4, fontSize: 12, pointerEvents: "none" }}>After</div>
+                        </div>
+                        <div style={{ position: "absolute", inset: 0, clipPath: `inset(0 ${100 - sliderPos}% 0 0)`, pointerEvents: "none" }}>
+                            <img src={beforeUrl} alt={`${title} (before)`} style={{ display: "block", width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none" }} />
+                            <div style={{ position: "absolute", top: 12, left: 12, background: "rgba(0,0,0,0.6)", color: "#fff", padding: "2px 8px", borderRadius: 4, fontSize: 12, pointerEvents: "none" }}>Before</div>
+                        </div>
                         <div style={{ position: "absolute", top: 0, bottom: 0, left: `${sliderPos}%`, width: 2, background: "#fff", boxShadow: "0 0 6px rgba(0,0,0,0.5)", transform: "translateX(-50%)", pointerEvents: "none" }} />
                         <div style={{ position: "absolute", top: "50%", left: `${sliderPos}%`, width: 28, height: 28, borderRadius: "50%", background: "#fff", boxShadow: "0 0 6px rgba(0,0,0,0.5)", transform: "translate(-50%, -50%)", pointerEvents: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
                             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5 3L2 8L5 13" stroke="#333" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /><path d="M11 3L14 8L11 13" stroke="#333" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
                         </div>
-                        <div style={{ position: "absolute", top: 12, left: 12, background: "rgba(0,0,0,0.6)", color: "#fff", padding: "2px 8px", borderRadius: 4, fontSize: 12, pointerEvents: "none" }}>Before</div>
-                        <div style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,0.6)", color: "#fff", padding: "2px 8px", borderRadius: 4, fontSize: 12, pointerEvents: "none" }}>After</div>
                     </div>
                 ) : (
                     <div style={{ width: 480, height: 320, display: "flex", alignItems: "center", justifyContent: "center", color: "#94a3b8" }}>加载中…</div>

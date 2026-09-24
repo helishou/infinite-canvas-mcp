@@ -33,7 +33,7 @@ function editableFields(detail: WorkflowDetail | null) {
 function defaultFieldValue(field: WorkflowField) {
     if (field.type === "dropdown") {
         const options = field.options || [];
-        return options.includes(String(field.default ?? "")) ? field.default : options[0] ?? "";
+        return options.includes(String(field.default ?? "")) ? field.default : (options[0] ?? "");
     }
     return field.default ?? (field.type === "boolean" ? false : field.type === "number" || field.type === "slider" ? 0 : "");
 }
@@ -62,7 +62,7 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
         setLoading(true);
         fetchWorkflows()
             .then((data) => setAvailable(data.workflows.map((item: WorkflowItem) => item.name)))
-            .catch((error) => message.error(error instanceof Error ? error.message : "加载工作流失败"))
+            .catch((error) => message.error(error instanceof Error ? error.message : "加载模型实现失败"))
             .finally(() => setLoading(false));
     }, [open, model]);
 
@@ -113,7 +113,7 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
             width={760}
             centered
             onCancel={onClose}
-            title={model?.name ? `配置模型工作流：${model.name}` : "添加模型"}
+            title={model?.name ? `配置模型：${model.name}` : "添加模型"}
             styles={{ body: { maxHeight: "64vh", overflowY: "auto" } }}
             footer={[
                 <Button key="cancel" onClick={onClose}>
@@ -131,20 +131,15 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                 </label>
                 <label className="block">
                     <span className="mb-1 block text-sm font-medium">能力</span>
-                    <Segmented
-                        className="w-full"
-                        value={capability}
-                        options={CAPABILITIES.map((value) => ({ label: CAPABILITY_LABELS[value], value }))}
-                        onChange={(value) => setCapability(value as ModelCapability)}
-                    />
+                    <Segmented className="w-full" value={capability} options={CAPABILITIES.map((value) => ({ label: CAPABILITY_LABELS[value], value }))} onChange={(value) => setCapability(value as ModelCapability)} />
                 </label>
             </div>
 
             <div className="mt-5 mb-2 flex flex-wrap items-center justify-between gap-2">
                 <span className="text-sm font-semibold">
-                    工作流 <span className="ml-1 text-xs font-normal text-stone-500">已选 {selected.length} 个</span>
+                    内部实现 <span className="ml-1 text-xs font-normal text-stone-500">已选 {selected.length} 个</span>
                 </span>
-                <Input className="w-56" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索工作流" prefix={<Search className="size-4 text-stone-400" />} allowClear />
+                <Input className="w-56" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索内部实现" prefix={<Search className="size-4 text-stone-400" />} allowClear />
             </div>
 
             <div className="max-h-56 overflow-y-auto rounded-lg border border-stone-200 p-2 dark:border-stone-800">
@@ -159,13 +154,13 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                         ))}
                     </div>
                 ) : (
-                    <div className="py-8 text-center text-sm text-stone-500">{loading ? "加载中…" : "暂无工作流，请先到「工作流」页面上传"}</div>
+                    <div className="py-8 text-center text-sm text-stone-500">{loading ? "加载中…" : "暂无本地实现，请先在模型页导入模型"}</div>
                 )}
             </div>
 
             <div className="mt-5 text-sm font-semibold">输入场景路由与参数</div>
             <div className="mt-0.5 text-xs text-stone-500">
-                单图 / 多图指本次携带 1 张 / 多张参考（视频、文本、音频同理按参考数量区分）；一个工作流做三份工作时三个场景选同一个即可。某个场景不需要对外可用，就选「{UNSUPPORTED_LABEL}」。每个场景还能单独配「参数」——不同场景走不同工作流时，参数各配各的。
+                单图 / 多图指本次携带 1 张 / 多张参考（视频、文本、音频同理按参考数量区分）；一个内部实现支持全部场景时三个场景选同一个即可。某个场景不需要对外可用，就选「{UNSUPPORTED_LABEL}」。每个场景还能单独配置参数。
             </div>
             <div className="mt-2 space-y-2">
                 {MODEL_INPUT_SCENARIOS.map((scenario) => {
@@ -179,7 +174,7 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                                 className="min-w-0 flex-1"
                                 disabled={!selected.length}
                                 value={routed || undefined}
-                                placeholder={selected.length ? "选择工作流" : "先选工作流"}
+                                placeholder={selected.length ? "选择内部实现" : "先选内部实现"}
                                 options={[...selected.map((workflow) => ({ label: workflow, value: workflow })), { label: UNSUPPORTED_LABEL, value: WORKFLOW_ROUTE_UNSUPPORTED }]}
                                 onChange={(value) => {
                                     if (value === routed) return;
@@ -201,11 +196,9 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                 })}
             </div>
             {unsupportedScenarios.length ? (
-                <div className="mt-2 text-xs text-amber-600 dark:text-amber-400">
-                    已标记不支持：{unsupportedScenarios.map((scenario) => labels[scenario]).join(" / ")}；用该模型做这类生成时会直接提示不支持，不会回落到其它工作流。
-                </div>
+                <div className="mt-2 text-xs text-amber-600 dark:text-amber-400">已标记不支持：{unsupportedScenarios.map((scenario) => labels[scenario]).join(" / ")}；用该模型做这类生成时会直接提示不支持，不会回落到其它实现。</div>
             ) : selected.length === 1 ? (
-                <div className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">当前只挂了一个工作流，文生 / 单图 / 多图都会走它（参数仍可按场景分别配）。</div>
+                <div className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">当前只挂了一个内部实现，文生 / 单图 / 多图都会使用它（参数仍可按场景分别配置）。</div>
             ) : null}
 
             <ScenarioWorkflowParamsModal
@@ -229,7 +222,21 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
 }
 
 /** 单个输入场景的工作流参数：按该场景实际走的工作流拉字段，填的覆盖值随模型一起保存。 */
-function ScenarioWorkflowParamsModal({ open, workflow, scenarioLabel, value, onSave, onClose }: { open: boolean; workflow: string; scenarioLabel: string; value?: Record<string, unknown>; onSave: (value?: Record<string, unknown>) => void; onClose: () => void }) {
+function ScenarioWorkflowParamsModal({
+    open,
+    workflow,
+    scenarioLabel,
+    value,
+    onSave,
+    onClose,
+}: {
+    open: boolean;
+    workflow: string;
+    scenarioLabel: string;
+    value?: Record<string, unknown>;
+    onSave: (value?: Record<string, unknown>) => void;
+    onClose: () => void;
+}) {
     const { message } = App.useApp();
     const [detail, setDetail] = useState<WorkflowDetail | null>(null);
     const [values, setValues] = useState<Record<string, unknown>>({});
@@ -252,12 +259,14 @@ function ScenarioWorkflowParamsModal({ open, workflow, scenarioLabel, value, onS
             .catch((error) => {
                 if (cancelled) return;
                 setDetail(null);
-                message.error(error instanceof Error ? error.message : `读取工作流「${workflow}」失败`);
+                message.error(error instanceof Error ? error.message : "读取模型实现失败");
             })
             .finally(() => {
                 if (!cancelled) setLoading(false);
             });
-        return () => { cancelled = true; };
+        return () => {
+            cancelled = true;
+        };
         // value 只在弹窗打开时取初值，后续编辑不再被外部覆盖。
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open, workflow]);
@@ -274,14 +283,29 @@ function ScenarioWorkflowParamsModal({ open, workflow, scenarioLabel, value, onS
             styles={{ body: { maxHeight: "60vh", overflowY: "auto" } }}
             footer={[
                 applied ? (
-                    <Button key="clear" danger type="text" onClick={() => { onSave(undefined); onClose(); }}>
+                    <Button
+                        key="clear"
+                        danger
+                        type="text"
+                        onClick={() => {
+                            onSave(undefined);
+                            onClose();
+                        }}
+                    >
                         清除该场景参数
                     </Button>
                 ) : null,
                 <Button key="cancel" onClick={onClose}>
                     取消
                 </Button>,
-                <Button key="save" type="primary" onClick={() => { onSave(values); onClose(); }}>
+                <Button
+                    key="save"
+                    type="primary"
+                    onClick={() => {
+                        onSave(values);
+                        onClose();
+                    }}
+                >
                     保存
                 </Button>,
             ]}
@@ -291,7 +315,7 @@ function ScenarioWorkflowParamsModal({ open, workflow, scenarioLabel, value, onS
             ) : fields.length ? (
                 <WorkflowCustomFields fields={fields} values={values} onChange={(id, next) => setValues((current) => ({ ...current, [id]: next }))} />
             ) : (
-                <div className="py-8 text-center text-sm text-stone-500">该工作流没有可配置的参数（参考图与提示词由生成时自动注入）。</div>
+                <div className="py-8 text-center text-sm text-stone-500">该模型实现没有可配置的参数（参考图与提示词由生成时自动注入）。</div>
             )}
         </Modal>
     );

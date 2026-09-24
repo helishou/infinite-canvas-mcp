@@ -25,23 +25,28 @@ export function assertIndependentMediaRoot(mediaDir: string, comfyRoot: string) 
     }
 }
 
-export function comfyInputName(file: string, mediaDir: string) {
+export function comfyInputName(file: string, mediaDir: string, flat = false) {
     const source = path.resolve(file), media = path.resolve(mediaDir);
     if (!isInside(media, source)) throw new Error(`H3 本地输入只接受运行媒体文件：${file}`);
+    if (flat) return path.basename(source);
     return `infinite-canvas-cache/${path.relative(media, source).split(path.sep).join("/")}`;
 }
 
-/** ComfyUI 只持有执行副本；删除输入缓存后可从独立媒体库重新复制。 */
-export async function copyComfyInput(file: string, mediaDir: string, comfyRoot: string) {
+/** ComfyUI 只持有执行副本；删除输入缓存后可从独立媒体库重新复制。
+ *  flat=true 时直接落到 input/ 根目录（仅文件名），与远程 /upload/image 行为一致，
+ *  使 nanfeng 节点基于 os.listdir(input/) 的扁平下拉也能校验通过。 */
+export async function copyComfyInput(file: string, mediaDir: string, comfyRoot: string, flat = false) {
     assertIndependentMediaRoot(mediaDir, comfyRoot);
-    const name = comfyInputName(file, mediaDir);
+    const name = comfyInputName(file, mediaDir, flat);
     const source = await realpath(file);
     if (!isInside(await realpath(mediaDir), source)) throw new Error("运行媒体文件不可链接到媒体库之外");
     const input = await realpath(path.join(comfyRoot, "input"));
     assertIndependentMediaRoot(mediaDir, input);
     const target = path.join(input, name);
     await mkdir(path.dirname(target), { recursive: true });
-    if (!isInside(input, await realpath(path.dirname(target))) || (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink())) {
+    const targetDir = await realpath(path.dirname(target));
+    const validTargetDir = flat ? targetDir === input : isInside(input, targetDir);
+    if (!validTargetDir || (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink())) {
         throw new Error("ComfyUI 输入缓存不可链接到外部目录或文件");
     }
     await copyFile(source, target);

@@ -7,7 +7,7 @@ import { segmentsFor } from "../hooks/useH3Segments";
 export function requestH3Run(ctx: CanvasNodeContext, all = false) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const metadata = node.metadata || {};
-    if (["queued", "loading"].includes(String(metadata.status || ""))) return;
+    if (["queued", "loading", "awaiting_confirmation"].includes(String(metadata.status || ""))) return;
     const segments = segmentsFor(metadata);
     const selectedId = String(metadata.selectedSegmentId || segments[0]?.id || "");
     const selected = segments.find((segment) => segment.id === selectedId) || segments[0];
@@ -27,11 +27,13 @@ export function requestH3Run(ctx: CanvasNodeContext, all = false) {
         runProgress: 0,
         runStartedAt: 0,
     });
+    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, requestId: runtimeRunId, all });
 }
 
 export function resetAndRequestH3Run(ctx: CanvasNodeContext, all = false) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const metadata = node.metadata || {};
+    if (metadata.status === "awaiting_confirmation") return;
     const segments = segmentsFor(metadata);
     const selectedId = String(metadata.selectedSegmentId || segments[0]?.id || "");
     const selected = segments.find((segment) => segment.id === selectedId) || segments[0];
@@ -47,18 +49,57 @@ export function resetAndRequestH3Run(ctx: CanvasNodeContext, all = false) {
         runRequestAll: all, runRequestConsumedId: "", cancelRequested: false, runtimeTaskId: "",
         runProgress: 0, runStartedAt: 0,
     });
+    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, requestId: runtimeRunId, all });
 }
 
 export function resetH3Run(ctx: CanvasNodeContext) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
+    if (node.metadata?.status === "awaiting_confirmation") return;
     const segments = segmentsFor(node.metadata || {}).map((segment) => ({ ...segment, result: "", results: [], status: "idle", progress: 0, runtimeTaskId: "" }));
     ctx.updateMetadata({ content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, segments, status: "idle", errorDetails: "", runtimeTaskId: "", runtimeRunId: "", runProgress: 0, runRequestId: "", runRequestConsumedId: "", cancelRequested: false, runFinishedAt: undefined });
 }
 
 export function H3StatusBadge({ status, error, onRetry }: { status: string; error: string; onRetry: () => void }) {
+    const [copiedError, setCopiedError] = useState(false);
     if (!status || status === "idle") return null;
-    const label = status === "queued" ? "排队中…" : status === "loading" ? "生成中…" : status === "success" ? "已完成" : status === "cancelled" ? "已取消" : status === "error" ? `失败：${error || "未知错误"}` : status;
-    return <div className={`minimax-status-badge ${status}`}><span>{label}</span>{status === "error" ? <button type="button" onClick={(event) => { event.stopPropagation(); onRetry(); }}>重试</button> : null}</div>;
+    const label = status === "queued" ? "排队中…" : status === "loading" ? "生成中…" : status === "awaiting_confirmation" ? "一采待确认" : status === "success" ? "已完成" : status === "cancelled" ? "已取消" : status === "error" ? `失败：${error || "未知错误"}` : status;
+    const copyError = async () => {
+        const text = error || "未知错误";
+        let copied = false;
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(text);
+                copied = true;
+            }
+        } catch { /* fall back to execCommand */ }
+        if (!copied) {
+            const textarea = document.createElement("textarea");
+            textarea.value = text;
+            textarea.style.position = "fixed";
+            textarea.style.opacity = "0";
+            document.body.appendChild(textarea);
+            textarea.select();
+            try { copied = document.execCommand("copy"); } catch { /* clipboard unavailable */ }
+            textarea.remove();
+        }
+        if (!copied) return;
+        setCopiedError(true);
+        window.setTimeout(() => setCopiedError(false), 1500);
+    };
+    return <div className={`minimax-status-badge ${status}`}><span
+        role={status === "error" ? "button" : undefined}
+        tabIndex={status === "error" ? 0 : undefined}
+        title={status === "error" ? "点击复制完整错误信息" : undefined}
+        style={status === "error" ? { cursor: "copy", userSelect: "text" } : undefined}
+        onClick={status === "error" ? (event) => { event.stopPropagation(); void copyError(); } : undefined}
+        onKeyDown={status === "error" ? (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                event.stopPropagation();
+                void copyError();
+            }
+        } : undefined}
+    >{copiedError ? "错误已复制到剪贴板" : label}</span>{status === "error" ? <button type="button" onClick={(event) => { event.stopPropagation(); onRetry(); }}>重试</button> : null}</div>;
 }
 
 // 时间轴轨道按固定 100px/秒 铺（ruler tick 用 time*50px 定位，可横向滚动），
@@ -97,16 +138,18 @@ export function resolveH3PaneSizes(metadata: Record<string, unknown> | null | un
 
 // 行高布局常量（拖拽侧与读取侧共用的唯一口径，此前散在三处导致互相打架）：
 // wb-body 自身 padding+gap 合计 36；Output 行保底 80；
-// 时间轴面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110 + 余量 ≈ 190 + Refs 行高。
+// 时间轴面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110 + 余量 ≈ 190；Refs 行另有最小高度。
 export const H3_BODY_CHROME = 36;
 export const H3_OUTPUT_MIN = 80;
 export const H3_PREVIEW_MIN = 130;
 export const H3_REF_MIN = 60;
 export const H3_TIMELINE_CHROME = 190;
+export const H3_TIMELINE_MIN = H3_TIMELINE_CHROME + H3_REF_MIN;
 export const H3_NODE_MAX = 4000;
 
 // 高度预算求解：节点在画布上被手动压小、行1+行2+Output 装不下时，按
-// 「预览先让(到 130 下限) → 时间轴再让(到 max(250, 190+Refs) 下限)」连续收敛，Output 始终保底 80。
+// 「预览先让(到 130 下限) → 时间轴再让(到固定内容下限)」连续收敛，Output 始终保底 80；
+// 时间轴收缩时 Refs 行同步压到 60px 下限，避免高 Refs 默认值锁死 Output 分界线。
 // 全程单调连续（脱离挤压态时恰好等于输入值），边界无跳变。拖拽侧与读取侧共用。
 export function h3SolveRows(bodyH: number, p: number, t: number, r: number) {
     const avail = Math.max(0, bodyH - H3_BODY_CHROME - H3_OUTPUT_MIN);
@@ -117,7 +160,7 @@ export function h3SolveRows(bodyH: number, p: number, t: number, r: number) {
         const dp = Math.min(over, Math.max(0, ep - H3_PREVIEW_MIN));
         ep -= dp;
         const rest = over - dp;
-        if (rest > 0) et -= Math.min(rest, Math.max(0, et - Math.max(250, H3_TIMELINE_CHROME + r)));
+        if (rest > 0) et -= Math.min(rest, Math.max(0, et - H3_TIMELINE_MIN));
     }
     return { p: Math.round(ep), t: Math.round(et), r: Math.round(Math.max(H3_REF_MIN, Math.min(r, et - H3_TIMELINE_CHROME))) };
 }
@@ -149,14 +192,14 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
             const metadata = ctxRef.current.node.metadata || {};
             const r = Math.max(H3_REF_MIN, Math.min(900, Number(metadata.minimaxRefLaneH) || 150));
             const p = Math.max(H3_PREVIEW_MIN, Math.min(2000, Number(metadata.minimaxPreviewH) || 220));
-            const t = Math.max(H3_TIMELINE_CHROME + r, Math.min(2000, Number(metadata.minimaxTimelineH) || 320));
+            const t = Math.max(H3_TIMELINE_MIN, Math.min(2000, Number(metadata.minimaxTimelineH) || 320));
             let next: { p: number; t: number; r: number };
             if (prev > 36 && bodyH > 36 && prev !== bodyH) {
                 // 节点高度变化：以上一次的实际视觉行高为基准等比缩放（Output 是余量，随总空间自然同比）
                 const base = h3SolveRows(prev, p, t, r);
                 const k = (bodyH - H3_BODY_CHROME) / (prev - H3_BODY_CHROME);
                 const np = Math.max(H3_PREVIEW_MIN, Math.round(base.p * k));
-                const nt = Math.max(250, Math.round(base.t * k));
+            const nt = Math.max(H3_TIMELINE_MIN, Math.round(base.t * k));
                 const nr = Math.max(H3_REF_MIN, Math.min(nt - H3_TIMELINE_CHROME, Math.round(base.r * k)));
                 next = h3SolveRows(bodyH, np, nt, nr);
             } else {
@@ -220,9 +263,10 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
             const host = hostRef.current?.parentElement;
             // 快照直接取 metadata 真值（钳制与 bounds 一致）。历史 bug 源：这里曾钳到 900，
             // 而行高/节点早已允许 2000，超 900 的节点一抓手就先跳回 900。
-            const refLane0 = Math.max(H3_REF_MIN, Math.min(900, Number(metadata.minimaxRefLaneH) || 150));
+            const refLaneStored = Math.max(H3_REF_MIN, Math.min(900, Number(metadata.minimaxRefLaneH) || 150));
             const p0 = Math.max(H3_PREVIEW_MIN, Math.min(2000, Number(metadata.minimaxPreviewH) || 220));
-            const t0 = Math.max(H3_TIMELINE_CHROME + refLane0, Math.min(2000, Number(metadata.minimaxTimelineH) || 320));
+            const t0 = Math.max(H3_TIMELINE_MIN, Math.min(2000, Number(metadata.minimaxTimelineH) || 320));
+            const refLane0 = Math.max(H3_REF_MIN, Math.min(refLaneStored, t0 - H3_TIMELINE_CHROME));
             const bodyH = host?.querySelector<HTMLElement>(".minimax-wb-body")?.clientHeight || 0;
             const library = host?.querySelector<HTMLElement>(".minimax-library");
             const outputH = library && library.offsetHeight > 0 ? library.offsetHeight : Math.max(H3_OUTPUT_MIN, bodyH - H3_BODY_CHROME - p0 - t0);
@@ -246,12 +290,11 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
         if (!state) return;
         const meta = H3_PANE_META[state.key];
         let [min, max] = H3_PANE_BOUNDS[state.key];
-        // 时间轴面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110 + Refs 行 refLaneH，
-        // timelineH 低于它行与行就会互相挤压裁切；两把行高手柄互相约束下限/上限。
+        // 时间轴面板内部固定需求 = controls 44 + 刻度尺 28 + Video 行最低 ~110；
+        // Refs 行在时间轴收缩时可压到 H3_REF_MIN，两把行高手柄互相约束下限/上限。
         const metadataNow = ctx.node.metadata || {};
-        const refLaneNow = Math.max(H3_REF_MIN, Math.min(900, Number(metadataNow.minimaxRefLaneH) || 150));
-        const timelineNow = Math.max(H3_TIMELINE_CHROME + refLaneNow, Math.min(2000, Number(metadataNow.minimaxTimelineH) || 320));
-        if (state.key === "timelineH") min = H3_TIMELINE_CHROME + refLaneNow;
+        const timelineNow = Math.max(H3_TIMELINE_MIN, Math.min(2000, Number(metadataNow.minimaxTimelineH) || 320));
+        if (state.key === "timelineH") min = H3_TIMELINE_MIN;
         if (state.key === "refLaneH") max = Math.min(max, timelineNow - H3_TIMELINE_CHROME);
         const factor = scale();
         const delta = (meta.axis === "y" ? event.clientY : event.clientX) / factor - (meta.axis === "y" ? state.y : state.x);
@@ -259,7 +302,7 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
         // Output 压到 80 保底后继续下拉 → 节点自动长高，反向拖回时节点单调缩回。
         if (state.key === "timelineH") {
             const t0 = state.timelineH || 320;
-            const minT = H3_TIMELINE_CHROME + refLaneNow;
+            const minT = H3_TIMELINE_MIN;
             const capT = t0 + ((state.outputH || H3_OUTPUT_MIN) - H3_OUTPUT_MIN); // 节点不变时时间轴的物理上限
             const desiredT = t0 + meta.sign * delta;
             if (state.nodeH) ctx.updateNode({ height: Math.round(Math.min(H3_NODE_MAX, state.nodeH + Math.max(0, desiredT - capT))) });
@@ -282,11 +325,11 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
             return;
         }
         // 规则②（VideoRefs↔preview 分界线，AGENTS.md 定案）：Output 高度不变；预览与时间轴此消彼长；
-        // 时间轴压到下限(190+Refs行高)后继续下拉 → 节点自动长高（预览吃增量、时间轴/Output 不变）；反向拖回节点缩回。
+        // 时间轴压到固定内容下限后继续下拉 → 节点自动长高（预览吃增量、时间轴/Output 不变）；反向拖回节点缩回。
         if (state.key === "previewH" && state.timelineH !== undefined) {
             const t0 = state.timelineH;
             const p0 = Math.max(H3_PREVIEW_MIN, state.value);
-            const minT = H3_TIMELINE_CHROME + refLaneNow;
+            const minT = H3_TIMELINE_MIN;
             const maxP = p0 + (t0 - minT);                                // 节点/Output 不变时预览的物理上限
             const desiredP = p0 + delta;
             if (state.nodeH) ctx.updateNode({ height: Math.round(Math.min(H3_NODE_MAX, state.nodeH + Math.max(0, desiredP - maxP))) });
@@ -364,17 +407,43 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     const activeRef = useRef(0);
     const [active, setActive] = useState(0);
     const [slotSrc, setSlotSrc] = useState<[string, string]>([url || "", ""]);
+    // ⚠️ 必须放在下方所有提前 return（!url / image / audio）之前：hooks 数量在两次渲染间必须一致，
+    // 否则预览源在「视频 ↔ 空/图片/音频」之间切换时（如选中有结果/无结果的 Clip）会直接抛
+    // "Rendered more/fewer hooks than during the previous render"，整棵节点树被错误边界拆掉。
+    const [isMuted, setIsMuted] = useState(true);
     const onEndedRef = useRef(onEnded);
     useEffect(() => { onEndedRef.current = onEnded; }, [onEnded]);
     const nextUrlRef = useRef(nextUrl);
     useEffect(() => { nextUrlRef.current = nextUrl; }, [nextUrl]);
     const playheadRef = useRef(playhead);
     useEffect(() => { playheadRef.current = playhead; }, [playhead]);
+    // 用户主动暂停标记：onPause 置 true（onPlay / playToken 起播时清除）。
+    // 用于在 Clip 边界拦截「暂停竞态」：用户在片段结尾瞬间点暂停时，ended 仍会触发换段，
+    // 把画面切成下一段的首帧——表现为「点暂停后跳到首帧」。该标记让换段机器让位于用户暂停。
+    const userPausedRef = useRef(false);
+    // 断流早退重试标记：弱网/后端不支持 Range 时媒体会在中途触发 ended（currentTime << duration），
+    // 对同一 src 只自动重试一次，避免死循环。
+    const endedRetrySrcRef = useRef<string | null>(null);
     // 当前 active 视频播完：连续播放模式下，若 buffer 槽已预载好下一段，交叉淡入直接续播；否则走 advancePlayback 重载
     useEffect(() => {
         const media = videosRef.current[activeRef.current];
         if (!media) return;
         const handler = () => {
+            // 用户刚点了暂停（paused 且未到末尾）：绝不能换段，保持用户看到的当前帧。
+            // 注意自然播完时 paused 也是 true，必须用 ended 区分。
+            if (media.paused && !media.ended) return;
+            // 断流早退守卫：ended 但 currentTime 明显没播完（媒体流被截断/Range 失败），
+            // 对同一 src 重试一次起播，成功则继续原地播而不是错误地切到下一段首帧。
+            const dur = Number(media.duration || 0);
+            if (media.ended && dur > 0 && media.currentTime < dur - 0.3) {
+                const srcKey = media.currentSrc || media.src || "";
+                if (endedRetrySrcRef.current !== srcKey) {
+                    endedRetrySrcRef.current = srcKey;
+                    try { media.currentTime = Math.max(0, media.currentTime - 0.2); } catch { /* 尚未可 seek */ }
+                    void media.play().catch(() => undefined);
+                    return;
+                }
+            }
             const continuous = ctx.node.metadata?.h3PlaybackAll === true;
             const next = nextUrlRef.current;
             const i = activeRef.current === 0 ? 1 : 0;
@@ -386,7 +455,11 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                 activeRef.current = i;
                 setActive(i);
                 try { buf.currentTime = 0; } catch { /* 尚未可 seek */ }
-                void buf.play().catch(() => undefined);
+                void buf.play().catch(() => {
+                    // 自动播放被浏览器策略拦截（如已取消静音）：回退到常规换段路径，
+                    // 由父组件递增 playRequest 重新起播，避免永远停在首帧。
+                    onEndedRef.current?.();
+                });
             } else {
                 onEndedRef.current?.();
             }
@@ -394,15 +467,6 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         media.addEventListener("ended", handler);
         return () => media.removeEventListener("ended", handler);
     }, [active]);
-    // playToken 由 H3Workbench 在用户真正发起播放时（playAll / 续播换段）显式递增。
-    // 只看 playToken 是否变化，**不**依赖 h3PlayRequest：metadata 里的 h3PlayRequest 残留值、
-    // MCP / 多端同步、StrictMode dev 模式下 useEffect 跑两次都不会触发自动播放。
-    // h3PlayRequest 仍保留在 metadata 里，只用于「我刚才播到哪」的持久化展示。
-    useEffect(() => {
-        const v = videosRef.current[activeRef.current];
-        if (!v) return;
-        if (v.paused) void v.play().catch(() => undefined);
-    }, [playToken]);
     // Tab / 窗口切到后台时强制 pause 双槽视频：浏览器在隐藏标签里仍会继续跑 video，
     // 切回来时已经播过一段，看上去像"自动播放"。在不可见时主动 pause 一次，切回来由用户/下一次 playRequest 决定是否续播。
     useEffect(() => {
@@ -418,24 +482,11 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         };
     }, []);
     // 拖动刻度 seek / 换段：跳到 active 槽对应本地帧（playhead 为绝对时间，减时间轴偏移得本地帧）
-    useEffect(() => {
-        const v = videosRef.current[activeRef.current];
-        if (!v || !Number.isFinite(playhead)) return;
-        const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
-        if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.1) v.currentTime = local;
-    }, [playhead, timelineOffset]);
-    // 点击播放（playToken 变化）时：先把当前帧跳到 playhead 再播放。
-    // 依赖只放 [playToken]，playhead/timelineOffset 通过闭包拿最新值但不放进依赖——
-    // 播放中 playhead 由 rAF 直接驱动 DOM（不回写 metadata），若也依赖 playhead，
-    // 此 effect 会在每次外部 seek 后执行，把已自然前进的 currentTime 拉回上一帧造成卡顿/回跳。
-    // 拖动刻度/换段导致的 seek 由上方依赖 [playhead] 的 seek effect 处理。
-    useEffect(() => {
-        const v = videosRef.current[activeRef.current];
-        if (!v) return;
-        const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
-        if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.05) v.currentTime = local;
-    }, [playToken]);
-    // 播放期间用 requestAnimationFrame 平滑驱动时间刻度指针（直接改 DOM，不写 metadata）
+    // 以及「点击播放（playToken 变化）时先把当前帧跳到 playhead 再播放」的两个 seek effect，
+    // 与 playToken 起播 effect 一并放在下方 [url]/预载 effect 之后：它们读取 activeRef.current，
+    // 必须等 [url] effect 在同一轮提交里先把 active 槽切好，否则会把「已播完的旧槽」当成 active
+    // 起播（旧槽不可见地在后台重播，可见的新槽停在首帧）——这正是「暂停/换段后画面跳到首帧」的根因之一。
+    // 播放期间由 requestAnimationFrame 平滑驱动时间刻度指针（直接改 DOM，不写 metadata）
     useEffect(() => {
         let raf = 0;
         const tick = () => {
@@ -477,6 +528,39 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         loadedUrlRef.current[i] = nextUrl;
         setSlotSrc((cur) => { const next = [...cur] as [string, string]; next[i] = nextUrl; return next; });
     }, [nextUrl, active]);
+    // playToken 由 H3Workbench 在用户真正发起播放时（playAll / 续播换段）显式递增。
+    // 只看 playToken 是否变化，**不**依赖 h3PlayRequest：metadata 里的 h3PlayRequest 残留值、
+    // MCP / 多端同步、StrictMode dev 模式下 useEffect 跑两次都不会触发自动播放。
+    // h3PlayRequest 由本窗口 view 持有，不能用共享 metadata 触发播放。
+    // ⚠️ 必须比较 playToken 的**变化**：effect 在 mount 时也会执行一次，而刚挂载的 video
+    // 必然是 paused=true，只判断 v.paused 会让每次刷新页面 / 节点重新挂载都自动播放。
+    const playedTokenRef = useRef(playToken);
+    useEffect(() => {
+        if (playedTokenRef.current === playToken) return;
+        playedTokenRef.current = playToken;
+        userPausedRef.current = false;
+        const v = videosRef.current[activeRef.current];
+        if (!v) return;
+        if (v.paused) void v.play().catch(() => undefined);
+    }, [playToken]);
+    // 拖动刻度 seek / 换段：跳到 active 槽对应本地帧（playhead 为绝对时间，减时间轴偏移得本地帧）
+    useEffect(() => {
+        const v = videosRef.current[activeRef.current];
+        if (!v || !Number.isFinite(playhead)) return;
+        const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
+        if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.1) v.currentTime = local;
+    }, [playhead, timelineOffset]);
+    // 点击播放（playToken 变化）时：先把当前帧跳到 playhead 再播放。
+    // 依赖只放 [playToken]，playhead/timelineOffset 通过闭包拿最新值但不放进依赖——
+    // 播放中 playhead 由 rAF 直接驱动 DOM（不回写 metadata），若也依赖 playhead，
+    // 此 effect 会在每次外部 seek 后执行，把已自然前进的 currentTime 拉回上一帧造成卡顿/回跳。
+    // 拖动刻度/换段导致的 seek 由上方依赖 [playhead] 的 seek effect 处理。
+    useEffect(() => {
+        const v = videosRef.current[activeRef.current];
+        if (!v) return;
+        const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
+        if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.05) v.currentTime = local;
+    }, [playToken]);
     // 支持把输出视频/图片拖到画布变成独立节点（复用 storageKey，不重新上传）
     const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
         const payload = JSON.stringify({ url, type: kind, kind, name: name || "H3 输出", storageKey });
@@ -487,14 +571,13 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     };
     if (!url) return <div className="minimax-player-content"><div className="minimax-player-empty">连接视频和角色参考图</div></div>;
     if (kind === "image") return <div className="minimax-player-content minimax-player-image" draggable onDragStart={handleDragStart}><img src={url} alt="H3 reference" draggable={false} /></div>;
-    if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio ref={(node) => { videosRef.current[0] = node; }} src={url} controls preload="metadata" draggable={false} onPause={(event) => { const m = event.currentTarget; const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity))); ctx.updateMetadata({ playhead: timelineOffset + localTime }); }} /></div></div>;
+    if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio loop={Boolean(url) && !ctx.node.metadata?.h3PlaybackAll} ref={(node) => { videosRef.current[0] = node; }} src={url} controls preload="metadata" draggable={false} onPause={(event) => { const m = event.currentTarget; const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity))); ctx.updateMetadata({ playhead: timelineOffset + localTime }); }} /></div></div>;
     // 视频：双槽交叉淡入续播。两个 video 绝对叠放，active 槽可见且有 controls，另一槽透明且不接收事件；
     // 下一段已在 inactive 槽预载就绪，ended 时切换 active 即可即时续播，无 src 重载间隙。
     // muted 用 state 而不是 JSX 静态属性：rAF tick 触发 onPlayheadTick → 父组件重渲染，
     // 如果是 <video muted /> 静态属性，React 会在每次渲染把 muted 重新置为 true，
     // 用户点原生控件取消静音下一帧又被强制回 true，体感就是"老被静音"。
-    // 初始值 true 是为了保住浏览器 autoplay 权限（muted 视频不需要用户手势即可自动播放）。
-    const [isMuted, setIsMuted] = useState(true);
+    // isMuted 的 useState 已提升到组件顶部 hooks 区（见上方注释），不能放在这些 return 之后。
     return (
         <div className="minimax-player-content">
             {[0, 1].map((slot) => (
@@ -503,6 +586,10 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                     ref={(node) => { videosRef.current[slot] = node; }}
                     src={slotSrc[slot] ? resultUrl(slotSrc[slot]) : undefined}
                     controls={active === slot}
+                    // 默认单段预览循环：交给浏览器原生 loop 处理，不再在 ended 事件里手动
+                    // 重置 currentTime + play()，避免任何 React state 副作用。连续播放
+                    // 模式下两个槽都不循环，让 ended 事件正常触发交叉淡入续播。
+                    loop={Boolean(slotSrc[slot]) && active === slot && !ctx.node.metadata?.h3PlaybackAll}
                     muted={isMuted}
                     playsInline
                     preload="auto"
@@ -522,9 +609,12 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                     onPause={(event) => {
                         if (slot !== activeRef.current) return;
                         const m = event.currentTarget;
+                        // 自然播完也会触发 pause，不算「用户暂停」；只有未到末尾的 pause 才冻结换段。
+                        if (!m.ended) userPausedRef.current = true;
                         const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity)));
                         ctx.updateMetadata({ playhead: timelineOffset + localTime });
                     }}
+                    onPlay={() => { if (slot === activeRef.current) userPausedRef.current = false; }}
                 />
             ))}
         </div>

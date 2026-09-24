@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Bot, Download, FileText, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload } from "lucide-react";
-import { Button, Dropdown, Input, Modal, Popover, Tooltip } from "antd";
+import { BookOpen, Bot, Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
+import { Button, Dropdown, Modal, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { UserStatusActions } from "@/components/layout/user-status-actions";
@@ -8,8 +8,14 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { DOCS_URL } from "@/constant/env";
+import type { CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
+import { CanvasCollaborativeText } from "./canvas-collaborative-text";
+import { CanvasDraftsButton } from "./canvas-drafts-button";
+import { CanvasTaskCenterButton } from "./canvas-task-center";
+import { CanvasTextSuggestionsButton } from "./canvas-text-suggestions-button";
 
 export function CanvasTopBar({
+    projectId,
     title,
     titleDraft,
     isTitleEditing,
@@ -24,6 +30,8 @@ export function CanvasTopBar({
     onCreateProject,
     onDeleteProject,
     onExportProject,
+    exporting,
+    transferBusy,
     onImportImage,
     onOpenPlugins,
     onUndo,
@@ -32,9 +40,10 @@ export function CanvasTopBar({
     compactAgentStatus,
     onToggleAgent,
     globalPrompt,
-    onGlobalPromptChange,
     onOpenGenerationLogs,
+    collaborators,
 }: {
+    projectId: string;
     title: string;
     titleDraft: string;
     isTitleEditing: boolean;
@@ -49,6 +58,8 @@ export function CanvasTopBar({
     onCreateProject: () => void;
     onDeleteProject: () => void;
     onExportProject: () => void;
+    exporting: boolean;
+    transferBusy: boolean;
     onImportImage: () => void;
     onOpenPlugins: () => void;
     onUndo: () => void;
@@ -57,8 +68,8 @@ export function CanvasTopBar({
     compactAgentStatus: { connected: boolean; enabled: boolean; activity: string };
     onToggleAgent: () => void;
     globalPrompt: string;
-    onGlobalPromptChange: (value: string) => void;
     onOpenGenerationLogs: () => void;
+    collaborators: CanvasCollaborator[];
 }) {
     const colorTheme = useThemeStore((state) => state.theme);
     const { t } = useTranslation();
@@ -104,7 +115,7 @@ export function CanvasTopBar({
                                 { key: "delete", danger: true, icon: <Trash2 className="size-4" />, label: t("canvas.deleteCurrent"), onClick: onDeleteProject },
                                 { type: "divider" },
                                 { key: "import", icon: <Upload className="size-4" />, label: t("canvas.importAsset"), onClick: onImportImage },
-                                { key: "export", icon: <Download className="size-4" />, label: t("canvas.exportCurrent"), onClick: onExportProject },
+                                { key: "export", disabled: transferBusy, icon: exporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />, label: exporting ? t("canvas.projectPage.exporting") : t("canvas.exportCurrent"), onClick: onExportProject },
                                 { type: "divider" },
                                 { key: "undo", disabled: !canUndo, icon: <Undo2 className="size-4" />, label: <MenuLabel text={t("canvas.undo")} shortcut="⌘ Z" />, onClick: onUndo },
                                 { key: "redo", disabled: !canRedo, icon: <Redo2 className="size-4" />, label: <MenuLabel text={t("canvas.redo")} shortcut="⌘ ⇧ Z / ⌘ Y" />, onClick: onRedo },
@@ -142,10 +153,13 @@ export function CanvasTopBar({
                         )}
                     </div>
                     <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />
+                    <CanvasCollaborators collaborators={collaborators} />
+                    <CanvasDraftsButton />
+                    <CanvasTextSuggestionsButton projectId={projectId} />
                     <Popover
                         trigger="click"
                         placement="bottomLeft"
-                        content={<div className="w-80"><Input.TextArea autoFocus value={globalPrompt} onChange={(event) => onGlobalPromptChange(event.target.value)} placeholder={t("canvas.globalPromptPlaceholder")} autoSize={{ minRows: 3, maxRows: 8 }} /></div>}
+                        content={<div className="w-80"><CanvasCollaborativeText projectId={projectId} target={{ field: "globalPrompt" }} placeholder={t("canvas.globalPromptPlaceholder")} /></div>}
                     >
                         <Tooltip title={t("canvas.globalPromptHint")}>
                                 <button type="button" aria-label={t("canvas.globalPrompt")} className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: globalPrompt.trim() ? theme.node.text : theme.node.muted }}>
@@ -159,6 +173,7 @@ export function CanvasTopBar({
                 <div className="pointer-events-auto flex items-center gap-1.5">
                     <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />
                     <Tooltip title="生成日志"><button type="button" aria-label="生成日志" className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip>
+                    <CanvasTaskCenterButton projectId={projectId} />
                     <span className="h-6 w-px" style={{ background: theme.toolbar.border }} />
                     <Button
                         type="text"
@@ -190,6 +205,34 @@ export function CanvasTopBar({
             </Modal>
         </>
     );
+}
+
+function CanvasCollaborators({ collaborators }: { collaborators: CanvasCollaborator[] }) {
+    const colorTheme = useThemeStore((state) => state.theme);
+    const theme = canvasThemes[colorTheme];
+    if (!collaborators.length) return null;
+    const label = collaborators.map((item) => `${item.label} · ${item.kind === "mcp" ? "MCP" : item.kind === "agent" ? "Agent" : item.kind === "browser" ? "浏览器" : "后台"}`).join("\n");
+    return (
+        <Tooltip title={<span className="whitespace-pre-line">最近参与画布操作<br />{label}</span>}>
+            <div className="flex h-8 items-center gap-1.5 px-1 text-xs" style={{ color: theme.node.muted }} aria-label={`最近协作者 ${collaborators.length} 个`}>
+                <UsersRound className="size-3.5" />
+                <span className="flex -space-x-1.5">
+                    {collaborators.slice(0, 4).map((item) => (
+                        <span key={item.clientId} className="grid size-5 place-items-center rounded-full border text-[9px] font-semibold" style={{ borderColor: theme.toolbar.panel, background: collaboratorColor(item.clientId), color: "#fff" }}>
+                            {(item.label || item.kind).slice(0, 1).toUpperCase()}
+                        </span>
+                    ))}
+                </span>
+            </div>
+        </Tooltip>
+    );
+}
+
+function collaboratorColor(clientId: string) {
+    const colors = ["#0f766e", "#b45309", "#be123c", "#1d4ed8", "#6d28d9", "#3f6212"];
+    let hash = 0;
+    for (let index = 0; index < clientId.length; index += 1) hash = (hash * 31 + clientId.charCodeAt(index)) | 0;
+    return colors[Math.abs(hash) % colors.length];
 }
 
 function MenuLabel({ text, shortcut }: { text: string; shortcut: string }) {

@@ -8,7 +8,16 @@ export type BackendEvent = {
     revision?: number;
     createdAt: string;
     payload: unknown;
+    source?: CanvasEventSource;
+    operationId?: string;
 };
+
+export type CanvasEventSource = {
+    clientId: string;
+    kind: "browser" | "mcp" | "agent" | "task" | "system";
+    label?: string;
+};
+
 
 type Listener = (event: BackendEvent) => void;
 
@@ -27,11 +36,13 @@ export class BackendEventBus {
         return event;
     }
 
-    publishCanvasDelta(input: { entityId: string; revision: number; operations: CanvasOperation[]; updatedAt?: string; operationResults?: unknown[] }) {
+    publishCanvasDelta(input: { entityId: string; revision: number; operations: CanvasOperation[]; updatedAt?: string; operationResults?: unknown[]; source?: CanvasEventSource; operationId?: string }) {
         return this.publish({
             type: "canvas.updated",
             entityId: input.entityId,
             revision: input.revision,
+            ...(input.source ? { source: input.source } : {}),
+            ...(input.operationId ? { operationId: input.operationId } : {}),
             payload: {
                 operations: input.operations,
                 ...(input.operationResults ? { operationResults: input.operationResults } : {}),

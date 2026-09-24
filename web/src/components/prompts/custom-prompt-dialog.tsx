@@ -132,6 +132,7 @@ export function CustomPromptDialog({ open, mode, initial, onClose, onSaved }: Pr
             cancelText={t("common.cancel")}
             confirmLoading={submitting}
             destroyOnHidden
+            forceRender
             width={600}
         >
             <Form form={form} layout="vertical" preserve={false}>

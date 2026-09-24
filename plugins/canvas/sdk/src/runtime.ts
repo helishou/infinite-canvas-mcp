@@ -35,3 +35,4 @@ export const useRef: typeof React.useRef = ((...args: unknown[]) => (getReact().
 export const useReducer: typeof React.useReducer = ((...args: unknown[]) => (getReact().useReducer as (...a: unknown[]) => unknown)(...args)) as typeof React.useReducer;
 export const useContext: typeof React.useContext = ((...args: unknown[]) => (getReact().useContext as (...a: unknown[]) => unknown)(...args)) as typeof React.useContext;
 export const useId: typeof React.useId = ((...args: unknown[]) => (getReact().useId as (...a: unknown[]) => unknown)(...args)) as typeof React.useId;
+export const useSyncExternalStore: typeof React.useSyncExternalStore = ((...args: unknown[]) => (getReact().useSyncExternalStore as (...a: unknown[]) => unknown)(...args)) as typeof React.useSyncExternalStore;

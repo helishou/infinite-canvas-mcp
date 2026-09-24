@@ -2,12 +2,14 @@ import path from "node:path";
 import type {
     Asset, AssetFolder, CanvasFolder, CanvasProject,
     GenerationLog, GenerationLogStatus, MediaFile,
+    McpObservabilityEvent, McpObservabilityEventInput,
     RuntimeTask, RuntimeTaskEvent, RuntimeTaskStatus,
 } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
+import type { CanvasCommandContext } from "../canvas/collaboration.js";
 
 /** 各 store 的筛选条件。 */
-export type AssetFilter = { kind?: string; folderId?: string };
+export type AssetFilter = { kind?: string; folderId?: string; dramaId?: string };
 export type LogFilter = { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number };
 export type LogDeleteScope = { id?: string; projectId?: string; nodeId?: string };
 export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null };
@@ -34,15 +36,14 @@ export type H3NodeMaterial = {
     segmentId?: string;
     createdAt: string;
 };
-export type CanvasProjectFilter = { folderId?: string | null };
+export type CanvasProjectFilter = { episodeId?: string; id?: string };
 export type CanvasProjectStore = {
-    list(filter?: CanvasProjectFilter): CanvasProject[];
+    list(): CanvasProject[];
     listSummaries(filter?: CanvasProjectFilter): CanvasProject[];
     get(id: string): CanvasProject | null;
-    upsert(project: CanvasProject): CanvasProject;
-    replaceAll(projects: CanvasProject[]): CanvasProject[];
+    create(project: CanvasProject): { project: CanvasProject; created: boolean };
     delete(id: string): number;
-    applyOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[]): { project: CanvasProject; revision: number; operationResults: unknown[]; operations: CanvasOperation[] };
+    applyOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[], context?: CanvasCommandContext): { project: CanvasProject; revision: number; operationResults: unknown[]; operations: CanvasOperation[]; duplicated?: boolean };
     /** H3 任务终态与 Clip、生成日志在同一数据库事务中回写。 */
     writeBackH3Task(
         task: RuntimeTask,
@@ -51,10 +52,14 @@ export type CanvasProjectStore = {
     ): { project: CanvasProject; log: GenerationLog | null; operations: CanvasOperation[] } | null;
     writeBackCanvasImageTask(
         task: RuntimeTask,
-        input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append" },
+        input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append"; imageIds?: string[] },
         media: Array<Record<string, unknown>>,
     ): { project: CanvasProject; operations: CanvasOperation[] } | null;
     markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    writeBackCanvasVideoTask(task: RuntimeTask, input: { projectId: string; nodeId: string; prompt: string; model: string }, media: Record<string, unknown>): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    markCanvasVideoTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    writeBackCanvasAudioTask(task: RuntimeTask, input: { projectId: string; nodeId: string; prompt: string; model: string }, media: Record<string, unknown>): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    markCanvasAudioTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;
     /** H3 节点历史运行产物（替代老的 metadata.materials 与 segments[i].results[].params 字段）。 */
     getH3NodeMaterials(projectId: string, nodeId: string, limit?: number, segmentId?: string): H3NodeMaterial[];
 };
@@ -64,6 +69,7 @@ export type CanvasFolderStore = {
     list(): CanvasFolder[];
     upsert(folder: CanvasFolder): CanvasFolder;
     delete(id: string): number;
+    deleteDrama(id: string): number;
 };
 
 /** 资产 store：assets + asset_folders 统一入口。 */
@@ -109,6 +115,7 @@ export type TaskStore = {
     get(id: string): RuntimeTask | null;
     list(filter?: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number }): RuntimeTask[];
     update(id: string, patch: TaskPatch): RuntimeTask;
+    transitionH3(id: string, expectedStatus: RuntimeTaskStatus, expectedRevision: number, patch: TaskPatch & { status: RuntimeTaskStatus; result: Record<string, unknown> }, event: { type: string; payload: Record<string, unknown> }): RuntimeTask | null;
     cancel(id: string): RuntimeTask;
     events(id: string, after?: number): RuntimeTaskEvent[];
     /** 追加一条任务事件（bridge 执行过程上报用）。 */
@@ -122,6 +129,13 @@ export type GenerationLogStore = {
     update(id: string, patch: Partial<GenerationLogInput>): GenerationLog;
     list(filter?: LogFilter): GenerationLog[];
     delete(scope: LogDeleteScope): number;
+};
+
+/** MCP 调用只保存脱敏摘要，用 traceId 串联工具、画布事务和任务。 */
+export type McpObservabilityStore = {
+    record(input: McpObservabilityEventInput): McpObservabilityEvent;
+    trace(traceId: string): McpObservabilityEvent[];
+    report(): Record<string, unknown>;
 };
 
 /** 运行时设置 store（runtime_settings 表）。 */
@@ -139,6 +153,7 @@ export type Stores = {
     media: MediaStore;
     tasks: TaskStore;
     logs: GenerationLogStore;
+    mcpObservability: McpObservabilityStore;
     settings: SettingStore;
 };
 

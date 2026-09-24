@@ -18,16 +18,18 @@ test("generation flow reuses referenced nodes when the prompt only mentions them
     const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
     const runs = ops.filter((op) => op.type === "run_generation");
     assert.equal(addedTextNodes.length, 0);
+    assert.equal(config?.metadata?.smart, true);
     assert.equal(ops.filter((op) => op.type === "connect_nodes" && op.fromNodeId === "text-1" && String(op.toNodeId).startsWith("config-")).length, 1);
     assert.match(String(config?.metadata?.prompt), /^@\[node:text-1\]$/);
     assert.equal(runs.length, 1);
 });
 
-test("generation flow still creates a prompt node for prose prompts", () => {
+test("generation flow keeps prose prompts on the smart image node", () => {
     const ops = opsOf("canvas_generate_image", { prompt: "a cat on a roof", referenceNodeIds: ["text-1"], autoRun: true });
-    assert.equal(ops.filter((op) => op.type === "add_node" && op.nodeType === "text").length, 1);
+    assert.equal(ops.filter((op) => op.type === "add_node" && op.nodeType === "text").length, 0);
     const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
-    assert.match(String(config?.metadata?.prompt), /@\[node:text-/);
+    assert.equal(config?.metadata?.prompt, "a cat on a roof");
+    assert.equal(config?.metadata?.smart, true);
 });
 
 test("setting generation references removes old media inputs but keeps the prompt connection", () => {
@@ -73,6 +75,30 @@ test("running generation with referenceNodeIds replaces old media inputs before 
     ]);
 });
 
+test("running generation persists an explicit prompt on the target node", () => {
+    const ops = opsOf("canvas_run_generation", {
+        nodeId: "config",
+        prompt: "a rainy neon street at night",
+    }, {
+        nodes: [{ id: "config", type: "config", position: { x: 0, y: 0 }, width: 320, height: 240 }],
+        connections: [],
+    });
+    assert.deepEqual(ops, [
+        { type: "update_node", id: "config", metadata: { composerContent: "a rainy neon street at night", prompt: "a rainy neon street at night" } },
+        { type: "run_generation", nodeId: "config", mode: "image", prompt: "a rainy neon street at night" },
+    ]);
+});
+
+test("canvas_apply_ops 直接提交生成操作时也持久化显式提示词", () => {
+    const ops = opsOf("canvas_apply_ops", {
+        ops: [{ type: "run_generation", nodeId: "config", mode: "image", prompt: "direct canvas op prompt" }],
+    });
+    assert.deepEqual(ops, [
+        { type: "update_node", id: "config", metadata: { composerContent: "direct canvas op prompt", prompt: "direct canvas op prompt" } },
+        { type: "run_generation", nodeId: "config", mode: "image", prompt: "direct canvas op prompt" },
+    ]);
+});
+
 test("running generation preserves the explicitly selected segment", () => {
     const ops = opsOf("canvas_run_generation", { nodeId: "config", segmentId: "S03" });
     assert.deepEqual(ops, [
@@ -89,13 +115,9 @@ test("generation flow anchors to the first reference node (same row, x = ref.rig
         ],
     };
     const ops = opsOf("canvas_generate_image", { prompt: "a follow-up shot", referenceNodeIds: ["ref"], autoRun: true }, state);
-    const text = ops.find((op) => op.type === "add_node" && op.nodeType === "text");
     const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
-    // text 起点 = firstReference 右边 + 96、y 与 reference 对齐
-    assert.equal((text as { position: { x: number; y: number } }).position.x, 1000 + 320 + 96);
-    assert.equal((text as { position: { x: number; y: number } }).position.y, 240);
-    // config 在 text 右边 420（保持老间距口径），y 同样与 reference 对齐
-    assert.equal((config as { position: { x: number; y: number } }).position.x, 1000 + 320 + 96 + 420);
+    // 图片生成把提示词直接写进 config，config 贴在 firstReference 同行右侧。
+    assert.equal((config as { position: { x: number; y: number } }).position.x, 1000 + 320 + 96);
     assert.equal((config as { position: { x: number; y: number } }).position.y, 240);
 });
 
@@ -106,8 +128,29 @@ test("generation flow falls back to canvas-far-right + y=0 when no reference is 
         ],
     };
     const ops = opsOf("canvas_generate_image", { prompt: "lone prompt", autoRun: true }, state);
-    const text = ops.find((op) => op.type === "add_node" && op.nodeType === "text");
-    // 没有 reference 时退回到 nextCanvasX（画布全局最右 + 80），y 用 0
-    assert.equal((text as { position: { x: number; y: number } }).position.x, 320 + 80);
-    assert.equal((text as { position: { x: number; y: number } }).position.y, 0);
+    const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
+    // 没有 reference 时，config 退回到 nextCanvasX（画布全局最右 + 80），y 用 0。
+    assert.equal((config as { position: { x: number; y: number } }).position.x, 320 + 80);
+    assert.equal((config as { position: { x: number; y: number } }).position.y, 0);
+});
+
+test("generation flow moves right when the reference row already contains a previous flow", () => {
+    const state = {
+        nodes: [
+            { id: "ref", type: "image", position: { x: 1000, y: 240 }, width: 320, height: 240 },
+            { id: "old-text", type: "text", position: { x: 1416, y: 240 }, width: 320, height: 240 },
+            { id: "old-config", type: "config", position: { x: 1836, y: 240 }, width: 320, height: 240 },
+        ],
+    };
+    const ops = opsOf("canvas_generate_image", { prompt: "another shot", referenceNodeIds: ["ref"], autoRun: true }, state);
+    const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
+    assert.equal((config as { position: { x: number; y: number } }).position.x, 2252);
+    assert.equal((config as { position: { x: number; y: number } }).position.y, 240);
+});
+
+test("generation flow handles legacy nodes without dimensions", () => {
+    const state = { nodes: [{ id: "legacy", type: "image", position: { x: 100, y: 0 } }] };
+    const ops = opsOf("canvas_generate_image", { prompt: "legacy canvas" }, state as any);
+    const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
+    assert.equal((config as { position: { x: number; y: number } }).position.x, 500);
 });

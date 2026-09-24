@@ -1,6 +1,6 @@
 // ComfyUI 工作流管理：拉取 / 上传 / 删除 / 详情 / 运行
 // 后端 API：backend/src/workflows/routes.ts
-import { request } from "@/services/backend-api";
+import { request, fetchBackendTask } from "@/services/backend-api";
 
 export type WorkflowItem = {
     name: string;
@@ -11,7 +11,7 @@ export type WorkflowItem = {
 
 // 跟 backend/src/db.ts 的 WorkflowField / WorkflowConfig 对齐。
 // 配置面板加完后这个类型可以删，本地前端 types 由 workflows 页面那侧维护。
-export type WorkflowFieldType = "text" | "number" | "slider" | "boolean" | "dropdown" | "image";
+export type WorkflowFieldType = "text" | "number" | "slider" | "boolean" | "dropdown" | "image" | "audio" | "video";
 export type WorkflowField = {
     id: string;
     node: string;
@@ -44,9 +44,31 @@ export type WorkflowDetail = {
     config?: WorkflowConfig;
 };
 
+export type WorkflowPackage = {
+    format: "infinite-canvas-workflow";
+    version: 1;
+    name: string;
+    workflow: Record<string, unknown>;
+    config: WorkflowConfig;
+};
+
 export function isWorkflowImageField(field: WorkflowField, workflow?: Record<string, unknown>) {
     if (field.type === "image") return true;
     return field.node.split(",").some((nodeId) => (workflow?.[nodeId] as { class_type?: unknown } | undefined)?.class_type === "LoadImage");
+}
+
+export function isWorkflowAudioField(field: WorkflowField, workflow?: Record<string, unknown>) {
+    if (field.type === "audio") return true;
+    return field.node.split(",").some((nodeId) => (workflow?.[nodeId] as { class_type?: unknown } | undefined)?.class_type === "LoadAudio");
+}
+
+export function isWorkflowVideoField(field: WorkflowField, workflow?: Record<string, unknown>) {
+    if (field.type === "video") return true;
+    return field.node.split(",").some((nodeId) => /(?:^|_)LoadVideo/.test(String((workflow?.[nodeId] as { class_type?: unknown } | undefined)?.class_type || "")));
+}
+
+export function workflowRequiresPrompt(detail?: WorkflowDetail | null) {
+    return Boolean(detail?.config?.fields.some((field) => field.type === "text" && field.required === true && (field.isPrompt || field.id.toLowerCase() === "prompt")));
 }
 
 // 跟 backend/src/workflows/executor.ts 的 RunResult 对齐；
@@ -61,7 +83,7 @@ export type WorkflowRunResult = {
 };
 
 // fields 字典：key = WorkflowField.id，value：
-//   - image 字段：dataURL 字符串
+//   - image / audio / video 字段：Backend 媒体 URL（兼容旧 dataURL）
 //   - text/number/... 字段：原始值
 // 顶层 prompt 字段约定 key = "prompt"（与生图工作台传入对齐）
 export type WorkflowRunFields = {
@@ -77,6 +99,14 @@ export function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {
     return request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(name)}`);
 }
 
+export function exportWorkflowPackage(name: string): Promise<WorkflowPackage> {
+    return request<WorkflowPackage>("GET", `/api/workflows/${encodeURIComponent(name)}/export`);
+}
+
+export function importWorkflowPackage(name: string, workflowPackage: WorkflowPackage, options?: { exposeModel?: boolean }): Promise<{ name: string }> {
+    return request<{ name: string }>("POST", "/api/workflows/import", { name, package: workflowPackage, exposeModel: options?.exposeModel });
+}
+
 // 仅重命名显示标题（title），不动底层文件名
 export function renameWorkflowTitle(name: string, title: string): Promise<{ name: string; title: string }> {
     return request<{ name: string; title: string }>("PUT", `/api/workflows/${encodeURIComponent(name)}/title`, { title });
@@ -87,13 +117,14 @@ export function fetchWorkflowComboOptions(name: string): Promise<{ options: Reco
     return request<{ options: Record<string, Record<string, string[]>> }>("GET", `/api/workflows/${encodeURIComponent(name)}/combo-options`);
 }
 
-export function runWorkflow(name: string, fields: WorkflowRunFields, config?: WorkflowConfig, clientTaskId?: string): Promise<WorkflowRunResult> {
+export function runWorkflow(name: string, fields: WorkflowRunFields, config?: WorkflowConfig, clientTaskId?: string): Promise<{ taskId: string }> {
+    // 后端 /run 现在后台执行、立即返回 taskId；前端用 pollWorkflowTask 轮询结果。
     // config 是 WorkflowExecutor.run 第一个会用到的字段（processImageFields 读
     // config.fields），前端如果漏传会让 executor 立刻崩
     // "Cannot read properties of undefined (reading 'fields')"。
     // 用户后续在 workflows 页面配完字段后，前端传真 config 让
     // processImageFields 能把 image 类型的 dataURL 上传到 ComfyUI。
-    return request<WorkflowRunResult>("POST", `/api/workflows/${encodeURIComponent(name)}/run`, {
+    return request<{ taskId: string }>("POST", `/api/workflows/${encodeURIComponent(name)}/run`, {
         fields,
         clientTaskId,
         config: config ?? {
@@ -104,4 +135,37 @@ export function runWorkflow(name: string, fields: WorkflowRunFields, config?: Wo
             fields: [],
         },
     });
+}
+
+/**
+ * 轮询工作流任务直到终态，返回与旧 runWorkflow 兼容的 WorkflowRunResult。
+ * 用于替代同步长连接：run 端点返回 taskId 后，前端据此轮询任务状态拿媒体结果，
+ * 避免长连接被中断导致 "Failed to fetch"。
+ */
+export async function pollWorkflowTask(
+    taskId: string,
+    options?: { signal?: AbortSignal; intervalMs?: number; timeoutMs?: number },
+): Promise<WorkflowRunResult> {
+    const interval = options?.intervalMs ?? 1500;
+    const timeout = options?.timeoutMs ?? 30 * 60 * 1000;
+    const startedAt = Date.now();
+    for (;;) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        if (Date.now() - startedAt > timeout) throw new Error("工作流任务轮询超时（30 分钟）");
+        const res = await fetchBackendTask(taskId, options?.signal);
+        const task = res.task;
+        if (!task) throw new Error("工作流任务不存在");
+        if (task.status === "succeeded") {
+            const media = (task.result?.media ?? task.result?.images ?? []).map((m) => ({
+                url: m.url,
+                storageKey: m.storageKey,
+                mimeType: m.mimeType,
+                filename: m.filename,
+            }));
+            return { taskId, media: media as WorkflowRunResult["media"], status: { status_str: "success", completed: true } };
+        }
+        if (task.status === "failed") throw new Error(task.error || "工作流执行失败");
+        if (task.status === "cancelled") throw new Error("任务已取消");
+        await new Promise((resolve) => setTimeout(resolve, interval));
+    }
 }

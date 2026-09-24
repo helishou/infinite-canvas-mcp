@@ -436,6 +436,13 @@
         top: 21px;
     }
 
+    /* 生成中的画布节点：缩小时边框会被父层 scale 压到不足 1px，这里用按屏幕像素补偿过的
+       静态光环提示「这个节点在跑任务」；--canvas-generating-ring 由节点按 scale 传入。
+       刻意不加动画：缩略壳本身就是为省开销做的降级，持续重绘的旋转/呼吸效果与之相悖。 */
+    .canvas-node-generating {
+        box-shadow: 0 0 0 var(--canvas-generating-ring, 4px) color-mix(in srgb, var(--canvas-generating, #d97706) 32%, transparent);
+    }
+
     @keyframes canvas-batch-child-in {
         from {
             opacity: 0;
@@ -459,6 +466,35 @@
 ::view-transition-new(root) {
     animation: none;
     mix-blend-mode: normal;
+}
+
+::view-transition-group(drama-cover),
+::view-transition-group(drama-title),
+::view-transition-group(drama-summary) {
+    animation-duration: 460ms;
+    animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+::view-transition-image-pair(drama-cover) {
+    overflow: hidden;
+    border-radius: 1rem;
+}
+
+::view-transition-old(drama-cover),
+::view-transition-new(drama-cover),
+::view-transition-old(drama-title),
+::view-transition-new(drama-title),
+::view-transition-old(drama-summary),
+::view-transition-new(drama-summary) {
+    mix-blend-mode: normal;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    ::view-transition-group(drama-cover),
+    ::view-transition-group(drama-title),
+    ::view-transition-group(drama-summary) {
+        animation-duration: 1ms;
+    }
 }
 
 .agent-streamdown {

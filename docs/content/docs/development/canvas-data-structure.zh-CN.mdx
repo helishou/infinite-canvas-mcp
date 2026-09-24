@@ -230,3 +230,16 @@ type UploadedImage = {
 5. 删除时会同时 `URL.revokeObjectURL`，并从内存缓存 `objectUrls` 移除。
 
 这套方式可以避免同一张图片被画布、素材或助手同时引用时误删。
+
+## 实时协作与版本顺序
+
+浏览器、MCP、Canvas Agent 和后台生成任务都通过同一套画布 operation 修改项目。每批持久化操作包含：
+
+- `expectedRevision`：发起方看到的共同基线版本。
+- `operationId`：操作批次的幂等标识；Backend 在 SQLite 的 `canvas_operation_batches` 中记录它，相同 ID 重试只返回原结果，不重复执行或广播。
+- `source`：`clientId`、协作者类型和显示名称，用于追踪操作来源。
+- `operations`：节点、连线、H3 Clip 和项目字段的细粒度修改。
+
+Backend 在事务内应用操作、递增画布 revision，再通过 SSE 广播同一批 delta。客户端先乐观更新本地投影；收到其他协作者的 delta 后，以共同基线检测冲突，不冲突的本地操作自动 rebase，只有同一目标的真实冲突才交给用户选择。
+
+光标、选区和拖动预览属于临时 presence，通过 `/canvas/realtime` WebSocket 房间传播，只保存在内存中，不写 SQLite，也不增加画布 revision。SSE 连接生命周期用于维护当前在线参与者；断开页面后会自动离开协作列表。

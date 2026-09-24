@@ -13,9 +13,10 @@
     "workers"
   ],
   "scripts": {
-    "dev": "tsx --watch src/index.ts",
+    "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "redact-inline-media": "tsx src/maintenance/redact-inline-media.ts",
+    "prune-canvas-batches": "tsx src/maintenance/prune-canvas-batches.ts",
     "test": "node ../scripts/test.mjs",
     "start": "node dist/index.js",
     "prepack": "npm run build"
@@ -27,11 +28,14 @@
     "nanoid": "^5.1.16",
     "sharp": "^0.35.4",
     "winston": "^3.19.0",
+    "ws": "^8.21.3",
+    "yjs": "^13.6.32",
     "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0"
   },

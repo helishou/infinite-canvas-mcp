@@ -6,7 +6,7 @@ import { cleanupUnusedMedia } from "@/services/file-storage";
 import { deleteBackendAsset, deleteBackendAssetFolder, fetchBackendAssets, upsertBackendAsset, upsertBackendAssetFolder } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
-export type AssetKind = "text" | "image" | "video" | "audio" | "character";
+export type AssetKind = "text" | "image" | "video" | "audio" | "character" | "scene";
 export type TextAsset = AssetBase<"text"> & { data: { content: string } };
 export type ImageAsset = AssetBase<"image"> & { data: { dataUrl: string; storageKey?: string; width: number; height: number; bytes: number; mimeType: string } };
 export type VideoAsset = AssetBase<"video"> & { data: { url: string; storageKey?: string; width: number; height: number; bytes: number; mimeType: string } };
@@ -25,6 +25,7 @@ export type CharacterImage = {
     mimeType: string;
     outfit: string;
     outfitDescription: string;
+    role?: string;
 };
 export type CharacterAsset = AssetBase<"character"> & {
     data: {
@@ -33,11 +34,33 @@ export type CharacterAsset = AssetBase<"character"> & {
         description: string;
         voice: string;
         voiceName: string;
+        voiceDescription: string;
+        voiceStorageKey?: string;
         voiceAssetId: string;
         images: CharacterImage[];
+        primaryIndex?: number;
     };
 };
-export type Asset = TextAsset | ImageAsset | VideoAsset | AudioAsset | CharacterAsset;
+export type SceneImage = {
+    url: string;
+    storageKey?: string;
+    name: string;
+    width: number;
+    height: number;
+    bytes: number;
+    mimeType: string;
+};
+export type SceneAsset = AssetBase<"scene"> & {
+    data: {
+        name: string;
+        description: string;
+        image: SceneImage;
+        colorCard?: SceneImage;
+        colorPalette?: string[];
+        colorCardPrompt: string;
+    };
+};
+export type Asset = TextAsset | ImageAsset | VideoAsset | AudioAsset | CharacterAsset | SceneAsset;
 
 type AssetBase<T extends AssetKind> = {
     id: string;
@@ -46,6 +69,7 @@ type AssetBase<T extends AssetKind> = {
     coverUrl: string;
     tags: string[];
     folderId?: string | null;
+    dramaId?: string | null;
     source?: string;
     note?: string;
     createdAt: string;
@@ -117,6 +141,7 @@ type LegacyCompositeAsset = {
     coverUrl: string;
     tags: string[];
     folderId?: string | null;
+    dramaId?: string | null;
     source?: string;
     note?: string;
     createdAt: string;
@@ -201,6 +226,7 @@ export function migrateCompositeToCharacter(asset: LegacyCompositeAsset, allAsse
         coverUrl,
         tags: asset.tags || [],
         folderId: asset.folderId ?? null,
+        dramaId: asset.dramaId ?? null,
         source: asset.source,
         note: asset.note,
         createdAt: asset.createdAt,
@@ -217,8 +243,10 @@ export function migrateCompositeToCharacter(asset: LegacyCompositeAsset, allAsse
             description,
             voice: "",
             voiceName: "",
+            voiceDescription: "",
             voiceAssetId: "",
             images,
+            primaryIndex: 0,
         },
     };
 }
@@ -348,6 +376,13 @@ function scheduleAssetSync() {
 if (typeof window !== "undefined") {
     window.addEventListener("backend-connected", () => {
         void hydrateAssets();
+    });
+    window.addEventListener("backend-event", (event) => {
+        const detail = (event as CustomEvent<{ type?: string; entityId?: string; payload?: { deleted?: number } }>).detail;
+        if (detail?.type !== "canvas-folder.updated" || !detail.entityId || !detail.payload?.deleted) return;
+        useAssetStore.setState((state) => ({
+            assets: state.assets.map((asset) => asset.dramaId === detail.entityId ? { ...asset, dramaId: null } : asset),
+        }));
     });
 }
 

@@ -51,7 +51,7 @@ export const SITE_TOOL_LABELS: Record<SiteToolName, string> = {
 
 type SiteToolInput = Record<string, unknown>;
 type SiteToolContext = { canvasSnapshot?: unknown };
-type GenerationStatus = "idle" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
+type GenerationStatus = "idle" | "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled";
 type GenerationStatusItem = { id: string; source: "canvas" | "image" | "video"; status: GenerationStatus; kind?: string; title?: string; prompt?: string; projectId?: string; createdAt?: string; updatedAt?: string; successCount?: number; failCount?: number; error?: string };
 
 export async function runSiteTool(name: SiteToolName, input: SiteToolInput, navigate: NavigateFunction, context: SiteToolContext = {}): Promise<unknown> {

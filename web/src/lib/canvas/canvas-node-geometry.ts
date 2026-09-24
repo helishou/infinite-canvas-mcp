@@ -1,4 +1,4 @@
-import { CanvasNodeType, type CanvasNodeData, type ConnectionHandle } from "@/types/canvas";
+import { CanvasNodeType, type CanvasNodeData, type ConnectionHandle, type Position } from "@/types/canvas";
 
 export function nodeBounds(nodes: CanvasNodeData[]) {
     return nodes.reduce(
@@ -12,20 +12,49 @@ export function nodeBounds(nodes: CanvasNodeData[]) {
     );
 }
 
-export function findGroupDropTarget(movedIds: Set<string>, nodes: CanvasNodeData[]) {
-    if (nodes.some((node) => movedIds.has(node.id) && node.type === CanvasNodeType.Group)) return null;
-    const movingNodes = nodes.filter((node) => movedIds.has(node.id) && node.type !== CanvasNodeType.Group);
-    if (!movingNodes.length) return null;
-    return (
-        [...nodes].reverse().find((group) => {
-            if (group.type !== CanvasNodeType.Group || movedIds.has(group.id) || group.metadata?.groupLocked) return false;
-            return movingNodes.some((node) => {
-                const centerX = node.position.x + node.width / 2;
-                const centerY = node.position.y + node.height / 2;
-                return centerX >= group.position.x && centerX <= group.position.x + group.width && centerY >= group.position.y && centerY <= group.position.y + group.height;
-            });
-        }) || null
+/** 组框相对成员包围盒的内边距；顶边多留一截避开组标题栏（容器 p-3 + 标题行 h-7）。 */
+export const GROUP_FRAME_PADDING = { left: 24, right: 24, top: 44, bottom: 24 };
+
+/**
+ * 组框 = 成员包围盒 + 内边距。组作为容器必须包住自己的成员，所以坐标由成员反推，
+ * 不接受外部指定；成员为空时返回 null（没有可包的矩形）。
+ */
+export function groupFrameOfMembers(rects: Array<{ x: number; y: number; width: number; height: number }>) {
+    if (!rects.length) return null;
+    const bounds = rects.reduce(
+        (acc, rect) => ({
+            minX: Math.min(acc.minX, rect.x),
+            minY: Math.min(acc.minY, rect.y),
+            maxX: Math.max(acc.maxX, rect.x + rect.width),
+            maxY: Math.max(acc.maxY, rect.y + rect.height),
+        }),
+        { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity },
     );
+    return {
+        x: Math.round(bounds.minX - GROUP_FRAME_PADDING.left),
+        y: Math.round(bounds.minY - GROUP_FRAME_PADDING.top),
+        width: Math.round(bounds.maxX - bounds.minX + GROUP_FRAME_PADDING.left + GROUP_FRAME_PADDING.right),
+        height: Math.round(bounds.maxY - bounds.minY + GROUP_FRAME_PADDING.top + GROUP_FRAME_PADDING.bottom),
+    };
+}
+
+type GroupDropCandidates = {
+    hasMovedGroup: boolean;
+    movingNodes: readonly CanvasNodeData[];
+    groups: readonly CanvasNodeData[];
+};
+
+export function findGroupDropTarget(movedIds: Set<string>, nodes: CanvasNodeData[], previewPositions?: ReadonlyMap<string, Position>, candidates?: GroupDropCandidates) {
+    if (candidates?.hasMovedGroup || (!candidates && nodes.some((node) => movedIds.has(node.id) && node.type === CanvasNodeType.Group))) return null;
+    const movingNodes = candidates?.movingNodes || nodes.filter((node) => movedIds.has(node.id) && node.type !== CanvasNodeType.Group);
+    if (!movingNodes.length) return null;
+    const groups = candidates?.groups || nodes;
+    for (let index = groups.length - 1; index >= 0; index -= 1) {
+        const group = groups[index];
+        if (group.type !== CanvasNodeType.Group || group.metadata?.orderedGroup || (!candidates && (movedIds.has(group.id) || group.metadata?.groupLocked))) continue;
+        if (movingNodes.some((node) => containsCenter(group, node, previewPositions))) return group;
+    }
+    return null;
 }
 
 export function snapNodesIntoGroup(movedIds: Set<string>, nodes: CanvasNodeData[], group: CanvasNodeData) {
@@ -46,14 +75,18 @@ export function snapNodesIntoGroup(movedIds: Set<string>, nodes: CanvasNodeData[
 }
 
 export function findContainingGroupId(node: CanvasNodeData, nodes: CanvasNodeData[]) {
-    const centerX = node.position.x + node.width / 2;
-    const centerY = node.position.y + node.height / 2;
-    return (
-        [...nodes]
-            .reverse()
-            .find((group) => group.type === CanvasNodeType.Group && group.id !== node.id && centerX >= group.position.x && centerX <= group.position.x + group.width && centerY >= group.position.y && centerY <= group.position.y + group.height)?.id ||
-        undefined
-    );
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {
+        const group = nodes[index];
+        if (group.type === CanvasNodeType.Group && !group.metadata?.orderedGroup && group.id !== node.id && containsCenter(group, node)) return group.id;
+    }
+    return undefined;
+}
+
+function containsCenter(group: CanvasNodeData, node: CanvasNodeData, previewPositions?: ReadonlyMap<string, Position>) {
+    const position = previewPositions?.get(node.id) || node.position;
+    const centerX = position.x + node.width / 2;
+    const centerY = position.y + node.height / 2;
+    return centerX >= group.position.x && centerX <= group.position.x + group.width && centerY >= group.position.y && centerY <= group.position.y + group.height;
 }
 
 /** 在锚点周围按近到远寻找不与现有节点相交的位置，供生成结果节点落点使用。 */
@@ -150,12 +183,18 @@ export function getConnectionTargetAnchor(node: CanvasNodeData, current: Connect
     };
 }
 
-export function normalizeConnection(firstNodeId: string, secondNodeId: string, nodes: CanvasNodeData[], firstHandleType: "source" | "target") {
-    const first = nodes.find((node) => node.id === firstNodeId);
-    const second = nodes.find((node) => node.id === secondNodeId);
+export function normalizeConnection(firstNodeId: string, secondNodeId: string, nodes: CanvasNodeData[], firstHandleType: "source" | "target", nodeById?: ReadonlyMap<string, CanvasNodeData>) {
+    const first = nodeById?.get(firstNodeId) || nodes.find((node) => node.id === firstNodeId);
+    const second = nodeById?.get(secondNodeId) || nodes.find((node) => node.id === secondNodeId);
     if (!first || !second || first.id === second.id) return null;
     if (second.type === CanvasNodeType.Group) return null;
-    if (first.type === CanvasNodeType.Config && second.type === CanvasNodeType.Config) return null;
+    if (first.type === CanvasNodeType.Config && second.type === CanvasNodeType.Config) {
+        // 智能生成节点本身既是配置也是可复用的结果/参考节点，允许智能节点之间串接；
+        // 历史普通配置节点仍保持禁止互连，避免把旧的 prompt/config 流误接成配置链。
+        const bothSmart = first.metadata?.smart === true && second.metadata?.smart === true;
+        if (!bothSmart) return null;
+        return firstHandleType === "target" ? { fromNodeId: second.id, toNodeId: first.id } : { fromNodeId: first.id, toNodeId: second.id };
+    }
     if (second.type === CanvasNodeType.Config) return { fromNodeId: first.id, toNodeId: second.id };
     if (first.type === CanvasNodeType.Config && firstHandleType === "target") return { fromNodeId: second.id, toNodeId: first.id };
     if (first.type === CanvasNodeType.Config) return { fromNodeId: first.id, toNodeId: second.id };

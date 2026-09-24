@@ -11,6 +11,7 @@ import type { BackendEventBus } from "../events.js";
 import { splitVideo } from "./video-segment.js";
 import { buildMotionContextClip } from "./motion-context.js";
 import { assertIndependentMediaRoot, comfyInputName, copyComfyInput, resolveComfyRoot } from "./local-root.js";
+import { normalizeH3Params, resolveH3Seed } from "../canvas/h3-params.js";
 
 /** ComfyUI Bridge 的总后台侧依赖：任务走 task store，URL 走 setting store。 */
 export type ComfyUiDeps = {
@@ -21,7 +22,7 @@ export type ComfyUiDeps = {
     onTaskTerminal?: (task: RuntimeTask) => void | Promise<void>;
 };
 
-export type ComfyPreset = { id: string; name: string; kind: "image" | "video"; inputs: string[]; params: string[] };
+export type ComfyPreset = { id: string; name: string; kind: "image" | "video" | "audio"; inputs: string[]; params: string[] };
 export type ComfyModelCatalog = { models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng?: Record<string, unknown[]>; refreshedAt: string; error?: string };
 
 const NANFENG_H3_CLASS = "NanFengH3MultiReferenceGeneratorV15";
@@ -30,7 +31,8 @@ const PRESETS: ComfyPreset[] = [
     { id: "z-image", name: "Z-Image 文生图", kind: "image", inputs: ["prompt"], params: ["width", "height", "seed"] },
     { id: "flux2-klein", name: "Flux2-Klein 图生图", kind: "image", inputs: ["prompt", "references"], params: ["width", "height", "seed"] },
     { id: "flashvsr-1.1", name: "FlashVSR 视频修复", kind: "video", inputs: ["video"], params: ["scale", "longEdge"] },
-    { id: "minimax-h3", name: "H3导演台 视频生成", kind: "video", inputs: ["video", "references", "audios", "segments"], params: ["mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sampler", "scheduler", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd", "emptyFiveMinuteTimeline", "taeh3Enabled", "motionContextEnabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise", "constantTriggerWord"] },
+    { id: "indextts-2.5", name: "IndexTTS 2.5 配音", kind: "audio", inputs: ["prompt", "referenceAudio"], params: ["language", "speed", "seed", "filenamePrefix"] },
+    { id: "minimax-h3", name: "H3导演台 视频生成", kind: "video", inputs: ["video", "references", "audios", "segments"], params: ["mode", "duration", "aspectRatio", "megapixels", "sizeMultiple", "steps", "denoise", "seed", "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sampler", "scheduler", "loraSlots", "dedicatedAttention", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision", "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality", "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality", "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd", "emptyFiveMinuteTimeline", "taeh3Enabled", "motionContextEnabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise", "constantTriggerWord"] },
 ];
 
 /** 从 ComfyUI 任务历史的状态对象中抽取可读的错误信息。
@@ -53,9 +55,14 @@ function extractComfyErrorMessage(status: any): string {
 export type H3ActualSubmission = {
     promptId: string;
     seed?: number;
+    seedMode?: "random" | "fixed";
     frames?: number;
     width?: number;
     height?: number;
+    steps?: number;
+    sampler?: string;
+    scheduler?: string;
+    teAccel?: boolean;
     loras?: Array<{ name: string; strength: number }>;
     attention?: string;
     sigma?: string;
@@ -66,6 +73,13 @@ export type H3ActualSubmission = {
      */
     mediaInputs?: { images: string[]; videos: string[]; audios: string[] };
 };
+
+export type H3WatchdogState = { stalled: boolean; stagnantForMs: number; progress: number };
+
+export function h3WatchdogState(now: number, lastActivityAt: number, timeoutMs: number, progress: number): H3WatchdogState {
+    const stagnantForMs = Math.max(0, now - lastActivityAt);
+    return { stalled: timeoutMs > 0 && stagnantForMs >= timeoutMs, stagnantForMs, progress };
+}
 
 export type H3LivePreview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
 
@@ -90,7 +104,15 @@ export function summarizeH3Workflow(workflow: Record<string, any>, promptId: str
         const loras = Array.from({ length: 8 }, (_, index) => ({ name: String(native[`LoRA${index + 1}`] || ""), strength: Number(native[`LoRA${index + 1}强度`] ?? 1), enabled: native[`LoRA${index + 1}启用`] === true })).filter((item) => item.enabled && item.name && item.name !== "未选择").map(({ name, strength }) => ({ name, strength }));
         const manual = native["V81一采使用手动Sigma"] === true ? native["H3完整Sigma序列"] : native["西格玛模式"] === "手动序列" ? native["手动西格玛"] : "";
         const mediaInputs = { images: pickNativeSlots(native, "图片", 9), videos: pickNativeSlots(native, "视频", 3), audios: pickNativeSlots(native, "音频", 3) };
-        return { promptId, seed: Number(native["随机种子"]), frames: durationToFrames(Number(native["时长秒"] || 5)), ...(requestedRatio === "原图比例" ? {} : { width, height: Math.max(32, Math.round(width * ratioHeight(ratio) / ratioWidth(ratio) / multiple) * multiple) }), ...(loras.length ? { loras } : {}), attention: native["启用H3 SLA"] === true ? "H3 SLA" : String(native.SageAttention || "disabled"), sigma: manual ? `手动：${String(manual)}` : `调度器：${String(native["调度器"] || "")} / ${Number(native["采样步数"] || 0)} 步`, mediaInputs };
+        const dedicatedAttention = String(native["H3专用注意力"] || "");
+        const attention = native["启用H3 SLA"] === true
+            ? "H3 SLA"
+            : dedicatedAttention === "H3专用Sage加速"
+                ? dedicatedAttention
+                : String(native.SageAttention || dedicatedAttention || "disabled");
+        const sigmaValues = manual ? String(manual).match(/[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g) : null;
+        const steps = sigmaValues && sigmaValues.length >= 2 ? sigmaValues.length - 1 : Number(native["采样步数"] || 0);
+        return { promptId, seed: Number(native["随机种子"]), seedMode: native["固定随机种子"] === true ? "fixed" : "random", frames: durationToFrames(Number(native["时长秒"] || 5)), ...(requestedRatio === "原图比例" ? {} : { width, height: Math.max(32, Math.round(width * ratioHeight(ratio) / ratioWidth(ratio) / multiple) * multiple) }), steps, sampler: String(native["采样器"] || ""), scheduler: String(native["调度器"] || ""), ...(loras.length ? { loras } : {}), attention, sigma: manual ? `手动：${String(manual)}` : `调度器：${String(native["调度器"] || "")} / ${Number(native["采样步数"] || 0)} 步`, mediaInputs };
     }
     const inputsOf = (type: string) => nodes.find((node) => node.class_type === type)?.inputs || {};
     const condition = nodes.find((node) => node.class_type === "MiniMaxH3ReferenceToVideo" || node.class_type === "MiniMaxH3ImageToVideo")?.inputs || {};
@@ -102,12 +124,17 @@ export function summarizeH3Workflow(workflow: Record<string, any>, promptId: str
     const attention = nodes.some((node) => node.class_type === "MiniMaxH3MemoryEfficientSageAttentionPatch") ? "H3专用Sage加速" : sage ? String(sage) : "disabled";
     const manual = nodes.find((node) => node.class_type === "ManualSigmas")?.inputs?.sigmas;
     const scheduler = inputsOf("BasicScheduler");
+    const manualValues = manual ? String(manual).match(/[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g) : null;
     return {
         promptId,
         seed: Number(inputsOf("RandomNoise").noise_seed),
         frames: Number(condition.length),
         width: Number(condition.width),
         height: Number(condition.height),
+        steps: manualValues && manualValues.length >= 2 ? manualValues.length - 1 : Number(scheduler.steps || 0),
+        sampler: String(inputsOf("KSamplerSelect").sampler_name || ""),
+        scheduler: String(scheduler.scheduler || ""),
+        teAccel: nodes.some((node) => node.class_type === "TESpeedMiniMaxH3"),
         ...(loras.length ? { loras } : {}),
         attention,
         sigma: manual ? `手动：${String(manual)}` : `调度器：${String(scheduler.scheduler || "")} / ${Number(scheduler.steps || 0)} 步`,
@@ -404,19 +431,23 @@ export class ComfyUiBackend {
         // closeWs 仍处于 TDZ（const 尚未初始化）而抛出 "closeWs is not defined"，掩盖真实错误。
         let capturedPromptId: string | null = null;
         let ws: any = null;
-        let wsExecuted = false;
-        let wsExecutedAt = 0;
+        let wsExecutionDone = false;
+        let wsCompletedAt = 0;
         let wsError: Error | null = null;
         let wsOutputs: any = null;
         let wsExecutionSuccessOutputs: any = null;
         let wsExecutionSuccessAt = 0;
         let wsClosed = false;
         let wsCloseError: Error | null = null;
+        let warnedWsFallback = false;
+        let lastActivityAt = Date.now();
+        let lastProgress = 0.05;
         let closeWs: () => void = () => {};
         try {
             const uploadFn = preset === "minimax-h3"
                 ? (file: string) => this.localH3Input(file, controller.signal, comfyUrl)
                 : (file: string) => this.upload(file, controller.signal, comfyUrl);
+            if (preset === "minimax-h3") await refreshNanFengCatalog(comfyUrl, controller.signal);
             const workflow = preset === "minimax-h3"
                 ? await buildNativeNanFengV15Workflow(prepared.input, params, uploadFn, comfyUrl, controller.signal)
                 : await buildWorkflow(preset, prepared.input, params, uploadFn);
@@ -461,15 +492,31 @@ export class ComfyUiBackend {
                                 // 仍然记录 execution_success 的 prompt_id 匹配失败，但不接管
                                 return;
                             }
+                            if (msg.type === "progress") {
+                                const data = msg.data || {};
+                                const value = Number(data.value);
+                                const total = Number(data.max);
+                                if (Number.isFinite(value) && Number.isFinite(total) && total > 0) {
+                                    lastProgress = Math.min(0.95, Math.max(0.05, 0.05 + 0.9 * (value / total)));
+                                    this.updateTask(task.id, { progress: lastProgress });
+                                    this.deps.tasks.addEvent(task.id, "progress", { promptId: capturedPromptId, value, total, progress: lastProgress });
+                                }
+                                lastActivityAt = Date.now();
+                            }
+                            if (msg.type === "executing" || msg.type === "executed" || msg.type === "execution_error" || msg.type === "execution_success") lastActivityAt = Date.now();
+                            if ((msg.type === "executing" && msg.data?.node === null) || msg.type === "execution_success") {
+                                // `executed` is emitted per node, not when the whole prompt finishes.
+                                // ComfyUI's global completion signal is `executing` with node=null.
+                                wsExecutionDone = true;
+                                wsCompletedAt = Date.now();
+                            }
                             if (msg.type === "executed" || msg.type === "execution_success") {
-                                wsExecuted = true; wsExecutedAt = Date.now();
                                 // 多输出节点的工作流（如 Z-Image 的 PreviewImage + rgthree Image Comparer）
                                 // 每个节点都会发 executed；若直接覆盖，后执行节点的 outputs 会顶掉先执行的，
-                                // 若最后执行的节点用非标准键（rgthree 用 a_images/b_images）就会得到空媒体。
+                                // 若最后执行节点用非标准键（rgthree 用 a_images/b_images）就会得到空媒体。
                                 // 这里按节点合并而非覆盖（execution_success 在当前 ComfyUI 只带 prompt_id，无 output）。
                                 if (msg.data?.output && typeof msg.data.output === "object") wsOutputs = { ...(wsOutputs || {}), ...(msg.data.output as Record<string, unknown>) };
-                                // execution_success（v1.5+）payload 才是整个 graph 的 outputs，executed 只是单节点。
-                                // 同时记录一份合并视图，优先用 execution_success 的 outputs。
+                                // 兼容会在 execution_success 中附带整图 outputs 的服务端；标准 ComfyUI 通常只发 prompt_id。
                                 if (msg.type === "execution_success" && msg.data?.output && typeof msg.data.output === "object") {
                                     wsExecutionSuccessOutputs = msg.data.output;
                                     wsExecutionSuccessAt = Date.now();
@@ -512,6 +559,10 @@ export class ComfyUiBackend {
             this.deps.tasks.addEvent(task.id, "submitted", actualSubmission ? { promptId: body.prompt_id, actualSubmission: { ...actualSubmission, promptId: body.prompt_id } } : { promptId: body.prompt_id });
             const startedAt = Date.now();
             const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(60 * 60 * 1000, Number(params.maxExecutionMs) || 30 * 60 * 1000));
+            const stallTimeoutMs = params.stallTimeoutMs === undefined
+                ? 9000 * 1000
+                : Math.max(0, Number(params.stallTimeoutMs) || 0);
+            lastActivityAt = startedAt;
             let missingHistoryCount = 0;
             let consecutiveMissingInQueue = 0;
             // 收到 executed 信号后，先直接用消息携带的 outputs 回写（绕过 /history 被清理的坑）；
@@ -535,25 +586,55 @@ export class ComfyUiBackend {
             for (;;) {
                 if (controller.signal.aborted) { closeWs(); throw new Error("任务已取消"); }
                 if (Date.now() - startedAt > maxExecutionMs) { closeWs(); throw new Error(`ComfyUI 任务执行超时（已超过 ${Math.round(maxExecutionMs / 60000)} 分钟），请检查 ComfyUI 是否仍在运行`); }
+                const watchdog = h3WatchdogState(Date.now(), lastActivityAt, stallTimeoutMs, lastProgress);
+                if (watchdog.stalled) {
+                    let queueState = "unknown";
+                    try {
+                        const queueResponse = await fetch(`${comfyUrl}/queue`, { signal: controller.signal });
+                        if (queueResponse.ok) {
+                            const queue = await queueResponse.json() as { queue_running?: unknown[]; queue_pending?: unknown[] };
+                            const contains = (items: unknown[]) => items.some((entry) => Array.isArray(entry) && String(entry[1] || entry[0] || "").includes(promptId));
+                            queueState = contains(queue.queue_running || []) ? "running" : contains(queue.queue_pending || []) ? "pending" : "not-found";
+                        } else queueState = `queue-http-${queueResponse.status}`;
+                    } catch (error) {
+                        queueState = `queue-error:${error instanceof Error ? error.message : String(error)}`;
+                    }
+                    const stalledMessage = `ComfyUI H3 任务疑似卡住：${Math.round(watchdog.stagnantForMs / 1000)} 秒无进度变化，当前进度 ${Math.round(watchdog.progress * 100)}%，队列状态 ${queueState}；已自动停止，若需等待模型加载可把 stallTimeoutMs 设为更大值`;
+                    this.deps.tasks.addEvent(task.id, "watchdog_stalled", { promptId: body.prompt_id, progress: watchdog.progress, stagnantForMs: watchdog.stagnantForMs, queueState });
+                    await this.cancelComfyExecution(task.id);
+                    closeWs();
+                    throw new Error(stalledMessage);
+                }
                 if (wsError) { closeWs(); throw wsError; }
-                // WebSocket 已确认任务完成：优先用 execution_success 事件（v1.5+ 推送的整个 graph outputs），
-                // 没有就退回 executed 单节点 outputs；都没有再回 /history；
-                if (wsExecuted) {
+                // WebSocket 已确认整条 prompt 完成：优先用 execution_success 的整图 outputs（若服务端提供），
+                // 否则使用逐节点 executed 输出；仍无可用媒体时回查 /history。
+                if (wsExecutionDone) {
                     // 优先用 execution_success（whole-graph）outputs，回退到 executed（单节点）outputs
                     const useOutputs = (wsExecutionSuccessOutputs && typeof wsExecutionSuccessOutputs === "object" && Object.keys(wsExecutionSuccessOutputs).length > 0)
                         ? wsExecutionSuccessOutputs
                         : (wsOutputs && typeof wsOutputs === "object" && Object.keys(wsOutputs).length > 0 ? wsOutputs : null);
                     if (useOutputs) {
-                        closeWs();
                         const media = await collectOutputMedia(useOutputs, comfyUrl, this.deps.media, controller.signal);
-                        return withActualSubmission({ promptId: body.prompt_id, outputs: useOutputs, media, status: { status_str: "success", completed: true } }, body.prompt_id);
+                        // NanFeng emits an intermediate executed event with a placeholder
+                        // text output before VHS_VideoCombine emits the final MP4. Do not
+                        // close the socket or mark the task complete until real media exists.
+                        if (media.length > 0) {
+                            closeWs();
+                            return withActualSubmission({ promptId: body.prompt_id, outputs: useOutputs, media, status: { status_str: "success", completed: true } }, body.prompt_id);
+                        }
                     }
                     const item = await fetchHistoryNow();
                     if (item) {
                         const statusStr = item?.status?.status_str;
                         if (statusStr === "error" || statusStr === "failed") { closeWs(); throw new Error(extractComfyErrorMessage(item.status)); }
-                        closeWs();
-                        return withActualSubmission({ promptId: body.prompt_id, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, body.prompt_id);
+                        const media = await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal);
+                        // /history can expose an intermediate H3 node result before the
+                        // final VHS_VideoCombine output is written. Keep waiting if it has
+                        // no retrievable media yet.
+                        if (media.length > 0) {
+                            closeWs();
+                            return withActualSubmission({ promptId: body.prompt_id, outputs: item!.outputs, media, status: item!.status || {} }, body.prompt_id);
+                        }
                     }
                     if (wsClosed) {
                         const reason = (wsCloseError as Error | null)?.message || "WebSocket 已关闭";
@@ -561,7 +642,7 @@ export class ComfyUiBackend {
                         throw new Error(`ComfyUI ${reason}；目标 promptId ${body.prompt_id} 的 history 与 WebSocket 输出均不可用。未写入任何媒体，可从 ComfyUI 输出目录按 promptId 手动恢复。`);
                     }
                     // executed 没带 outputs 且 history 也取不到：再等一会，但不再走慢速 missing 计数
-                    if (Date.now() - wsExecutedAt > 60000) { closeWs(); throw new Error(`ComfyUI 已在 WebSocket 中报告目标 promptId ${body.prompt_id} 完成，但 history 与 WebSocket 输出均不可用；未写入任何媒体。`); }
+                    if (Date.now() - wsCompletedAt > 60000) { closeWs(); throw new Error(`ComfyUI 已在 WebSocket 中报告目标 promptId ${body.prompt_id} 完成，但 history 与 WebSocket 输出均不可用；未写入任何媒体。`); }
                     await new Promise((resolve) => setTimeout(resolve, 1500));
                     continue;
                 }
@@ -569,7 +650,8 @@ export class ComfyUiBackend {
                 // 而是退回 /history 轮询——ComfyUI 可能已完成但 WS 因代理超时/负载高等原因提前断开，
                 // 任务本身仍在执行或已完成，结果在 /history 或 /output 里。
                 // 仅在 /history 也长期无果时才最终 fail，避免"ComfyUI 实际跑完了但前端收不到结果"。
-                if (wsClosed && !wsExecuted) {
+                if (wsClosed && !wsExecutionDone && !warnedWsFallback) {
+                    warnedWsFallback = true;
                     const reason = (wsCloseError as Error | null)?.message || "WebSocket 已关闭但未收到 executed 事件";
                     console.warn(`[comfyui] WS 提前断开，退回 /history 轮询：${reason}`);
                     // 不再 throw，继续走下面的 /history 轮询
@@ -588,7 +670,11 @@ export class ComfyUiBackend {
                             throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item?.status)}`);
                         }
                         closeWs();
-                        return withActualSubmission({ promptId: body.prompt_id, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, body.prompt_id);
+                        const media = await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal);
+                        if (media.length === 0) {
+                            throw new Error(`ComfyUI 执行完成但未取回媒体输出，promptId ${body.prompt_id}`);
+                        }
+                        return withActualSubmission({ promptId: body.prompt_id, outputs: item!.outputs, media, status: item!.status || {} }, body.prompt_id);
                     }
                     if (item === undefined || (typeof item === "object" && Object.keys(item).length === 0)) {
                         missingHistoryCount++;
@@ -630,17 +716,25 @@ export class ComfyUiBackend {
     private async cancelComfyExecution(taskId: string) {
         const execution = this.comfyExecutions.get(taskId);
         if (!execution) return;
-        const { url, promptId } = execution;
-        try {
-            if (promptId) {
-                await fetch(`${url}/queue`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ delete: [promptId] }) });
-            }
-            // ComfyUI uses /interrupt for the currently executing prompt;
-            // queued prompts are handled by the /queue delete above.
-            await fetch(`${url}/interrupt`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-        } catch (error) {
-            this.deps.tasks.addEvent(taskId, "cancel_error", { error: error instanceof Error ? error.message : String(error) });
+        await this.cancelPromptExecution(execution.url, execution.promptId, taskId);
+    }
+
+    async cancelPromptExecution(comfyUrl: string, promptId: string | undefined, taskId: string) {
+        const url = comfyUrl.replace(/\/$/, "");
+        const errors: string[] = [];
+        if (promptId) {
+            try {
+                const response = await fetch(`${url}/queue`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ delete: [promptId] }) });
+                if (!response.ok) errors.push(`/queue HTTP ${response.status}`);
+            } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
         }
+        // ComfyUI uses /interrupt for the currently executing prompt;
+        // queued prompts are handled by the /queue delete above.
+        try {
+            const response = await fetch(`${url}/interrupt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(promptId ? { prompt_id: promptId } : {}) });
+            if (!response.ok) errors.push(`/interrupt HTTP ${response.status}`);
+        } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
+        if (errors.length) this.deps.tasks.addEvent(taskId, "cancel_error", { promptId, errors });
     }
 
     public async upload(file: string, signal: AbortSignal, comfyUrl = this.url) {
@@ -661,8 +755,11 @@ export class ComfyUiBackend {
         const direct = this.localH3DirectConfig();
         if (!direct.ready) throw new Error("H3 本地输入未就绪；请检查 ComfyUI 根目录，并确保画布媒体库独立于 ComfyUI 安装目录。");
         signal.throwIfAborted();
-        const name = await copyComfyInput(file, MEDIA_DIR, direct.rootDir);
-        const query = new URLSearchParams({ filename: path.basename(name), subfolder: path.posix.dirname(name), type: "input" });
+        // 南风 V15 的图片/视频/音频 COMBO 在 INPUT_TYPES 中只枚举
+        // os.listdir(ComfyUI/input)，因此不能提交 infinite-canvas-cache/input/...。
+        // 这里保持媒体库独立，只把执行副本平铺到 ComfyUI/input，行为与 /upload/image 一致。
+        const name = await copyComfyInput(file, MEDIA_DIR, direct.rootDir, true);
+        const query = new URLSearchParams({ filename: name, subfolder: "", type: "input" });
         const response = await fetch(`${comfyUrl}/view?${query}`, { method: "HEAD", signal });
         if (!response.ok) throw new Error(`H3 输入副本不可读：ComfyUI 未暴露 ${name}（HTTP ${response.status}）。请检查 ComfyUI input 目录。`);
         return name;
@@ -749,7 +846,7 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
     const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
     const packagedRoot = path.join(packageRoot, "workflows");
     const root = path.resolve(process.env.INFINITE_CANVAS_WORKFLOWS || packagedRoot);
-    const files: Record<string, string> = { "z-image": "Z-Image.json", "flux2-klein": "Flux2-Klein.json", "flashvsr-1.1": path.join("custom", "视频修复FlashVSR1.1.json") };
+    const files: Record<string, string> = { "z-image": "Z-Image.json", "flux2-klein": "Flux2-Klein.json", "flashvsr-1.1": path.join("custom", "视频修复FlashVSR1.1.json"), "indextts-2.5": "IndexTTS-2.5.json" };
     const source = JSON.parse(await readFile(path.join(root, files[preset]), "utf8")) as Record<string, any>;
     const promptText = String(input.prompt || "");
     const promptNode = preset === "z-image" ? source["23"] : preset === "flux2-klein" ? source["168"] : null;
@@ -776,6 +873,18 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
     }
     if (preset === "flashvsr-1.1" && source["2"]?.inputs) source["2"].inputs.value = Number(params.scale || 2);
     if (preset === "flashvsr-1.1" && source["40"]?.inputs && params.longEdge !== undefined && params.longEdge !== "auto") source["40"].inputs.longer_edge = Number(params.longEdge);
+    if (preset === "indextts-2.5") {
+        const referenceAudio = String(input.referenceAudio || "");
+        if (!referenceAudio) throw new Error("IndexTTS 2.5 需要 referenceAudio 参考音频");
+        if (!upload) throw new Error("IndexTTS 2.5 缺少音频上传器");
+        source["20"].inputs.audio = await upload(referenceAudio);
+        source["30"].inputs.text = promptText;
+        source["30"].inputs.language = String(params.language || "ZH");
+        const speed = Number(params.speed || 1);
+        source["30"].inputs.duration_factor = speed > 0 ? 1 / speed : 1;
+        source["30"].inputs.seed = Number.isFinite(Number(params.seed)) ? Number(params.seed) : 0;
+        source["40"].inputs.filename_prefix = String(params.filenamePrefix || "tts_audio/IndexTTS_2_5");
+    }
     if (preset === "minimax-h3-deprecated") {
         if (typeof params.modelName === "string" && params.modelName.trim() && source["127"]?.inputs) source["127"].inputs.unet_name = normalizeH3WorkflowModel(params.modelName);
         const duration = Math.max(0.5, Math.min(60, Number(params.duration || 8)));
@@ -946,8 +1055,9 @@ const NANFENG_REF2VA_MODES = new Set(["ref2va"]);
 const H3_NO_TEXT_CONSTRAINT = "\n画面不要额外字幕、文字、水印或Logo。";
 
 /** 给提示词尾部追加防字幕约束（幂等：已含则不加）。 */
-function withNoTextConstraint(prompt: string): string {
+function withNoTextConstraint(prompt: string, noCaption = true): string {
     const body = String(prompt || "");
+    if (!noCaption) return body;
     if (!body.trim()) return body;
     if (body.includes("不要额外字幕")) return body;
     return body.trimEnd() + H3_NO_TEXT_CONSTRAINT;
@@ -956,7 +1066,14 @@ function withNoTextConstraint(prompt: string): string {
 /** 正常路径：交给南风 V15 主节点内部 GraphBuilder 展开，保留其原生释放/加载依赖。 */
 export async function buildNativeNanFengV15Workflow(input: Record<string, unknown>, params: Record<string, unknown>, upload: (file: string) => Promise<string>, _comfyUrl: string, signal: AbortSignal): Promise<Record<string, any>> {
     if (signal.aborted) throw new Error("任务已取消");
+    params = normalizeH3Params(params, true);
     const mode = normalizeNanFengMode(params.mode ?? params.taskMode ?? (typeof input.video === "string" ? "ref2va" : "t2v"));
+    if (params.postGenerationOnly === true) return buildDecodedH3SecondPassWorkflow(input, params, upload, signal);
+    params = normalizeH3Params(await resolveNanFengWorkflowParams(_comfyUrl, params, signal), true);
+    // The native V15 node has no TE-speed input. Keep the visible switch
+    // effective by using the expanded graph when it is enabled, where the
+    // TESpeedMiniMaxH3 patcher is an actual model node.
+    if (params.teAccel === true) return buildExpandedNanFengV10Workflow(input, params, upload, _comfyUrl, signal);
     const refs = Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : [];
     const videos = (Array.isArray(input.videos) ? input.videos.map(String).filter(Boolean) : typeof input.video === "string" ? [input.video] : []).slice(0, 3);
     const audios = Array.isArray(input.audios) ? input.audios.map(String).filter(Boolean).slice(0, 3) : [];
@@ -965,18 +1082,19 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     const uploadedRefs = await Promise.all(refs.map(upload));
     const uploadedVideos = await Promise.all(videos.map(upload));
     const uploadedAudios = await Promise.all(referenceAudios.map(upload));
+    const previousVideo = typeof input.previousVideo === "string" && input.previousVideo ? await upload(input.previousVideo) : "";
     validateNanFengMode(mode, uploadedRefs.length, uploadedVideos.length, uploadedAudios.length, params);
-    const slots = Array.isArray(params.loraSlots) ? params.loraSlots : [{ name: params.loraName, strength: params.loraStrength, enabled: Boolean(params.loraName) }];
+    const slots = Array.isArray(params.loraSlots) ? params.loraSlots : [];
     const value = (key: string, fallback: unknown) => params[key] ?? fallback;
     const selectedAttention = String(value("sageAttention", value("dedicatedAttention", "H3专用Sage加速")));
     const sageAttention = selectedAttention === "关闭" ? "disabled" : selectedAttention === "自动" || selectedAttention === "H3专用Sage加速" ? "auto" : selectedAttention;
     const inputs: Record<string, unknown> = {
         "模型": String(value("modelName", "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors")), "文本编码器": String(value("textEncoder", "qwen3vl_32b_minimax_h3_fp8.safetensors")), "文本编码器类型": String(value("textEncoderType", "minimax")), "文本编码器设备": String(value("textEncoderDevice", "default")), "视频VAE": String(value("videoVae", "minimax_h3_video_vae_fp16.safetensors")), "音频VAE": String(value("audioVae", "minimax_h3_audio_vae_fp32.safetensors")), "模型权重精度": String(value("precision", "default")),
-        "SageAttention": sageAttention, "H3专用注意力": selectedAttention, "允许编译": value("allowCompile", false), "画面比例": normalizeH3AspectRatio(String(value("aspectRatio", "16:9 (Widescreen)"))), "百万像素": Number(value("megapixels", 0.4)), "尺寸倍数": Number(value("sizeMultiple", 32)), "时长秒": Number(value("duration", 5)), "提示词": withNoTextConstraint(String(input.prompt || "")), "恒定触发词": String(value("constantTriggerWord", "")), "随机种子": Number.isFinite(Number(params.seed)) && Number(params.seed) >= 0 ? Number(params.seed) : Math.floor(Math.random() * 1125899906842624), "采样器": String(value("sampler", "res_multistep")), "调度器": String(value("scheduler", "simple")), "采样步数": Number(value("steps", 20)), "降噪强度": Number(value("denoise", 1)), "参考图尺寸": String(value("refImageSize", "match")),
+        "SageAttention": sageAttention, "H3专用注意力": selectedAttention, "允许编译": value("allowCompile", false), "画面比例": normalizeH3AspectRatio(String(value("aspectRatio", "16:9 (Widescreen)"))), "百万像素": Number(value("megapixels", 0.4)), "尺寸倍数": Number(value("sizeMultiple", 32)), "时长秒": Number(value("duration", 5)), "提示词": withNoTextConstraint(String(input.prompt || ""), value("noCaption", true) !== false), "恒定触发词": String(value("constantTriggerWord", "")), "随机种子": resolveH3Seed(params), "采样器": String(value("sampler", "res_multistep")), "调度器": String(value("scheduler", "simple")), "采样步数": Number(value("steps", 20)), "降噪强度": Number(value("denoise", 1)), "参考图尺寸": String(value("refImageSize", "match")),
         "文生视频": mode === "t2v", "图生视频": mode === "i2v", "首尾帧": mode === "fl2v", "启用LoRA": slots.some((slot: any) => slot?.enabled !== false && String(slot?.name || "").trim()), "启用锁音频": value("lockAudio", false), "开启音频驱动模式": value("audioDrive", false), "音频驱动文件": params.audioDrive === true ? uploadedAudios[0] || "" : "", "运行时预留显存GB": Number(value("reservedVramGb", 0.6)), "启用运行时预留显存": value("runtimeReserveEnabled", false), "启用UniBlockSwap": value("uniBlockSwapEnabled", false), "UniBlockSwap常驻块数": Number(value("uniBlockSwapBlocks", 1)), "启用H3潜空间放大二采": value("latentUpscaleEnabled", false), "H3潜空间放大模型": String(value("latentUpscaleModel", "minimax_h3_latent_upscaler_3d_fp16.safetensors")), "H3潜空间目标百万像素": Number(value("latentUpscaleMegapixels", 1)), "H3潜空间对齐": Number(value("latentUpscaleAlign", 2)), "H3潜空间精度": String(value("latentUpscalePrecision", "bf16")), "H3一采步数": Number(value("h3FirstSteps", 6)), "H3二采步数": Number(value("h3SecondSteps", 4)), "H3完整Sigma序列": String(value("h3FullSigma", "")), "V81一采使用手动Sigma": value("v81ManualSigma", false), "启用实时预览": value("realtimePreviewEnabled", true), "实时预览最长边": Number(value("realtimePreviewLongEdge", 512)), "实时预览帧数": Number(value("realtimePreviewFrames", 12)), "实时预览帧率": Number(value("realtimePreviewFps", 8)), "实时预览JPEG质量": Number(value("realtimePreviewJpegQuality", 75)), "参考图最长边": Number(value("referenceLongEdge", 1920)), "启用H3 SLA": value("slaEnabled", false), "SLA稀疏率": Number(value("slaSparsity", 0.9)), "SLA块大小": String(value("slaBlockSize", "64")), "SLA最短序列": Number(value("slaMinSequence", 4096)), "SLA末尾稠密步数": Number(value("slaDenseLastSteps", 1)), "SLA保护音频": value("slaProtectAudio", true), "SLA指定稠密步": String(value("slaDenseSteps", "0")), "SLA稠密后端": String(value("slaBackend", "comfy_kitchen")), "SLA关闭FP16累加": value("slaDisableFp16Accum", true), "SLA稳定运动": value("slaStabilizeMotion", true),
         // V15 继承链要求完整提交旧字段，即使对应功能未启用也必须显式提交默认值。
         "启用SolAttn": value("solEnabled", false), "SolAttn_tau": Number(value("solTau", 1.2)), "SolAttn阈值类型": String(value("solThresholdType", "diag")), "SolAttn精确模式": String(value("solExactMode", "exact_kv")), "SolAttn完整末步": Number(value("solFullFinalSteps", 1)), "SolAttn末段比例": Number(value("solTailRatio", 0)), "SolAttn前缀Token": Number(value("solPrefixTokens", 0)),
-        "启用T8缓存": value("t8Enabled", false), "T8残差阈值": Number(value("t8ResidualThreshold", 0.12)), "T8开始比例": Number(value("t8StartPercent", 0.08)), "T8结束比例": Number(value("t8EndPercent", 0.95)), "T8连续命中": Number(value("t8MaxConsecutiveHits", 2)), "T8缓存设备": String(value("t8CacheDevice", "cpu")), "T8指标步幅": Number(value("t8MetricStride", 8)), "T8详细日志": value("t8Verbose", false), "固定随机种子": value("fixedSeed", false),
+        "启用T8缓存": value("t8Enabled", false), "T8残差阈值": Number(value("t8ResidualThreshold", 0.12)), "T8开始比例": Number(value("t8StartPercent", 0.08)), "T8结束比例": Number(value("t8EndPercent", 0.95)), "T8连续命中": Number(value("t8MaxConsecutiveHits", 2)), "T8缓存设备": String(value("t8CacheDevice", "cpu")), "T8指标步幅": Number(value("t8MetricStride", 8)), "T8详细日志": value("t8Verbose", false), "固定随机种子": String(value("noiseSeedMode", "random")) === "fixed" || value("fixedSeed", false) === true,
         "启动准备": String(value("startupPreparation", "关闭（原始输出）")), "单人小脸修复": value("singleFaceRepair", false), "多人小脸修复": value("multiFaceRepair", false), "人物1身份参考": String(value("person1Reference", "图片1")), "人物2身份参考": String(value("person2Reference", "图片2")), "人物1图中位置": String(value("person1Position", "自动（最大脸）")), "人物2图中位置": String(value("person2Position", "自动（最大脸）")),
         "全局修复": value("globalRepairEnabled", false), "全局修复倍率": Number(value("globalRepairScale", 1.5)), "Sigma策略": String(value("sigmaStrategy", "原生轨迹（不加步）")), "分块处理（节约显存）": String(value("chunkProcessing", "关闭")), "分块卸载层数": Number(value("chunkOffloadLayers", 50)), "全局修复LoRA模式": String(value("globalRepairLoraMode", "专用4步LoRA")), "全局修复LoRA": String(value("globalRepairLora", "自动选择4步LoRA")), "全局修复LoRA强度": Number(value("globalRepairLoraStrength", 0.75)), "全局修复步数": Number(value("globalRepairSteps", 4)), "全局修复降噪": Number(value("globalRepairDenoise", 0.28)), "全局修复Sigma策略": String(value("globalRepairSigmaStrategy", "最终区间增加1步")), "全局修复范围": String(value("globalRepairRange", "全画面双区")), "低显存注意力分头数": Number(value("lowVramAttentionHeads", 10)),
         "H3二采LoRA模式": String(value("h3SecondLoraMode", "继承一采LoRA")), "H3二采LoRA": String(value("h3SecondLora", "")), "H3二采LoRA强度": Number(value("h3SecondLoraStrength", 0.6)),
@@ -1004,7 +1122,122 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     for (const [target, source, fallback] of [
         ["DLSS_video_upscale_mode", "dlssVideoUpscaleMode", "1.5× (Quality)"], ["DLSS_video_require_neural_upscaling", "dlssVideoRequireNeuralUpscaling", false], ["DLSS_video_nr_preset", "dlssVideoNrPreset", "Default"], ["DLSS_video_nr_style", "dlssVideoNrStyle", "Default"], ["DLSS_video_nr_intensity", "dlssVideoNrIntensity", 1], ["DLSS_video_local_tone_strength", "dlssVideoLocalToneStrength", 1], ["DLSS_video_local_structure_strength", "dlssVideoLocalStructureStrength", 1], ["DLSS_video_skin_structure_strength", "dlssVideoSkinStructureStrength", -1], ["DLSS_video_automatic_mask", "dlssVideoAutomaticMask", false], ["DLSS_video_dlss_model_preset", "dlssVideoModelPreset", "Default"], ["DLSS_video_encoding_quality", "dlssVideoEncodingQuality", "Max"], ["DLSS_video_video_codec", "dlssVideoCodec", "H.264"], ["DLSS_video_container", "dlssVideoContainer", "MP4"], ["DLSS_video_rename", "dlssVideoRename", "Auto"], ["DLSS_video_custom_suffix", "dlssVideoCustomSuffix", "_DLSS5"], ["DLSS_video_hdr_mode", "dlssVideoHdrMode", false], ["DLSS_video_output_detail_strength", "dlssVideoOutputDetailStrength", 1], ["DLSS_fg_output_fps", "dlssFgOutputFps", "60"], ["DLSS_fg_dlss_engine", "dlssFgEngine", "Auto"], ["DLSS_fg_encoding_quality", "dlssFgEncodingQuality", "Max"], ["DLSS_fg_video_codec", "dlssFgVideoCodec", "H.264"], ["DLSS_fg_container", "dlssFgContainer", "MP4"], ["DLSS_fg_rename", "dlssFgRename", "Auto"], ["DLSS_fg_custom_suffix", "dlssFgCustomSuffix", "_DLSSFG"], ["DLSS_fg_hdr_mode", "dlssFgHdrMode", false]] as Array<[string, string, unknown]>) inputs[target] = value(source, fallback);
     for (const [target, source, fallback] of [["南风ER_solver_type", "erSolverType", "ER-SDE"], ["南风ER_max_stage", "erMaxStage", 3], ["南风ER_eta", "erEta", 1], ["南风ER_s_noise", "erSNoise", 1]] as Array<[string, string, unknown]>) inputs[target] = value(source, fallback);
-    return { nf_v15: { class_type: NANFENG_H3_CLASS, inputs }, nf_output: { class_type: NANFENG_VHS_CLASS, inputs: { images: ["nf_v15", 0], audio: ["nf_v15", 1], filename_prefix: "NanFeng_H3", frame_rate: 24, format: "video/h264-mp4", loop_count: 0, pingpong: false, save_output: true } } };
+    const graph: Record<string, any> = { nf_v15: { class_type: NANFENG_H3_CLASS, inputs } };
+    let outputImages: [string, number] = ["nf_v15", 0];
+    let outputAudio: [string, number] = ["nf_v15", 1];
+    if (params.faceRefineEnabled === true) {
+        const modelName = String(inputs["模型"]);
+        graph.face_model = { class_type: "UNETLoader", inputs: { unet_name: modelName, weight_dtype: String(inputs["模型权重精度"]) } };
+        let faceModel: [string, number] = ["face_model", 0];
+        slots.slice(0, 8).forEach((slot: any, index: number) => {
+            if (slot?.enabled === false || !String(slot?.name || "").trim()) return;
+            const id = `face_lora_${index + 1}`;
+            graph[id] = { class_type: "LoraLoaderModelOnly", inputs: { model: faceModel, lora_name: String(slot.name).trim(), strength_model: Number(slot.strength ?? 1) } };
+            faceModel = [id, 0];
+        });
+        graph.face_clip = { class_type: "CLIPLoader", inputs: { clip_name: String(inputs["文本编码器"]), type: String(inputs["文本编码器类型"]), device: String(inputs["文本编码器设备"]) } };
+        graph.face_video_vae = { class_type: "VAELoader", inputs: { vae_name: String(inputs["视频VAE"]) } };
+        graph.face_audio_vae = { class_type: "VAELoader", inputs: { vae_name: String(inputs["音频VAE"]) } };
+        graph.face_refine = { class_type: "MiniMaxH3PostGenerationFaceRefine", inputs: {
+            images: ["nf_v15", 0], audio: ["nf_v15", 1], model: faceModel,
+            vae: ["face_video_vae", 0], audio_vae: ["face_audio_vae", 0], clip: ["face_clip", 0],
+            prompt: String(inputs["提示词"]), seed: Number(inputs["随机种子"]),
+            cfg: Number(params.faceRefineCfg ?? 1), shift_video: Number(params.videoSigmaShift ?? 12), shift_audio: Number(params.audioSigmaShift ?? 3),
+            detector: String(params.faceRefineDetector || "face_yolov8m.pt"), confidence: Number(params.faceRefineConfidence ?? 0.35),
+            crop_factor: Number(params.faceRefineCropFactor ?? 2.5), canvas_size: Number(params.faceRefineCanvasSize ?? 768),
+            denoise: Number(params.faceRefineDenoise ?? 0.4), steps: Number(params.faceRefineSteps ?? 8),
+            sampler: String(params.faceRefineSampler || "euler"), scheduler: String(params.faceRefineScheduler || "simple"),
+            paste_region: String(params.faceRefinePasteRegion || "face_only"), mask_dilation: Number(params.faceRefineMaskDilation ?? 16),
+            feather: Number(params.faceRefineFeather ?? 24), colour_match: Number(params.faceRefineColourMatch ?? 1),
+            blend: Number(params.faceRefineBlend ?? 1), ref_image_size: String(params.refImageSize || "match"),
+            seam_fade_frames: Number(value("seamFaceFadeFrames", 0)), seam_colour_match: Number(value("seamColourMatch", 0)),
+            audio_crossfade_ms: Number(value("seamAudioCrossfadeMs", 0)),
+        } };
+        if (previousVideo && (Number(value("seamFaceFadeFrames", 0)) > 0 || Number(value("seamColourMatch", 0)) > 0 || Number(value("seamAudioCrossfadeMs", 0)) > 0)) {
+            graph.seam_previous_video = { class_type: "LoadVideo", inputs: { file: previousVideo } };
+            graph.seam_previous_parts = { class_type: "GetVideoComponents", inputs: { video: ["seam_previous_video", 0] } };
+            graph.face_refine.inputs.previous_images = ["seam_previous_parts", 0];
+            graph.face_refine.inputs.previous_audio = ["seam_previous_parts", 1];
+        }
+        outputImages = ["face_refine", 0];
+        outputAudio = ["face_refine", 1];
+    }
+    graph.nf_output = { class_type: NANFENG_VHS_CLASS, inputs: { images: outputImages, audio: outputAudio, filename_prefix: "NanFeng_H3", frame_rate: 24, format: "video/h264-mp4", loop_count: 0, pingpong: false, save_output: true } };
+    return graph;
+}
+
+/** Phase B: decode the durable first-pass MP4 and run the configured post-generation refinement. */
+export async function buildDecodedH3SecondPassWorkflow(input: Record<string, unknown>, params: Record<string, unknown>, upload: (file: string) => Promise<string>, signal: AbortSignal): Promise<Record<string, any>> {
+    if (signal.aborted) throw new Error("任务已取消");
+    params = normalizeH3Params(params, true);
+    const source = String(input.video || "").trim();
+    if (!source) throw new Error("确认精修缺少已缓存的一采视频");
+    const uploaded = await upload(source);
+    const modelName = String(params.modelName || "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors");
+    const graph: Record<string, any> = {
+        cached_first_pass: { class_type: "LoadVideo", inputs: { file: uploaded } },
+        cached_parts: { class_type: "GetVideoComponents", inputs: { video: ["cached_first_pass", 0] } },
+        refine_model: { class_type: "UNETLoader", inputs: { unet_name: modelName, weight_dtype: String(params.precision || "default") } },
+        refine_clip: { class_type: "CLIPLoader", inputs: { clip_name: String(params.textEncoder || "qwen3vl_32b_minimax_h3_fp8.safetensors"), type: String(params.textEncoderType || "minimax"), device: String(params.textEncoderDevice || "default") } },
+        refine_video_vae: { class_type: "VAELoader", inputs: { vae_name: String(params.videoVae || "minimax_h3_video_vae_fp16.safetensors") } },
+        refine_audio_vae: { class_type: "VAELoader", inputs: { vae_name: String(params.audioVae || "minimax_h3_audio_vae_fp32.safetensors") } },
+    };
+    let model: [string, number] = ["refine_model", 0];
+    const slots = Array.isArray(params.loraSlots) ? params.loraSlots as any[] : [];
+    slots.slice(0, 8).forEach((slot, index) => {
+        if (slot?.enabled === false || !String(slot?.name || "").trim()) return;
+        const id = `refine_lora_${index + 1}`;
+        graph[id] = { class_type: "LoraLoaderModelOnly", inputs: { model, lora_name: String(slot.name).trim(), strength_model: Number(slot.strength ?? 1) } };
+        model = [id, 0];
+    });
+    let images: [string, number] = ["cached_parts", 0];
+    let audio: [string, number] = ["cached_parts", 1];
+    if (params.faceRefineEnabled === true) {
+        const uploadedRefs = await Promise.all((Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : []).map(upload));
+        addH3FaceRefineNode(graph, "face_refine", {
+            images, audio, model, vae: ["refine_video_vae", 0], audio_vae: ["refine_audio_vae", 0], clip: ["refine_clip", 0],
+        }, params, uploadedRefs, withNoTextConstraint(String(input.prompt || ""), params.noCaption !== false), resolveH3Seed(params));
+        images = ["face_refine", 0]; audio = ["face_refine", 1];
+    } else {
+        graph.full_frame_refine = { class_type: "MiniMaxH3PostGenerationFullFrameRefine", inputs: {
+            images, audio, model, vae: ["refine_video_vae", 0], audio_vae: ["refine_audio_vae", 0], clip: ["refine_clip", 0],
+            prompt: withNoTextConstraint(String(input.prompt || ""), params.noCaption !== false), seed: resolveH3Seed(params),
+            steps: Number(params.h3SecondSteps ?? params.secondPassSteps ?? 4), denoise: Number(params.secondPassDenoise ?? params.denoise ?? 0.28), sampler: String(params.secondPassSampler || params.sampler || "res_multistep"), scheduler: String(params.secondPassScheduler || params.scheduler || "simple"), target_megapixels: Number(params.latentUpscaleMegapixels ?? params.secondPassMegapixels ?? params.megapixels ?? 0.4),
+        } };
+        images = ["full_frame_refine", 0]; audio = ["full_frame_refine", 1];
+    }
+    graph.nf_output = { class_type: NANFENG_VHS_CLASS, inputs: { images, audio, filename_prefix: "NanFeng_H3_Confirmed", frame_rate: 24, format: "video/h264-mp4", loop_count: 0, pingpong: false, save_output: true } };
+    return graph;
+}
+
+function addH3FaceRefineNode(
+    graph: Record<string, any>,
+    id: string,
+    baseInputs: Record<string, any>,
+    params: Record<string, unknown>,
+    uploadedRefs: string[],
+    prompt: string,
+    seed: number,
+) {
+    const referenceInputs: Record<string, [string, number]> = {};
+    uploadedRefs.forEach((file, index) => {
+        const imageId = `${id}_reference_${index + 1}`;
+        graph[imageId] = { class_type: "LoadImage", inputs: { image: file } };
+        referenceInputs[`reference_${index + 1}`] = [imageId, 0];
+    });
+    graph[id] = { class_type: "InfiniteCanvasH3FaceRefine", inputs: {
+        ...baseInputs,
+        ...referenceInputs,
+        prompt, seed,
+        cfg: Number(params.faceRefineCfg ?? 1), shift_video: Number(params.videoSigmaShift ?? 12), shift_audio: Number(params.audioSigmaShift ?? 3),
+        detector: String(params.faceRefineDetector || "face_yolov8m.pt"), confidence: Number(params.faceRefineConfidence ?? 0.35),
+        crop_factor: Number(params.faceRefineCropFactor ?? 2.5), canvas_size: Number(params.faceRefineCanvasSize ?? 768),
+        denoise: Number(params.faceRefineDenoise ?? 0.4), steps: Number(params.faceRefineSteps ?? 8),
+        sampler: String(params.faceRefineSampler || "euler"), scheduler: String(params.faceRefineScheduler || "simple"),
+        paste_region: String(params.faceRefinePasteRegion || "face_only"), mask_dilation: Number(params.faceRefineMaskDilation ?? 16),
+        feather: Number(params.faceRefineFeather ?? 24), colour_match: Number(params.faceRefineColourMatch ?? 1),
+        blend: Number(params.faceRefineBlend ?? 1), ref_image_size: String(params.refImageSize || "match"),
+    } };
 }
 
 /** 备用：此前的分拆 API 图，保留用于定位原生 V10 节点异常。 */
@@ -1016,6 +1249,7 @@ export async function buildExpandedNanFengV10Workflow(
     signal: AbortSignal,
 ): Promise<Record<string, any>> {
     if (signal.aborted) throw new Error("任务已取消");
+    params = normalizeH3Params(params, true);
     const mode = normalizeNanFengMode(params.mode ?? params.taskMode ?? (typeof input.video === "string" ? "ref2va" : "t2v"));
     // V10 继承 V8.1/V7 的实际运行分支：旧 V4 Sigma、V5 高清二采、SolAttn/T8
     // 字段只保留兼容读取，不进入 V10 的 generate() 执行图。
@@ -1039,7 +1273,7 @@ export async function buildExpandedNanFengV10Workflow(
 
     const start = node("nf_start", "NanFengH3ReleaseAtStartV15", { unet_name: modelName, clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName, reserved_vram_gb: params.runtimeReserveEnabled === true ? Number(params.reservedVramGb ?? 0.6) : 0 });
     let model = node("nf_model", "UNETLoader", { unet_name: modelName, weight_dtype: String(params.precision || "default") });
-    const loraSlots = Array.isArray(params.loraSlots) ? params.loraSlots : [{ name: params.loraName, strength: params.loraStrength, enabled: true }];
+    const loraSlots = Array.isArray(params.loraSlots) ? params.loraSlots : [];
     loraSlots.slice(0, 8).forEach((slot: any, index: number) => {
         if (slot?.enabled === false || typeof slot?.name !== "string" || !slot.name.trim()) return;
         model = node(`nf_lora_${index + 1}`, "LoraLoaderModelOnly", { model: model(0), lora_name: slot.name.trim(), strength_model: Number(slot.strength ?? 0.75) });
@@ -1054,13 +1288,16 @@ export async function buildExpandedNanFengV10Workflow(
         if (sage === "H3专用Sage加速") model = node("nf_h3_attention", "MiniMaxH3MemoryEfficientSageAttentionPatch", { model: model(0) });
         else if (sage !== "disabled") model = node("nf_sage", "PathchSageAttentionKJ", { model: model(0), sage_attention: sage, allow_compile: params.allowCompile === true });
     }
+    if (params.teAccel === true) {
+        model = node("nf_te", "TESpeedMiniMaxH3", { model: model(0), processing_control_value: 0.08, processing_percent_1: 0.1, processing_percent_2: 0.9, mcs: 2, device: "auto", mode: "standard" });
+    }
         node("nf_condition_loaders", "NanFengH3ReleaseBeforeConditionLoadersV15", {
         clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName,
     });
     const clip = node("nf_clip", "CLIPLoader", { clip_name: textEncoder, type: String(params.textEncoderType || "minimax"), device: String(params.textEncoderDevice || "default") });
     const videoVae = node("nf_video_vae", "VAELoader", { vae_name: videoVaeName });
     const audioVae = node("nf_audio_vae", "VAELoader", { vae_name: audioVaeName });
-    const promptBody = withNoTextConstraint(String(input.prompt || "").trim());
+    const promptBody = withNoTextConstraint(String(input.prompt || "").trim(), params.noCaption !== false);
     const trigger = String(params.constantTriggerWord || "").trim();
     const prompt = trigger && promptBody ? `${trigger}\n${promptBody}` : trigger || promptBody;
     const refs = Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : [];
@@ -1124,8 +1361,7 @@ export async function buildExpandedNanFengV10Workflow(
     if (latentUpscaleRequested && fullSigmaText) validateNanFengFullSigma(fullSigmaText, h3FirstSteps, h3SecondSteps);
     else if (manualSigmaEnabled && fullSigmaText) validateNanFengSingleSigma(fullSigmaText);
     const scheduler = node("nf_scheduler", "BasicScheduler", { model: samplingModelRef, scheduler: String(params.scheduler || "simple"), steps: latentUpscaleRequested ? h3FirstSteps + h3SecondSteps : Number(v10LegacySecondPassEnabled && params.secondPassEnabled ? params.firstPassSteps ?? params.steps ?? 20 : params.steps || 20), denoise: Number(params.denoise ?? 1) });
-    const requestedSeed = Number(params.seed);
-    const noise = node("nf_noise", "RandomNoise", { noise_seed: Number.isFinite(requestedSeed) && requestedSeed >= 0 ? requestedSeed : Math.floor(Math.random() * 1125899906842624) });
+    const noise = node("nf_noise", "RandomNoise", { noise_seed: resolveH3Seed(params) });
     let sigmas = scheduler(0);
     let latentSigmaSplit: any;
     if ((latentUpscaleRequested || manualSigmaEnabled) && fullSigmaText) sigmas = node("nf_h3_full_sigmas", "ManualSigmas", { sigmas: fullSigmaText })(0);
@@ -1331,6 +1567,77 @@ function normalizeH3WorkflowModel(value: string) {
     return aliases[key] || requested;
 }
 
+function normalizeComfyChoiceKey(value: string) {
+    return value.toLowerCase().replace(/[\\/_\s-]/g, "");
+}
+
+function comfyChoiceBasename(value: string) {
+    return value.replace(/^[\\/]+/, "").split(/[\\/]/).pop()?.toLowerCase() || value.toLowerCase();
+}
+
+/** 将旧画布里保存的路径对齐到重装后南风节点当前的 COMBO 选项。 */
+function resolveComfyChoice(value: unknown, choices: string[], fallbackToFirst = false) {
+    const requested = String(value ?? "").trim();
+    if (!requested || !choices.length) return requested;
+    const direct = choices.find((choice) => choice === requested);
+    if (direct) return direct;
+    const key = normalizeComfyChoiceKey(requested);
+    const normalized = choices.filter((choice) => normalizeComfyChoiceKey(choice) === key);
+    if (normalized.length === 1) return normalized[0];
+    const filename = comfyChoiceBasename(requested);
+    const suffix = choices.filter((choice) => comfyChoiceBasename(choice) === filename);
+    if (suffix.length === 1) return suffix[0];
+    if (fallbackToFirst) return choices[0];
+    return requested;
+}
+
+async function refreshNanFengCatalog(comfyUrl: string, signal: AbortSignal) {
+    // V15 自带的 refresh route 清掉了 folder_paths 的模型缓存；/refresh
+    // 并不是所有 ComfyUI 版本都提供，保留它作为旧安装的兼容回退。
+    for (const route of ["/nanfeng/v15/h3/refresh-models", "/refresh"]) {
+        try {
+            const response = await fetch(`${comfyUrl}${route}`, { signal });
+            if (response.ok) return true;
+        } catch {}
+    }
+    return false;
+}
+
+async function resolveNanFengWorkflowParams(comfyUrl: string, params: Record<string, unknown>, signal: AbortSignal) {
+    let resolved = await resolveH3ModelParams(comfyUrl, params, signal);
+    try {
+        const response = await fetch(`${comfyUrl}/object_info/${encodeURIComponent(NANFENG_H3_CLASS)}`, { signal });
+        if (!response.ok) return resolved;
+        const body = await response.json() as Record<string, any>;
+        const required = body[NANFENG_H3_CLASS]?.input?.required || {};
+        const choices = (name: string) => Array.isArray(required[name]?.[0]) ? required[name][0].map(String) : [];
+        const pathFields: Array<[string, string]> = [
+            ["modelName", "模型"], ["textEncoder", "文本编码器"], ["videoVae", "视频VAE"],
+            ["audioVae", "音频VAE"], ["latentUpscaleModel", "H3潜空间放大模型"],
+        ];
+        const next = { ...resolved };
+        for (const [paramName, inputName] of pathFields) {
+            const available = choices(inputName);
+            if (!available.length) continue;
+            const configuredDefault = String(required[inputName]?.[1]?.default || available[0]);
+            const current = String(next[paramName] || "").trim();
+            next[paramName] = current ? resolveComfyChoice(current, available, inputName !== "模型") : configuredDefault;
+        }
+        if (Array.isArray(next.loraSlots)) {
+            next.loraSlots = next.loraSlots.map((slot: any, index: number) => {
+                const available = choices(`LoRA${index + 1}`);
+                if (!available.length || !slot || String(slot.name || "").trim() === "") return slot;
+                const name = resolveComfyChoice(slot.name, available, false);
+                return { ...slot, name: available.includes(name) ? name : "未选择", enabled: available.includes(name) && slot.enabled !== false };
+            });
+        }
+        resolved = next;
+    } catch {
+        // object_info 不可达时保留旧兼容值；/prompt 会继续返回 ComfyUI 的具体校验错误。
+    }
+    return resolved;
+}
+
 async function resolveH3ModelParams(comfyUrl: string, params: Record<string, unknown>, signal: AbortSignal) {
     const requested = String(params.modelName || "").trim();
     if (!requested) return params;
@@ -1367,10 +1674,17 @@ async function resolveH3ModelParams(comfyUrl: string, params: Record<string, unk
 
 function normalizeH3AspectRatio(value: string) {
     const aliases: Record<string, string> = {
+        // 短形式
         "16:9": "16:9 (Widescreen)", "9:16": "9:16 (Portrait Widescreen)", "1:1": "1:1 (Square)",
         "4:3": "4:3 (Standard)", "3:4": "3:4 (Portrait Standard)", "2:3": "2:3 (Portrait Photo)", "3:2": "3:2 (Photo)",
+        // H3 端 ClipSettings 选项里曾经使用的简称（已落库 segment.aspectRatio 可能是这些值）
+        "9:16 (Portrait)": "9:16 (Portrait Widescreen)",
+        "4:3 (Standard)": "4:3 (Standard)", "3:4 (Portrait)": "3:4 (Portrait Standard)",
+        "3:2 (Photo)": "3:2 (Photo)", "2:3 (Portrait)": "2:3 (Portrait Photo)",
     };
-    return aliases[value] || value;
+    const normalized = aliases[value] || value;
+    console.warn("[H3 normalizeAspectRatio]", { input: value, output: normalized, hit: value in aliases });
+    return normalized;
 }
 
 /** 带重试的 fetch：ComfyUI 刚执行完时输出文件可能还在落盘，瞬时 404 应重试而非放弃。 */
@@ -1406,13 +1720,13 @@ export async function collectOutputMedia(outputs: Record<string, any>, baseUrl: 
         if (Array.isArray(value)) { value.forEach(visit); return; }
         if (typeof value !== "object") return;
         if (typeof value.filename === "string" && value.filename) {
-            // LoadImage/LoadVideo 等节点会把输入素材以 type=input 写进 history outputs，
-            // 但部分 H3 VHS 输出也会落在 `infinite-canvas/output` 并错误标成 input。
-            // 只排除普通输入目录，保留明确位于 output 子目录的生成视频。
+            // LoadImage/LoadVideo 等节点会把输入素材以 type=input 写进 history outputs。
+            // 一采缓存也位于 input/infinite-canvas-cache/output，不能因目录名含 output 就当成精修结果；
+            // 只保留确实来自 H3 VHS `infinite-canvas/output` 子目录的特殊输出。
             const outputType = String(value.type || "").trim().toLowerCase();
             const subfolder = String(value.subfolder || "");
-            const isVideoOutput = /\.(mp4|webm|mov|m4v|mkv)$/i.test(String(value.filename)) && /(^|[\\/])output([\\/]|$)/i.test(subfolder);
-            if (outputType === "input" && !isVideoOutput) return;
+            const isH3VideoOutput = /\.(mp4|webm|mov|m4v|mkv)$/i.test(String(value.filename)) && /(^|[\\/])infinite-canvas[\\/]output([\\/]|$)/i.test(subfolder);
+            if (outputType === "input" && !isH3VideoOutput) return;
             const key = `${value.filename}|${value.subfolder || ""}|${value.type || ""}`;
             if (!seen.has(key)) { seen.add(key); items.push(value); }
             return;
@@ -1433,7 +1747,13 @@ export async function collectOutputMedia(outputs: Record<string, any>, baseUrl: 
 function mimeForOutput(item: Record<string, any>) {
     const name = String(item.filename || "").toLowerCase();
     if (/\.(mp4|webm|mov|m4v|mkv)$/.test(name)) return "video/mp4";
-    if (/\.(mp3|wav|ogg|opus|flac|aac|m4a)$/.test(name)) return "audio/mpeg";
+    if (/\.wav$/.test(name)) return "audio/wav";
+    if (/\.flac$/.test(name)) return "audio/flac";
+    if (/\.ogg$/.test(name)) return "audio/ogg";
+    if (/\.opus$/.test(name)) return "audio/opus";
+    if (/\.aac$/.test(name)) return "audio/aac";
+    if (/\.m4a$/.test(name)) return "audio/mp4";
+    if (/\.mp3$/.test(name)) return "audio/mpeg";
     if (/\.gif$/.test(name)) return "image/gif";
     return "image/png";
 }

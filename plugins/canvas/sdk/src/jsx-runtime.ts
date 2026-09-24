@@ -9,10 +9,17 @@ import { getReact } from "./runtime";
 // Fragment 哨兵:渲染时才解析为宿主 React.Fragment,避免模块顶层触碰运行时。
 export const Fragment = Symbol.for("infinite-canvas.jsx.fragment") as unknown as React.ExoticComponent<{ children?: React.ReactNode }>;
 
-function createElement(type: unknown, props: Record<string, unknown> | null, key?: unknown): React.ReactElement {
+function createElement(type: unknown, props: Record<string, unknown> | null, key?: unknown, staticChildren = false): React.ReactElement {
     const react = getReact();
     const resolvedType = type === Fragment ? react.Fragment : type;
-    // automatic 运行时已把 children 放进 props;key 单独传入以避免展开 key 警告。
+    // jsxs 表示编译期已知的多个静态子节点。将它们作为 createElement 的多个子参数
+    // 传入，避免 React 把整个 children 数组误判为缺少 key 的动态列表。
+    if (staticChildren && Array.isArray(props?.children)) {
+        const { children, ...rest } = props;
+        const config = key === undefined ? rest : { ...rest, key };
+        return react.createElement(resolvedType as never, config as never, ...children as React.ReactNode[]) as React.ReactElement;
+    }
+    // jsx 的单子节点（包括真正的动态数组）仍原样传递，保留 React 的 key 校验。
     const config = key === undefined ? props : { ...(props ?? {}), key };
     return react.createElement(resolvedType as never, config as never);
 }
@@ -21,8 +28,10 @@ export function jsx(type: unknown, props: Record<string, unknown> | null, key?: 
     return createElement(type, props, key);
 }
 
-// jsxs 用于静态多子节点;转发逻辑与 jsx 一致(children 已在 props 内)。
-export const jsxs = jsx;
+// jsxs 用于静态多子节点，需要与动态数组的 jsx 语义区分。
+export function jsxs(type: unknown, props: Record<string, unknown> | null, key?: unknown): React.ReactElement {
+    return createElement(type, props, key, true);
+}
 
 // 让 `jsxImportSource` 指向本包的编译器能从这里取到 JSX 内建标签类型(复用 @types/react)。
 export namespace JSX {

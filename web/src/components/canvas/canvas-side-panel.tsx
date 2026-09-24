@@ -1,20 +1,24 @@
-import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, ListChecks, ListRestart, MapPinned, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
+import { findCharacterVoiceAsset, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
+import { CustomPromptDialog } from "@/components/prompts/custom-prompt-dialog";
+import { fetchBackendCanvasDrama } from "@/services/backend-api";
 import { fetchSourcePrompts, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
-import { resolveImageUrl, uploadImage } from "@/services/image-storage";
-import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
+import { ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
+import { useAssetStore, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
+import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -30,6 +34,7 @@ const PANEL_EASE = [0.22, 1, 0.36, 1] as const;
 type PanelTab = "canvas" | "assets" | "prompts";
 
 type Props = {
+    projectId: string;
     nodes: CanvasNodeData[];
     selectedNodeIds: Set<string>;
     onFocusNode: (nodeId: string) => void;
@@ -43,7 +48,10 @@ const NODE_TYPE_ICON: Record<string, typeof Square> = {
     [CanvasNodeType.Audio]: Music2,
     [CanvasNodeType.Text]: Type,
     [CanvasNodeType.Config]: Settings2,
+    [CanvasNodeType.Loop]: ListRestart,
     [CanvasNodeType.Group]: Square,
+    [CanvasNodeType.Character]: User,
+    [CanvasNodeType.Scene]: MapPinned,
 };
 
 const STATUS_COLOR: Record<string, string> = {
@@ -53,7 +61,7 @@ const STATUS_COLOR: Record<string, string> = {
     idle: "transparent",
 };
 
-export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset }: Props) {
+export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset }: Props) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
@@ -110,7 +118,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
                     {tab === "canvas" ? (
                         <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} theme={theme} />
                     ) : tab === "assets" ? (
-                        <CanvasAssetsTab onInsert={onInsertAsset} theme={theme} />
+                        <CanvasAssetsTab projectId={projectId} onInsert={onInsertAsset} theme={theme} />
                     ) : (
                         <CanvasPromptsTab onInsert={onInsertAsset} theme={theme} />
                     )}
@@ -119,7 +127,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
             </motion.aside>
         </motion.div>
     );
-}
+});
 
 function TabButton({ label, active, theme, onClick }: { label: string; active: boolean; theme: CanvasTheme; onClick: () => void }) {
     return (
@@ -134,14 +142,40 @@ function TabButton({ label, active, theme, onClick }: { label: string; active: b
 // Canvas tab: list nodes and center, zoom, and select the clicked node.
 // ---------------------------------------------------------------------------
 
-const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Group];
+const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Loop, CanvasNodeType.Character, CanvasNodeType.Scene, CanvasNodeType.Group];
+const H3_NODE_TYPES = new Set(["minimax-h3:video", "smart-minimax", "minimax", "minimax-h3"]);
+
+function isVideoCanvasNode(node: CanvasNodeData) {
+    return node.type === CanvasNodeType.Video || H3_NODE_TYPES.has(node.type);
+}
 
 function nodePreviewText(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt || "";
     return getNodeDefinition(node.type)?.title || node.type;
 }
 
-function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme }) {
+function matchesNodeTypeFilter(node: CanvasNodeData, typeFilter: string) {
+    if (typeFilter === "all" || node.type === typeFilter || (typeFilter === CanvasNodeType.Video && isVideoCanvasNode(node))) return true;
+    return node.type === CanvasNodeType.Config
+        && node.metadata?.smart === true
+        && (node.metadata.generationMode || "image") === typeFilter;
+}
+
+function imageCoverForNode(node: CanvasNodeData) {
+    if (node.type === CanvasNodeType.Config && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image") {
+        const images = node.metadata.images || [];
+        const primary = images.find((image) => image.id === node.metadata?.primaryImageId) || images[0];
+        const content = primary?.content || node.metadata.content || "";
+        const storageKey = primary?.storageKey || node.metadata.storageKey;
+        return content || storageKey ? { content, storageKey } : undefined;
+    }
+    if (node.type === CanvasNodeType.Image && (node.metadata?.content || node.metadata?.storageKey)) {
+        return { content: node.metadata.content || "", storageKey: node.metadata.storageKey };
+    }
+    return undefined;
+}
+
+const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const [keyword, setKeyword] = useState("");
@@ -154,7 +188,7 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
-        return nodes.filter((node) => (typeFilter === "all" || node.type === typeFilter) && (!query || [node.title, node.metadata?.content, node.metadata?.prompt].filter(Boolean).join(" ").toLowerCase().includes(query)));
+        return nodes.filter((node) => matchesNodeTypeFilter(node, typeFilter) && (!query || [node.title, node.metadata?.content, node.metadata?.prompt].filter(Boolean).join(" ").toLowerCase().includes(query)));
     }, [nodes, keyword, typeFilter]);
     const treeRows = useMemo(() => {
         const filteredIds = new Set(filtered.map((node) => node.id));
@@ -234,8 +268,12 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
                     <div className="relative w-full" style={{ height: rowVirtualizer.getTotalSize() }}>
                         {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                             const { node, depth, hasChildren } = treeRows[virtualRow.index];
-                            const Icon = NODE_TYPE_ICON[node.type] || FileText;
+                            const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart === true ? node.metadata.generationMode || "image" : undefined;
+                            const Icon = NODE_TYPE_ICON[smartMode || node.type] || FileText;
                             const isImage = node.type === CanvasNodeType.Image && node.metadata?.content;
+                            const hasImageCover = Boolean(imageCoverForNode(node));
+                            const isCharacter = node.type === CanvasNodeType.Character;
+                            const isScene = node.type === CanvasNodeType.Scene;
                             const isChecked = checked.has(node.id);
                             const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
                             return (
@@ -249,7 +287,7 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
                                     <button type="button" onClick={() => (selectMode ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.sidePanel.focusNode")}>
                                         {selectMode ? <CheckMark checked={isChecked} theme={theme} /> : null}
                                         <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
-                                            {isImage ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
+                                            {hasImageCover || isCharacter || isScene ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
                                         </span>
                                         <span className="min-w-0 flex-1 space-y-0.5">
                                             <span className="block truncate text-sm font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
@@ -292,14 +330,21 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
             ) : null}
         </div>
     );
-}
+});
 
 function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     const [url, setUrl] = useState("");
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
-    const content = node.metadata?.content || "";
-    const storageKey = node.metadata?.storageKey;
+    const isCharacter = node.type === CanvasNodeType.Character;
+    const isScene = node.type === CanvasNodeType.Scene;
+    const characterImages = node.metadata?.characterImages || [];
+    const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex ?? 0, 0), Math.max(characterImages.length - 1, 0));
+    const primaryImage = isCharacter ? characterImages[primaryIndex] || characterImages[0] : undefined;
+    const imageCover = imageCoverForNode(node);
+    const content = isCharacter ? primaryImage?.url || "" : isScene ? node.metadata?.sceneImage?.url || "" : imageCover?.content || "";
+    const storageKey = isCharacter ? primaryImage?.storageKey : isScene ? node.metadata?.sceneImage?.storageKey : imageCover?.storageKey;
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
 
     useEffect(() => {
         let cancelled = false;
@@ -307,6 +352,7 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
             setUrl("");
             return;
         }
+        void ensureImagePreview(storageKey);
         resolveImageUrl(storageKey, content).then((resolved) => {
             if (!cancelled) setUrl(resolved);
         }).catch(() => {
@@ -315,7 +361,8 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
         return () => { cancelled = true; };
     }, [backendConnected, backendToken, content, storageKey]);
 
-    return url ? <img src={url} alt={node.title} className="size-full object-cover" /> : <ImageIcon className="size-5 opacity-60" />;
+    const source = previewUrlFor(storageKey) || url;
+    return source ? <img src={source} alt={node.title} className="size-full object-cover" /> : isCharacter ? <User className="size-5 opacity-60" /> : isScene ? <MapPinned className="size-5 opacity-60" /> : <ImageIcon className="size-5 opacity-60" />;
 }
 
 function CheckMark({ checked, theme }: { checked: boolean; theme: CanvasTheme }) {
@@ -336,35 +383,100 @@ const ASSET_GROUPS: { kind: AssetKind; icon: typeof Square }[] = [
     { kind: "audio", icon: Music2 },
     { kind: "text", icon: FileText },
     { kind: "character", icon: User },
+    { kind: "scene", icon: MapPinned },
 ];
+const ALL_ASSET_DRAMAS = "__all-asset-dramas__";
+const UNASSIGNED_ASSET_DRAMA = "__unassigned-asset-drama__";
+
+function characterPrimaryIndex(asset: Extract<Asset, { kind: "character" }>) {
+    if (asset.data.primaryIndex != null) return asset.data.primaryIndex;
+    const coverIndex = asset.data.images.findIndex((image) => image.url === asset.coverUrl);
+    return coverIndex >= 0 ? coverIndex : 0;
+}
 
 function buildInsertPayload(asset: Asset): InsertAssetPayload {
     if (asset.kind === "text") return { kind: "text", content: asset.data.content, title: asset.title };
     if (asset.kind === "video") return { kind: "video", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, width: asset.data.width, height: asset.data.height };
     if (asset.kind === "audio") return { kind: "audio", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, bytes: asset.data.bytes, mimeType: asset.data.mimeType, durationMs: asset.data.durationMs };
-    if (asset.kind === "character") return { kind: "character", title: asset.title, images: asset.data.images };
+    if (asset.kind === "character") {
+        const voiceAsset = findCharacterVoiceAsset(useAssetStore.getState().assets.filter((candidate): candidate is AudioAsset => candidate.kind === "audio"), {
+            assetId: asset.data.voiceAssetId,
+            storageKey: asset.data.voiceStorageKey,
+            url: asset.data.voice,
+        });
+        return {
+        kind: "character",
+        assetId: asset.id,
+        title: asset.title,
+        description: asset.data.description,
+        images: asset.data.images,
+        primaryIndex: characterPrimaryIndex(asset),
+        voice: asset.data.voice || voiceAsset?.data.url || "",
+        voiceName: resolveCharacterVoiceName(asset.data.voiceName, voiceAsset),
+        voiceDescription: asset.data.voiceDescription,
+        voiceStorageKey: asset.data.voiceStorageKey || voiceAsset?.data.storageKey,
+        voiceAssetId: asset.data.voiceAssetId || voiceAsset?.id || "",
+        };
+    }
+    if (asset.kind === "scene") return { kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorPalette: asset.data.colorPalette, colorCardPrompt: asset.data.colorCardPrompt };
     return { kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title };
 }
 
-const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onInsert: (payload: InsertAssetPayload) => void; theme: CanvasTheme }) {
+const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, theme }: { projectId: string; onInsert: (payload: InsertAssetPayload) => void; theme: CanvasTheme }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
+    const connected = useBackendStore((state) => state.connected);
+    const dramas = useCanvasStore((state) => state.folders);
     const assets = useAssetStore((state) => state.assets);
     const addAsset = useAssetStore((state) => state.addAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
     const [keyword, setKeyword] = useState("");
     const [tagFilter, setTagFilter] = useState<string>("all");
+    const [dramaFilter, setDramaFilter] = useState(ALL_ASSET_DRAMAS);
     // 默认全折叠，避免打开侧栏时被一堆自动展开的内容刷屏；用户手动展开过的会写入 setCollapsed 记录下来
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => Object.fromEntries(ASSET_GROUPS.map((group) => [group.kind, true])));
     const [uploading, setUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const dramaQuery = useQuery({
+        queryKey: ["canvas-drama", projectId],
+        queryFn: () => fetchBackendCanvasDrama(projectId),
+        enabled: connected && Boolean(projectId),
+        retry: false,
+    });
+    const visibleDramas = useMemo(() => {
+        const currentDrama = dramaQuery.data?.drama;
+        return currentDrama && !dramas.some((drama) => drama.id === currentDrama.id) ? [...dramas, currentDrama] : dramas;
+    }, [dramaQuery.data?.drama, dramas]);
+    const dramaIds = useMemo(() => new Set(visibleDramas.map((drama) => drama.id)), [visibleDramas]);
+    const dramaOptions = useMemo(() => [
+        { label: t("assets.drama.all"), value: ALL_ASSET_DRAMAS },
+        { label: t("assets.drama.unassigned"), value: UNASSIGNED_ASSET_DRAMA },
+        ...visibleDramas.map((drama) => ({ label: drama.name, value: drama.id })),
+    ], [t, visibleDramas]);
 
-    const allTags = useMemo(() => Array.from(new Set(assets.flatMap((asset) => asset.tags || []))).slice(0, 20), [assets]);
+    useEffect(() => {
+        setDramaFilter(ALL_ASSET_DRAMAS);
+        setTagFilter("all");
+    }, [projectId]);
+    useEffect(() => {
+        if (dramaQuery.isSuccess) {
+            setDramaFilter(dramaQuery.data.episode?.dramaId || ALL_ASSET_DRAMAS);
+            setTagFilter("all");
+        }
+    }, [dramaQuery.data?.episode?.dramaId, dramaQuery.isSuccess]);
+
+    const scopedAssets = useMemo(() => assets.filter((asset) => {
+        if (dramaFilter === ALL_ASSET_DRAMAS) return true;
+        if (dramaFilter === UNASSIGNED_ASSET_DRAMA) return !asset.dramaId || !dramaIds.has(asset.dramaId);
+        return asset.dramaId === dramaFilter;
+    }), [assets, dramaFilter, dramaIds]);
+
+    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.kind === "character" || asset.kind === "scene" ? [] : asset.tags || []))).slice(0, 20), [scopedAssets]);
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
-        return assets.filter((asset) => (tagFilter === "all" || (asset.tags || []).includes(tagFilter)) && (!query || [asset.title, ...(asset.tags || [])].join(" ").toLowerCase().includes(query)));
-    }, [assets, keyword, tagFilter]);
+        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.kind !== "character" && asset.kind !== "scene" && (asset.tags || []).includes(tagFilter))) && (!query || [asset.title, ...(asset.kind === "character" || asset.kind === "scene" ? [] : asset.tags || [])].join(" ").toLowerCase().includes(query)));
+    }, [keyword, scopedAssets, tagFilter]);
 
     const groups = useMemo(() => ASSET_GROUPS.map((group) => ({ ...group, items: filtered.filter((asset) => asset.kind === group.kind) })).filter((group) => group.items.length > 0), [filtered]);
 
@@ -374,15 +486,16 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
         setUploading(true);
         const hide = message.loading(t("canvas.sidePanel.addingAssets"), 0);
         let added = 0;
+        const dramaId = dramaFilter !== ALL_ASSET_DRAMAS && dramaFilter !== UNASSIGNED_ASSET_DRAMA ? dramaFilter : null;
         try {
             for (const file of files) {
                 if (file.type.startsWith("image/")) {
                     const image = await uploadImage(file);
-                    addAsset({ kind: "image", title: file.name || t("assets.kinds.image"), coverUrl: image.url, tags: [], data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
+                    addAsset({ kind: "image", title: file.name || t("assets.kinds.image"), coverUrl: image.url, tags: [], dramaId, data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
                     added += 1;
                 } else if (file.type.startsWith("video/")) {
                     const media = await uploadMediaFile(file, "video");
-                    addAsset({ kind: "video", title: file.name || t("assets.kinds.video"), coverUrl: "", tags: [], data: { url: media.url, storageKey: media.storageKey, width: media.width || 0, height: media.height || 0, bytes: media.bytes, mimeType: media.mimeType } });
+                    addAsset({ kind: "video", title: file.name || t("assets.kinds.video"), coverUrl: "", tags: [], dramaId, data: { url: media.url, storageKey: media.storageKey, width: media.width || 0, height: media.height || 0, bytes: media.bytes, mimeType: media.mimeType } });
                     added += 1;
                 }
             }
@@ -413,6 +526,17 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
                     {t("canvas.sidePanel.add")}
                 </button>
                 <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple className="hidden" onChange={(e) => void handleFiles(e.target.files)} />
+            </div>
+            <div className="flex items-center gap-2 px-3 pb-2">
+                <Clapperboard className="size-3.5 shrink-0 opacity-45" />
+                <Select
+                    size="small"
+                    className="min-w-0 flex-1"
+                    value={dramaFilter}
+                    options={dramaOptions}
+                    loading={dramaQuery.isLoading}
+                    onChange={(value) => { setDramaFilter(value); setTagFilter("all"); }}
+                />
             </div>
             {allTags.length ? (
                 <div className="flex flex-wrap gap-1.5 px-3 pb-2">
@@ -476,10 +600,22 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
                 characterName: asset.data.name || asset.title,
                 characterDescription: asset.data.description,
                 characterImages: asset.data.images,
-                voice: asset.data.voice,
-                voiceName: asset.data.voiceName,
-                voiceAssetId: asset.data.voiceAssetId,
+                characterPrimaryIndex: characterPrimaryIndex(asset),
+                characterVoiceUrl: asset.data.voice,
+                characterVoiceName: asset.data.voiceName,
+                characterVoiceDescription: asset.data.voiceDescription,
+                characterVoiceStorageKey: asset.data.voiceStorageKey,
+                characterVoiceAssetId: asset.data.voiceAssetId,
             };
+            const payload = JSON.stringify(ref);
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);
+            event.dataTransfer.setData("application/json", payload);
+            event.dataTransfer.setData("text/plain", payload);
+            return;
+        }
+        if (asset.kind === "scene") {
+            const ref = { type: "scene", kind: "scene", name: asset.title, sceneAssetId: asset.id, sceneName: asset.data.name || asset.title, sceneDescription: asset.data.description, sceneImage: asset.data.image, sceneColorCard: asset.data.colorCard, sceneColorPalette: asset.data.colorPalette, sceneColorCardPrompt: asset.data.colorCardPrompt };
             const payload = JSON.stringify(ref);
             event.dataTransfer.effectAllowed = "copy";
             event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);
@@ -525,6 +661,9 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
 function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }> }) {
     const { t } = useTranslation();
     const [covers, setCovers] = useState<string[]>([]);
+    const primaryIndex = Math.min(Math.max(characterPrimaryIndex(asset), 0), Math.max(asset.data.images.length - 1, 0));
+    const orderedImages = asset.data.images.length ? [asset.data.images[primaryIndex], ...asset.data.images.filter((_, index) => index !== primaryIndex)] : [];
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     useEffect(() => {
         let cancelled = false;
         const urls: string[] = [];
@@ -532,17 +671,19 @@ function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }
         const addUrl = (url?: string) => { if (url && !urls.includes(url)) urls.push(url); };
         const addStorageKey = (key?: string) => { if (key && !storageKeys.includes(key)) storageKeys.push(key); };
         addUrl(asset.coverUrl);
-        for (const image of asset.data.images) {
+        for (const image of orderedImages) {
             addUrl(image.url);
             addStorageKey(image.storageKey);
+            void ensureImagePreview(image.storageKey);
         }
         Promise.all(storageKeys.map((key) => resolveImageUrl(key))).then((resolved) => {
             if (!cancelled) setCovers([...urls, ...resolved.filter((url): url is string => Boolean(url) && !urls.includes(url))]);
         }).catch(() => { if (!cancelled) setCovers(urls); });
         return () => { cancelled = true; };
-    }, [asset.id, asset.coverUrl, asset.data.images]);
+    }, [asset.id, asset.coverUrl, asset.data.images, primaryIndex]);
     const count = asset.data.images.length;
-    if (covers.length) return <img src={covers[0]} alt="" onError={() => setCovers((current) => current.slice(1))} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+    const preview = orderedImages.map((image) => previewUrlFor(image.storageKey)).find(Boolean);
+    if (preview || covers.length) return <img src={preview || covers[0]} alt="" onError={() => setCovers((current) => current.slice(1))} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     return (
         <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
             <div className="text-[11px] font-medium text-stone-500 dark:text-stone-400">{t("assets.kinds.character")}</div>
@@ -559,6 +700,7 @@ function AssetCover({ asset }: { asset: Asset }) {
         return <video src={`${asset.data.url}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     }
     if (asset.kind === "character") return <CharacterCover asset={asset} />;
+    if (asset.kind === "scene") return <SceneCover asset={asset} />;
     if (asset.kind === "audio") {
         return (
             <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
@@ -567,7 +709,21 @@ function AssetCover({ asset }: { asset: Asset }) {
             </div>
         );
     }
-    return <img src={asset.coverUrl || (asset as ImageAsset).data.dataUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+    return <ImageAssetCover asset={asset as ImageAsset} />;
+}
+
+function SceneCover({ asset }: { asset: Extract<Asset, { kind: "scene" }> }) {
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
+    useEffect(() => { void ensureImagePreview(asset.data.image.storageKey); }, [asset.data.image.storageKey]);
+    return <img src={previewUrlFor(asset.data.image.storageKey) || asset.data.image.url || asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+}
+
+function ImageAssetCover({ asset }: { asset: ImageAsset }) {
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
+    useEffect(() => {
+        void ensureImagePreview(asset.data.storageKey);
+    }, [asset.data.storageKey]);
+    return <img src={previewUrlFor(asset.data.storageKey) || asset.coverUrl || asset.data.dataUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +743,21 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
     const [expanded, setExpanded] = useState<Record<string, boolean>>({});
     const [customOpen, setCustomOpen] = useState(true);
     const [detail, setDetail] = useState<Prompt | null>(null);
+    const [addDialogOpen, setAddDialogOpen] = useState(false);
+    const addPromptAction = (
+        <button
+            type="button"
+            onClick={(event) => {
+                event.stopPropagation();
+                setAddDialogOpen(true);
+            }}
+            className="grid size-6 place-items-center rounded-md opacity-60 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10"
+            aria-label={t("canvas.sidePanel.addPrompt")}
+            title={t("canvas.sidePanel.addPrompt")}
+        >
+            <Plus className="size-3.5" />
+        </button>
+    );
 
     useEffect(() => {
         if (!customLoaded) void loadCustomPrompts().catch(() => message.error(t("prompts.loadFailed")));
@@ -608,7 +779,7 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 <div className="space-y-1">
-                    {customLoaded ? <PromptItemsGroup items={customPromptItems} keyword={keyword} open={customOpen} sourceName={CUSTOM_PROMPTS_CATEGORY} icon={Sparkles} theme={theme} onToggle={() => setCustomOpen((value) => !value)} onInsert={onInsert} onView={setDetail} emptyText={t("canvas.sidePanel.customEmpty")} /> : null}
+                    {customLoaded ? <PromptItemsGroup items={customPromptItems} keyword={keyword} open={customOpen} sourceName={CUSTOM_PROMPTS_CATEGORY} icon={Sparkles} theme={theme} onToggle={() => setCustomOpen((value) => !value)} onInsert={onInsert} onView={setDetail} emptyText={t("canvas.sidePanel.customEmpty")} headerAction={addPromptAction} /> : null}
                     {enabledSources.length ? enabledSources.map((source) => (
                         <PromptSourceGroup
                             key={source.id}
@@ -626,6 +797,7 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
                 </div>
             </div>
             <PromptDetailDialog prompt={detail} onClose={() => setDetail(null)} onCopy={(prompt) => void copyPrompt(prompt)} />
+            <CustomPromptDialog open={addDialogOpen} mode="add" onClose={() => setAddDialogOpen(false)} />
         </div>
     );
 });
@@ -671,6 +843,7 @@ function PromptItemsGroup({
     error = false,
     onRetry,
     emptyText,
+    headerAction,
 }: {
     items: Prompt[];
     keyword: string;
@@ -685,6 +858,7 @@ function PromptItemsGroup({
     error?: boolean;
     onRetry?: () => void;
     emptyText: string;
+    headerAction?: ReactNode;
 }) {
     const { t } = useTranslation();
     const showResults = open || !!keyword.trim();
@@ -696,12 +870,15 @@ function PromptItemsGroup({
     const insertPrompt = (item: Prompt) => onInsert({ kind: "text", content: item.prompt, title: item.title });
     return (
         <div>
-            <button type="button" onClick={onToggle} className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-xs font-semibold opacity-75 transition hover:opacity-100">
-                <ChevronRight className={cn("size-3.5 transition-transform", showResults && "rotate-90")} />
-                <Icon className="size-3.5" />
-                <span className="min-w-0 flex-1 truncate">{sourceName}</span>
+            <div className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-xs font-semibold opacity-75 transition hover:opacity-100">
+                <button type="button" onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+                    <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", showResults && "rotate-90")} />
+                    <Icon className="size-3.5 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{sourceName}</span>
+                </button>
+                {headerAction}
                 {!loading && !error && items.length > 0 ? <span className="opacity-50">{filtered.length}</span> : null}
-            </button>
+            </div>
             {showResults ? (
                 <div className="px-1 pb-2 pt-1">
                     {loading ? (

@@ -71,3 +71,9 @@ Message references and generated images use the same blob-storage rules. They ar
 `uploadImage()` accepts a Blob, data URL, or remote URL. It downloads remote data once, verifies that the Blob decodes as an image, stores it in `image_files` under an `image:<id>` key, and returns an in-memory object URL plus metadata. If CORS blocks byte access but the browser can still display the remote image, it returns that URL without a storage key. Opening a project resolves each stored key into a fresh object URL.
 
 Cleanup is reference-based. After deleting nodes, canvases, assets, or assistant sessions, the application collects every still-referenced storage key, removes unreferenced blobs, revokes their object URLs, and removes them from the in-memory cache. This prevents deleting a file still shared by another canvas feature.
+
+## Realtime collaboration
+
+Browsers, MCP, Canvas Agent, and backend generation tasks all mutate a canvas through the same operation protocol. A persistent batch carries an `expectedRevision`, an idempotent `operationId`, source identity, and fine-grained node/edge/segment operations. The Backend applies the batch transactionally, records it in `canvas_operation_batches`, increments the project revision, and broadcasts the same delta over SSE. Replaying an existing operation ID returns the recorded result without applying or broadcasting it twice.
+
+Clients optimistically update their projection and rebase non-conflicting local operations onto incoming revisions. Only real same-target conflicts require user resolution. Ephemeral cursor, selection, and drag-preview presence uses the `/canvas/realtime` WebSocket room and is never persisted or counted as a project revision. The SSE connection lifecycle maintains the active participant list.

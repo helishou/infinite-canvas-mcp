@@ -1,4 +1,7 @@
-export type H3ReferenceRole = "character_turnaround" | "storyboard" | "scene" | "motion_reference" | "audio_reference" | "character_voice";
+export type H3ReferenceRole = "character_identity" | "character_turnaround" | "storyboard" | "scene" | "blocking" | "keyframe" | "motion_reference" | "audio_reference" | "character_voice" | "style" | "palette" | "prop" | "other";
+export type H3ReferenceUsage = "reference" | "first_frame" | "last_frame";
+export type H3ReferenceRetention = "fully_preserved" | "partially_preserved" | "attribute_transfer" | "weak_reference";
+export type H3ReferenceBinding = { id: string; assetId: string; label: string; role: H3ReferenceRole; tags: string[]; description?: string; enabled: boolean; usage: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; subjectId?: string; storyboardSubjectIds?: string[]; mediaType?: "image" | "video" | "audio"; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string; groupId?: string; outfitId?: string };
 
 export type H3CharacterOutfit = {
     id: string;
@@ -6,12 +9,14 @@ export type H3CharacterOutfit = {
     name: string;
     storageKey?: string;
     mimeType?: string;
+    role?: H3ReferenceRole;
     enabled: boolean;
 };
 
 export type H3CharacterVoice = {
     url: string;
     name: string;
+    description?: string;
     storageKey?: string;
     assetId?: string;
 };
@@ -21,12 +26,40 @@ export type H3CharacterGroup = {
     characterName: string;
     characterAssetId?: string;
     characterNodeId?: string;
+    /** 角色在当前 Clip 的稳定主体 ID；没有独立主体表时使用 characterNodeId。 */
+    subjectId?: string;
     voice?: H3CharacterVoice;
     outfits: H3CharacterOutfit[];
     voiceEnabled: boolean;
 };
 
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; order?: number; groupId?: string; outfitId?: string };
+export type H3CharacterGroupEditPatch = {
+    outfitEnabled?: Record<string, boolean>;
+    voiceEnabled?: boolean;
+};
+
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; description?: string; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown> };
+export type H3StoryboardShot = { id: string; duration?: number; referenceBindingId?: string };
+
+/**
+ * Clip 级「实体定义」：subject_definitions 的权威来源。
+ * 打开分镜编辑表单时按当前 Clip 引用规则生成一份默认值，用户可手动增删改。
+ * 未自定义（缺省）时按下述规则即时生成，保证旧数据行为不变。
+ */
+export type H3SubjectDefinition = {
+    /** 稳定主体 ID（对应 subjects manifest 的 id / groupId / subjectId）。 */
+    id: string;
+    /** 展示名，写入 `<Subject N> is <name>.`。 */
+    name: string;
+    englishName?: string;
+    /** 视觉来源的参考标签，如 `<Picture 2>`。 */
+    pictures?: string[];
+    /** 补充描述（profile / 服装 / 视觉特征）。 */
+    profile?: string;
+    outfits?: string[];
+    /** 主体类别，仅用于 UI 分组与配色。 */
+    role?: string;
+};
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
@@ -47,6 +80,7 @@ export type H3Segment = {
     // H3ClipCard 用它显示 hover 提示，避免前端"卡片不更新"的视觉假象。
     errorDetails?: string;
     taskMode?: string;
+    storyboardCompositeEnabled?: boolean;
     seed?: number | string;
     noiseSeedMode?: "random" | "fixed";
     noiseSeed?: number | string;
@@ -96,6 +130,31 @@ export type H3Segment = {
     faceRepairSingle?: boolean;
     faceRepairMulti?: boolean;
     globalRepair?: boolean;
+    /** Director track -> crop -> H3 r2v resample -> stitch post-pass. */
+    faceRefineEnabled?: boolean;
+    faceRefineDetector?: string;
+    faceRefineConfidence?: number;
+    faceRefineCropFactor?: number;
+    faceRefineCanvasSize?: number;
+    faceRefineDenoise?: number;
+    faceRefineSteps?: number;
+    faceRefineSampler?: string;
+    faceRefineScheduler?: string;
+    faceRefinePasteRegion?: string;
+    faceRefineMaskDilation?: number;
+    faceRefineFeather?: number;
+    faceRefineColourMatch?: number;
+    faceRefineBlend?: number;
+    /** Two-phase mode uses a durable decoded first-pass video; it does not reuse V15 latent. */
+    confirmationMode?: boolean;
+    firstPassResult?: string;
+    firstPassStorageKey?: string;
+    firstPassFingerprint?: string;
+    firstPassReady?: boolean;
+    storyboardPromptCache?: { version: 12; fingerprint: string; subjectDefinitions: string; retentionAnalysis: string };
+    seamFaceFadeFrames?: number;
+    seamColourMatch?: number;
+    seamAudioCrossfadeMs?: number;
     lowMemoryAttentionHeads?: number;
     reservedVramGb?: number;
     runtimeReserveEnabled?: boolean;
@@ -199,6 +258,18 @@ export type H3Segment = {
     referenceLongEdge?: number;
     refs?: { image?: H3Ref[]; video?: H3Ref[]; audio?: H3Ref[] };
     refItems?: H3Ref[];
+    referenceBindings?: H3ReferenceBinding[];
+    /** 当前 Clip 是否显示分镜时间轨；每段独立保存。 */
+    storyboardModeEnabled?: boolean;
+    /** 以稳定 reference binding ID 为键的 Clip 本地分镜时长（秒）。 */
+    storyboardDurations?: Record<string, number>;
+    /** 独立于参考图片的分镜项目；referenceBindingId 仅用于兼容旧的图片分镜。 */
+    storyboardShots?: H3StoryboardShot[];
+    /**
+     * Clip 级实体定义（subject_definitions 的权威来源）。缺省时由当前 Clip 引用规则生成，
+     * 用户一旦在分镜编辑里编辑过就以此为准。
+     */
+    subjectDefinitions?: H3SubjectDefinition[];
     h3CharacterGroups?: Record<string, H3CharacterGroup>;
     aspectRatio?: string;
     megapixels?: number;

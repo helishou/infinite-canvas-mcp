@@ -78,6 +78,42 @@ test("add_h3_segment：按 id 追加新段到末尾，重复 id 抛错", () => {
     ]), /已存在/);
 });
 
+test("add_h3_segment：可按 beforeSegmentId / afterSegmentId 插入并保留完整段字段", () => {
+    const project = makeProject([makeH3Node({
+        segments: [
+            { id: "s1", prompt: "开场", referenceBindings: [{ id: "r1" }] },
+            { id: "s2", prompt: "中段", referenceBindings: [{ id: "r2" }] },
+        ],
+    })]);
+    const before = applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_h3_segment", nodeId: "h3-1", beforeSegmentId: "s2", segment: { id: "s1b", prompt: "插入前", referenceBindings: [{ id: "rb" }] } },
+    ]);
+    assert.equal(before[0].insertedSegmentIndex, 1);
+    let segments = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
+    assert.deepEqual(segments.map((segment) => segment.id), ["s1", "s1b", "s2"]);
+    assert.deepEqual(segments[1].referenceBindings, [{ id: "rb" }]);
+
+    const after = applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_h3_segment", nodeId: "h3-1", afterSegmentId: "s1b", segment: { id: "s1c", prompt: "插入后" } },
+    ]);
+    assert.equal(after[0].insertedSegmentIndex, 2);
+    segments = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
+    assert.deepEqual(segments.map((segment) => segment.id), ["s1", "s1b", "s1c", "s2"]);
+});
+
+test("add_h3_segment：插入定位参数互斥且必须命中已有段", () => {
+    const project = makeProject([makeH3Node()]);
+    assert.throws(() => applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_h3_segment", nodeId: "h3-1", beforeSegmentId: "s1", afterSegmentId: "s2", segment: { id: "s3" } },
+    ]), /不能同时指定/);
+    assert.throws(() => applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_h3_segment", nodeId: "h3-1", beforeSegmentId: "missing", segment: { id: "s3" } },
+    ]), /beforeSegmentId 不存在/);
+    assert.throws(() => applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_h3_segment", nodeId: "h3-1", afterSegmentId: "missing", segment: { id: "s4" } },
+    ]), /afterSegmentId 不存在/);
+});
+
 test("delete_h3_segment：按 id 删除；远端已无该段视为 skipped", () => {
     const project = makeProject([makeH3Node()]);
     const results = applyCanvasProjectOperations(project as Record<string, unknown>, [
@@ -94,6 +130,23 @@ test("delete_h3_segment：按 id 删除；远端已无该段视为 skipped", () 
     assert.equal(second[0].skipped, true);
 });
 
+test("delete_node 后同批 delete_connections：连线已级联删除时幂等跳过", () => {
+    const project = makeProject([
+        { id: "node-1", type: "text", metadata: {} },
+        { id: "node-2", type: "text", metadata: {} },
+    ]);
+    project.connections = [{ id: "edge-1", fromNodeId: "node-1", toNodeId: "node-2" }];
+    const results = applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "delete_node", id: "node-1" },
+        { type: "delete_connections", ids: ["edge-1"] },
+    ]);
+    assert.deepEqual(results[0].deletedNodeIds, ["node-1"]);
+    assert.equal(results[1].skipped, true);
+    assert.deepEqual(results[1].deletedConnectionIds, []);
+    assert.equal(project.nodes.length, 1);
+    assert.equal(project.connections.length, 0);
+});
+
 test("replace_h3_segments：完全替换；id 集合变化是允许的", () => {
     const project = makeProject([makeH3Node()]);
     const results = applyCanvasProjectOperations(project as Record<string, unknown>, [
@@ -106,6 +159,24 @@ test("replace_h3_segments：完全替换；id 集合变化是允许的", () => {
     assert.deepEqual(results[0].createdSegmentIds?.sort(), ["x1", "x2"]);
     const segments = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
     assert.deepEqual(segments.map((s) => s.id), ["x1", "x2"]);
+});
+
+test("replace_h3_segments：省略字段继承旧值，显式空数组才清空参考", () => {
+    const project = makeProject([makeH3Node()]);
+    const segments = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
+    segments[0].refs = { image: [{ storageKey: "image:keep" }], video: [], audio: [] };
+    segments[0].refItems = [{ storageKey: "image:keep" }];
+    segments[0].referenceBindings = [{ id: "binding-keep", assetId: "asset-keep" }];
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "replace_h3_segments", nodeId: "h3-1", segments: [{ id: "s1", prompt: "重排但丢了 refs" }, { id: "s2", prompt: "保留" }] },
+    ]);
+    const preserved = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
+    assert.equal((preserved[0].referenceBindings as unknown[]).length, 1);
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "replace_h3_segments", nodeId: "h3-1", segments: [{ id: "s1", refs: { image: [], video: [], audio: [] }, refItems: [], referenceBindings: [] }, { id: "s2" }] },
+    ]);
+    const cleared = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
+    assert.deepEqual(cleared[0].referenceBindings, []);
 });
 
 test("update_node.metadata.segments 严格校验：id 集合不一致时抛错", () => {
@@ -163,4 +234,64 @@ test("混合：H3 节点级 metadata + 单段 patch 共存，revision 一次 +1"
     assert.equal(segments[1].status, "idle");
     assert.equal((node.metadata as Record<string, unknown>).status, "running");
     assert.equal((node.metadata as Record<string, unknown>).runProgress, 0.5);
+});
+
+test("referenceBindings CAS 使用结构比较，且项目参考资产不会改节点位置", () => {
+    const project = makeProject([makeH3Node()]) as Project & Record<string, unknown>;
+    const originalPosition = structuredClone((project.nodes as Array<Record<string, unknown>>)[0].position);
+    const bindings = [{ id: "binding-1", assetId: "asset-1", label: "人物", role: "character_identity", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:1" }];
+    applyCanvasProjectOperations(project, [
+        { type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { referenceBindings: bindings }, expectedFields: { referenceBindings: undefined } },
+        { type: "upsert_reference_asset", asset: { id: "asset-1", label: "人物", mediaType: "image", role: "character_identity", tags: [], storageKey: "image:1" } },
+    ]);
+    assert.deepEqual((project.nodes as Array<Record<string, unknown>>)[0].position, originalPosition);
+    assert.deepEqual(project.referenceCatalog, [{ id: "asset-1", label: "人物", mediaType: "image", role: "character_identity", tags: [], storageKey: "image:1" }]);
+    assert.throws(() => applyCanvasProjectOperations(project, [{ type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { referenceBindings: [] }, expectedFields: { referenceBindings: [{ ...bindings[0], label: "旧人物" }] } }]));
+});
+
+test("add_node：省略坐标时按当前画布向右排布，同批节点不重叠", () => {
+    const project = makeProject([]);
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_node", id: "a", nodeType: "image", width: 320, height: 240 },
+        { type: "add_node", id: "b", nodeType: "image", width: 320, height: 240 },
+        { type: "add_node", id: "c", nodeType: "image", width: 640, height: 480 },
+    ]);
+    assert.deepEqual(project.nodes.map((node) => node.position), [
+        { x: 0, y: 0 },
+        { x: 416, y: 0 },
+        { x: 832, y: 0 },
+    ]);
+});
+
+test("add_node：显式坐标仍保持调用方布局，不被自动排布覆盖", () => {
+    const project = makeProject([]);
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_node", id: "a", nodeType: "text", position: { x: 120, y: 240 } },
+    ]);
+    assert.deepEqual(project.nodes[0].position, { x: 120, y: 240 });
+});
+
+test("add_node：写入有序组成员时同步 groupSlots 和节点位置", () => {
+    const project = makeProject([
+        { id: "g1", type: "group", title: "有序组", position: { x: 0, y: 0 }, width: 760, height: 480, metadata: { orderedGroup: true, groupSlots: ["old"] } },
+        { id: "old", type: "image", title: "旧节点", position: { x: 24, y: 52 }, width: 240, height: 160, metadata: { groupId: "g1" } },
+    ]);
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "add_node", id: "new", nodeType: "image", position: { x: 1600, y: 900 }, width: 240, height: 160, metadata: { groupId: "g1" } },
+    ]);
+    const group = project.nodes.find((node) => node.id === "g1")!;
+    const added = project.nodes.find((node) => node.id === "new")!;
+    assert.deepEqual((group.metadata as Record<string, unknown>).groupSlots, ["old", "new"]);
+    assert.ok((added.position as { x: number }).x < 760 && (added.position as { y: number }).y < 480, "新节点应立即落在有序组框内");
+});
+
+test("run_generation 前的提示词更新会持久化到智能节点", () => {
+    const project = makeProject([{ id: "config-1", type: "config", title: "智能生成", position: { x: 0, y: 0 }, width: 320, height: 240, metadata: { smart: true, generationMode: "image" } }]);
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "update_node", id: "config-1", metadata: { composerContent: "新的场景提示词", prompt: "新的场景提示词" } },
+        { type: "run_generation", nodeId: "config-1", mode: "image", prompt: "新的场景提示词" },
+    ]);
+    const metadata = project.nodes[0].metadata as Record<string, unknown>;
+    assert.equal(metadata.composerContent, "新的场景提示词");
+    assert.equal(metadata.prompt, "新的场景提示词");
 });

@@ -22,8 +22,8 @@ type CanvasSidePanelStore = {
 
 export const useCanvasSidePanelStore = create<CanvasSidePanelStore>((set, get) => ({
     width: CANVAS_SIDE_PANEL_DEFAULT_WIDTH,
-    panelOpen: true,
-    panelMounted: true,
+    panelOpen: false,
+    panelMounted: false,
     panelClosing: false,
     setWidth: (width) => {
         const clamped = Math.min(CANVAS_SIDE_PANEL_MAX_WIDTH, Math.max(CANVAS_SIDE_PANEL_MIN_WIDTH, width));

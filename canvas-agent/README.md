@@ -78,10 +78,10 @@ codex plugin marketplace add "$(pwd)"
 codex plugin add infinite-canvas@infinite-canvas-local
 ```
 
-插件默认通过 npm 启动 MCP；这个命令只提供 MCP 工具，不会把 MCP 写入全局配置，也不会在退出时自动卸载：
+插件把 Codex 直接连接到常驻 Backend MCP，不会为每个任务启动 MCP 子进程，也不会把 MCP 写入全局配置：
 
-```bash
-npx -y @basketikun/infinite-canvas-backend mcp
+```text
+http://127.0.0.1:17370/mcp
 ```
 
 使用时可以直接在 Codex 里说“打开 Infinite Canvas”。网页只连接 Backend 的一个地址和 Token；旧版需要 `17371` 的客户端仍可启动 `canvas-agent`，它现在只是转发到 Backend，不再创建独立业务数据库。
@@ -91,25 +91,18 @@ npx -y @basketikun/infinite-canvas-backend mcp
 使用 Backend MCP：
 
 ```bash
-codex mcp add infinite-canvas -- npx -y @basketikun/infinite-canvas-backend mcp
+codex mcp add infinite-canvas --url http://127.0.0.1:17370/mcp
 ```
 
 `npx -y @basketikun/canvas-agent` 仅作为旧版 `17371` HTTP 地址的兼容代理；新安装不需要单独启动它。
 
-本仓库开发时可以改成，实际使用建议替换为本机绝对路径：
-
-```bash
-codex mcp add infinite-canvas -- node /path/to/infinite-canvas/canvas-agent/dist/index.js mcp
-```
-
-Canvas Agent 源码使用 TypeScript 编写，MCP 协议层使用官方 `@modelcontextprotocol/sdk`，工具入参使用 `zod` 描述。
+Canvas Agent 不再承载独立 MCP server；画布工具 schema 和 H3 插件工具由 Backend MCP 注册，Backend 是业务数据和任务的唯一权威。
 
 如果希望终端里的 Codex 不被 MCP 审批卡住，可以在 `~/.codex/config.toml` 里给这个 MCP 设置自动放行：
 
 ```toml
 [mcp_servers.infinite-canvas]
-command = "npx"
-args = ["-y", "@basketikun/infinite-canvas-backend", "mcp"]
+url = "http://127.0.0.1:17370/mcp"
 default_tools_approval_mode = "approve"
 ```
 
@@ -152,14 +145,6 @@ Claude Code Adapter 代码暂时保留，但当前网页侧边栏只开放 Codex
 
 如果希望 Claude Code 也能操作画布，需要给 Claude Code 添加同一个 MCP。建议用 user scope，避免 Canvas Agent 从不同目录启动时找不到配置：
 
-```bash
-claude mcp add --scope user --transport stdio infinite-canvas -- npx -y @basketikun/infinite-canvas-backend mcp
-```
-
-本仓库开发时可以改成：
-
-```bash
-claude mcp add --scope user --transport stdio infinite-canvas -- node /path/to/infinite-canvas/canvas-agent/dist/index.js mcp
-```
+将 Claude Code 的 MCP 配置指向同一个 Backend HTTP MCP：`http://127.0.0.1:17370/mcp`。
 
 Canvas Agent 调用 Claude Code 时会默认带上 `--allowedTools mcp__infinite-canvas__*`，画布写操作仍由网页侧边栏确认。

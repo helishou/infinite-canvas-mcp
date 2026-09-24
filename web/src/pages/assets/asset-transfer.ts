@@ -3,7 +3,7 @@ import { saveAs } from "file-saver";
 import { createZip, readZip } from "@/lib/zip";
 import { getMediaBlob, setMediaBlob } from "@/services/file-storage";
 import { getImageBlob, setImageBlob } from "@/services/image-storage";
-import type { Asset, AudioAsset, CharacterAsset, ImageAsset, VideoAsset } from "@/stores/use-asset-store";
+import type { Asset, AudioAsset, CharacterAsset, ImageAsset, VideoAsset, SceneAsset } from "@/stores/use-asset-store";
 
 type AssetExportFile = {
     app: "infinite-canvas";
@@ -23,11 +23,14 @@ type AssetExportItem = {
 export async function exportAssets(assets: Asset[], filename: string) {
     const files: AssetExportItem[] = [];
     const zipFiles: { name: string; data: BlobPart }[] = [];
+    const requestedKeys = new Set<string>();
 
     await Promise.all(
         assets.map(async (asset) => {
             if (asset.kind === "image") {
                 if (!asset.data.storageKey) return;
+                if (requestedKeys.has(asset.data.storageKey)) return;
+                requestedKeys.add(asset.data.storageKey);
                 const blob = await getImageBlob(asset.data.storageKey);
                 if (!blob) return;
                 const path = `files/${safeFileName(asset.data.storageKey)}.${fileExtension(blob.type, "image")}`;
@@ -35,6 +38,8 @@ export async function exportAssets(assets: Asset[], filename: string) {
                 zipFiles.push({ name: path, data: blob });
             } else if (asset.kind === "video" || asset.kind === "audio") {
                 if (!asset.data.storageKey) return;
+                if (requestedKeys.has(asset.data.storageKey)) return;
+                requestedKeys.add(asset.data.storageKey);
                 const blob = await getMediaBlob(asset.data.storageKey);
                 if (!blob) return;
                 const path = `files/${safeFileName(asset.data.storageKey)}.${fileExtension(blob.type, asset.kind)}`;
@@ -44,6 +49,27 @@ export async function exportAssets(assets: Asset[], filename: string) {
                 // 角色资产的每一张图都打包到 zip，并把 storageKey 一起导出，导入端按 storageKey 还原
                 for (const image of asset.data.images) {
                     if (!image.storageKey) continue;
+                    if (requestedKeys.has(image.storageKey)) continue;
+                    requestedKeys.add(image.storageKey);
+                    const blob = await getImageBlob(image.storageKey);
+                    if (!blob) continue;
+                    const path = `files/${safeFileName(image.storageKey)}.${fileExtension(blob.type, "image")}`;
+                    files.push({ storageKey: image.storageKey, path, mimeType: blob.type || image.mimeType, bytes: blob.size });
+                    zipFiles.push({ name: path, data: blob });
+                }
+                if (asset.data.voiceStorageKey && !requestedKeys.has(asset.data.voiceStorageKey)) {
+                    requestedKeys.add(asset.data.voiceStorageKey);
+                    const blob = await getMediaBlob(asset.data.voiceStorageKey);
+                    if (blob) {
+                        const path = `files/${safeFileName(asset.data.voiceStorageKey)}.${fileExtension(blob.type, "audio")}`;
+                        files.push({ storageKey: asset.data.voiceStorageKey, path, mimeType: blob.type || "audio/*", bytes: blob.size });
+                        zipFiles.push({ name: path, data: blob });
+                    }
+                }
+            } else if (asset.kind === "scene") {
+                for (const image of [asset.data.image, asset.data.colorCard].filter((item): item is NonNullable<SceneAsset["data"]["colorCard"]> => Boolean(item))) {
+                    if (!image.storageKey || requestedKeys.has(image.storageKey)) continue;
+                    requestedKeys.add(image.storageKey);
                     const blob = await getImageBlob(image.storageKey);
                     if (!blob) continue;
                     const path = `files/${safeFileName(image.storageKey)}.${fileExtension(blob.type, "image")}`;
@@ -57,6 +83,24 @@ export async function exportAssets(assets: Asset[], filename: string) {
     const data: AssetExportFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), assets, files };
     const zip = await createZip([{ name: "assets.json", data: JSON.stringify(data, null, 2) }, ...zipFiles]);
     saveAs(zip, filename);
+}
+
+export async function exportCharacterImages(asset: CharacterAsset, filename: string) {
+    const files: { name: string; data: BlobPart }[] = [];
+    for (const [index, image] of asset.data.images.entries()) {
+        let blob = image.storageKey ? await getImageBlob(image.storageKey) : null;
+        if (!blob && image.url) {
+            try {
+                const response = await fetch(image.url);
+                if (response.ok) blob = await response.blob();
+            } catch { /* 单张远程图片不可读时继续导出其余图片 */ }
+        }
+        if (!blob) continue;
+        const label = safeFileName(image.outfit || image.name || `image-${index + 1}`) || `image-${index + 1}`;
+        files.push({ name: `${String(index + 1).padStart(2, "0")}-${label}.${fileExtension(blob.type || image.mimeType, "image")}`, data: blob });
+    }
+    if (!files.length) throw new Error("character images unavailable");
+    saveAs(await createZip(files), filename);
 }
 
 export async function readAssetPackage(file: File) {

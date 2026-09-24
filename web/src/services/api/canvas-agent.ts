@@ -180,7 +180,14 @@ export function setCodexSkillEnabled(endpoint: string, token: string, skill: Pic
 
 export async function fetchAgentJson<T>(endpoint: string, token: string, path: string, init?: RequestInit) {
     const url = `${endpoint}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
-    const res = await fetch(url, init);
+    let res: Response;
+    try {
+        res = await fetch(url, init);
+    } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") throw error;
+        const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
+        throw new Error(`无法连接 Canvas Agent：${init?.method || "GET"} ${endpoint}${path}（${reason}）。请确认 Agent 已启动、地址和端口正确；若只在浏览器报错，还需检查当前网页来源是否被 Agent 允许。`);
+    }
     const data = (await res.json().catch(() => ({}))) as T & { error?: string; msg?: string };
     if (!res.ok) throw new AgentApiError(res.status, data);
     return data;

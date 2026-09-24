@@ -1,10 +1,10 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Button, Empty, Input, Spin, Tag, message, Select, Switch } from "antd";
-import { Upload as UploadIcon, Upload, Play, Trash2, Settings2, Workflow, Code, Server, History } from "lucide-react";
-import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs } from "@/services/backend-api";
-import { renameWorkflowTitle } from "@/services/api/workflows";
+import { Button, Empty, Input, Spin, Tabs, Tag, message, Select, Switch } from "antd";
+import { Upload as UploadIcon, Upload, Download, Play, Trash2, Settings2, Workflow, Code, History } from "lucide-react";
+import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs, uploadBackendMedia, backendMediaUrl } from "@/services/backend-api";
+import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, pollWorkflowTask, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
-import { InstancesModal } from "./instances-modal";
+import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
 import "../../styles/workflow-graph.css";
 import type { WorkflowConfig, WorkflowField } from "@/types/workflow";
 
@@ -22,13 +22,7 @@ type WorkflowDetail = {
     builtin: boolean;
 };
 
-type TaskResult = {
-    taskId: string;
-    promptId: string;
-    media: Array<{ url: string; mimeType: string; filename: string; storageKey?: string }>;
-    status: { status_str: string; completed: boolean };
-    error?: string;
-};
+type TaskResult = WorkflowRunResult;
 
 export default function WorkflowsPage() {
     const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
@@ -36,8 +30,8 @@ export default function WorkflowsPage() {
     const [selected, setSelected] = useState<WorkflowDetail | null>(null);
     const [running, setRunning] = useState(false);
     const [taskResult, setTaskResult] = useState<TaskResult | null>(null);
+    const [section, setSection] = useState("workflows");
     const [activeTab, setActiveTab] = useState("structure");
-    const [instancesOpen, setInstancesOpen] = useState(false);
     const [historyLogs, setHistoryLogs] = useState<Array<{ id: string; workflow: string; prompt: string; status: string; createdAt: string; outputs: Array<{ url: string; mimeType: string }>; error?: string }>>([]);
     const [loadingHistory, setLoadingHistory] = useState(false);
     const [editingName, setEditingName] = useState<string | null>(null);
@@ -58,16 +52,39 @@ export default function WorkflowsPage() {
         setLoading(true);
         try {
             const text = await file.text();
-            const workflow = JSON.parse(text);
-            await request("POST", "/api/workflows", { name: file.name.replace(/\.json$/, ""), workflow });
-            message.success("工作流上传成功");
-            fetchWorkflows();
+            const value = JSON.parse(text) as Record<string, unknown>;
+            if (value.format === "infinite-canvas-workflow") {
+                await importWorkflowPackage(file.name, value as WorkflowPackage);
+                message.success("工作流包导入成功");
+            } else {
+                await request("POST", "/api/workflows", { name: file.name.replace(/\.json$/, ""), workflow: value });
+                message.success("ComfyUI 工作流导入成功");
+            }
+            await fetchWorkflows();
         } catch (err) {
-            message.error(err instanceof Error ? err.message : "上传失败");
+            message.error(err instanceof Error ? err.message : "导入失败");
         } finally {
             setLoading(false);
         }
         return false;
+    };
+
+    const handleExport = async () => {
+        if (!selected) return;
+        try {
+            const workflowPackage = await exportWorkflowPackage(selected.name);
+            const title = (selected.config.title || selected.name.replace(/^custom\//, "").replace(/\.json$/, ""))
+                .replace(/[\\/:*?"<>|]+/g, "-");
+            const url = URL.createObjectURL(new Blob([JSON.stringify(workflowPackage, null, 2)], { type: "application/json" }));
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = `${title}.workflow.json`;
+            anchor.click();
+            URL.revokeObjectURL(url);
+            message.success("工作流包已导出");
+        } catch (err) {
+            message.error(err instanceof Error ? err.message : "导出失败");
+        }
     };
 
     const handleDelete = async (name: string) => {
@@ -125,10 +142,8 @@ export default function WorkflowsPage() {
         setRunning(true);
         setTaskResult(null);
         try {
-            const result = await request<TaskResult>("POST", `/api/workflows/${encodeURIComponent(selected.name)}/run`, {
-                fields,
-                config: selected.config,
-            });
+            const { taskId } = await runWorkflow(selected.name, fields, selected.config);
+            const result = await pollWorkflowTask(taskId);
             setTaskResult(result);
             if (result.status.status_str === "success") {
                 message.success("工作流执行完成");
@@ -184,29 +199,37 @@ export default function WorkflowsPage() {
     };
 
     return (
-        <div className="mx-auto max-w-7xl p-6">
-            <div className="flex items-center justify-between">
-                <h1 className="flex items-center gap-2 text-2xl font-semibold">
-                    <Workflow className="size-6" /> 工作流管理
-                </h1>
-                <Button icon={<Server className="size-4" />} onClick={() => setInstancesOpen(true)}>
-                    管理后端
-                </Button>
+        <div className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-6 py-4">
+            <div className="shrink-0">
+                <h1 className="flex items-center gap-2 text-xl font-semibold"><Workflow className="size-5" /> ComfyUI</h1>
+                <p className="mt-0.5 text-xs text-stone-500">集中管理工作流、本地模型和运行环境。</p>
             </div>
 
-            <div className="mt-6 grid grid-cols-12 gap-6">
-                <div className="col-span-8">
+            <Tabs
+                className="mt-2 shrink-0 [&_.ant-tabs-nav]:!mb-3"
+                activeKey={section}
+                onChange={setSection}
+                items={[
+                    { key: "workflows", label: "工作流库" },
+                    { key: "models", label: "模型" },
+                    { key: "runtime", label: "运行环境" },
+                ]}
+            />
+
+            <div className={`min-h-0 flex-1 ${section === "workflows" ? "overflow-hidden" : "overflow-y-auto"}`}>
+            {section === "workflows" ? <div className="grid h-full min-h-0 grid-cols-12 gap-4">
+                <div className="col-span-8 min-h-0">
                     {!selected ? (
-                        <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
+                        <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
                             <div className="text-center">
-                                <Workflow className="mx-auto size-12 text-stone-300" />
+                                <Workflow className="mx-auto size-10 text-stone-300" />
                                 <p className="mt-2 text-sm text-stone-500">选择工作流查看详情</p>
                             </div>
                         </div>
                     ) : (
-                        <div className="space-y-4">
-                            <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-stone-900">
-                                <div>
+                        <div className="flex h-full min-h-0 flex-col gap-3">
+                            <div className="flex shrink-0 items-center justify-between rounded-lg border border-stone-200 bg-white px-4 py-3 dark:border-stone-700 dark:bg-stone-900">
+                                <div className="min-w-0">
                                     {editingName === selected.name ? (
                                         <Input
                                             autoFocus
@@ -215,11 +238,11 @@ export default function WorkflowsPage() {
                                             onChange={(e) => setEditValue(e.target.value)}
                                             onPressEnter={() => handleRename(selected.name)}
                                             onBlur={() => handleRename(selected.name)}
-                                            className="mb-1 w-full"
+                                            className="w-full"
                                         />
                                     ) : (
                                         <h2
-                                            className={`text-lg font-semibold ${selected.builtin ? "" : "cursor-pointer hover:text-blue-600"}`}
+                                            className={`truncate text-base font-semibold ${selected.builtin ? "" : "cursor-pointer hover:text-blue-600"}`}
                                             title={selected.builtin ? "" : "双击重命名"}
                                             onDoubleClick={() => {
                                                 if (selected.builtin) return;
@@ -230,40 +253,45 @@ export default function WorkflowsPage() {
                                             {selected.config.title || selected.name}
                                         </h2>
                                     )}
-                                    <p className="text-sm text-stone-500">{selected.name.replace(/^custom\//, "")} · {Object.keys(selected.workflow).length} 个节点 · {selected.config.fields.length} 字段</p>
+                                    <p className="mt-0.5 truncate text-xs text-stone-500">{selected.name.replace(/^custom\//, "")} · {Object.keys(selected.workflow).length} 个节点 · {selected.config.fields.length} 字段</p>
                                 </div>
-                                <div className="flex gap-2">
-                                    <Button danger icon={<Trash2 className="size-4" />} onClick={() => handleDelete(selected.name)}>
-                                        删除
+                                <div className="ml-3 flex shrink-0 gap-2">
+                                    <Button size="small" icon={<Download className="size-3.5" />} onClick={handleExport}>
+                                        导出
                                     </Button>
+                                    {!selected.builtin && (
+                                        <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => handleDelete(selected.name)}>
+                                            删除
+                                        </Button>
+                                    )}
                                 </div>
                             </div>
 
-                            <div className="rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
-                                <div className="flex border-b border-stone-200 dark:border-stone-700">
+                            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
+                                <div className="flex shrink-0 border-b border-stone-200 dark:border-stone-700">
                                     <button
-                                        className={`flex items-center gap-2 px-4 py-3 text-sm transition ${activeTab === "structure" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
+                                        className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === "structure" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
                                         onClick={() => setActiveTab("structure")}
                                     >
-                                        <Code className="size-4" /> 节点图
+                                        <Code className="size-3.5" /> 节点图
                                     </button>
                                     <button
-                                        className={`flex items-center gap-2 px-4 py-3 text-sm transition ${activeTab === "run" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
+                                        className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === "run" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
                                         onClick={() => setActiveTab("run")}
                                     >
-                                        <Play className="size-4" /> 运行
+                                        <Play className="size-3.5" /> 运行
                                     </button>
                                     <button
-                                        className={`flex items-center gap-2 px-4 py-3 text-sm transition ${activeTab === "history" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
+                                        className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === "history" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
                                         onClick={() => setActiveTab("history")}
                                     >
-                                        <History className="size-4" /> 历史 ({historyLogs.length})
+                                        <History className="size-3.5" /> 历史 ({historyLogs.length})
                                     </button>
                                 </div>
 
-                                <div className="p-4">
+                                <div className="min-h-0 flex-1 overflow-y-auto p-3">
                                     {activeTab === "structure" && (
-                                        <div className="h-[500px]">
+                                        <div className="h-full min-h-[280px]">
                                             <WorkflowGraphPanel
                                                 name={selected.name}
                                                 workflow={selected.workflow}
@@ -308,7 +336,11 @@ export default function WorkflowsPage() {
                                                                 {log.outputs.length > 0 && (
                                                                     <div className="mt-1 flex gap-1">
                                                                         {log.outputs.slice(0, 4).map((o, i) => (
-                                                                            <img key={i} src={o.url} alt="" className="h-10 w-10 rounded object-cover" />
+                                                                            o.mimeType?.startsWith("audio/")
+                                                                                ? <audio key={i} src={o.url} controls className="h-10 w-56" />
+                                                                                : o.mimeType?.startsWith("video/")
+                                                                                    ? <video key={i} src={o.url} className="h-10 w-16 rounded object-cover" />
+                                                                                    : <img key={i} src={o.url} alt="" className="h-10 w-10 rounded object-cover" />
                                                                         ))}
                                                                         {log.outputs.length > 4 && (
                                                                             <span className="flex h-10 w-10 items-center justify-center rounded bg-stone-100 text-xs text-stone-500">+{log.outputs.length - 4}</span>
@@ -329,13 +361,14 @@ export default function WorkflowsPage() {
                     )}
                 </div>
 
-                <div className="col-span-4 space-y-4">
-                    <div className="relative flex items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-900">
-                        <UploadIcon className="size-4 shrink-0 text-stone-400" />
-                        <span className="text-sm text-stone-600 dark:text-stone-300">点击或拖拽上传 .json</span>
+                <div className="col-span-4 flex min-h-0 flex-col gap-3">
+                    <div className="relative flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-900">
+                        {loading ? <Spin size="small" /> : <UploadIcon className="size-4 shrink-0 text-stone-400" />}
+                        <span className="text-sm text-stone-600 dark:text-stone-300">{loading ? "正在导入…" : "导入 ComfyUI JSON / 工作流包"}</span>
                         <input
                             type="file"
                             accept=".json"
+                            disabled={loading}
                             onChange={async (e) => {
                                 const file = e.target.files?.[0];
                                 if (file) { await handleUpload(file); e.target.value = ""; }
@@ -344,18 +377,18 @@ export default function WorkflowsPage() {
                         />
                     </div>
 
-                    <div className="rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
-                        <div className="border-b border-stone-200 px-4 py-3 dark:border-stone-700">
+                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
+                        <div className="shrink-0 border-b border-stone-200 px-3 py-2.5 dark:border-stone-700">
                             <h2 className="text-sm font-medium">工作流列表</h2>
                         </div>
                         {workflows.length === 0 ? (
-                            <div className="p-6"><Empty description="暂无工作流" /></div>
+                            <div className="flex flex-1 items-center justify-center p-6"><Empty description="暂无工作流" /></div>
                         ) : (
-                            <div className="divide-y divide-stone-200 dark:divide-stone-700">
+                            <div className="min-h-0 flex-1 divide-y divide-stone-200 overflow-y-auto dark:divide-stone-700">
                                 {workflows.map((wf) => (
                                     <div
                                         key={wf.name}
-                                        className={`cursor-pointer px-4 py-3 transition hover:bg-stone-50 dark:hover:bg-stone-800 ${selected?.name === wf.name ? "bg-stone-100 dark:bg-stone-800" : ""}`}
+                                        className={`cursor-pointer px-3 py-2.5 transition hover:bg-stone-50 dark:hover:bg-stone-800 ${selected?.name === wf.name ? "bg-stone-100 dark:bg-stone-800" : ""}`}
                                         onClick={() => { if (editingName !== wf.name) handleLoadDetail(wf.name); }}
                                     >
                                         <div className="flex items-center justify-between">
@@ -385,7 +418,7 @@ export default function WorkflowsPage() {
                                                         {wf.title}
                                                     </p>
                                                 )}
-                                                <p className="text-xs text-stone-500">{wf.name.replace(/^custom\//, "")}</p>
+                                                <p className="mt-0.5 truncate text-xs text-stone-500">{wf.name.replace(/^custom\//, "")}</p>
                                             </div>
                                             <Tag color="blue">{wf.fieldCount} 字段</Tag>
                                         </div>
@@ -395,9 +428,8 @@ export default function WorkflowsPage() {
                         )}
                     </div>
                 </div>
+            </div> : section === "models" ? <ComfyChannelsPanel /> : <ComfyRuntimePanel />}
             </div>
-
-            <InstancesModal open={instancesOpen} onClose={() => setInstancesOpen(false)} />
         </div>
     );
 }
@@ -411,55 +443,70 @@ type RunPanelProps = {
     result: TaskResult | null;
 };
 
-type ImageFieldUploadProps = {
+type MediaFieldUploadProps = {
     fieldId: string;
     value: string;
+    kind: "image" | "audio" | "video";
     onChange: (value: string) => void;
 };
 
-function ImageFieldUpload({ fieldId, value, onChange }: ImageFieldUploadProps) {
+function MediaFieldUpload({ fieldId, value, kind, onChange }: MediaFieldUploadProps) {
     const inputRef = useRef<HTMLInputElement>(null);
     const [previewUrl, setPreviewUrl] = useState(value);
+    const [filename, setFilename] = useState("");
+    const [uploading, setUploading] = useState(false);
+
+    const previewValue = (source: string) => {
+        if (!source.startsWith("/media/")) return source;
+        const storageKey = decodeURIComponent(source.slice("/media/".length).split("?", 1)[0]);
+        return backendMediaUrl(storageKey);
+    };
 
     useEffect(() => {
-        if (value) setPreviewUrl(value);
-        localStorage.removeItem(`wf_image_${fieldId}`);
-    }, [fieldId, value]);
+        setPreviewUrl(previewValue(value));
+        if (!value) setFilename("");
+        if (kind === "image") localStorage.removeItem(`wf_image_${fieldId}`);
+    }, [fieldId, kind, value]);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         e.target.value = "";
         if (!file) return;
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-        });
-        setPreviewUrl(dataUrl);
-        onChange(dataUrl);
+        setUploading(true);
+        try {
+            const media = await uploadBackendMedia({ name: file.name, blob: file, mimeType: file.type || undefined, category: "input" });
+            setPreviewUrl(backendMediaUrl(media.storageKey));
+            setFilename(file.name);
+            onChange(media.url);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "媒体上传失败");
+        } finally {
+            setUploading(false);
+        }
     };
 
     return (
         <div className="space-y-2">
             <div className="flex items-center gap-2">
-                <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
-                <Button size="small" icon={<Upload className="size-3" />} onClick={() => inputRef.current?.click()}>
-                    {previewUrl ? "更换图片" : "选择图片"}
+                <input ref={inputRef} type="file" accept={`${kind}/*`} className="hidden" onChange={handleFileChange} />
+                <Button size="small" loading={uploading} icon={<Upload className="size-3" />} onClick={() => inputRef.current?.click()}>
+                    {previewUrl ? `更换${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}` : `选择${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}`}
                 </Button>
                 {previewUrl && (
                     <>
-                        <Tag color="blue" className="text-xs truncate max-w-32">已选择图片</Tag>
-                        <Button size="small" danger type="text" onClick={() => { setPreviewUrl(""); onChange(""); }}>
+                        <Tag color="blue" className="text-xs truncate max-w-48">{filename || `已选择${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}`}</Tag>
+                        <Button size="small" danger type="text" onClick={() => { setPreviewUrl(""); setFilename(""); onChange(""); }}>
                             <Trash2 className="size-3" />
                         </Button>
                     </>
                 )}
             </div>
             {previewUrl && (
-                <div className="relative inline-block">
-                    <img src={previewUrl} alt="" className="h-24 w-24 rounded object-cover border border-stone-200 dark:border-stone-700" />
-                </div>
+                kind === "audio"
+                    ? <audio src={previewUrl} controls className="w-full" />
+                    : kind === "video"
+                        ? <video src={previewUrl} controls className="max-h-64 w-full rounded border border-stone-200 dark:border-stone-700" />
+                        : <div className="relative inline-block"><img src={previewUrl} alt="" className="h-24 w-24 rounded object-cover border border-stone-200 dark:border-stone-700" /></div>
             )}
         </div>
     );
@@ -494,7 +541,11 @@ function RunPanel({ config, onRun, running, result }: RunPanelProps) {
                             {field.type === "text" ? (
                                 <Input.TextArea value={fields[field.id] || ""} onChange={(e) => setFields((p) => ({ ...p, [field.id]: e.target.value }))} rows={2} placeholder={field.name} />
                             ) : field.type === "image" ? (
-                                <ImageFieldUpload fieldId={field.id} value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
+                                <MediaFieldUpload fieldId={field.id} kind="image" value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
+                            ) : field.type === "audio" ? (
+                                <MediaFieldUpload fieldId={field.id} kind="audio" value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
+                            ) : field.type === "video" ? (
+                                <MediaFieldUpload fieldId={field.id} kind="video" value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
                             ) : field.type === "dropdown" ? (
                                 <Select value={fields[field.id] || undefined} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} options={(field.options ?? []).map((o) => ({ label: o, value: o }))} placeholder={field.name} className="w-full" />
                             ) : field.type === "boolean" ? (

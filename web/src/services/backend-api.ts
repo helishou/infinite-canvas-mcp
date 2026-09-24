@@ -1,13 +1,17 @@
 /** 总后台 API client（Web 端）。 */
 
 import { getBackendTokenShared } from "@/lib/backend-token";
+import { backendConnection } from "@/lib/backend-connection";
+import { nanoid } from "nanoid";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult } from "@basketikun/canvas-agent/generation-contract";
-import { CANVAS_GENERATION_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
+import { CANVAS_GENERATION_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
+import { ensureCanvasDraftLease } from "@/lib/canvas/canvas-draft-session";
 
 export type BackendMediaResult = {
     storageKey: string;
     url: string;
     mimeType: string;
+    filename?: string;
     bytes: number;
     width: number | null;
     height: number | null;
@@ -17,10 +21,17 @@ export type BackendMediaResult = {
 export type BackendTokenResponse = { ok: boolean; token: string };
 
 const DEFAULT_URL = "http://127.0.0.1:17370";
+const canvasClientId = `browser:${nanoid()}`;
+
+export { getCanvasDraftSessionId } from "@/lib/canvas/canvas-draft-session";
+
+export function getCanvasCollaborationClient() {
+    return { clientId: canvasClientId, kind: "browser" as const, label: "浏览器画布" };
+}
 
 export function getBackendUrl(): string {
     if (typeof window === "undefined") return DEFAULT_URL;
-    return localStorage.getItem("backend-url") || DEFAULT_URL;
+    return backendConnection().url;
 }
 
 export class BackendApiError extends Error {
@@ -28,14 +39,23 @@ export class BackendApiError extends Error {
 }
 
 export async function request<T = unknown>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
+    if (method !== "GET" && /^\/canvas\/projects(?:\/|$)/.test(path)) await ensureCanvasDraftLease();
     const token = getBackendTokenShared();
-    const url = `${getBackendUrl().replace(/\/$/, "")}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
-    const res = await fetch(url, {
-        method,
-        headers: body ? { "content-type": "application/json" } : {},
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: options?.signal,
-    });
+    const backendUrl = getBackendUrl().replace(/\/$/, "");
+    const url = `${backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+    let res: Response;
+    try {
+        res = await fetch(url, {
+            method,
+            headers: body ? { "content-type": "application/json" } : {},
+            body: body !== undefined ? JSON.stringify(body) : undefined,
+            signal: options?.signal,
+        });
+    } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") throw error;
+        const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
+        throw new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
+    }
     const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
     if (!res.ok) {
         // 把后端返回的 error 字符串完整透传（之前 30 字符截断导致 500 错看不到）
@@ -55,11 +75,11 @@ export type BackendRuntimeTask = {
     segmentId?: string;
     executor?: string;
     model?: string;
-    status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+    status: "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled";
     progress: number;
     input?: Record<string, unknown>;
     params?: Record<string, unknown>;
-    result?: { media?: BackendMediaResult[]; images?: BackendMediaResult[] } | null;
+    result?: { media?: BackendMediaResult[]; images?: BackendMediaResult[]; texts?: Array<{ index?: number; content: string }>; confirmation?: { pending: Array<{ nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string; firstPassStorageKey?: string }> } } | null;
     outputs?: Array<Record<string, unknown>>;
     error?: string | null;
     createdAt?: string;
@@ -93,7 +113,8 @@ export async function backendHealth(): Promise<{ ok: boolean; protocolVersion?: 
 /** 自动发现 backend token（读 backend.json）。 */
 export async function discoverBackendToken(): Promise<BackendTokenResponse> {
     try {
-        const res = await fetch(`${getBackendUrl().replace(/\/$/, "")}/config`);
+        const token = getBackendTokenShared();
+        const res = await fetch(`${getBackendUrl().replace(/\/$/, "")}/config`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
         if (!res.ok) return { ok: false, token: "" };
         const data = await res.json();
         return { ok: Boolean(data.ok), token: data.token || "" };
@@ -124,22 +145,109 @@ export function deleteBackendCanvasFolder(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/folders/${encodeURIComponent(id)}`);
 }
 
-export function saveBackendProjects(projects: Record<string, unknown>[]) {
-    return request<{ ok: boolean; projects?: Record<string, unknown>[] }>("PUT", "/canvas/projects", { projects });
+export function deleteBackendDramaProject(id: string) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/projects/${encodeURIComponent(id)}`);
 }
 
-export function upsertBackendProject(project: Record<string, unknown>) {
-    return request<{ ok: boolean; project?: Record<string, unknown> }>("POST", "/canvas/projects", project);
+export type DramaEpisode = {
+    id: string;
+    dramaId: string;
+    episodeNumber: number;
+    title: string;
+    synopsis: string;
+    fullPlot: string;
+    canvasId: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+
+export function fetchBackendDramaEpisodes(dramaId: string) {
+    return request<{ ok: boolean; dramaId: string; episodes?: DramaEpisode[] }>("GET", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`);
 }
 
-export function applyBackendCanvasOperations(projectId: string, operations: Array<Record<string, unknown>>, expectedRevision?: number) {
-    return request<{ ok: boolean; operations: Array<Record<string, unknown>>; revision: number; updatedAt: string; operationResults?: unknown[] }>(
-        "POST", `/canvas/projects/${encodeURIComponent(projectId)}/ops?response=delta`, { expectedRevision, operations },
+export function fetchBackendDramaEpisode(episodeId: string) {
+    return request<{ ok: boolean; episode?: DramaEpisode; canvas?: Record<string, unknown> | null }>("GET", `/drama/episodes/${encodeURIComponent(episodeId)}`);
+}
+
+export function fetchBackendCanvasDrama(projectId: string) {
+    return request<{ ok: boolean; projectId: string; episode?: DramaEpisode | null; drama?: { id: string; name: string } | null }>("GET", `/canvas/projects/${encodeURIComponent(projectId)}/drama`);
+}
+
+export function createBackendDramaEpisode(dramaId: string, input: { episodeNumber: number; title?: string; synopsis?: string; fullPlot?: string; canvasId?: string | null }) {
+    return request<{ ok: boolean; episode?: DramaEpisode }>("POST", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`, input);
+}
+
+export function updateBackendDramaEpisode(episodeId: string, patch: Partial<Pick<DramaEpisode, "episodeNumber" | "title" | "synopsis" | "fullPlot" | "canvasId">>) {
+    return request<{ ok: boolean; episode?: DramaEpisode; canvas?: Record<string, unknown> | null }>("PATCH", `/drama/episodes/${encodeURIComponent(episodeId)}`, patch);
+}
+
+export function deleteBackendDramaEpisode(episodeId: string) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/episodes/${encodeURIComponent(episodeId)}`);
+}
+
+export type DramaCustomAsset = {
+    id: string;
+    title: string;
+    dramaId?: string | null;
+    data: { dramaId: string; storageKey: string; fileName: string; mimeType: string; bytes: number };
+    metadata?: { extension?: string };
+    createdAt: string;
+    updatedAt: string;
+};
+
+export function fetchBackendDramaAssets(dramaId: string) {
+    return request<{ ok: boolean; dramaId: string; assets?: DramaCustomAsset[] }>("GET", `/drama/projects/${encodeURIComponent(dramaId)}/assets`);
+}
+
+export async function uploadBackendDramaAsset(dramaId: string, file: File) {
+    const token = getBackendTokenShared();
+    const url = `${getBackendUrl().replace(/\/$/, "")}/drama/projects/${encodeURIComponent(dramaId)}/assets?token=${encodeURIComponent(token)}`;
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": file.type || "application/octet-stream", "x-asset-name": encodeURIComponent(file.name) },
+        body: file,
+    });
+    const data = await response.json().catch(() => ({})) as { ok?: boolean; asset?: DramaCustomAsset; error?: string };
+    if (!response.ok || !data.asset) throw new BackendApiError(`上传剧目资产失败：${data.error || `HTTP ${response.status}`}`, response.status, data);
+    return data.asset;
+}
+
+export function deleteBackendDramaAsset(dramaId: string, assetId: string) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/projects/${encodeURIComponent(dramaId)}/assets/${encodeURIComponent(assetId)}`);
+}
+
+export function createBackendProject(project: Record<string, unknown>) {
+    return request<{ ok: boolean; project: Record<string, unknown>; created: boolean }>("POST", "/canvas/projects", project);
+}
+
+export function applyBackendCanvasOperations(projectId: string, operations: Array<Record<string, unknown>>, baseRevision?: number, operationId = nanoid(), source = getCanvasCollaborationClient()) {
+    return request<{ ok: boolean; project: Record<string, unknown>; revision: number; operationId: string; operationResults?: unknown[] }>(
+        "POST", `/canvas/projects/${encodeURIComponent(projectId)}/ops`, { baseRevision, operations, operationId, source },
     );
 }
 
 export function deleteBackendProject(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/projects/${encodeURIComponent(id)}`);
+}
+
+export function fetchProjectReferenceAssets(projectId: string) {
+    return request<{ ok: boolean; assets: import("@/types/canvas-plugin").CanvasReferenceAsset[] }>("GET", `/canvas/projects/${encodeURIComponent(projectId)}/reference-assets`);
+}
+
+export function upsertProjectReferenceAsset(projectId: string, asset: Record<string, unknown>) {
+    return request<{ ok: boolean; asset: import("@/types/canvas-plugin").CanvasReferenceAsset }>("POST", `/canvas/projects/${encodeURIComponent(projectId)}/reference-assets`, asset);
+}
+
+export function upsertProjectReferenceAssets(projectId: string, assets: Array<Record<string, unknown>>) {
+    return request<{ ok: boolean; assets: import("@/types/canvas-plugin").CanvasReferenceAsset[] }>("POST", `/canvas/projects/${encodeURIComponent(projectId)}/reference-assets/batch`, { assets });
+}
+
+export function deleteProjectReferenceAsset(projectId: string, assetId: string) {
+    return request<{ ok: boolean; deleted: number }>("DELETE", `/canvas/projects/${encodeURIComponent(projectId)}/reference-assets/${encodeURIComponent(assetId)}`);
+}
+
+export function validateProjectReferences(projectId: string, nodeId: string, segmentId: string) {
+    return request<{ ok: boolean; validation: import("@/types/canvas-plugin").CanvasReferenceValidation }>("POST", `/canvas/projects/${encodeURIComponent(projectId)}/reference-validation`, { nodeId, segmentId });
 }
 
 export type DetectImageSplitLineInsetResult = {
@@ -163,10 +271,11 @@ export function detectImageSplitLineInset(input: { dataUrl: string; rows: number
 
 // ── Assets ───────────────────────────────────────────────────────────────
 
-export function fetchBackendAssets(options: { kind?: string; folderId?: string } = {}) {
+export function fetchBackendAssets(options: { kind?: string; folderId?: string; dramaId?: string } = {}) {
     const params = new URLSearchParams();
     if (options.kind) params.set("kind", options.kind);
     if (options.folderId) params.set("folderId", options.folderId);
+    if (options.dramaId) params.set("dramaId", options.dramaId);
     const qs = params.toString();
     return request<{ ok: boolean; assets?: unknown[]; folders?: unknown[] }>("GET", `/canvas/assets${qs ? `?${qs}` : ""}`);
 }
@@ -202,6 +311,10 @@ export function fetchBackendInstalledPlugins() {
 
 export function saveBackendInstalledPlugins(plugins: InstalledPluginRecord[]) {
     return request<{ ok: boolean; plugins?: InstalledPluginRecord[] }>("PUT", "/plugins/installed", { plugins });
+}
+
+export function saveBackendPluginMcpDeclarations(declarations: Array<Record<string, unknown>>) {
+    return request<{ ok: boolean; declarations?: Array<Record<string, unknown>> }>("PUT", "/plugins/mcp", { declarations });
 }
 
 export function getBackendPluginStorage<T = unknown>(pluginId: string, key: string) {
@@ -373,6 +486,10 @@ export function fetchBackendTask(id: string, signal?: AbortSignal) {
     return request<{ ok: boolean; task?: BackendRuntimeTask; events?: unknown[] }>("GET", canvasTaskPath(id), undefined, { signal });
 }
 
+export function resolveBackendH3Confirmation(id: string, input: { action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean }) {
+    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", h3ConfirmationPath(id), input);
+}
+
 export function fetchBackendTasks(options: { projectId?: string; nodeIds?: string[]; segmentIds?: string[]; scope?: "all" | "canvas" | "image" | "video"; status?: string; kind?: string; model?: string; taskId?: string; limit?: number; offset?: number } = {}) {
     const params = new URLSearchParams();
     if (options.projectId) params.set("projectId", options.projectId);
@@ -403,6 +520,22 @@ export function cancelBackendTask(id: string) {
 
 export function retryBackendTask(id: string) {
     return request<{ ok: boolean; task?: BackendRuntimeTask; parentTaskId?: string }>("POST", canvasTaskActionPath(id, "retry"));
+}
+
+export function claimBackendBrowserTask(id: string, workerId: string) {
+    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/claim`, { workerId });
+}
+
+export function completeBackendBrowserTask(id: string, workerId: string, result: Record<string, unknown>) {
+    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/complete`, { workerId, result });
+}
+
+export function failBackendBrowserTask(id: string, workerId: string, error: string) {
+    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/fail`, { workerId, error });
+}
+
+export function releaseBackendBrowserTask(id: string, workerId: string) {
+    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/release`, { workerId });
 }
 
 export function diagnoseBackendCanvasProject(projectId: string) {

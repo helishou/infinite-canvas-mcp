@@ -16,7 +16,55 @@
     {
       "id": 3,
       "prompt": "请用 GPT Image 在画布上逐镜生成关键帧，再用 MiniMax H3 按 Clip 串成视频。人物不大幅转身就用单张形象图，需要全身站位时才用站位图；每跑完一张先让我检查。",
-      "expected_output": "按单张 16:9 关键帧、参考职责编号、人工验收闸门和 H3 逐段生产执行；根据动作幅度选择人物形象图或站位图，不连续盲跑。",
+      "expected_output": "主 Skill 先路由到分镜关键帧子 Skill，按单张 16:9、参考职责和人工验收闸门逐镜执行；每张获批后再路由到 Clip 视频子 Skill，不连续盲跑。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "故事、角色、色卡和站位图都已经确认了。请只设计 S02 的镜头表和动作衔接，不要生成图片或视频。",
+      "expected_output": "直接路由到镜头设计子 Skill，复用已确认上游，只输出镜头表、前中后状态、轴线、声音字段和逐镜参考计划；不加载无关生产细则，不提交生成任务。",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "关键帧和三个 H3 Clip 都生成完了，请检查人物漂移、动作重复、对白和段间承接，先给验收结论，不要重新生成。",
+      "expected_output": "关键帧检查由分镜关键帧子 Skill 自行完成，Clip 检查由 Clip 视频子 Skill 自行完成；都以实际节点、任务、媒体和参考日志为证据给出状态，不调用独立验收 Skill，也不擅自返修。",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "所有 Clip 已经确认通过，请整理最终交付清单和素材位置，候选版本不要混进正式成片。",
+      "expected_output": "主 Skill 直接汇总 Clip 阶段已经 accepted 的版本、顺序、时长和素材位置，把候选与待返修项分开；不创建额外阶段，也不自动增加拼接、导出或打包操作。",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "外部规范要求把‘静态关键帧提交后必须回读真实参考输入’补充到 canvas-video-production-sop 这个 Skill 里。",
+      "expected_output": "把 canvas-video-production-sop 解释为整个 Skill 包，按功能将规则写入分镜关键帧子 Skill；主 Skill 只在路由或跨阶段约束变化时更新，不把阶段细则重新堆回主入口。",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "请按现有镜头表生成一张普通双人对话关键帧，使用 Neo Image 2。",
+      "expected_output": "路由到分镜关键帧子 Skill，直接使用其中内嵌的六段式、参考职责、防串脸、体位视线、光影和轴线规则；不完整读取 1847 行 Neo Image 规范，只有遇到未覆盖图型时才按精确标题局部查阅。",
+      "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "上次 S02-03 的关键帧任务提交后断线了。继续这个短片项目，先告诉我现在做到哪里，再完成已授权的下一镜。",
+      "expected_output": "先读取 Backend dataDir 下该项目的 progress.md 和文字分镜表 storyboard.md；用记录的分镜图有序组 ID 和 groupSlots 核对已采用图片，再按 taskId 查询真实终态、节点、媒体与验收证据，不重复提交断线前的任务。",
+      "files": []
+    },
+    {
+      "id": 10,
+      "prompt": "这个短片刚建好画布，请把剧本和分镜表整理到固定位置，以后能从这里继续做。",
+      "expected_output": "从当前 Backend dataDir 和精确 canvasProjectId 确定 productions/<canvasProjectId>/，只创建缺失的 progress.md、script.md、storyboard.md、assets.md；文字分镜表写入 storyboard.md，分镜图在生成并验收后加入画布有序组，progress.md 记录该组 ID。",
+      "files": []
+    },
+    {
+      "id": 11,
+      "prompt": "S02-03 和 S02-04 是同一房间、同一人物、机位几乎一样的连续镜头，没有跨切点动作或画外对白。分析是否都要分镜图，再用 H3 生成。",
+      "expected_output": "文字分镜表仍保留两镜，可让后镜复用首镜关键帧或不单独生图；Clip 默认拆成两段，因为相同场景、人物和机位不足以合并理由。若用户随后指出存在必须跨镜延续的动作/对白，再按明确依据合并。",
       "files": []
     }
   ]

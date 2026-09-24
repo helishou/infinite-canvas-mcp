@@ -1,7 +1,7 @@
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
 import { Button, Segmented, Switch } from "antd";
-import { CircleDot, Eraser, Grid2x2, Group, Hand, Image as ImageIcon, Info, Moon, MousePointer2, Music2, Palette, Puzzle, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, User, Video } from "lucide-react";
+import { CircleDot, Eraser, Grid2x2, Group, Hand, Image as ImageIcon, Info, ListRestart, MapPinned, Moon, MousePointer2, Music2, Palette, Puzzle, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, User, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasBackgroundMode, type CanvasColorTheme, type CanvasTheme } from "@/lib/canvas-theme";
 import { getNodePluginId, listNodeDefinitions, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
@@ -22,8 +22,11 @@ export function CanvasToolbar({
     onAddAudio,
     onAddText,
     onAddConfig,
+    onAddLoop,
     onAddGroup,
+    groupSelection,
     onAddCharacter,
+    onAddScene,
     onAddExtensionNode,
     onUndo,
     onRedo,
@@ -47,8 +50,12 @@ export function CanvasToolbar({
     onAddAudio: () => void;
     onAddText: () => void;
     onAddConfig: () => void;
+    onAddLoop: () => void;
     onAddGroup: () => void;
+    /** 当前选中的普通节点 ≥2：点「组」会把它们装进新组，而不是新建空组。 */
+    groupSelection: boolean;
     onAddCharacter: () => void;
+    onAddScene: () => void;
     onAddExtensionNode: (type: string) => void;
     onUndo: () => void;
     onRedo: () => void;
@@ -74,7 +81,7 @@ export function CanvasToolbar({
     const [extPanelX, setExtPanelX] = useState(0);
     // Keep extension plugin nodes synchronized with registry changes.
     useNodeRegistryVersion();
-    const extensionDefs = listNodeDefinitions().filter((def) => def.showInCreateMenu !== false && (getNodePluginId(def.type) !== "builtin" || def.type === "minimax-h3:video"));
+    const extensionDefs = listNodeDefinitions().filter((def) => def.showInCreateMenu !== false && getNodePluginId(def.type) !== "builtin");
     const dockStyle = { background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item, boxShadow: colorTheme === "dark" ? "0 18px 45px rgba(0,0,0,.32)" : "0 16px 40px rgba(28,25,23,.12)" };
     const hoverStyle = { background: theme.toolbar.itemHover, color: theme.toolbar.activeText };
     const activeStyle = { background: theme.toolbar.activeBg, color: theme.toolbar.activeText };
@@ -125,10 +132,16 @@ export function CanvasToolbar({
                 <ToolbarButton id="tool-config" label={t("canvas.toolbar.config")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddConfig}>
                     <Settings2 className="size-4.5" />
                 </ToolbarButton>
+                <ToolbarButton id="tool-loop" label={t("canvas.toolbar.loop")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddLoop}>
+                    <ListRestart className="size-4.5" />
+                </ToolbarButton>
                 <ToolbarButton id="tool-character" label={t("canvas.toolbar.character")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddCharacter}>
                     <User className="size-4.5" />
                 </ToolbarButton>
-                <ToolbarButton id="tool-group" label={t("canvas.toolbar.group")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddGroup}>
+                <ToolbarButton id="tool-scene" label={t("canvas.toolbar.scene")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddScene}>
+                    <MapPinned className="size-4.5" />
+                </ToolbarButton>
+                <ToolbarButton id="tool-group" label={t(groupSelection ? "canvas.controls.group" : "canvas.toolbar.group")} active={groupSelection} activeStyle={activeStyle} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddGroup}>
                     <Group className="size-4.5" />
                 </ToolbarButton>
                 {extensionDefs.length ? (
@@ -366,7 +379,7 @@ function DockTip({ label, x, theme }: { label: string; x: number; theme: CanvasT
     );
 }
 
-function toolLabel(id: string, t: (key: string) => string) {
+function toolLabel(id: string, t: (key: string) => string, groupSelection = false) {
     if (id === "tool-select") return t("canvas.toolbar.select");
     if (id === "tool-pan") return t("canvas.toolbar.pan");
     if (id === "tool-undo") return t("canvas.undo");
@@ -374,10 +387,13 @@ function toolLabel(id: string, t: (key: string) => string) {
     if (id === "tool-text") return t("canvas.toolbar.text");
     if (id === "tool-image") return t("canvas.toolbar.image");
     if (id === "tool-video") return t("canvas.toolbar.video");
+    if (id === "tool-h3") return "MiniMax H3";
     if (id === "tool-audio") return t("canvas.toolbar.audio");
     if (id === "tool-config") return t("canvas.toolbar.config");
+    if (id === "tool-loop") return t("canvas.toolbar.loop");
     if (id === "tool-character") return t("canvas.toolbar.character");
-    if (id === "tool-group") return t("canvas.toolbar.group");
+    if (id === "tool-scene") return t("canvas.toolbar.scene");
+    if (id === "tool-group") return t(groupSelection ? "canvas.controls.group" : "canvas.toolbar.group");
     if (id === "tool-extensions") return t("canvas.toolbar.extensions");
     if (id === "tool-upload") return t("canvas.toolbar.upload");
     if (id === "tool-style") return t("canvas.toolbar.appearance");

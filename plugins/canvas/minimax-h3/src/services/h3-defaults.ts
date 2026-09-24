@@ -1,10 +1,13 @@
 // 生成参数由 Backend 持久化（权威）；这里仅保留当前页面内存缓存，供同步的节点工厂读取。
 // localStorage 旧 key（STORAGE_KEY）只由 Host 用于一次性迁移旧版本数据，不再作为生成参数读取路径。
-// 「设为默认参数」的布局快照（节点宽高 + 各模块区域宽高）是浏览器本地视图设置：
-// 不参与 Backend 生成参数集合，单独持久化在 LAYOUT_KEY（跨刷新/重启保留，与参数迁移互不干扰），
-// 读取生成参数时剥掉 layout，避免混进 segment。
+// 「设为默认参数」的布局快照（节点宽高 + 各模块区域宽高）随默认参数一起保存：Host 注入的
+// settings.layout 是主来源（跨浏览器/客户端一致），localStorage LAYOUT_KEY 只作兜底副本；
+// 读取生成参数时仍剥掉 layout，避免混进 segment。
+import { readH3Layout } from "../../../../../canvas-agent/src/plugins/minimax-h3/node-factory";
+
 const LAYOUT_KEY = "minimax-h3-default-layout";
 let cachedPayload: StoredPayload | null = null;
+let cachedLayoutPanes: Record<string, number> | null = null;
 
 export interface StoredH3Defaults {
     type: "minimax-h3-settings";
@@ -12,15 +15,13 @@ export interface StoredH3Defaults {
     settings: Record<string, unknown>;
 }
 
-// 随默认参数保存的布局键：与 H3_PANE_META 的 metadataKey 一一对应。
-export const H3_DEFAULT_LAYOUT_PANE_KEYS = ["minimaxPreviewH", "minimaxPreviewW", "minimaxPromptW", "minimaxTimelineH", "minimaxRefLaneH"];
-
 export type H3DefaultLayout = { width?: number; height?: number; panes?: Record<string, number> };
 
 type StoredPayload = { type?: string; version?: number; settings?: Record<string, unknown> };
 
 export function setDefaultParamsCache(settings: Record<string, unknown>): void {
     cachedPayload = { type: "minimax-h3-settings", version: 2, settings };
+    cachedLayoutPanes = null;
 }
 
 if (typeof window !== "undefined") {
@@ -39,37 +40,25 @@ export function readDefaultParams(): Record<string, unknown> {
 }
 
 export function readDefaultLayout(): H3DefaultLayout {
-    // 布局持久化在独立 localStorage key（刷新后内存缓存为空，这里仍能恢复），
-    // 内存缓存里若也带 layout（本页刚保存过）则优先用缓存，两者同源。
-    let source: { width?: unknown; height?: unknown; panes?: Record<string, unknown> } | null = null;
+    // 布局快照两处同源同结构：内存缓存（本页刚保存过，或 Host 从后端默认参数灌进来的 layout）
+    // 优先；缓存为空（刷新后）再读 localStorage 副本。校验统一走 readH3Layout，脏值丢弃。
+    let source: unknown = null;
     const cached = (cachedPayload as { settings?: Record<string, unknown> } | null)?.settings?.layout;
     if (cached && typeof cached === "object") source = cached;
     else {
         try {
             if (typeof localStorage !== "undefined") {
                 const raw = localStorage.getItem(LAYOUT_KEY);
-                if (raw) {
-                    const parsed = JSON.parse(raw) as { width?: unknown; height?: unknown; panes?: Record<string, unknown> };
-                    if (parsed && typeof parsed === "object") source = parsed;
-                }
+                if (raw) source = JSON.parse(raw);
             }
         } catch {
             source = null;
         }
     }
-    if (!source) return {};
-    const layout = source as H3DefaultLayout;
-    const panesRaw = layout.panes && typeof layout.panes === "object" ? (layout.panes as Record<string, unknown>) : {};
-    const panes: Record<string, number> = {};
-    for (const key of H3_DEFAULT_LAYOUT_PANE_KEYS) {
-        const value = Number(panesRaw[key]);
-        if (Number.isFinite(value) && value > 0) panes[key] = value;
-    }
+    const { width, height, panes } = readH3Layout(source);
     const result: H3DefaultLayout = {};
-    const width = Number(layout.width);
-    const height = Number(layout.height);
-    if (Number.isFinite(width) && width > 0) result.width = width;
-    if (Number.isFinite(height) && height > 0) result.height = height;
+    if (width !== undefined) result.width = width;
+    if (height !== undefined) result.height = height;
     if (Object.keys(panes).length) result.panes = panes;
     return result;
 }
@@ -89,10 +78,17 @@ export function writeDefaultParams(settings: Record<string, unknown>): void {
 
 export function clearDefaultParams(): void {
     cachedPayload = null;
+    cachedLayoutPanes = null;
     try {
         if (typeof localStorage === "undefined") return;
         localStorage.removeItem(LAYOUT_KEY);
     } catch {
         // 忽略
     }
+}
+
+// 默认布局里的模块宽高：节点自己还没有任何布局值时的初值（渲染路径每帧都要读，这里做一层缓存）。
+export function readDefaultLayoutPanes(): Record<string, number> {
+    cachedLayoutPanes ??= readDefaultLayout().panes || {};
+    return cachedLayoutPanes;
 }

@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
-import { ArrowUp, LoaderCircle, Maximize2, Square } from "lucide-react";
-import { Button, Modal, Tooltip } from "antd";
+import { useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useParams } from "react-router-dom";
+import { getCanvasTextSession } from "@/services/api/canvas-text";
+import type { CanvasTextEditorHandle, CanvasTextTarget } from "@/types/canvas-plugin";
+import { ArrowUp, Image as ImageIcon, LoaderCircle, Maximize2, MessageSquare, Music2, Square, Video } from "lucide-react";
+import { Button, Modal, Segmented, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -10,11 +13,12 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
-import { CanvasPromptChipInput } from "./canvas-prompt-chip-input";
+import { CanvasCollaborativeText } from "./canvas-collaborative-text";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
 import { CanvasTextSettingsPopover } from "./canvas-text-settings-popover";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+
 import { CanvasNodeReferenceBar } from "./canvas-node-reference-bar";
 
 export type CanvasNodeGenerationMode = CanvasGenerationMode;
@@ -22,7 +26,6 @@ export type CanvasNodeGenerationMode = CanvasGenerationMode;
 type CanvasNodePromptPanelProps = {
     node: CanvasNodeData;
     isRunning: boolean;
-    onPromptChange: (nodeId: string, prompt: string) => void;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeData["metadata"]>) => void;
     onGenerate: (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => void;
     onStop: (nodeId: string) => void;
@@ -35,37 +38,42 @@ type CanvasNodePromptPanelProps = {
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], onDisconnectReference, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], onDisconnectReference, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const mode = modeOverride ?? defaultMode(node.type);
+    const isSmartGenerationNode = node.type === CanvasNodeType.Config && node.metadata?.smart === true;
+    const mode = modeOverride ?? (isSmartGenerationNode ? node.metadata?.generationMode || "image" : defaultMode(node.type));
     const config = buildNodeConfig(globalConfig, node, mode);
-    const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
-    const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
+    const hasTextContent = (node.type === CanvasNodeType.Text || (isSmartGenerationNode && mode === "text")) && Boolean(node.metadata?.content?.trim());
+    const hasImageContent = (node.type === CanvasNodeType.Image || (isSmartGenerationNode && mode === "image")) && Boolean(node.metadata?.content);
     const isEditingExistingContent = hasTextContent || hasImageContent;
-    const [prompt, setPrompt] = useState(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
+    const { id: projectId = "" } = useParams();
+    const field = node.type === CanvasNodeType.Config || isEditingExistingContent ? "composerContent" : "prompt";
+    const target = useMemo<CanvasTextTarget>(() => ({ nodeId: node.id, field }), [node.id, field]);
+    const session = useMemo(() => getCanvasTextSession(projectId, target), [projectId, target]);
+    const textStatus = useSyncExternalStore(session.subscribe, session.getSnapshot);
+    const prompt = textStatus.text;
+    const editorRef = useRef<CanvasTextEditorHandle>(null);
     const [expanded, setExpanded] = useState(false);
-    // 本次会带上的参考图数量（连接来的图片节点 + 提示词里 @ 到的图片）：
-    // 决定输入场景（0 = 文生 / 1 = 单图 / ≥2 = 多图），进而决定参数字段读哪个工作流。
-    const referenceCount = connectedNodes.filter((item) => item.type === CanvasNodeType.Image).length + mentionReferences.filter((item) => item.kind === "image").length;
+    const [imagePromptRequired, setImagePromptRequired] = useState(false);
+    const promptRequired = mode !== "image" || imagePromptRequired;
+    const activeHistoryImage = mode === "image" && node.metadata?.activeImageHistoryExplicit === true && node.metadata?.activeImageHistoryId
+        ? node.metadata.images?.find((image) => image.id === node.metadata?.activeImageHistoryId)
+        : undefined;
+    const historyReferences = activeHistoryImage?.generationSnapshot?.references;
+    // 当前版本已恢复时按该版本的图片数路由工作流，否则按实时连接和 @ 引用计算。
+    const referenceCount = historyReferences !== undefined
+        ? historyReferences.length
+        : connectedNodes.filter((item) => item.type === CanvasNodeType.Image).length + mentionReferences.filter((item) => item.kind === "image").length;
+    const clearHistoryReferences = () => onConfigChange(node.id, { activeImageHistoryId: null, activeImageHistoryExplicit: false });
 
-    // Restore prompts only when switching nodes; preserve the current input after generation on the same node.
-    useEffect(() => {
-        setPrompt(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [node.id]);
-
-    const updatePrompt = (value: string) => {
-        setPrompt(value);
-        if (isEditingExistingContent) onConfigChange(node.id, { composerContent: value });
-        else onPromptChange(node.id, value);
-    };
+    const updatePrompt = (value: string) => editorRef.current?.replace(value);
 
     const submit = () => {
         const text = prompt.trim();
-        if (!text || isRunning) return;
+        if (!textStatus.ready || textStatus.blocked || isRunning || (promptRequired && !text)) return;
         onGenerate(node.id, mode, text);
     };
 
@@ -80,13 +88,30 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
             style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
         >
-            <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} onDisconnect={onDisconnectReference} onStartSelection={onStartReferenceSelection} />
-            <CanvasPromptChipInput
-                value={prompt}
+            <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={historyReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={onStartReferenceSelection} />
+            {isSmartGenerationNode ? (
+                <Segmented
+                    className="mb-2 w-full"
+                    size="small"
+                    block
+                    disabled={isRunning}
+                    value={mode}
+                    onChange={(value) => onConfigChange(node.id, { generationMode: value as CanvasGenerationMode })}
+                    options={[
+                        { value: "image", label: <span className="inline-flex items-center gap-1"><ImageIcon className="size-3.5" />{t("canvas.configNode.image")}</span> },
+                        { value: "video", label: <span className="inline-flex items-center gap-1"><Video className="size-3.5" />{t("canvas.configNode.video")}</span> },
+                        { value: "audio", label: <span className="inline-flex items-center gap-1"><Music2 className="size-3.5" />{t("canvas.configNode.audio")}</span> },
+                        { value: "text", label: <span className="inline-flex items-center gap-1"><MessageSquare className="size-3.5" />{t("canvas.configNode.text")}</span> },
+                    ]}
+                />
+            ) : null}
+            <CanvasCollaborativeText
+                projectId={projectId} target={target} chips dialogue
                 references={mentionReferences}
-                onChange={updatePrompt}
+                editorRef={editorRef}
                 onSubmit={submit}
                 className="thin-scrollbar h-40 w-full cursor-text resize-none rounded-xl px-3 py-2 text-sm leading-5 outline-none"
                 style={{ background: "transparent", color: theme.node.text }}
@@ -111,6 +136,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                                 onOpenChange={onImageSettingsOpenChange}
                                 comfyParams={node.metadata?.comfyParams}
                                 onComfyParamsChange={(value) => onConfigChange(node.id, { comfyParams: value })}
+                                onPromptRequiredChange={setImagePromptRequired}
                                 referenceCount={referenceCount}
                             />
                         </>
@@ -135,7 +161,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                     type="primary"
                     className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
                     danger={isRunning}
-                    disabled={!isRunning && !prompt.trim()}
+                    disabled={!isRunning && (!textStatus.ready || textStatus.blocked || (promptRequired && !prompt.trim()))}
                     onClick={() => (isRunning ? onStop(node.id) : submit())}
                     aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
                 >
@@ -154,11 +180,10 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
             </div>
             <Modal title={t("canvas.promptPanel.editorTitle")} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
-                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
-                    <CanvasPromptChipInput
-                        value={prompt}
+                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={historyReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
+                    <CanvasCollaborativeText
+                        projectId={projectId} target={target} chips dialogue
                         references={mentionReferences}
-                        onChange={updatePrompt}
                         className="thin-scrollbar h-[52dvh] min-h-80 w-full cursor-text overflow-y-auto rounded-xl border p-4 text-[15px] leading-6 outline-none"
                         style={{ background: "transparent", borderColor: theme.toolbar.border, color: theme.node.text }}
                         placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}

@@ -9,9 +9,12 @@
     "./http": "./dist/server/http.js",
     "./plugin-mcp": "./dist/server/plugin-mcp.js",
     "./schemas": "./dist/canvas/schemas.js",
+    "./collaboration-tools": "./dist/canvas/collaboration-tools.js",
+    "./runtime-fields": "./dist/canvas/runtime-fields.js",
     "./operations": "./dist/canvas/operations.js",
     "./generation-contract": "./dist/canvas/generation-contract.js",
     "./generation-api": "./dist/canvas/generation-api.js",
+    "./reference-contract": "./dist/canvas/reference-contract.js",
     "./model-workflow": "./dist/canvas/model-workflow.js",
     "./runtime/comfy-client": "./dist/runtime/comfy-client.js",
     "./runtime/agent-runtime": "./dist/runtime/agent-runtime.js",
@@ -42,6 +45,7 @@
     "strip-ansi": "7.2.0",
     "winston": "^3.19.0",
     "yaml": "^2.9.0",
+    "yjs": "^13.6.32",
     "zod": "^3.25.0"
   },
   "devDependencies": {

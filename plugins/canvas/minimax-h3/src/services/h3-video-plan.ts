@@ -92,6 +92,16 @@ export function parseStructuredStoryboard(text: string, count: number): H3PlanDr
   });
 }
 
+function musicLine(music: unknown) {
+  const value = String(music ?? "").trim();
+  // 模型按旧规则常把"无配乐"写成 N/A / none，音频模型会把 N/A 读成"未指定"而自行补一层铺底。
+  // 这里统一兜底成显式中文禁令，确保喂给 H3 的 prompt 永远带明确禁乐句。
+  if (!value || /^n\/?a$|^none$/i.test(value)) {
+    return "配乐：无；禁止任何背景音乐、配乐或非剧情音轨（ABSOLUTELY NO background music, no score）";
+  }
+  return `配乐：${value}`;
+}
+
 function promptFor(draft: H3PlanDraft, refs: H3Ref[]) {
   const counters = { image: 0, video: 0, audio: 0 };
   const referenceList = refs.map((ref) => {
@@ -110,7 +120,7 @@ function promptFor(draft: H3PlanDraft, refs: H3Ref[]) {
     draft.continuityOut ? `连续性要求（接出）：${draft.continuityOut}` : "",
     `参考素材：${referenceList}`,
     draft.soundscape ? `声音环境：${draft.soundscape}` : "",
-    draft.music ? `配乐：${draft.music}` : "",
+    musicLine(draft.music),
     draft.constraints?.length ? `限制条件：${draft.constraints.join("；")}` : "",
     "保持人物外观、服饰、比例、空间方向、动作轴和光线连续，不添加未指定的主体、文字或镜头外信息。",
   ].filter(Boolean).join("\n");

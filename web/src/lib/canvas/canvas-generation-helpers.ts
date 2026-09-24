@@ -1,13 +1,14 @@
 import { defaultConfig, resolveModelForCapability, type AiConfig } from "@/stores/use-config-store";
 import i18n from "@/i18n";
-import { resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
 import { referenceUrl } from "@/lib/canvas/canvas-node-factory";
+import { nodeResourceItems } from "@/lib/canvas/canvas-resource-references";
 import type { NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
 import type { ReferenceImage } from "@/types/image";
-import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
+import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasImageReferenceSnapshot, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
 
 export function imageExtension(dataUrl: string) {
     return dataUrl.match(/^data:image[/]([^;]+)/)?.[1] || dataUrl.match(/image[/]([^;]+)/)?.[1] || "png";
@@ -40,6 +41,17 @@ export async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
         }),
     );
     return references.every(Boolean) ? (references as ReferenceImage[]) : null;
+}
+
+export function resolveImageGenerationReferences(references: CanvasImageReferenceSnapshot[]): ReferenceImage[] {
+    return references.map((reference, index) => ({
+        id: reference.id || String(index),
+        name: reference.name || `reference-${index + 1}.png`,
+        type: reference.type || "image/png",
+        dataUrl: reference.url || "",
+        ...(reference.url ? { url: reference.url } : {}),
+        ...(reference.storageKey ? { storageKey: reference.storageKey } : {}),
+    }));
 }
 
 export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
@@ -96,6 +108,7 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
                 if (!raw && !image.storageKey) return image;
                 const resolved = await resolveImageUrl(image.storageKey, raw);
                 if (!resolved) return image;
+                if (image.storageKey) void ensureImagePreview(image.storageKey);
                 if (resolved === raw && !raw.startsWith("data:image/")) return image;
                 if (image.storageKey) return { ...image, content: resolved };
 
@@ -232,20 +245,36 @@ export function findRetrySourceNode(nodeId: string, nodes: CanvasNodeData[], con
 }
 
 export function sourceNodeReferenceImages(node: CanvasNodeData | null) {
-    if (!node || node.type !== CanvasNodeType.Image || !node.metadata?.content) return [];
+    if (!node || !node.metadata) return [];
+    const metadata = node.metadata;
+    const hasSmartImageSlots = node.type === CanvasNodeType.Config && metadata.smart === true && metadata.generationMode === "image" && Boolean(metadata.images?.length);
+    if ((node.type !== CanvasNodeType.Image && !(node.type === CanvasNodeType.Config && metadata.smart)) || (!metadata.content && !hasSmartImageSlots)) return [];
+    if (node.type === CanvasNodeType.Config && metadata.generationMode === "image" && metadata.images?.length) {
+        const primary = nodeResourceItems(node).find((resource) => resource.kind === "image");
+        if (primary) return [{ id: `${node.id}-primary`, name: `${node.title || node.id}.png`, type: metadata.mimeType || "image/png", dataUrl: primary.url || "", storageKey: primary.storageKey }];
+    }
     return [
         {
             id: node.id,
             name: `${node.title || node.id}.png`,
-            type: node.metadata.mimeType || "image/png",
-            dataUrl: node.metadata.content,
-            storageKey: node.metadata.storageKey,
+            type: metadata.mimeType || "image/png",
+            dataUrl: metadata.content || "",
+            storageKey: metadata.storageKey,
         },
     ];
 }
 
 export function isAudioFile(file: File) {
     return file.type.startsWith("audio/") || /\.(mp3|wav)$/i.test(file.name);
+}
+
+/** 文本节点（文本类型 / 文本模式的智能生成节点）当前展示的正文；非文本节点或正文为空时返回空串。 */
+export function nodeCopyableText(node: CanvasNodeData) {
+    const metadata = node.metadata;
+    if (node.type !== CanvasNodeType.Text && metadata?.generationMode !== "text") return "";
+    const texts = metadata?.texts || [];
+    const primary = texts.find((text) => text.id === metadata?.primaryTextId) || texts[0];
+    return (primary?.content || metadata?.content || "").trim();
 }
 
 export function buildAngleLabel(params: CanvasImageAngleParams) {

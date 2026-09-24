@@ -20,7 +20,7 @@ export type Position = { x: number; y: number };
 export type CanvasBuiltinNodeType = "image" | "text" | "config" | "video" | "audio" | "group";
 export type CanvasNodeTypeId = CanvasBuiltinNodeType | (string & {});
 
-export type CanvasNodeStatus = "idle" | "queued" | "success" | "loading" | "error" | "cancelled";
+export type CanvasNodeStatus = "idle" | "queued" | "loading" | "awaiting_confirmation" | "success" | "error" | "cancelled";
 export type CanvasImageGenerationType = "generation" | "edit";
 
 // 节点 metadata 是扁平可选字段袋;插件自定义字段可直接写入(内容惯例放 content)。
@@ -171,22 +171,26 @@ export type GenerateVideoResult = {
     durationMs?: number;
 };
 
+// 传入 log 后宿主会把本次调用登记进生成日志（platform=canvas-text），节点/Clip 同时写进运行任务
+export type GenerateTextLogMeta = { taskMode: string; prompt?: string; nodeId?: string; segmentId?: string; references?: Array<Record<string, unknown>> };
 export type GenerateTextOptions = {
     signal?: AbortSignal;
     model?: string;
     system?: string; // 附加系统提示词(拼在宿主系统提示之后)
     references?: Array<{ url: string; name?: string }>;
     onDelta?: (text: string) => void; // 流式增量回调
+    log?: GenerateTextLogMeta;
 };
 
 export type GenerateTextResult = {
     text: string;
+    taskId?: string; // Backend 运行任务 ID（任务中心可查）
 };
 export type LocalH3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
 export type LocalH3Result = { url: string; storageKey?: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; actualSubmission?: LocalH3ActualSubmission; segments?: Array<{ media?: Array<{ url: string; storageKey?: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Preview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
-export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: LocalH3Preview | null; result?: LocalH3Result | null; error?: string | null };
+export type LocalH3Task = { id: string; status: "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: LocalH3Preview | null; result?: (LocalH3Result & { currentChildTaskId?: string; currentChildKind?: string; confirmation?: { pending: Array<{ nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string }> } }) | null; error?: string | null };
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 
 // 一个可选模型:value 传回给 generateXxx({ model }),label 用于展示
@@ -199,6 +203,7 @@ export type CanvasPluginAi = {
     generateVideo: (prompt: string, options?: GenerateVideoOptions) => Promise<GenerateVideoResult>;
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
     runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
+    resolveH3Confirmation: (input: { taskId: string; action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean }) => Promise<LocalH3Task>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
@@ -235,6 +240,15 @@ export type PluginStorage = {
 };
 
 export type CanvasAssetPickerImage = { kind: "image"; dataUrl: string; title: string; storageKey?: string };
+export type CanvasReferenceAsset = { id: string; label: string; mediaType: "image" | "video" | "audio"; role: string; tags: string[]; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string; subjectId?: string; analysis?: Record<string, unknown> };
+export type CanvasReferenceValidation = { semanticPrompt: string; compiledPrompt: string; bindings: Array<Record<string, unknown>>; references: Array<Record<string, unknown>>; issues: Array<{ severity: "error" | "warning"; code: string; message: string; bindingId?: string }>; migratedLegacyRefs: boolean };
+export type CanvasReferenceService = {
+    list: () => Promise<CanvasReferenceAsset[]>;
+    upsert: (asset: Partial<CanvasReferenceAsset> & { label: string }) => Promise<CanvasReferenceAsset>;
+    upsertMany: (assets: Array<Partial<CanvasReferenceAsset> & { label: string }>) => Promise<CanvasReferenceAsset[]>;
+    remove: (assetId: string) => Promise<void>;
+    validate: (nodeId: string, segmentId: string) => Promise<CanvasReferenceValidation>;
+};
 
 export type CanvasGenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 export type CanvasGenerationLog = {
@@ -252,7 +266,61 @@ export type CanvasGenerationLogs = {
     remove: (options: { id?: string; projectId?: string; nodeId?: string }) => Promise<number>;
 };
 
+export type CanvasTextTarget = { nodeId?: string; segmentId?: string; textItemId?: string; field: "prompt" | "content" | "composerContent" | "globalPrompt" };
+export type CanvasTextSnapshot = { ready: boolean; pending: number; blocked: boolean; error: string; text: string };
+export type CanvasTextSuggestionInput = { id: string; target: CanvasTextTarget; documentId: string; base: string; text: string };
+export type CanvasTextSuggestion = CanvasTextSuggestionInput & { status: "pending" | "applied" | "dismissed"; revision: number };
+export type CanvasTextSuggestions = {
+    getSnapshot: () => { items: CanvasTextSuggestion[]; pending: number; error: string };
+    subscribe: (listener: () => void) => () => void;
+    refresh: (retryRejected?: boolean) => Promise<void>;
+    save: (input: Omit<CanvasTextSuggestionInput, "target">) => Promise<void>;
+    apply: (id: string, documentId: string, expectedText: string) => Promise<void>;
+    dismiss: (id: string) => Promise<void>;
+};
+export type CanvasTextDocument = {
+    getSnapshot: () => CanvasTextSnapshot;
+    subscribe: (listener: () => void) => () => void;
+    getDocumentId: () => string;
+    flush: () => Promise<void>;
+};
+export type CanvasTextEditorHandle = {
+    insert: (text: string, options?: { prefixNewline?: boolean; select?: boolean }) => void;
+    replace: (text: string) => void;
+    focus: () => void;
+};
+export type CanvasTextReference = { label: string; displayLabel?: string; title?: string; insert?: string; tokens?: string[]; previewUrl?: string; active?: boolean; suggestible?: boolean; kind?: string };
+export type CanvasSpeakerOption = { id: string; name?: string; previewUrl?: string };
+export type CanvasTextEditorProps = {
+    projectId: string; target: CanvasTextTarget; placeholder?: string;
+    references?: CanvasTextReference[]; chips?: boolean;
+    /** 台词说话人名册：菜单/徽标按此显示角色名与头像；省略时回退 S1–S6。 */
+    speakers?: CanvasSpeakerOption[];
+    /** Local rich text editor for transient fields that are persisted through their owning document. */
+    standalone?: boolean; value?: string; onChange?: (text: string) => void;
+    /** Standalone editor grows with its content instead of owning an internal scroll area. */
+    autoHeight?: boolean;
+    className?: string; style?: import("react").CSSProperties;
+    editorRef?: import("react").Ref<CanvasTextEditorHandle>;
+    onSubmit?: () => void; onBlur?: () => void; onEscape?: () => void;
+    autoFocus?: boolean;
+    /** 启用台词（<d>…</d>）内联高亮与右键「转为台词/取消台词」。 */
+    dialogue?: boolean;
+    /** 为每个非空实际换行添加主题着色，并为编辑器提供可拖拽的细滚动条。 */
+    lineMap?: boolean;
+};
+
 export type CanvasNodeContext = {
+    TextEditor: ComponentType<CanvasTextEditorProps>;
+    textDocument: (target: CanvasTextTarget) => CanvasTextDocument;
+    textSuggestions: (target: CanvasTextTarget) => CanvasTextSuggestions;
+    replaceText: (target: CanvasTextTarget, documentId: string, expectedText: string, text: string) => Promise<boolean>;
+    /** 当前窗口的节点视图状态，不同步给其他协作者。 */
+    view: {
+        getSnapshot: () => Record<string, unknown>;
+        subscribe: (listener: () => void) => () => void;
+        update: (patch: Record<string, unknown>) => void;
+    };
     projectId: string;
     // 自身数据
     node: CanvasNodeData;
@@ -269,12 +337,14 @@ export type CanvasNodeContext = {
     getDownstream: () => CanvasNodeData[];
     // 画布操作(复用 Agent 指令集)
     applyOps: (ops: CanvasAgentOp[]) => void;
+    flush: () => Promise<void>;
     // 节点间/插件间通信
     emit: (event: string, payload?: unknown) => void;
     on: (event: string, handler: (payload: unknown) => void) => () => void;
     // AI 生成能力(生图/生视频/生文本),复用宿主模型配置
     ai: CanvasPluginAi;
     h3Defaults: CanvasH3Defaults;
+    references: CanvasReferenceService;
     // 打开/关闭本节点下方的自定义 Panel(需在节点定义里提供 Panel)
     openPanel: () => void;
     closePanel: () => void;
@@ -334,7 +404,7 @@ export type CanvasNodeDefinition = {
     interactionToggle?: boolean;
     // 配合 interactionToggle:返回 true 表示当前节点内容「强制可交互」(如编辑态),
     // 此时忽略 interactive 标志、始终允许操作,并隐藏移动/交互开关。缺省视为 false。
-    forceInteractive?: (node: CanvasNodeData) => boolean;
+    forceInteractive?: (node: CanvasNodeData, view: Record<string, unknown>) => boolean;
     keepAspectRatio?: (node: CanvasNodeData) => boolean;
     resource?: (node: CanvasNodeData) => CanvasNodeResource | CanvasNodeResource[] | null;
     // 渲染
@@ -424,7 +494,7 @@ export type McpToolHandler = (input: Record<string, unknown>, context: PluginMcp
 export type CanvasPluginMcp = {
     id: string; // 应等于插件 id
     version: string;
-    tools: McpToolDefinition[];
+    tools: readonly McpToolDefinition[];
     // 返回「工具 id -> 处理函数」映射,Agent 据此为每个工具调用 registerTool。
     // 官方/本地插件由 Agent 侧打包的 MCP 模块提供,浏览器声明可省略。
     createHandler?: (context: PluginMcpContext) => Record<string, McpToolHandler>;

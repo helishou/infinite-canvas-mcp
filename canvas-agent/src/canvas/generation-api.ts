@@ -8,6 +8,9 @@ export type CanvasTaskAction = (typeof CANVAS_TASK_ACTIONS)[number];
 export function canvasTaskPath(id: string) {
     return `${CANVAS_TASKS_PATH}/${encodeURIComponent(id)}`;
 }
+export function h3ConfirmationPath(id: string) {
+    return `${canvasTaskPath(id)}/h3-confirmation`;
+}
 
 export function canvasTaskActionPath(id: string, action: CanvasTaskAction) {
     return `${canvasTaskPath(id)}/${action}`;

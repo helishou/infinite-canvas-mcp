@@ -11,7 +11,7 @@ import { WorkflowSelectModal } from "./workflow-select-modal";
 
 type ScriptTarget = { name: string; capability: ModelCapability; value: string };
 
-export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: boolean; channel: ModelChannel | null; onSave: (channel: ModelChannel) => void; onClose: () => void }) {
+export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind = false }: { open: boolean; channel: ModelChannel | null; onSave: (channel: ModelChannel) => void; onClose: () => void; lockKind?: boolean }) {
     const { t } = useTranslation();
     const [draft, setDraft] = useState<ModelChannel | null>(channel);
     const [selectOpen, setSelectOpen] = useState(false);
@@ -99,7 +99,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                 </label>
                 <label className="block">
                     <span className="mb-1 block text-sm font-medium">渠道类型</span>
-                    <Select className="w-full" value={draft.kind || "api"} options={[{ label: "云端 API", value: "api" }, { label: "本地 ComfyUI", value: "comfyui" }]} onChange={(kind) => patch({ kind })} />
+                    <Select disabled={lockKind} className="w-full" value={draft.kind || "api"} options={[{ label: "云端 API", value: "api" }, { label: "本地 ComfyUI", value: "comfyui" }]} onChange={(kind) => patch({ kind })} />
                 </label>
                 <label className="block md:col-span-2">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.baseUrl")}</span>

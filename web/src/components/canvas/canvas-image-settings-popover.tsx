@@ -8,8 +8,8 @@ import { ImageSettingsPanel, imageQualityLabel, imageSizeLabel } from "@/compone
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, type AiConfig } from "@/stores/use-config-store";
-import { fetchWorkflowDetail, isWorkflowImageField, type WorkflowDetail } from "@/services/api/workflows";
-import { reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
+import { fetchWorkflowDetail, isWorkflowImageField, workflowRequiresPrompt, type WorkflowDetail } from "@/services/api/workflows";
+import { migrateWorkflowParams, reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
 
 type CanvasImageSettingsPopoverProps = {
     config: AiConfig;
@@ -24,11 +24,12 @@ type CanvasImageSettingsPopoverProps = {
     // comfyParams 存在 node.metadata，运行时由 runLocalComfyImage 合并进 workflow fields。
     comfyParams?: Record<string, unknown>;
     onComfyParamsChange?: (value: Record<string, unknown>) => void;
+    onPromptRequiredChange?: (required: boolean) => void;
     // 本次将带上的参考图数量：决定输入场景（0 = 文生 / 1 = 单图 / ≥2 = 多图），从而决定读哪个工作流的参数。
     referenceCount?: number;
 };
 
-export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, referenceCount = 0 }: CanvasImageSettingsPopoverProps) {
+export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, onPromptRequiredChange, referenceCount = 0 }: CanvasImageSettingsPopoverProps) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
@@ -36,6 +37,11 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     const [open, setOpen] = useState(false);
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
     const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
+    const workflowDetailRef = useRef<WorkflowDetail | null>(null);
+    const comfyParamsRef = useRef(comfyParams);
+    const onComfyParamsChangeRef = useRef(onComfyParamsChange);
+    comfyParamsRef.current = comfyParams;
+    onComfyParamsChangeRef.current = onComfyParamsChange;
     // 已按哪个「模型 + 场景工作流」把参数落进节点 metadata：切换后要改用渠道配置重新铺一遍，
     // 否则同一字段名（如 steps）会沿用上一个场景的值。
     const appliedWorkflowRef = useRef("");
@@ -54,6 +60,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
             const target = event.target;
             if (!(target instanceof Node)) return;
             if (buttonRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+            if (target instanceof Element && target.closest(".ant-select-dropdown")) return;
             if (document.activeElement instanceof HTMLElement && panelRef.current?.contains(document.activeElement)) document.activeElement.blur();
             setOpen(false);
             onOpenChange?.(false);
@@ -78,23 +85,40 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
 
     useEffect(() => {
         if (!workflowName) {
+            workflowDetailRef.current = null;
             setWorkflowDetail(null);
             return;
         }
+        // 首次挂载时加载提示词要求；面板每次打开时重新取字段，避免使用已过期的字段 ID。
+        if (!open && workflowDetailRef.current?.name === workflowName) return;
         let cancelled = false;
         fetchWorkflowDetail(workflowName)
             .then((detail) => {
                 if (cancelled) return;
+                const previous = workflowDetailRef.current;
+                if (previous?.name === detail.name) {
+                    const migrated = migrateWorkflowParams(comfyParamsRef.current, previous.config?.fields || [], detail.config?.fields || []);
+                    if (migrated && migrated !== comfyParamsRef.current) {
+                        comfyParamsRef.current = migrated;
+                        onComfyParamsChangeRef.current?.(migrated);
+                    }
+                }
+                workflowDetailRef.current = detail;
                 setWorkflowDetail(detail);
             })
             .catch(() => {
                 if (cancelled) return;
+                workflowDetailRef.current = null;
                 setWorkflowDetail(null);
             });
         return () => {
             cancelled = true;
         };
-    }, [workflowName]);
+    }, [open, workflowName]);
+
+    useEffect(() => {
+        onPromptRequiredChange?.(workflowDetail?.name === workflowName && workflowRequiresPrompt(workflowDetail));
+    }, [onPromptRequiredChange, workflowDetail, workflowName]);
 
     const customFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, workflowDetail?.workflow) && !field.isPrompt);
 
@@ -105,31 +129,47 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
         const signature = `${config.model}::${workflowName}`;
         const workflowChanged = Boolean(appliedWorkflowRef.current && appliedWorkflowRef.current !== signature);
         appliedWorkflowRef.current = signature;
-        // 渠道设置里为当前输入场景配的参数优先于工作流字段默认值。
+        // 模型设置里为当前输入场景配的参数优先于内部实现字段默认值。
         const routedParams = resolveModelWorkflowParams(config, config.model, referenceCount);
-        const next = reconcileWorkflowParams(comfyParams, customFields, routedParams, workflowChanged);
-        if (next && next !== comfyParams) onComfyParamsChange(next);
+        const currentParams = comfyParamsRef.current;
+        const next = reconcileWorkflowParams(currentParams, customFields, routedParams, workflowChanged);
+        if (next && next !== currentParams) {
+            comfyParamsRef.current = next;
+            onComfyParamsChange(next);
+        }
     }, [comfyParams, customFields, onComfyParamsChange, workflowDetail, workflowName, config, referenceCount]);
 
-    const panel = open && buttonRect ? (
-        <ImageSettingsPortal
-            buttonRect={buttonRect}
-            panelRef={panelRef}
-            placement={placement}
-            theme={theme}
-            config={config}
-            onConfigChange={onConfigChange}
-            customFields={customFields}
-            customFieldValues={comfyParams}
-            onCustomFieldChange={onComfyParamsChange ? (id, value) => onComfyParamsChange({ ...(comfyParams || {}), [id]: value }) : undefined}
-            hideStandardImageOptions={isLocalCustomWorkflow}
-        />
-    ) : null;
+    const panel =
+        open && buttonRect ? (
+            <ImageSettingsPortal
+                buttonRect={buttonRect}
+                panelRef={panelRef}
+                placement={placement}
+                theme={theme}
+                config={config}
+                onConfigChange={onConfigChange}
+                customFields={customFields}
+                customFieldValues={comfyParams}
+                onCustomFieldChange={onComfyParamsChange ? (id, value) => {
+                    const next = { ...(comfyParamsRef.current || {}), [id]: value };
+                    comfyParamsRef.current = next;
+                    onComfyParamsChange(next);
+                } : undefined}
+                hideStandardImageOptions={isLocalCustomWorkflow}
+            />
+        ) : null;
 
     return (
         <>
             <span ref={buttonRef} className="inline-flex min-w-0">
-                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[180px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => updateOpen(!open)}>
+                <Button
+                    size="small"
+                    type="text"
+                    className={buttonClassName || "!h-8 !max-w-[180px] !justify-start !rounded-full !px-2.5"}
+                    style={{ background: theme.node.fill, color: theme.node.text }}
+                    icon={<Settings2 className="size-3.5" />}
+                    onClick={() => updateOpen(!open)}
+                >
                     <span className="truncate">
                         {imageQualityLabel(quality)} · {imageSizeLabel(activeSize)} · {t("canvas.controls.images", { count })}
                     </span>
@@ -185,14 +225,7 @@ function ImageSettingsPortal({
     } as const;
 
     return createPortal(
-        <div
-            ref={panelRef}
-            className="canvas-image-settings-popover"
-            style={style}
-            onPointerDown={(event) => event.stopPropagation()}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => event.stopPropagation()}
-        >
+        <div ref={panelRef} className="canvas-image-settings-popover" style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
             <ImageSettingsPanel
                 config={config}
                 onConfigChange={(key, value) => onConfigChange(key, value)}

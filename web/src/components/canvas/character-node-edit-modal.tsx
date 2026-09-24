@@ -1,20 +1,29 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Modal, Input, Button, Select, message } from "antd";
-import { Plus, Save, Trash2, Upload as UploadIcon, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Image as AntImage, Modal, Input, Button, message, Select } from "antd";
+import { ImagePlus, Save, Trash2, Upload as UploadIcon, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { uploadImage } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
-import { useAssetStore } from "@/stores/use-asset-store";
+import { VoiceAssetSelect } from "@/components/assets/voice-asset-select";
+import { useAssetStore, type AudioAsset } from "@/stores/use-asset-store";
+import { findCharacterVoiceAsset, hasCharacterVoiceSource, resolveCharacterVoiceName } from "@/lib/character-voice";
 import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 import { CanvasNodeType } from "@/types/canvas";
 
 type CharacterImage = NonNullable<CanvasNodeMetadata["characterImages"]>[number];
 
+const IMAGE_ROLE_KEYS = [
+    "character_identity", "character_turnaround", "storyboard", "scene", "blocking", "keyframe",
+    "motion_reference", "style", "palette", "prop", "other",
+] as const;
+
 type Props = {
     open: boolean;
+    selectingCanvasImage: boolean;
+    canvasImagePick: { id: string; image: CharacterImage } | null;
     node: CanvasNodeData | null;
     onClose: () => void;
+    onPickCanvasImage: () => void;
     onSave: (patch: {
         title: string;
         characterName: string;
@@ -23,24 +32,30 @@ type Props = {
         characterPrimaryIndex: number;
         characterVoiceUrl: string;
         characterVoiceName: string;
+        characterVoiceDescription: string;
+        characterVoiceStorageKey: string;
         characterVoiceAssetId: string;
     }) => void;
 };
 
 /** 角色节点双击打开的完整编辑面板：标题/描述/参考图/声线。 */
-export function CharacterNodeEditModal({ open, node, onClose, onSave }: Props) {
+export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImagePick, node, onClose, onPickCanvasImage, onSave }: Props) {
     const { t } = useTranslation();
+    const imageRoleOptions = IMAGE_ROLE_KEYS.map((role) => ({ value: role, label: t(`canvas.character.imageRoles.${role}`) }));
     const assets = useAssetStore((state) => state.assets);
+    const audioAssets = useMemo(() => assets.filter((asset): asset is AudioAsset => asset.kind === "audio"), [assets]);
     const [title, setTitle] = useState("");
     const [description, setDescription] = useState("");
     const [images, setImages] = useState<CharacterImage[]>([]);
     const [primaryIndex, setPrimaryIndex] = useState(0);
     const [voiceUrl, setVoiceUrl] = useState("");
     const [voiceName, setVoiceName] = useState("");
+    const [voiceDescription, setVoiceDescription] = useState("");
+    const [voiceStorageKey, setVoiceStorageKey] = useState("");
     const [voiceAssetId, setVoiceAssetId] = useState("");
     const [saving, setSaving] = useState(false);
     const voiceInputRef = useRef<HTMLInputElement>(null);
-    const imageInputRef = useRef<HTMLInputElement>(null);
+    const lastCanvasImagePickRef = useRef("");
 
     // 同步打开的节点到本地状态
     useEffect(() => {
@@ -50,29 +65,22 @@ export function CharacterNodeEditModal({ open, node, onClose, onSave }: Props) {
         setDescription(typeof meta.characterDescription === "string" ? meta.characterDescription : "");
         setImages(Array.isArray(meta.characterImages) ? meta.characterImages : []);
         setPrimaryIndex(Math.min(Math.max(meta.characterPrimaryIndex || 0, 0), Math.max((meta.characterImages?.length || 1) - 1, 0)));
-        setVoiceUrl(typeof meta.characterVoiceUrl === "string" ? meta.characterVoiceUrl : "");
-        setVoiceName(typeof meta.characterVoiceName === "string" ? meta.characterVoiceName : "");
-        setVoiceAssetId(typeof meta.characterVoiceAssetId === "string" ? meta.characterVoiceAssetId : "");
-    }, [open, node]);
+        const storedVoiceUrl = typeof meta.characterVoiceUrl === "string" ? meta.characterVoiceUrl : "";
+        const storedVoiceStorageKey = typeof meta.characterVoiceStorageKey === "string" ? meta.characterVoiceStorageKey : "";
+        const storedVoiceAssetId = typeof meta.characterVoiceAssetId === "string" ? meta.characterVoiceAssetId : "";
+        const voiceAsset = findCharacterVoiceAsset(audioAssets, { assetId: storedVoiceAssetId, storageKey: storedVoiceStorageKey, url: storedVoiceUrl });
+        setVoiceUrl(storedVoiceUrl || voiceAsset?.data.url || "");
+        setVoiceName(resolveCharacterVoiceName(typeof meta.characterVoiceName === "string" ? meta.characterVoiceName : "", voiceAsset));
+        setVoiceDescription(typeof meta.characterVoiceDescription === "string" ? meta.characterVoiceDescription : "");
+        setVoiceStorageKey(storedVoiceStorageKey || voiceAsset?.data.storageKey || "");
+        setVoiceAssetId(storedVoiceAssetId || voiceAsset?.id || "");
+    }, [audioAssets, open, node]);
 
-    const handleAddImage = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        e.target.value = "";
-        if (!file) return;
-        const result = await uploadImage(file, { category: "library" });
-        const next: CharacterImage = {
-            url: result.url,
-            storageKey: result.storageKey,
-            name: file.name,
-            outfit: "",
-            outfitDescription: "",
-            width: result.width,
-            height: result.height,
-            bytes: result.bytes,
-            mimeType: result.mimeType,
-        };
-        setImages((current) => [...current, next]);
-    }, []);
+    useEffect(() => {
+        if (!canvasImagePick || canvasImagePick.id === lastCanvasImagePickRef.current) return;
+        lastCanvasImagePickRef.current = canvasImagePick.id;
+        setImages((current) => current.some((image) => image.storageKey && image.storageKey === canvasImagePick.image.storageKey || image.url === canvasImagePick.image.url) ? current : [...current, canvasImagePick.image]);
+    }, [canvasImagePick]);
 
     const handleVoiceUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -81,6 +89,7 @@ export function CharacterNodeEditModal({ open, node, onClose, onSave }: Props) {
         const result = await uploadMediaFile(file, "audio", "library");
         setVoiceUrl(result.url);
         setVoiceName(file.name);
+        setVoiceStorageKey(result.storageKey || "");
         setVoiceAssetId("");
     }, []);
 
@@ -114,22 +123,22 @@ export function CharacterNodeEditModal({ open, node, onClose, onSave }: Props) {
             title: title.trim() || t("canvas.nodeTypes.character"),
             characterName: title.trim(),
             characterDescription: description.trim(),
-            characterImages: images,
+            characterImages: images.map((image) => ({ ...image, role: image.role || "character_turnaround" })),
             characterPrimaryIndex: Math.min(primaryIndex, images.length - 1),
             characterVoiceUrl: voiceUrl,
-            characterVoiceName: voiceName,
+            characterVoiceName: resolveCharacterVoiceName(voiceName),
+            characterVoiceDescription: voiceDescription.trim(),
+            characterVoiceStorageKey: voiceStorageKey,
             characterVoiceAssetId: voiceAssetId,
         });
         setSaving(false);
         onClose();
     };
 
-    const voiceAssetOptions = assets
-        .filter((asset) => asset.kind === "audio")
-        .map((asset) => ({ label: asset.title || "声音", value: asset.id }));
+    const voiceSource = hasCharacterVoiceSource({ url: voiceUrl, storageKey: voiceStorageKey, assetId: voiceAssetId });
 
     return (
-        <Modal open={open} onCancel={onClose} footer={null} width={720} destroyOnClose title={t("canvas.character.editTitle")}>
+        <Modal open={open && !selectingCanvasImage} onCancel={onClose} footer={null} width={720} destroyOnHidden title={t("canvas.character.editTitle")}>
             <div className="space-y-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <label className="space-y-1">
@@ -149,26 +158,26 @@ export function CharacterNodeEditModal({ open, node, onClose, onSave }: Props) {
                                     </button>
                                 }
                             />
-                            {voiceUrl ? (
-                                <Button icon={<X className="size-3.5" />} onClick={() => { setVoiceUrl(""); setVoiceName(""); setVoiceAssetId(""); }} />
+                            {voiceSource ? (
+                                <Button icon={<X className="size-3.5" />} onClick={() => { setVoiceUrl(""); setVoiceName(""); setVoiceDescription(""); setVoiceStorageKey(""); setVoiceAssetId(""); }} />
                             ) : null}
                         </div>
-                        {voiceAssetOptions.length ? (
-                            <Select
-                                className="w-full"
-                                size="small"
+                        {audioAssets.length || voiceSource ? (
+                            <VoiceAssetSelect
+                                assets={audioAssets}
                                 placeholder={t("canvas.character.editPickVoiceAsset")}
-                                options={voiceAssetOptions}
                                 value={voiceAssetId || undefined}
-                                onChange={(id) => {
-                                    const asset = assets.find((candidate) => candidate.id === id);
-                                    if (asset?.kind !== "audio") return;
-                                    setVoiceAssetId(id);
+                                preview={voiceSource ? { id: voiceAssetId, url: voiceUrl, storageKey: voiceStorageKey, name: voiceName } : undefined}
+                                onChange={(asset) => {
+                                    if (!asset) return;
+                                    setVoiceAssetId(asset.id);
                                     setVoiceUrl(asset.data.url);
                                     setVoiceName(asset.title);
+                                    setVoiceStorageKey(asset.data.storageKey || "");
                                 }}
                             />
                         ) : null}
+                        <Input.TextArea rows={2} value={voiceDescription} onChange={(event) => setVoiceDescription(event.target.value)} placeholder={t("assets.character.voiceDescriptionPlaceholder")} />
                     </label>
                 </div>
                 <label className="block space-y-1">
@@ -178,14 +187,14 @@ export function CharacterNodeEditModal({ open, node, onClose, onSave }: Props) {
                 <div className="space-y-1">
                     <div className="flex items-center justify-between">
                         <span className="text-xs text-stone-500">{t("canvas.character.editImages")}</span>
-                        <Button size="small" icon={<Plus className="size-3.5" />} onClick={() => imageInputRef.current?.click()}>
-                            {t("assets.character.addImage")}
+                        <Button size="small" icon={<ImagePlus className="size-3.5" />} onClick={onPickCanvasImage}>
+                            {t("canvas.character.addImageFromCanvas")}
                         </Button>
                     </div>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                         {images.map((image, idx) => (
                             <div key={idx} className="relative rounded-md border border-stone-200 p-2 dark:border-stone-700">
-                                <img src={image.url} alt={image.outfit || image.name} className="h-24 w-full rounded object-cover" />
+                                <AntImage src={image.url} alt={image.outfit || image.name} preview={{ src: image.url }} className="!h-24 !w-full !rounded !object-cover" />
                                 <div className="mt-1 space-y-1">
                                     <Input
                                         size="small"
@@ -193,6 +202,16 @@ export function CharacterNodeEditModal({ open, node, onClose, onSave }: Props) {
                                         onChange={(e) => updateImage(idx, { outfit: e.target.value })}
                                         placeholder={t("assets.character.outfitPlaceholder")}
                                     />
+                                    <label className="block space-y-1">
+                                        <span className="text-xs text-stone-500">{t("canvas.character.imageRole")}</span>
+                                        <Select
+                                            size="small"
+                                            className="w-full"
+                                            value={image.role || "character_turnaround"}
+                                            options={imageRoleOptions}
+                                            onChange={(role) => updateImage(idx, { role })}
+                                        />
+                                    </label>
                                     <Input.TextArea
                                         size="small"
                                         rows={2}
@@ -220,7 +239,6 @@ export function CharacterNodeEditModal({ open, node, onClose, onSave }: Props) {
                     {t("common.save")}
                 </Button>
             </div>
-            <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={handleAddImage} />
             <input ref={voiceInputRef} type="file" accept="audio/*" className="hidden" onChange={handleVoiceUpload} />
         </Modal>
     );

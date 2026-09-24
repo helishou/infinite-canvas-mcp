@@ -4,7 +4,7 @@ import type { AiConfig } from "@/stores/use-config-store";
 import type { UploadedImage } from "@/services/image-storage";
 import type { UploadedFile } from "@/services/file-storage";
 import type { ReferenceImage } from "@/types/image";
-import { CanvasNodeType, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeMetadata, type CanvasNodeTypeId, type Position } from "@/types/canvas";
+import { CanvasNodeType, type CanvasGenerationMode, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeMetadata, type CanvasNodeModeResult, type CanvasNodeTypeId, type Position } from "@/types/canvas";
 
 export function createCanvasNode(type: CanvasNodeTypeId, position: Position, metadata?: CanvasNodeMetadata): CanvasNodeData {
     const spec = getNodeSpec(type);
@@ -49,6 +49,7 @@ export function buildImageGenerationMetadata(type: CanvasImageGenerationType, co
         ...(config.background ? { background: config.background } : {}),
         count,
         references: references.map(referenceUrl).filter((url): url is string => Boolean(url)),
+        referenceIds: references.map((reference) => reference.id).filter(Boolean),
     };
 }
 
@@ -64,8 +65,37 @@ export function buildAudioGenerationMetadata(config: AiConfig): CanvasNodeMetada
 
 export function applyNodeConfigPatch(node: CanvasNodeData, patch: Partial<CanvasNodeData["metadata"]>) {
     const safePatch = patch || {};
-    const next = { ...node, metadata: { ...node.metadata, ...safePatch } };
+    const modeChanged = node.type === CanvasNodeType.Config
+        && node.metadata?.smart === true
+        && typeof safePatch.generationMode === "string"
+        && safePatch.generationMode !== node.metadata.generationMode;
+    const nextMetadata = { ...node.metadata, ...safePatch };
+    if (modeChanged) {
+        // 共享媒体字段按模式搬存；图片/文本列表保留在各自字段，兼容只写入 content 的旧结果。
+        const previousMode = (node.metadata?.generationMode || "image") as CanvasGenerationMode;
+        const nextMode = safePatch.generationMode as CanvasGenerationMode;
+        const resultsByMode = { ...node.metadata?.generationResultsByMode };
+        const currentResult: CanvasNodeModeResult = {};
+        for (const key of MODE_RESULT_FIELDS) {
+            const value = node.metadata?.[key];
+            if (value !== undefined) Object.assign(currentResult, { [key]: value });
+        }
+        if (Object.keys(currentResult).length) resultsByMode[previousMode] = currentResult;
+        const restoredResult = resultsByMode[nextMode];
+        delete resultsByMode[nextMode];
+        for (const key of MODE_RESULT_FIELDS) delete nextMetadata[key];
+        if (restoredResult) Object.assign(nextMetadata, restoredResult);
+        if (Object.keys(resultsByMode).length) nextMetadata.generationResultsByMode = resultsByMode;
+        else delete nextMetadata.generationResultsByMode;
+        delete nextMetadata.errorDetails;
+        nextMetadata.status = "idle";
+    }
+    const next = { ...node, metadata: nextMetadata };
     const spec = node.type === CanvasNodeType.Video ? NODE_DEFAULT_SIZE[CanvasNodeType.Video] : NODE_DEFAULT_SIZE[CanvasNodeType.Image];
     const size = typeof safePatch.size === "string" && !node.metadata?.content ? nodeSizeFromRatio(safePatch.size, spec.width, spec.height) : null;
     return size && (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video) ? { ...next, ...size, position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 } } : next;
 }
+
+const MODE_RESULT_FIELDS = [
+    "content", "url", "storageKey", "mimeType", "bytes", "naturalWidth", "naturalHeight", "durationMs",
+] as const satisfies readonly (keyof CanvasNodeMetadata)[];

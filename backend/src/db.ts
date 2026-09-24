@@ -4,12 +4,18 @@ import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
+import { completedImageSlots, imageSlotStatus, imageSourceStatus } from "./canvas/image-result-slots.js";
 import { applyCanvasProjectOperations, type CanvasOperation } from "./canvas/project-ops.js";
+import { prepareClientCanvasOperation, stripCanvasLocalViewState } from "./canvas/operation-authority.js";
+import { collaborationError, commandFingerprint, concurrentCommandConflicts, type CanvasCommandContext, type CanvasCommit } from "./canvas/collaboration.js";
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
+import * as Y from "yjs";
+import { textSuggestionInputSchema, type CanvasTextSuggestion } from "@basketikun/canvas-agent/schemas";
+import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, textOperation, textTargetSchema, type CanvasTextTarget } from "./canvas/collaborative-text.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-export type RuntimeTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type RuntimeTaskStatus = "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled";
 export type GenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 
 export type RuntimeTask = {
@@ -39,6 +45,13 @@ export type GenerationLog = {
     outputs: Array<Record<string, unknown>>; error?: string;
     params: Record<string, unknown>; createdAt: string; updatedAt: string;
 };
+export type McpObservabilityEventInput = {
+    sessionId: string; traceId: string; event: "tool.started" | "tool.succeeded" | "tool.failed"; tool: string;
+    projectId?: string; nodeId?: string; operationId?: string; taskId?: string;
+    durationMs?: number; errorCode?: string; recoverable?: boolean; suggestedTool?: string;
+    inputSummary?: Record<string, unknown>; outputSummary?: Record<string, unknown>;
+};
+export type McpObservabilityEvent = McpObservabilityEventInput & { id: string; createdAt: string };
 export type MediaFile = {
     storageKey: string; filePath: string; mimeType: string;
     bytes: number; width: number | null; height: number | null; durationMs: number | null;
@@ -48,14 +61,28 @@ export type AssetFolder = { id: string; name: string; parentId: string | null; c
 export type CanvasFolder = {
     id: string; name: string; createdAt: string; updatedAt?: string;
     outline?: string; description?: string; coverStorageKey?: string | null; tags?: string[];
+    /** 画布侧创建的普通文件夹为 false；旧客户端未传时按短剧兼容。 */
+    isDrama?: boolean;
 };
 export type Asset = {
     id: string; kind: string; title: string; coverUrl: string; tags: string[];
-    folderId: string | null; data: Record<string, unknown>; note: string | null;
+    folderId: string | null; dramaId?: string | null; data: Record<string, unknown>; note: string | null;
     source: string | null; metadata: Record<string, unknown>;
     createdAt: string; updatedAt: string;
 };
-export type CanvasProject = Record<string, unknown> & { id: string; folderId?: string | null };
+export type DramaEpisode = {
+    id: string;
+    dramaId: string;
+    episodeNumber: number;
+    title: string;
+    synopsis: string;
+    fullPlot: string;
+    canvasId: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+export type CanvasProject = Record<string, unknown> & { id: string };
+
 export type PluginDeclaration = {
     id: string;
     name: string;
@@ -67,7 +94,7 @@ export type PluginDeclaration = {
 
 // ── Workflow Import ──────────────────────────────────────────────────────
 
-export type WorkflowFieldType = 'text' | 'number' | 'slider' | 'boolean' | 'dropdown' | 'image';
+export type WorkflowFieldType = 'text' | 'number' | 'slider' | 'boolean' | 'dropdown' | 'image' | 'audio' | 'video';
 
 export type WorkflowField = {
     id: string;
@@ -104,6 +131,9 @@ export type WorkflowConfigRow = {
 
 export class BackendDatabase {
     readonly db: DatabaseSync;
+    private canvasCommitListener?: (commit: CanvasCommit) => void;
+
+    onCanvasCommit(listener: (commit: CanvasCommit) => void) { this.canvasCommitListener = listener; }
 
     constructor(file: string = DB_FILE) {
         ensureDataDirs();
@@ -126,8 +156,40 @@ export class BackendDatabase {
             CREATE TABLE IF NOT EXISTS canvas_projects (
                 id TEXT PRIMARY KEY,
                 data_json TEXT NOT NULL,
-                folder_id TEXT REFERENCES canvas_folders(id) ON DELETE SET NULL,
                 updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS canvas_operation_batches (
+                operation_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                base_revision INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                source_json TEXT NOT NULL DEFAULT '{}',
+                operations_json TEXT NOT NULL,
+                results_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS canvas_operation_batches_project_revision ON canvas_operation_batches(project_id, revision);
+            CREATE TABLE IF NOT EXISTS canvas_command_receipts (
+                operation_id TEXT PRIMARY KEY REFERENCES canvas_operation_batches(operation_id) ON DELETE CASCADE,
+                request_hash TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS canvas_collaboration_checkpoints (
+                project_id TEXT PRIMARY KEY REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                revision INTEGER NOT NULL,
+                data_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS canvas_text_documents (
+                project_id TEXT NOT NULL REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                target_key TEXT NOT NULL,
+                state BLOB NOT NULL,
+                PRIMARY KEY (project_id, target_key)
+            );
+            CREATE TABLE IF NOT EXISTS canvas_text_suggestions (
+                project_id TEXT NOT NULL REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                id TEXT NOT NULL,
+                target_key TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                PRIMARY KEY (project_id, id)
             );
             CREATE TABLE IF NOT EXISTS canvas_folders (
                 id TEXT PRIMARY KEY,
@@ -142,6 +204,21 @@ export class BackendDatabase {
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS drama_episodes (
+                id TEXT PRIMARY KEY,
+                drama_id TEXT NOT NULL REFERENCES drama_projects(folder_id) ON DELETE CASCADE,
+                episode_number INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                synopsis TEXT NOT NULL DEFAULT '',
+                full_plot TEXT NOT NULL DEFAULT '',
+                canvas_id TEXT REFERENCES canvas_projects(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(drama_id, episode_number),
+                UNIQUE(canvas_id)
+            );
+            CREATE INDEX IF NOT EXISTS drama_episodes_drama_id ON drama_episodes(drama_id);
+            CREATE INDEX IF NOT EXISTS drama_episodes_canvas_id ON drama_episodes(canvas_id);
             CREATE TABLE IF NOT EXISTS assets (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -149,6 +226,7 @@ export class BackendDatabase {
                 cover_url TEXT NOT NULL DEFAULT '',
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 folder_id TEXT REFERENCES asset_folders(id) ON DELETE SET NULL,
+                drama_id TEXT REFERENCES drama_projects(folder_id) ON DELETE SET NULL,
                 data_json TEXT NOT NULL DEFAULT '{}',
                 note TEXT,
                 source TEXT,
@@ -219,6 +297,26 @@ export class BackendDatabase {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS task_events_task_id_id ON task_events(task_id, id);
+            CREATE TABLE IF NOT EXISTS mcp_observability_events (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                project_id TEXT,
+                node_id TEXT,
+                operation_id TEXT,
+                task_id TEXT,
+                duration_ms INTEGER,
+                error_code TEXT,
+                recoverable INTEGER,
+                suggested_tool TEXT,
+                input_summary_json TEXT NOT NULL DEFAULT '{}',
+                output_summary_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS mcp_observability_trace ON mcp_observability_events(trace_id, created_at);
+            CREATE INDEX IF NOT EXISTS mcp_observability_tool_event ON mcp_observability_events(tool, event, created_at);
             CREATE TABLE IF NOT EXISTS runtime_settings (
                 key TEXT PRIMARY KEY,
                 value_json TEXT NOT NULL,
@@ -244,6 +342,15 @@ export class BackendDatabase {
                 updated_at TEXT NOT NULL
             );
         `);
+        // 文本身份属于对象的一次生命周期，不得由可复用的 nodeId / segmentId 推导。
+        const textColumns = this.db.prepare("PRAGMA table_info(canvas_text_documents)").all() as Array<{ name: string }>;
+        if (!textColumns.some((column) => column.name === "document_id")) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec("ALTER TABLE canvas_text_documents ADD COLUMN document_id TEXT; UPDATE canvas_text_documents SET document_id = lower(hex(randomblob(16)))");
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
         const version = this.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version?: number } | undefined;
         const currentVersion = version?.version || 0;
         if (currentVersion < 1) {
@@ -283,6 +390,68 @@ export class BackendDatabase {
             // 这里加一列 + 索引，删除剧目时 ON DELETE SET NULL（画布掉回"未编排场景"分类）。
             this.attachCanvasProjectsToFolders();
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (6, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 7) {
+            // v6 的 folder_id 列假设是「画布 → 剧目」方向，但实际叙事模型是
+            // 「剧目 → 分集 → 画布」三层：drama_projects 是根，每个 drama 下多个 episode，
+            // 每个 episode 1:1 绑一个画布（asset 也算画布）。v6 抹平了 episode 这一层，导致
+            // 「分集剧情」无处放、前端假设了 folder_id 但语义错位。
+            // v7 改造：
+            //   1. 新表 drama_episodes（episode_number + title + synopsis + canvas_id 1:1 可空）
+            //   2. 删 canvas_projects.folder_id 列（关系由 drama_episodes.canvas_id 承接）
+            //   3. 把既存 canvas_projects.folder_id 数据搬到 drama_episodes（自动建空 episode 1）
+            //   4. drama_projects.outline 保留作「项目总纲」字段（与 episodes.synopsis 区分粒度）
+            this.createDramaEpisodesTable();
+            this.migrateV6FolderIdToV7Episodes();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (7, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 8) {
+            // v7 已可能在旧服务进程中执行：补清 data_json.folderId，并把 episode 外键/唯一约束统一到最终模型。
+            this.migrateV7ToV8EpisodeConstraints();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (8, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 9) {
+            // 资产文件夹只表达库内整理方式；drama_id 单独记录资产所属剧目。
+            // 旧 drama-file 已把归属写在 data_json.dramaId，迁移时回填到正式列。
+            this.attachAssetsToDramas();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (9, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 10) {
+            // 分集梗概用于快速浏览，完整剧情单独保存，避免长文本挤占卡片摘要。
+            this.attachFullPlotToDramaEpisodes();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (10, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 11) {
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (11, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 12) {
+            // MiniMax H3 工作流把宽高从比例/像素量计算改为可直接暴露的 PrimitiveInt 参数，
+            // 让已经初始化过的数据库也能看到宽度、高度和时长字段。
+            this.migrateMiniMaxH3WorkflowFields();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (12, ?)").run(new Date().toISOString());
+        }
+    }
+
+    private attachFullPlotToDramaEpisodes() {
+        const columns = this.db.prepare("PRAGMA table_info(drama_episodes)").all() as Array<{ name: string }>;
+        if (!columns.some((column) => column.name === "full_plot")) {
+            this.db.exec("ALTER TABLE drama_episodes ADD COLUMN full_plot TEXT NOT NULL DEFAULT ''");
+        }
+    }
+
+    private attachAssetsToDramas() {
+        const columns = this.db.prepare("PRAGMA table_info(assets)").all() as Array<{ name: string }>;
+        if (!columns.some((column) => column.name === "drama_id")) {
+            this.db.exec("ALTER TABLE assets ADD COLUMN drama_id TEXT REFERENCES drama_projects(folder_id) ON DELETE SET NULL");
+        }
+        this.db.exec("CREATE INDEX IF NOT EXISTS assets_drama ON assets(drama_id)");
+        const legacyFiles = this.db.prepare("SELECT id, data_json FROM assets WHERE kind = 'drama-file' AND drama_id IS NULL").all() as Array<{ id: string; data_json: string }>;
+        const update = this.db.prepare("UPDATE assets SET drama_id = ? WHERE id = ?");
+        for (const row of legacyFiles) {
+            const dramaId = parseJsonObject(row.data_json).dramaId;
+            if (typeof dramaId !== "string") continue;
+            const exists = this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(dramaId);
+            if (exists) update.run(dramaId, row.id);
         }
     }
 
@@ -413,6 +582,159 @@ export class BackendDatabase {
     }
 
     /**
+     * v7 migration: 新表 drama_episodes（episode_number / title / synopsis / canvas_id 1:1 可空）。
+     * 列在 CREATE TABLE 里已预声明（新建库直接生效）；老库由 v7 migration 兜底。
+     * UNIQUE(drama_id, episode_number) 防重；两个索引加速按剧目/按画布反查。
+     */
+    private createDramaEpisodesTable() {
+        const epExists = (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='drama_episodes'").get() as { name?: string } | undefined)?.name;
+        if (!epExists) {
+            this.db.exec(`CREATE TABLE drama_episodes (
+                id TEXT PRIMARY KEY,
+                drama_id TEXT NOT NULL REFERENCES drama_projects(folder_id) ON DELETE CASCADE,
+                episode_number INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                synopsis TEXT NOT NULL DEFAULT '',
+                full_plot TEXT NOT NULL DEFAULT '',
+                canvas_id TEXT REFERENCES canvas_projects(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(drama_id, episode_number),
+                UNIQUE(canvas_id)
+            )`);
+        }
+        this.attachFullPlotToDramaEpisodes();
+        this.db.exec("CREATE INDEX IF NOT EXISTS drama_episodes_drama_id ON drama_episodes(drama_id)");
+        this.db.exec("CREATE INDEX IF NOT EXISTS drama_episodes_canvas_id ON drama_episodes(canvas_id)");
+        const epCount = (this.db.prepare("SELECT COUNT(*) AS n FROM drama_episodes").get() as { n: number }).n;
+        console.log(`[migrate v7] drama_episodes ready (${epCount} episode(s))`);
+    }
+
+    /**
+     * v7 migration: 把 v6 时代 canvas_projects.folder_id 的存量关系搬到 drama_episodes。
+     * 规则：
+     // 每对（drama, canvas）自动建一个空 episode 1（占位，待用户填标题/分集剧情）。
+     // 同一 drama 下若已有 episode 1 且 canvas_id 未占，则新挂 canvas；
+     // 已有 canvas_id 重复则跳过（防冲突）。
+     // 每个 drama 即使没有任何 canvas，也建一个空 episode 1 占位。
+     */
+    private migrateV6FolderIdToV7Episodes() {
+        // 列是否存在
+        const cols = this.db.prepare("PRAGMA table_info(canvas_projects)").all() as Array<{ name: string }>;
+        const hasFolderId = cols.some((c) => c.name === "folder_id");
+        let migrated = 0;
+        if (hasFolderId) {
+            // 读 v6 时代所有 folder_id → canvas 映射
+            const rows = this.db.prepare("SELECT p.id, p.folder_id FROM canvas_projects p INNER JOIN drama_projects d ON d.folder_id = p.folder_id WHERE p.folder_id IS NOT NULL").all() as Array<{ id: string; folder_id: string }>;
+            for (const row of rows) {
+                this.upsertDramaEpisode({
+                    dramaId: row.folder_id,
+                    episodeNumber: 1,
+                    title: "",
+                    synopsis: "",
+                    canvasId: row.id,
+                });
+                migrated++;
+            }
+            // 同步清理 v6 写入 data_json 的冗余 folderId，避免画布读接口继续泄露旧直属关系。
+            const projects = this.db.prepare("SELECT id, data_json FROM canvas_projects").all() as Array<{ id: string; data_json: string }>;
+            const updateProject = this.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?");
+            for (const row of projects) {
+                let project: unknown;
+                try { project = JSON.parse(row.data_json); } catch { continue; }
+                if (!project || typeof project !== "object" || !("folderId" in project)) continue;
+                delete (project as Record<string, unknown>).folderId;
+                updateProject.run(JSON.stringify(project), row.id);
+            }
+            // 删列（ALTER TABLE DROP COLUMN 是 SQLite 3.35+ 才有；走重建表最稳）
+            this.db.exec("PRAGMA foreign_keys=OFF");
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE canvas_projects_new (
+                    id TEXT PRIMARY KEY,
+                    data_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )`);
+                this.db.exec("INSERT INTO canvas_projects_new (id, data_json, updated_at) SELECT id, data_json, updated_at FROM canvas_projects");
+                this.db.exec("DROP TABLE canvas_projects");
+                this.db.exec("ALTER TABLE canvas_projects_new RENAME TO canvas_projects");
+                this.db.exec("COMMIT");
+            } catch (error) {
+                this.db.exec("ROLLBACK");
+                throw error;
+            } finally {
+                this.db.exec("PRAGMA foreign_keys=ON");
+            }
+        }
+        // 给所有没建过 episode 的 drama 也建一个空 episode 1 占位
+        const dramasWithoutEpisode = this.db.prepare(
+            "SELECT d.folder_id AS id FROM drama_projects d LEFT JOIN drama_episodes e ON e.drama_id = d.folder_id WHERE e.id IS NULL"
+        ).all() as Array<{ id: string }>;
+        for (const d of dramasWithoutEpisode) {
+            this.upsertDramaEpisode({
+                dramaId: d.id,
+                episodeNumber: 1,
+                title: "",
+                synopsis: "",
+                canvasId: null,
+            });
+            migrated++;
+        }
+        console.log(`[migrate v7] migrated ${migrated} episode(s)`);
+    }
+
+    /** v8：修复已执行 v7 的旧进程留下的关系残留，保持迁移可重复执行。 */
+    private migrateV7ToV8EpisodeConstraints() {
+        const invalid = this.db.prepare(
+            "SELECT e.id, e.drama_id FROM drama_episodes e LEFT JOIN drama_projects d ON d.folder_id = e.drama_id WHERE d.folder_id IS NULL"
+        ).all() as Array<{ id: string; drama_id: string }>;
+        if (invalid.length) throw new Error(`drama_episodes 存在不属于剧目的记录: ${invalid.map((row) => row.id).join(", ")}`);
+        const duplicateCanvas = this.db.prepare(
+            "SELECT canvas_id FROM drama_episodes WHERE canvas_id IS NOT NULL GROUP BY canvas_id HAVING COUNT(*) > 1"
+        ).all() as Array<{ canvas_id: string }>;
+        if (duplicateCanvas.length) throw new Error(`同一画布被多个分集绑定: ${duplicateCanvas.map((row) => row.canvas_id).join(", ")}`);
+
+        this.db.exec("PRAGMA foreign_keys=OFF");
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const projects = this.db.prepare("SELECT id, data_json FROM canvas_projects").all() as Array<{ id: string; data_json: string }>;
+            const updateProject = this.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?");
+            for (const row of projects) {
+                let project: unknown;
+                try { project = JSON.parse(row.data_json); } catch { continue; }
+                if (!project || typeof project !== "object" || !("folderId" in project)) continue;
+                delete (project as Record<string, unknown>).folderId;
+                updateProject.run(JSON.stringify(project), row.id);
+            }
+
+            this.db.exec(`CREATE TABLE drama_episodes_v8 (
+                id TEXT PRIMARY KEY,
+                drama_id TEXT NOT NULL REFERENCES drama_projects(folder_id) ON DELETE CASCADE,
+                episode_number INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                synopsis TEXT NOT NULL DEFAULT '',
+                canvas_id TEXT REFERENCES canvas_projects(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(drama_id, episode_number),
+                UNIQUE(canvas_id)
+            )`);
+            this.db.exec("INSERT INTO drama_episodes_v8 SELECT id, drama_id, episode_number, title, synopsis, canvas_id, created_at, updated_at FROM drama_episodes");
+            this.db.exec("DROP TABLE drama_episodes");
+            this.db.exec("ALTER TABLE drama_episodes_v8 RENAME TO drama_episodes");
+            this.db.exec("CREATE INDEX drama_episodes_drama_id ON drama_episodes(drama_id)");
+            this.db.exec("CREATE INDEX drama_episodes_canvas_id ON drama_episodes(canvas_id)");
+            this.db.exec("COMMIT");
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        } finally {
+            this.db.exec("PRAGMA foreign_keys=ON");
+        }
+        console.log("[migrate v8] cleaned legacy canvas folder fields and normalized episode constraints");
+    }
+
+    /**
      * v6 migration: 给老 canvas_projects 加 folder_id 列 + 索引。
      * 列在 CREATE TABLE 里已经预声明（新建库直接生效）；老库用 ALTER TABLE 兜底。
      * ON DELETE SET NULL：删剧目时画布自动掉到"未编排场景"分类，不级联删画布。
@@ -465,63 +787,81 @@ export class BackendDatabase {
         }
     }
 
+    private migrateMiniMaxH3WorkflowFields() {
+        const row = this.db.prepare("SELECT fields_json FROM workflow_configs WHERE name = ?").get("MiniMax_H3.json") as { fields_json?: string } | undefined;
+        if (!row?.fields_json) return;
+        let fields: WorkflowField[];
+        try { fields = JSON.parse(row.fields_json) as WorkflowField[]; } catch { return; }
+        if (!Array.isArray(fields) || fields.some((field) => ["width", "height"].includes(field.id))) return;
+        const legacy = new Set(["aspect_ratio", "megapixels"]);
+        if (!fields.some((field) => legacy.has(field.id))) return;
+        const next = fields.filter((field) => !legacy.has(field.id));
+        const durationIndex = next.findIndex((field) => field.id === "duration");
+        const sizeFields: WorkflowField[] = [
+            { id: "width", node: "140", input: "value", name: "宽度（像素）", type: "number", default: 864, step: 32 },
+            { id: "height", node: "141", input: "value", name: "高度（像素）", type: "number", default: 480, step: 32 },
+        ];
+        next.splice(durationIndex < 0 ? next.length : durationIndex, 0, ...sizeFields);
+        this.upsertWorkflowConfig("MiniMax_H3.json", { fieldsJson: JSON.stringify(next) });
+        console.log("[migrate v12] exposed MiniMax H3 width/height workflow fields");
+    }
+
     // ── canvas_projects ───────────────────────────────────────────────────
 
-    listCanvasProjects(filter?: { folderId?: string | null }): CanvasProject[] {
-        // 按 folderId 过滤时走列上索引（不取 summary，全量 JSON）。
-        // folderId === null → 显式只取未挂剧目的画布；
-        // folderId === undefined → 不过滤；
-        // 字符串则严格相等（caller 负责把空字符串规范成 null 或单值）。
-        if (filter && "folderId" in filter) {
-            if (filter.folderId === null) {
-                const rows = this.db.prepare("SELECT data_json FROM canvas_projects WHERE folder_id IS NULL ORDER BY updated_at DESC").all() as Array<{ data_json: string }>;
-                return rows.flatMap((row) => {
-                    try {
-                        const value = JSON.parse(row.data_json) as CanvasProject;
-                        return value && typeof value === "object" && value.id ? [value] : [];
-                    } catch { return []; }
-                });
-            }
-            const target = String(filter.folderId || "").trim();
-            if (!target) return [];
-            const rows = this.db.prepare("SELECT data_json FROM canvas_projects WHERE folder_id = ? ORDER BY updated_at DESC").all(target) as Array<{ data_json: string }>;
-            return rows.flatMap((row) => {
-                try {
-                    const value = JSON.parse(row.data_json) as CanvasProject;
-                    return value && typeof value === "object" && value.id ? [value] : [];
-                } catch { return []; }
-            });
-        }
+    listCanvasProjects(): CanvasProject[] {
+        // v7 后画布不再有 folder_id 列；关系由 drama_episodes.canvas_id 承接。
+        // 按 episode 过滤用 listCanvasProjectsByEpisode（canvas-agent / REST 那边）。
         const rows = this.db.prepare("SELECT data_json FROM canvas_projects ORDER BY updated_at DESC").all() as Array<{ data_json: string }>;
         return rows.flatMap((row) => {
             try {
-                const value = JSON.parse(row.data_json) as CanvasProject;
+                const value = stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject;
                 return value && typeof value === "object" && value.id ? [value] : [];
             } catch { return []; }
         });
     }
 
-    listCanvasProjectSummaries(filter?: { folderId?: string | null; id?: string }): CanvasProject[] {
-        // 走 folder_id 列索引，不依赖 data_json 内部字段。
-        // null → 未挂剧目；string → 严格相等；undefined + id? → 仅按 id 过滤。
-        const where: string[] = [];
-        const params: Array<string | null> = [];
-        if (filter && "folderId" in filter) {
-            if (filter.folderId === null) {
-                where.push("folder_id IS NULL");
-            } else {
-                const target = String(filter.folderId || "").trim();
-                if (!target) return [];
-                where.push("folder_id = ?");
-                params.push(target);
-            }
+    listCanvasProjectsByEpisode(episodeId: string): CanvasProject[] {
+        const ep = this.getDramaEpisode(episodeId);
+        if (!ep || !ep.canvasId) return [];
+        const proj = this.getCanvasProject(ep.canvasId);
+        return proj ? [proj] : [];
+    }
+
+    listCanvasProjectsByDrama(dramaId: string): Array<{ episode: DramaEpisode; canvas: CanvasProject | null }> {
+        const episodes = this.listDramaEpisodes(dramaId);
+        return episodes.map((episode) => ({
+            episode,
+            canvas: episode.canvasId ? this.getCanvasProject(episode.canvasId) : null,
+        }));
+    }
+
+    listCanvasProjectSummaries(filter?: { episodeId?: string; id?: string }): CanvasProject[] {
+        // v7: 画布表无 folder_id 列，按 episode 过滤走 listCanvasProjectsByEpisode 路径。
+        // 这里保留纯 id 过滤（web /drama 页按画布 ID 查摘要时用）。
+        if (filter?.episodeId) {
+            const ep = this.getDramaEpisode(filter.episodeId);
+            if (!ep?.canvasId) return [];
+            const proj = this.getCanvasProject(ep.canvasId);
+            if (!proj) return [];
+            return [{
+                id: proj.id,
+                title: String((proj as Record<string, unknown>).title || ""),
+                episodeId: ep.id,
+                dramaId: ep.dramaId,
+                updatedAt: String((proj as Record<string, unknown>).updatedAt || ""),
+                revision: Number((proj as Record<string, unknown>).revision || 0),
+                nodeCount: Array.isArray((proj as Record<string, unknown>).nodes) ? ((proj as unknown as { nodes: unknown[] }).nodes.length) : 0,
+                connectionCount: Array.isArray((proj as Record<string, unknown>).connections) ? ((proj as unknown as { connections: unknown[] }).connections.length) : 0,
+            } as unknown as CanvasProject];
         }
+        const where: string[] = [];
+        const params: Array<string> = [];
         if (filter?.id) {
             where.push("id = ?");
             params.push(filter.id);
         }
         const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-        return this.db.prepare(`SELECT id, folder_id AS folderId, updated_at AS updatedAt,
+        return this.db.prepare(`SELECT id, updated_at AS updatedAt,
             json_extract(data_json, '$.title') AS title,
             json_extract(data_json, '$.createdAt') AS createdAt,
             COALESCE(json_extract(data_json, '$.revision'), 0) AS revision,
@@ -530,33 +870,173 @@ export class BackendDatabase {
             FROM canvas_projects ${whereClause} ORDER BY updated_at DESC`).all(...params) as CanvasProject[];
     }
 
-    upsertCanvasProject(project: CanvasProject) {
-        const now = new Date().toISOString();
-        const updatedAt = String(project.updatedAt || now);
-        const current = this.getCanvasProject(project.id);
-        const currentRevision = Number(current?.revision || 0);
-        const incomingRevision = Number(project.revision ?? currentRevision);
-        // revision 是画布写入的权威顺序；旧全量快照不能靠较新的时间戳覆盖新操作。
-        if (current && incomingRevision < currentRevision) return current;
-        // 客户端可能持有旧的全量画布快照；不能让它覆盖 MCP 刚写入的节点状态。
-        if (current && Date.parse(String(current.updatedAt || "")) > Date.parse(updatedAt)) return current;
-        project.revision = Math.max(currentRevision, incomingRevision);
-        // folderId 双写：data_json 保留冗余字段（前端 /drama 页面与外部 schema 已经在用），
-        // folder_id 列作为权威查询索引（带 ON DELETE SET NULL）。null/空字符串都规范化为 NULL。
-        const folderIdRaw = typeof project.folderId === "string" ? project.folderId.trim() : "";
-        const folderId = folderIdRaw || null;
-        this.db.prepare(
-            "INSERT INTO canvas_projects (id, data_json, folder_id, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, folder_id = excluded.folder_id, updated_at = excluded.updated_at"
-        ).run(project.id, JSON.stringify(project), folderId, updatedAt);
-        return this.getCanvasProject(project.id)!;
+    createCanvasProject(input: CanvasProject) {
+        if (typeof input?.id !== "string" || !input.id.trim()) throw new Error("project.id 必填");
+        const project = stripCanvasLocalViewState(input as unknown as Record<string, unknown>) as unknown as CanvasProject;
+        delete project.folderId;
+        // revision 是后台权威顺序；导入/新建均从零开始，不能把外部版本带进本地日志。
+        project.revision = 0;
+        const seedHash = (value: CanvasProject) => {
+            const { revision: _revision, updatedAt: _updatedAt, createdAt: _createdAt, folderId: _folderId, ...seed } = value;
+            return commandFingerprint(seed);
+        };
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const current = this.getCanvasProject(project.id);
+            if (current) {
+                const checkpoint = this.db.prepare("SELECT revision, data_json FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(project.id) as { revision: number; data_json: string } | undefined;
+                if (!checkpoint || checkpoint.revision !== 0 || seedHash(JSON.parse(checkpoint.data_json)) !== seedHash(project)) {
+                    throw Object.assign(collaborationError("PROJECT_EXISTS", "画布已存在，不能用整图覆盖；请提交增量操作或使用新 ID 导入"), { project: current, revision: current.revision });
+                }
+                this.db.exec("COMMIT");
+                return { project: current, created: false };
+            }
+            const now = new Date().toISOString();
+            project.createdAt ||= now;
+            project.updatedAt = now;
+            const json = JSON.stringify(project);
+            this.db.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)").run(project.id, json, now);
+            this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, 0, ?)").run(project.id, json);
+            this.db.exec("COMMIT");
+            return { project, created: true };
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
     }
 
-    applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, operations: CanvasOperation[]) {
+    getCanvasText(id: string, input: unknown) {
+        const target = textTargetSchema.parse(input);
+        const project = this.getCanvasProject(id);
+        if (!project) throw new Error(`画布不存在: ${id}`);
+        const text = readText(project, target);
+        const row = this.db.prepare("SELECT state FROM canvas_text_documents WHERE project_id = ? AND target_key = ?").get(id, textKey(target)) as { state: Uint8Array } | undefined;
+        const doc = loadTextDocument(row?.state, text);
+        try {
+            if (doc.getText("text").toString() !== text) replaceText(doc, text);
+            const state = Y.encodeStateAsUpdate(doc);
+            const documentId = this.saveCanvasText(id, target, state);
+            return { projectId: id, target, documentId, text, revision: Number(project.revision || 0), state: Buffer.from(state).toString("base64"), stateVector: Buffer.from(Y.encodeStateVector(doc)).toString("base64") };
+        } finally { doc.destroy(); }
+    }
+
+    private saveCanvasText(id: string, target: CanvasTextTarget, state: Uint8Array) {
+        const row = this.db.prepare("INSERT INTO canvas_text_documents (project_id, target_key, state, document_id) VALUES (?, ?, ?, ?) ON CONFLICT(project_id, target_key) DO UPDATE SET state = excluded.state RETURNING document_id").get(id, textKey(target), state, crypto.randomUUID()) as { document_id: string };
+        return row.document_id;
+    }
+
+    private applyCanvasTextOperation(id: string, project: Record<string, unknown>, operation: CanvasOperation): CanvasOperation {
+        const target = textTargetSchema.parse(operation.target);
+        const current = readText(project, target);
+        const row = this.db.prepare("SELECT state, document_id FROM canvas_text_documents WHERE project_id = ? AND target_key = ?").get(id, textKey(target)) as { state: Uint8Array; document_id: string } | undefined;
+        if (!row || row.document_id !== operation.documentId) throw collaborationError("TEXT_DOCUMENT_REPLACED", "文本对象已被替换，请保留旧草稿并重新读取目标");
+        const doc = loadTextDocument(row.state, current);
+        try {
+            if (doc.getText("text").toString() !== current) replaceText(doc, current);
+            const before = Y.encodeStateVector(doc);
+            if (operation.type === "text_replace") {
+                if (typeof operation.expectedText !== "string" || typeof operation.text !== "string") throw new Error("条件替换必须提供原文和新文本");
+                if (current !== operation.expectedText) throw collaborationError("TEXT_CONFLICT", "原文已变化，改写结果需作为建议保留，不能覆盖当前文本");
+                replaceText(doc, operation.text);
+            } else {
+                if (typeof operation.update !== "string" || !operation.update) throw new Error("缺少 Yjs 文本增量");
+                Y.applyUpdate(doc, Buffer.from(operation.update, "base64"));
+            }
+            if ([...doc.share.keys()].some((key) => key !== "text") || doc.getText("text").toDelta().some((item: { insert?: unknown }) => typeof item.insert !== "string")) throw new Error("协作文本只允许纯文字增量");
+            this.saveCanvasText(id, target, Y.encodeStateAsUpdate(doc));
+            return { ...textOperation(target, doc.getText("text").toString(), project), textUpdate: { target, documentId: row.document_id, update: Buffer.from(Y.encodeStateAsUpdate(doc, before)).toString("base64") } };
+        } finally { doc.destroy(); }
+    }
+
+    listCanvasTextSuggestions(id: string, input?: unknown): CanvasTextSuggestion[] {
+        if (!this.getCanvasProject(id)) throw new Error(`画布不存在: ${id}`);
+        const target = input === undefined ? undefined : textTargetSchema.parse(input);
+        const rows = (target
+            ? this.db.prepare("SELECT data_json FROM canvas_text_suggestions WHERE project_id = ? AND target_key = ?").all(id, textKey(target))
+            : this.db.prepare("SELECT data_json FROM canvas_text_suggestions WHERE project_id = ?").all(id)) as Array<{ data_json: string }>;
+        return rows.map((row) => JSON.parse(row.data_json) as CanvasTextSuggestion).sort((a, b) => b.revision - a.revision);
+    }
+
+    private applyTextSuggestion(id: string, project: Record<string, unknown>, operation: CanvasOperation): CanvasOperation {
+        let suggestion: CanvasTextSuggestion;
+        let canonical: CanvasOperation = { type: "text_suggestion" };
+        if (operation.type === "save_text_suggestion") {
+            const input = textSuggestionInputSchema.parse(operation.suggestion);
+            const existing = this.db.prepare("SELECT data_json FROM canvas_text_suggestions WHERE project_id = ? AND id = ?").get(id, input.id) as { data_json: string } | undefined;
+            if (existing) {
+                const saved = JSON.parse(existing.data_json) as CanvasTextSuggestion;
+                if (commandFingerprint(textSuggestionInputSchema.parse(saved)) !== commandFingerprint(input)) throw collaborationError("OPERATION_ID_REUSED", "候选 ID 已用于不同内容");
+                return { ...canonical, textSuggestion: saved };
+            }
+            // 生成途中目标可能被删除；仍保存返回结果，但绝不自动写入新建的同 ID 目标。
+            suggestion = { ...input, status: "pending", revision: Number(project.revision || 0) + 1 };
+        } else {
+            const row = this.db.prepare("SELECT data_json FROM canvas_text_suggestions WHERE project_id = ? AND id = ?").get(id, String(operation.id || "")) as { data_json: string } | undefined;
+            if (!row) throw new Error("找不到改写候选");
+            suggestion = JSON.parse(row.data_json) as CanvasTextSuggestion;
+            if (operation.action !== "apply" && operation.action !== "dismiss") throw new Error("候选操作必须为 apply 或 dismiss");
+            if (suggestion.status !== "pending") throw collaborationError("TEXT_SUGGESTION_RESOLVED", "候选已被处理，请同步最新状态");
+            if (operation.action === "apply") {
+                if (operation.documentId !== suggestion.documentId) throw collaborationError("TEXT_DOCUMENT_REPLACED", "候选属于旧文本对象，不能应用到重建的目标");
+                canonical = this.applyCanvasTextOperation(id, project, { type: "text_replace", target: suggestion.target, documentId: suggestion.documentId, expectedText: operation.expectedText, text: suggestion.text });
+            }
+            suggestion = { ...suggestion, status: operation.action === "apply" ? "applied" : "dismissed", revision: Number(project.revision || 0) + 1 };
+        }
+        this.db.prepare("INSERT INTO canvas_text_suggestions (project_id, id, target_key, data_json) VALUES (?, ?, ?, ?) ON CONFLICT(project_id, id) DO UPDATE SET data_json = excluded.data_json")
+            .run(id, suggestion.id, textKey(suggestion.target), JSON.stringify(suggestion));
+        return { ...canonical, textSuggestion: suggestion };
+    }
+
+    readCanvasChanges(id: string, afterRevision: number) {
+        const project = this.getCanvasProject(id);
+        if (!project) throw new Error(`画布不存在: ${id}`);
+        if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) throw new Error("afterRevision 必须为非负整数");
+        const revision = Number(project.revision || 0);
+        const rows = this.db.prepare("SELECT * FROM canvas_operation_batches WHERE project_id = ? AND revision > ? ORDER BY revision").all(id, afterRevision) as Array<Record<string, unknown>>;
+        const commits: CanvasCommit[] = rows.map((row) => ({ projectId: id, operationId: String(row.operation_id), baseRevision: Number(row.base_revision), revision: Number(row.revision), source: JSON.parse(String(row.source_json)), operations: JSON.parse(String(row.operations_json)), operationResults: JSON.parse(String(row.results_json)), updatedAt: String(row.created_at) }));
+        const complete = afterRevision <= revision && commits.length === revision - afterRevision && commits.every((commit, index) => commit.baseRevision === afterRevision + index && commit.revision === afterRevision + index + 1);
+        return { projectId: id, revision, reset: !complete, commits: complete ? commits : [], ...(!complete ? { project } : {}) };
+    }
+
+    private canvasProjectAt(id: string, revision: number): CanvasProject {
+        const row = this.db.prepare("SELECT revision, data_json FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id) as { revision: number; data_json: string } | undefined;
+        if (!row || row.revision > revision) throw collaborationError("RECEIPT_UNAVAILABLE", "旧请求没有可恢复回执，请读取最新画布后重新操作");
+        const project = stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject;
+        const rows = this.db.prepare("SELECT revision, operations_json, created_at FROM canvas_operation_batches WHERE project_id = ? AND revision > ? AND revision <= ? ORDER BY revision").all(id, row.revision, revision) as Array<{ revision: number; operations_json: string; created_at: string }>;
+        if (rows.length !== revision - row.revision) throw collaborationError("RECEIPT_UNAVAILABLE", "操作历史不连续，不能还原旧请求回执");
+        for (const entry of rows) {
+            applyCanvasProjectOperations(project, JSON.parse(entry.operations_json));
+            project.revision = entry.revision;
+            project.updatedAt = entry.created_at;
+        }
+        return stripCanvasLocalViewState(project as unknown as Record<string, unknown>) as unknown as CanvasProject;
+    }
+
+    applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, inputOperations: CanvasOperation[], context?: CanvasCommandContext) {
+        const operationId = context?.operationId || crypto.randomUUID();
+        const fingerprint = commandFingerprint({ id, expectedRevision, baseRevision: context?.baseRevision, operations: inputOperations });
+        const operations = structuredClone(inputOperations);
+        let commit: CanvasCommit;
         this.db.exec("BEGIN IMMEDIATE");
         try {
             const current = this.getCanvasProject(id);
             if (!current) throw new Error(`画布不存在: ${id}`);
             const currentRevision = Number(current.revision || 0);
+            {
+                const existing = this.db.prepare("SELECT b.project_id AS projectId, b.revision, b.operations_json AS operationsJson, b.results_json AS resultsJson, r.request_hash AS requestHash FROM canvas_operation_batches b LEFT JOIN canvas_command_receipts r ON r.operation_id = b.operation_id WHERE b.operation_id = ?").get(operationId) as { projectId: string; revision: number; operationsJson: string; resultsJson: string; requestHash?: string } | undefined;
+                if (existing) {
+                    if (existing.projectId !== id || existing.requestHash !== fingerprint) throw collaborationError("OPERATION_ID_REUSED", "operationId 已用于不同请求，请勿修改重试请求内容");
+                    const project = this.canvasProjectAt(id, Number(existing.revision));
+                    this.db.exec("COMMIT");
+                    return { project, revision: Number(existing.revision), operationId, operationResults: JSON.parse(existing.resultsJson), operations: JSON.parse(existing.operationsJson), duplicated: true };
+                }
+            }
+            if (!operations.length || operations.some((operation) => !operation || typeof operation.type !== "string")) throw new Error("operations 必须为非空有效操作数组");
+            if (context?.baseRevision !== undefined) {
+                const history = this.readCanvasChanges(id, context.baseRevision);
+                const conflicts = history.reset ? ["history"] : concurrentCommandConflicts(operations, history.commits.flatMap((entry) => entry.operations));
+                if (conflicts.length) throw Object.assign(collaborationError("FIELD_CONFLICT", "目标字段已被其他协作者修改"), { project: current, revision: currentRevision, conflictTargets: conflicts });
+            }
             if (expectedRevision !== undefined && expectedRevision !== currentRevision) {
                 const error = new Error("画布版本冲突");
                 (error as Error & { code?: string; project?: CanvasProject; revision?: number }).code = "REVISION_CONFLICT";
@@ -565,18 +1045,62 @@ export class BackendDatabase {
                 throw error;
             }
             const project = structuredClone(current) as Record<string, unknown>;
-            const operationResults = applyCanvasProjectOperations(project, operations);
+            this.db.prepare("INSERT OR IGNORE INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
+            const operationResults = operations.flatMap((operation, index) => {
+                if (operation.type === "text_suggestion") throw new Error("text_suggestion 是服务端回执，不能直接提交");
+                // 文本增量与候选通知必须由本次事务计算，不能信任客户端夹带的回执字段。
+                delete operation.textUpdate;
+                delete operation.textUpdates;
+                delete operation.textSuggestion;
+                const isSuggestion = operation.type === "save_text_suggestion" || operation.type === "resolve_text_suggestion";
+                const isText = isSuggestion || operation.type === "text_update" || operation.type === "text_replace";
+                if (isSuggestion) operations[index] = this.applyTextSuggestion(id, project, operation);
+                else if (isText) operations[index] = this.applyCanvasTextOperation(id, project, operation);
+                if (!context?.runtimeWrite) prepareClientCanvasOperation(project, operations[index]);
+                const result = applyCanvasProjectOperations(project, [operations[index]]);
+                if (!isText) {
+                    // 每一步删除后立即清理；同批 delete + add 同 ID 也必须得到新文本身份。
+                    if (["delete_node", "delete_h3_segment", "replace_h3_segments"].includes(operation.type) || (operation.type === "update_node" && (["segments", "texts"].some((key) => Object.hasOwn(operation.metadata as object || {}, key) || (operation.metadataDelete as string[] || []).includes(key)) || Object.hasOwn(operation.patch as object || {}, "type")))) {
+                        const documents = this.db.prepare("SELECT target_key FROM canvas_text_documents WHERE project_id = ?").all(id) as Array<{ target_key: string }>;
+                        for (const { target_key } of documents) {
+                            const [nodeId, segmentId, field, textItemId] = JSON.parse(target_key);
+                            try { readText(project, { nodeId: nodeId || undefined, segmentId: segmentId || undefined, field, textItemId }); }
+                            catch { this.db.prepare("DELETE FROM canvas_text_documents WHERE project_id = ? AND target_key = ?").run(id, target_key); }
+                        }
+                    }
+                    const textUpdates = editedTextTargets(operation, project).flatMap((target) => {
+                        const row = this.db.prepare("SELECT state FROM canvas_text_documents WHERE project_id = ? AND target_key = ?").get(id, textKey(target)) as { state: Uint8Array } | undefined;
+                        if (!row) return [];
+                        const doc = loadTextDocument(row.state, "");
+                        try {
+                            const before = Y.encodeStateVector(doc);
+                            replaceText(doc, readText(project, target));
+                            const documentId = this.saveCanvasText(id, target, Y.encodeStateAsUpdate(doc));
+                            return [{ target, documentId, update: Buffer.from(Y.encodeStateAsUpdate(doc, before)).toString("base64") }];
+                        } finally { doc.destroy(); }
+                    });
+                    if (textUpdates.length) operations[index].textUpdates = textUpdates;
+                }
+                return result;
+            });
             const revision = currentRevision + 1;
             project.revision = revision;
             project.updatedAt = new Date().toISOString();
             this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?")
                 .run(JSON.stringify(project), String(project.updatedAt), id);
+            const source = context?.source || { clientId: "system:backend", kind: "system", label: "后台" };
+            this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+                .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(operations), JSON.stringify(operationResults), String(project.updatedAt));
+            this.db.prepare("INSERT INTO canvas_command_receipts (operation_id, request_hash) VALUES (?, ?)").run(operationId, fingerprint);
             this.db.exec("COMMIT");
-            return { project: project as CanvasProject, revision, operationResults, operations };
+            commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations, operationResults, source, updatedAt: String(project.updatedAt) };
         } catch (error) {
             this.db.exec("ROLLBACK");
             throw error;
         }
+        // 已提交的数据不能因为通知失败而被报告成事务失败，更不能尝试 ROLLBACK。
+        try { this.canvasCommitListener?.(commit); } catch (error) { console.error("画布提交成功，但实时通知失败", error); }
+        return { project: this.getCanvasProject(id)!, revision: commit.revision, operationId, operationResults: commit.operationResults, operations: commit.operations, duplicated: false };
     }
 
     writeBackH3Task(
@@ -647,7 +1171,7 @@ export class BackendDatabase {
         }
         operations.push({ type: "update_node", id: binding.nodeId, metadata: nodeMetadataPatch });
         try {
-            this.applyCanvasProjectOperations(binding.projectId, Number(project.revision || 0), operations);
+            this.applyCanvasProjectOperations(binding.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "H3 任务" } });
         } catch (error) {
             // 409（revision 过期）或 update_h3_segment CAS 失败（runtimeTaskId 已被清空 / 改了）都视为放弃回写。
             const message = error instanceof Error ? error.message : String(error);
@@ -659,18 +1183,47 @@ export class BackendDatabase {
 
     writeBackCanvasImageTask(
         task: RuntimeTask,
-        input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append" },
+        input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append"; imageIds?: string[] },
         media: Array<Record<string, unknown>>,
     ): { project: CanvasProject; operations: CanvasOperation[] } | null {
-        this.db.exec("BEGIN IMMEDIATE");
-        try {
             const project = this.getCanvasProject(input.projectId);
-            if (!project) { this.db.exec("COMMIT"); return null; }
+            if (!project) return null;
             const nodes = Array.isArray(project.nodes) ? structuredClone(project.nodes) as Array<Record<string, any>> : [];
             const connections = Array.isArray(project.connections) ? structuredClone(project.connections) as Array<Record<string, any>> : [];
             const source = nodes.find((item) => String(item.id || "") === input.nodeId);
-            if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) { this.db.exec("COMMIT"); return null; }
+            if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) return null;
             const sourceMetadata = recordOf(source.metadata);
+            if (recordOf(recordOf(task.input).params).writeBackToTarget === true) {
+                const output = media[0];
+                if (!output) throw new Error("生成完成但没有返回图片");
+                const metadata = {
+                    content: output.url, url: output.url, storageKey: output.storageKey || "", mimeType: output.mimeType || "image/png",
+                    bytes: output.bytes, naturalWidth: output.width, naturalHeight: output.height,
+                    prompt: input.prompt, model: input.model, generationType: input.references?.length ? "edit" : "generation",
+                    status: "success", runProgress: 1, generationTaskId: task.id,
+                };
+                const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata,
+                    metadataDelete: ["runtimeTaskId", "errorDetails"] }];
+                const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
+                    { runtimeWrite: true, operationId: `image-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
+                return { project: result.project, operations: result.operations };
+            }
+            if (input.imageIds) {
+                if (!media.length) throw new Error("生成完成但没有返回图片");
+                const slots = completedImageSlots(sourceMetadata, input.imageIds, media);
+                const initialSize = recordOf(task.params.imageTargetSize);
+                const keepSmartLayout = source.type === "config" && sourceMetadata.smart === true;
+                const resultSize = slots.content && !keepSmartLayout && !sourceMetadata.freeResize && source.width === initialSize.width && source.height === initialSize.height
+                    ? fitImageNodeSize(Number(slots.naturalWidth || 0), Number(slots.naturalHeight || 0)) : {};
+                const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId,
+                    patch: resultSize,
+                    metadata: { ...slots, status: "success", runProgress: 1, generationTaskId: task.id },
+                    metadataDelete: ["runtimeTaskId", "errorDetails"] },
+                    ...imageSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success")];
+                const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
+                    { runtimeWrite: true, operationId: `image-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
+                return { project: result.project, operations: result.operations };
+            }
             const operations: CanvasOperation[] = [];
             const activeIds = new Set(Array.isArray(sourceMetadata.generatedResultIds)
                 ? sourceMetadata.generatedResultIds.map(String)
@@ -729,63 +1282,93 @@ export class BackendDatabase {
                 resultX += width + 40;
             });
             if (!createdIds.length) throw new Error("生成完成但没有返回图片");
-            const sourceMetadataPatch = { status: "success", runtimeTaskId: undefined, errorDetails: undefined, model: input.model, prompt: input.prompt, primaryImageId: createdIds[0], generatedResultIds: createdIds, generationTaskId: task.id };
+            const sourceMetadataPatch = { status: "success", primaryImageId: createdIds[0], generatedResultIds: createdIds, generationTaskId: task.id };
             source.metadata = { ...sourceMetadata, ...sourceMetadataPatch };
             operations.push({ type: "update_node", id: input.nodeId, metadata: sourceMetadataPatch, metadataDelete: ["runtimeTaskId", "errorDetails"] });
-            const nextProject: CanvasProject = { ...project, nodes, connections, revision: Number(project.revision || 0) + 1, updatedAt: new Date().toISOString() };
-            this.db.prepare(
-                "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
-            ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
-            this.db.exec("COMMIT");
-            return { project: this.getCanvasProject(nextProject.id)!, operations };
-        } catch (error) {
-            this.db.exec("ROLLBACK");
-            throw error;
-        }
+            operations.push(...imageSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success"));
+            const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
+            return { project: result.project, operations: result.operations };
     }
 
     markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null {
-        this.db.exec("BEGIN IMMEDIATE");
-        try {
             const project = this.getCanvasProject(input.projectId);
-            if (!project) { this.db.exec("COMMIT"); return null; }
+            if (!project) return null;
             const nodes = Array.isArray(project.nodes) ? structuredClone(project.nodes) as Array<Record<string, any>> : [];
             const source = nodes.find((item) => String(item.id || "") === input.nodeId);
-            if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) { this.db.exec("COMMIT"); return null; }
-            const metadataPatch = { status: task.status === "cancelled" ? "cancelled" : "error", runtimeTaskId: undefined, errorDetails: task.status === "cancelled" ? undefined : error };
+            if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) return null;
+            const status = task.status === "cancelled" ? "cancelled" : "error";
+            const errorDetails = task.status === "cancelled" ? undefined : error;
+            const metadataPatch = { status, runtimeTaskId: undefined, errorDetails,
+                ...imageSlotStatus(project, input.nodeId, task.input.imageIds as string[] | undefined, status, errorDetails) };
             source.metadata = { ...recordOf(source.metadata), ...metadataPatch };
             const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata: metadataPatch, metadataDelete: task.status === "cancelled" ? ["runtimeTaskId", "errorDetails"] : ["runtimeTaskId"] }];
-            const nextProject: CanvasProject = { ...project, nodes, revision: Number(project.revision || 0) + 1, updatedAt: new Date().toISOString() };
-            this.db.prepare(
-                "INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at"
-            ).run(nextProject.id, JSON.stringify(nextProject), String(nextProject.updatedAt));
-            this.db.exec("COMMIT");
-            return { project: this.getCanvasProject(nextProject.id)!, operations };
-        } catch (caught) {
-            this.db.exec("ROLLBACK");
-            throw caught;
-        }
+            operations.push(...imageSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, status));
+            const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
+            return { project: result.project, operations: result.operations };
     }
 
-    replaceCanvasProjects(projects: CanvasProject[]): CanvasProject[] {
-        const now = new Date().toISOString();
-        this.db.exec("BEGIN IMMEDIATE");
-        try {
-            this.db.prepare("DELETE FROM canvas_projects").run();
-            const insert = this.db.prepare("INSERT INTO canvas_projects (id, data_json, folder_id, updated_at) VALUES (?, ?, ?, ?)");
-            for (const project of projects) {
-                if (project.id) {
-                    const folderIdRaw = typeof project.folderId === "string" ? project.folderId.trim() : "";
-                    const folderId = folderIdRaw || null;
-                    insert.run(project.id, JSON.stringify(project), folderId, String(project.updatedAt || now));
-                }
-            }
-            this.db.exec("COMMIT");
-        } catch (error) {
-            this.db.exec("ROLLBACK");
-            throw error;
-        }
-        return this.listCanvasProjects();
+    writeBackCanvasVideoTask(task: RuntimeTask, input: { projectId: string; nodeId: string; prompt: string; model: string }, media: Record<string, unknown>): { project: CanvasProject; operations: CanvasOperation[] } | null {
+            const project = this.getCanvasProject(input.projectId);
+            if (!project) return null;
+            const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+            const node = nodes.find((item) => String(item.id || "") === input.nodeId);
+            if (!node || String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) return null;
+            const metadata = recordOf(node.metadata);
+            const initialSize = recordOf(task.params.videoTargetSize);
+            const naturalWidth = Number(media.width || 0);
+            const naturalHeight = Number(media.height || 0);
+            const keepSmartLayout = node.type === "config" && metadata.smart === true;
+            const size = !keepSmartLayout && !metadata.freeResize && node.width === initialSize.width && node.height === initialSize.height && naturalWidth > 0 && naturalHeight > 0
+                ? fitImageNodeSize(naturalWidth, naturalHeight) : {};
+            const patch = {
+                status: "success", runProgress: 1, generationTaskId: task.id,
+                content: media.url, storageKey: media.storageKey || "", mimeType: media.mimeType || "video/mp4",
+                bytes: media.bytes, naturalWidth: media.width, naturalHeight: media.height, durationMs: media.durationMs,
+                prompt: input.prompt, model: input.model,
+            };
+            const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, patch: size, metadata: patch, metadataDelete: ["runtimeTaskId", "errorDetails"] }];
+            operations.push(...canvasMediaSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success"));
+            const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
+                { runtimeWrite: true, operationId: `video-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "视频生成任务" } });
+            return { project: result.project, operations: result.operations };
+    }
+
+    markCanvasVideoTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null {
+            const project = this.getCanvasProject(input.projectId);
+            if (!project) return null;
+            const node = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === input.nodeId) as Record<string, any> | undefined;
+            if (!node || String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) return null;
+            const status = task.status === "cancelled" ? "cancelled" : "error";
+            const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata: { status, errorDetails: status === "error" ? error : undefined },
+                metadataDelete: status === "cancelled" ? ["runtimeTaskId", "errorDetails"] : ["runtimeTaskId"] }];
+            operations.push(...canvasMediaSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, status));
+            const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
+                { runtimeWrite: true, operationId: `video-task-failed:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "视频生成任务" } });
+            return { project: result.project, operations: result.operations };
+    }
+
+    writeBackCanvasAudioTask(task: RuntimeTask, input: { projectId: string; nodeId: string; prompt: string; model: string }, media: Record<string, unknown>): { project: CanvasProject; operations: CanvasOperation[] } | null {
+        const project = this.getCanvasProject(input.projectId);
+        if (!project) return null;
+        const node = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === input.nodeId) as Record<string, any> | undefined;
+        if (!node || String(recordOf(node.metadata).runtimeTaskId || "") !== task.id || this.getTask(task.id)?.status === "cancelled") return null;
+        const metadata = { status: "success", runProgress: 1, generationTaskId: task.id, content: media.url, storageKey: media.storageKey || "", mimeType: media.mimeType || "audio/mpeg", bytes: media.bytes, durationMs: media.durationMs, prompt: input.prompt, model: input.model };
+        const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata, metadataDelete: ["runtimeTaskId", "errorDetails"] }];
+        operations.push(...canvasMediaSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success"));
+        const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, operationId: `audio-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "音频生成任务" } });
+        return { project: result.project, operations: result.operations };
+    }
+
+    markCanvasAudioTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null {
+        const project = this.getCanvasProject(input.projectId);
+        if (!project) return null;
+        const node = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === input.nodeId) as Record<string, any> | undefined;
+        if (!node || String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) return null;
+        const status = task.status === "cancelled" ? "cancelled" : "error";
+        const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata: { status, errorDetails: status === "error" ? error : undefined }, metadataDelete: status === "cancelled" ? ["runtimeTaskId", "errorDetails"] : ["runtimeTaskId"] }];
+        operations.push(...canvasMediaSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, status));
+        const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, operationId: `audio-task-failed:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "音频生成任务" } });
+        return { project: result.project, operations: result.operations };
     }
 
     deleteCanvasProject(id: string): number {
@@ -794,7 +1377,7 @@ export class BackendDatabase {
 
     listCanvasFolders(): CanvasFolder[] {
         const rows = this.db.prepare(
-            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.updated_at AS drama_updated_at FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id ORDER BY f.created_at ASC"
+            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.updated_at AS drama_updated_at, CASE WHEN d.folder_id IS NULL THEN 0 ELSE 1 END AS is_drama FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id ORDER BY f.created_at ASC"
         ).all() as Array<Record<string, unknown>>;
         return rows.map((row) => {
             const value = JSON.parse(String(row.tags_json || "[]"));
@@ -804,6 +1387,7 @@ export class BackendDatabase {
                 updatedAt: String(row.drama_updated_at || row.created_at),
                 outline: String(row.outline || ""), description: String(row.description || ""),
                 coverStorageKey: row.cover_storage_key ? String(row.cover_storage_key) : null, tags,
+                isDrama: Number(row.is_drama) === 1,
             };
         });
     }
@@ -816,32 +1400,122 @@ export class BackendDatabase {
             this.db.prepare(
                 "INSERT INTO canvas_folders (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name"
             ).run(folder.id, folder.name, folder.createdAt);
-            this.db.prepare(
-                "INSERT INTO drama_projects (folder_id, outline, description, cover_storage_key, tags_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id) DO UPDATE SET outline = excluded.outline, description = excluded.description, cover_storage_key = excluded.cover_storage_key, tags_json = excluded.tags_json, updated_at = excluded.updated_at"
-            ).run(folder.id, String(folder.outline || ""), String(folder.description || ""), folder.coverStorageKey || null, JSON.stringify(tags), updatedAt);
+            // 旧客户端没有 isDrama 字段，按原行为创建剧目；新画布普通文件夹显式传 false。
+            if (folder.isDrama !== false) {
+                this.db.prepare(
+                    "INSERT INTO drama_projects (folder_id, outline, description, cover_storage_key, tags_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id) DO UPDATE SET outline = excluded.outline, description = excluded.description, cover_storage_key = excluded.cover_storage_key, tags_json = excluded.tags_json, updated_at = excluded.updated_at"
+                ).run(folder.id, String(folder.outline || ""), String(folder.description || ""), folder.coverStorageKey || null, JSON.stringify(tags), updatedAt);
+            }
             this.db.exec("COMMIT");
         } catch (error) {
             this.db.exec("ROLLBACK");
             throw error;
         }
-        return { ...folder, updatedAt, outline: String(folder.outline || ""), description: String(folder.description || ""), coverStorageKey: folder.coverStorageKey || null, tags };
+        return { ...folder, updatedAt, outline: String(folder.outline || ""), description: String(folder.description || ""), coverStorageKey: folder.coverStorageKey || null, tags, isDrama: this.isDramaProject(folder.id) };
+    }
+
+    // ── drama_episodes ───────────────────────────────────────────
+    // episode 主键是 id（nanoid），drama_id + episode_number 唯一。
+    // upsertDramaEpisode 接受传入的 episode 对象，若 id 未填则随机生成；
+    // 同 (drama_id, episode_number) 已存在时按 id 替换（保留原 id）。
+    upsertDramaEpisode(input: { id?: string; dramaId: string; episodeNumber: number; title: string; synopsis: string; fullPlot?: string; canvasId?: string | null }): DramaEpisode {
+        const now = new Date().toISOString();
+        const id = input.id || `episode-${input.dramaId}-${input.episodeNumber}-${Math.random().toString(36).slice(2, 8)}`;
+        const existing = this.getDramaEpisodeByNumber(input.dramaId, input.episodeNumber);
+        const createdAt = existing?.createdAt || now;
+        const canvasId = input.canvasId ?? null;
+        const fullPlot = input.fullPlot ?? "";
+        if (existing) {
+            this.db.prepare(
+                "UPDATE drama_episodes SET title=?, synopsis=?, full_plot=?, canvas_id=?, updated_at=? WHERE id=?"
+            ).run(input.title, input.synopsis, fullPlot, canvasId, now, existing.id);
+            return this.getDramaEpisode(existing.id)!;
+        }
+        this.db.prepare(
+            "INSERT INTO drama_episodes (id, drama_id, episode_number, title, synopsis, full_plot, canvas_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).run(id, input.dramaId, input.episodeNumber, input.title, input.synopsis, fullPlot, canvasId, createdAt, now);
+        return this.getDramaEpisode(id)!;
+    }
+
+    updateDramaEpisode(id: string, patch: { episodeNumber?: number; title?: string; synopsis?: string; fullPlot?: string; canvasId?: string | null }): DramaEpisode | null {
+        const existing = this.getDramaEpisode(id);
+        if (!existing) return null;
+        const nextNumber = patch.episodeNumber ?? existing.episodeNumber;
+        const nextTitle = patch.title ?? existing.title;
+        const nextSynopsis = patch.synopsis ?? existing.synopsis;
+        const nextFullPlot = patch.fullPlot ?? existing.fullPlot;
+        const nextCanvasId = patch.canvasId === undefined ? existing.canvasId : patch.canvasId;
+        const conflict = this.getDramaEpisodeByNumber(existing.dramaId, nextNumber);
+        if (conflict && conflict.id !== id) throw new Error(`分集编号已存在: ${existing.dramaId}/${nextNumber}`);
+        if (nextCanvasId) {
+            const canvasConflict = this.getDramaEpisodeByCanvasId(nextCanvasId);
+            if (canvasConflict && canvasConflict.id !== id) throw new Error(`画布已绑定到分集: ${canvasConflict.id}`);
+        }
+        this.db.prepare(
+            "UPDATE drama_episodes SET episode_number=?, title=?, synopsis=?, full_plot=?, canvas_id=?, updated_at=? WHERE id=?"
+        ).run(nextNumber, nextTitle, nextSynopsis, nextFullPlot, nextCanvasId, new Date().toISOString(), id);
+        return this.getDramaEpisode(id);
+    }
+
+    getDramaEpisode(id: string): DramaEpisode | null {
+        const row = this.db.prepare("SELECT * FROM drama_episodes WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+        return row ? this.mapDramaEpisodeRow(row) : null;
+    }
+
+    getDramaEpisodeByNumber(dramaId: string, episodeNumber: number): DramaEpisode | null {
+        const row = this.db.prepare("SELECT * FROM drama_episodes WHERE drama_id = ? AND episode_number = ?").get(dramaId, episodeNumber) as Record<string, unknown> | undefined;
+        return row ? this.mapDramaEpisodeRow(row) : null;
+    }
+
+    getDramaEpisodeByCanvasId(canvasId: string): DramaEpisode | null {
+        const row = this.db.prepare("SELECT * FROM drama_episodes WHERE canvas_id = ?").get(canvasId) as Record<string, unknown> | undefined;
+        return row ? this.mapDramaEpisodeRow(row) : null;
+    }
+
+    listDramaEpisodes(dramaId: string): DramaEpisode[] {
+        const rows = this.db.prepare("SELECT * FROM drama_episodes WHERE drama_id = ? ORDER BY episode_number ASC").all(dramaId) as Array<Record<string, unknown>>;
+        return rows.map((row) => this.mapDramaEpisodeRow(row));
+    }
+
+    deleteDramaEpisode(id: string): number {
+        return Number(this.db.prepare("DELETE FROM drama_episodes WHERE id = ?").run(id).changes);
+    }
+
+    private mapDramaEpisodeRow(row: Record<string, unknown>): DramaEpisode {
+        return {
+            id: String(row.id),
+            dramaId: String(row.drama_id),
+            episodeNumber: Number(row.episode_number),
+            title: String(row.title || ""),
+            synopsis: String(row.synopsis || ""),
+            fullPlot: String(row.full_plot || ""),
+            canvasId: row.canvas_id ? String(row.canvas_id) : null,
+            createdAt: String(row.created_at),
+            updatedAt: String(row.updated_at),
+        };
     }
 
     deleteCanvasFolder(id: string): number {
+        // 画布普通文件夹才允许从这里删除；短剧项目由 deleteDramaProject 显式删除。
+        if (this.isDramaProject(id)) return 0;
         this.db.exec("BEGIN IMMEDIATE");
         try {
-            // folder_id 列由 ON DELETE SET NULL 自动清零；data_json 里的冗余字段也要同步删，
-            // 否则前端再读时还会看到 stale folderId（虽然 list 已经按列过滤了，但 getCanvasProject
-            // 直接反序列化 data_json，没有抹这一步就会泄露）。
-            const projects = this.listCanvasProjects();
-            const update = this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?");
-            const now = new Date().toISOString();
-            for (const project of projects) {
-                if (String(project.folderId || "") !== id) continue;
-                const next = { ...project };
-                delete next.folderId;
-                update.run(JSON.stringify(next), now, project.id);
-            }
+            const deleted = Number(this.db.prepare("DELETE FROM canvas_folders WHERE id = ?").run(id).changes);
+            this.db.exec("COMMIT");
+            return deleted;
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+    }
+
+    isDramaProject(id: string): boolean {
+        return Boolean(this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(id));
+    }
+
+    deleteDramaProject(id: string): number {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
             const deleted = Number(this.db.prepare("DELETE FROM canvas_folders WHERE id = ?").run(id).changes);
             this.db.exec("COMMIT");
             return deleted;
@@ -854,7 +1528,12 @@ export class BackendDatabase {
     getCanvasProject(id: string): CanvasProject | null {
         const row = this.db.prepare("SELECT data_json FROM canvas_projects WHERE id = ?").get(id) as { data_json?: string } | undefined;
         if (!row?.data_json) return null;
-        try { return JSON.parse(row.data_json) as CanvasProject; } catch { return null; }
+        try { return stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject; } catch { return null; }
+    }
+
+    getCanvasProjectRevision(id: string): number | null {
+        const row = this.db.prepare("SELECT CASE WHEN json_valid(data_json) THEN COALESCE(json_extract(data_json, '$.revision'), 0) END AS revision FROM canvas_projects WHERE id = ?").get(id) as { revision?: number | null } | undefined;
+        return row?.revision === undefined || row.revision === null ? null : Number(row.revision);
     }
 
     listPluginDeclarations(): PluginDeclaration[] {
@@ -935,11 +1614,12 @@ export class BackendDatabase {
         return Number(this.db.prepare("DELETE FROM workflow_configs WHERE name = ?").run(name).changes);
     }
 
-    listAssets(options: { kind?: string; folderId?: string } = {}): Asset[] {
+    listAssets(options: { kind?: string; folderId?: string; dramaId?: string } = {}): Asset[] {
         const clauses: string[] = [];
         const values: Array<string | null> = [];
         if (options.kind) { clauses.push("kind = ?"); values.push(options.kind); }
         if (options.folderId) { clauses.push("folder_id = ?"); values.push(options.folderId); }
+        if (options.dramaId) { clauses.push("drama_id = ?"); values.push(options.dramaId); }
         const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
         const rows = this.db.prepare(`SELECT * FROM assets ${where} ORDER BY updated_at DESC`).all(...values) as Array<Record<string, unknown>>;
         return rows.map(assetFromRow);
@@ -953,18 +1633,19 @@ export class BackendDatabase {
     upsertAsset(asset: Asset) {
         const now = new Date().toISOString();
         const updatedAt = asset.updatedAt || now;
+        const dramaId = asset.dramaId && this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(asset.dramaId) ? asset.dramaId : null;
         this.db.prepare(`
-            INSERT INTO assets (id, kind, title, cover_url, tags_json, folder_id, data_json, note, source, metadata_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO assets (id, kind, title, cover_url, tags_json, folder_id, drama_id, data_json, note, source, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 kind = excluded.kind, title = excluded.title, cover_url = excluded.cover_url,
-                tags_json = excluded.tags_json, folder_id = excluded.folder_id,
+                tags_json = excluded.tags_json, folder_id = excluded.folder_id, drama_id = excluded.drama_id,
                 data_json = excluded.data_json, note = excluded.note, source = excluded.source,
                 metadata_json = excluded.metadata_json, updated_at = excluded.updated_at
         `        ).run(
             asset.id, asset.kind, asset.title ?? "",
             asset.coverUrl ?? "", JSON.stringify(asset.tags ?? []),
-            asset.folderId ?? null, JSON.stringify(asset.data ?? {}),
+            asset.folderId ?? null, dramaId, JSON.stringify(asset.data ?? {}),
             asset.note ?? null, asset.source ?? null,
             JSON.stringify(asset.metadata ?? {}),
             asset.createdAt ?? now, updatedAt,
@@ -981,13 +1662,14 @@ export class BackendDatabase {
             const insertFolder = this.db.prepare("INSERT INTO asset_folders (id, name, parent_id, created_at) VALUES (?, ?, ?, ?)");
             for (const folder of folders) insertFolder.run(folder.id, folder.name, folder.parentId, folder.createdAt);
             const insertAsset = this.db.prepare(`
-                INSERT INTO assets (id, kind, title, cover_url, tags_json, folder_id, data_json, note, source, metadata_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO assets (id, kind, title, cover_url, tags_json, folder_id, drama_id, data_json, note, source, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
             for (const asset of assets) {
+                const dramaId = asset.dramaId && this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(asset.dramaId) ? asset.dramaId : null;
                 insertAsset.run(
                     asset.id, asset.kind, asset.title ?? "", asset.coverUrl ?? "", JSON.stringify(asset.tags ?? []),
-                    asset.folderId ?? null, JSON.stringify(asset.data ?? {}), asset.note ?? null, asset.source ?? null,
+                    asset.folderId ?? null, dramaId, JSON.stringify(asset.data ?? {}), asset.note ?? null, asset.source ?? null,
                     JSON.stringify(asset.metadata ?? {}), asset.createdAt ?? now, asset.updatedAt ?? now,
                 );
             }
@@ -1203,6 +1885,294 @@ export class BackendDatabase {
         return out;
     }
 
+    // ── MCP observability ─────────────────────────────────────────────────
+
+    createMcpObservabilityEvent(input: McpObservabilityEventInput): McpObservabilityEvent {
+        const event: McpObservabilityEvent = { ...input, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
+        this.db.prepare(`
+            INSERT INTO mcp_observability_events (
+                id, session_id, trace_id, event, tool, project_id, node_id, operation_id, task_id,
+                duration_ms, error_code, recoverable, suggested_tool, input_summary_json, output_summary_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            event.id, event.sessionId, event.traceId, event.event, event.tool,
+            event.projectId || null, event.nodeId || null, event.operationId || null, event.taskId || null,
+            event.durationMs == null ? null : Math.max(0, Math.round(event.durationMs)), event.errorCode || null,
+            event.recoverable == null ? null : event.recoverable ? 1 : 0, event.suggestedTool || null,
+            JSON.stringify(event.inputSummary || {}), JSON.stringify(event.outputSummary || {}), event.createdAt,
+        );
+        return event;
+    }
+
+    listMcpObservabilityEvents(traceId: string): McpObservabilityEvent[] {
+        const rows = this.db.prepare("SELECT * FROM mcp_observability_events WHERE trace_id = ? ORDER BY created_at, id").all(traceId) as Array<Record<string, unknown>>;
+        return rows.map(mcpObservabilityEventFromRow);
+    }
+
+    getMcpObservabilityReport() {
+        const totals = this.db.prepare(`
+            SELECT
+                SUM(CASE WHEN event = 'tool.started' THEN 1 ELSE 0 END) AS started,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN 1 ELSE 0 END) AS completed,
+                SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
+                AVG(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN duration_ms END) AS average_duration_ms,
+                MAX(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN duration_ms END) AS max_duration_ms,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN json_extract(output_summary_json, '$.outputChars') ELSE 0 END) AS total_output_chars,
+                MAX(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN json_extract(output_summary_json, '$.outputChars') END) AS max_output_chars,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN json_extract(input_summary_json, '$.inputChars') ELSE 0 END) AS total_input_chars,
+                MAX(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN json_extract(input_summary_json, '$.inputChars') END) AS max_input_chars,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(output_summary_json, '$.outputChars') IS NOT NULL THEN 1 ELSE 0 END) AS output_sized_calls,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(input_summary_json, '$.inputChars') IS NOT NULL THEN 1 ELSE 0 END) AS input_sized_calls,
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(output_summary_json, '$.outputChars') >= 100000 THEN 1 ELSE 0 END) AS oversized_calls
+            FROM mcp_observability_events
+        `).get() as Record<string, unknown>;
+        const byTool = this.db.prepare(`
+            WITH terminal AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (PARTITION BY tool ORDER BY duration_ms) AS duration_rank,
+                    COUNT(*) OVER (PARTITION BY tool) AS tool_count
+                FROM mcp_observability_events
+                WHERE event IN ('tool.succeeded', 'tool.failed')
+            )
+            SELECT tool,
+                COUNT(*) AS calls,
+                SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
+                AVG(duration_ms) AS average_duration_ms,
+                MAX(duration_ms) AS max_duration_ms,
+                MAX(CASE WHEN duration_rank = CAST((tool_count * 95 + 99) / 100 AS INTEGER) THEN duration_ms END) AS p95_duration_ms,
+                SUM(CASE WHEN json_extract(input_summary_json, '$.inputChars') IS NOT NULL OR json_extract(output_summary_json, '$.outputChars') IS NOT NULL THEN 1 ELSE 0 END) AS sized_calls,
+                SUM(CASE WHEN json_extract(output_summary_json, '$.outputChars') IS NOT NULL THEN 1 ELSE 0 END) AS output_sized_calls,
+                SUM(CASE WHEN json_extract(input_summary_json, '$.inputChars') IS NOT NULL THEN 1 ELSE 0 END) AS input_sized_calls,
+                MAX(json_extract(output_summary_json, '$.outputChars')) AS max_output_chars,
+                SUM(json_extract(output_summary_json, '$.outputChars')) AS total_output_chars,
+                MAX(json_extract(input_summary_json, '$.inputChars')) AS max_input_chars,
+                SUM(json_extract(input_summary_json, '$.inputChars')) AS total_input_chars
+            FROM terminal
+            GROUP BY tool ORDER BY calls DESC, tool
+        `).all() as Array<Record<string, unknown>>;
+        const errors = this.db.prepare(`
+            SELECT error_code AS code, COUNT(*) AS count
+            FROM mcp_observability_events
+            WHERE event = 'tool.failed' AND error_code IS NOT NULL
+            GROUP BY error_code ORDER BY count DESC, error_code
+        `).all() as Array<Record<string, unknown>>;
+        const taskObservationEvents = this.db.prepare(`
+            SELECT tool, task_id, event, output_summary_json, created_at, id
+            FROM mcp_observability_events
+            WHERE event IN ('tool.succeeded', 'tool.failed')
+              AND (task_id IS NOT NULL OR output_summary_json != '{}')
+            ORDER BY created_at, id
+        `).all() as Array<Record<string, unknown>>;
+        const observedTasks = collectObservedTaskLinks(taskObservationEvents);
+        const taskStatusQuery = this.db.prepare("SELECT status FROM tasks WHERE id = ?");
+        const taskStatusesByStatus = new Map<string, number>();
+        const taskOutcomesByToolMap = new Map<string, number>();
+        for (const link of observedTasks.links) {
+            const row = taskStatusQuery.get(link.taskId) as { status?: unknown } | undefined;
+            const status = String(row?.status || "missing");
+            taskStatusesByStatus.set(status, (taskStatusesByStatus.get(status) || 0) + 1);
+            const key = `${link.tool}\u0000${status}`;
+            taskOutcomesByToolMap.set(key, (taskOutcomesByToolMap.get(key) || 0) + 1);
+        }
+        const recovery = this.db.prepare(`
+            WITH terminal AS (
+                SELECT session_id, event, tool, suggested_tool, created_at, id,
+                    LEAD(event) OVER (PARTITION BY session_id ORDER BY created_at, id) AS next_event,
+                    LEAD(tool) OVER (PARTITION BY session_id ORDER BY created_at, id) AS next_tool
+                FROM mcp_observability_events
+                WHERE event IN ('tool.succeeded', 'tool.failed')
+            )
+            SELECT COUNT(*) AS suggested,
+                SUM(CASE WHEN next_tool = suggested_tool THEN 1 ELSE 0 END) AS followed,
+                SUM(CASE WHEN next_event = 'tool.succeeded' AND next_tool = suggested_tool THEN 1 ELSE 0 END) AS succeeded
+            FROM terminal WHERE event = 'tool.failed' AND suggested_tool IS NOT NULL
+        `).get() as Record<string, unknown>;
+        const sessions = this.db.prepare(`
+            SELECT COUNT(*) AS total, AVG(calls) AS average_calls, MAX(calls) AS max_calls
+            FROM (
+                SELECT session_id, COUNT(*) AS calls
+                FROM mcp_observability_events
+                WHERE event IN ('tool.succeeded', 'tool.failed')
+                GROUP BY session_id
+            )
+        `).get() as Record<string, unknown>;
+        const terminalDurationRows = this.db.prepare(`
+            SELECT tool, duration_ms, output_summary_json
+            FROM mcp_observability_events
+            WHERE event IN ('tool.succeeded', 'tool.failed') AND duration_ms IS NOT NULL
+        `).all() as Array<Record<string, unknown>>;
+        const allLatency = summarizeDurations(terminalDurationRows);
+        const ordinaryLatency = summarizeDurations(terminalDurationRows.filter((row) => !waitsForTasks(row.output_summary_json, row.tool)));
+        const waitingLatency = summarizeDurations(terminalDurationRows.filter((row) => waitsForTasks(row.output_summary_json, row.tool)));
+        const ordinaryByTool = new Map<string, Array<Record<string, unknown>>>();
+        for (const row of terminalDurationRows) {
+            if (waitsForTasks(row.output_summary_json, row.tool)) continue;
+            const tool = String(row.tool || "");
+            const rows = ordinaryByTool.get(tool) || [];
+            rows.push(row);
+            ordinaryByTool.set(tool, rows);
+        }
+        const daily = this.db.prepare(`
+            SELECT date(created_at, 'localtime') AS date,
+                COUNT(*) AS calls,
+                SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
+                AVG(duration_ms) AS average_duration_ms
+            FROM mcp_observability_events
+            WHERE event IN ('tool.succeeded', 'tool.failed')
+            GROUP BY date(created_at, 'localtime') ORDER BY date
+        `).all() as Array<Record<string, unknown>>;
+        const failuresByTool = this.db.prepare(`
+            SELECT tool, COALESCE(error_code, 'UNKNOWN') AS code, COUNT(*) AS count,
+                (
+                    SELECT latest.trace_id
+                    FROM mcp_observability_events AS latest
+                    WHERE latest.event = 'tool.failed'
+                      AND latest.tool = events.tool
+                      AND COALESCE(latest.error_code, 'UNKNOWN') = COALESCE(events.error_code, 'UNKNOWN')
+                    ORDER BY latest.created_at DESC, latest.id DESC
+                    LIMIT 1
+                ) AS latest_trace_id
+            FROM mcp_observability_events AS events
+            WHERE event = 'tool.failed'
+            GROUP BY tool, COALESCE(error_code, 'UNKNOWN')
+            ORDER BY count DESC, tool, code
+        `).all() as Array<Record<string, unknown>>;
+        const transitions = this.db.prepare(`
+            WITH terminal AS (
+                SELECT session_id, tool,
+                    LEAD(tool) OVER (PARTITION BY session_id ORDER BY created_at, id) AS next_tool
+                FROM mcp_observability_events
+                WHERE event IN ('tool.succeeded', 'tool.failed')
+            )
+            SELECT tool AS from_tool, next_tool AS to_tool, COUNT(*) AS count
+            FROM terminal
+            WHERE next_tool IS NOT NULL
+            GROUP BY tool, next_tool
+            ORDER BY count DESC, from_tool, to_tool
+        `).all() as Array<Record<string, unknown>>;
+        const taskOutcomesByTool = [...taskOutcomesByToolMap.entries()]
+            .map(([key, count]) => {
+                const [tool, status] = key.split("\u0000");
+                return { tool, status, count };
+            })
+            .sort((left, right) => right.count - left.count || left.tool.localeCompare(right.tool) || left.status.localeCompare(right.status));
+        const started = Number(totals.started || 0);
+        const completed = Number(totals.completed || 0);
+        const succeeded = Number(totals.succeeded || 0);
+        const recoverySuggested = Number(recovery.suggested || 0);
+        const recoveryFollowed = Number(recovery.followed || 0);
+        const recoverySucceeded = Number(recovery.succeeded || 0);
+        const toolMetrics = byTool.map((row) => metricRow({
+            ...row,
+            ordinary_p95_duration_ms: ordinaryByTool.has(String(row.tool || ""))
+                ? summarizeDurations(ordinaryByTool.get(String(row.tool || "")) || []).p95DurationMs
+                : null,
+        }));
+        const taskOutcomeMetrics = taskOutcomesByTool.map((row) => ({ tool: String(row.tool || ""), status: String(row.status || "unknown"), count: Number(row.count || 0) }));
+        // 单次返回体超过该字符数即视为「会显著占用模型上下文」。实测 canvas_get_state 单次
+        // 可达 2.2M 字符（≈55 万 tokens），阈值取 100k 字符以覆盖严重情形而不误报普通工具。
+        const payloadWarnChars = 100_000;
+        const oversizedCalls = Number(totals.oversized_calls || 0);
+        const payloadTotals = {
+            outputSizedCalls: Number(totals.output_sized_calls || 0),
+            inputSizedCalls: Number(totals.input_sized_calls || 0),
+            totalInputChars: Number(totals.total_input_chars || 0),
+            totalOutputChars: Number(totals.total_output_chars || 0),
+            maxOutputChars: totals.max_output_chars == null ? null : Number(totals.max_output_chars),
+            maxInputChars: totals.max_input_chars == null ? null : Number(totals.max_input_chars),
+        };
+        const diagnostics = buildMcpObservabilityDiagnostics({
+            started,
+            completed,
+            succeeded,
+            failed: Number(totals.failed || 0),
+            p95DurationMs: allLatency.p95DurationMs,
+            recoverySuggested,
+            recoveryFollowed,
+            recoverySucceeded,
+            tools: toolMetrics,
+            taskOutcomes: taskOutcomeMetrics,
+            payloadWarnChars,
+            oversizedCalls,
+        });
+        return {
+            generatedAt: new Date().toISOString(),
+            calls: {
+                started,
+                completed,
+                incomplete: Math.max(0, started - completed),
+                succeeded,
+                failed: Number(totals.failed || 0),
+                successRate: completed ? succeeded / completed : null,
+                averageDurationMs: totals.average_duration_ms == null ? null : Math.round(Number(totals.average_duration_ms)),
+                maxDurationMs: totals.max_duration_ms == null ? null : Number(totals.max_duration_ms),
+                p95DurationMs: allLatency.p95DurationMs,
+            },
+            sessions: {
+                total: Number(sessions.total || 0),
+                averageCalls: sessions.average_calls == null ? null : Number(Number(sessions.average_calls).toFixed(1)),
+                maxCalls: Number(sessions.max_calls || 0),
+            },
+            recovery: {
+                suggested: recoverySuggested,
+                followed: recoveryFollowed,
+                succeeded: recoverySucceeded,
+                followRate: recoverySuggested ? recoveryFollowed / recoverySuggested : null,
+                successRate: recoverySuggested ? recoverySucceeded / recoverySuggested : null,
+                followedSuccessRate: recoveryFollowed ? recoverySucceeded / recoveryFollowed : null,
+                observation: "same_session_adjacent_terminal_call",
+            },
+            byTool: toolMetrics,
+            errors: errors.map((row) => ({ code: String(row.code || "UNKNOWN"), count: Number(row.count || 0) })),
+            failuresByTool: failuresByTool.map((row) => ({ tool: String(row.tool || ""), code: String(row.code || "UNKNOWN"), count: Number(row.count || 0), latestTraceId: row.latest_trace_id ? String(row.latest_trace_id) : undefined })),
+            taskStatuses: [...taskStatusesByStatus.entries()].map(([status, count]) => ({ status, count })).sort((left, right) => right.count - left.count || left.status.localeCompare(right.status)),
+            taskOutcomesByTool: taskOutcomeMetrics,
+            taskAssociation: {
+                incomplete: observedTasks.incomplete,
+                note: observedTasks.incomplete
+                    ? "部分历史事件只保存了任务数量，未保存全部 taskId；相关任务统计可能不完整。"
+                    : "当前任务统计按创建工具和去重后的 taskId 计算。",
+            },
+            latency: {
+                ordinary: ordinaryLatency,
+                waiting: waitingLatency,
+            },
+            // MCP 输入/输出大小统计：字符数为序列化后的长度，token 为 4 字符≈1 token 的粗估。
+            payload: {
+                outputSizedCalls: payloadTotals.outputSizedCalls,
+                inputSizedCalls: payloadTotals.inputSizedCalls,
+                totalInputChars: payloadTotals.totalInputChars,
+                totalOutputChars: payloadTotals.totalOutputChars,
+                estimatedTotalInputTokens: Math.round(payloadTotals.totalInputChars / 4),
+                estimatedTotalOutputTokens: Math.round(payloadTotals.totalOutputChars / 4),
+                averageOutputChars: payloadTotals.outputSizedCalls ? Math.round(payloadTotals.totalOutputChars / payloadTotals.outputSizedCalls) : null,
+                maxOutputChars: payloadTotals.maxOutputChars,
+                maxOutputTokens: payloadTotals.maxOutputChars == null ? null : Math.round(payloadTotals.maxOutputChars / 4),
+                maxInputChars: payloadTotals.maxInputChars,
+                warnThresholdChars: payloadWarnChars,
+                oversizedCalls,
+                note: "仅统计已记录 inputSummary/outputSummary 的调用；早期事件缺少尺寸字段时不参与均值计算。",
+            },
+            transitions: transitions.map((row) => ({ fromTool: String(row.from_tool || ""), toTool: String(row.to_tool || ""), count: Number(row.count || 0) })),
+            daily: daily.map((row) => {
+                const calls = Number(row.calls || 0);
+                const dailySucceeded = Number(row.succeeded || 0);
+                return {
+                    date: String(row.date || ""),
+                    calls,
+                    succeeded: dailySucceeded,
+                    failed: Number(row.failed || 0),
+                    successRate: calls ? dailySucceeded / calls : null,
+                    averageDurationMs: row.average_duration_ms == null ? null : Math.round(Number(row.average_duration_ms)),
+                };
+            }),
+            diagnostics,
+        };
+    }
+
     // ── tasks ─────────────────────────────────────────────────────────────
 
     createTask(idOrKind: string, inputOrKindOrInput?: string | Record<string, unknown>, paramsOrInput?: Record<string, unknown>, paramsOrParams?: Record<string, unknown>): RuntimeTask {
@@ -1257,11 +2227,36 @@ export class BackendDatabase {
         return this.getTask(id)!;
     }
 
+    /** H3 决议与事件必须在同一个 SQLite 事务里落库；状态和版本共同构成 CAS。 */
+    transitionH3Task(id: string, expectedStatus: RuntimeTaskStatus, expectedRevision: number, patch: { status: RuntimeTaskStatus; progress?: number; result: Record<string, unknown>; error?: string | null }, event: { type: string; payload: Record<string, unknown> }): RuntimeTask | null {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const current = this.getTask(id);
+            const confirmation = current?.result?.confirmation;
+            const revision = confirmation && typeof confirmation === "object" && !Array.isArray(confirmation)
+                ? Number((confirmation as Record<string, unknown>).revision || 0) : 0;
+            if (!current || current.kind !== "canvas-h3-run" || current.status !== expectedStatus || revision !== expectedRevision) {
+                this.db.exec("ROLLBACK");
+                return null;
+            }
+            const task = this.updateTask(id, patch);
+            this.addTaskEvent(id, event.type, event.payload);
+            this.addTaskEvent(id, `status:${patch.status}`, { taskId: id, status: patch.status });
+            this.db.exec("COMMIT");
+            return task;
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+    }
+
     getTask(id: string): RuntimeTask | null {
         const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Record<string, unknown> | undefined;
         if (!row) return null;
         const input = parseJsonObject(row.input_json);
         const params = parseJsonObject(row.params_json);
+        // 插件文本等调用把归属节点/Clip 放在 input.params 里（顶层 nodeId 会触发画布回写绑定，不能放）
+        const inputParams = input.params && typeof input.params === "object" && !Array.isArray(input.params) ? input.params as Record<string, unknown> : {};
         const result = row.result_json ? parseJsonObject(row.result_json) : null;
         const binding = params.canvasBinding && typeof params.canvasBinding === "object" && !Array.isArray(params.canvasBinding)
             ? params.canvasBinding as Record<string, unknown> : {};
@@ -1277,8 +2272,8 @@ export class BackendDatabase {
             updatedAt: String(row.updated_at),
             parentTaskId: String(params.parentTaskId || "") || undefined,
             projectId: String(input.projectId || params.projectId || binding.projectId || "") || undefined,
-            nodeId: String(input.nodeId || params.nodeId || binding.nodeId || "") || undefined,
-            segmentId: String(input.segmentId || params.segmentId || binding.segmentId || "") || undefined,
+            nodeId: String(input.nodeId || inputParams.nodeId || params.nodeId || binding.nodeId || "") || undefined,
+            segmentId: String(input.segmentId || inputParams.segmentId || params.segmentId || binding.segmentId || "") || undefined,
             executor: String(params.executor || (String(row.kind).startsWith("comfyui:") ? "comfy" : String(row.kind))) || undefined,
             model: String(params.model || params.modelName || input.model || "") || undefined,
             outputs,
@@ -1403,6 +2398,13 @@ function fitImageNodeSize(width: number, height: number) {
     return { width: width * scale, height: height * scale };
 }
 
+function canvasMediaSourceStatus(project: CanvasProject, nodeId: string, sourceNodeId: string | undefined, taskId: string, status: string): CanvasOperation[] {
+    if (!sourceNodeId || sourceNodeId === nodeId) return [];
+    const source = (Array.isArray(project.nodes) ? project.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === sourceNodeId) as Record<string, any> | undefined;
+    if (source?.type !== "config" || source.metadata?.runtimeTaskId !== taskId) return [];
+    return [{ type: "update_node", id: sourceNodeId, metadata: { status }, metadataDelete: ["runtimeTaskId", "errorDetails"] }];
+}
+
 function recordOf(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -1417,6 +2419,7 @@ function assetFromRow(row: Record<string, unknown>): Asset {
         coverUrl: String(row.cover_url || ""),
         tags: parseJsonArray(row.tags_json) as string[],
         folderId: row.folder_id ? String(row.folder_id) : null,
+        dramaId: row.drama_id ? String(row.drama_id) : null,
         data: parseJsonObject(row.data_json),
         note: row.note ? String(row.note) : null,
         source: row.source ? String(row.source) : null,
@@ -1464,6 +2467,160 @@ function generationLogFromRow(row: Record<string, unknown>): GenerationLog {
         createdAt: String(row.created_at),
         updatedAt: String(row.updated_at),
     };
+}
+
+function mcpObservabilityEventFromRow(row: Record<string, unknown>): McpObservabilityEvent {
+    return {
+        id: String(row.id),
+        sessionId: String(row.session_id),
+        traceId: String(row.trace_id),
+        event: String(row.event) as McpObservabilityEvent["event"],
+        tool: String(row.tool),
+        projectId: row.project_id ? String(row.project_id) : undefined,
+        nodeId: row.node_id ? String(row.node_id) : undefined,
+        operationId: row.operation_id ? String(row.operation_id) : undefined,
+        taskId: row.task_id ? String(row.task_id) : undefined,
+        durationMs: row.duration_ms == null ? undefined : Number(row.duration_ms),
+        errorCode: row.error_code ? String(row.error_code) : undefined,
+        recoverable: row.recoverable == null ? undefined : Number(row.recoverable) === 1,
+        suggestedTool: row.suggested_tool ? String(row.suggested_tool) : undefined,
+        inputSummary: parseJsonObject(row.input_summary_json),
+        outputSummary: parseJsonObject(row.output_summary_json),
+        createdAt: String(row.created_at),
+    };
+}
+
+function waitsForTasks(value: unknown, tool?: unknown) {
+    return String(tool || "") === "canvas_wait_tasks" || parseJsonObject(value).waitsForTasks === true;
+}
+
+function summarizeDurations(rows: Array<Record<string, unknown>>) {
+    const values = rows
+        .map((row) => Number(row.duration_ms))
+        .filter((value) => Number.isFinite(value))
+        .sort((left, right) => left - right);
+    if (!values.length)
+        return {
+            calls: 0,
+            averageDurationMs: null as number | null,
+            maxDurationMs: null as number | null,
+            p95DurationMs: null as number | null,
+        };
+    return {
+        calls: values.length,
+        averageDurationMs: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length),
+        maxDurationMs: values[values.length - 1],
+        p95DurationMs: values[Math.max(0, Math.ceil(values.length * 0.95) - 1)],
+    };
+}
+
+function collectObservedTaskLinks(rows: Array<Record<string, unknown>>) {
+    const links = new Map<string, { taskId: string; tool: string }>();
+    let incomplete = false;
+    for (const row of rows) {
+        const output = parseJsonObject(row.output_summary_json);
+        const createdTaskIds = Array.isArray(output.createdTaskIds)
+            ? [...new Set(output.createdTaskIds.map(String).filter(Boolean))]
+            : [];
+        const scalarTaskId = row.task_id ? String(row.task_id) : "";
+        const taskIds = [...new Set([...createdTaskIds, ...(scalarTaskId ? [scalarTaskId] : [])])];
+        const declaredCount = typeof output.taskCount === "number" ? output.taskCount : undefined;
+        if (declaredCount != null && declaredCount > taskIds.length)
+            incomplete = true;
+        for (const taskId of taskIds) {
+            if (!links.has(taskId)) links.set(taskId, { taskId, tool: String(row.tool || "unknown") });
+        }
+    }
+    return { links: [...links.values()], incomplete };
+}
+
+function metricRow(row: Record<string, unknown>) {
+    const calls = Number(row.calls || 0);
+    const succeeded = Number(row.succeeded || 0);
+    const maxOutputChars = row.max_output_chars == null ? null : Number(row.max_output_chars);
+    const totalOutputChars = row.total_output_chars == null ? null : Number(row.total_output_chars);
+    const maxInputChars = row.max_input_chars == null ? null : Number(row.max_input_chars);
+    const totalInputChars = row.total_input_chars == null ? null : Number(row.total_input_chars);
+    const sizedCalls = Number(row.sized_calls || 0);
+    // 输出/入参均值各自用自己的分母：某次调用只记录了入参时，不应拉低返回体均值。
+    const outputSizedCalls = Number(row.output_sized_calls || 0);
+    const inputSizedCalls = Number(row.input_sized_calls || 0);
+    return {
+        tool: String(row.tool || ""),
+        calls,
+        succeeded,
+        failed: Number(row.failed || 0),
+        successRate: calls ? succeeded / calls : null,
+        averageDurationMs: row.average_duration_ms == null ? null : Math.round(Number(row.average_duration_ms)),
+        maxDurationMs: row.max_duration_ms == null ? null : Number(row.max_duration_ms),
+        p95DurationMs: row.p95_duration_ms == null ? null : Number(row.p95_duration_ms),
+        ordinaryP95DurationMs: row.ordinary_p95_duration_ms == null ? null : Number(row.ordinary_p95_duration_ms),
+        // 载荷口径：均值只对已记录尺寸的调用求平均；历史事件缺 summary 时不参与，避免把均值算低。
+        sizedCalls,
+        averageOutputChars: outputSizedCalls && totalOutputChars != null ? Math.round(totalOutputChars / outputSizedCalls) : null,
+        maxOutputChars,
+        estimatedOutputTokens: maxOutputChars == null ? null : Math.round(maxOutputChars / 4),
+        averageInputChars: inputSizedCalls && totalInputChars != null ? Math.round(totalInputChars / inputSizedCalls) : null,
+        maxInputChars,
+    };
+}
+
+function buildMcpObservabilityDiagnostics(input: {
+    started: number;
+    completed: number;
+    succeeded: number;
+    failed: number;
+    p95DurationMs: number | null;
+    recoverySuggested: number;
+    recoveryFollowed: number;
+    recoverySucceeded: number;
+    tools: Array<ReturnType<typeof metricRow>>;
+    taskOutcomes: Array<{ tool: string; status: string; count: number }>;
+    /** 单次返回体字符数阈值：超过即认为会显著占用模型上下文。 */
+    payloadWarnChars: number;
+    oversizedCalls: number;
+}) {
+    const diagnostics: Array<{ severity: "success" | "info" | "warning" | "error"; code: string; title: string; detail: string; tool?: string }> = [];
+    const incomplete = Math.max(0, input.started - input.completed);
+    if (!input.completed) {
+        diagnostics.push({ severity: "info", code: "NO_DATA", title: "等待真实调用数据", detail: "完成几次 MCP 画布操作后，这里会自动给出针对性的优化建议。" });
+        return diagnostics;
+    }
+    if (incomplete) diagnostics.push({ severity: "error", code: "INCOMPLETE_CALLS", title: "存在未闭合调用", detail: `${incomplete} 次调用只有 started 事件，优先检查进程中断、连接断开或未捕获异常。` });
+    const successRate = input.succeeded / input.completed;
+    if (successRate < 0.9) diagnostics.push({ severity: "warning", code: "LOW_SUCCESS_RATE", title: "整体成功率偏低", detail: `当前成功率 ${(successRate * 100).toFixed(1)}%，建议先处理数量最多的错误代码和失败工具。` });
+    for (const tool of input.tools) {
+        if (tool.calls >= 5 && tool.failed / tool.calls >= 0.2) diagnostics.push({ severity: "warning", code: "TOOL_FAILURE_HOTSPOT", title: `${tool.tool} 失败率偏高`, detail: `${tool.calls} 次调用中失败 ${tool.failed} 次，优先检查参数说明、前置状态与错误恢复建议。`, tool: tool.tool });
+        if (tool.calls >= 5 && tool.ordinaryP95DurationMs != null && tool.ordinaryP95DurationMs > 5000) diagnostics.push({ severity: "warning", code: "TOOL_LATENCY_HOTSPOT", title: `${tool.tool} 尾延迟偏高`, detail: `普通调用 P95 为 ${tool.ordinaryP95DurationMs} ms，已排除任务等待耗时；建议检查远端读取或重复调用路径。`, tool: tool.tool });
+        // 返回体过大会直接挤占模型上下文：给出「最大返回体」实证，而不是泛泛提示省 token。
+        if (tool.maxOutputChars != null && tool.maxOutputChars >= input.payloadWarnChars) diagnostics.push({
+            severity: "warning",
+            code: "TOOL_PAYLOAD_HOTSPOT",
+            title: `${tool.tool} 返回体过大`,
+            detail: `最大一次返回约 ${tool.maxOutputChars.toLocaleString("en-US")} 字符（≈${Math.round(tool.maxOutputChars / 4).toLocaleString("en-US")} tokens，估算），均值约 ${(tool.averageOutputChars ?? 0).toLocaleString("en-US")} 字符。单次调用即可挤占可观的模型上下文，建议改用更小的返回体或摘要型工具。`,
+            tool: tool.tool,
+        });
+    }
+    if (input.oversizedCalls > 0) diagnostics.push({
+        severity: input.oversizedCalls >= 10 ? "error" : "warning",
+        code: "OVERSIZED_PAYLOAD_CALLS",
+        title: "存在超大 MCP 返回体",
+        detail: `累计 ${input.oversizedCalls} 次调用返回超过 ${input.payloadWarnChars.toLocaleString("en-US")} 字符；这类工具一次调用就可能挤爆模型上下文，优先改用摘要型替代工具。`,
+    });
+    const taskOutcomes = new Map<string, { total: number; failed: number }>();
+    for (const outcome of input.taskOutcomes) {
+        const metric = taskOutcomes.get(outcome.tool) || { total: 0, failed: 0 };
+        if (!["queued", "running"].includes(outcome.status)) metric.total += outcome.count;
+        if (["failed", "cancelled", "missing"].includes(outcome.status)) metric.failed += outcome.count;
+        taskOutcomes.set(outcome.tool, metric);
+    }
+    for (const [tool, metric] of taskOutcomes) {
+        if (metric.total >= 3 && metric.failed / metric.total >= 0.2) diagnostics.push({ severity: "warning", code: "TASK_OUTCOME_HOTSPOT", title: `${tool} 后续任务失败率偏高`, detail: `${metric.total} 个已结束任务中有 ${metric.failed} 个失败、取消或丢失；工具调用成功不代表生成结果成功，应优先检查执行器和任务回写。`, tool });
+    }
+    if (input.recoverySuggested >= 3 && input.recoveryFollowed === 0) diagnostics.push({ severity: "warning", code: "LOW_RECOVERY_RATE", title: "没有观察到恢复建议被采纳", detail: `${input.recoverySuggested} 次恢复建议在同一会话的相邻终态调用中没有采纳样本；请检查调用指引、会话连续性或客户端是否中断。` });
+    else if (input.recoveryFollowed >= 3 && input.recoverySucceeded / input.recoveryFollowed < 0.5) diagnostics.push({ severity: "warning", code: "LOW_RECOVERY_RATE", title: "已采纳恢复建议成功率偏低", detail: `${input.recoveryFollowed} 次被采纳的恢复建议中仅 ${input.recoverySucceeded} 次成功，应调整 suggestedAction 或工具参数说明。` });
+    if (!diagnostics.length) diagnostics.push({ severity: "success", code: "HEALTHY", title: "当前 MCP 调用健康", detail: `已完成 ${input.completed} 次调用，未发现明显失败热点、未闭合调用或高尾延迟。` });
+    return diagnostics;
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> {

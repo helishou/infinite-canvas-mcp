@@ -17,13 +17,15 @@ export type GenerateImageOptions = GenerateOptions & { count?: number; size?: st
 export type GenerateImageResult = { images: string[] };
 export type GenerateVideoOptions = GenerateOptions & { size?: string; seconds?: string };
 export type GenerateVideoResult = { url: string; mimeType: string; width?: number; height?: number; durationMs?: number };
-export type GenerateTextOptions = { signal?: AbortSignal; model?: string; system?: string; references?: Array<{ url: string; name?: string }>; onDelta?: (text: string) => void };
-export type GenerateTextResult = { text: string };
-export type LocalH3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
+// 插件文本调用的日志归属元数据：传入后宿主把本次调用登记进生成日志，并把节点/Clip 写进运行任务。
+export type GenerateTextLogMeta = { taskMode: string; prompt?: string; nodeId?: string; segmentId?: string; references?: Array<Record<string, unknown>> };
+export type GenerateTextOptions = { signal?: AbortSignal; model?: string; system?: string; references?: Array<{ url: string; name?: string }>; onDelta?: (text: string) => void; log?: GenerateTextLogMeta };
+export type GenerateTextResult = { text: string; taskId?: string };
+export type LocalH3ActualSubmission = { promptId: string; seed?: number; seedMode?: "random" | "fixed"; frames?: number; width?: number; height?: number; steps?: number; sampler?: string; scheduler?: string; teAccel?: boolean; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
 export type LocalH3Result = { url: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; actualSubmission?: LocalH3ActualSubmission; segments?: Array<{ media?: Array<{ url: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Preview = { dataUrl: string; mime?: string; promptId?: string; step?: number; total?: number };
-export type LocalH3Task = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; result?: LocalH3Result | null; preview?: LocalH3Preview | null; error?: string | null };
+export type LocalH3Task = { id: string; status: "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled"; progress: number; result?: (LocalH3Result & { currentChildTaskId?: string; currentChildKind?: string; confirmation?: { pending: Array<{ nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string }> } }) | null; preview?: LocalH3Preview | null; error?: string | null };
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 export type PluginModelCapability = "image" | "video" | "text" | "audio";
 export type ModelOption = { value: string; label: string };
@@ -48,6 +50,7 @@ export type CanvasPluginAi = {
     generateVideo: (prompt: string, options?: GenerateVideoOptions) => Promise<GenerateVideoResult>;
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
     runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
+    resolveH3Confirmation: (input: { taskId: string; action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean }) => Promise<LocalH3Task>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
@@ -75,9 +78,72 @@ export type CanvasNodeToolbarItem = {
 };
 
 export type CanvasAssetPickerImage = { kind: "image"; dataUrl: string; title: string; storageKey?: string };
+export type CanvasReferenceAsset = { id: string; label: string; mediaType: "image" | "video" | "audio"; role: string; tags: string[]; url?: string; storageKey?: string; mimeType?: string; sourceNodeId?: string; subjectId?: string; analysis?: Record<string, unknown> };
+export type CanvasReferenceValidation = { semanticPrompt: string; compiledPrompt: string; bindings: Array<Record<string, unknown>>; references: Array<Record<string, unknown>>; issues: Array<{ severity: "error" | "warning"; code: string; message: string; bindingId?: string }>; migratedLegacyRefs: boolean };
+export type CanvasReferenceService = {
+    list: () => Promise<CanvasReferenceAsset[]>;
+    upsert: (asset: Partial<CanvasReferenceAsset> & { label: string }) => Promise<CanvasReferenceAsset>;
+    upsertMany: (assets: Array<Partial<CanvasReferenceAsset> & { label: string }>) => Promise<CanvasReferenceAsset[]>;
+    remove: (assetId: string) => Promise<void>;
+    validate: (nodeId: string, segmentId: string) => Promise<CanvasReferenceValidation>;
+};
 
 // Context injected while rendering each node; the primary interface between plugins and the canvas.
+export type CanvasTextTarget = { nodeId?: string; segmentId?: string; textItemId?: string; field: "prompt" | "content" | "composerContent" | "globalPrompt" };
+export type CanvasTextSnapshot = { ready: boolean; pending: number; blocked: boolean; error: string; text: string };
+export type CanvasTextSuggestionInput = { id: string; target: CanvasTextTarget; documentId: string; base: string; text: string };
+export type CanvasTextSuggestion = CanvasTextSuggestionInput & { status: "pending" | "applied" | "dismissed"; revision: number };
+export type CanvasTextSuggestions = {
+    getSnapshot: () => { items: CanvasTextSuggestion[]; pending: number; error: string };
+    subscribe: (listener: () => void) => () => void;
+    refresh: (retryRejected?: boolean) => Promise<void>;
+    save: (input: Omit<CanvasTextSuggestionInput, "target">) => Promise<void>;
+    apply: (id: string, documentId: string, expectedText: string) => Promise<void>;
+    dismiss: (id: string) => Promise<void>;
+};
+export type CanvasTextDocument = {
+    getSnapshot: () => CanvasTextSnapshot;
+    subscribe: (listener: () => void) => () => void;
+    getDocumentId: () => string;
+    flush: () => Promise<void>;
+};
+export type CanvasTextEditorHandle = {
+    insert: (text: string, options?: { prefixNewline?: boolean; select?: boolean }) => void;
+    replace: (text: string) => void;
+    focus: () => void;
+};
+export type CanvasTextReference = { label: string; displayLabel?: string; title?: string; insert?: string; tokens?: string[]; previewUrl?: string; active?: boolean; suggestible?: boolean; kind?: string };
+export type CanvasSpeakerOption = { id: string; name?: string; previewUrl?: string };
+export type CanvasTextEditorProps = {
+    projectId: string; target: CanvasTextTarget; placeholder?: string;
+    references?: CanvasTextReference[]; chips?: boolean;
+    /** 台词说话人名册：菜单/徽标按此显示角色名与头像；省略时回退 S1–S6。 */
+    speakers?: CanvasSpeakerOption[];
+    /** Local rich text editor for transient fields that are persisted through their owning document. */
+    standalone?: boolean; value?: string; onChange?: (text: string) => void;
+    /** Standalone editor grows with its content instead of owning an internal scroll area. */
+    autoHeight?: boolean;
+    className?: string; style?: import("react").CSSProperties;
+    editorRef?: import("react").Ref<CanvasTextEditorHandle>;
+    onSubmit?: () => void; onBlur?: () => void; onEscape?: () => void;
+    autoFocus?: boolean;
+    /** 启用台词（<d>…</d>）内联高亮与右键「转为台词/取消台词」。 */
+    dialogue?: boolean;
+    /** 为每个非空实际换行添加主题着色，并为编辑器提供可拖拽的细滚动条。 */
+    lineMap?: boolean;
+};
+
 export type CanvasNodeContext = {
+    TextEditor: ComponentType<CanvasTextEditorProps>;
+    textDocument: (target: CanvasTextTarget) => CanvasTextDocument;
+    textSuggestions: (target: CanvasTextTarget) => CanvasTextSuggestions;
+    replaceText: (target: CanvasTextTarget, documentId: string, expectedText: string, text: string) => Promise<boolean>;
+    /** 当前窗口的节点视图状态，不同步给其他协作者。 */
+    view: {
+        getSnapshot: () => Record<string, unknown>;
+        subscribe: (listener: () => void) => () => void;
+        update: (patch: Record<string, unknown>) => void;
+    };
     projectId: string;
     node: CanvasNodeData;
     theme: CanvasTheme;
@@ -94,12 +160,14 @@ export type CanvasNodeContext = {
     getDownstream: () => CanvasNodeData[];
     // Canvas operations using the Agent instruction set for nodes, connections, selection, viewport, and generation.
     applyOps: (ops: CanvasAgentOp[]) => void;
+    flush: () => Promise<void>;
     // Inter-node and inter-plugin communication.
     emit: (event: string, payload?: unknown) => void;
     on: (event: string, handler: (payload: unknown) => void) => () => void;
     // AI image, video, and text generation using the host model configuration.
     ai: CanvasPluginAi;
     h3Defaults: CanvasH3Defaults;
+    references: CanvasReferenceService;
     // Opens or closes the custom panel below this node; the definition must provide a Panel.
     openPanel: () => void;
     closePanel: () => void;
@@ -126,9 +194,11 @@ export type CanvasPluginHost = {
     updateNode: (nodeId: string, patch: Partial<Pick<CanvasNodeData, "title" | "width" | "height">>) => void;
     updateMetadata: (nodeId: string, patch: CanvasNodeMetadata) => void;
     applyOps: (ops: CanvasAgentOp[]) => void;
+    flush: () => Promise<void>;
     // AI generation using the current canvas model and credential configuration.
     ai: CanvasPluginAi;
     h3Defaults: CanvasH3Defaults;
+    references: CanvasReferenceService;
     // Opens or closes the custom panel below a specified node.
     openPanel: (nodeId: string) => void;
     closePanel: () => void;
@@ -162,7 +232,7 @@ export type CanvasNodeDefinition = {
     // Lets the host provide an Interaction/Move toolbar toggle and control pointer events through metadata.interactive.
     interactionToggle?: boolean;
     // With interactionToggle, true forces interactive content, ignores metadata.interactive, and hides the toggle.
-    forceInteractive?: (node: CanvasNodeData) => boolean;
+    forceInteractive?: (node: CanvasNodeData, view: Record<string, unknown>) => boolean;
     keepAspectRatio?: (node: CanvasNodeData) => boolean;
     resource?: (node: CanvasNodeData) => CanvasNodeResource | CanvasNodeResource[] | null;
     // Built-ins use canvas-node's internal renderer and may omit Content.
@@ -242,7 +312,7 @@ export type McpToolHandler = (input: Record<string, unknown>, context: PluginMcp
 export type CanvasPluginMcp = {
     id: string; // 应等于插件 id
     version: string;
-    tools: McpToolDefinition[];
+    tools: readonly McpToolDefinition[];
     // 返回「工具 id -> 处理函数」映射,Agent 据此为每个工具调用 registerTool。
     // 官方/本地插件由 Agent 侧打包的 MCP 模块提供,浏览器声明可省略。
     createHandler?: (context: PluginMcpContext) => Record<string, McpToolHandler>;

@@ -5,7 +5,7 @@ import { readDefaultLayout, readDefaultParams } from "./services/h3-defaults";
 
 export const h3NodeDefinition = {
     type: "minimax-h3:video",
-    legacyTypes: ["smart-minimax", "minimax"],
+    legacyTypes: ["smart-minimax", "minimax", "minimax-h3"],
     title: "H3导演台",
     icon: "✦",
     description: "H3导演台 视频生成与人物替换节点",

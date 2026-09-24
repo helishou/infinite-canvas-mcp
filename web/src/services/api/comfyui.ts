@@ -39,7 +39,7 @@ export function resolveBackendAgentEndpoint(): { endpoint: string; token: string
 export type LocalReference = { name: string; dataUrl?: string; url?: string; storageKey?: string };
 type ComfyMedia = { url: string; mimeType: string; storageKey?: string };
 type ComfyPreview = { promptId: string; dataUrl: string; step?: number; total?: number; mime?: string };
-export type H3ActualSubmission = { promptId: string; seed?: number; frames?: number; width?: number; height?: number; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
+export type H3ActualSubmission = { promptId: string; seed?: number; seedMode?: "random" | "fixed"; frames?: number; width?: number; height?: number; steps?: number; sampler?: string; scheduler?: string; teAccel?: boolean; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
 export type LocalH3TaskResult = { url: string; storageKey?: string; mimeType: string; taskId: string; width?: number; height?: number; durationMs?: number; actualSubmission?: H3ActualSubmission; segments?: Array<{ media?: ComfyMedia[] }> };
 type ComfyTask = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: ComfyPreview | null; result?: { media?: ComfyMedia[]; actualSubmission?: H3ActualSubmission; segments?: Array<{ media?: ComfyMedia[] }> } | null; error?: string | null };
 type VideoConcatTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia } | null; error?: string | null };

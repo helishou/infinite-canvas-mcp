@@ -111,10 +111,10 @@ codex plugin add infinite-canvas@infinite-canvas-local
 
 ## 手动排查
 
-插件默认通过下面的 MCP 命令启动 Canvas Agent：
+插件直接连接常驻 Backend 的 Streamable HTTP MCP，不会为每个任务启动 MCP 子进程：
 
-```bash
-npx -y @basketikun/infinite-canvas-backend mcp
+```text
+http://127.0.0.1:17370/mcp
 ```
 
 如果需要手动排查，先启动画布：

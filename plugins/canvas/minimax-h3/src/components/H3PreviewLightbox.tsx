@@ -25,17 +25,20 @@ export function H3PreviewLightbox({ item, onClose }: H3PreviewLightboxProps) {
 
     if (!item) return null;
 
+    const previewUrl = String(item.url || "").trim();
+    const media = !previewUrl ? <div style={{ padding: 24, color: "#f59e0b" }}>缺少预览 URL：{item.name || "未命名素材"}</div> : item.type === "video" ? (
+                    <video src={previewUrl} controls autoPlay playsInline style={{ maxWidth: "92vw", maxHeight: "86vh", borderRadius: 8, background: "#000" }} />
+                ) : item.type === "image" ? (
+                    <img src={previewUrl} alt={item.name} style={{ maxWidth: "92vw", maxHeight: "86vh", borderRadius: 8 }} />
+                ) : (
+                    <audio src={previewUrl} controls autoPlay style={{ width: "min(640px, 92vw)" }} />
+                );
+
     return createPortal(
         <div key="h3-preview-lightbox" className="minimax-lightbox" onClick={onClose}>
             <button type="button" className="minimax-lightbox-close" aria-label="关闭预览" onClick={(event) => { event.stopPropagation(); onClose(); }}><H3Icon name="close" /></button>
             <div className="minimax-lightbox-body" onClick={(event) => event.stopPropagation()}>
-                {item.type === "video" ? (
-                    <video src={item.url} controls autoPlay playsInline style={{ maxWidth: "92vw", maxHeight: "86vh", borderRadius: 8, background: "#000" }} />
-                ) : item.type === "image" ? (
-                    <img src={item.url} alt={item.name} style={{ maxWidth: "92vw", maxHeight: "86vh", borderRadius: 8 }} />
-                ) : (
-                    <audio src={item.url} controls autoPlay style={{ width: "min(640px, 92vw)" }} />
-                )}
+                {media}
                 <div className="minimax-lightbox-name">{item.name || (item.type === "video" ? "视频" : item.type === "image" ? "图片" : "音频")}</div>
             </div>
         </div>,

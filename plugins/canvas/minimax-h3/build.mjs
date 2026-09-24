@@ -1,6 +1,6 @@
 import { buildPlugin } from "@infinite-canvas/plugin-sdk/build";
 import { resolve, dirname } from "node:path";
-import { readFile, copyFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, copyFile, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 // 支持 Vite 风格的 `?raw` 导入(如 `import x from "./a.md?raw")`，
@@ -20,6 +20,23 @@ const rawPlugin = {
     },
 };
 
+const here = dirname(fileURLToPath(import.meta.url));
+const versionSource = await readFile(resolve(here, "../../../canvas-agent/src/plugins/minimax-h3/version.ts"), "utf8");
+const version = versionSource.match(/H3_PLUGIN_VERSION\s*=\s*["']([^"']+)["']/)?.[1];
+if (!version) throw new Error("无法读取 H3 插件版本常量");
+
+for (const [file, spaces] of [["package.json", 4], ["plugin.manifest.json", 2]]) {
+    const path = resolve(here, file);
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    manifest.version = version;
+    await writeFile(path, `${JSON.stringify(manifest, null, spaces)}\n`, "utf8");
+}
+const lockPath = resolve(here, "package-lock.json");
+const lock = JSON.parse(await readFile(lockPath, "utf8"));
+lock.version = version;
+lock.packages[""].version = version;
+await writeFile(lockPath, `${JSON.stringify(lock, null, 4)}\n`, "utf8");
+
 await buildPlugin(import.meta.url, {
     plugins: [rawPlugin],
     ...(process.env.NODE_ENV !== "production" ? { esbuild: { minify: false } } : {}),
@@ -28,7 +45,6 @@ await buildPlugin(import.meta.url, {
 // web/dist 是 vite build 的产物（构建时把 public/ 一起拷走），之后只重建插件不会更新 dist，
 // 页面加载 dist 里的插件就会一直跑旧代码。这里顺手同步一份；dist 不存在（纯 dev 模式）时跳过。
 try {
-    const here = dirname(fileURLToPath(import.meta.url));
     const distDir = resolve(here, "../../../web/dist/plugins");
     await mkdir(distDir, { recursive: true });
     await copyFile(resolve(here, "../../../web/public/plugins/minimax-h3.js"), resolve(distDir, "minimax-h3.js"));

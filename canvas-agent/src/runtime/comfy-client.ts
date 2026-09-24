@@ -6,6 +6,8 @@ import { BackendClient } from "./backend-client.js";
 import type { ComfyModelCatalog, ComfyPreset } from "./comfyui-types.js";
 import type { RuntimeTask, RuntimeTaskEvent } from "./types.js";
 
+export { BackendClientError } from "./backend-client.js";
+
 /** 构造 BackendClient（读 backend.json 或环境变量）。 */
 export function createBackendClient(backendUrl: string, env: Record<string, string | undefined> = process.env): BackendClient {
     const token = env.INFINITE_CANVAS_BACKEND_TOKEN

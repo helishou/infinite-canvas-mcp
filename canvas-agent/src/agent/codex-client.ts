@@ -1,16 +1,16 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { createAgentLogWriter } from "../utils/agent-runtime.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { VERSION } from "../config.js";
+import { loadConfig, VERSION } from "../config.js";
+import { createBackendClient } from "../runtime/comfy-client.js";
 import { logger } from "../utils/logger.js";
 import { field, type JsonRecord, errorMessage } from "../utils/value.js";
 import { codexEventHistory, type CodexEventHistory } from "./codex-event-history.js";
-import type { CodexNotificationParams, CodexPlanUpdate, CodexReasoningEffort, CodexRequestMethod, CodexRequestParams, CodexRequestResult, CodexSkillSelector, CodexTurnInput } from "./codex-protocol.js";
+import type { CodexNotificationParams, CodexPlanUpdate, CodexReasoningEffort, CodexRequestMethod, CodexRequestParams, CodexRequestResult, CodexSkillSelector, CodexThreadItemEntry, CodexTurnInput } from "./codex-protocol.js";
 import type { AgentEmit, AgentPermissionMode } from "./types.js";
 
 type AgentEvent = JsonRecord & { type: string; usage?: unknown };
@@ -21,7 +21,6 @@ type PendingDelta = { delta: string; itemType: string; params: ItemDeltaParams; 
 type ApprovalRequest = { id: number; method: string; params: JsonRecord; decision?: string };
 type PendingTurnStart = { threadId: string; prompt: string; messageText?: string; turnId?: string; onTurn?: (turnId: string) => void };
 
-const canvasAgentMcp = canvasAgentMcpCommand();
 const require = createRequire(import.meta.url);
 const STREAM_UPDATE_INTERVAL_MS = 40;
 const supplementalItemTypes = new Set(["agent_message", "reasoning", "plan", "mcp_tool_call", "command_execution", "file_change", "dynamic_tool_call", "collab_tool_call", "web_search", "image_view", "image_generation", "context_compaction"]);
@@ -164,7 +163,63 @@ export class CodexAppClient {
 
     /** 读取指定 Codex 线程。 */
     readThread(threadId: string, includeTurns = true) {
-        return this.request("thread/read", { threadId, includeTurns });
+        return this.request("thread/read", { threadId, includeTurns }).catch(async (error: unknown) => {
+            if (!includeTurns || !isPaginatedThreadReadError(error)) throw error;
+            logger.info("Reading paginated Codex thread history", { threadId });
+            return await this.readPaginatedThread(threadId);
+        });
+    }
+
+    private async readPaginatedThread(threadId: string) {
+        const { thread } = await this.request("thread/read", { threadId, includeTurns: false });
+        const [turns, itemEntries] = await Promise.all([
+            this.readAllThreadTurns(threadId),
+            this.readAllThreadItems(threadId),
+        ]);
+        const itemsByTurn = new Map<string, CodexThreadItemEntry["item"][]>();
+        for (const entry of itemEntries) {
+            const items = itemsByTurn.get(entry.turnId) || [];
+            items.push(entry.item);
+            itemsByTurn.set(entry.turnId, items);
+        }
+        return {
+            thread: {
+                ...thread,
+                turns: turns.map((turn) => ({ ...turn, items: itemsByTurn.get(turn.id) || [] })),
+            },
+        };
+    }
+
+    private async readAllThreadTurns(threadId: string) {
+        const turns: CodexRequestResult<"thread/turns/list">["data"] = [];
+        const seenCursors = new Set<string>();
+        let cursor: string | null = null;
+        do {
+            const page: CodexRequestResult<"thread/turns/list"> = await this.request("thread/turns/list", {
+                threadId, cursor, limit: 100, sortDirection: "asc", itemsView: "notLoaded",
+            });
+            turns.push(...page.data);
+            cursor = page.nextCursor;
+            if (cursor && seenCursors.has(cursor)) throw new Error("Codex thread turns pagination repeated a cursor");
+            if (cursor) seenCursors.add(cursor);
+        } while (cursor);
+        return turns;
+    }
+
+    private async readAllThreadItems(threadId: string) {
+        const entries: CodexThreadItemEntry[] = [];
+        const seenCursors = new Set<string>();
+        let cursor: string | null = null;
+        do {
+            const page: CodexRequestResult<"thread/items/list"> = await this.request("thread/items/list", {
+                threadId, cursor, limit: 100, sortDirection: "asc",
+            });
+            entries.push(...page.data);
+            cursor = page.nextCursor;
+            if (cursor && seenCursors.has(cursor)) throw new Error("Codex thread items pagination repeated a cursor");
+            if (cursor) seenCursors.add(cursor);
+        } while (cursor);
+        return entries;
     }
 
     /** 归档指定 Codex 线程。 */
@@ -777,17 +832,12 @@ function turnCacheKey(threadId: string, turnId: string) {
     return `${threadId}\0${turnId}`;
 }
 
-/** 生成 Codex 调用 Canvas Agent MCP 的启动命令。 */
-function canvasAgentMcpCommand() {
-    const current = process.argv.find((arg) => /index\.(t|j)s$/.test(arg)) || "";
-    const entry = path.resolve(current || fileURLToPath(new URL("../index.js", import.meta.url)));
-    const tsx = path.join(path.dirname(entry), "..", "node_modules", "tsx", "dist", "cli.mjs");
-    return entry.endsWith(".ts") ? { command: process.execPath, args: [tsx, entry, "mcp"] } : { command: process.execPath, args: [entry, "mcp"] };
-}
-
 /** 生成 Codex app-server 使用的 MCP 配置。 */
 function codexConfig(permissionMode: AgentPermissionMode) {
-    return { model_reasoning_summary: "auto", ...(permissionMode === "automatic" ? { approvals_reviewer: "auto_review" } : {}), mcp_servers: { "infinite-canvas": { command: canvasAgentMcp.command, args: canvasAgentMcp.args, default_tools_approval_mode: "approve", startup_timeout_sec: 20, tool_timeout_sec: 90 } } };
+    const agentConfig = loadConfig();
+    const backend = createBackendClient(process.env.INFINITE_CANVAS_BACKEND_URL || agentConfig.backendUrl || "http://127.0.0.1:17370");
+    const url = new URL(`${backend.backendUrl}/mcp`);
+    return { model_reasoning_summary: "auto", ...(permissionMode === "automatic" ? { approvals_reviewer: "auto_review" } : {}), mcp_servers: { "infinite-canvas": { url: url.toString(), bearer_token_env_var: "INFINITE_CANVAS_BACKEND_TOKEN", default_tools_approval_mode: "approve", startup_timeout_sec: 20, tool_timeout_sec: 90 } } };
 }
 
 function threadSettings(permissionMode: AgentPermissionMode) {
@@ -895,6 +945,10 @@ function parseMaybeJson(value: unknown) {
     } catch {
         return value;
     }
+}
+
+function isPaginatedThreadReadError(error: unknown) {
+    return /paginated threads do not support thread\/read.*includeTurns\s*=\s*true/i.test(errorMessage(error));
 }
 
 /** 定位当前依赖中 Codex CLI 的执行文件。 */

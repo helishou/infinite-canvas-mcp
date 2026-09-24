@@ -23,14 +23,60 @@ export const VIEWPORT_CULL_ZOOM_RATIO = 0.35;
 /** 裁剪时在视口外多渲染的屏幕像素距离，必须大于 VIEWPORT_CULL_SCREEN_MARGIN。 */
 export const VIEWPORT_RENDER_SCREEN_PADDING = 400;
 
+export type CanvasViewportSize = { width: number; height: number };
+
+/**
+ * 统一清洗持久化/导入的视口。旧画布使用 zoom，新版使用 k；两者未在边界处归一化时，
+ * 一次缩放就会把 x/y 计算成 NaN，导致全部节点不可见且 Backend 保存 400。
+ */
+export function normalizeViewportTransform(value: unknown): ViewportTransform {
+    const viewport = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+    const numberOr = (candidate: unknown, fallback: number) => {
+        const parsed = typeof candidate === "number" ? candidate : Number(candidate);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const rawScale = viewport.k ?? viewport.zoom;
+    const scale = numberOr(rawScale, 1);
+    return {
+        x: numberOr(viewport.x, 0),
+        y: numberOr(viewport.y, 0),
+        k: scale > 0 ? Math.min(Math.max(scale, 0.05), 5) : 1,
+    };
+}
+
 /** 裁剪用的世界单位外扩距离 = 屏幕像素 / 缩放比例。 */
 export function viewportRenderPadding(scale: number) {
     if (!(scale > 0)) return VIEWPORT_RENDER_SCREEN_PADDING;
     return VIEWPORT_RENDER_SCREEN_PADDING / scale;
 }
 
-export function needsViewportCull(last: ViewportTransform, next: ViewportTransform) {
+export function viewportWorldBounds(viewport: ViewportTransform, size: CanvasViewportSize, screenPadding = 0) {
+    const k = viewport.k > 0 ? viewport.k : 1;
+    const padding = screenPadding / k;
+    const left = -viewport.x / k - padding;
+    const top = -viewport.y / k - padding;
+    return {
+        left,
+        top,
+        right: left + Math.max(0, size.width) / k + padding * 2,
+        bottom: top + Math.max(0, size.height) / k + padding * 2,
+    };
+}
+
+/**
+ * 当前屏幕已经逼近上次裁剪的安全边缘时需要提前重算。
+ * 安全边缘保留 100px（400px 前瞻 - 300px 补算阈值），让 transition 有时间挂载新节点。
+ */
+export function viewportNeedsCoverageRefresh(rendered: ViewportTransform, next: ViewportTransform, size: CanvasViewportSize) {
+    const safePadding = Math.max(0, VIEWPORT_RENDER_SCREEN_PADDING - VIEWPORT_CULL_SCREEN_MARGIN);
+    const coverage = viewportWorldBounds(rendered, size, safePadding);
+    const visible = viewportWorldBounds(next, size);
+    return visible.left < coverage.left || visible.top < coverage.top || visible.right > coverage.right || visible.bottom > coverage.bottom;
+}
+
+export function needsViewportCull(last: ViewportTransform, next: ViewportTransform, size?: CanvasViewportSize) {
     if (!(next.k > 0) || !(last.k > 0)) return true;
+    if (size && viewportNeedsCoverageRefresh(last, next, size)) return true;
     // x / y 本身就是屏幕像素，直接比较屏幕位移即可，与缩放无关。
     const movedX = Math.abs(next.x - last.x);
     const movedY = Math.abs(next.y - last.y);

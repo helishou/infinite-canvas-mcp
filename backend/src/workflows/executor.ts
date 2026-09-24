@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import type { WorkflowConfig, WorkflowField, RuntimeTask, BackendDatabase } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import { collectOutputMedia } from "../comfyui/bridge.js";
@@ -17,6 +16,14 @@ type RunResult = {
     status: { status_str: string; completed: boolean };
 };
 
+function workflowRequestError(action: string, url: string, error: unknown) {
+    const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
+    const hint = /fetch failed|failed to fetch|networkerror|econnrefused|enotfound|etimedout|socket/i.test(reason)
+        ? "请确认 ComfyUI 已启动、地址可访问，且端口没有被防火墙拦截"
+        : "请检查 ComfyUI 返回的错误和当前工作流配置";
+    return new Error(`${action}失败：${url}（${reason}）。${hint}。`);
+}
+
 
 /**
  * 将用户字段值转换为 {node_id: {input_name: value}} 格式
@@ -30,8 +37,8 @@ function buildParams(fields: WorkflowField[], values: FieldValues, workflow: Rec
         // 跳过多节点字段（在 run() 中单独处理）
         if (field.node.includes(",")) continue;
         let value = values[field.id];
-        if (isImageField(field, workflow)) {
-            // LoadImage 字段即使配置类型被错误保存为 number/text，也必须按图片文件名处理。
+        if (isMediaField(field, workflow)) {
+            // LoadImage / LoadAudio / LoadVideo 字段即使配置类型被错误保存，也必须按媒体文件名处理。
         } else if (field.type === "number" || field.type === "slider") {
             const num = typeof value === "number" ? value : Number(value);
             if (!Number.isNaN(num)) {
@@ -60,6 +67,20 @@ function buildParams(fields: WorkflowField[], values: FieldValues, workflow: Rec
 function isImageField(field: WorkflowField, workflow: Record<string, unknown>) {
     if (field.type === "image") return true;
     return field.node.split(",").some((id) => (workflow[id] as { class_type?: string } | null | undefined)?.class_type === "LoadImage");
+}
+
+function isAudioField(field: WorkflowField, workflow: Record<string, unknown>) {
+    if (field.type === "audio") return true;
+    return field.node.split(",").some((id) => (workflow[id] as { class_type?: string } | null | undefined)?.class_type === "LoadAudio");
+}
+
+function isVideoField(field: WorkflowField, workflow: Record<string, unknown>) {
+    if (field.type === "video") return true;
+    return field.node.split(",").some((id) => /(?:^|_)LoadVideo/.test((workflow[id] as { class_type?: string } | null | undefined)?.class_type || ""));
+}
+
+function isMediaField(field: WorkflowField, workflow: Record<string, unknown>) {
+    return isImageField(field, workflow) || isAudioField(field, workflow) || isVideoField(field, workflow);
 }
 
 /**
@@ -143,7 +164,7 @@ function isNodePresent(workflow: Record<string, unknown>, id: string): boolean {
  * 并修正 Flux2-Klein 这类多分支共用输出/尺寸链的工作流）：
  * 1. 只移除空图片字段对应的 LoadImage 节点本身。
  * 2. 级联裁剪：
- *    - 普通节点：只要「任一」连线输入指向已删除节点就移除（它已无法产出有效输出）。
+ *    - 普通节点：只要「任一」必需连线输入指向已删除节点就移除；Qwen 图像编码节点的图片槽位可选。
  *    - ComfySwitchNode：仅当「选中分支」指向已删除节点才移除；未选中分支悬空不影响执行。
  *    - SaveImage / PreviewImage 永远保留（但其悬空输入会在提交前被校验捕获）。
  * 3. 清理存活节点上指向已删除节点的悬空连线（删除该 input 而不是删节点）。
@@ -184,7 +205,10 @@ function removeEmptyImageNodes(workflow: Record<string, unknown>, fields: Workfl
             const inputs = item!.inputs;
             if (!inputs) continue;
             const linkEntries = Object.entries(inputs).filter(
-                ([, v]) => Array.isArray(v) && typeof (v as unknown[])[0] === "string",
+                ([name, v]) =>
+                    Array.isArray(v) &&
+                    typeof (v as unknown[])[0] === "string" &&
+                    !(cls === "TextEncodeQwenImage21" && name.startsWith("images.")),
             );
             if (!linkEntries.length) continue;
             let shouldRemove = false;
@@ -224,10 +248,11 @@ function removeEmptyImageNodes(workflow: Record<string, unknown>, fields: Workfl
 
 /**
  * 解析 ComfySwitchNode 当前选中的分支名（on_true / on_false）。
- * 通过 switch 输入追溯 PrimitiveBoolean 节点的 value 判定；来源缺失/不可判定时返回 null。
+ * 支持 API 图里的直接布尔值，也支持追溯 PrimitiveBoolean 节点；来源缺失/不可判定时返回 null。
  */
 function selectedSwitchBranch(graph: Record<string, unknown>, node: WfNode): "on_true" | "on_false" | null {
     const sw = node!.inputs?.switch;
+    if (typeof sw === "boolean") return sw ? "on_true" : "on_false";
     if (Array.isArray(sw) && isNodePresent(graph, String(sw[0]))) {
         const swNode = graph[String(sw[0])] as WfNode;
         if (swNode && swNode.class_type === "PrimitiveBoolean") {
@@ -275,7 +300,7 @@ function routeSizeImage(workflow: Record<string, unknown>, presentLoadImages: Se
  * 拿裁剪前的 full 校验会把「已经被清掉的」悬空引用再次当错报上来。
  *
  * 校验内容：
- *   1) 兜底：prepared 至少要有一个 SaveImage / PreviewImage 输出节点，否则
+ *   1) 兜底：prepared 至少要有一个图片、视频或音频输出节点，否则
  *      ComfyUI 会返回 400 "Prompt has no outputs"，提前抛更清晰。
  *   2) 兜底悬空：prepared 里若还存在「input 引用了不在 prepared 中的节点」（说明第 3
  *      步漏掉），按 ComfySwitchNode 选中分支例外放过；其它情况列出。
@@ -283,17 +308,18 @@ function routeSizeImage(workflow: Record<string, unknown>, presentLoadImages: Se
  * @param prepared 裁剪 + 清理后的最终 workflow（即将提交给 ComfyUI）
  */
 function validatePromptGraph(prepared: Record<string, unknown>): void {
-    // 1) 兜底：没有任何 SaveImage / PreviewImage 输出节点
+    // 1) 兜底：没有任何媒体输出节点
     const hasOutput = Object.values(prepared).some(
         (n) =>
             !!n &&
             typeof n === "object" &&
-            ((n as WfNode)!.class_type === "SaveImage" || (n as WfNode)!.class_type === "PreviewImage"),
+            /^(?:Save|Preview)(?:Image|Video|Audio)/.test((n as WfNode)!.class_type || "")
+                || (n as WfNode)!.class_type === "VHS_VideoCombine",
     );
     if (!hasOutput) {
         throw new Error(
-            "工作流裁剪后没有任何 SaveImage / PreviewImage 输出节点，无法提交 ComfyUI。" +
-                "（说明：当前传入的参考图不足以覆盖工作流开关/分支依赖——Flux2-Klein 默认开关下「图 B(278)」为必选槽位，请提供该图片，或调整工作流开关后再试）",
+            "工作流裁剪后没有任何媒体输出节点，无法提交 ComfyUI。" +
+                "（请检查工作流输出节点，以及媒体输入、开关和分支依赖是否完整）",
         );
     }
     // 2) 兜底悬空：prepared 中还存在的 input 是否指向 prepared 中不存在的节点 id
@@ -322,7 +348,7 @@ function validatePromptGraph(prepared: Record<string, unknown>): void {
 }
 
 /**
- * 将 dataURL 上传到 ComfyUI，获取文件名
+ * 将媒体 dataURL 上传到 ComfyUI，获取 input 目录文件名。
  */
 async function uploadDataUrlToComfy(
     dataUrl: string,
@@ -332,7 +358,7 @@ async function uploadDataUrlToComfy(
 ): Promise<string> {
     const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
     if (!match) throw new Error(`Invalid dataURL for field ${fieldId}`);
-    const mimeType = match[1] || "image/png";
+    const mimeType = match[1] || "application/octet-stream";
     const base64 = match[2];
     const ext = mimeType.split("/")[1]?.split(";")[0] || "png";
     const filename = `workflow_${fieldId}_${Date.now()}.${ext}`;
@@ -342,11 +368,13 @@ async function uploadDataUrlToComfy(
     form.set("image", new Blob([blob], { type: mimeType }), filename);
     form.set("overwrite", "true");
 
-    const response = await fetch(`${comfyUrl.replace(/\/$/, "")}/upload/image`, {
-        method: "POST",
-        body: form,
-        signal,
-    });
+    const endpoint = `${comfyUrl.replace(/\/$/, "")}/upload/image`;
+    let response: Response;
+    try {
+        response = await fetch(endpoint, { method: "POST", body: form, signal });
+    } catch (error) {
+        throw workflowRequestError("上传参考图片到 ComfyUI", endpoint, error);
+    }
     if (!response.ok) {
         const text = await response.text().catch(() => "");
         throw new Error(`ComfyUI upload failed: HTTP ${response.status} ${text.slice(0, 200)}`);
@@ -357,9 +385,9 @@ async function uploadDataUrlToComfy(
 }
 
 /**
- * 处理 image 类型的 field：如果是 dataURL 则上传到 ComfyUI 获取文件名，否则保持原值
+ * 处理 image / audio / video 类型字段：dataURL 或媒体 URL 会先上传到 ComfyUI input 目录。
  */
-async function processImageFields(
+async function processMediaFields(
     fields: WorkflowField[],
     workflow: Record<string, unknown>,
     fieldValues: FieldValues,
@@ -368,37 +396,58 @@ async function processImageFields(
 ): Promise<FieldValues> {
     const result: FieldValues = { ...fieldValues };
     for (const field of fields) {
-        if (!isImageField(field, workflow)) continue;
+        if (!isMediaField(field, workflow)) continue;
+        const mediaKind = isAudioField(field, workflow) ? "音频" : isVideoField(field, workflow) ? "视频" : "图片";
         const value = fieldValues[field.id];
-        // 空图片槽位必须显式删除工作流中的原始文件名，否则 ComfyUI 会继续校验
-        // workflow JSON 里预置的 LoadImage 文件；这样一个工作流可以支持 0-N 张图。
+        if ((!value || typeof value !== "string") && field.required === true) {
+            throw new Error(`工作流缺少必选${mediaKind}：${field.name || field.id}`);
+        }
+        // 空媒体槽位必须显式删除工作流中的原始文件名，否则 ComfyUI 会继续校验模板文件。
         if (!value || typeof value !== "string") {
             result[field.id] = null;
             continue;
         }
-        if (value.startsWith("data:image")) {
+        // 媒体字段只接受显式媒体引用（data: / http(s):// / /media/）。
+        // 工作流节点图里写死的裸文件名（如 "jk美少女 (1).png"）或字段残留的默认文件名
+        // 不是用户显式传入的媒体，必须视为“未提供”并清空，否则会被原样发到 ComfyUI
+        // 导致“所有图都被传入”。这是“图片参数必须显式传入”的硬约束。
+        const isExplicitMediaRef =
+            value.startsWith("data:image") || value.startsWith("data:audio") || value.startsWith("data:video") ||
+            /^https?:\/\//.test(value) || value.startsWith("/media/");
+        if (!isExplicitMediaRef) {
+            result[field.id] = null;
+            continue;
+        }
+        if (value.startsWith("data:image") || value.startsWith("data:audio") || value.startsWith("data:video")) {
             result[field.id] = await uploadDataUrlToComfy(value, field.id, comfyUrl, signal);
         } else if (/^https?:\/\//.test(value) || value.startsWith("/media/")) {
-            // 生图工作站的参考图是 URL 或 /media/ 路径，需要 fetch 后上传到 ComfyUI
+            // 媒体库引用是 URL 或 /media/ 路径，需要 fetch 后上传到 ComfyUI。
             let url = value;
             if (value.startsWith("/media/")) {
                 // /media/ 路径由本 backend 服务（默认 17370），不从 ComfyUI 取
                 const backendBase = `http://127.0.0.1:${process.env.PORT || 17370}`;
                 url = `${backendBase}${value}`;
             }
-            const resp = await fetch(url, { signal });
-            if (!resp.ok) throw new Error(`为字段 ${field.id} 拉取图片失败: HTTP ${resp.status}`);
+            let resp: Response;
+            try {
+                resp = await fetch(url, { signal });
+            } catch (error) {
+                throw workflowRequestError(`读取字段「${field.name || field.id}」的${mediaKind}`, url, error);
+            }
+            if (!resp.ok) throw new Error(`为字段 ${field.id} 拉取${mediaKind}失败: HTTP ${resp.status}`);
             const blob = await resp.blob();
-            const ext = blob.type.split("/")[1]?.split(";")[0] || "png";
+            const ext = blob.type.split("/")[1]?.split(";")[0] || (mediaKind === "音频" ? "wav" : mediaKind === "视频" ? "mp4" : "png");
             const filename = `workflow_${field.id}_${Date.now()}.${ext}`;
             const form = new FormData();
             form.set("image", blob, filename);
             form.set("overwrite", "true");
-            const uploadResp = await fetch(`${comfyUrl.replace(/\/$/, "")}/upload/image`, {
-                method: "POST",
-                body: form,
-                signal,
-            });
+            const uploadEndpoint = `${comfyUrl.replace(/\/$/, "")}/upload/image`;
+            let uploadResp: Response;
+            try {
+                uploadResp = await fetch(uploadEndpoint, { method: "POST", body: form, signal });
+            } catch (error) {
+                throw workflowRequestError(`上传字段「${field.name || field.id}」到 ComfyUI`, uploadEndpoint, error);
+            }
             if (!uploadResp.ok) {
                 const text = await uploadResp.text().catch(() => "");
                 throw new Error(`ComfyUI 上传失败: HTTP ${uploadResp.status} ${text.slice(0, 200)}`);
@@ -411,8 +460,22 @@ async function processImageFields(
     return result;
 }
 
+export function applyWorkflowFieldDefaults(
+    fields: WorkflowField[],
+    values: FieldValues,
+): FieldValues {
+    const merged: FieldValues = {};
+    for (const field of fields || []) {
+        if (field.default !== undefined) merged[field.id] = field.default;
+    }
+    // Explicit values, including false/0/null, are intentional overrides.
+    Object.assign(merged, values || {});
+    return merged;
+}
+
 export class WorkflowExecutor {
     private readonly controllers = new Map<string, AbortController>();
+    private readonly comfyExecutions = new Map<string, { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> }>();
     constructor(
         private readonly bridge: ComfyUiBackend,
         private readonly tasks: TaskStore,
@@ -421,25 +484,48 @@ export class WorkflowExecutor {
         private readonly db?: BackendDatabase,
     ) {}
 
-    async run(
+    /**
+     * 准备一次工作流运行：应用默认值、上传媒体、注入参数、裁剪、校验、创建任务。
+     * 同步部分（媒体上传 + 校验）可能抛错，由调用方捕获。
+     * 返回执行所需的上下文；真正提交给 ComfyUI 并等待结果的动作在 executeAndFinalize 中。
+     */
+    private async prepareRun(
         workflowJson: Record<string, unknown>,
         config: WorkflowConfig,
         fieldValues: FieldValues,
         clientId: string,
-        comfyUrl?: string,
-        name?: string,
-        clientTaskId?: string,
-        // 画布生成日志关联：项目 id + 触发节点 id（为空时仍允许走，但没有日志）
-        projectId?: string,
-        nodeId?: string,
-        parentTaskId?: string,
-    ): Promise<RunResult> {
+        comfyUrl: string | undefined,
+        name: string | undefined,
+        clientTaskId: string | undefined,
+        projectId: string | undefined,
+        nodeId: string | undefined,
+        parentTaskId: string | undefined,
+    ): Promise<{
+        task: RuntimeTask;
+        prepared: Record<string, unknown>;
+        url: string;
+        controller: AbortController;
+        clientId: string;
+        promptText: string;
+        persistedFieldValues: FieldValues;
+        projectId: string | undefined;
+        nodeId: string | undefined;
+        name: string | undefined;
+        configTitle: string;
+    }> {
         const controller = new AbortController();
         const url = comfyUrl ?? this.bridge.getUrl();
-        // 先处理 image 字段：上传 dataURL → 获取文件名
-        const processedValues = await processImageFields(config.fields, workflowJson, fieldValues, url, controller.signal);
+        const effectiveFieldValues = applyWorkflowFieldDefaults(config.fields || [], fieldValues);
+        for (const field of config.fields || []) {
+            const value = effectiveFieldValues[field.id];
+            if (field.required === true && !isMediaField(field, workflowJson) && (value === undefined || value === null || value === "")) {
+                throw new Error(`工作流缺少必填字段：${field.name || field.id}`);
+            }
+        }
+        // 先处理媒体字段：上传 dataURL → 获取 ComfyUI input 文件名
+        const processedValues = await processMediaFields(config.fields, workflowJson, effectiveFieldValues, url, controller.signal);
         const promptText = buildPrompt(config.fields, processedValues) || config.title;
-        const persistedFieldValues = redactInlineMedia(fieldValues);
+        const persistedFieldValues = redactInlineMedia(effectiveFieldValues);
         // 处理 seed=-1 随机化
         for (const field of config.fields || []) {
             if ((field.id === "seed" || field.id === "noise_seed") && processedValues[field.id] === -1) {
@@ -466,6 +552,28 @@ export class WorkflowExecutor {
             Object.assign(params[nodeId] as Record<string, unknown>, inputs);
         }
         const full = injectParams(workflowJson, params);
+        // 关键修复「image_qwen_image_2_1_image_edit 传入所有图」：
+        // 节点图里 LoadImage 写死了旧文件名（如 "jk美少女 (1).png"），getPresentLoadImages 仅靠
+        // graph 真相判定“已提供”，会把这些写死文件名当成已提供 → 全部发到 ComfyUI。
+        // 这里把「用户未显式提供」的 LoadImage 节点 inputs.image 显式置空，使 graph 真相 = “未提供”，
+        // 下游 getPresentLoadImages / removeEmptyImageNodes 据此把它们剪掉。
+        // “显式提供”= 原始字段值是 data:/http(s):// /media/ 这三类媒体引用（processMediaFields 之后
+        // 已转成 ComfyUI 文件名，故必须用 processMediaFields 之前的 effectiveFieldValues 判定）。
+        for (const field of config.fields || []) {
+            if (!isImageField(field, workflowJson)) continue;
+            const raw = effectiveFieldValues[field.id];
+            const provided =
+                typeof raw === "string" &&
+                raw.length > 0 &&
+                (raw.startsWith("data:") || /^https?:\/\//.test(raw) || raw.startsWith("/media/"));
+            if (provided) continue;
+            for (const id of field.node.split(",").map((x) => x.trim())) {
+                const node = full[id] as WfNode | undefined;
+                if (!node || node.class_type !== "LoadImage") continue;
+                if (!node.inputs) node.inputs = {};
+                node.inputs.image = null;
+            }
+        }
         // 智能路由：若尺寸源 LoadImage 缺失但用户提供了其它参考图，把尺寸链(GETImageSize 上游 scaler)
         // 改接到用户提供的图上，使 Flux2-Klein 这类工作流在任意单图下都能拼出有效图。
         // 用 graph 真相（LoadImage.inputs.image 是否非空）判定“已提供”，不再依赖 processedValues。
@@ -504,7 +612,28 @@ export class WorkflowExecutor {
             : this.tasks.create("workflow", { workflow: "custom", fields: persistedFieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) });
         this.controllers.set(task.id, controller);
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
+        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title };
+    }
 
+    /**
+     * 提交给 ComfyUI 并等待结果，更新任务状态与生成日志。
+     * 设计为「后台执行」：调用方通常不 await（runBackground 立即返回 taskId），
+     * 但 run() 会 await 它以保持同步契约（画布视频分发依赖同步结果）。
+     */
+    private async executeAndFinalize(ctx: {
+        task: RuntimeTask;
+        prepared: Record<string, unknown>;
+        url: string;
+        controller: AbortController;
+        clientId: string;
+        promptText: string;
+        persistedFieldValues: FieldValues;
+        projectId: string | undefined;
+        nodeId: string | undefined;
+        name: string | undefined;
+        configTitle: string;
+    }): Promise<RunResult> {
+        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle } = ctx;
         try {
             this.tasks.update(task.id, { status: "running", progress: 0.05 });
             const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId);
@@ -527,7 +656,7 @@ export class WorkflowExecutor {
                     mimeType: m.mimeType,
                     name: m.filename,
                 })),
-                params: { fields: persistedFieldValues, configTitle: config.title },
+                params: { fields: persistedFieldValues, configTitle },
             });
             return { taskId: task.id, ...finalResult };
         } catch (error) {
@@ -549,15 +678,62 @@ export class WorkflowExecutor {
                 durationMs: 0,
                 outputs: [],
                 error: message,
-                params: { fields: persistedFieldValues, configTitle: config.title },
+                params: { fields: persistedFieldValues, configTitle },
             });
             throw error;
         } finally {
             this.controllers.delete(task.id);
+            this.comfyExecutions.delete(task.id);
         }
     }
 
+    async run(
+        workflowJson: Record<string, unknown>,
+        config: WorkflowConfig,
+        fieldValues: FieldValues,
+        clientId: string,
+        comfyUrl?: string,
+        name?: string,
+        clientTaskId?: string,
+        // 画布生成日志关联：项目 id + 触发节点 id（为空时仍允许走，但没有日志）
+        projectId?: string,
+        nodeId?: string,
+        parentTaskId?: string,
+    ): Promise<RunResult> {
+        const ctx = await this.prepareRun(workflowJson, config, fieldValues, clientId, comfyUrl, name, clientTaskId, projectId, nodeId, parentTaskId);
+        return this.executeAndFinalize(ctx);
+    }
+
+    /**
+     * 后台运行：准备完成后立即返回 taskId，ComfyUI 执行在后台进行。
+     * 用于 HTTP /api/workflows/:name/run——避免长连接（生图可能耗时数分钟）被中断导致
+     * 前端收到 "Failed to fetch" 而后端实际已提交 ComfyUI，进而用户误以为失败重复点击、堆积任务。
+     * 前端应通过 taskId 轮询任务状态获取结果。
+     */
+    async runBackground(
+        workflowJson: Record<string, unknown>,
+        config: WorkflowConfig,
+        fieldValues: FieldValues,
+        clientId: string,
+        comfyUrl?: string,
+        name?: string,
+        clientTaskId?: string,
+        projectId?: string,
+        nodeId?: string,
+        parentTaskId?: string,
+    ): Promise<{ taskId: string }> {
+        const ctx = await this.prepareRun(workflowJson, config, fieldValues, clientId, comfyUrl, name, clientTaskId, projectId, nodeId, parentTaskId);
+        // executeAndFinalize 内部已捕获异常并把任务标 failed + 写生成日志，这里吞掉重抛避免 unhandled rejection。
+        void this.executeAndFinalize(ctx).catch(() => {});
+        return { taskId: ctx.task.id };
+    }
+
     cancel(id: string) {
+        const execution = this.comfyExecutions.get(id);
+        if (execution) {
+            execution.cancelRequested = true;
+            void this.cancelComfyExecution(id, execution);
+        }
         this.controllers.get(id)?.abort();
         this.controllers.delete(id);
         const task = this.tasks.get(id);
@@ -567,6 +743,12 @@ export class WorkflowExecutor {
         return updated;
     }
 
+    private cancelComfyExecution(taskId: string, execution: { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> }) {
+        if (!execution.promptId) return Promise.resolve();
+        execution.cancellation ||= this.bridge.cancelPromptExecution(execution.url, execution.promptId, taskId);
+        return execution.cancellation;
+    }
+
     private async executeWorkflow(
         task: RuntimeTask,
         workflow: Record<string, unknown>,
@@ -574,6 +756,8 @@ export class WorkflowExecutor {
         controller: AbortController,
         clientId: string,
     ) {
+        const activeExecution = { url: comfyUrl, cancelRequested: false } as { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> };
+        this.comfyExecutions.set(task.id, activeExecution);
         const Ctor = (globalThis as any).WebSocket;
         let capturedPromptId: string | null = null;
         let ws: any = null;
@@ -584,6 +768,7 @@ export class WorkflowExecutor {
         let wsExecutionSuccessOutputs: Record<string, unknown> | null = null;
 
         try {
+            if (controller.signal.aborted) throw new Error("任务已取消");
             if (typeof Ctor === "function") {
                 try {
                     const wsBase = comfyUrl.replace(/^http/, "ws");
@@ -614,12 +799,18 @@ export class WorkflowExecutor {
                 } catch {}
             }
 
-            const response = await fetch(`${comfyUrl}/prompt`, {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ prompt: workflow, client_id: task.id }),
-                signal: controller.signal,
-            });
+            const promptEndpoint = `${comfyUrl}/prompt`;
+            let response: Response;
+            try {
+                // 保持提交请求可读到 prompt_id：若此时取消，收到 ID 后再从 ComfyUI 队列移除。
+                response = await fetch(promptEndpoint, {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ prompt: workflow, client_id: task.id }),
+                });
+            } catch (error) {
+                throw workflowRequestError("提交 ComfyUI 工作流", promptEndpoint, error);
+            }
             if (!response.ok) {
                 const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000);
                 throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`);
@@ -630,12 +821,20 @@ export class WorkflowExecutor {
             }
             const promptId = body.prompt_id;
             capturedPromptId = promptId;
+            activeExecution.promptId = promptId;
             this.tasks.addEvent(task.id, "submitted", { promptId });
+            if (controller.signal.aborted || activeExecution.cancelRequested) {
+                await this.cancelComfyExecution(task.id, activeExecution);
+                throw new Error("任务已取消");
+            }
 
             const startedAt = Date.now();
             const maxExecutionMs = 30 * 60 * 1000;
             for (;;) {
-                if (controller.signal.aborted) throw new Error("任务已取消");
+                if (controller.signal.aborted || activeExecution.cancelRequested) {
+                    await this.cancelComfyExecution(task.id, activeExecution);
+                    throw new Error("任务已取消");
+                }
                 if (Date.now() - startedAt > maxExecutionMs) throw new Error("ComfyUI 任务执行超时（30 分钟）");
                 if (wsError) throw wsError;
 
@@ -650,7 +849,13 @@ export class WorkflowExecutor {
 
                 if (wsClosed) throw new Error("WebSocket 已关闭但未收到 executed");
 
-                const historyRes = await fetch(`${comfyUrl}/history/${encodeURIComponent(promptId)}`, { signal: controller.signal });
+                const historyEndpoint = `${comfyUrl}/history/${encodeURIComponent(promptId)}`;
+                let historyRes: Response;
+                try {
+                    historyRes = await fetch(historyEndpoint, { signal: controller.signal });
+                } catch (error) {
+                    throw workflowRequestError("查询 ComfyUI 任务状态", historyEndpoint, error);
+                }
                 if (historyRes.ok) {
                     const history = await historyRes.json() as Record<string, any>;
                     const item = history[promptId];
