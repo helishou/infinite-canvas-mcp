@@ -192,7 +192,7 @@ export default function McpObservabilityPage() {
                         <Statistic
                             title="返回体均值"
                             value={chars(report?.payload?.averageOutputChars ?? null)}
-                            suffix={report?.payload ? `${report.payload.sizedCalls} 次已记录` : undefined}
+                            suffix={report?.payload ? `${report.payload.outputSizedCalls} 次已记录` : undefined}
                         />
                         <Statistic
                             title="累计输出"

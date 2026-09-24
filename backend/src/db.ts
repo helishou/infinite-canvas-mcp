@@ -1924,7 +1924,7 @@ export class BackendDatabase {
                 MAX(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN json_extract(input_summary_json, '$.inputChars') END) AS max_input_chars,
                 SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(output_summary_json, '$.outputChars') IS NOT NULL THEN 1 ELSE 0 END) AS output_sized_calls,
                 SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(input_summary_json, '$.inputChars') IS NOT NULL THEN 1 ELSE 0 END) AS input_sized_calls,
-                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(output_summary_json, '$.outputChars') > 100000 THEN 1 ELSE 0 END) AS oversized_calls
+                SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(output_summary_json, '$.outputChars') >= 100000 THEN 1 ELSE 0 END) AS oversized_calls
             FROM mcp_observability_events
         `).get() as Record<string, unknown>;
         const byTool = this.db.prepare(`

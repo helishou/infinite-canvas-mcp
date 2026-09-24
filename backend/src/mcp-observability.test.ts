@@ -179,6 +179,29 @@ test("MCP 诊断统计每个工具的输入输出大小并标记超大返回体"
     }
 });
 
+test("MCP 超大返回体阈值包含恰好 100000 字符", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "infinite-canvas-mcp-observability-threshold-"));
+    const database = new BackendDatabase(path.join(dir, "runtime.sqlite"));
+    try {
+        database.createMcpObservabilityEvent({
+            sessionId: "session-threshold",
+            traceId: "trace-threshold",
+            event: "tool.succeeded",
+            tool: "canvas_get_state",
+            durationMs: 1,
+            inputSummary: { inputChars: 10 },
+            outputSummary: { outputChars: 100000 },
+        });
+        const report = database.getMcpObservabilityReport();
+        assert.equal(report.payload.oversizedCalls, 1);
+        assert.equal(report.payload.outputSizedCalls, 1);
+        assert.equal(report.payload.averageOutputChars, 100000);
+    } finally {
+        database.close();
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test("canvas_wait_tasks 的历史事件即使缺少等待标记也不污染普通延迟", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "infinite-canvas-mcp-observability-wait-legacy-"));
     const database = new BackendDatabase(path.join(dir, "runtime.sqlite"));

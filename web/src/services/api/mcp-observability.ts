@@ -21,7 +21,8 @@ export type McpObservabilityMetric = {
 };
 
 export type McpObservabilityPayloadSummary = {
-    sizedCalls: number;
+    outputSizedCalls: number;
+    inputSizedCalls: number;
     totalInputChars: number;
     totalOutputChars: number;
     estimatedTotalInputTokens: number;
