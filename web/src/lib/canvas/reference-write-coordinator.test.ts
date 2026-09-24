@@ -140,8 +140,9 @@ test("回退到在途 signature 会取消旧 queued，重复调用共享当前 P
     const a2 = coordinator.upsert(asset("a", "A"));
     assert.strictEqual(a1, a2);
     await tick();
-    const [aResult, bResult] = await Promise.all([a1, a2, b]);
+    const [aResult, aResult2, bResult] = await Promise.all([a1, a2, b]);
     assert.deepEqual(aResult, asset("a", "A"));
+    assert.deepEqual(aResult2, asset("a", "A"));
     assert.deepEqual(bResult, asset("a", "A"));
     assert.deepEqual(calls.map((item) => item.label), ["A"]);
 });
@@ -246,6 +247,23 @@ test("同 asset 重复 remove 会结算旧 Promise，且只执行一次删除", 
     await a;
     await Promise.all([firstRemove, secondRemove]);
     assert.deepEqual(calls, ["upsert:A", "remove"]);
+});
+
+test("remove 执行中重复 remove 共享同一个在途 Promise", async () => {
+    const removal = deferred<void>();
+    let removeCalls = 0;
+    const coordinator = createReferenceWriteCoordinator(service({
+        remove: async () => { removeCalls++; return removal.promise; },
+    }));
+
+    const firstRemove = coordinator.remove("a");
+    await tick();
+    const secondRemove = coordinator.remove("a");
+    assert.strictEqual(firstRemove, secondRemove);
+    assert.equal(removeCalls, 1);
+    removal.resolve();
+    await Promise.all([firstRemove, secondRemove]);
+    assert.equal(removeCalls, 1);
 });
 
 test("remove 覆盖 queued upsert 时旧 Promise 以 typed error 结算", async () => {

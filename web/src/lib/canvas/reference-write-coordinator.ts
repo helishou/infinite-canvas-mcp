@@ -18,9 +18,10 @@ type NamedInput = Parameters<CanvasReferenceService["upsert"]>[0] & { id: string
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void };
 type PendingWrite = { kind: "upsert"; signature: string; input: NamedInput; deferred: Deferred<ReferenceAsset> };
 type RunningWrite = { kind: "upsert"; signature: string; input: NamedInput; deferred: Deferred<ReferenceAsset> };
+type RunningRemove = { kind: "remove"; assetId: string; deferred: Deferred<void> };
 type RemoveIntent = { kind: "remove"; assetId: string; deferred: Deferred<void> };
 type LaneIntent = PendingWrite | RemoveIntent;
-type Lane = { running?: RunningWrite; pending?: LaneIntent; drain?: Promise<void> };
+type Lane = { running?: RunningWrite | RunningRemove; pending?: LaneIntent; drain?: Promise<void> };
 
 function deferred<T>(): Deferred<T> {
     let resolve!: (value: T) => void;
@@ -49,7 +50,7 @@ export function createReferenceWriteCoordinator(delegate: CanvasReferenceService
         return lane;
     };
 
-    const clearRunning = (assetId: string, running: RunningWrite) => {
+    const clearRunning = (assetId: string, running: RunningWrite | RunningRemove) => {
         const lane = lanes.get(assetId);
         if (lane?.running !== running) return;
         lane.running = undefined;
@@ -89,11 +90,23 @@ export function createReferenceWriteCoordinator(delegate: CanvasReferenceService
                 }
                 lane.pending = undefined;
                 if (pending.kind === "remove") {
+                    const running: RunningRemove = { ...pending };
+                    let settled = false;
+                    const settle = () => {
+                        if (settled) return;
+                        settled = true;
+                        clearRunning(assetId, running);
+                    };
+                    lane.running = running;
+                    const request = Promise.resolve().then(() => delegate.remove(pending.assetId));
+                    void request.then(
+                        () => { settle(); running.deferred.resolve(); },
+                        (error) => { settle(); running.deferred.reject(error); },
+                    );
                     try {
-                        await delegate.remove(pending.assetId);
-                        pending.deferred.resolve();
-                    } catch (error) {
-                        pending.deferred.reject(error);
+                        await running.deferred.promise;
+                    } catch {
+                        /* the original caller receives the removal failure */
                     }
                     continue;
                 }
@@ -114,7 +127,7 @@ export function createReferenceWriteCoordinator(delegate: CanvasReferenceService
             const lane = getLane(assetId);
             const current = lane.running;
 
-            if (current?.signature === signature) {
+            if (current?.kind === "upsert" && current.signature === signature) {
                 const cancelled = lane.pending;
                 if (cancelled) {
                     lane.pending = undefined;
@@ -146,6 +159,7 @@ export function createReferenceWriteCoordinator(delegate: CanvasReferenceService
         list: () => delegate.list(),
         remove: (assetId) => {
             const lane = getLane(assetId);
+            if (lane.running?.kind === "remove") return lane.running.deferred.promise;
             if (lane.pending?.kind === "remove") return lane.pending.deferred.promise;
             const next: RemoveIntent = { kind: "remove", assetId, deferred: deferred<void>() };
             const superseded = lane.pending;
