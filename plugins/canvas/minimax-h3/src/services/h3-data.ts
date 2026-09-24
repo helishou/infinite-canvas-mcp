@@ -297,6 +297,10 @@ type UpsertCharacterGroupInput = {
     selectedOutfitKeys?: string[];
     voice?: H3CharacterVoice;
     defaultVoiceEnabled?: boolean;
+    /** 角色主图索引（来自 character 节点 metadata.characterPrimaryIndex）。
+     * 新建（无 existing）且未传 selectedOutfitKeys 时，自动按主图作为唯一启用服装。
+     * 存量 group 的 enabled 状态完全不动。 */
+    characterPrimaryIndex?: number;
 };
 
 function outfitKey(outfit: Pick<CharacterOutfitInput, "storageKey" | "url">) {
@@ -328,13 +332,26 @@ function mergeOutfitCatalog(existing: H3CharacterOutfit[], incoming: CharacterOu
     });
 }
 
-/** 登记一个角色组：outfits 是完整源目录，selectedOutfitKeys 只修改当前 Clip 的启用状态。 */
+/** 登记一个角色组：outfits 是完整源目录，selectedOutfitKeys 只修改当前 Clip 的启用状态。
+ * 新建（无 existing）且未传 selectedOutfitKeys 时，如果带 characterPrimaryIndex，则按主图作为唯一启用服装；
+ * 否则保持原行为：所有 outfit 都 enabled（存量选过的都传 selectedOutfitKeys）。 */
 export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterGroupInput): H3Segment {
     if (!input.characterNodeId) throw new Error("角色组必须绑定已有 characterNodeId");
     if (!input.outfits.length) throw new Error(`角色 ${input.characterName || input.characterNodeId} 缺少完整服装目录`);
-    if (input.selectedOutfitKeys && !input.selectedOutfitKeys.length) throw new Error("当前 Clip 至少需要选择一套角色服装");
     const existing = findCharacterGroupBySource(segment, input);
     const groups = { ...(segment.h3CharacterGroups || {}) };
+    // 新建路径：未传 selectedOutfitKeys 时按主图默认只勾一套服装（characterPrimaryIndex）。
+    const isCreating = !existing;
+    const selectionExplicit = Array.isArray(input.selectedOutfitKeys);
+    let nextSelectedOutfitKeys = input.selectedOutfitKeys;
+    if (isCreating && !selectionExplicit && Number.isFinite(input.characterPrimaryIndex)) {
+        const idx = Math.min(Math.max(Math.floor(input.characterPrimaryIndex!), 0), Math.max(input.outfits.length - 1, 0));
+        const primaryOutfit = input.outfits[idx];
+        if (primaryOutfit) {
+            const key = outfitKey(primaryOutfit);
+            if (key) nextSelectedOutfitKeys = [key];
+        }
+    }
     if (existing) {
         // 同源角色默认合并目录：即使调用方只带当前选择，也不能删除历史目录项。
         const nextOutfits = mergeOutfitCatalog(existing.outfits, input.outfits, input.selectedOutfitKeys);
@@ -361,7 +378,7 @@ export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterG
         characterNodeId: input.characterNodeId,
         subjectId: input.subjectId || input.characterNodeId,
         voice: input.voice,
-        outfits: mergeOutfitCatalog([], input.outfits, input.selectedOutfitKeys),
+        outfits: mergeOutfitCatalog([], input.outfits, nextSelectedOutfitKeys),
         voiceEnabled: input.voice ? (input.defaultVoiceEnabled ?? true) : false,
     });
     if (!nextGroup.outfits.some((outfit) => outfit.enabled)) return segment;

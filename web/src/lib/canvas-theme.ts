@@ -21,6 +21,7 @@ export const canvasThemes = {
             text: "#292524",
             muted: "#78716c",
             faint: "#a8a29e",
+            generating: "#d97706",
             typeStroke: { character: "#7c3aed", scene: "#0f766e", group: "#b45309" },
         },
         toolbar: {
@@ -51,6 +52,7 @@ export const canvasThemes = {
             text: "#f5f5f4",
             muted: "#d6d3d1",
             faint: "#78716c",
+            generating: "#fbbf24",
             typeStroke: { character: "#c4b5fd", scene: "#5eead4", group: "#fbbf24" },
         },
         toolbar: {

@@ -65,7 +65,8 @@ import { setBackendCanvasPresence } from "@/stores/use-backend-store";
 import { useCanvasDocument } from "@/pages/canvas/hooks/use-canvas-document";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
-import { buildCanvasGraphIndex, createMentionReferenceSelector, getGroupResourceNodes, isCanvasReferenceNode, nodeResourceItems, type CanvasCharacterReferenceSelection, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { buildCanvasGraphIndex, createMentionReferenceSelector, getGroupResourceNodes, isCanvasReferenceNode, nodeResourceItems, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { useCopyText } from "@/hooks/use-copy-text";
 import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
@@ -82,6 +83,7 @@ import {
     imageExtension,
     isAudioFile,
     isGenerationCanceled,
+    nodeCopyableText,
     resolveImageGenerationReferences,
     resolveMetadataReferences,
     sourceNodeReferenceImages,
@@ -188,7 +190,9 @@ async function writeCanvasClipboardBlob(blob: Promise<Blob | null>, kind: Canvas
 
 function isLegacyCanvasClipboardText(text: string) {
     try {
-        return (JSON.parse(text) as { format?: unknown }).format === "infinite-canvas-nodes";
+        const value = JSON.parse(text) as { format?: unknown };
+        // 兼容历史格式名与当前 CANVAS_CLIPBOARD_FORMAT（复制兜底时 JSON 会以纯文本进入系统剪贴板）
+        return value.format === "infinite-canvas-nodes" || value.format === CANVAS_CLIPBOARD_FORMAT;
     } catch {
         return false;
     }
@@ -335,6 +339,7 @@ export default function CanvasPage() {
 function InfiniteCanvasPage() {
     const { message, modal } = App.useApp();
     const { t } = useTranslation();
+    const copyText = useCopyText();
     const { exportCanvasProjects: runCanvasExport, exporting, busy: canvasTransferBusy } = useExportCanvas();
     // Subscribe to the registry version so plugin registration changes rerender the canvas.
     const nodeRegistryVersion = useNodeRegistryVersion((state) => state.version);
@@ -1014,6 +1019,8 @@ function InfiniteCanvasPage() {
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
     const contextMenuNode = contextMenu?.type === "node" ? nodeById.get(contextMenu.nodeId) || null : null;
+    // 只有文本节点（文本类型 / 文本模式的智能生成节点）且正文非空时，右键菜单才提供「复制内容」。
+    const contextMenuText = contextMenuNode ? nodeCopyableText(contextMenuNode) : "";
     // 右键菜单「生成组」的可用性：选中的普通节点（组不计）至少 2 个。
     const groupableSelectedCount = useMemo(
         () => nodes.reduce((count, node) => (selectedNodeIds.has(node.id) && node.type !== CanvasNodeType.Group ? count + 1 : count), 0),
@@ -1588,9 +1595,23 @@ function InfiniteCanvasPage() {
         clipboardRef.current = clipboard;
         localMultiClipboardFallbackRef.current = copiedNodes.length > 1;
         const serialized = serializeCanvasClipboard(clipboard);
+        // 富格式（媒体二进制 + 画布 JSON）写入失败时的兜底：把画布 JSON 以纯文本写进系统剪贴板，
+        // 粘贴端会识别该 JSON 并按节点复制还原（不会误建文字节点）。
+        // 应用内剪贴板 clipboardRef 无论如何都已设置，画布内 Ctrl+V 不依赖系统剪贴板。
+        const writeSystemTextFallback = async () => {
+            if (navigator.clipboard?.writeText) {
+                try {
+                    await navigator.clipboard.writeText(serialized);
+                    return true;
+                } catch {
+                    // 降级到 execCommand 兜底
+                }
+            }
+            return copyToClipboard(serialized);
+        };
         if (copiedNodes.length > 1) {
             try {
-                if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") return;
+                if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") throw new Error("clipboard write unsupported");
                 await navigator.clipboard.write([
                     new ClipboardItem({
                         "text/plain": new Blob([copiedNodes.map((node) => node.title).join("\n")], { type: "text/plain" }),
@@ -1599,12 +1620,17 @@ function InfiniteCanvasPage() {
                 ]);
                 localMultiClipboardFallbackRef.current = false;
             } catch {
-                // Keep the in-app clipboard so Ctrl/Cmd+V can still duplicate the selection.
+                if (!(await writeSystemTextFallback())) void message.error(t("canvas.projectPage.clipboardCopyFailed"));
             }
             return;
         }
         const content = getCanvasClipboardContent(copiedNodes[0]);
-        if (!content) return;
+        if (!content) {
+            // 未生成 / 生成失败的节点没有媒体内容可写（此前在这里静默返回，表现为 Ctrl+C 毫无反应），
+            // 现在把节点结构（提示词、模型配置、连线）作为画布 JSON 复制，粘贴可原样重建。
+            if (!(await writeSystemTextFallback())) void message.error(t("canvas.projectPage.clipboardCopyFailed"));
+            return;
+        }
 
         try {
             if (content.kind === "text") {
@@ -1627,6 +1653,7 @@ function InfiniteCanvasPage() {
             }
             if (!(await writeCanvasClipboardBlob(readCanvasClipboardBlob(copiedNodes[0]), content.kind, copiedNodes[0].metadata?.mimeType, serialized))) throw new Error("clipboard write failed");
         } catch {
+            if (await writeSystemTextFallback()) return;
             void message.error(t("canvas.projectPage.clipboardCopyFailed"));
         }
     }, [graphIndex, message, t]);
@@ -2732,7 +2759,13 @@ function InfiniteCanvasPage() {
             }
 
             const text = await navigator.clipboard.readText();
-            if (isLegacyCanvasClipboardText(text)) return false;
+            if (isLegacyCanvasClipboardText(text)) {
+                // 画布剪贴板 JSON（复制兜底时以纯文本进入系统剪贴板）：转成应用内剪贴板后
+                // 交给 pasteCopiedNodes 按节点粘贴，绝不能当成普通文本创建文字节点。
+                const parsed = parseCanvasClipboard(text);
+                if (parsed) clipboardRef.current = parsed;
+                return false;
+            }
             if (createTextNodeFromClipboard(text)) message.success(t("canvas.projectPage.clipboardTextAdded"));
             return Boolean(text.trim());
         } catch {
@@ -2743,11 +2776,14 @@ function InfiniteCanvasPage() {
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
-            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-shortcuts-ignore]"))
-                return;
-
             const key = event.key.toLowerCase();
             const isModifierShortcut = event.metaKey || event.ctrlKey;
+            // 焦点在富文本编辑器（contenteditable / 标记 shortcuts-ignore 的容器，如 H3 主提示词）
+            // 但未选中任何文本时，Ctrl/Cmd+C 放行为「复制节点」：否则点完节点（焦点落进编辑器）
+            // 再按 Ctrl+C 会毫无反应。有选中文本时仍走浏览器默认复制文本；输入框内永不回落。
+            const editorCopyFallback = isModifierShortcut && !event.altKey && key === "c" && !window.getSelection()?.toString() && Boolean(target?.closest("[contenteditable='true'],[data-canvas-shortcuts-ignore]"));
+            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || (target?.closest("[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-shortcuts-ignore]") && !editorCopyFallback))
+                return;
 
             if (isModifierShortcut && key === "c" && window.getSelection()?.toString()) return;
 
@@ -3035,17 +3071,6 @@ function InfiniteCanvasPage() {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? applyNodeConfigPatch(node, patch) : node)));
     }, []);
 
-    const handleCharacterReferenceChange = useCallback((targetNodeId: string, sourceNodeId: string, selection: CanvasCharacterReferenceSelection) => {
-        setNodes((prev) =>
-            prev.map((node) =>
-                node.id === targetNodeId
-                    ? applyNodeConfigPatch(node, {
-                          characterReferences: { ...node.metadata?.characterReferences, [sourceNodeId]: selection },
-                      })
-                    : node,
-            ),
-        );
-    }, []);
 
     const downloadNodeImage = useCallback((node: CanvasNodeData) => {
         const isSmartGenerationNode = node.type === CanvasNodeType.Config && node.metadata?.smart === true;
@@ -4895,7 +4920,6 @@ function InfiniteCanvasPage() {
                         onStop={confirmStopGeneration}
                         onDisconnectReference={disconnectNodeReference}
                         onStartReferenceSelection={startNodeReferenceSelection}
-                        onCharacterReferenceChange={(sourceNodeId, selection) => handleCharacterReferenceChange(panelNode.id, sourceNodeId, selection)}
                         onImageSettingsOpenChange={(open) => {
                             setNodeImageSettingsOpen(open);
                             if (open) setToolbarNodeId(null);
@@ -4912,7 +4936,6 @@ function InfiniteCanvasPage() {
                         onClose={() => setDialogNodeId(null)}
                         onDisconnectReference={disconnectNodeReference}
                         onStartReferenceSelection={startNodeReferenceSelection}
-                        onCharacterReferenceChange={(sourceNodeId, selection) => handleCharacterReferenceChange(panelNode.id, sourceNodeId, selection)}
                     />
                 )
             ) : (
@@ -4927,7 +4950,6 @@ function InfiniteCanvasPage() {
                     onStop={confirmStopGeneration}
                     onDisconnectReference={disconnectNodeReference}
                     onStartReferenceSelection={startNodeReferenceSelection}
-                    onCharacterReferenceChange={(sourceNodeId, selection) => handleCharacterReferenceChange(panelNode.id, sourceNodeId, selection)}
                     modeOverride={getNodeDefinition(panelNode.type)?.useBuiltinPanel?.mode}
                     onImageSettingsOpenChange={(open) => {
                         setNodeImageSettingsOpen(open);
@@ -4940,7 +4962,6 @@ function InfiniteCanvasPage() {
             confirmStopGeneration,
             connectedNodesByNodeId,
             disconnectNodeReference,
-            handleCharacterReferenceChange,
             handleConfigNodeChange,
             handleGenerateNode,
             mentionReferencesByNodeId,
@@ -5314,6 +5335,7 @@ function InfiniteCanvasPage() {
                         menu={contextMenu}
                         canCaptureVideoFrame={contextMenuNode?.type === CanvasNodeType.Video && Boolean(contextMenuNode.metadata?.content)}
                         canGroup={contextMenu.type === "node" && selectedNodeIds.has(contextMenu.nodeId) && groupableSelectedCount > 1}
+                        canCopyContent={Boolean(contextMenuText)}
 
                         onClose={() => setContextMenu(null)}
                         onCaptureVideoFrame={(position) => {
@@ -5322,6 +5344,11 @@ function InfiniteCanvasPage() {
                         }}
                         onGroup={() => {
                             groupSelectedNodes();
+                            setContextMenu(null);
+                        }}
+
+                        onCopyContent={() => {
+                            if (contextMenuText) copyText(contextMenuText);
                             setContextMenu(null);
                         }}
 

@@ -609,6 +609,12 @@ export const pluginMcp: PluginMcpModule = {
                 const inherited = inheritedH3Params(node);
                 const next = rawSegments.map((item) => {
                     const normalized = normalizePlannedSegment(item) as Record<string, unknown>;
+                    const carriesReferences = Object.prototype.hasOwnProperty.call(item, "references");
+                    if (!carriesReferences) {
+                        delete normalized.refs;
+                        delete normalized.refItems;
+                        delete normalized.referenceBindings;
+                    }
                     const previous = existing.find((segment) => String(segment.id || "") === String(normalized.id || ""));
                     const preservedReferences = previous ? Object.fromEntries(["refs", "refItems", "referenceBindings"].filter((key) => normalized[key] === undefined && previous[key] !== undefined).map((key) => [key, previous[key]])) : {};
                     return { ...inherited, ...preservedReferences, ...normalized };

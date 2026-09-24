@@ -268,6 +268,15 @@ export function isAudioFile(file: File) {
     return file.type.startsWith("audio/") || /\.(mp3|wav)$/i.test(file.name);
 }
 
+/** 文本节点（文本类型 / 文本模式的智能生成节点）当前展示的正文；非文本节点或正文为空时返回空串。 */
+export function nodeCopyableText(node: CanvasNodeData) {
+    const metadata = node.metadata;
+    if (node.type !== CanvasNodeType.Text && metadata?.generationMode !== "text") return "";
+    const texts = metadata?.texts || [];
+    const primary = texts.find((text) => text.id === metadata?.primaryTextId) || texts[0];
+    return (primary?.content || metadata?.content || "").trim();
+}
+
 export function buildAngleLabel(params: CanvasImageAngleParams) {
     const horizontal = params.horizontalAngle === 0 ? i18n.t("canvas.generation.front") : params.horizontalAngle > 0 ? i18n.t("canvas.generation.rotateRight", { angle: params.horizontalAngle }) : i18n.t("canvas.generation.rotateLeft", { angle: Math.abs(params.horizontalAngle) });
     const pitch = params.pitchAngle === 0 ? i18n.t("canvas.generation.level") : params.pitchAngle > 0 ? i18n.t("canvas.generation.topDown", { angle: params.pitchAngle }) : i18n.t("canvas.generation.lowAngle", { angle: Math.abs(params.pitchAngle) });

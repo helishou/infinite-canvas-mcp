@@ -68,48 +68,44 @@ function unwrapDialogue(view: EditorView, range: { from: number; to: number; inn
     view.focus();
 }
 
-function promptLineMapExtension(panelColor: string, markerTargets?: readonly string[]) {
-    const targetLines = markerTargets ? new Set(markerTargets) : null;
+function promptLineMapExtension(panelColor: string) {
     return ViewPlugin.fromClass(class {
         decorations: DecorationSet = Decoration.none;
         private readonly rail: HTMLDivElement;
         private readonly thumb: HTMLDivElement;
         private readonly resizeObserver: ResizeObserver | null;
-        private markerFrame = 0;
-        private scrollAnimationFrame = 0;
-        private thumbDrag: { pointerId: number; startY: number; startScrollTop: number; maxScroll: number; travel: number } | null = null;
+        private layoutFrame = 0;
+        private drag: { pointerId: number; mode: "thumb" | "jump"; startY: number; startScrollTop: number; maxScroll: number; travel: number; thumbHeight: number } | null = null;
 
         constructor(private readonly view: EditorView) {
             this.rail = document.createElement("div");
             this.rail.className = "cm-canvas-line-marker-rail";
-            this.rail.setAttribute("role", "group");
-            this.rail.setAttribute("aria-label", "提示词行位置");
+            this.rail.setAttribute("aria-hidden", "true");
             this.thumb = document.createElement("div");
             this.thumb.className = "cm-canvas-line-scroll-thumb";
             this.thumb.setAttribute("aria-hidden", "true");
             this.rail.append(this.thumb);
-            this.rail.addEventListener("pointerdown", this.handleRailPointerDown);
-            this.thumb.addEventListener("pointerdown", this.handleThumbPointerDown);
-            this.thumb.addEventListener("pointermove", this.handleThumbPointerMove);
-            this.thumb.addEventListener("pointerup", this.handleThumbPointerEnd);
-            this.thumb.addEventListener("pointercancel", this.handleThumbPointerEnd);
+            this.rail.addEventListener("pointerdown", this.handlePointerDown);
+            this.rail.addEventListener("pointermove", this.handlePointerMove);
+            this.rail.addEventListener("pointerup", this.handlePointerEnd);
+            this.rail.addEventListener("pointercancel", this.handlePointerEnd);
             this.view.dom.classList.add("cm-canvas-line-map");
             this.view.dom.append(this.rail);
-            this.resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(this.scheduleMarkers);
+            this.resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(this.scheduleLayout);
             this.resizeObserver?.observe(view.dom);
             this.resizeObserver?.observe(view.scrollDOM);
             this.resizeObserver?.observe(view.contentDOM);
-            this.view.scrollDOM.addEventListener("scroll", this.scheduleMarkers, { passive: true });
+            this.view.scrollDOM.addEventListener("scroll", this.scheduleLayout, { passive: true });
             this.updateDecorations();
-            this.scheduleMarkers();
+            this.scheduleLayout();
         }
 
         update(update: import("@codemirror/view").ViewUpdate) {
             if (update.docChanged) this.updateDecorations();
-            if (update.docChanged || update.geometryChanged || update.viewportChanged) this.scheduleMarkers();
+            if (update.docChanged || update.geometryChanged || update.viewportChanged) this.scheduleLayout();
         }
 
-        docViewUpdate() { this.scheduleMarkers(); }
+        docViewUpdate() { this.scheduleLayout(); }
 
         private updateDecorations() {
             const ranges = [];
@@ -127,88 +123,68 @@ function promptLineMapExtension(panelColor: string, markerTargets?: readonly str
             this.decorations = Decoration.set(ranges, true);
         }
 
-        private scheduleMarkers = () => {
-            if (this.markerFrame) cancelAnimationFrame(this.markerFrame);
-            this.markerFrame = requestAnimationFrame(() => {
-                this.markerFrame = 0;
-                this.renderMarkers();
+        private scheduleLayout = () => {
+            if (this.layoutFrame) cancelAnimationFrame(this.layoutFrame);
+            this.layoutFrame = requestAnimationFrame(() => {
+                this.layoutFrame = 0;
+                this.syncThumb();
             });
         };
 
-        private cancelScrollAnimation = () => {
-            if (!this.scrollAnimationFrame) return;
-            cancelAnimationFrame(this.scrollAnimationFrame);
-            this.scrollAnimationFrame = 0;
-        };
+        private get maxScroll() {
+            return Math.max(0, this.view.scrollDOM.scrollHeight - this.view.scrollDOM.clientHeight);
+        }
 
-        private scrollToMarker = (target: number) => {
-            this.cancelScrollAnimation();
-            const start = this.view.scrollDOM.scrollTop;
-            const distance = target - start;
-            if (Math.abs(distance) < 1 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-                this.view.scrollDOM.scrollTop = target;
-                return;
-            }
-            const startedAt = performance.now();
-            const duration = 180;
-            const step = (now: number) => {
-                const progress = Math.min(1, (now - startedAt) / duration);
-                this.view.scrollDOM.scrollTop = start + distance * (1 - Math.pow(1 - progress, 3));
-                if (progress < 1) this.scrollAnimationFrame = requestAnimationFrame(step);
-                else this.scrollAnimationFrame = 0;
-            };
-            this.scrollAnimationFrame = requestAnimationFrame(step);
-        };
-
-        private handleRailPointerDown = (event: PointerEvent) => {
-            if (event.button !== 0 || event.target !== this.rail) return;
-            event.preventDefault();
-            event.stopPropagation();
-            this.cancelScrollAnimation();
-            const height = this.rail.clientHeight;
-            const thumbHeight = this.thumb.offsetHeight;
-            const travel = Math.max(0, height - thumbHeight);
-            const maxScroll = Math.max(0, this.view.scrollDOM.scrollHeight - this.view.scrollDOM.clientHeight);
-            const y = (event.clientY - this.rail.getBoundingClientRect().top) / this.view.scaleY;
-            this.view.scrollDOM.scrollTop = travel ? Math.max(0, Math.min(travel, y - thumbHeight / 2)) / travel * maxScroll : 0;
-        };
-
-        private handleThumbPointerDown = (event: PointerEvent) => {
+        /** 轨道按下：按在滑块上按比例拖动，按在轨道空白处则让滑块中心对齐指针并可接着拖动。 */
+        private handlePointerDown = (event: PointerEvent) => {
             if (event.button !== 0) return;
             event.preventDefault();
             event.stopPropagation();
-            this.cancelScrollAnimation();
-            const maxScroll = Math.max(0, this.view.scrollDOM.scrollHeight - this.view.scrollDOM.clientHeight);
-            this.thumbDrag = {
+            const thumbHeight = this.thumb.offsetHeight;
+            const travel = Math.max(0, this.rail.clientHeight - thumbHeight);
+            this.drag = {
                 pointerId: event.pointerId,
+                mode: event.target === this.thumb ? "thumb" : "jump",
                 startY: event.clientY,
                 startScrollTop: this.view.scrollDOM.scrollTop,
-                maxScroll,
-                travel: Math.max(0, this.rail.clientHeight - this.thumb.offsetHeight),
+                maxScroll: this.maxScroll,
+                travel,
+                thumbHeight,
             };
-            this.thumb.setPointerCapture(event.pointerId);
+            if (this.drag.mode === "jump") this.alignThumbToPointer(event.clientY);
+            this.rail.setPointerCapture(event.pointerId);
         };
 
-        private handleThumbPointerMove = (event: PointerEvent) => {
-            const drag = this.thumbDrag;
+        private handlePointerMove = (event: PointerEvent) => {
+            const drag = this.drag;
             if (!drag || drag.pointerId !== event.pointerId || !drag.travel) return;
             event.preventDefault();
-            const delta = (event.clientY - drag.startY) / this.view.scaleY;
-            this.view.scrollDOM.scrollTop = Math.max(0, Math.min(drag.maxScroll, drag.startScrollTop + delta / drag.travel * drag.maxScroll));
+            if (drag.mode === "thumb") {
+                const delta = (event.clientY - drag.startY) / this.view.scaleY;
+                this.view.scrollDOM.scrollTop = Math.max(0, Math.min(drag.maxScroll, drag.startScrollTop + delta / drag.travel * drag.maxScroll));
+                return;
+            }
+            this.alignThumbToPointer(event.clientY);
         };
 
-        private handleThumbPointerEnd = (event: PointerEvent) => {
-            if (!this.thumbDrag || this.thumbDrag.pointerId !== event.pointerId) return;
-            if (this.thumb.hasPointerCapture(event.pointerId)) this.thumb.releasePointerCapture(event.pointerId);
-            this.thumbDrag = null;
+        private handlePointerEnd = (event: PointerEvent) => {
+            if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+            if (this.rail.hasPointerCapture(event.pointerId)) this.rail.releasePointerCapture(event.pointerId);
+            this.drag = null;
         };
 
-        private renderMarkers() {
+        /** 让滑块中心对齐指针在轨道上的位置，点到哪就滚到哪。 */
+        private alignThumbToPointer(clientY: number) {
+            const drag = this.drag;
+            if (!drag || !drag.travel) return;
+            const y = (clientY - this.rail.getBoundingClientRect().top) / this.view.scaleY;
+            this.view.scrollDOM.scrollTop = Math.max(0, Math.min(drag.travel, y - drag.thumbHeight / 2)) / drag.travel * drag.maxScroll;
+        }
+
+        private syncThumb() {
             const editorRect = this.view.dom.getBoundingClientRect();
             const scrollerRect = this.view.scrollDOM.getBoundingClientRect();
             const height = this.view.scrollDOM.clientHeight;
-            const documentLength = Math.max(1, this.view.state.doc.length);
-            const markerInset = 12;
             this.rail.style.top = `${(scrollerRect.top - editorRect.top) / this.view.scaleY}px`;
             this.rail.style.height = `${height}px`;
             this.rail.style.bottom = "auto";
@@ -218,44 +194,16 @@ function promptLineMapExtension(panelColor: string, markerTargets?: readonly str
             const thumbTravel = Math.max(0, height - thumbHeight);
             this.thumb.style.height = `${thumbHeight}px`;
             this.thumb.style.top = `${maxScroll ? this.view.scrollDOM.scrollTop / maxScroll * thumbTravel : 0}px`;
-            const fragment = document.createDocumentFragment();
-            for (let number = 1; number <= this.view.state.doc.lines; number += 1) {
-                const line = this.view.state.doc.line(number);
-                const lineText = line.text.trim();
-                if (!lineText || (targetLines && !targetLines.has(lineText))) continue;
-                const accentIndex = (number - 1) % PROMPT_LINE_ACCENTS.length;
-                const top = markerInset + line.from / documentLength * Math.max(0, height - markerInset * 2);
-                const marker = document.createElement("button");
-                marker.type = "button";
-                marker.className = "cm-canvas-line-marker";
-                marker.style.top = `${top}px`;
-                marker.style.setProperty("--cm-canvas-line-accent", PROMPT_LINE_ACCENTS[accentIndex]);
-                const label = targetLines ? lineText.replace(/:$/, "") : `第 ${number} 行`;
-                marker.title = `跳转到 ${label}`;
-                marker.setAttribute("aria-label", `跳转到 ${label}`);
-                marker.addEventListener("mousedown", (event) => event.preventDefault());
-                marker.addEventListener("click", (event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    const targetY = line.from / documentLength * scrollHeight;
-                    this.scrollToMarker(Math.max(0, Math.min(maxScroll, targetY - height / 2)));
-                });
-                fragment.append(marker);
-            }
-            this.rail.querySelectorAll(".cm-canvas-line-marker").forEach((marker) => marker.remove());
-            this.rail.append(fragment);
         }
 
         destroy() {
             this.resizeObserver?.disconnect();
-            this.view.scrollDOM.removeEventListener("scroll", this.scheduleMarkers);
-            this.rail.removeEventListener("pointerdown", this.handleRailPointerDown);
-            this.thumb.removeEventListener("pointerdown", this.handleThumbPointerDown);
-            this.thumb.removeEventListener("pointermove", this.handleThumbPointerMove);
-            this.thumb.removeEventListener("pointerup", this.handleThumbPointerEnd);
-            this.thumb.removeEventListener("pointercancel", this.handleThumbPointerEnd);
-            if (this.markerFrame) cancelAnimationFrame(this.markerFrame);
-            this.cancelScrollAnimation();
+            this.view.scrollDOM.removeEventListener("scroll", this.scheduleLayout);
+            this.rail.removeEventListener("pointerdown", this.handlePointerDown);
+            this.rail.removeEventListener("pointermove", this.handlePointerMove);
+            this.rail.removeEventListener("pointerup", this.handlePointerEnd);
+            this.rail.removeEventListener("pointercancel", this.handlePointerEnd);
+            if (this.layoutFrame) cancelAnimationFrame(this.layoutFrame);
             this.rail.remove();
             this.view.dom.classList.remove("cm-canvas-line-map");
         }
@@ -600,7 +548,7 @@ export function CanvasCollaborativeText(props: CanvasTextEditorProps) {
 }
 
 function CanvasStandaloneText(props: CanvasTextEditorProps) {
-    const { placeholder = "请输入文本", references = [], chips = false, dialogue = false, lineMap = false, lineMapTargets, editorRef, className, style, autoFocus = false, autoHeight = false } = props;
+    const { placeholder = "请输入文本", references = [], chips = false, dialogue = false, lineMap = false, editorRef, className, style, autoFocus = false, autoHeight = false } = props;
     const parent = useRef<HTMLDivElement>(null);
     const editor = useRef<EditorView | null>(null);
     const applyingValue = useRef(false);
@@ -615,7 +563,7 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
     const lineMapCompartment = useMemo(() => new Compartment(), []);
     const colorTheme = useThemeStore((state) => state.theme);
     const theme = canvasThemes[colorTheme];
-    const lineMapExtension = useMemo(() => lineMap ? promptLineMapExtension(theme.node.fill, lineMapTargets) : [], [lineMap, lineMapTargets, theme.node.fill]);
+    const lineMapExtension = useMemo(() => lineMap ? promptLineMapExtension(theme.node.fill) : [], [lineMap, theme.node.fill]);
     const themeExtension = useMemo(() => EditorView.theme({
         "&": { height: autoHeight ? "auto" : "100%", color: theme.node.text, backgroundColor: "transparent", fontSize: "inherit" },
         "&.cm-focused": { outline: "none" },
@@ -692,7 +640,12 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
     useEffect(() => { editor.current?.dispatch({ effects: mentions.reconfigure(mentionExtensions(references, chips, setImagePreview)) }); }, [mentions, references, chips]);
     useEffect(() => { editor.current?.dispatch({ effects: lineMapCompartment.reconfigure(lineMapExtension) }); }, [lineMapCompartment, lineMapExtension]);
 
-    return <div className={className} style={style} data-canvas-shortcuts-ignore onKeyDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
+    return <div className={className} style={style} data-canvas-shortcuts-ignore onKeyDown={(event) => {
+        // Ctrl/Cmd+C 且编辑器内未选中文字时放行事件冒泡：画布全局快捷键会回落为「复制节点」，
+        // 否则焦点落在编辑器里按 Ctrl+C 毫无反应。其余按键照旧拦截，避免触发画布快捷键。
+        const copyIntent = (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "c" && !window.getSelection()?.toString();
+        if (!copyIntent) event.stopPropagation();
+    }} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
         <div ref={parent} style={{ height: autoHeight ? "auto" : "100%", minHeight: 80 }} />
         {dialogueMenu ? <DialogueContextMenu menu={dialogueMenu} onClose={() => setDialogueMenu(null)} theme={theme} /> : null}
         {imagePreview ? <Image style={{ display: "none" }} src={imagePreview} preview={{ visible: true, onVisibleChange: (visible) => { if (!visible) setImagePreview(null); } }} /> : null}
@@ -701,7 +654,7 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
 
 /** 不接受受控全文：Yjs binding 负责远端增量、输入法、光标与本地撤销。 */
 function CanvasYjsText(props: CanvasTextEditorProps) {
-    const { projectId, target, placeholder = "请输入文本", references = [], chips = false, dialogue = false, lineMap = false, lineMapTargets, editorRef, className, style, autoFocus = false } = props;
+    const { projectId, target, placeholder = "请输入文本", references = [], chips = false, dialogue = false, lineMap = false, editorRef, className, style, autoFocus = false } = props;
     const targetKey = canvasTextKey(target);
     const session = useMemo(() => getCanvasTextSession(projectId, target), [projectId, targetKey]);
     const status = useSyncExternalStore(session.subscribe, session.getSnapshot);
@@ -740,7 +693,7 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
         ".cm-canvas-speaker": { display: "inline-flex", alignItems: "center", padding: "0 6px", margin: "0 2px", borderRadius: "6px", backgroundColor: colorTheme === "dark" ? "rgba(168,85,247,.25)" : "rgba(147,51,234,.14)", color: colorTheme === "dark" ? "#d8b4fe" : "#7e22ce", fontWeight: "600", fontSize: "0.92em", cursor: "pointer", userSelect: "none" },
         ".cm-canvas-speaker-ghost": { backgroundColor: "transparent", border: `1px dashed ${colorTheme === "dark" ? "rgba(168,85,247,.5)" : "rgba(147,51,234,.45)"}`, color: colorTheme === "dark" ? "rgba(216,180,254,.75)" : "rgba(126,34,206,.65)", fontWeight: "500", fontSize: "0.82em" },
     }, { dark: colorTheme === "dark" }), [theme, colorTheme]);
-    const lineMapExtension = useMemo(() => lineMap ? promptLineMapExtension(theme.node.fill, lineMapTargets) : [], [lineMap, lineMapTargets, theme.node.fill]);
+    const lineMapExtension = useMemo(() => lineMap ? promptLineMapExtension(theme.node.fill) : [], [lineMap, theme.node.fill]);
 
     useImperativeHandle(editorRef, () => ({
         focus: () => editor.current?.focus(),
@@ -791,7 +744,11 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
     useEffect(() => { editor.current?.dispatch({ effects: mentions.reconfigure(mentionExtensions(references, chips, setImagePreview)) }); }, [mentions, references, chips]);
     useEffect(() => { editor.current?.dispatch({ effects: lineMapCompartment.reconfigure(lineMapExtension) }); }, [lineMapCompartment, lineMapExtension]);
 
-    return <div className={className} style={style} data-canvas-shortcuts-ignore onKeyDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
+    return <div className={className} style={style} data-canvas-shortcuts-ignore onKeyDown={(event) => {
+        // 同 CanvasStandaloneText：Ctrl/Cmd+C 未选中文字时放行冒泡，回落为「复制节点」
+        const copyIntent = (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "c" && !window.getSelection()?.toString();
+        if (!copyIntent) event.stopPropagation();
+    }} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
         <div ref={parent} style={{ height: "100%", minHeight: 80 }} />
         {!status.ready && !status.error ? <small style={{ color: theme.node.muted }}>正在读取协作文档…</small> : null}
         {dialogueMenu ? <DialogueContextMenu menu={dialogueMenu} onClose={() => setDialogueMenu(null)} theme={theme} /> : null}

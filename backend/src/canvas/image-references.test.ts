@@ -46,6 +46,27 @@ test("角色参考入边按生成节点保存的服装选择解析为图片输�
     assert.deepEqual(resolveCanvasImageReferences(project, "config")?.map((reference) => reference.storageKey), ["image:outfit-b"]);
 });
 
+test("角色参考未保存选择时默认只用主图，存量选择不改写", () => {
+    const project = {
+        id: "project-1",
+        nodes: [
+            { id: "config-default", type: "config", metadata: {} },
+            { id: "config-existing", type: "config", metadata: { characterReferences: { char: { imageKeys: ["image:outfit-a"] } } } },
+            { id: "char", type: "character", title: "沈昭宁", metadata: { characterPrimaryIndex: 1, characterImages: [
+                { url: "outfit-a", storageKey: "image:outfit-a", name: "outfit-a", mimeType: "image/png" },
+                { url: "outfit-b", storageKey: "image:outfit-b", name: "outfit-b", mimeType: "image/png" },
+            ] } },
+        ],
+        connections: [
+            { id: "char-default", fromNodeId: "char", toNodeId: "config-default", role: "reference", order: 0 },
+            { id: "char-existing", fromNodeId: "char", toNodeId: "config-existing", role: "reference", order: 0 },
+        ],
+    };
+
+    assert.deepEqual(resolveCanvasImageReferences(project, "config-default")?.map((reference) => reference.storageKey), ["image:outfit-b"]);
+    assert.deepEqual(resolveCanvasImageReferences(project, "config-existing")?.map((reference) => reference.storageKey), ["image:outfit-a"]);
+});
+
 test("场景参考只提交栅格场景图，不把 SVG 色卡作为图片模型输入", () => {
     const project = {
         id: "project-1",

@@ -29,6 +29,11 @@ import { H3Icon } from "./H3Icon";
 import { H3ClipCard } from "./H3ClipCard";
 import { h3ThemeVars } from "../h3-theme";
 
+function newClipId() {
+    const randomUUID = typeof globalThis.crypto?.randomUUID === "function" ? globalThis.crypto.randomUUID.bind(globalThis.crypto) : undefined;
+    return `segment-${randomUUID ? randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+}
+
 type H3TimelineProps = {
     ctx: CanvasNodeContext;
     segments: H3Segment[];
@@ -36,6 +41,7 @@ type H3TimelineProps = {
     total: number;
     onRemoveRef: (segmentId: string, ref: H3Ref) => void;
     onEditRef: (segmentId: string, ref: H3Ref) => void;
+    onRequestReplaceRef: (segmentId: string, ref: H3Ref) => void;
     onRequestPickRef: (segmentId: string, slotIndex: number) => void;
     /** 空分镜请求绑定参考图：进入画布选节点模式，选中后把图片绑到该分镜。 */
     onRequestPickStoryboardShot: (segmentId: string, shotId: string) => void;
@@ -48,7 +54,7 @@ type H3TimelineProps = {
     fmt: (value: number) => string;
 };
 
-export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEditRef, onRequestPickRef, onRequestPickStoryboardShot, pickingShotKey, onSegmentChange, pickingKey, onPlayAll, fmt }: H3TimelineProps) {
+export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEditRef, onRequestReplaceRef, onRequestPickRef, onRequestPickStoryboardShot, pickingShotKey, onSegmentChange, pickingKey, onPlayAll, fmt }: H3TimelineProps) {
     const compactMedia = ctx.scale < 0.2;
     const trackScrollRef = useRef<HTMLDivElement | null>(null);
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
@@ -60,21 +66,21 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     // 时间轴右键菜单（两种 kind）：
     // - storyboard：右键参考行的分镜轨/分镜卡片，afterId 有值表示点在某张分镜上（可"其后插入/移除"）。
     // - clip：右键视频行的 Clip 卡片，提供「在左边/右边添加 Clip」「删除 Clip」。
-    type TimelineMenu = { kind: "storyboard"; segmentId: string; x: number; y: number; afterId?: string; index?: number } | { kind: "clip"; segmentId: string; x: number; y: number };
+    type TimelineMenu = { kind: "storyboard"; segmentId: string; x: number; y: number; afterId?: string; index?: number } | { kind: "clip"; segmentId: string; x: number; y: number } | { kind: "reference"; segmentId: string; ref: H3Ref; x: number; y: number };
     const [timelineMenu, setTimelineMenu] = useState<TimelineMenu | null>(null);
     const refContentRef = useRef<HTMLDivElement | null>(null);
     const storyboardMenuRef = useRef<HTMLDivElement | null>(null);
     // 参考行右键 = 分镜菜单：直接从光标下的元素解析 Clip，再按光标的横向位置解析
     // 落在哪张分镜上，菜单因此永远贴着鼠标弹出，"新增分镜"也落在鼠标那一格。
     // 视频行右键 = Clip 菜单（onVideoRowContextMenu，见下）。
-    // ⚠️ 只在分镜轨 lane / 分镜卡片上挂 onContextMenu 是不够的：参考格上右键没有 handler，
-    // 事件会一路冒到画布节点，弹出节点级「复制 / 删除」菜单（用户实测踩到过）。
-    // 参考行整体接管；若该位置没有可编辑分镜的 Clip（i2v / t2v / fl2v 等不渲染分镜轨），
-    // 则完全不拦截，交回画布默认右键菜单。
+    // 分镜右键菜单只挂在「分镜轨 lane / 分镜卡片」上：参考九宫格（minimax-ref-grid）右键不触发，
+    // 否则整条参考行都弹分镜菜单，触发区域过大。九宫格右键仅阻止冒泡到画布节点默认菜单
+    // （避免误弹「复制 / 删除」），不再弹分镜菜单。若该位置没有可编辑分镜的 Clip
+    // （i2v / t2v / fl2v 等不渲染分镜轨），则完全不拦截，交回画布默认右键菜单。
     // ⚠️ 不要再用「(clientX - 内容左边) / 100」把屏幕坐标换算成秒：画布视口带 scale(k)，1 秒对应的
     // 屏幕像素是 100k，缩放后换算结果整体偏小 → 解析到错误的 Clip（实测画布缩放到 0.184 时，右键靠后
-    // 的 Clip 会解析成靠前的 Clip），表现就是"新增的分镜跑到别的位置去了"。改成 DOM 命中：Clip 卡片、
-    // 参考格、分镜轨都带 data-segment-id，与画布缩放无关。
+    // 的 Clip 会解析成靠前的 Clip），表现就是"新增的分镜跑到别的位置去了"。改成 DOM 命中：分镜卡片
+    // 带 data-segment-id / data-storyboard-id，与画布缩放无关。
     const storyboardShotAt = (segment: H3Segment, clientX: number) => {
         const lane = refContentRef.current
             ? Array.from(refContentRef.current.querySelectorAll<HTMLElement>(".minimax-storyboard-lane")).find((el) => el.dataset.segmentId === segment.id)
@@ -88,19 +94,26 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         return index >= 0 ? { id, index } : undefined;
     };
     const onTimelineContextMenu = (event: ReactMouseEvent) => {
-        const holder = (event.target as Element | null)?.closest?.("[data-segment-id]") as HTMLElement | null | undefined;
-        let segment = holder?.dataset.segmentId ? segments.find((item) => item.id === holder.dataset.segmentId) : undefined;
-        if (!segment) {
-            // 兜底：参考格与 Clip 横向 1:1 对齐，直接按光标的屏幕 x 命中（不写死 px/秒）。
-            const ruler = refContentRef.current ? Array.from(refContentRef.current.querySelectorAll<HTMLElement>(".minimax-ref-grid[data-segment-id]")) : [];
-            const hit = ruler.find((el) => { const rect = el.getBoundingClientRect(); return event.clientX >= rect.left && event.clientX <= rect.right; });
-            segment = hit?.dataset.segmentId ? segments.find((item) => item.id === hit.dataset.segmentId) : undefined;
+        const target = event.target as Element | null;
+        // 只在「分镜轨 lane / 分镜卡片」上弹分镜菜单；参考九宫格右键只拦冒泡、不弹菜单。
+        const lane = target?.closest?.(".minimax-storyboard-lane") as HTMLElement | null | undefined;
+        if (lane) {
+            const segment = segments.find((item) => item.id === lane.dataset.segmentId);
+            if (!segment || !supportsStoryboardTrack(segment)) { event.preventDefault(); event.stopPropagation(); return; }
+            event.preventDefault();
+            event.stopPropagation();
+            const shot = storyboardShotAt(segment, event.clientX);
+            setTimelineMenu({ kind: "storyboard", segmentId: segment.id, x: event.clientX, y: event.clientY, afterId: shot?.id, index: shot?.index });
+            return;
         }
-        if (!segment || !supportsStoryboardTrack(segment)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const shot = storyboardShotAt(segment, event.clientX);
-        setTimelineMenu({ kind: "storyboard", segmentId: segment.id, x: event.clientX, y: event.clientY, afterId: shot?.id, index: shot?.index });
+        // 落在参考九宫格（minimax-ref-grid）上：阻止冒泡到画布节点默认菜单，但不开分镜菜单。
+        const inRefGrid = target?.closest?.(".minimax-ref-grid") as HTMLElement | null | undefined;
+        if (inRefGrid) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+        }
+        // 其余空白 / 其它区域不拦截，交回画布默认右键菜单。
     };
     // 视频行右键 = Clip 菜单（左加/右加/删除）。只拦截真正落在 Clip 卡片上的右键；
     // 空白处不拦截，交回画布默认菜单。
@@ -116,13 +129,19 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         if (!timelineMenu) return;
         const close = () => setTimelineMenu(null);
         const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setTimelineMenu(null); };
-        // 点菜单外 / 滚轮 / 再次右键都会关闭；菜单自身右键不冒泡关闭。
-        window.addEventListener("click", close);
+        // 用 pointerdown 捕获阶段关闭（画布拖拽/平移路径会吞掉后续 click，click 监听不可靠，与项目其他浮层一致）；
+        // 菜单内部的 pointerdown 不关闭，让菜单项自己的 onClick 正常执行。滚轮 / 再次右键也会关闭；菜单自身右键不冒泡关闭。
+        const onPointerDown = (event: PointerEvent) => {
+            const target = event.target;
+            if (target instanceof Node && storyboardMenuRef.current?.contains(target)) return;
+            setTimelineMenu(null);
+        };
+        window.addEventListener("pointerdown", onPointerDown, true);
         window.addEventListener("scroll", close, true);
         window.addEventListener("keydown", onKey);
         window.addEventListener("contextmenu", close);
         return () => {
-            window.removeEventListener("click", close);
+            window.removeEventListener("pointerdown", onPointerDown, true);
             window.removeEventListener("scroll", close, true);
             window.removeEventListener("keydown", onKey);
             window.removeEventListener("contextmenu", close);
@@ -154,16 +173,23 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         return () => el.removeEventListener("wheel", onWheel);
     }, []);
     const [hasHorizontalOverflow, setHasHorizontalOverflow] = useState(false);
-    // 自定义横向滚动条（替代原生：更高便于点按 + 每 Clip 标记点击跳转）
+    // 自定义横向滚动条（替代原生：更高便于点按，轨道与滑块统一在同一容器里处理）
     const scrollbarRef = useRef<HTMLDivElement | null>(null);
     const thumbRef = useRef<HTMLDivElement | null>(null);
-    const thumbDragRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number; maxScroll: number; thumbTravel: number } | null>(null);
-    const scrollAnimRef = useRef<number | null>(null);
+    const dragRef = useRef<{
+        pointerId: number;
+        mode: "thumb" | "jump";
+        startX: number;
+        startScrollLeft: number;
+        maxScroll: number;
+        thumbTravel: number;
+        thumbWidth: number;
+        scaleX: number;
+    } | null>(null);
     const geomRef = useRef<{ trackWidth: number; contentWidth: number }>({ trackWidth: 0, contentWidth: 1 });
-    const [geom, setGeom] = useState<{ trackWidth: number; contentWidth: number }>(geomRef.current);
-    const setGeomBoth = (g: { trackWidth: number; contentWidth: number }) => { geomRef.current = g; setGeom(g); };
-    const cancelScrollAnim = useCallback(() => {
-        if (scrollAnimRef.current != null) { cancelAnimationFrame(scrollAnimRef.current); scrollAnimRef.current = null; }
+    const maxScrollValue = useCallback(() => {
+        const { trackWidth, contentWidth } = geomRef.current;
+        return Math.max(0, contentWidth - trackWidth);
     }, []);
     // 根据当前滚动位置刷新滑块位置（不触发 React 重渲染）
     const updateThumb = useCallback(() => {
@@ -179,95 +205,65 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         const t = thumbRef.current;
         if (t) { t.style.width = `${thumbWidth}px`; t.style.left = `${thumbLeft}px`; }
     }, []);
-    // 短时平滑滚动（尊重系统“减少动态效果”设置）
-    const smoothScrollTo = useCallback((target: number) => {
-        const scroll = trackScrollRef.current;
-        if (!scroll) return;
-        cancelScrollAnim();
-        const start = scroll.scrollLeft;
-        const distance = target - start;
-        if (Math.abs(distance) < 1 || (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)) {
-            scroll.scrollLeft = target;
-            return;
-        }
-        const startedAt = performance.now();
-        const duration = 180;
-        const step = (now: number) => {
-            const progress = Math.min(1, (now - startedAt) / duration);
-            scroll.scrollLeft = start + distance * (1 - Math.pow(1 - progress, 3));
-            if (progress < 1) scrollAnimRef.current = requestAnimationFrame(step);
-            else scrollAnimRef.current = null;
-        };
-        scrollAnimRef.current = requestAnimationFrame(step);
-    }, [cancelScrollAnim]);
     // 测算轨道几何（可见宽度 + 内容总宽）并刷新滑块
     const measureAndUpdate = useCallback(() => {
         const track = scrollbarRef.current;
         const scroll = trackScrollRef.current;
         if (!track || !scroll) return;
-        const trackWidth = track.clientWidth;
-        const contentWidth = scroll.scrollWidth;
-        setGeomBoth({ trackWidth, contentWidth });
+        geomRef.current = { trackWidth: track.clientWidth, contentWidth: scroll.scrollWidth };
         updateThumb();
     }, [updateThumb]);
-    // 点击滚动条上的 Clip 标记：平滑滚到该 Clip 居中并选中
-    const scrollToClip = useCallback((segment: H3Segment) => {
+    /** 滚动条按下：按在滑块上按比例拖动，按在轨道空白处则让滑块中心对齐指针并可接着拖动。 */
+    const alignThumbToPointer = useCallback((clientX: number) => {
+        const drag = dragRef.current;
+        const track = scrollbarRef.current;
         const scroll = trackScrollRef.current;
-        if (!scroll) return;
-        const { trackWidth, contentWidth } = geomRef.current;
-        const maxScroll = Math.max(0, contentWidth - trackWidth);
-        const clipCenterPx = (Number(segment.start || 0) + Math.max(0.5, Number(segment.duration || 1)) / 2) * 100;
-        const target = Math.max(0, Math.min(maxScroll, clipCenterPx - trackWidth / 2));
-        smoothScrollTo(target);
-        ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) });
-    }, [ctx, smoothScrollTo]);
-    // 点击轨道空白处：按点击位置比例跳转
-    const onScrollbarClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-        if (event.target !== scrollbarRef.current) return;
+        if (!drag || !track || !scroll || !drag.thumbTravel) return;
+        const x = (clientX - track.getBoundingClientRect().left) / drag.scaleX;
+        scroll.scrollLeft = Math.max(0, Math.min(drag.thumbTravel, x - drag.thumbWidth / 2)) / drag.thumbTravel * drag.maxScroll;
+    }, []);
+    const onScrollbarPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+        if (event.button !== 0) return;
         const track = scrollbarRef.current;
         const scroll = trackScrollRef.current;
         if (!track || !scroll) return;
-        const rect = track.getBoundingClientRect();
-        const x = event.clientX - rect.left;
-        const { trackWidth, contentWidth } = geomRef.current;
-        const maxScroll = Math.max(0, contentWidth - trackWidth);
-        const ratio = trackWidth ? x / trackWidth : 0;
-        smoothScrollTo(Math.max(0, Math.min(maxScroll, ratio * maxScroll)));
-    }, [smoothScrollTo]);
-    const onThumbPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-        if (event.button !== 0) return;
+        const maxScroll = maxScrollValue();
+        if (!maxScroll) return;
         event.preventDefault();
         event.stopPropagation();
-        cancelScrollAnim();
-        const track = scrollbarRef.current;
-        const scroll = trackScrollRef.current;
-        if (!track || !scroll) return;
-        const { trackWidth, contentWidth } = geomRef.current;
-        const maxScroll = Math.max(0, contentWidth - trackWidth);
+        const trackWidth = geomRef.current.trackWidth;
+        const rect = track.getBoundingClientRect();
         const thumbWidth = thumbRef.current?.offsetWidth ?? 0;
-        thumbDragRef.current = {
+        dragRef.current = {
             pointerId: event.pointerId,
+            mode: event.target === thumbRef.current ? "thumb" : "jump",
             startX: event.clientX,
             startScrollLeft: scroll.scrollLeft,
             maxScroll,
             thumbTravel: Math.max(1, trackWidth - thumbWidth),
+            thumbWidth,
+            scaleX: rect.width && trackWidth ? rect.width / trackWidth : 1,
         };
-        (event.target as HTMLElement).setPointerCapture(event.pointerId);
-    }, [cancelScrollAnim]);
-    const onThumbPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-        const drag = thumbDragRef.current;
-        if (!drag || drag.pointerId !== event.pointerId || !drag.maxScroll) return;
-        event.preventDefault();
+        if (dragRef.current.mode === "jump") alignThumbToPointer(event.clientX);
+        track.setPointerCapture(event.pointerId);
+    }, [alignThumbToPointer, maxScrollValue]);
+    const onScrollbarPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+        const drag = dragRef.current;
         const scroll = trackScrollRef.current;
-        if (!scroll) return;
-        const delta = event.clientX - drag.startX;
-        scroll.scrollLeft = Math.max(0, Math.min(drag.maxScroll, drag.startScrollLeft + (delta / drag.thumbTravel) * drag.maxScroll));
-    }, []);
-    const onThumbPointerEnd = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-        if (!thumbDragRef.current || thumbDragRef.current.pointerId !== event.pointerId) return;
-        const el = event.target as HTMLElement;
-        if (el.hasPointerCapture?.(event.pointerId)) el.releasePointerCapture(event.pointerId);
-        thumbDragRef.current = null;
+        if (!drag || drag.pointerId !== event.pointerId || !scroll) return;
+        event.preventDefault();
+        if (drag.mode === "thumb") {
+            const delta = (event.clientX - drag.startX) / drag.scaleX;
+            scroll.scrollLeft = Math.max(0, Math.min(drag.maxScroll, drag.startScrollLeft + (delta / drag.thumbTravel) * drag.maxScroll));
+            return;
+        }
+        alignThumbToPointer(event.clientX);
+    }, [alignThumbToPointer]);
+    const onScrollbarPointerEnd = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        if (scrollbarRef.current?.hasPointerCapture(event.pointerId)) scrollbarRef.current.releasePointerCapture(event.pointerId);
+        dragRef.current = null;
     }, []);
     // 时间轴宽度由父容器宽度决定（100% 跟随），同时保留总时长所需的最小宽度，
     // 这样 9s 总长时不会再在右边留出大段黑色空白，1.8s 间隔仍按 100px/秒等比放大。
@@ -514,7 +510,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, referenceBindings, storyboardModeEnabled, storyboardDurations, storyboardShots, ...settings } = basis || ({} as H3Segment);
         return {
             ...settings,
-            id: `segment-${Date.now()}`,
+            id: newClipId(),
             prompt: defaultPrompt,
             duration: Number(basis?.duration || 5),
             status: "idle",
@@ -592,6 +588,12 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                     event.stopPropagation();
                     if (ref) onEditRef(segment.id, ref);
                 }}
+                onContextMenu={(event) => {
+                    if (!ref) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setTimelineMenu({ kind: "reference", segmentId: segment.id, ref, x: event.clientX, y: event.clientY });
+                }}
                 className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isAddSlot ? "is-add-slot" : ""} ${pickingKey === `${segment.id}:${refIndex}` ? "is-picking" : ""} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""} ${overLimit ? "is-over-limit" : ""} ${dropTargetKey === `${segment.id}:${refIndex}` ? "is-drop-target" : ""}`}
                 title={ref ? `双击编辑参考素材职责${overLimit ? `（已超出 H3 运行上限：图片最多 ${H3_RUNTIME_REF_LIMITS.image} 张、视频/音频最多 ${H3_RUNTIME_REF_LIMITS.video} 个，运行会报错）` : ""}` : pickingKey === `${segment.id}:${refIndex}` ? "在画布上点选节点作为参考（Esc 取消）" : "点击进入画布选节点模式，挑一个节点作为参考（也可直接拖素材进来）"}
             >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-role" title="参考职责">{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
@@ -627,7 +629,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                     data-storyboard-id={item.id}
                     draggable
                     style={{ left: `${start * 100}px`, width: `${imageWidth}px` }}
-                    title={`${item.ref?.name || `分镜 ${index + 1}`} · ${item.duration.toFixed(2)} 秒 · ${item.ref ? "双击编辑参考素材职责" : "双击进入画布选节点，为该分镜绑定参考图"} · 右键插入/移除`}
+                    title={`${item.ref?.name || `分镜 ${index + 1}`} · ${item.duration.toFixed(2)} 秒 · ${item.ref ? "双击编辑参考素材职责" : "单击进入画布选节点，为该分镜绑定参考图"} · 右键插入/移除`}
                     onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-h3-storyboard", item.id); }}
                     onDragOver={(event) => {
                         if (event.dataTransfer.types.includes("application/x-h3-storyboard")) { event.preventDefault(); event.stopPropagation(); return; }
@@ -650,15 +652,21 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                         event.stopPropagation();
                         onSegmentChange(assignStoryboardShotRef(segment, item.id, dropped));
                     }}
+                    onClick={(event) => {
+                        // 空分镜单击即进入画布选节点绑图（与参考九宫格空槽一致）；
+                        // 已绑定图不在此处理，事件冒泡到分镜轨 lane 作选中段 + 定位播放头。
+                        if (item.ref) return;
+                        event.stopPropagation();
+                        onRequestPickStoryboardShot(segment.id, item.id);
+                    }}
                     onDoubleClick={(event) => {
                         event.stopPropagation();
                         if (item.ref) onEditRef(segment.id, item.ref);
-                        else onRequestPickStoryboardShot(segment.id, item.id);
                     }}
                         onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setTimelineMenu({ kind: "storyboard", segmentId: segment.id, x: event.clientX, y: event.clientY, afterId: item.id, index }); }}
                     >
                         <div className="minimax-storyboard-card-visual">
-                            {item.ref ? <img src={item.ref.url} alt={item.ref.name} draggable={false} /> : <div className="minimax-storyboard-placeholder">分镜 {index + 1} · 双击绑图</div>}
+                            {item.ref ? <img src={item.ref.url} alt={item.ref.name} draggable={false} /> : <div className="minimax-storyboard-placeholder">分镜 {index + 1} · 单击绑图</div>}
                             {index > 0 ? <span className="minimax-storyboard-time" title="切镜点 · 前序分镜累计时长">{start.toFixed(2)}s</span> : null}
                             {item.ref ? <span className="minimax-storyboard-role" style={{ cursor: "default" }}>分镜 {index + 1}</span> : null}
                             <button type="button" className="minimax-storyboard-remove" title="移除分镜" onClick={(event) => { event.stopPropagation(); onSegmentChange(removeStoryboardShot(segment, item.id)); }} onDoubleClick={(event) => event.stopPropagation()}>×</button>
@@ -700,6 +708,9 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     };
     const storyboardMenuSegment = timelineMenu ? segments.find((item) => item.id === timelineMenu.segmentId) : undefined;
     const storyboardMenuItems = storyboardMenuSegment ? storyboardTrackItems(storyboardMenuSegment) : [];
+    const storyboardMenuItem = timelineMenu?.kind === "storyboard" && timelineMenu.afterId
+        ? storyboardMenuItems.find((item) => item.id === timelineMenu.afterId)
+        : undefined;
     const storyboardMenuLastTooShort = storyboardMenuItems.length > 0 && (storyboardMenuItems[storyboardMenuItems.length - 1]?.duration ?? 0) < H3_STORYBOARD_MIN_DURATION * 2;
     const storyboardMenuDonorTooShort = timelineMenu?.kind === "storyboard" && timelineMenu.afterId ? (storyboardMenuItems.find((item) => item.id === timelineMenu.afterId)?.duration ?? 0) < H3_STORYBOARD_MIN_DURATION * 2 : false;
     // ⚠️ 画布视口容器带 transform: translate(...) scale(k)，节点内的 position:fixed 会被当成
@@ -731,8 +742,28 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                     title={segments.length <= 1 ? "至少保留一个 Clip" : "删除这个 Clip"}
                     onClick={(event) => { event.stopPropagation(); removeClip(timelineMenuClipIndex); setTimelineMenu(null); }}
                 >删除 Clip</button>
+            </> : timelineMenu.kind === "reference" ? <>
+                <div className="minimax-storyboard-menu-title">参考素材 · {timelineMenu.ref.name || "当前引用"}</div>
+                <button
+                    type="button"
+                    className="minimax-storyboard-menu-item"
+                    title="关闭职责编辑并在画布上选择新的参考节点"
+                    onClick={(event) => { event.stopPropagation(); onRequestReplaceRef(timelineMenu.segmentId, timelineMenu.ref); setTimelineMenu(null); }}
+                >从画布中替换</button>
+                <button
+                    type="button"
+                    className="minimax-storyboard-menu-item"
+                    title="编辑当前参考素材职责"
+                    onClick={(event) => { event.stopPropagation(); onEditRef(timelineMenu.segmentId, timelineMenu.ref); setTimelineMenu(null); }}
+                >编辑参考素材职责</button>
             </> : <>
                 <div className="minimax-storyboard-menu-title">{`Clip ${timelineMenuClipIndex + 1} · ${timelineMenu.kind === "storyboard" && timelineMenu.afterId ? `分镜 ${timelineMenu.index! + 1}` : "分镜轨"}`}</div>
+                {timelineMenu.kind === "storyboard" && storyboardMenuItem?.ref ? <button
+                    type="button"
+                    className="minimax-storyboard-menu-item"
+                    title="关闭职责编辑并在画布上选择新的分镜参考图"
+                    onClick={(event) => { event.stopPropagation(); onRequestReplaceRef(timelineMenu.segmentId, storyboardMenuItem.ref!); setTimelineMenu(null); }}
+                >从画布中替换</button> : null}
                 {timelineMenu.kind === "storyboard" && timelineMenu.afterId ? <button
                     type="button"
                     className="minimax-storyboard-menu-item"
@@ -793,33 +824,17 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         <div
             ref={scrollbarRef}
             className={`minimax-timeline-scrollbar ${hasHorizontalOverflow ? "" : "is-disabled"}`}
-            role="group"
-            aria-label="时间轴横向滚动条"
-            onClick={onScrollbarClick}
+            aria-hidden="true"
+            onPointerDown={onScrollbarPointerDown}
+            onPointerMove={onScrollbarPointerMove}
+            onPointerUp={onScrollbarPointerEnd}
+            onPointerCancel={onScrollbarPointerEnd}
         >
             <div
                 ref={thumbRef}
                 className="minimax-timeline-scroll-thumb"
                 aria-hidden="true"
-                onPointerDown={onThumbPointerDown}
-                onPointerMove={onThumbPointerMove}
-                onPointerUp={onThumbPointerEnd}
-                onPointerCancel={onThumbPointerEnd}
             />
-            {segments.map((segment, index) => {
-                if (!geom.trackWidth) return null;
-                const left = Math.min(geom.trackWidth - 8, (Number(segment.start || 0) * 100 / Math.max(1, geom.contentWidth)) * geom.trackWidth);
-                return <button
-                    key={segment.id}
-                    type="button"
-                    className={`minimax-timeline-clip-marker ${segment.id === selected?.id ? "is-active" : ""}`}
-                    style={{ left: `${left}px` }}
-                    title={`跳转到 Clip ${index + 1}`}
-                    aria-label={`跳转到 Clip ${index + 1}`}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={(event) => { event.preventDefault(); event.stopPropagation(); scrollToClip(segment); }}
-                />;
-            })}
         </div>
         <div className="minimax-track-gutter">
             <button type="button" className="minimax-video-add" onClick={addSegment}><H3Icon name="plus" /></button>

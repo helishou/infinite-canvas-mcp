@@ -241,6 +241,8 @@ export function readCharacterGroupFromDrop(event: React.DragEvent<HTMLElement> |
     selectedOutfitKeys?: string[];
     defaultVoiceEnabled?: boolean;
     voice?: { url: string; name: string; description?: string; storageKey?: string; assetId?: string };
+    /** 角色主图索引（来自 character 节点 metadata.characterPrimaryIndex）。upsertCharacterGroup 新建路径会按它作默认启用。 */
+    characterPrimaryIndex?: number;
 } | null {
     const transfer = event.dataTransfer;
     const encoded = transfer.getData("application/x-infinite-canvas-ref");
@@ -274,7 +276,11 @@ export function readCharacterGroupFromDrop(event: React.DragEvent<HTMLElement> |
         ? value.selectedOutfitKeys.filter((key): key is string => typeof key === "string")
         : undefined;
     const defaultVoiceEnabled = typeof value.defaultVoiceEnabled === "boolean" ? value.defaultVoiceEnabled : undefined;
-    return { characterName, characterAssetId, characterNodeId, outfits, selectedOutfitKeys, defaultVoiceEnabled, voice };
+    const characterPrimaryIndexRaw = Number(value.characterPrimaryIndex);
+    const characterPrimaryIndex = Number.isFinite(characterPrimaryIndexRaw) && characterPrimaryIndexRaw >= 0
+        ? Math.min(Math.floor(characterPrimaryIndexRaw), Math.max(outfits.length - 1, 0))
+        : undefined;
+    return { characterName, characterAssetId, characterNodeId, outfits, selectedOutfitKeys, defaultVoiceEnabled, voice, characterPrimaryIndex };
 }
 
 // 从画布上的角色节点读同一份角色组入参（字段口径与上面拖拽 payload 一致），
@@ -285,6 +291,8 @@ export function readCharacterGroupFromNode(node: CanvasNodeData): {
     characterNodeId: string;
     outfits: Array<{ url: string; name: string; storageKey?: string; mimeType?: string; role?: H3Ref["role"] }>;
     voice?: { url: string; name: string; description?: string; storageKey?: string; assetId?: string };
+    /** 角色主图索引（来自 character 节点 metadata.characterPrimaryIndex）。upsertCharacterGroup 新建路径会按它作默认启用。 */
+    characterPrimaryIndex?: number;
 } | null {
     const metadata = (node.metadata || {}) as Record<string, unknown>;
     if (!Array.isArray(metadata.characterImages)) return null;
@@ -297,10 +305,15 @@ export function readCharacterGroupFromNode(node: CanvasNodeData): {
         return [{ url, name: String(image.outfit || image.name || "outfit"), storageKey, mimeType: String(image.mimeType || "") || undefined, role: characterImageRole(image.role) }];
     });
     const voiceUrl = String(metadata.characterVoiceUrl || "").trim();
+    const primaryIndexRaw = Number(metadata.characterPrimaryIndex);
+    const characterPrimaryIndex = Number.isFinite(primaryIndexRaw) && primaryIndexRaw >= 0
+        ? Math.min(Math.floor(primaryIndexRaw), Math.max(outfits.length - 1, 0))
+        : undefined;
     return {
         characterName: String(metadata.characterName || node.title || "角色"),
         characterAssetId: typeof metadata.characterAssetId === "string" ? metadata.characterAssetId : undefined,
         characterNodeId: node.id,
+        characterPrimaryIndex,
         outfits,
         voice: voiceUrl ? {
             url: voiceUrl,

@@ -7,6 +7,9 @@ import { fetchMcpObservabilityReport, fetchMcpObservabilityTrace, type McpObserv
 const percent = (value: number | null) => (value == null ? "—" : `${(value * 100).toFixed(1)}%`);
 const duration = (value: number | null | undefined) => (value == null ? "—" : `${value} ms`);
 const signed = (value: number | null, digits = 0, suffix = "") => (value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(digits)}${suffix}`);
+/** 字符数按 4 字符 ≈ 1 token 粗估，与后端口径一致。 */
+const chars = (value: number | null | undefined) => (value == null ? "—" : `${value.toLocaleString("en-US")} 字符`);
+const approxTokens = (value: number | null | undefined) => (value == null ? "—" : `≈${Math.round(value / 4).toLocaleString("en-US")} tokens`);
 
 function parseBaselineReport(payload: unknown): McpObservabilityReport | null {
     if (!payload || typeof payload !== "object") return null;
@@ -176,6 +179,37 @@ export default function McpObservabilityPage() {
                     </div>
                 </Card>
 
+                <Card
+                    title="输入输出大小"
+                    extra={<Typography.Text type="secondary">字符数为序列化长度，token 按 4 字符 ≈ 1 token 粗估</Typography.Text>}
+                >
+                    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                        <Statistic
+                            title="最大单次返回"
+                            value={chars(report?.payload?.maxOutputChars ?? null)}
+                            suffix={report?.payload ? approxTokens(report.payload.maxOutputChars) : undefined}
+                        />
+                        <Statistic
+                            title="返回体均值"
+                            value={chars(report?.payload?.averageOutputChars ?? null)}
+                            suffix={report?.payload ? `${report.payload.sizedCalls} 次已记录` : undefined}
+                        />
+                        <Statistic
+                            title="累计输出"
+                            value={report?.payload ? approxTokens(report.payload.totalOutputChars) : "—"}
+                            suffix={report?.payload ? chars(report.payload.totalOutputChars) : undefined}
+                        />
+                        <Statistic
+                            title="超大返回体调用"
+                            value={report?.payload?.oversizedCalls ?? 0}
+                            suffix={report?.payload ? `≥ ${report.payload.warnThresholdChars.toLocaleString("en-US")} 字符` : undefined}
+                        />
+                    </div>
+                    {report?.payload?.note ? (
+                        <Typography.Text type="secondary" className="mt-3 block text-xs">{report.payload.note}</Typography.Text>
+                    ) : null}
+                </Card>
+
                 {baselineReport ? (
                     <Card title="基线对比" extra={<Typography.Text type="secondary">{baselineName}</Typography.Text>}>
                         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -196,15 +230,29 @@ export default function McpObservabilityPage() {
                         loading={loading}
                         dataSource={report?.byTool ?? []}
                         pagination={false}
-                        scroll={{ x: 900 }}
+                        scroll={{ x: 1360 }}
                         columns={[
                             { title: "工具", dataIndex: "tool" },
-                            { title: "调用", dataIndex: "calls", width: 90 },
-                            { title: "成功率", dataIndex: "successRate", width: 100, render: percent },
-                            { title: "失败", dataIndex: "failed", width: 80 },
-                            { title: "平均耗时", dataIndex: "averageDurationMs", width: 120, render: duration },
-                            { title: "P95", dataIndex: "p95DurationMs", width: 110, render: duration },
-                            { title: "最长耗时", dataIndex: "maxDurationMs", width: 120, render: duration },
+                            { title: "调用", dataIndex: "calls", width: 80 },
+                            { title: "成功率", dataIndex: "successRate", width: 90, render: percent },
+                            { title: "失败", dataIndex: "failed", width: 70 },
+                            {
+                                title: "最大返回体",
+                                dataIndex: "maxOutputChars",
+                                width: 190,
+                                render: (value: number | null | undefined) =>
+                                    value == null ? <Typography.Text type="secondary">未采集</Typography.Text> : (
+                                        <Space direction="vertical" size={0}>
+                                            <Typography.Text type={value >= 100000 ? "danger" : undefined}>{chars(value)}</Typography.Text>
+                                            <Typography.Text type="secondary" className="text-xs">{approxTokens(value)}</Typography.Text>
+                                        </Space>
+                                    ),
+                            },
+                            { title: "返回均值", dataIndex: "averageOutputChars", width: 120, render: (value: number | null | undefined) => (value == null ? "—" : chars(value)) },
+                            { title: "最大入参", dataIndex: "maxInputChars", width: 110, render: (value: number | null | undefined) => (value == null ? "—" : chars(value)) },
+                            { title: "平均耗时", dataIndex: "averageDurationMs", width: 110, render: duration },
+                            { title: "P95", dataIndex: "p95DurationMs", width: 100, render: duration },
+                            { title: "最长耗时", dataIndex: "maxDurationMs", width: 110, render: duration },
                         ]}
                     />
                 </Card>
@@ -325,12 +373,34 @@ export default function McpObservabilityPage() {
                         dataSource={traceEvents}
                         pagination={false}
                         locale={{ emptyText: "输入 traceId 后查看完整调用链" }}
-                        scroll={{ x: 900 }}
+                        scroll={{ x: 1120 }}
                         columns={[
-                            { title: "时间", dataIndex: "createdAt", width: 180, render: (value: string) => new Date(value).toLocaleString() },
-                            { title: "事件", dataIndex: "event", width: 130, render: (value: string) => <Tag color={value === "tool.failed" ? "error" : value === "tool.succeeded" ? "success" : "processing"}>{value}</Tag> },
-                            { title: "工具", dataIndex: "tool", width: 220 },
-                            { title: "耗时", dataIndex: "durationMs", width: 100, render: duration },
+                            { title: "时间", dataIndex: "createdAt", width: 170, render: (value: string) => new Date(value).toLocaleString() },
+                            { title: "事件", dataIndex: "event", width: 120, render: (value: string) => <Tag color={value === "tool.failed" ? "error" : value === "tool.succeeded" ? "success" : "processing"}>{value}</Tag> },
+                            { title: "工具", dataIndex: "tool", width: 200 },
+                            { title: "耗时", dataIndex: "durationMs", width: 90, render: duration },
+                            {
+                                title: "入参 / 返回",
+                                width: 170,
+                                render: (_: unknown, item: McpObservabilityEvent) => {
+                                    const inputChars = typeof item.inputSummary?.inputChars === "number" ? item.inputSummary.inputChars : null;
+                                    const outputChars = typeof item.outputSummary?.outputChars === "number" ? item.outputSummary.outputChars : null;
+                                    const outputBytes = typeof item.outputSummary?.outputBytes === "number" ? item.outputSummary.outputBytes : null;
+                                    if (inputChars == null && outputChars == null) return <Typography.Text type="secondary">未采集</Typography.Text>;
+                                    return (
+                                        <Typography.Text type={outputChars != null && outputChars >= 100000 ? "danger" : undefined}>
+                                            {inputChars == null ? "—" : `${inputChars.toLocaleString("en-US")}`}
+                                            {" / "}
+                                            {outputChars == null ? "—" : `${outputChars.toLocaleString("en-US")}`}
+                                            {outputBytes != null && outputBytes > 512 * 1024 && (
+                                                <Typography.Text type="danger" style={{ marginLeft: 6 }}>
+                                                    超限 {(outputBytes / 1024 / 1024).toFixed(2)}MB
+                                                </Typography.Text>
+                                            )}
+                                        </Typography.Text>
+                                    );
+                                },
+                            },
                             {
                                 title: "上下文",
                                 render: (_: unknown, item: McpObservabilityEvent) =>

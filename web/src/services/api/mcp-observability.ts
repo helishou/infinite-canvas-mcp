@@ -10,6 +10,29 @@ export type McpObservabilityMetric = {
     maxDurationMs: number | null;
     p95DurationMs: number | null;
     ordinaryP95DurationMs?: number | null;
+    /** 已记录尺寸的调用数；早期事件缺 summary 时不参与均值。 */
+    sizedCalls?: number;
+    averageOutputChars?: number | null;
+    maxOutputChars?: number | null;
+    /** 4 字符 ≈ 1 token 的粗估。 */
+    estimatedOutputTokens?: number | null;
+    averageInputChars?: number | null;
+    maxInputChars?: number | null;
+};
+
+export type McpObservabilityPayloadSummary = {
+    sizedCalls: number;
+    totalInputChars: number;
+    totalOutputChars: number;
+    estimatedTotalInputTokens: number;
+    estimatedTotalOutputTokens: number;
+    averageOutputChars: number | null;
+    maxOutputChars: number | null;
+    maxOutputTokens: number | null;
+    maxInputChars: number | null;
+    warnThresholdChars: number;
+    oversizedCalls: number;
+    note?: string;
 };
 
 export type McpObservabilityReport = {
@@ -49,6 +72,7 @@ export type McpObservabilityReport = {
         ordinary: McpObservabilityDurationSummary;
         waiting: McpObservabilityDurationSummary;
     };
+    payload?: McpObservabilityPayloadSummary;
     transitions: Array<{ fromTool: string; toTool: string; count: number }>;
     daily: Array<{
         date: string;

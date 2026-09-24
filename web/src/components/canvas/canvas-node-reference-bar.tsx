@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { characterReferenceKey, getGroupResourceNodes, isAudioGenerationNode, isImageGenerationNode, isTextGenerationNode, nodeResourceItems, type CanvasCharacterReferenceSelection } from "@/lib/canvas/canvas-resource-references";
-import { CanvasCharacterReferenceModal } from "./canvas-character-reference-modal";
+
 import type { CanvasNodeResource } from "@/types/canvas-plugin";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasImageReferenceSnapshot, type CanvasNodeData } from "@/types/canvas";
@@ -15,17 +15,16 @@ import { useBackendStore } from "@/stores/use-backend-store";
 
 type ReferenceEntry = { node: CanvasNodeData; sourceNodeId: string; resource?: CanvasNodeResource; index: number; character?: boolean };
 
-export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyReferences, onClearHistoryReferences, onDisconnect, onStartSelection, onCharacterSelectionChange }: { nodeId: string; nodes: CanvasNodeData[]; connectedNodes: CanvasNodeData[]; historyReferences?: CanvasImageReferenceSnapshot[]; onClearHistoryReferences?: () => void; onDisconnect?: (fromNodeId: string, toNodeId: string) => void; onStartSelection?: (nodeId: string) => void; onCharacterSelectionChange?: (sourceNodeId: string, selection: CanvasCharacterReferenceSelection) => void }) {
+export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyReferences, onClearHistoryReferences, onDisconnect, onStartSelection }: { nodeId: string; nodes: CanvasNodeData[]; connectedNodes: CanvasNodeData[]; historyReferences?: CanvasImageReferenceSnapshot[]; onClearHistoryReferences?: () => void; onDisconnect?: (fromNodeId: string, toNodeId: string) => void; onStartSelection?: (nodeId: string) => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const [editingCharacterNodeId, setEditingCharacterNodeId] = useState<string | null>(null);
     const targetNode = nodes.find((node) => node.id === nodeId);
     const characterSelections = targetNode?.metadata?.characterReferences || {};
     const references: ReferenceEntry[] = connectedNodes.flatMap((sourceNode) => (sourceNode.type === CanvasNodeType.Group ? getGroupResourceNodes(sourceNode.id, nodes) : [sourceNode]).flatMap((node): ReferenceEntry[] => {
         if (node.type === CanvasNodeType.Character) return [{ node, sourceNodeId: sourceNode.id, index: 0, character: true }];
         return nodeResourceItems(node).map((resource, index) => ({ node, resource, index, sourceNodeId: sourceNode.id }));
     }));
-    const editingCharacterNode = editingCharacterNodeId ? nodes.find((node) => node.id === editingCharacterNodeId) : undefined;
+
     return (
         <div className="mb-2">
             <div className="mb-1.5 text-[11px] font-medium" style={{ color: theme.node.muted }}>{t("canvas.references.title")}</div>
@@ -40,7 +39,6 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyR
                         sourceIsImageGeneration={isImageGenerationNode(targetNode)}
                         sourceIsAudioGeneration={isAudioGenerationNode(targetNode)}
                         sourceIsTextGeneration={isTextGenerationNode(targetNode)}
-                        onOpen={onCharacterSelectionChange ? () => setEditingCharacterNodeId(reference.node.id) : undefined}
                         onRemove={() => onDisconnect?.(reference.sourceNodeId, nodeId)}
                     />
                 ) : (
@@ -50,7 +48,7 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyR
                     <Plus className="size-4" />
                 </button>
             </div>
-            {editingCharacterNode && onCharacterSelectionChange ? <CanvasCharacterReferenceModal node={editingCharacterNode} selection={characterSelections[editingCharacterNode.id]} hideVoiceOption={isImageGenerationNode(targetNode) || isTextGenerationNode(targetNode)} onApply={(selection) => onCharacterSelectionChange(editingCharacterNode.id, selection)} onClose={() => setEditingCharacterNodeId(null)} /> : null}
+
         </div>
     );
 }
@@ -78,15 +76,19 @@ function HistoryImageReference({ reference, onClear }: { reference: CanvasImageR
     );
 }
 
-function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sourceIsAudioGeneration, sourceIsTextGeneration, onOpen, onRemove }: { node: CanvasNodeData; selection?: CanvasCharacterReferenceSelection; sourceIsImageGeneration?: boolean; sourceIsAudioGeneration?: boolean; sourceIsTextGeneration?: boolean; onOpen?: () => void; onRemove: () => void }) {
+function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sourceIsAudioGeneration, sourceIsTextGeneration, onRemove }: { node: CanvasNodeData; selection?: CanvasCharacterReferenceSelection; sourceIsImageGeneration?: boolean; sourceIsAudioGeneration?: boolean; sourceIsTextGeneration?: boolean; onRemove: () => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
     const images = node.metadata?.characterImages || [];
-    const keys = selection?.imageKeys?.length ? new Set(selection.imageKeys) : null;
-    const selectedImages = (keys ? images.filter((image, index) => keys.has(characterReferenceKey(image, index))) : images).slice(0, 2);
-    const selectedImageCount = selection?.imageKeys ? selection.imageKeys.length : images.length;
+    const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
+    const primaryImage = images[primaryIndex];
+    const keys = selection?.imageKeys
+        ? new Set(selection.imageKeys)
+        : new Set(primaryImage ? [characterReferenceKey(primaryImage, primaryIndex)] : []);
+    const selectedImages = images.filter((image, index) => keys.has(characterReferenceKey(image, index))).slice(0, 2);
+    const selectedImageCount = selection?.imageKeys ? selection.imageKeys.length : selectedImages.length;
     const voiceIncluded = !sourceIsImageGeneration && !sourceIsAudioGeneration && !sourceIsTextGeneration && selection?.voiceEnabled !== false && Boolean(node.metadata?.characterVoiceUrl || node.metadata?.characterVoiceStorageKey);
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     const [urls, setUrls] = useState<string[]>([]);
@@ -101,16 +103,15 @@ function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sour
     // 音频生成节点：角色引用以「声线音频」作为输入，渲染音频格。
     // 文本生成节点：角色引用以「角色文本设定」作为输入，渲染文本格。
     // 两个早返回都放在 hooks 之后，避免切换生成模式时 hook 数量变化导致 React 报错。
-    if (sourceIsAudioGeneration) return <CharacterAudioReferenceItem node={node} onOpen={onOpen} onRemove={onRemove} />;
-    if (sourceIsTextGeneration) return <CharacterTextReferenceItem node={node} onOpen={onOpen} onRemove={onRemove} />;
+    if (sourceIsAudioGeneration) return <CharacterAudioReferenceItem node={node} onRemove={onRemove} />;
+    if (sourceIsTextGeneration) return <CharacterTextReferenceItem node={node} onRemove={onRemove} />;
     // 选 1 张图 → 占 1 格方形；选 2 张图 → 横向矩形占 2 格；多张时角标显示总数。
     const wide = selectedImages.length > 1;
     return (
         <div
-            className={`group relative ${wide ? "h-12 w-[104px]" : "size-12"} shrink-0 cursor-pointer overflow-hidden rounded-xl border transition hover:opacity-85`}
+            className={`group relative ${wide ? "h-12 w-[104px]" : "size-12"} shrink-0 overflow-hidden rounded-xl border transition hover:opacity-85`}
             style={{ borderColor: theme.node.activeStroke || theme.toolbar.border, background: theme.toolbar.activeBg }}
-            title={onOpen ? "双击选择角色参考输入" : t("canvas.references.empty")}
-            onDoubleClick={(event) => { event.stopPropagation(); onOpen?.(); }}
+            title={t("canvas.references.empty")}
         >
             <span className="flex size-full">
                 {selectedImages.map((image, index) => {
@@ -131,7 +132,7 @@ function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sour
 }
 
 /** 角色节点被「音频类生成节点」引用时，角色引用以声线音频作为输入：方形音频格 + 角色名 + 试听。 */
-function CharacterAudioReferenceItem({ node, onOpen, onRemove }: { node: CanvasNodeData; onOpen?: () => void; onRemove: () => void }) {
+function CharacterAudioReferenceItem({ node, onRemove }: { node: CanvasNodeData; onRemove: () => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const backendConnected = useBackendStore((state) => state.connected);
@@ -149,10 +150,9 @@ function CharacterAudioReferenceItem({ node, onOpen, onRemove }: { node: CanvasN
     }, [backendConnected, backendToken, voiceKey, voiceUrl]);
     return (
         <div
-            className="group relative grid size-12 shrink-0 cursor-pointer place-items-center rounded-xl border transition hover:opacity-85"
+            className="group relative grid size-12 shrink-0 place-items-center rounded-xl border transition hover:opacity-85"
             style={{ borderColor: theme.node.activeStroke || theme.toolbar.border, background: theme.toolbar.activeBg }}
-            title={onOpen ? "双击选择角色参考输入" : t("canvas.references.empty")}
-            onDoubleClick={(event) => { event.stopPropagation(); onOpen?.(); }}
+            title={t("canvas.references.empty")}
         >
             <Music2 className="size-5" style={{ color: theme.node.muted }} />
             <span className="pointer-events-none absolute bottom-0 left-0 max-w-full truncate rounded-tr-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{node.metadata?.characterName || node.title || "角色"}</span>
@@ -167,18 +167,17 @@ function CharacterAudioReferenceItem({ node, onOpen, onRemove }: { node: CanvasN
     );
 }
 
-/** 角色节点被「文本类生成节点」引用时，角色引用以角色的文本设定作为输入：方形文本格 + 角色名；双击可查看/调整。 */
-function CharacterTextReferenceItem({ node, onOpen, onRemove }: { node: CanvasNodeData; onOpen?: () => void; onRemove: () => void }) {
+/** 角色节点被「文本类生成节点」引用时，角色引用以角色的文本设定作为输入：方形文本格 + 角色名。 */
+function CharacterTextReferenceItem({ node, onRemove }: { node: CanvasNodeData; onRemove: () => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const name = node.metadata?.characterName || node.title || "角色";
     const description = node.metadata?.characterDescription || node.metadata?.characterEnglishName || "";
     return (
         <div
-            className="group relative grid size-12 shrink-0 cursor-pointer place-items-center rounded-xl border transition hover:opacity-85"
+            className="group relative grid size-12 shrink-0 place-items-center rounded-xl border transition hover:opacity-85"
             style={{ borderColor: theme.node.activeStroke || theme.toolbar.border, background: theme.toolbar.activeBg }}
-            title={onOpen ? `${name}${description ? ` · ${description}` : ""}（双击选择角色参考输入）` : t("canvas.references.empty")}
-            onDoubleClick={(event) => { event.stopPropagation(); onOpen?.(); }}
+            title={description ? `${name} · ${description}` : name}
         >
             <FileText className="size-5" style={{ color: theme.node.muted }} />
             <span className="pointer-events-none absolute bottom-0 left-0 max-w-full truncate rounded-tr-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{name}</span>

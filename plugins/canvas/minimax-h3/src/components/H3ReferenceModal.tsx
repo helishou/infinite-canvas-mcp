@@ -35,7 +35,6 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const [usage, setUsage] = useState<H3ReferenceUsage>(characterReference ? "reference" : refItem.usage || "reference");
     const [description, setDescription] = useState(refItem.description || "");
     const [storyboardSubjectIds, setStoryboardSubjectIds] = useState<string[]>(refItem.storyboardSubjectIds || []);
-    const [outfitEnabled, setOutfitEnabled] = useState<Record<string, boolean>>({});
     const [voiceEnabled, setVoiceEnabled] = useState(group?.voiceEnabled ?? false);
     const [analyzing, setAnalyzing] = useState(false);
     const [analysis, setAnalysis] = useState("");
@@ -48,7 +47,6 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         setUsage(characterReference ? "reference" : refItem.usage || "reference");
         setDescription(refItem.description || "");
         setStoryboardSubjectIds(refItem.storyboardSubjectIds || []);
-        setOutfitEnabled(Object.fromEntries((group?.outfits || []).map((outfit) => [outfit.id, outfit.enabled])));
         setVoiceEnabled(group?.voiceEnabled ?? false);
         setAnalysis("");
         setPreviewItem(null);
@@ -75,7 +73,9 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         if (appliedRole === "storyboard" && refItem.type === "image") next.storyboardSubjectIds = storyboardSubjectIds.filter((id) => characters.some((character) => character.id === id));
         else delete next.storyboardSubjectIds;
         if (next.assetId) await ctx.references.upsert({ id: next.assetId, label: next.name, mediaType: next.type, role: appliedRole, tags: next.tags || [], url: next.url, storageKey: next.storageKey, mimeType: next.mimeType, sourceNodeId: next.nodeId, subjectId: next.subjectId, ...(Object.keys(nextAnalysis).length ? { analysis: nextAnalysis } : {}) }).catch(() => undefined);
-        const characterPatch = group ? { outfitEnabled, voiceEnabled } : undefined;
+        // 服装选择区已在 UI 中移除：patch 里不带 outfitEnabled，避免覆盖存量的 outfit.enabled；
+        // 声线开关保留，照旧提交 voiceEnabled。
+        const characterPatch = group ? { voiceEnabled } : undefined;
         onApply(next, characterPatch);
         onClose();
     };
@@ -118,32 +118,15 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                     {!characterReference ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>主要职责</span><Select value={role} options={ROLE_OPTIONS} onChange={setRole} /></label> : null}
-                    {group ? <div style={{ display: "grid", gap: 8 }}>
-                        <div style={{ fontSize: 13, opacity: 0.65 }}>角色参考图（{group.characterName}）</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))", gap: 8, maxHeight: 180, overflowY: "auto" }}>
-                            {group.outfits.map((outfit) => {
-                                const checked = outfitEnabled[outfit.id] ?? false;
-                                return <div key={outfit.id} style={{ position: "relative" }}>
-                                    <label style={{ display: "block", border: `1px solid ${checked ? ctx.theme.node.activeStroke : ctx.theme.node.stroke}`, borderRadius: 6, overflow: "hidden", cursor: "pointer", background: ctx.theme.node.panel, opacity: checked ? 1 : 0.45 }}>
-                                        <img src={outfit.url} alt={outfit.name} style={{ width: "100%", height: 72, objectFit: "cover", display: "block" }} />
-                                        <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 6px", fontSize: 11 }}>
-                                            <Checkbox checked={checked} onChange={(event) => setOutfitEnabled((current) => ({ ...current, [outfit.id]: event.target.checked }))} />
-                                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{outfit.name}</span>
-                                        </div>
-                                    </label>
-                                    <button type="button" className="minimax-outfit-zoom" title="放大预览" aria-label={`放大预览 ${outfit.name}`} onClick={() => setPreviewItem({ url: outfit.url, type: "image", name: outfit.name })}><H3Icon name="zoom" /></button>
-                                </div>;
-                            })}
-                        </div>
-                        {group.voice ? <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 8, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
-                            <span style={{ fontSize: 12 }}>声线</span>
-                            <span style={{ flex: 1, minWidth: 0 }}>
-                                <span style={{ display: "block", fontSize: 12, opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.voice.name}</span>
-                                {group.voice.description ? <span style={{ display: "block", marginTop: 2, fontSize: 11, opacity: 0.55 }}>{group.voice.description}</span> : null}
-                            </span>
-                            <Button type="text" size="small" icon={<Play className="size-3.5" />} onClick={() => setPreviewItem({ ...group.voice!, type: "audio" })}>试听</Button>
-                            <Switch size="small" checked={voiceEnabled} onChange={setVoiceEnabled} />
-                        </div> : null}
+                    {/* 服装缩略图选择区已移除：角色节点连 H3 时按 characterPrimaryIndex 自动取主图，不再在 modal 里展示/勾选服装。 */}
+                    {group?.voice ? <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 8, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
+                        <span style={{ fontSize: 12 }}>声线</span>
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                            <span style={{ display: "block", fontSize: 12, opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.voice.name}</span>
+                            {group.voice.description ? <span style={{ display: "block", marginTop: 2, fontSize: 11, opacity: 0.55 }}>{group.voice.description}</span> : null}
+                        </span>
+                        <Button type="text" size="small" icon={<Play className="size-3.5" />} onClick={() => setPreviewItem({ ...group.voice!, type: "audio" })}>试听</Button>
+                        <Switch size="small" checked={voiceEnabled} onChange={setVoiceEnabled} />
                     </div> : null}
                     {isStoryboardImage ? <div style={{ display: "grid", gap: 6 }}>
                         <span style={{ fontSize: 13, opacity: 0.65 }}>分镜中出现的人物（可多选）</span>

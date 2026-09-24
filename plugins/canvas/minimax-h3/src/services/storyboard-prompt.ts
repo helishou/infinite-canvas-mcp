@@ -1,4 +1,5 @@
 import { promptDetails, validateDefinitionCoverage } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
+import type { H3SubjectDefinition } from "../types";
 
 export type StoryboardPromptSubject = {
     id: string;
@@ -11,6 +12,47 @@ export type StoryboardPromptSubject = {
     pictures: string[];
     role?: string;
 };
+
+/**
+ * 用户自定义的实体定义覆盖规则生成的 subjects。
+ * 覆盖存在时它是**权威清单**：未列出的主体即视为已删除，顺序决定 `<Subject N>` 编号。
+ * 名称/描述/服装/视觉来源可按实体逐项覆写，未填写的项回落到规则生成值。
+ */
+export function mergeSubjectDefinitions(ruleSubjects: StoryboardPromptSubject[], override?: H3SubjectDefinition[] | null): StoryboardPromptSubject[] {
+    if (!override?.length) return ruleSubjects;
+    const byId = new Map(ruleSubjects.map((subject) => [subject.id, subject]));
+    const merged = override.map((definition): StoryboardPromptSubject => {
+        const base = byId.get(definition.id);
+        return {
+            id: definition.id,
+            name: definition.name?.trim() || base?.name || definition.id,
+            englishName: definition.englishName?.trim() || base?.englishName,
+            aliases: base?.aliases || [],
+            shotMarkers: base?.shotMarkers || [],
+            profile: definition.profile ?? base?.profile ?? "",
+            outfits: definition.outfits?.length ? definition.outfits : base?.outfits || [],
+            pictures: definition.pictures?.length ? definition.pictures : base?.pictures || [],
+            role: definition.role || base?.role,
+        };
+    });
+    // 覆盖清单里出现的 ID 但规则侧没有对应主体（用户手工新增）时，保留其自身描述。
+    return merged.map((subject) => subject.profile || subject.pictures.length
+        ? subject
+        : { ...subject, profile: subject.profile || "visual features follow the linked reference" });
+}
+
+/** 把规则生成的主体清单转成可编辑的实体定义（分镜编辑表单打开时的默认值）。 */
+export function toSubjectDefinitions(subjects: StoryboardPromptSubject[]): H3SubjectDefinition[] {
+    return subjects.map((subject) => ({
+        id: subject.id,
+        name: subject.name,
+        englishName: subject.englishName,
+        pictures: [...subject.pictures],
+        profile: subject.profile,
+        outfits: [...subject.outfits],
+        role: subject.role,
+    }));
+}
 
 export type StoryboardPromptReference = {
     tag: string;

@@ -231,9 +231,11 @@ function renderLoopPrompt(prompt: string, index: number, total: number) {
 
 function readCharacterGenerationResources(node: CanvasNodeData, selection?: CanvasCharacterReferenceSelection): NodeGenerationResourceInput[] {
     const images = node.metadata?.characterImages || [];
-    const selectedKeys = selection?.imageKeys;
+    const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
+    const primaryImage = images[primaryIndex];
+    const selectedKeys = new Set(selection?.imageKeys || (primaryImage ? [characterReferenceKey(primaryImage, primaryIndex)] : []));
     const imageInputs = images.flatMap((image, index): NodeGenerationResourceInput[] => {
-        if (!image.url || (selectedKeys && !selectedKeys.includes(characterReferenceKey(image, index)))) return [];
+        if (!image.url || !selectedKeys.has(characterReferenceKey(image, index))) return [];
         return [{
             nodeId: node.id,
             type: "image",

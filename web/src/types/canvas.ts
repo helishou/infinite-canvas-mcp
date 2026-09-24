@@ -95,6 +95,8 @@ export type CanvasNodeMetadata = {
     smart?: boolean;
     prompt?: string;
     status?: CanvasNodeStatus;
+    /** 后端回写的运行进度（0–1），仅生成中有效；前端只读，不得回写。 */
+    runProgress?: number;
     errorDetails?: string;
     fontSize?: number;
     generationMode?: CanvasGenerationMode;

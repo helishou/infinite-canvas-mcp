@@ -58,7 +58,7 @@ Clip ID / 对应镜头 ID（合并时列全部镜头、依据、组内顺序和�
 
 ### 标准顺序
 
-1. **定向读取**：用 `h3_get_clip(projectId, nodeId, segmentId)`，或读取同等精度的 node/segment，确认目标 segment、最近已完成来源、角色组、binding、prompt、运行态和已有结果。不要先拉取整张画布。需要插入/改序时，先另存完整 `metadata.segments` 快照并读取最新 collaboration revision；优先逐段 `update_h3_segment` 修改 `start`/`title`。`replace_h3_segments` 会以传入对象全量替换 segment，不能只传 ID；若必须使用它，要提交完整配置对象并只在确认后台会合并的前提下省略运行态字段，否则参考图、角色绑定和提示词会被清空。写后立即回读目标片段的 references、characterGroups、prompt 和时间轴。
+1. **定向读取**：用 `h3_get_clip(projectId, nodeId, segmentId)`，或读取同等精度的 node/segment，确认目标 segment、最近已完成来源、角色组、binding、prompt、运行态和已有结果。不要先拉取整张画布。需要插入/改序时，先另存完整 `metadata.segments` 快照并读取最新 collaboration revision；优先逐段 `update_h3_segment` 修改 `start`/`title`。`replace_h3_segments` 会替换段数组顺序和成员，并按稳定 segment ID 合并字段；省略字段继承旧值，显式传入空值才清空。写后立即回读目标片段的 references、characterGroups、prompt 和时间轴。
 2. **准备输入**：构造一次 `h3_prepare_clip` 请求：
    - `inheritFromSegmentId`：明确指定已完成来源；省略时由工具选择目标之前最近已完成 segment；
    - `patch`：只放本次要改的剧情、分镜、时长和提示词字段，以及用户明确要求改变的运行参数；

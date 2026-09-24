@@ -41,6 +41,26 @@ export type H3CharacterGroupEditPatch = {
 export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; description?: string; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown> };
 export type H3StoryboardShot = { id: string; duration?: number; referenceBindingId?: string };
 
+/**
+ * Clip 级「实体定义」：subject_definitions 的权威来源。
+ * 打开分镜编辑表单时按当前 Clip 引用规则生成一份默认值，用户可手动增删改。
+ * 未自定义（缺省）时按下述规则即时生成，保证旧数据行为不变。
+ */
+export type H3SubjectDefinition = {
+    /** 稳定主体 ID（对应 subjects manifest 的 id / groupId / subjectId）。 */
+    id: string;
+    /** 展示名，写入 `<Subject N> is <name>.`。 */
+    name: string;
+    englishName?: string;
+    /** 视觉来源的参考标签，如 `<Picture 2>`。 */
+    pictures?: string[];
+    /** 补充描述（profile / 服装 / 视觉特征）。 */
+    profile?: string;
+    outfits?: string[];
+    /** 主体类别，仅用于 UI 分组与配色。 */
+    role?: string;
+};
+
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
 export type H3Pane = "library" | "preview" | "video" | "refs";
@@ -245,6 +265,11 @@ export type H3Segment = {
     storyboardDurations?: Record<string, number>;
     /** 独立于参考图片的分镜项目；referenceBindingId 仅用于兼容旧的图片分镜。 */
     storyboardShots?: H3StoryboardShot[];
+    /**
+     * Clip 级实体定义（subject_definitions 的权威来源）。缺省时由当前 Clip 引用规则生成，
+     * 用户一旦在分镜编辑里编辑过就以此为准。
+     */
+    subjectDefinitions?: H3SubjectDefinition[];
     h3CharacterGroups?: Record<string, H3CharacterGroup>;
     aspectRatio?: string;
     megapixels?: number;

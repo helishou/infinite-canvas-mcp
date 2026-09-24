@@ -179,7 +179,7 @@ function hasGroupResources(node: CanvasNodeData, nodes: CanvasNodeData[], index?
 }
 
 export function isCanvasReferenceNode(node: CanvasNodeData, nodes: CanvasNodeData[], index?: CanvasGraphIndex) {
-    return isResourceNode(node) || hasGroupResources(node, nodes, index) || hasLoopResources(node, nodes, index);
+    return node.type === CanvasNodeType.Character || isResourceNode(node) || hasGroupResources(node, nodes, index) || hasLoopResources(node, nodes, index);
 }
 
 function expandGroupResourceNodes(inputNodes: CanvasNodeData[], nodes: CanvasNodeData[], index?: CanvasGraphIndex) {

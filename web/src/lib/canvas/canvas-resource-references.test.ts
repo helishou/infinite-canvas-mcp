@@ -48,6 +48,38 @@ test("智能生成节点只把主图作为下游参考输入", () => {
     assert.deepEqual(sourceNodeReferenceImages(source).map((image) => image.storageKey), ["media/second.png"]);
 });
 
+test("角色参考默认只用主图，存量服装选择保持原样", () => {
+    const character: CanvasNodeData = {
+        id: "character",
+        type: CanvasNodeType.Character,
+        title: "沈昭宁",
+        position: { x: 0, y: 0 },
+        width: 340,
+        height: 480,
+        metadata: {
+            characterImages: [
+                { url: "outfit-a.png", storageKey: "media/outfit-a.png", name: "outfit-a", outfit: "常服", outfitDescription: "", width: 100, height: 100, bytes: 1, mimeType: "image/png" },
+                { url: "outfit-b.png", storageKey: "media/outfit-b.png", name: "outfit-b", outfit: "退婚雪服", outfitDescription: "", width: 100, height: 100, bytes: 1, mimeType: "image/png" },
+            ],
+            characterPrimaryIndex: 1,
+        },
+    };
+    const baseTarget: CanvasNodeData = { id: "target", type: CanvasNodeType.Config, title: "目标", position: { x: 500, y: 0 }, width: 420, height: 540, metadata: { smart: true, generationMode: "image" } };
+    const connection = { id: "character-target", fromNodeId: character.id, toNodeId: baseTarget.id, role: "reference" as const };
+    const resolve = (metadata: CanvasNodeData["metadata"]) => {
+        const target = { ...baseTarget, metadata };
+        const nodes = [character, target];
+        const connections = [connection];
+        return buildNodeGenerationInputs(target.id, nodes, connections, buildCanvasGraphIndex(nodes, connections))
+            .filter((input) => input.type === "image")
+            .map((input) => input.type === "image" ? input.image?.storageKey : undefined);
+    };
+
+    assert.deepEqual(resolve(baseTarget.metadata), ["media/outfit-b.png"]);
+    assert.deepEqual(resolve({ ...baseTarget.metadata, characterReferences: { character: { imageKeys: ["media/outfit-a.png"] } } }), ["media/outfit-a.png"]);
+    assert.deepEqual(resolve({ ...baseTarget.metadata, characterReferences: { character: { imageKeys: [] } } }), []);
+});
+
 test("循环节点按轮次选择上游图片并渲染循环变量", () => {
     const imageA: CanvasNodeData = { id: "image-a", type: CanvasNodeType.Image, title: "A", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "a.png", storageKey: "media/a.png" } };
     const imageB: CanvasNodeData = { id: "image-b", type: CanvasNodeType.Image, title: "B", position: { x: 0, y: 120 }, width: 100, height: 100, metadata: { content: "b.png", storageKey: "media/b.png" } };

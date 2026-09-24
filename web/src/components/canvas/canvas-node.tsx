@@ -109,6 +109,25 @@ function nodeAccentColor(node: CanvasNodeData, theme: CanvasTheme) {
     return theme.node.muted;
 }
 
+/**
+ * 生成中判定：节点级 status 或任一产出（图片 / 文本 / H3 分镜）仍在排队或生成。
+ * 概览壳与紧凑壳都据此补上活动标记，避免缩小后和普通节点长得一样。
+ */
+function isNodeGenerating(node: CanvasNodeData) {
+    const pending = (status?: string) => status === "loading" || status === "queued";
+    const metadata = node.metadata as (CanvasNodeData["metadata"] & { segments?: Array<{ status?: string }> }) | undefined;
+    if (!metadata) return false;
+    if (pending(metadata.status)) return true;
+    if (metadata.images?.some((image) => pending(image.status)) || metadata.texts?.some((text) => pending(text.status))) return true;
+    return Array.isArray(metadata.segments) && metadata.segments.some((segment) => pending(segment.status));
+}
+
+/** 后端回写的运行进度（0–1）；生成中但进度未知时返回 undefined，角标只显示转圈。 */
+function nodeRunProgress(node: CanvasNodeData) {
+    const progress = node.metadata?.runProgress;
+    return typeof progress === "number" && progress > 0.01 && progress < 1 ? Math.round(progress * 100) : undefined;
+}
+
 type OverviewImage = Pick<CanvasNodeImage, "content" | "storageKey" | "naturalWidth" | "naturalHeight">;
 
 function overviewImageForNode(node: CanvasNodeData): OverviewImage | undefined {
@@ -274,23 +293,36 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     const textOverviewFontSize = Math.max(12, Math.min(14 / Math.max(scale, 0.01), (width * 0.8) / Math.max(1, Math.ceil(Array.from(textOverviewTitle).length / 2)), height * 0.28));
     const overviewIconSize = Math.min(44 / Math.max(scale, 0.01), Math.min(width, height) * 0.42);
     const hasMediaPreview = Boolean(image || videoSource || isH3);
-    const borderColor = active ? selectionBlue : isRelated ? theme.node.muted : nodeAccentColor(data, theme);
+    const generating = isNodeGenerating(data);
+    const generatingPercent = generating ? nodeRunProgress(data) : undefined;
+    // 概览壳处在父级 scale 变换层内，边框会细到看不见，标记只能靠「够大的色块 + 屏幕恒定尺寸的角标」表达。
+    const generatingAccent = theme.node.generating;
+    const generatingBadgeSize = Math.max(4, Math.min(16 / Math.max(scale, 0.01), Math.min(width, height) * 0.26));
+    const generatingBadgeFontSize = Math.max(9, Math.min(11 / Math.max(scale, 0.01), width * 0.06));
+    const generatingBadgePad = Math.max(1, generatingBadgeSize * 0.26);
+    // 节点在屏幕上不够宽时只留标记点：百分比数字挤在小卡片上反而看不清。
+    const showGeneratingPercent = generatingPercent !== undefined && width * scale >= 96 && height * scale >= 44;
+    const generatingTint = `color-mix(in srgb, ${generatingAccent} 16%, transparent)`;
+    // 生成中的节点用活动色铺底/着色，缩小后和一个橙块一样好认，不依赖被 scale 压扁的边框。
+    const generatingBaseFill = `color-mix(in srgb, ${generatingAccent} 16%, ${theme.node.fill})`;
+    const borderColor = active ? selectionBlue : generating ? generatingAccent : isRelated ? theme.node.muted : nodeAccentColor(data, theme);
     const summary = overviewSummary(data);
 
     return (
         <div
             data-node-id={data.id}
-            className={`node-element group/node absolute flex select-none overflow-hidden rounded-3xl ${isH3 ? "border" : "border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"}`}
+            className={`node-element group/node absolute flex select-none overflow-hidden rounded-3xl ${isH3 ? "border" : "border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${generating && !active ? "canvas-node-generating" : ""}`}
             style={{
                 transform: `translate(${position.x}px, ${position.y}px)`,
                 width,
                 height,
                 color: theme.node.text,
-                background: isGroup || isH3 || hasMediaPreview ? "transparent" : theme.node.fill,
+                background: isGroup || isH3 || hasMediaPreview ? "transparent" : generating ? generatingBaseFill : theme.node.fill,
                 borderColor,
                 borderWidth: isGroup ? 3 : undefined,
                 borderStyle: isGroup ? "dashed" : "solid",
                 boxShadow: active ? `0 0 0 1px ${selectionBlue}55` : isRelated ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
+                ...(generating ? ({ "--canvas-generating": generatingAccent, "--canvas-generating-ring": `${Math.max(3, 6 / Math.max(scale, 0.01))}px` } as React.CSSProperties) : null),
                 // 画布节点处于父级 scale 变换层内；content-visibility:auto 在缩放到 24% 以下时
                 // 会被部分浏览器误判为视口外，从而把概览节点整块跳过绘制。轻量壳本身已足够省开销，
                 // 这里不再启用会影响可见性的浏览器跳过绘制。
@@ -315,31 +347,47 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
             ) : videoSource ? (
                 <OverviewVideoPreview source={videoSource} label={data.title || data.type} theme={theme} iconSize={overviewIconSize} />
             ) : isTextOverview ? (
-                <div className="flex h-full w-full items-center justify-center px-6 text-center" style={{ background: theme.node.fill }}>
+                <div className="flex h-full w-full items-center justify-center px-6 text-center" style={{ background: generating ? generatingBaseFill : theme.node.fill }}>
                     <span className="line-clamp-2 font-semibold leading-snug opacity-85" style={{ fontSize: textOverviewFontSize }}>
                         {textOverviewTitle}
                     </span>
                 </div>
             ) : (
-                <div className="relative flex h-full w-full min-w-0 flex-col justify-between overflow-hidden p-3" style={{ background: theme.node.fill }}>
+                <div className="relative flex h-full w-full min-w-0 flex-col justify-between overflow-hidden p-3" style={{ background: generating ? generatingBaseFill : theme.node.fill }}>
                     {!isGroup ? (
                         <Icon
                             aria-hidden="true"
                             className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-                            style={{ width: overviewIconSize, height: overviewIconSize, color: nodeAccentColor(data, theme), opacity: 0.22 }}
+                            style={{ width: overviewIconSize, height: overviewIconSize, color: generating ? generatingAccent : nodeAccentColor(data, theme), opacity: generating ? 0.34 : 0.22 }}
                         />
                     ) : null}
                     <div className="relative flex min-w-0 items-center gap-2">
-                        {!isGroup ? <Icon className="size-4 shrink-0 opacity-80" style={{ color: nodeAccentColor(data, theme) }} /> : null}
+                        {!isGroup ? <Icon className="size-4 shrink-0 opacity-80" style={{ color: generating ? generatingAccent : nodeAccentColor(data, theme) }} /> : null}
                         <span className="truncate text-[11px] font-medium opacity-90">{data.title || data.type}</span>
                     </div>
                     <span className="relative line-clamp-2 text-[10px] leading-4 opacity-75">{summary}</span>
                 </div>
             )}
+            {/* 缩略图/文本会盖住底色，生成中再叠一层活动色，保证缩小后整块仍然泛橙。 */}
+            {generating && (hasMediaPreview || isTextOverview) ? <div className="pointer-events-none absolute inset-0" style={{ background: generatingTint }} /> : null}
             {image || videoSource || isH3 ? (
                 <div className="pointer-events-none absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1 bg-black/45 px-2 py-1 text-[10px] text-white">
                     <Icon className="size-3 shrink-0" />
                     <span className="truncate">{data.title || summary}</span>
+                </div>
+            ) : null}
+            {generating ? (
+                <div
+                    className="pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full font-medium text-white"
+                    style={{ background: "rgba(28,25,23,.68)", padding: `${generatingBadgePad}px ${generatingBadgePad * 1.7}px` }}
+                >
+                    {/* 缩略壳的存在意义就是省开销，角标只做静态色点，不加旋转/呼吸动画。 */}
+                    <span
+                        aria-hidden="true"
+                        className="block shrink-0 rounded-full"
+                        style={{ width: generatingBadgeSize, height: generatingBadgeSize, background: generatingAccent }}
+                    />
+                    {showGeneratingPercent ? <span style={{ fontSize: generatingBadgeFontSize, lineHeight: 1 }}>{generatingPercent}%</span> : null}
                 </div>
             ) : null}
         </div>
@@ -504,6 +552,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const isScene = data.type === CanvasNodeType.Scene;
     const hasSceneContent = isScene && Boolean(data.metadata?.sceneImage?.url);
     const isGroup = data.type === CanvasNodeType.Group;
+    const generating = isNodeGenerating(data);
     const batchCount =
         data.type === CanvasNodeType.Image || (isSmartGenerationNode && smartMode === "image")
             ? data.metadata?.images?.length || 0
@@ -531,21 +580,24 @@ export const CanvasNode = React.memo(function CanvasNode({
     const groupBorderColor = isGroupDropTarget || isActive ? selectionBlue : theme.node.typeStroke.group;
     const nodeBorderColor = isGroup
         ? groupBorderColor
-        : isCharacter
-          ? characterBorderColor
-          : isScene
-            ? sceneBorderColor
-            : isSmartGenerationNode
-              ? smartBorderColor
-              : hasImageContent || hasCharacterContent || hasSceneContent
-                ? imageBorderColor
-                : isActive
-                  ? selectionBlue
-                  : isRelated
-                    ? theme.node.muted
-                    : transparentBg
-                      ? "transparent"
-                      : theme.node.stroke;
+        : // 正在跑任务的节点统一用活动色描边，和选中蓝、关联灰拉开区分；选中态仍以蓝为优先。
+          generating && !isActive
+          ? theme.node.generating
+          : isCharacter
+            ? characterBorderColor
+            : isScene
+              ? sceneBorderColor
+              : isSmartGenerationNode
+                ? smartBorderColor
+                : hasImageContent || hasCharacterContent || hasSceneContent
+                  ? imageBorderColor
+                  : isActive
+                    ? selectionBlue
+                    : isRelated
+                      ? theme.node.muted
+                      : transparentBg
+                        ? "transparent"
+                        : theme.node.stroke;
     const textareaRef = useRef<HTMLDivElement>(null);
     const titleInputRef = useRef<HTMLInputElement>(null);
     const resizeRef = useRef({
@@ -702,6 +754,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 height: previewBounds?.height || data.height,
                 transition: "box-shadow 200ms ease",
                 contain: "layout style",
+                ...(generating ? ({ "--canvas-generating": theme.node.generating, "--canvas-generating-ring": `${Math.max(3, 6 / Math.max(scale, 0.01))}px` } as React.CSSProperties) : null),
             }}
             onMouseEnter={() => {
                 setHovered(true);
@@ -802,7 +855,7 @@ export const CanvasNode = React.memo(function CanvasNode({
 
             <div
                 data-character-drop={data.type === CanvasNodeType.Character ? "true" : undefined}
-                className={`relative h-full w-full overflow-visible rounded-3xl ${data.type === "minimax-h3:video" ? "border" : "border-2"}`}
+                className={`relative h-full w-full overflow-visible rounded-3xl ${data.type === "minimax-h3:video" ? "border" : "border-2"} ${generating && !isActive ? "canvas-node-generating" : ""}`}
                 style={{
                     background: isGroup || data.type === "minimax-h3:video" ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || hasSceneContent || transparentBg ? "transparent" : theme.node.fill,
                     borderColor: nodeBorderColor,
@@ -1008,10 +1061,19 @@ function NodeContent(props: NodeContentRendererProps) {
 function CompactNodeContent({ node, theme, scale }: Pick<NodeContentRendererProps, "node" | "theme" | "scale">) {
     const Icon = nodeTypeIcon(node);
     const isGroup = node.type === CanvasNodeType.Group;
+    // 紧凑壳是 scale 低于 0.24 时的内容降级，同样要能让远处看出「这个节点在跑任务」。
+    const generating = isNodeGenerating(node);
     const iconSize = Math.min(44 / Math.max(scale, 0.01), Math.min(node.width, node.height) * 0.42);
     return (
-        <div className="relative flex h-full w-full items-center justify-center overflow-hidden" style={{ color: theme.node.text }} aria-label={node.title || node.type}>
-            {!isGroup ? <Icon aria-hidden="true" style={{ width: iconSize, height: iconSize, color: nodeAccentColor(node, theme) }} /> : null}
+        <div
+            className="relative flex h-full w-full items-center justify-center overflow-hidden"
+            style={{ color: theme.node.text, background: generating && !isGroup ? `color-mix(in srgb, ${theme.node.generating} 16%, ${theme.node.fill})` : undefined }}
+            aria-label={node.title || node.type}
+        >
+            {/* 缩略壳存在的意义就是省开销：生成中只靠活动色铺底 + 活动色图标区分，不做旋转动画。 */}
+            {!isGroup ? (
+                <Icon aria-hidden="true" style={{ width: iconSize, height: iconSize, color: generating ? theme.node.generating : nodeAccentColor(node, theme) }} />
+            ) : null}
             <span
                 className={`absolute inset-x-1 truncate text-center opacity-75 ${isGroup ? "inset-y-0 flex items-center justify-center" : "bottom-1"}`}
                 style={isGroup ? { fontSize: Math.min(12 / Math.max(scale, 0.01), Math.min(node.width, node.height) * 0.35) } : undefined}

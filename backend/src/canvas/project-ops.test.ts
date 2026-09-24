@@ -161,16 +161,22 @@ test("replace_h3_segments：完全替换；id 集合变化是允许的", () => {
     assert.deepEqual(segments.map((s) => s.id), ["x1", "x2"]);
 });
 
-test("replace_h3_segments：禁止遗漏已有参考字段导致静默清空", () => {
+test("replace_h3_segments：省略字段继承旧值，显式空数组才清空参考", () => {
     const project = makeProject([makeH3Node()]);
     const segments = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
     segments[0].refs = { image: [{ storageKey: "image:keep" }], video: [], audio: [] };
     segments[0].refItems = [{ storageKey: "image:keep" }];
     segments[0].referenceBindings = [{ id: "binding-keep", assetId: "asset-keep" }];
-    assert.throws(() => applyCanvasProjectOperations(project as Record<string, unknown>, [
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
         { type: "replace_h3_segments", nodeId: "h3-1", segments: [{ id: "s1", prompt: "重排但丢了 refs" }, { id: "s2", prompt: "保留" }] },
-    ]), /必须显式携带 refs、refItems、referenceBindings/);
-    assert.equal((segments[0].referenceBindings as unknown[]).length, 1);
+    ]);
+    const preserved = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
+    assert.equal((preserved[0].referenceBindings as unknown[]).length, 1);
+    applyCanvasProjectOperations(project as Record<string, unknown>, [
+        { type: "replace_h3_segments", nodeId: "h3-1", segments: [{ id: "s1", refs: { image: [], video: [], audio: [] }, refItems: [], referenceBindings: [] }, { id: "s2" }] },
+    ]);
+    const cleared = (project.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>;
+    assert.deepEqual(cleared[0].referenceBindings, []);
 });
 
 test("update_node.metadata.segments 严格校验：id 集合不一致时抛错", () => {

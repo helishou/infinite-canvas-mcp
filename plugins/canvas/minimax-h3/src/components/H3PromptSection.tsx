@@ -2,14 +2,14 @@ import { getReact, useEffect, useMemo, useRef, useState } from "@infinite-canvas
 import type { CanvasNodeContext, CanvasReferenceAsset, CanvasTextEditorHandle, CanvasTextReference } from "@infinite-canvas/plugin-sdk";
 import type { ChangeEvent } from "react";
 import { Button, Modal, Select, Switch } from "antd";
-import type { H3Ref, H3ReferenceRetention, H3Segment } from "../types";
+import type { H3Ref, H3ReferenceRetention, H3Segment, H3SubjectDefinition } from "../types";
 import { H3Icon } from "./H3Icon";
 import { StoryboardDialogueStrip } from "./StoryboardDialogueStrip";
 import type { StoryboardSpeakerOption } from "./StoryboardDialogueStrip";
 import { inferReferenceRole, refsForSegment, segmentRefsPatch } from "../services/h3-data";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { persistPromptCandidate, promptJobs, setPromptJob } from "../services/h3-prompt-jobs";
-import { buildStoryboardPromptSections, storyboardPromptFingerprint } from "../services/storyboard-prompt";
+import { buildStoryboardPromptSections, mergeSubjectDefinitions, storyboardPromptFingerprint, toSubjectDefinitions } from "../services/storyboard-prompt";
 import { extractDialogues, stripDialogueSpeakers, injectDialogueSpeakers, parseSubjectSpeakerMap, collectSpeakerIds } from "../services/storyboard-dialogue";
 import { h3ThemeVars } from "../h3-theme";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
@@ -69,17 +69,6 @@ const H3_OFFICIAL_BLOCK = [
   "non_diegetic_music:",
   "N/A",
 ].join("\n");
-const H3_PROMPT_JUMP_TARGETS = [
-  "subject_definitions:",
-  "summary:",
-  "retention_analysis:",
-  "detailed_description:",
-  "integrated_multimodal_description:",
-  "overall_soundscape:",
-  "non_diegetic_music:",
-  "storyboard_timeline:",
-];
-
 const H3_SECTION_BLOCKS: Record<string, string> = {
   模板: H3_OFFICIAL_BLOCK,
   定义: "subject_definitions:\n",
@@ -234,13 +223,20 @@ function normalizeLegacyReferenceTokens(text: string, refs: H3Ref[]) {
 }
 
 function pictureBindingIdsInDescription(description: string, imageRefs: H3Ref[]) {
+  const isStoryboardRef = (ref?: H3Ref) => Boolean(ref) && inferReferenceRole(ref!) === "storyboard";
   return [...new Set([
-    ...Array.from(description.matchAll(/<Picture\s+(\d+)>/giu), (match) => imageRefs[Number(match[1]) - 1]?.bindingId),
-    ...Array.from(description.matchAll(/\{\{\s*ref:\s*([^{}]+?)\s*\}\}/gu), (match) => imageRefs.find((ref) => ref.bindingId === match[1].trim())?.bindingId),
+    ...Array.from(description.matchAll(/<Picture\s+(\d+)>/giu), (match) => {
+      const ref = imageRefs[Number(match[1]) - 1];
+      return ref && isStoryboardRef(ref) ? ref.bindingId : undefined;
+    }),
+    ...Array.from(description.matchAll(/\{\{\s*ref:\s*([^{}]+?)\s*\}\}/gu), (match) => {
+      const ref = imageRefs.find((item) => item.bindingId === match[1].trim());
+      return ref && isStoryboardRef(ref) ? ref.bindingId : undefined;
+    }),
   ].filter((id): id is string => Boolean(id)))];
 }
 
-function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment, fields: { openingDescription: string; summary: string; soundscape: string; music: string }, shots: StoryboardShot[], referenceCatalog: CanvasReferenceAsset[], retentionLevels: Record<string, H3ReferenceRetention> = {}) {
+function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment, fields: { openingDescription: string; summary: string; soundscape: string; music: string }, shots: StoryboardShot[], referenceCatalog: CanvasReferenceAsset[], retentionLevels: Record<string, H3ReferenceRetention> = {}, subjectOverrides?: H3SubjectDefinition[] | null) {
   const originalRefs = refsForSegment(segment).map((ref) => ref.bindingId && retentionLevels[ref.bindingId] ? { ...ref, retentionLevel: retentionLevels[ref.bindingId] } : ref);
   const composite = storyboardCompositeLayout(segment.storyboardCompositeEnabled === true, shots, originalRefs);
   const compositeSourceIds = new Set(composite?.panels.map((panel) => panel.bindingId) || []);
@@ -377,7 +373,7 @@ function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment,
       ? speakerBySubject.get(reference.subjectId)
       : undefined,
   }));
-  const subjectManifest = [...subjects.values()].map((subject) => ({
+  const subjectManifest = mergeSubjectDefinitions([...subjects.values()].map((subject) => ({
     id: subject.id,
     name: subject.name,
     englishName: subject.englishName,
@@ -387,7 +383,7 @@ function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment,
     outfits: [...subject.outfits],
     pictures: subject.pictures,
     role: subject.role,
-  }));
+  })), subjectOverrides);
   validatePromptReferences([fields.summary, fields.openingDescription, ...shots.map((shot) => shot.description), fields.soundscape, fields.music].join("\n"), originalRefs, subjectManifest.length);
   const normalizedShots = shots.map((shot) => ({
     description: normalizeLegacyReferenceTokens(shot.description.trim(), originalRefs),
@@ -613,6 +609,36 @@ function serializeStoryboardDescription(openingDescription: string, shots: Story
   return [openingDescription.trim(), serializeStoryboardShots(shots, imageRefs, referenceCatalog, compositeEnabled)].filter(Boolean).join("\n\n");
 }
 
+/**
+ * 实体定义驱动的 <Subject N> 引用块。
+ * 与 characterEditorReference 的差别：主体不要求是角色节点——道具/场景等主观体同样成立，
+ * 没有角色节点时用实体名与预览图兜底，避免渲染成「人物未找到」。
+ */
+function subjectDefinitionEditorReference(ctx: CanvasNodeContext, segment: H3Segment | undefined, definition: H3SubjectDefinition, subjectOrdinal: number, fallbackRef?: H3Ref): CanvasTextReference {
+  const groups = segment?.h3CharacterGroups || {};
+  const group = groups[definition.id] || Object.values(groups).find((item) => item.characterNodeId === definition.id || item.subjectId === definition.id);
+  const node = ctx.getNode(group?.characterNodeId || definition.id);
+  const metadata = node?.metadata || {};
+  const images = Array.isArray(metadata.characterImages) ? metadata.characterImages as Array<{ url?: unknown }> : [];
+  const primaryIndex = Number(metadata.characterPrimaryIndex || 0);
+  const primaryImage = images[primaryIndex] || images[0];
+  const fallbackOutfit = group?.outfits.find((outfit) => outfit.enabled) || group?.outfits[0];
+  const name = definition.name?.trim() || group?.characterName || node?.title || fallbackRef?.name || definition.id;
+  const previewUrl = typeof primaryImage?.url === "string" ? primaryImage.url : fallbackOutfit?.url || (fallbackRef?.type === "image" ? fallbackRef.url : undefined);
+  const isCharacter = Boolean(group) || node?.type === "character" || definition.role === "character_identity" || definition.role === "character_turnaround";
+  const kindLabel = isCharacter ? "人物" : definition.role === "prop" ? "道具" : definition.role === "scene" ? "场景" : "实体";
+  // kind: "character" 让说话人名册只收角色；非角色实体用 image/其他 kind，仍可正常解析 <Subject N>。
+  return {
+    label: `${kindLabel} · ${name}`,
+    displayLabel: `${kindLabel} · ${name}`,
+    title: `${kindLabel} · ${name}`,
+    kind: isCharacter ? "character" : "image",
+    previewUrl,
+    insert: `<Subject ${subjectOrdinal}>`,
+    tokens: [`<Subject ${subjectOrdinal}>`],
+  };
+}
+
 function characterEditorReference(ctx: CanvasNodeContext, segment: H3Segment | undefined, subjectId: string, subjectOrdinal: number, fallbackRef?: H3Ref): CanvasTextReference {
   const groups = segment?.h3CharacterGroups || {};
   const group = groups[subjectId] || Object.values(groups).find((item) => item.characterNodeId === subjectId || item.subjectId === subjectId);
@@ -669,6 +695,8 @@ export function H3PromptSection({
   const [storyboardCompleting, setStoryboardCompleting] = useState(false);
   const [storyboardPromptGenerating, setStoryboardPromptGenerating] = useState(false);
   const [storyboardError, setStoryboardError] = useState<string | null>(null);
+  // 实体定义：打开分镜编辑时按当前 Clip 引用规则生成默认值，用户可手动增删改。
+  const [subjectDefinitions, setSubjectDefinitions] = useState<H3SubjectDefinition[]>([]);
   const storyboardShotsRef = useRef<StoryboardShot[]>([]);
   storyboardShotsRef.current = storyboardShots;
   const storyboardCompositeEnabledRef = useRef(selected?.storyboardCompositeEnabled === true);
@@ -688,6 +716,8 @@ export function H3PromptSection({
   const storyboardVersionRef = useRef(0);
   const storyboardSaveQueueRef = useRef<Promise<boolean>>(Promise.resolve(true));
   const storyboardPromptGenerationRef = useRef(false);
+  const subjectDefinitionsRef = useRef<H3SubjectDefinition[]>([]);
+  subjectDefinitionsRef.current = subjectDefinitions;
   const [helpOpen, setHelpOpen] = useState(false);
   const [referenceCatalog, setReferenceCatalog] = useState<CanvasReferenceAsset[]>([]);
   useEffect(() => {
@@ -876,6 +906,34 @@ export function H3PromptSection({
     if (changed) patchSelected(segmentRefsPatch(nextRefs));
     return true;
   };
+  /** 实体定义编辑：写回 state 并把清单持久化到当前 Clip（方案 A：随 Clip 走）。 */
+  const commitSubjectDefinitions = (next: H3SubjectDefinition[]) => {
+    subjectDefinitionsRef.current = next;
+    setSubjectDefinitions(next);
+    storyboardVersionRef.current += 1;
+    storyboardDirtyRef.current = true;
+    setStoryboardDirty(true);
+    setStoryboardError(null);
+    patchSelected({ subjectDefinitions: next });
+  };
+  const updateSubjectDefinition = (index: number, patch: Partial<H3SubjectDefinition>) => {
+    commitSubjectDefinitions(subjectDefinitionsRef.current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
+  };
+  const removeSubjectDefinition = (index: number) => {
+    commitSubjectDefinitions(subjectDefinitionsRef.current.filter((_, itemIndex) => itemIndex !== index));
+  };
+  const addSubjectDefinition = () => {
+    commitSubjectDefinitions([...subjectDefinitionsRef.current, {
+      id: `subject-${crypto.randomUUID()}`,
+      name: "",
+      profile: "",
+      pictures: [],
+      outfits: [],
+    }]);
+  };
+  const resetSubjectDefinitions = () => {
+    commitSubjectDefinitions(defaultSubjectDefinitions());
+  };
   const updateStoryboardTextField = (field: "openingDescription" | "summary" | "soundscape" | "music", value: string) => {
     if (field === "openingDescription") { storyboardOpeningDescriptionRef.current = value; setStoryboardOpeningDescription(value); }
     if (field === "summary") { storyboardSummaryRef.current = value; setStoryboardSummary(value); }
@@ -924,6 +982,19 @@ export function H3PromptSection({
     }]
     : []);
 
+  // 实体定义的视觉来源池：当前 Clip 的**所有**图片引用（不限于分镜图，道具/场景/角色都算）。
+  // 值用 `<Picture N>` 与本字段的存储格式一致；缩略图即图片本身，不显示编号。
+  const subjectPicturePool = imageRefs.flatMap((ref, index) => (ref.url || ref.storageKey)
+    ? [{
+      ref,
+      value: `<Picture ${index + 1}>`,
+      label: <span className="nfh3-storyboard-picture-option">
+        {ref.url ? <img src={ref.url} alt="" /> : null}
+        <span>{storyboardRefDisplayName(ref.name) || "未命名参考"}</span>
+      </span>,
+    }]
+    : []);
+
   const ensureStoryboardPromptSections = async () => {
     if (promptMode !== "ref2va" || !selected?.id) return true;
     if (storyboardPromptGenerationRef.current) return false;
@@ -950,7 +1021,7 @@ export function H3PromptSection({
       if (!segment) throw new Error("当前 Clip 已不存在，无法生成提示词。");
       validateStoryboardShotDescriptions(shots);
       validateShotTimeline(shots, Number(segment.duration));
-      const generation = storyboardGenerationContext(ctx, segment, fields, shots, referenceCatalog, storyboardRetentionLevelsRef.current);
+      const generation = storyboardGenerationContext(ctx, segment, fields, shots, referenceCatalog, storyboardRetentionLevelsRef.current, segment.subjectDefinitions);
       const normalizedSummary = generation.summary;
       const expectedDescription = serializeStoryboardDescription(fields.openingDescription, shots, imageRefs, referenceCatalog, segment.storyboardCompositeEnabled === true);
       if (
@@ -985,7 +1056,7 @@ export function H3PromptSection({
       if (latestSelectedId !== segmentId) throw new Error("当前 Clip 已切换，未将生成结果写入其他 Clip。");
       const latestSegment = segmentsFor(latestMetadata).find((item) => item.id === segmentId);
       if (!latestSegment) throw new Error("当前 Clip 已不存在，未应用生成结果。");
-      const latestGeneration = storyboardGenerationContext(ctx, latestSegment, fields, shots, referenceCatalog, storyboardRetentionLevelsRef.current);
+      const latestGeneration = storyboardGenerationContext(ctx, latestSegment, fields, shots, referenceCatalog, storyboardRetentionLevelsRef.current, latestSegment.subjectDefinitions);
       if (await storyboardPromptFingerprint(latestGeneration.content) !== fingerprint) throw new Error("分镜引用或人物资料在生成过程中发生变化，请确认后重试。");
       if (
         readPromptSection(latest.text, "summary") !== normalizedSummary ||
@@ -1024,7 +1095,22 @@ export function H3PromptSection({
     setStoryboardDirty(needsBindingSave);
     setStoryboardError(null);
     setIsTranslated(false);
+    // 实体定义：优先用 Clip 上已保存的用户版本；没有则按当前 Clip 引用规则生成一份默认值。
+    const savedDefinitions = selected?.subjectDefinitions;
+    setSubjectDefinitions(savedDefinitions?.length ? savedDefinitions : defaultSubjectDefinitions());
     setStoryboardMode(true);
+  };
+  /** 按当前 Clip 引用规则生成一份默认实体定义（打开表单时的初值 / 「重置为规则生成」）。 */
+  const defaultSubjectDefinitions = (): H3SubjectDefinition[] => {
+    const segment = selected;
+    if (!segment) return [];
+    const generation = storyboardGenerationContext(ctx, segment, {
+      openingDescription: storyboardOpeningDescriptionRef.current,
+      summary: storyboardSummaryRef.current,
+      soundscape: storyboardSoundscapeRef.current,
+      music: storyboardMusicRef.current,
+    }, storyboardShotsRef.current, referenceCatalog, storyboardRetentionLevelsRef.current);
+    return toSubjectDefinitions(generation.subjects);
   };
   const cancelStoryboard = () => {
     if (storyboardCompleting || storyboardSaving || storyboardPromptGenerating) return;
@@ -1063,6 +1149,7 @@ export function H3PromptSection({
   useEffect(() => { setIsTranslated(false); }, [selected?.id, prompt]);
 
   const enhancePrompt = async () => {
+    console.log("zengqiangtishici ")
     if (!textStatus.ready || textStatus.blocked || !prompt.trim() || enhancing) return;
     const targetSegmentId = selected?.id;
     const promptAtCall = prompt;
@@ -1260,21 +1347,47 @@ export function H3PromptSection({
       if (group?.[1].subjectId) aliases.add(group[1].subjectId);
       subjects.set(canonicalId, aliases);
     };
+    const definedSubjects = subjectDefinitions.length ? subjectDefinitions : null;
     mentionItems.filter(({ ref }) => ref.type === "image").forEach(({ ref }) => {
       addSubject(subjectIdForRef(ref));
       addSubject(ref.groupId);
       ref.storyboardSubjectIds?.forEach(addSubject);
     });
     const subjectOrdinalById = new Map<string, number>();
+    if (definedSubjects) {
+      // 实体定义是权威编号：<Subject N> 的 N 即定义顺序。
+      definedSubjects.forEach((definition, index) => {
+        subjectOrdinalById.set(definition.id, index + 1);
+        subjects.get(definition.id)?.forEach((id) => subjectOrdinalById.set(id, index + 1));
+      });
+    }
     [...subjects].forEach(([subjectId, aliases], index) => {
-      aliases.forEach((id) => subjectOrdinalById.set(id, index + 1));
+      if (subjectOrdinalById.has(subjectId)) return;
+      aliases.forEach((id) => { if (!subjectOrdinalById.has(id)) subjectOrdinalById.set(id, index + 1); });
       subjectOrdinalById.set(subjectId, index + 1);
     });
-    subjects.forEach((aliases, subjectId) => {
-      const fallbackRef = mentionItems.find(({ ref }) => ref.type === "image" && (aliases.has(ref.groupId || "") || aliases.has(subjectIdForRef(ref) || "") || ref.storyboardSubjectIds?.some((id) => aliases.has(id))))?.ref;
-      const subjectOrdinal = subjectOrdinalById.get(subjectId) || 1;
-      references.push(characterEditorReference(ctx, selected, subjectId, subjectOrdinal, fallbackRef));
-    });
+    if (definedSubjects) {
+      const pictureRefFor = (definition: H3SubjectDefinition) => {
+        const tags = definition.pictures || [];
+        return mentionItems.find(({ ref }) => ref.type === "image" && (
+          ref.subjectId === definition.id || ref.groupId === definition.id ||
+          (ref.storyboardSubjectIds || []).includes(definition.id) ||
+          tags.some((tag) => {
+            const match = /^<Picture\s+(\d+)>$/iu.exec(tag);
+            return match ? mentionItems[Number(match[1]) - 1]?.ref === ref : false;
+          })
+        ))?.ref;
+      };
+      definedSubjects.forEach((definition, index) => {
+        references.push(subjectDefinitionEditorReference(ctx, selected, definition, index + 1, pictureRefFor(definition)));
+      });
+    } else {
+      subjects.forEach((aliases, subjectId) => {
+        const fallbackRef = mentionItems.find(({ ref }) => ref.type === "image" && (aliases.has(ref.groupId || "") || aliases.has(subjectIdForRef(ref) || "") || ref.storyboardSubjectIds?.some((id) => aliases.has(id))))?.ref;
+        const subjectOrdinal = subjectOrdinalById.get(subjectId) || 1;
+        references.push(characterEditorReference(ctx, selected, subjectId, subjectOrdinal, fallbackRef));
+      });
+    }
     mentionItems.forEach((item) => {
       const group = item.ref.groupId ? selected?.h3CharacterGroups?.[item.ref.groupId] : undefined;
       const isOutfit = Boolean(group && item.ref.outfitId);
@@ -1295,7 +1408,7 @@ export function H3PromptSection({
       });
     });
     return references;
-  }, [ctx, mentionItems, promptMode, referenceCatalog, selected]);
+  }, [ctx, mentionItems, promptMode, referenceCatalog, selected, subjectDefinitions]);
   const unresolvedReferenceMarkers = useMemo(() => {
     if (!textStatus.ready) return [];
     const knownTokens = new Set(editorReferences.flatMap((reference) => reference.tokens || []).map((token) => token.toLocaleLowerCase()));
@@ -1325,22 +1438,34 @@ export function H3PromptSection({
     }
     return roster;
   }, [characterReferences, prompt]);
-  const storyboardEditorReferences = useMemo(() => [
-    ...imageRefs.filter((ref) => isStoryboardPictureRef(ref) && Boolean(ref.bindingId)).map((ref) => {
-      const pictureTag = `<Picture ${imageRefs.findIndex((item) => item.bindingId === ref.bindingId) + 1}>`;
-      return {
-        label: `分镜图 · ${storyboardRefDisplayName(ref.name) || "未命名参考"}`,
-        displayLabel: `分镜图 · ${storyboardRefDisplayName(ref.name) || "未命名参考"}`,
-        title: storyboardRefDisplayName(ref.name) || "分镜图参考",
-        kind: "image",
-        previewUrl: ref.url,
-        insert: pictureTag,
-        tokens: [pictureTag, `{{ref:${ref.bindingId}}}`],
-      };
-    }),
-    ...editorReferences.filter((reference) => reference.kind === "audio" || reference.kind === "video"),
-    ...characterReferences,
-  ], [characterReferences, editorReferences, imageRefs]);
+  // 分镜编辑各文本框的引用列表：覆盖当前 Clip 的**全部**图片引用。
+  // <Picture N> 的 N 一律取 imageRefs 里的真实序号，保证与 prompt 文本、外层编辑器完全一致；
+  // 若按 role 过滤（只放分镜图/角色），场景、道具、风格等引用就会在分镜编辑里显示「未找到」。
+  // pictureBindingIdsInDescription 已加护栏：反查时只认 role==="storyboard"，
+  // 所以这里放全量不会把 scene/prop 误算成分镜图，composite/track/retention 判定不受影响。
+  const storyboardEditorReferences = useMemo(() => {
+    const roleLabel = (role: string) => role === "storyboard" ? "分镜图" : role === "character_turnaround" || role === "character_identity" ? "人物"
+      : role === "prop" ? "道具" : role === "scene" ? "场景" : role === "style" || role === "palette" ? "风格" : "参考图";
+    return [
+      ...imageRefs.flatMap((ref, index) => {
+        if (!ref.url && !ref.storageKey) return [];
+        const role = inferReferenceRole(ref);
+        const pictureTag = `<Picture ${index + 1}>`;
+        const refName = storyboardRefDisplayName(ref.name) || "未命名参考";
+        return [{
+          label: `${roleLabel(role)} · ${refName}`,
+          displayLabel: `${roleLabel(role)} · ${refName}`,
+          title: refName,
+          kind: "image",
+          previewUrl: ref.url,
+          insert: pictureTag,
+          tokens: ref.bindingId ? [pictureTag, `{{ref:${ref.bindingId}}}`] : [pictureTag],
+        }];
+      }),
+      ...editorReferences.filter((reference) => reference.kind === "audio" || reference.kind === "video"),
+      ...characterReferences,
+    ];
+  }, [characterReferences, editorReferences, imageRefs]);
 
   const boundStoryboardImageCount = new Set(storyboardShots.flatMap((shot) => [
     ...(shot.pictureBindingId ? [shot.pictureBindingId] : []),
@@ -1508,7 +1633,7 @@ export function H3PromptSection({
       <div key="prompt-textarea-wrap" className={`minimax-prompt-translate-wrap${!isTranslated && selected ? " has-line-map" : ""}`}>
         {isTranslated && translation && translation.segmentId === selected?.id && translation.prompt === prompt
           ? <textarea readOnly value={translation.text} aria-label="中文翻译（只读）" />
-          : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips speakers={speakerRoster} dialogue lineMap lineMapTargets={H3_PROMPT_JUMP_TARGETS} placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
+          : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
         <button
           key="prompt-translate"
           type="button"
@@ -1560,6 +1685,62 @@ export function H3PromptSection({
             }}>添加分镜</button>
           </div>
           <div className="nfh3-storyboard-fields">
+            {promptMode === "ref2va" ? <details className="nfh3-storyboard-detail nfh3-subject-definitions" open>
+              <summary>
+                实体定义（{subjectDefinitions.length}）
+                <span className="nfh3-subject-actions">
+                  <button type="button" onClick={() => addSubjectDefinition()}>添加实体</button>
+                  <button type="button" onClick={() => resetSubjectDefinitions()}>重置为规则生成</button>
+                </span>
+              </summary>
+              <div className="nfh3-storyboard-detail-body">
+                <div className="nfh3-subject-hint">打开表单时已按当前 Clip 引用自动填写。Subject 不一定只能是角色——道具、场景等主体同样在此定义，编号即 &lt;Subject N&gt; 的 N。</div>
+                {subjectDefinitions.length ? subjectDefinitions.map((definition, index) => (
+                  <div className="nfh3-subject-row" key={definition.id || index}>
+                    <span className="nfh3-subject-ordinal">{`<Subject ${index + 1}>`}</span>
+                    <input
+                      className="nfh3-subject-name"
+                      value={definition.name}
+                      placeholder="主体名称（角色 / 道具 / 场景…）"
+                      onChange={(event) => updateSubjectDefinition(index, { name: event.target.value })}
+                      aria-label={`实体 ${index + 1} 名称`}
+                    />
+                    <input
+                      className="nfh3-subject-profile"
+                      value={definition.profile || ""}
+                      placeholder="视觉特征描述（可选，留空则用规则生成的描述）"
+                      onChange={(event) => updateSubjectDefinition(index, { profile: event.target.value })}
+                      aria-label={`实体 ${index + 1} 描述`}
+                    />
+                    <Select
+                      className="nfh3-subject-pictures"
+                      popupClassName="nfh3-subject-pictures-popup"
+                      mode="multiple"
+                      size="small"
+                      value={definition.pictures?.length ? definition.pictures : []}
+                      options={[
+                        ...subjectPicturePool.map(({ value, label }) => ({ value, label })),
+                        ...(definition.pictures || []).filter((tag) => !subjectPicturePool.some((option) => option.value === tag))
+                          .map((tag) => ({ value: tag, label: <span className="nfh3-storyboard-picture-option"><span>{`${tag}（已移除的参考）`}</span></span> })),
+                      ]}
+                      labelRender={({ value }) => {
+                        const option = subjectPicturePool.find((item) => item.value === value);
+                        const url = option?.ref.url;
+                        return <span className="nfh3-subject-picture-chip" title={option?.ref.name || String(value)}>
+                          {url ? <img src={url} alt="" /> : null}
+                        </span>;
+                      }}
+                      optionRender={(option) => <>{option.label}</>}
+                      onChange={(value) => updateSubjectDefinition(index, { pictures: (value as string[]).map(String) })}
+                      placeholder="选择视觉来源（可多选）"
+                      aria-label={`实体 ${index + 1} 视觉来源`}
+                      style={{ width: "100%" }}
+                    />
+                    <button type="button" className="nfh3-subject-remove" onClick={() => removeSubjectDefinition(index)} aria-label={`删除实体 ${index + 1}`}>删除</button>
+                  </div>
+                )) : <div className="nfh3-subject-hint">当前 Clip 未解析出实体。可点「重置为规则生成」或「添加实体」。</div>}
+              </div>
+            </details> : null}
             {promptMode === "ref2va" ? <details className="nfh3-storyboard-detail" open>
               <summary>summary</summary>
               <div className="nfh3-storyboard-detail-body">
@@ -1585,7 +1766,7 @@ export function H3PromptSection({
                       autoHeight
                       value={storyboardOpeningDescription}
                       onChange={(description) => updateStoryboardTextField("openingDescription", description)}
-                      references={characterReferences}
+                      references={storyboardEditorReferences}
                       speakers={speakerRoster}
                       dialogue
                       chips

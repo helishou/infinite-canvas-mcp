@@ -415,11 +415,33 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     useEffect(() => { nextUrlRef.current = nextUrl; }, [nextUrl]);
     const playheadRef = useRef(playhead);
     useEffect(() => { playheadRef.current = playhead; }, [playhead]);
+    // 用户主动暂停标记：onPause 置 true（onPlay / playToken 起播时清除）。
+    // 用于在 Clip 边界拦截「暂停竞态」：用户在片段结尾瞬间点暂停时，ended 仍会触发换段，
+    // 把画面切成下一段的首帧——表现为「点暂停后跳到首帧」。该标记让换段机器让位于用户暂停。
+    const userPausedRef = useRef(false);
+    // 断流早退重试标记：弱网/后端不支持 Range 时媒体会在中途触发 ended（currentTime << duration），
+    // 对同一 src 只自动重试一次，避免死循环。
+    const endedRetrySrcRef = useRef<string | null>(null);
     // 当前 active 视频播完：连续播放模式下，若 buffer 槽已预载好下一段，交叉淡入直接续播；否则走 advancePlayback 重载
     useEffect(() => {
         const media = videosRef.current[activeRef.current];
         if (!media) return;
         const handler = () => {
+            // 用户刚点了暂停（paused 且未到末尾）：绝不能换段，保持用户看到的当前帧。
+            // 注意自然播完时 paused 也是 true，必须用 ended 区分。
+            if (media.paused && !media.ended) return;
+            // 断流早退守卫：ended 但 currentTime 明显没播完（媒体流被截断/Range 失败），
+            // 对同一 src 重试一次起播，成功则继续原地播而不是错误地切到下一段首帧。
+            const dur = Number(media.duration || 0);
+            if (media.ended && dur > 0 && media.currentTime < dur - 0.3) {
+                const srcKey = media.currentSrc || media.src || "";
+                if (endedRetrySrcRef.current !== srcKey) {
+                    endedRetrySrcRef.current = srcKey;
+                    try { media.currentTime = Math.max(0, media.currentTime - 0.2); } catch { /* 尚未可 seek */ }
+                    void media.play().catch(() => undefined);
+                    return;
+                }
+            }
             const continuous = ctx.node.metadata?.h3PlaybackAll === true;
             const next = nextUrlRef.current;
             const i = activeRef.current === 0 ? 1 : 0;
@@ -431,7 +453,11 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                 activeRef.current = i;
                 setActive(i);
                 try { buf.currentTime = 0; } catch { /* 尚未可 seek */ }
-                void buf.play().catch(() => undefined);
+                void buf.play().catch(() => {
+                    // 自动播放被浏览器策略拦截（如已取消静音）：回退到常规换段路径，
+                    // 由父组件递增 playRequest 重新起播，避免永远停在首帧。
+                    onEndedRef.current?.();
+                });
             } else {
                 onEndedRef.current?.();
             }
@@ -439,20 +465,6 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         media.addEventListener("ended", handler);
         return () => media.removeEventListener("ended", handler);
     }, [active]);
-    // playToken 由 H3Workbench 在用户真正发起播放时（playAll / 续播换段）显式递增。
-    // 只看 playToken 是否变化，**不**依赖 h3PlayRequest：metadata 里的 h3PlayRequest 残留值、
-    // MCP / 多端同步、StrictMode dev 模式下 useEffect 跑两次都不会触发自动播放。
-    // h3PlayRequest 由本窗口 view 持有，不能用共享 metadata 触发播放。
-    // ⚠️ 必须比较 playToken 的**变化**：effect 在 mount 时也会执行一次，而刚挂载的 video
-    // 必然是 paused=true，只判断 v.paused 会让每次刷新页面 / 节点重新挂载都自动播放。
-    const playedTokenRef = useRef(playToken);
-    useEffect(() => {
-        if (playedTokenRef.current === playToken) return;
-        playedTokenRef.current = playToken;
-        const v = videosRef.current[activeRef.current];
-        if (!v) return;
-        if (v.paused) void v.play().catch(() => undefined);
-    }, [playToken]);
     // Tab / 窗口切到后台时强制 pause 双槽视频：浏览器在隐藏标签里仍会继续跑 video，
     // 切回来时已经播过一段，看上去像"自动播放"。在不可见时主动 pause 一次，切回来由用户/下一次 playRequest 决定是否续播。
     useEffect(() => {
@@ -468,24 +480,11 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         };
     }, []);
     // 拖动刻度 seek / 换段：跳到 active 槽对应本地帧（playhead 为绝对时间，减时间轴偏移得本地帧）
-    useEffect(() => {
-        const v = videosRef.current[activeRef.current];
-        if (!v || !Number.isFinite(playhead)) return;
-        const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
-        if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.1) v.currentTime = local;
-    }, [playhead, timelineOffset]);
-    // 点击播放（playToken 变化）时：先把当前帧跳到 playhead 再播放。
-    // 依赖只放 [playToken]，playhead/timelineOffset 通过闭包拿最新值但不放进依赖——
-    // 播放中 playhead 由 rAF 直接驱动 DOM（不回写 metadata），若也依赖 playhead，
-    // 此 effect 会在每次外部 seek 后执行，把已自然前进的 currentTime 拉回上一帧造成卡顿/回跳。
-    // 拖动刻度/换段导致的 seek 由上方依赖 [playhead] 的 seek effect 处理。
-    useEffect(() => {
-        const v = videosRef.current[activeRef.current];
-        if (!v) return;
-        const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
-        if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.05) v.currentTime = local;
-    }, [playToken]);
-    // 播放期间用 requestAnimationFrame 平滑驱动时间刻度指针（直接改 DOM，不写 metadata）
+    // 以及「点击播放（playToken 变化）时先把当前帧跳到 playhead 再播放」的两个 seek effect，
+    // 与 playToken 起播 effect 一并放在下方 [url]/预载 effect 之后：它们读取 activeRef.current，
+    // 必须等 [url] effect 在同一轮提交里先把 active 槽切好，否则会把「已播完的旧槽」当成 active
+    // 起播（旧槽不可见地在后台重播，可见的新槽停在首帧）——这正是「暂停/换段后画面跳到首帧」的根因之一。
+    // 播放期间由 requestAnimationFrame 平滑驱动时间刻度指针（直接改 DOM，不写 metadata）
     useEffect(() => {
         let raf = 0;
         const tick = () => {
@@ -527,6 +526,39 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         loadedUrlRef.current[i] = nextUrl;
         setSlotSrc((cur) => { const next = [...cur] as [string, string]; next[i] = nextUrl; return next; });
     }, [nextUrl, active]);
+    // playToken 由 H3Workbench 在用户真正发起播放时（playAll / 续播换段）显式递增。
+    // 只看 playToken 是否变化，**不**依赖 h3PlayRequest：metadata 里的 h3PlayRequest 残留值、
+    // MCP / 多端同步、StrictMode dev 模式下 useEffect 跑两次都不会触发自动播放。
+    // h3PlayRequest 由本窗口 view 持有，不能用共享 metadata 触发播放。
+    // ⚠️ 必须比较 playToken 的**变化**：effect 在 mount 时也会执行一次，而刚挂载的 video
+    // 必然是 paused=true，只判断 v.paused 会让每次刷新页面 / 节点重新挂载都自动播放。
+    const playedTokenRef = useRef(playToken);
+    useEffect(() => {
+        if (playedTokenRef.current === playToken) return;
+        playedTokenRef.current = playToken;
+        userPausedRef.current = false;
+        const v = videosRef.current[activeRef.current];
+        if (!v) return;
+        if (v.paused) void v.play().catch(() => undefined);
+    }, [playToken]);
+    // 拖动刻度 seek / 换段：跳到 active 槽对应本地帧（playhead 为绝对时间，减时间轴偏移得本地帧）
+    useEffect(() => {
+        const v = videosRef.current[activeRef.current];
+        if (!v || !Number.isFinite(playhead)) return;
+        const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
+        if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.1) v.currentTime = local;
+    }, [playhead, timelineOffset]);
+    // 点击播放（playToken 变化）时：先把当前帧跳到 playhead 再播放。
+    // 依赖只放 [playToken]，playhead/timelineOffset 通过闭包拿最新值但不放进依赖——
+    // 播放中 playhead 由 rAF 直接驱动 DOM（不回写 metadata），若也依赖 playhead，
+    // 此 effect 会在每次外部 seek 后执行，把已自然前进的 currentTime 拉回上一帧造成卡顿/回跳。
+    // 拖动刻度/换段导致的 seek 由上方依赖 [playhead] 的 seek effect 处理。
+    useEffect(() => {
+        const v = videosRef.current[activeRef.current];
+        if (!v) return;
+        const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
+        if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.05) v.currentTime = local;
+    }, [playToken]);
     // 支持把输出视频/图片拖到画布变成独立节点（复用 storageKey，不重新上传）
     const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
         const payload = JSON.stringify({ url, type: kind, kind, name: name || "H3 输出", storageKey });
@@ -575,9 +607,12 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                     onPause={(event) => {
                         if (slot !== activeRef.current) return;
                         const m = event.currentTarget;
+                        // 自然播完也会触发 pause，不算「用户暂停」；只有未到末尾的 pause 才冻结换段。
+                        if (!m.ended) userPausedRef.current = true;
                         const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity)));
                         ctx.updateMetadata({ playhead: timelineOffset + localTime });
                     }}
+                    onPlay={() => { if (slot === activeRef.current) userPausedRef.current = false; }}
                 />
             ))}
         </div>

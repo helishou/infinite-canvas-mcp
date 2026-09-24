@@ -207,23 +207,13 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const previousSegments = segmentsOf(node);
             const previousIds = previousSegments.map((segment) => String(segment.id || ""));
             const incomingIds = incoming.map((segment) => String(segment.id || ""));
-            // replace_h3_segments 是整数组替换；遗漏参考字段会把已有参考静默清空。
-            // 参考应通过细粒度绑定工具显式修改，重排/计划替换必须完整携带三组字段。
-            const referenceFields = ["refs", "refItems", "referenceBindings"] as const;
-            for (const segment of incoming) {
-                const id = String(segment.id || "");
-                const previous = previousSegments.find((item) => String(item.id || "") === id);
-                if (!previous) continue;
-                const hadReferences = referenceFields.some((field) => previous[field] !== undefined);
-                const carriesReferences = referenceFields.every((field) => Object.prototype.hasOwnProperty.call(segment, field));
-                if (hadReferences && !carriesReferences) {
-                    throw new Error(`replace_h3_segments 拒绝覆盖 ${nodeId}/${id}：必须显式携带 refs、refItems、referenceBindings，避免清空已有参考`);
-                }
-            }
             result.deletedSegmentIds = previousIds.filter((id) => !incomingIds.includes(id));
             result.createdSegmentIds = incomingIds.filter((id) => !previousIds.includes(id));
             const metadata = recordOf(node.metadata);
-            metadata.segments = incoming.map((segment) => ({ ...segment }));
+            const previousById = new Map(previousSegments.map((segment) => [String(segment.id || ""), segment]));
+            // replace_h3_segments 替换段数组的顺序和成员；同 ID 段按字段合并，省略字段继承旧值，
+            // 只有调用方明确传入字段（例如 []）时才覆盖旧值。
+            metadata.segments = incoming.map((segment) => ({ ...(previousById.get(String(segment.id || "")) || {}), ...segment }));
             node.metadata = metadata;
         } else if (operation.type === "delete_h3_segment") {
             const nodeId = String(operation.nodeId || "");

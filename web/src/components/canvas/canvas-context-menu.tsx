@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
-import { BetweenHorizontalStart, GalleryHorizontalEnd, GalleryHorizontal, Group, Plus, Trash2 } from "lucide-react";
+import { BetweenHorizontalStart, ClipboardCopy, GalleryHorizontalEnd, GalleryHorizontal, Group, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -12,9 +12,11 @@ export function CanvasNodeContextMenu({
     menu,
     canCaptureVideoFrame,
     canGroup,
+    canCopyContent,
     onClose,
     onCaptureVideoFrame,
     onGroup,
+    onCopyContent,
 
     onDuplicate,
     onDelete,
@@ -22,10 +24,12 @@ export function CanvasNodeContextMenu({
     menu: ContextMenuState;
     canCaptureVideoFrame: boolean;
     canGroup: boolean;
+    canCopyContent: boolean;
 
     onClose: () => void;
     onCaptureVideoFrame: (position: VideoFramePosition) => void;
     onGroup: () => void;
+    onCopyContent: () => void;
 
     onDuplicate: () => void;
     onDelete: () => void;
@@ -60,6 +64,13 @@ export function CanvasNodeContextMenu({
             {canGroup ? (
                 <>
                     <MenuButton icon={<Group className="size-4" />} label={t("canvas.controls.group")} onClick={onGroup} />
+                    <div className="my-1 border-t" style={{ borderColor: theme.toolbar.border }} />
+                </>
+            ) : null}
+
+            {canCopyContent ? (
+                <>
+                    <MenuButton icon={<ClipboardCopy className="size-4" />} label={t("canvas.controls.copyContent")} onClick={onCopyContent} />
                     <div className="my-1 border-t" style={{ borderColor: theme.toolbar.border }} />
                 </>
             ) : null}

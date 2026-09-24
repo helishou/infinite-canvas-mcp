@@ -150,6 +150,32 @@ test("H3：新增 segment 产 add_h3_segment；删除产 delete_h3_segment", () 
     assert.equal(del?.segmentId, "s2");
 });
 
+test("H3：新增 segment 携带插入锚点，回放后保持 UI 顺序", () => {
+    const base = makeProject([makeH3Node("h3-1", [
+        { id: "s1", prompt: "A" },
+        { id: "s2", prompt: "B" },
+    ])]);
+    const next = makeProject([makeH3Node("h3-1", [
+        { id: "s1", prompt: "A" },
+        { id: "s3", prompt: "新 C" },
+        { id: "s2", prompt: "B" },
+    ])]);
+    const [add] = diffCanvasProject(base, next).filter((op) => op.type === "add_h3_segment");
+    assert.equal(add?.afterSegmentId, "s1");
+    const replayed = applyBackendCanvasDelta(base, [add], 1);
+    const replayedSegments = (replayed.nodes[0].metadata as unknown as { segments?: Array<{ id?: string }> } | undefined)?.segments || [];
+    assert.deepEqual(replayedSegments.map((segment) => segment.id), ["s1", "s3", "s2"]);
+});
+
+test("H3：新增 segment 的回执重放幂等，不重复插入同一个 Clip", () => {
+    const base = makeProject([makeH3Node("h3-1", [{ id: "s1", prompt: "A" }])]);
+    const operation = { type: "add_h3_segment", nodeId: "h3-1", afterSegmentId: "s1", segment: { id: "s2", prompt: "B" } };
+    const once = applyBackendCanvasDelta(base, [operation], 1);
+    const twice = applyBackendCanvasDelta(once, [operation], 2);
+    const segments = (twice.nodes[0].metadata as unknown as { segments?: Array<{ id?: string }> } | undefined)?.segments || [];
+    assert.deepEqual(segments.map((segment) => segment.id), ["s1", "s2"]);
+});
+
 test("H3：本地不能删除 Backend 所有的运行字段", () => {
     const base = makeProject([makeH3Node("h3-1", [
         { id: "s1", prompt: "A", errorDetails: "旧错误" },

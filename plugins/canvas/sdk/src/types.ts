@@ -305,10 +305,8 @@ export type CanvasTextEditorProps = {
     autoFocus?: boolean;
     /** 启用台词（<d>…</d>）内联高亮与右键「转为台词/取消台词」。 */
     dialogue?: boolean;
-    /** 为每个非空实际换行添加主题着色与可点击滚动刻度。 */
+    /** 为每个非空实际换行添加主题着色，并为编辑器提供可拖拽的细滚动条。 */
     lineMap?: boolean;
-    /** 仅为匹配这些完整行文本的行显示跳转刻度；省略时显示所有非空行。 */
-    lineMapTargets?: string[];
 };
 
 export type CanvasNodeContext = {
