@@ -1238,6 +1238,15 @@ function InfiniteCanvasPage() {
         setContextMenu,
     });
 
+    const openAssetPicker = useCallback(
+        (options?: { kind?: "image" }) =>
+            new Promise<{ kind: "image"; dataUrl: string; title: string; storageKey?: string } | null>((resolve) => {
+                assetPickerResolverRef.current = resolve;
+                setAssetPickerAllowedKinds(options?.kind ? [options.kind] : undefined);
+                setAssetPickerOpen(true);
+            }),
+        [],
+    );
     const { pluginHost, renderPluginPanel, buildNodeToolbarItems } = usePluginHost({
         projectId,
         effectiveConfig,
@@ -1249,12 +1258,7 @@ function InfiniteCanvasPage() {
         viewportRef,
         setNodes,
         setDialogNodeId,
-        openAssetPicker: (options) =>
-            new Promise((resolve) => {
-                assetPickerResolverRef.current = resolve;
-                setAssetPickerAllowedKinds(options?.kind ? [options.kind] : undefined);
-                setAssetPickerOpen(true);
-            }),
+        openAssetPicker,
         applyAgentOps,
     });
     const pluginToolbarItems = useMemo(() => (toolbarNode ? buildNodeToolbarItems(toolbarNode) : undefined), [buildNodeToolbarItems, toolbarEditing, toolbarNode]);
