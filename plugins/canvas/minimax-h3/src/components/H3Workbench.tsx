@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "@infinite-canvas/plugin-sdk";
+import { useEffect, useRef, useState, useCallback, useMemo } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
 import { message } from "antd";
 import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
@@ -7,7 +7,7 @@ import { useH3LocalView } from "../hooks/useH3LocalView";
 import { applyCharacterGroupEdits, refsForSegment, removeCharacterGroup, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
-import { syncReferenceCatalog } from "../services/h3-reference-sync";
+import { referenceCatalogSignature, syncReferenceCatalog } from "../services/h3-reference-sync";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { h3ThemeVars } from "../h3-theme";
 import { assignStoryboardShotRef, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
@@ -167,9 +167,10 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             syncReferences(new Set(event.nodeIds.filter((id): id is string => typeof id === "string")));
         });
     }, [ctx.getNode, ctx.node.id, ctx.node.metadata, ctx.on, ctx.projectId, ctx.updateMetadata]);
+    const catalogSignature = useMemo(() => referenceCatalogSignature(segments), [segments]);
     useEffect(() => {
         void syncReferenceCatalog(segments, catalogSyncedRef.current, ctx.references.upsert, ctx.references.upsertMany);
-    }, [ctx.references, segments]);
+    }, [catalogSignature, ctx.references]);
     useEffect(() => {
         let changed = false;
         const next = segments.map((segment) => {

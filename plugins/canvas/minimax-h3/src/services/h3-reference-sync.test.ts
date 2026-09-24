@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { CanvasReferenceAsset } from "@infinite-canvas/plugin-sdk";
 import type { H3ReferenceBinding, H3Segment } from "../types";
-import { syncReferenceCatalog } from "./h3-reference-sync";
+import { referenceCatalogSignature, syncReferenceCatalog } from "./h3-reference-sync";
 
 const binding: H3ReferenceBinding = { id: "binding-shared", assetId: "asset-shared", label: "婚书落雪", mediaType: "image", role: "storyboard", tags: [], enabled: true, usage: "reference", storageKey: "image:shared" };
 const clips: H3Segment[] = [
@@ -72,4 +72,34 @@ test("初始化同步优先合并为一次批量写入", async () => {
     await syncReferenceCatalog(clips, cache, async (asset) => { itemCalls++; return asset as CanvasReferenceAsset; }, async (assets) => { batchCalls++; return assets as CanvasReferenceAsset[]; });
     assert.equal(batchCalls, 1);
     assert.equal(itemCalls, 0);
+});
+
+test("catalog signature 忽略对象换引用和 enabled，但包含 Clip/binding 身份、顺序与提交字段", () => {
+    const base = structuredClone(clips);
+    const sameContent = structuredClone(clips);
+    sameContent[0].referenceBindings![0].enabled = false;
+    assert.equal(referenceCatalogSignature(base), referenceCatalogSignature(sameContent));
+
+    const changedField = structuredClone(clips);
+    changedField[0].referenceBindings![0].label = "新名称";
+    assert.notEqual(referenceCatalogSignature(base), referenceCatalogSignature(changedField));
+
+    const copiedClip = structuredClone(clips);
+    copiedClip[1].id = "clip-1-copy";
+    assert.notEqual(referenceCatalogSignature(base), referenceCatalogSignature(copiedClip));
+
+    const replacedBinding = structuredClone(clips);
+    replacedBinding[0].referenceBindings![0].id = "binding-replacement";
+    assert.notEqual(referenceCatalogSignature(base), referenceCatalogSignature(replacedBinding));
+
+    const reordered = structuredClone(clips);
+    [reordered[0], reordered[1]] = [reordered[1]!, reordered[0]!];
+    assert.notEqual(referenceCatalogSignature(base), referenceCatalogSignature(reordered));
+
+    const duplicateAssetRelativeOrder = [
+        { id: "clip-a", referenceBindings: [{ ...binding, id: "binding-a", label: "A" }] },
+        { id: "clip-b", referenceBindings: [{ ...binding, id: "binding-b", label: "B" }] },
+    ] satisfies H3Segment[];
+    const duplicateAssetReordered = [duplicateAssetRelativeOrder[1]!, duplicateAssetRelativeOrder[0]!];
+    assert.notEqual(referenceCatalogSignature(duplicateAssetRelativeOrder), referenceCatalogSignature(duplicateAssetReordered));
 });
