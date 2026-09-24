@@ -43,6 +43,28 @@ test("StrictMode 重跑及在途重绘不会重发，失败只释放对应绑定
     assert.equal(calls, 3);
 });
 
+test("没有待同步绑定时不发送空批量请求", async () => {
+    const cache = new Map<string, string>();
+    let batchCalls = 0;
+    let itemCalls = 0;
+
+    await syncReferenceCatalog(
+        [],
+        cache,
+        async (asset) => {
+            itemCalls++;
+            return asset as CanvasReferenceAsset;
+        },
+        async () => {
+            batchCalls++;
+            return [];
+        },
+    );
+
+    assert.equal(batchCalls, 0);
+    assert.equal(itemCalls, 0);
+});
+
 test("初始化同步优先合并为一次批量写入", async () => {
     const cache = new Map<string, string>();
     let batchCalls = 0;

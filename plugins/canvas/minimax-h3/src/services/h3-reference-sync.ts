@@ -12,6 +12,7 @@ export async function syncReferenceCatalog(segments: H3Segment[], synced: Map<st
         synced.set(key, signature);
         return [{ key, signature, asset }];
     }));
+    if (!pending.length) return;
     try {
         if (upsertMany) await upsertMany(pending.map(({ asset }) => asset));
         else await Promise.all(pending.map(async ({ key, signature, asset }) => {
