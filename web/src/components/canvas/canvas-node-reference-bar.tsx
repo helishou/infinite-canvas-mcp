@@ -107,27 +107,39 @@ function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sour
     if (sourceIsTextGeneration) return <CharacterTextReferenceItem node={node} onRemove={onRemove} />;
     // 选 1 张图 → 占 1 格方形；选 2 张图 → 横向矩形占 2 格；多张时角标显示总数。
     const wide = selectedImages.length > 1;
+    const name = node.metadata?.characterName || node.title || "角色";
+    const hoverPreview = selectedImages.length ? (
+        <span className="flex gap-2">
+            {selectedImages.map((image, index) => {
+                const url = urls[index] || previewUrlFor(image.storageKey);
+                return url ? <img key={index} src={url} alt={image.outfit || image.name || ""} className="max-h-52 w-36 rounded-lg object-cover" draggable={false} /> : null;
+            })}
+        </span>
+    ) : (
+        <span className="block max-h-52 w-72 overflow-auto whitespace-pre-wrap text-sm">{name}</span>
+    );
     return (
-        <div
-            className={`group relative ${wide ? "h-12 w-[104px]" : "size-12"} shrink-0 overflow-hidden rounded-xl border transition hover:opacity-85`}
-            style={{ borderColor: theme.node.activeStroke || theme.toolbar.border, background: theme.toolbar.activeBg }}
-            title={t("canvas.references.empty")}
-        >
-            <span className="flex size-full">
-                {selectedImages.map((image, index) => {
-                    const url = urls[index] || previewUrlFor(image.storageKey);
-                    return (
-                        <span key={index} className="relative min-w-0 flex-1 overflow-hidden" style={{ background: theme.node.panel }}>
-                            {url ? <img src={url} alt={image.outfit || image.name || ""} className="absolute inset-0 size-full object-cover" draggable={false} /> : <span className="grid size-full place-items-center text-[10px]" style={{ color: theme.node.muted }}>{selectedImageCount} 图</span>}
-                        </span>
-                    );
-                })}
-                {!selectedImages.length ? <span className="grid size-full place-items-center px-1 text-center leading-tight"><span className="min-w-0 truncate text-[10px] font-medium">{node.metadata?.characterName || node.title || "角色"}</span></span> : null}
-            </span>
-            <span className="pointer-events-none absolute bottom-0 left-0 max-w-full truncate rounded-tr-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{node.metadata?.characterName || node.title || "角色"}{voiceIncluded ? " · 声线" : ""}</span>
-            <span className="pointer-events-none absolute right-0 top-0 rounded-bl-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{selectedImageCount}图</span>
-            <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
-        </div>
+        <Popover placement="topLeft" mouseEnterDelay={0.15} content={hoverPreview}>
+            <div
+                className={`group relative ${wide ? "h-12 w-[104px]" : "size-12"} shrink-0 overflow-hidden rounded-xl border transition hover:opacity-85`}
+                style={{ borderColor: theme.node.activeStroke || theme.toolbar.border, background: theme.toolbar.activeBg }}
+            >
+                <span className="flex size-full">
+                    {selectedImages.map((image, index) => {
+                        const url = urls[index] || previewUrlFor(image.storageKey);
+                        return (
+                            <span key={index} className="relative min-w-0 flex-1 overflow-hidden" style={{ background: theme.node.panel }}>
+                                {url ? <img src={url} alt={image.outfit || image.name || ""} className="absolute inset-0 size-full object-cover" draggable={false} /> : <span className="grid size-full place-items-center text-[10px]" style={{ color: theme.node.muted }}>{selectedImageCount} 图</span>}
+                            </span>
+                        );
+                    })}
+                    {!selectedImages.length ? <span className="grid size-full place-items-center px-1 text-center leading-tight"><span className="min-w-0 truncate text-[10px] font-medium">{name}</span></span> : null}
+                </span>
+                <span className="pointer-events-none absolute bottom-0 left-0 max-w-full truncate rounded-tr-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{name}{voiceIncluded ? " · 声线" : ""}</span>
+                <span className="pointer-events-none absolute right-0 top-0 rounded-bl-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{selectedImageCount}图</span>
+                <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
+            </div>
+        </Popover>
     );
 }
 

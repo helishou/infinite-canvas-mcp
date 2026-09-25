@@ -162,13 +162,16 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         const merged = {
             ...binding,
             ...(asset || {}),
+            ...sourceMediaOf(project, { ...binding, sourceNodeId: binding.sourceNodeId || asset?.sourceNodeId }),
             id: binding.id,
             assetId: binding.assetId,
             enabled: binding.enabled,
             usage: binding.usage,
             role: binding.role,
-            tags: binding.tags.length ? binding.tags : asset?.tags || [],
-            subjectId: binding.subjectId || asset?.subjectId,
+            label: binding.label,
+            tags: binding.tags,
+            subjectId: binding.subjectId,
+            sourceNodeId: binding.sourceNodeId || asset?.sourceNodeId,
         } as ReferenceBinding & ProjectReferenceAsset;
         const mediaType = inferReferenceMediaType(merged);
         if (!merged.storageKey && !merged.url) {
@@ -201,13 +204,35 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
             if (!bySubjectId.has(id)) registerSubject(reference, [id]);
         });
     });
-    validatePromptReferences(semanticPrompt, references, new Set(bySubjectId.values()).size, issues);
+    // Subject is a semantic prompt token, not a media-slot reference. It may
+    // describe a character, prop, scene, object, or an entity defined elsewhere;
+    // never validate it against character bindings or enabled media count.
+    validatePromptReferences(semanticPrompt, references, undefined, issues);
     const compiledPrompt = semanticPrompt
         .replace(/<(subject|picture|video|audio)\s+(\d+)>/giu, (_marker, kind: string, ordinal: string) => `<${kind[0].toUpperCase()}${kind.slice(1).toLowerCase()} ${ordinal}>`)
         .replace(/(<Subject\s+\d+>)(?=[\p{L}\p{N}(])/gu, "$1 ");
     const promptWithBoundSubjects = bindLiteralSubjectsToPictures(compiledPrompt, references, bySubjectId);
     validateLimits(segment, semanticPrompt, references, issues);
     return { semanticPrompt, compiledPrompt: promptWithBoundSubjects, bindings, references, issues, migratedLegacyRefs };
+}
+
+function sourceMediaOf(project: Record<string, unknown>, binding: ReferenceBinding) {
+    if (!binding.sourceNodeId) return {};
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+    const node = nodes.find((item) => String(item.id || "") === binding.sourceNodeId);
+    if (!node) return {};
+    const metadata = recordOf(node.metadata);
+    let media = metadata;
+    if (node.type === "scene") media = recordOf(metadata.sceneImage);
+    else if (node.type === "config" && metadata.smart === true && (metadata.generationMode || "image") === "image") {
+        const images = Array.isArray(metadata.images) ? metadata.images.map(recordOf) : [];
+        media = images.find((item) => item.id === metadata.primaryImageId && (item.content || item.storageKey))
+            || images.find((item) => item.content || item.storageKey) || metadata;
+    } else if (node.type === "character") return {};
+    const storageKey = String(media.storageKey || recordOf(media.assetRef).storageKey || "");
+    const url = String(media.content || media.url || media.localUrl || media.sourceUrl || "");
+    if (!storageKey && !url) return {};
+    return { ...(storageKey ? { storageKey } : {}), ...(url ? { url } : {}), ...(media.mimeType ? { mimeType: String(media.mimeType) } : {}) };
 }
 
 function bindLiteralSubjectsToPictures(
@@ -269,7 +294,7 @@ export function assertReferenceCompilation(compilation: ReferenceCompilation) {
     if (errors.length) throw new Error(errors.map((issue) => issue.message).join("；"));
 }
 
-function validatePromptReferences(prompt: string, references: CompiledReference[], subjectCount: number, issues: ReferenceIssue[]) {
+function validatePromptReferences(prompt: string, references: CompiledReference[], subjectCount: number | undefined, issues: ReferenceIssue[]) {
     const counts = {
         subject: subjectCount,
         picture: references.filter((reference) => reference.mediaType === "image").length,
@@ -280,6 +305,7 @@ function validatePromptReferences(prompt: string, references: CompiledReference[
     for (const match of prompt.matchAll(/<(Subject|Picture|Video|Audio)\s+(\d+)>/giu)) {
         const kind = match[1].toLowerCase() as keyof typeof counts;
         const ordinal = Number(match[2]);
+        if (kind === "subject") continue;
         if (ordinal > 0 && ordinal <= counts[kind]) continue;
         const key = `${kind}:${ordinal}`;
         if (reported.has(key)) continue;

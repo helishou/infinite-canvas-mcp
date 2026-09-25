@@ -94,6 +94,13 @@ Clip ID / 对应镜头 ID（合并时列全部镜头、依据、组内顺序和�
 - `canvas_connect_nodes` 使用 `connections: [{ fromNodeId, toNodeId, role, order }]`；`canvas_update_node` 使用 `id`。
 - 保存真实 taskId，以有界等待或短轮询查询。异常时查询原任务，不重复提交以避免重复扣费。
 
+## 返修问题与尝试计数
+
+- 返修细节写入项目制作目录的 `rework-log.md`；`progress.md` 只保留当前阶段摘要和日志索引，不展开每个问题的原因、尝试次数或 taskId/storageKey 明细。
+- 每个问题按稳定 `segmentId` 与 `sourceShotId` 建条目，记录失败现象、对照的锚图/分镜版本、根因证据、每次输入改动、taskId、storageKey、独立 QC 结论和下一步。没有核实的原因写“待核对”，不要猜。
+- H3 返修次数按一次 `canvas-h3-run` 父任务计数；其 `comfyui:minimax-h3` 子任务只作为同一尝试的执行证据，不再加一次。失败提交、取消任务、成功生成、视频质检结果分别记录，不能把 task `succeeded` 当作 QC `PASS`。
+- 返修后保留旧 taskId 与 storageKey，并把新旧输入版本和输出对应起来；不得覆盖或删除历史结果来伪造修复链。若同一问题连续失败两次，停止盲目重试，回查 storyboard、关键帧硬锚、参考绑定和提示词。
+
 ## 生成后回读与 Clip 验收
 
 确认任务成功、真实视频媒体存在、时长与尺寸正确、结果写回目标节点、generation log 中参考图片/视频真实传入、节点布局未改变。记录 Clip 的模式、prompt 版本、输入、taskId、storageKey、首尾状态和声音要求。

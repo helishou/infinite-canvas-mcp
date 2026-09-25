@@ -31,7 +31,20 @@ export function splitH3MetadataPatch(patch: Record<string, unknown>) {
 // 保持现有子组件接口，但明确将视图字段从共享文档中剥离。
 export function useH3LocalView(ctx: CanvasNodeContext): CanvasNodeContext {
     const view = ctx.view;
-    const local = getReact().useSyncExternalStore(view.subscribe, view.getSnapshot);
+    const React = getReact();
+    const selected = React.useRef<{ view: typeof view; raw: Record<string, unknown>; snapshot: Record<string, unknown> } | null>(null);
+    const getSnapshot = React.useCallback(() => {
+        const raw = view.getSnapshot();
+        const previous = selected.current;
+        if (previous?.view === view && Object.keys(raw).every((key) =>
+            key === "timelineScrollLeft" || key === "h3Scrubbing" || Object.is(previous.raw[key], raw[key]))) return previous.snapshot;
+        const snapshot = { ...raw };
+        selected.current = { view, raw, snapshot };
+        return snapshot;
+    }, [view]);
+    const local = React.useSyncExternalStore(view.subscribe, getSnapshot, getSnapshot);
+    const liveView = view.getSnapshot();
+    const visibleLocal = { ...local, timelineScrollLeft: liveView.timelineScrollLeft, h3Scrubbing: liveView.h3Scrubbing };
     // 取值优先级：本窗口视图状态 > 节点共享 metadata > 新建节点写入首个 segment 的布局快照 > 保存的默认布局 > 内置默认值。
     // 中间几层不能省：
     // ① 节点 metadata：新建 H3 节点会把「设为默认参数」保存的布局快照抄进节点；
@@ -50,7 +63,7 @@ export function useH3LocalView(ctx: CanvasNodeContext): CanvasNodeContext {
     };
     return {
         ...ctx,
-        node: { ...ctx.node, metadata: metadata(ctx.node.metadata || {}, local) },
+        node: { ...ctx.node, metadata: metadata(ctx.node.metadata || {}, visibleLocal) },
         getNode: (id) => {
             const node = ctx.getNode(id);
             return node && id === ctx.node.id ? { ...node, metadata: metadata(node.metadata || {}, view.getSnapshot()) } : node;

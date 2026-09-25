@@ -38,6 +38,7 @@ import type {
 import { BackendEventBus, type CanvasEventSource } from "./events.js";
 import type { CanvasOperation } from "./canvas/project-ops.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
+import { syncCharacterAssetsForProject } from "./canvas/character-asset-on-open.js";
 import {
   detectLineInset,
   type DetectLineInsetParams,
@@ -485,6 +486,14 @@ export function startServer(
     if (!project)
       return void res.status(404).json({ ok: false, error: "画布不存在" });
     res.json({ ok: true, project });
+  });
+  app.post("/canvas/projects/:id/sync-character-assets", (req, res) => {
+    try {
+      res.json({ ok: true, ...syncCharacterAssetsForProject(stores, req.params.id) });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      res.status(detail.startsWith("画布不存在:") ? 404 : 400).json({ ok: false, error: detail });
+    }
   });
   app.get("/canvas/projects/:id/drama", (req, res) => {
     if (!db.getCanvasProject(req.params.id))
@@ -1598,8 +1607,8 @@ export function startServer(
   app.post(`${CANVAS_TASKS_PATH}/:id/h3-confirmation`, (req, res) => {
     if (!deps.resolveH3Confirmation) return void res.status(501).json({ ok: false, error: "H3 confirmation unavailable" });
     const body = req.body as Partial<H3ConfirmationAction> | undefined;
-    if (!body || !["confirm", "keep_first_pass", "discard"].includes(String(body.action)) || !Array.isArray(body.segmentIds) || body.segmentIds.length !== 1 || typeof body.segmentIds[0] !== "string" || typeof body.firstPassFingerprint !== "string")
-      return void res.status(400).json({ ok: false, error: "H3 确认需要 action、单个 segmentId 及 firstPassFingerprint" });
+    if (!body || !["confirm", "keep_first_pass", "discard"].includes(String(body.action)) || typeof body.segmentId !== "string" || !Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0 || (body.postpassParams !== undefined && (!body.postpassParams || typeof body.postpassParams !== "object" || Array.isArray(body.postpassParams))))
+      return void res.status(400).json({ ok: false, error: "H3 确认需要 action、segmentId 和 expectedRevision" });
     try {
       const task = deps.resolveH3Confirmation(String(req.params.id), body as H3ConfirmationAction);
       res.json({ ok: true, task });

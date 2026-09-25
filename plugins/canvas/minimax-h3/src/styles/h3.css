@@ -39,6 +39,8 @@
 .minimax-player-image,.minimax-player-image img { width:100%; height:100%; object-fit:contain; }
 .minimax-player-stage video,.minimax-player-stage img { width:100%; height:100%; object-fit:contain; background:#0b0c0e; }
 .minimax-player-empty { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:26px; font-weight:850; }
+/* 预览左下角分辨率角标：图片/视频加载后实时显示真实尺寸（见 H3PreviewPlayer mediaResolution） */
+.minimax-player-resolution { position:absolute; left:8px; bottom:8px; z-index:6; padding:2px 8px; border-radius:5px; background:rgba(15,23,42,.82); color:#e2e8f0; font-size:12px; line-height:1.4; letter-spacing:.02em; pointer-events:none; font-variant-numeric:tabular-nums; box-shadow:0 1px 6px rgba(0,0,0,.4); }
 .minimax-edit-timeline { position:relative; min-width:0; min-height:140px; display:grid; grid-template-columns:36px minmax(0,1fr) 54px; grid-template-rows:36px minmax(0,1fr) 96px 26px; border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
 
 /* 左侧标签列：与右侧 Video / Refs 行精确对齐，第一行占满剩余高度，第二行固定 96px */
@@ -178,6 +180,11 @@
 .nfh3-storyboard-modal .minimax-collaborative-prompt .cm-line { font-size:15px !important; line-height:1.45 !important; }
 .nfh3-storyboard-toolbar { display:flex; flex:0 0 auto; align-items:center; justify-content:space-between; gap:8px; padding-bottom:10px; border-bottom:1px solid var(--h3-border); color:var(--h3-muted); font-size:14px; }
 .nfh3-storyboard-composite-toggle { display:inline-flex; flex:0 0 auto; align-items:center; gap:7px; color:var(--h3-text); }
+/* 顶栏空间充足：使用明确的 44×24 尺寸，避免被 Ant Design 的 small 固定宽度覆盖。 */
+.nfh3-storyboard-composite-toggle .ant-switch,
+.nfh3-storyboard-composite-toggle .ant-switch.ant-switch-sm { width:44px; min-width:44px; height:24px; padding:2px; }
+.nfh3-storyboard-composite-toggle .ant-switch .ant-switch-handle { width:20px; height:20px; inset-block-start:2px; }
+.nfh3-storyboard-composite-toggle .ant-switch.ant-switch-checked .ant-switch-handle { inset-inline-start:22px; }
 .nfh3-storyboard-composite-hint { color:var(--h3-muted); font-size:12px; }
 .nfh3-storyboard-toolbar button,.nfh3-storyboard-item-head button,.nfh3-storyboard-error button { height:30px; padding:0 10px; border:1px solid var(--h3-border); border-radius:4px; background:transparent; color:var(--h3-text); font-size:14px; cursor:pointer; }
 .nfh3-storyboard-toolbar button:hover,.nfh3-storyboard-item-head button:hover,.nfh3-storyboard-error button:hover { border-color:var(--h3-active); color:var(--h3-active-text); background:var(--h3-hover); }
@@ -191,31 +198,35 @@
 .nfh3-storyboard-detail > summary:hover { color:var(--h3-active-text); background:color-mix(in srgb,var(--h3-hover) 55%,transparent); }
 .nfh3-storyboard-detail > summary button { margin-left:auto; }
 .nfh3-storyboard-detail-body { display:flex; flex-direction:column; gap:10px; padding:0 14px 14px; }
-/* 实体定义面板：一行一实体，编号即 <Subject N> */
+/* 实体定义面板：编号即 <Subject N>，每个实体独立成可扫描的字段卡片。 */
 .nfh3-subject-definitions > summary { font-size:15px; }
 .nfh3-subject-actions { display:inline-flex; gap:8px; margin-left:auto; }
 .nfh3-subject-actions button { padding:3px 10px; font-size:12px; border:1px solid var(--h3-border); border-radius:5px; background:var(--h3-panel); color:var(--h3-text); cursor:pointer; }
 .nfh3-subject-actions button:hover { border-color:var(--h3-active-text); color:var(--h3-active-text); }
 .nfh3-subject-hint { color:var(--h3-muted); font-size:12px; line-height:1.5; }
-.nfh3-subject-row { display:grid; grid-template-columns:82px minmax(120px,1fr) minmax(160px,2fr) auto auto; align-items:center; gap:8px; padding:6px 8px; border:1px solid var(--h3-border); border-radius:6px; background:color-mix(in srgb,var(--h3-fill) 35%,transparent); }
-.nfh3-subject-ordinal { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:var(--h3-active-text); white-space:nowrap; }
-.nfh3-subject-row input { width:100%; padding:4px 7px; border:1px solid var(--h3-border); border-radius:5px; outline:none; background:var(--h3-panel); color:var(--h3-text); font-size:13px; }
+.nfh3-subject-row { display:flex; flex-direction:column; gap:10px; padding:12px; border:1px solid var(--h3-border); border-radius:8px; background:color-mix(in srgb,var(--h3-fill) 35%,transparent); }
+.nfh3-subject-primary { display:grid; grid-template-columns:82px minmax(0,1fr) auto; align-items:end; gap:10px; }
+.nfh3-subject-ordinal { align-self:center; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:var(--h3-active-text); white-space:nowrap; }
+.nfh3-subject-field { display:flex; min-width:0; flex-direction:column; gap:5px; color:var(--h3-muted); font-size:12px; font-weight:700; }
+.nfh3-subject-field > span { display:flex; align-items:center; gap:6px; }
+.nfh3-subject-field em { color:var(--h3-muted); font-size:11px; font-style:normal; font-weight:500; opacity:.72; }
+.nfh3-subject-row input { width:100%; height:34px; padding:6px 9px; border:1px solid var(--h3-border); border-radius:5px; outline:none; background:var(--h3-panel); color:var(--h3-text); font-size:13px; }
 .nfh3-subject-row input:focus { border-color:var(--h3-active-text); }
-.nfh3-subject-pictures { width:100%; min-width:0; font-size:12px; }
-/* 视觉来源多选：选中项只显示很小的缩略图，不占高度 */
-.nfh3-subject-pictures .ant-select-selector { min-height:26px !important; padding:0 4px !important; background:var(--h3-panel) !important; border-color:var(--h3-border) !important; }
-.nfh3-subject-pictures .ant-select-selection-overflow { gap:2px; }
-.nfh3-subject-pictures .ant-select-selection-item { height:20px !important; margin:2px 2px 2px 0 !important; padding:0 2px !important; border-radius:3px !important; background:color-mix(in srgb,var(--h3-fill) 70%,transparent) !important; }
-.nfh3-subject-pictures .ant-select-selection-item-remove { font-size:10px; }
+.nfh3-subject-pictures { width:100%; min-width:0; font-size:13px; }
+/* 视觉来源多选：保留缩略图识别，同时提高点击与选中态尺寸。 */
+.nfh3-subject-pictures .ant-select-selector { min-height:34px !important; padding:3px 6px !important; background:var(--h3-panel) !important; border-color:var(--h3-border) !important; }
+.nfh3-subject-pictures .ant-select-selection-overflow { gap:4px; align-items:center; }
+.nfh3-subject-pictures .ant-select-selection-item { height:26px !important; margin:0 !important; padding:0 4px !important; border-radius:4px !important; background:color-mix(in srgb,var(--h3-fill) 70%,transparent) !important; }
+.nfh3-subject-pictures .ant-select-selection-item-remove { font-size:12px; }
 .nfh3-subject-picture-chip { display:inline-flex; align-items:center; }
-.nfh3-subject-picture-chip img { width:26px; height:16px; object-fit:cover; border-radius:2px; display:block; }
-/* 下拉选项里的缩略图也保持小尺寸（下拉挂在 portal 上，靠 popupClassName 定位） */
-.nfh3-subject-pictures-popup .nfh3-storyboard-picture-option img { width:26px; height:16px; }
-.nfh3-subject-pictures-popup .nfh3-storyboard-picture-option { gap:6px; font-size:12px; }
-.nfh3-subject-pictures-popup .ant-select-item { min-height:24px; padding:2px 8px; }
-.nfh3-subject-remove { padding:3px 8px; font-size:12px; border:1px solid var(--h3-border); border-radius:5px; background:transparent; color:var(--h3-muted); cursor:pointer; }
+.nfh3-subject-picture-chip img { width:34px; height:22px; object-fit:cover; border-radius:3px; display:block; }
+/* 下拉候选项使用更易扫描的缩略图尺寸。 */
+.nfh3-subject-pictures-popup .nfh3-storyboard-picture-option img { width:48px; height:30px; }
+.nfh3-subject-pictures-popup .nfh3-storyboard-picture-option { gap:8px; font-size:12px; }
+.nfh3-subject-pictures-popup .ant-select-item { min-height:34px; padding:3px 8px; }
+.nfh3-subject-remove { align-self:end; height:34px; padding:0 12px; font-size:12px; border:1px solid var(--h3-border); border-radius:5px; background:transparent; color:var(--h3-muted); cursor:pointer; }
 .nfh3-subject-remove:hover { border-color:#d9534f; color:#d9534f; }
-@media (max-width:720px) { .nfh3-subject-row { grid-template-columns:70px 1fr; grid-auto-rows:min-content; } }
+@media (max-width:720px) { .nfh3-subject-primary { grid-template-columns:1fr auto; } .nfh3-subject-ordinal { grid-column:1/-1; } }
 .nfh3-storyboard-subdetail { border:0; border-top:1px solid var(--h3-border); border-radius:0; background:transparent; }
 .nfh3-storyboard-subdetail > summary { min-height:42px; padding:8px 0; font-size:14px; }
 .nfh3-storyboard-list { display:flex; flex:0 0 auto; flex-direction:column; gap:12px; overflow:visible; padding:1px 0 4px; }
@@ -232,8 +243,11 @@
 .nfh3-storyboard-item-head button { height:28px; color:var(--h3-muted); }
 .nfh3-storyboard-picture-option { display:inline-flex; align-items:center; gap:7px; }
 .nfh3-storyboard-picture-option img { width:40px; height:25px; object-fit:cover; border-radius:3px; }
-.nfh3-storyboard-picture-binding { display:flex; flex:0 0 auto; align-items:center; flex-wrap:wrap; gap:8px; color:var(--h3-muted); font-size:14px; font-weight:700; }
-.nfh3-storyboard-field-label { display:block; }
+.nfh3-storyboard-picture-binding { display:grid; flex:0 0 auto; grid-template-columns:78px minmax(300px,440px) minmax(190px,240px); align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--h3-border); border-radius:7px; background:color-mix(in srgb,var(--h3-panel) 65%,transparent); color:var(--h3-muted); font-size:13px; font-weight:700; }
+.nfh3-storyboard-picture-binding > label { line-height:1.35; }
+.nfh3-storyboard-picture-binding > .ant-select { width:100%; min-width:0; }
+.nfh3-storyboard-picture-binding > .ant-select:nth-of-type(2) { grid-column:2; }
+.nfh3-storyboard-field-label { display:block; margin-top:2px; }
 .nfh3-storyboard-field-label,.nfh3-storyboard-transition label { color:var(--h3-muted); font-size:14px; font-weight:700; }
 .nfh3-speaker-option { display:inline-flex; align-items:center; gap:7px; }
 .nfh3-speaker-option img { width:26px; height:26px; object-fit:cover; border-radius:50%; }
@@ -465,7 +479,7 @@
 
 /* NanFeng V10 参数区：以可折叠工作区代替旧版平铺参数墙。 */
 .nfh3-settings { min-width:0; min-height:0; overflow:auto; display:flex; flex-direction:column; gap:12px; padding:4px 2px 16px; scrollbar-width:thin; }
-.nfh3-section { overflow:hidden; border:1px solid #34404c; border-radius:8px; background:#20262d; }
+.nfh3-section { flex:none; overflow:hidden; border:1px solid #34404c; border-radius:8px; background:#20262d; }
 .nfh3-section-head { width:100%; min-height:68px; display:grid; grid-template-columns:36px auto minmax(0,1fr); align-items:center; gap:10px; padding:0 9px; border:0; background:linear-gradient(180deg,#29323b,#232a31); color:#e8edf5; text-align:left; cursor:pointer; }
 .nfh3-section-head:hover { background:#303b46; }
 .nfh3-chevron { width:16px; height:16px; display:block; justify-self:center; border-right:2px solid #67d5ff; border-bottom:2px solid #67d5ff; transform:rotate(-45deg); transform-origin:center; }
@@ -478,21 +492,22 @@
 .nfh3-preset-actions button:hover:not(:disabled) { border-color:#22d3ee; color:#f8fafc; }
 .nfh3-preset-actions button:disabled { cursor:not-allowed; opacity:.45; }
 @keyframes nfh3-section-in { from { opacity:0; transform:translateY(-3px); } to { opacity:1; transform:none; } }
-.nfh3-control-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
-.nfh3-control { min-width:0; min-height:68px; display:grid; grid-template-columns:minmax(108px,auto) minmax(0,1fr); align-items:center; gap:12px; padding:8px 12px; border:1px solid #34404c; border-radius:6px; background:#252c33; color:#9eafc1; font-size:22px; font-weight:800; }
+.nfh3-control-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.nfh3-control { min-width:0; min-height:54px; display:grid; grid-template-columns:minmax(58px,92px) minmax(0,1fr); align-items:center; gap:8px; padding:6px 9px; border:1px solid #34404c; border-radius:6px; background:#252c33; color:#9eafc1; font-size:18px; font-weight:800; }
+.nfh3-control > span { min-width:0; line-height:1.2; overflow-wrap:anywhere; }
 .nfh3-control.wide { grid-column:1/-1; }
-.nfh3-control input { min-width:0; width:100%; height:48px; border:0; outline:0; background:transparent; color:#f3f7fb; font-size:22px; }
+.nfh3-control input { min-width:0; width:100%; height:44px; border:0; outline:0; background:transparent; color:#f3f7fb; font-size:22px; }
 .nfh3-control select { min-width:0; width:100%; height:56px; border:0; outline:0; background:transparent; color:#f3f7fb; font-size:33px; line-height:1.2; }
 .nfh3-native-select { min-width:0; width:100%; height:56px; padding:0 12px 0 5px; border:1px solid #3b4a58; border-radius:4px; outline:0; background:#1b2126; color:#f3f7fb; font-size:33px; line-height:1.2; font-weight:700; cursor:pointer; }
 .nfh3-native-select:focus { border-color:#41c7f2; box-shadow:0 0 0 2px rgba(65,199,242,.1); }
 .nfh3-control select option { background:#20262d; color:#f3f7fb; }
-.nfh3-control .ant-select { min-width:0; background:transparent !important; box-shadow:none !important; }
+.nfh3-control .ant-select { min-width:0; width:100%; background:transparent !important; box-shadow:none !important; }
 .nfh3-control .ant-select-selector,.nfh3-control .ant-select-arrow { cursor:pointer; }
-.nfh3-control .ant-select-selector { min-height:48px !important; height:48px !important; padding:0 6px !important; border:0 !important; background:transparent !important; box-shadow:none !important; }
-.nfh3-control .ant-select-selection-item,.nfh3-control .ant-select-selection-placeholder,.nfh3-control .ant-select-selection-search-input { color:#f3f7fb !important; font-size:28px !important; line-height:46px !important; }
+.nfh3-control .ant-select-selector { min-height:44px !important; height:44px !important; padding:0 6px !important; border:0 !important; background:transparent !important; box-shadow:none !important; }
+.nfh3-control .ant-select-selection-item,.nfh3-control .ant-select-selection-placeholder,.nfh3-control .ant-select-selection-search-input { color:#f3f7fb !important; font-size:22px !important; line-height:42px !important; }
 .nfh3-control .ant-select-selection-item { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .nfh3-control .ant-input-number { min-width:0; border:0; background:transparent; box-shadow:none; }
-.nfh3-control .ant-input-number-input { height:48px; padding:0 3px; color:#f3f7fb; font-size:22px; }
+.nfh3-control .ant-input-number-input { height:44px; padding:0 3px; color:#f3f7fb; font-size:22px; }
 .nfh3-textarea { width:100%; min-height:164px; resize:vertical; padding:14px; border:1px solid #3b4a58; border-radius:6px; outline:0; background:#11161a; color:#eaf2f8; font:11px/1.45 "Segoe UI","Microsoft YaHei",sans-serif; }
 .nfh3-textarea:focus,.nfh3-control input:focus,.nfh3-control select:focus { border-color:#41c7f2; }
 .nfh3-prompt-options { display:flex; align-items:center; gap:14px; min-width:0; padding:8px 0 2px; }
@@ -743,7 +758,12 @@
 .minimax-lightbox { position:fixed; inset:0; z-index:9999; display:flex; align-items:center; justify-content:center; background:rgba(2,6,23,.82); backdrop-filter:blur(2px); }
 .minimax-lightbox-body { position:relative; display:flex; flex-direction:column; align-items:center; gap:8px; max-width:94vw; max-height:92vh; }
 .minimax-lightbox-body video,.minimax-lightbox-body img { display:block; max-width:92vw; max-height:84vh; border-radius:8px; background:#000; box-shadow:0 18px 60px rgba(0,0,0,.6); }
+.minimax-frame-menu { position:absolute; z-index:9999; width:220px; padding:6px; border:1px solid #4b5563; border-radius:8px; background:#24272b; box-shadow:0 10px 30px rgba(0,0,0,.48); font-size:20px; }
+.minimax-frame-menu button { display:block; width:100%; height:48px; padding:0 12px; border:0; border-radius:5px; background:transparent; color:#d1d5db; font-size:20px; font-weight:600; line-height:48px; text-align:left; cursor:pointer; }
+.minimax-frame-menu button:hover,.minimax-frame-menu button:focus-visible { background:#343a40; color:#fff; outline:none; }
 .minimax-lightbox-name { color:#e2e8f0; font-size:24px; font-weight:700; padding:2px 10px; border-radius:999px; background:rgba(15,23,42,.7); }
+/* 灯箱预览文件名旁的分辨率：图片/视频加载后显示真实尺寸 */
+.minimax-lightbox-resolution { margin-left:10px; font-size:20px; font-weight:600; color:#94a3b8; opacity:.9; font-variant-numeric:tabular-nums; }
 .minimax-lightbox-close { position:fixed; top:16px; right:18px; width:36px; height:36px; border:1px solid rgba(255,255,255,.22); border-radius:9px; background:rgba(15,23,42,.86); color:#e2e8f0; cursor:pointer; display:flex; align-items:center; justify-content:center; }
 .minimax-lightbox-close:hover { border-color:rgba(125,211,252,.7); background:#16445b; color:#e0f2fe; }
 .minimax-lightbox-close svg { width:18px; height:18px; }

@@ -1,46 +1,28 @@
-# 活页面验证配方（browser_exec 接管用户授权 Chrome 后）
+# 页面验证方法
 
-当 src 改了、HMR 应该推过、但用户看不到变化 → 用这套直接在用户那台画布页面上读 DOM 实测，**不靠用户截图**。
+触发：UI 变更验收，或源码已改而页面表现未变。浏览器工具的能力与调用以当前会话说明为准；不要求历史 browser_exec/CDP 工具必须存在。
 
-## 一次性确认：能否接管
+## 准备证据
 
-1. 让用户在 Chrome 里打开 `chrome://inspect/#remote-debugging`，勾上"Allow remote debugging for this browser instance"，点 Allow。
-2. 每次新 `browser_exec` 会话都会再弹一次 Allow（per-connection 授权，正常）。
-3. `new_tab("http://127.0.0.1:3001/canvas/<id>")` 后 `wait_for_load()`，再 `time.sleep(2-3)` 等 HMR/组件挂载。
-4. **快速 smoke**：`js("document.querySelectorAll('.minimax-canvas-workbench').length")` 返回 1 = 节点已渲染。
+- 打开独立测试标签页与临时画布，保留用户原页面、窗口和对话。
+- 确认 Web URL、源码/HMR 或 dist 消费路径以及目标节点；需要刷新只刷新测试页，等待明确挂载状态。
+- 不为连接工具关闭 Chrome、改用户 profile 或重启整套服务。仅确认资源/进程更新时参照[运行与验证](development-verification.md)。
 
-## 三个必查的事实
+## 观察与操作
 
-| 想验证 | JS 表达式 | 看什么 |
-|---|---|---|
-| 颜色/计算样式生效 | `js("getComputedStyle(document.querySelector('.minimax-edit-timeline'),'::after').backgroundColor")` | 应为 `rgb(59, 130, 246)`（项目蓝） |
-| 指针位置跟手 | `js("getComputedStyle(document.querySelector('.minimax-edit-timeline'),'::after').left")` | 字符串如 `"853.5px"`；同步看 `playhead = seconds*50 + 52`（50px/s 刻度） |
-| 点击落点不被遮挡 | `js("(function(){const r=el.getBoundingClientRect();return JSON.stringify({x:r.x+r.width*f,y:r.y+r.height/2})})()")` + `document.elementFromPoint(x,y)` | class 应是预期可点击元素，不是 `.minimax-pane-resize` 或 `.minimax-track-content` |
+| 目标 | 证据 |
+|---|---|
+| 样式已生效 | 目标元素及伪元素 computed style，与当前主题 token/最终 CSS 对照 |
+| 坐标准确 | rect、布局尺寸、真实轨道宽、滚动偏移与内容时间 |
+| 点击命中 | elementFromPoint、事件路径与实际动作结果 |
+| 分区不串扰 | 同一次操作前后的节点及各分区尺寸 |
+| 副作用受控 | 用户 trigger、订阅状态，StrictMode 下无无意重播/重提 |
+| 异常归因 | 当前控制台错误及最小复现，而非仅最后落栈组件 |
 
-## 合成 PointerEvent 测试 click
+屏幕坐标按 rect/布局比例换回内容坐标；取当前滚动或 transform 偏移，不写死 px/秒。交互不变量与视口性能场景见[交互约束](../../../rules/canvas-ui.md)。
 
-`setPointerCapture` 对 `dispatchEvent(new PointerEvent(...))` 的假事件会抛 NotFoundError，截断后续 handler。两种绕法：
+优先真实指针操作。合成 PointerEvent 没有活动指针时 setPointerCapture 可能失败，先区分探针限制和产品错误。发现反馈循环时跟踪测量、状态、DOM 回写的真实链路。
 
-1. **try/catch 已经在源码里**（H3 当前 scrubber 写法）→ 直接 dispatch，正常测。
-2. **源码没保护** → 用 CDP 真鼠标（harness 偶尔 5s 超时；超时则退而求其次直接读 `metadata.playhead` 验证函数是否执行）：
-   ```python
-   cdp('Input.dispatchMouseEvent', type='mousePressed', x=x, y=y, button='left', clickCount=1)
-   cdp('Input.dispatchMouseEvent', type='mouseReleased', x=x, y=y, button='left', clickCount=1)
-   ```
+## 完成条件
 
-## 三个常见踩坑
-
-- **画布节点带 zoom transform**（实测 ~0.282）：`getBoundingClientRect()` 给屏幕 px，`offsetLeft/Width/Top` 给本地 CSS px。混用必错（曾因此 scrubber 只 3px 高）。统一规则：定位用 `offset*`，屏幕尺寸量完除以 `wbr.width / wb.offsetWidth`。
-- **ruler 横向滚动**：点击换算必须加 `scrollLeft`：`px = (clientX - rect.left)/scale + scroll`，否则滚出去的内容点不到。
-- **HMR 后旧的组件实例还在**：测之前先 `js("location.reload()")` + 等 5s，否则可能拿到旧 React fiber。
-
-## 测完必读的状态
-
-```js
-js("""JSON.stringify({
-  brand: document.querySelector('.minimax-brand b')?.textContent,
-  after: getComputedStyle(document.querySelector('.minimax-edit-timeline'),'::after').left,
-})""")
-```
-
-`brand` 应形如 `"10.0s / 31s"`，`after` 形如 `"552px"`。两次相差 ≥0.5s 即视为指针真的跟着 click 移动。
+只验收本次改变的可观察行为和直接相邻约束；主题/语言受影响时一并核对。记录实际通过项与未覆盖项，不以构建通过、HMR 通知、单个截图或文件时间代替行为证据。仅清理本次创建的测试内容。

@@ -38,6 +38,8 @@ import { splitImageBuffer } from "./canvas/image-split.js";
 import { cropImageBuffer, parseAspectRatio, type CropAnchor } from "./canvas/image-crop.js";
 import {
   effectiveCanvasNodeType,
+  resolveCanvasImageReferences,
+  resolveCanvasImageReferencesByIds,
   resolveCanvasImageReferenceNode,
 } from "./canvas/image-references.js";
 import {
@@ -321,6 +323,7 @@ const BACKEND_CANVAS_TOOLS = [
   "canvas_connect_nodes",
   "canvas_set_generation_references",
   "canvas_select_nodes",
+  "canvas_image_input_manifest",
   "canvas_run_generation",
   "canvas_task_status",
   "canvas_wait_tasks",
@@ -602,9 +605,9 @@ async function executeDirectCanvasTool(
   if (name === "canvas_h3_confirmation") {
     const task = await backendApi.resolveH3Confirmation(String(input.taskId), {
       action: input.action as "confirm" | "keep_first_pass" | "discard",
-      segmentIds: (input.segmentIds as string[]).map(String),
-      firstPassFingerprint: String(input.firstPassFingerprint),
-      ...(input.retry === true ? { retry: true } : {}),
+      segmentId: String(input.segmentId),
+      expectedRevision: Number(input.expectedRevision),
+      ...(input.postpassParams ? { postpassParams: input.postpassParams as Record<string, unknown> } : {}),
     });
     return { ok: true, task: toCanvasTask(task) };
   }
@@ -613,6 +616,8 @@ async function executeDirectCanvasTool(
   const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
   const project = await fetchCurrentCanvasProject(config, projectId);
   const projectState = project as Record<string, unknown>;
+  if (name === "canvas_image_input_manifest")
+    return buildCanvasImageInputManifest(project, input);
   if (name === "canvas_get_state")
     return compactProjectSummary(projectState, input);
   if (name === "canvas_export_snapshot")
@@ -633,6 +638,16 @@ async function executeDirectCanvasTool(
       ? await applyNodeFactoryDefaults(generationInput, backendApi)
       : generationInput;
   preflightExistingCanvasState(name, toolInput, projectState);
+  if (name === "canvas_run_generation") {
+    const node = nodesOf(projectState).find((item) => String(item.id || "") === String(toolInput.nodeId || ""));
+    const mode = String(toolInput.mode || recordOf(node?.metadata).generationMode || (node?.type === "image" ? "image" : ""));
+    if (mode === "image") {
+      const manifest = buildCanvasImageInputManifest(project, toolInput);
+      if (manifest.issues.length) throw new Error(`图片参考预检失败：${manifest.issues.join("；")}`);
+      const expectedHash = String(toolInput.expectedReferenceManifestHash || "");
+      if (expectedHash && expectedHash !== manifest.manifestHash) throw new Error("图片参考输入已变化；请重新读取 canvas_image_input_manifest");
+    }
+  }
   const request = buildCanvasToolRequest(name, toolInput, {
     nodes: nodesOf(projectState) as never,
     connections: connectionsOf(projectState) as never,
@@ -2286,6 +2301,7 @@ function toCanvasTask(task: {
     ...(task.kind === "canvas-h3-run" && task.status === "awaiting_confirmation" ? {
       phase: "confirmation",
       confirmation: {
+        revision: Number(recordOf(result.confirmation).revision || 0),
         pending: (Array.isArray(recordOf(result.confirmation).pending) ? recordOf(result.confirmation).pending as Array<Record<string, unknown>> : []).map((item) => ({
           nodeId: String(item.nodeId || ""), segmentId: String(item.segmentId || ""),
           firstPassFingerprint: String(item.firstPassFingerprint || ""), firstPassResult: String(item.firstPassResult || ""), firstPassStorageKey: String(item.firstPassStorageKey || ""),
@@ -2380,10 +2396,15 @@ async function inspectCanvasContext(
     selection: summaries.filter((node) => selectedIds.has(node.id)),
     nodes: summaries,
     truncated: nodes.length > summaries.length,
-    referenceCandidates: summaries.filter((node) => node.type !== "config"),
+    referenceCandidates: summaries.filter((node) => node.type !== "config").map((node) => ({
+      id: node.id, type: node.type, title: node.title, storageKey: node.storageKey,
+    })),
     generationTargets: summaries.filter(
       (node) => node.generationMode || node.type === "config",
-    ),
+    ).map((node) => ({
+      id: node.id, type: node.type, title: node.title,
+      generationMode: node.generationMode, model: node.model, status: node.status,
+    })),
     capabilities: (["text", "image", "video", "audio"] as const).map(
       (capability) => ({
         capability,
@@ -2653,6 +2674,48 @@ function preflightExistingCanvasState(
   );
 }
 
+function buildCanvasImageInputManifest(project: CanvasProject, input: Record<string, unknown>) {
+  const nodeId = String(input.nodeId || "");
+  const nodes = nodesOf(project as Record<string, unknown>);
+  const target = nodes.find((node) => String(node.id || "") === nodeId);
+  if (!target) throw new Error(`找不到图片生成节点:${nodeId}`);
+  const mode = String(input.mode || recordOf(target.metadata).generationMode || (target.type === "image" ? "image" : ""));
+  if (mode !== "image") throw new Error(`节点 ${nodeId} 不是图片生成节点`);
+  const requested = Array.isArray(input.referenceNodeIds) ? [...new Set(input.referenceNodeIds.map(String))] : [];
+  const sourceIds = requested.length ? requested : connectionsOf(project as Record<string, unknown>)
+    .filter((edge) => String(edge.toNodeId || "") === nodeId)
+    .sort((a, b) => Number(a.order ?? Number.MAX_SAFE_INTEGER) - Number(b.order ?? Number.MAX_SAFE_INTEGER))
+    .map((edge) => String(edge.fromNodeId || ""))
+    .filter((id) => nodes.find((node) => String(node.id || "") === id)?.type !== "text");
+  const metadata = recordOf(target.metadata);
+  const selections = { ...recordOf(metadata.characterReferences) };
+  const supplied = recordOf(input.characterImageKeys);
+  for (const [id, imageKeys] of Object.entries(supplied))
+    selections[id] = { ...recordOf(selections[id]), imageKeys };
+  const issues: string[] = [];
+  for (const id of Object.keys(supplied)) if (!sourceIds.includes(id)) issues.push(`characterImageKeys 包含未连接的角色节点:${id}`);
+  for (const id of sourceIds) {
+    const source = nodes.find((node) => String(node.id || "") === id);
+    if (!source) { issues.push(`参考节点不存在:${id}`); continue; }
+    if (source.type !== "character") continue;
+    const images = Array.isArray(recordOf(source.metadata).characterImages) ? recordOf(source.metadata).characterImages as Array<Record<string, unknown>> : [];
+    const keys = images.map((image) => String(image.storageKey || "")).filter(Boolean);
+    const selected = recordOf(selections[id]).imageKeys;
+    const selectedKeys = Array.isArray(selected) ? selected.map(String) : [];
+    if (keys.length > 1 && !selectedKeys.length) issues.push(`角色 ${id} 有多张图，需明确 characterImageKeys`);
+    if (selectedKeys.some((key) => !keys.includes(key))) issues.push(`角色 ${id} 的所选图片不在角色节点中`);
+  }
+  const preview = { ...project, nodes: nodes.map((node) => String(node.id || "") === nodeId
+    ? { ...node, metadata: { ...metadata, characterReferences: selections } }
+    : node) } as CanvasProject;
+  const references = requested.length
+    ? resolveCanvasImageReferencesByIds(preview, nodeId, requested)
+    : resolveCanvasImageReferences(preview, nodeId) || [];
+  const manifest = references.map((ref, index) => ({ ordinal: index + 1, id: ref.id, name: ref.name, storageKey: ref.storageKey || "", mimeType: ref.mimeType }));
+  const manifestHash = crypto.createHash("sha256").update(JSON.stringify([nodeId, sourceIds, manifest])).digest("hex");
+  return { ok: issues.length === 0, projectId: project.id, nodeId, revision: project.revision, referenceNodeIds: sourceIds, references: manifest, issues, manifestHash };
+}
+
 function nodesOf(project: Record<string, unknown>) {
   return Array.isArray(project.nodes)
     ? (project.nodes as Array<Record<string, unknown>>)
@@ -2672,22 +2735,57 @@ function compactProject(project: Record<string, unknown>) {
   };
 }
 
-/** canvas_get_state 默认只回节点摘要：真实画布的整幅节点 metadata 实测 3.3 MB（≈80 万 token），
- *  直接进模型上下文会挤爆窗口，也会撞上 0.5 MiB 输出上限（旧实现直接报 OUTPUT_TOO_LARGE）。
- *  需要某个节点的完整 metadata 时显式传 nodeIds；导出整图请用 canvas_export_snapshot。 */
+/** 默认尽量返回全部节点摘要；超出 MCP 输出上限时自动分页。完整 metadata 只通过 nodeIds 定向读取。 */
 function compactProjectSummary(project: Record<string, unknown>, input: Record<string, unknown>) {
   const nodes = nodesOf(project);
   const wanted = Array.isArray(input.nodeIds) ? new Set(input.nodeIds.map(String)) : null;
-  const selected = wanted ? nodes.filter((node) => wanted.has(String(node.id))) : nodes;
-  const summaries = wanted ? selected : selected.slice(0, 200).map(nodeSummary);
-  return {
+  const connections = connectionsOf(project);
+  const base = {
     ...projectSummary(project as unknown as CanvasProject),
-    nodes: summaries,
-    connections: connectionsOf(project),
     totalNodes: nodes.length,
-    truncated: wanted ? false : selected.length > summaries.length,
-    hint: '需要某节点的完整 metadata 时传 nodeIds: ["<id>"]；节点级细节也可用 canvas_inspect，导出整图用 canvas_export_snapshot',
   };
+  if (wanted) {
+    const selected = nodes.filter((node) => wanted.has(String(node.id)));
+    const related = connections.filter((edge) => wanted.has(String(edge.fromNodeId)) || wanted.has(String(edge.toNodeId)));
+    const result = { ...base, nodes: selected, connections: related, truncated: false,
+      hint: 'H3 Clip 详情可用 h3_get_clip 定向读取；导出整图用 canvas_export_snapshot' };
+    if (MAX_TOOL_OUTPUT_BYTES <= 0 || measureToolResultSize(result).bytes <= MAX_TOOL_OUTPUT_BYTES) return result;
+    return { ...result, nodes: selected.map(nodeSummary), metadataTruncated: true,
+      hint: "所选节点的完整 metadata 超过 MCP 输出上限，已返回节点摘要；H3 Clip 请用 h3_get_node 获取片段 ID，再用 h3_get_clip 定向读取。" };
+  }
+  const nodeOffset = Math.min(nodes.length, Math.max(0, Number(input.nodeOffset || 0)));
+  const nodeLimit = input.nodeLimit == null ? nodes.length : Number(input.nodeLimit);
+  const available = nodes.slice(nodeOffset, nodeOffset + nodeLimit).map(nodeSummary);
+  const page = (count: number) => {
+    const chosen = available.slice(0, count);
+    const nextNodeOffset = nodeOffset + count < nodes.length ? nodeOffset + count : undefined;
+    const allNodes = nodeOffset === 0 && nextNodeOffset === undefined;
+    const ids = new Set(chosen.map((node) => node.id));
+    const pageConnections = allNodes ? connections : connections.filter((edge) => ids.has(String(edge.fromNodeId)) || ids.has(String(edge.toNodeId)));
+    return { ...base, nodes: chosen, connections: pageConnections, nodeOffset,
+      truncated: nextNodeOffset !== undefined,
+      ...(nextNodeOffset !== undefined ? { nextNodeOffset } : {}),
+      ...(pageConnections.length < connections.length ? { connectionsTruncated: true } : {}),
+      hint: nextNodeOffset !== undefined
+        ? `还有节点未返回；用 nodeOffset: ${nextNodeOffset} 读取下一页，同一 revision 下逐页合并并按连线 id 去重。`
+        : '需要某节点的完整 metadata 时传 nodeIds: ["<id>"]；H3 Clip 详情用 h3_get_clip',
+    };
+  };
+  const full = page(available.length);
+  if (MAX_TOOL_OUTPUT_BYTES <= 0 || measureToolResultSize(full).bytes <= MAX_TOOL_OUTPUT_BYTES) return full;
+  let low = 0;
+  let high = available.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (measureToolResultSize(page(middle)).bytes <= MAX_TOOL_OUTPUT_BYTES) low = middle;
+    else high = middle - 1;
+  }
+  if (low > 0) return page(low);
+  const first = { ...page(1), connections: [], connectionsTruncated: true,
+    hint: `当前节点相关连线超过输出上限；用 nodeOffset: ${nodeOffset + 1} 继续读取节点。` };
+  if (measureToolResultSize(first).bytes <= MAX_TOOL_OUTPUT_BYTES) return first;
+  const size = measureToolResultSize(first);
+  throw new McpPayloadOverflowError(size.bytes, size.chars, MAX_TOOL_OUTPUT_BYTES, "canvas_get_state");
 }
 
 function textResult(value: unknown) {
@@ -2805,7 +2903,7 @@ function h3ConfirmationSuggestion(task: Record<string, unknown>) {
   const item = Array.isArray(pending) ? recordOf(pending[0]) : {};
   return {
     tool: "canvas_h3_confirmation",
-    input: { taskId: String(task.taskId || ""), segmentIds: [String(item.segmentId || "")], firstPassFingerprint: String(item.firstPassFingerprint || "") },
+    input: { taskId: String(task.taskId || ""), segmentId: String(item.segmentId || ""), expectedRevision: Number(recordOf(task.confirmation).revision || 0) },
     actionChoices: ["confirm", "keep_first_pass", "discard"],
     note: "请先查看一采结果，由用户明确选择 action；此处不会自动确认二采。",
   };
@@ -2925,6 +3023,8 @@ function classifyToolError(
     /(?:节点|node|生成目标).*(?:不存在|not found)|找不到(?:画布)?节点/i.test(
       message,
     );
+  const missingSegment =
+    backendError.code === "SEGMENT_NOT_FOUND" || /找不到片段|片段不存在|clip not found/i.test(message);
   const missingModel =
     backendError.code === "MODEL_REQUIRED" ||
     (/模型/.test(message) && /未配置|没有配置|缺少/.test(message));
@@ -2946,6 +3046,8 @@ function classifyToolError(
         ? "TASK_NOT_FOUND"
         : missingNode
           ? "NODE_NOT_FOUND"
+          : missingSegment
+            ? "SEGMENT_NOT_FOUND"
           : missingModel
             ? "MODEL_REQUIRED"
             : conflict
@@ -2983,6 +3085,8 @@ function classifyToolError(
             projectId: String(input.projectId || state.activeProjectId || "") || undefined,
           },
         }
+      : missingSegment
+        ? { tool: "h3_get_node", input: { projectId: String(input.projectId || state.activeProjectId || ""), nodeId: String(input.nodeId || "") } }
       : missingModel
         ? { tool: "models_list", input: {} }
         : timeout && taskIds.length
@@ -2990,7 +3094,7 @@ function classifyToolError(
           : authFailure
             ? { action: "检查 Backend 地址、Token 和权限后再重试" }
             : { action: "检查 errorContext 后修正输入或连接；不要重复提交完全相同的失败请求" };
-  const recoverable = selectionRequired || missingProject || missingTask || missingNode || missingModel || conflict || timeout || payloadOverflow;
+  const recoverable = selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingModel || conflict || timeout || payloadOverflow;
   return {
     code,
     message,

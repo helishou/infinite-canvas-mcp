@@ -226,8 +226,8 @@ export class PluginMcpRegistry {
 
     private async enable(declaration: PluginMcpDeclaration) {
         const existing = this.plugins.get(declaration.id);
-        if (existing?.enabled && existing.version === declaration.version && existing.tools.length === declaration.mcp.tools.length) {
-            return; // 已注册且未变,跳过(避免重复注册抛错)
+        if (existing?.enabled && existing.version === declaration.version) {
+            return; // 第一方工具以本地模块为准；声明列表长度可能滞后，不能因此每轮重复注册。
         }
         const firstParty = KNOWN_FIRST_PARTY[declaration.id];
         if (!firstParty) {

@@ -69,6 +69,7 @@ export const toolNames = [
   "canvas_delete_nodes",
   "canvas_connect_nodes",
   "canvas_select_nodes",
+  "canvas_image_input_manifest",
   "canvas_run_generation",
   "canvas_task_status",
   "canvas_wait_tasks",
@@ -318,8 +319,10 @@ export const toolInputSchemas = {
       .array(z.string())
       .optional()
       .describe(
-        "只取这些节点的完整 metadata；省略时返回全部节点的摘要（整幅 metadata 可达数 MB，会撞输出上限）",
+        "只取这些节点的完整数据及其相关连线；超出输出上限时返回节点摘要并标记 metadataTruncated。传 nodeIds 时忽略分页参数",
       ),
+    nodeOffset: z.number().int().min(0).optional().describe("摘要分页起点；返回 nextNodeOffset 时用该值继续读取"),
+    nodeLimit: z.number().int().min(1).optional().describe("可选的本次节点数上限；省略则尽量返回全部节点摘要，超出当前 MCP 输出上限（默认 512 KiB）时自动分页"),
   }),
   canvas_get_selection: canvasProjectSchema.passthrough(),
   canvas_export_snapshot: canvasProjectSchema.passthrough(),
@@ -540,6 +543,11 @@ export const toolInputSchemas = {
   canvas_select_nodes: canvasProjectSchema.extend({
     ids: z.array(z.string()).describe("要选中的节点 ID 数组；空数组=清空选区"),
   }),
+  canvas_image_input_manifest: canvasProjectSchema.extend({
+    nodeId: z.string().describe("待生成的图片节点 ID"),
+    referenceNodeIds: z.array(z.string()).optional().describe("可选的新参考节点顺序；省略时按当前连线预检"),
+    characterImageKeys: z.record(z.array(z.string())).optional().describe("按 character 节点 ID 明确选中的图片 storageKey 列表"),
+  }),
   canvas_run_generation: canvasProjectSchema.extend({
     nodeId: z.string().describe("要触发生成的配置/媒体节点 ID，必填"),
     segmentId: z
@@ -557,6 +565,8 @@ export const toolInputSchemas = {
       .describe(
         "参考节点 ID 列表；会替换节点当前的媒体参考连线；想保留旧参考请用现有节点连线",
       ),
+    characterImageKeys: z.record(z.array(z.string())).optional().describe("按 character 节点 ID 指定实际图片；角色有多张图片且未设置节点选择时必须提供"),
+    expectedReferenceManifestHash: z.string().optional().describe("canvas_image_input_manifest 返回的参考清单指纹；提交时不一致则拒绝生成"),
     params: recordSchema
       .optional()
       .describe(
@@ -597,9 +607,9 @@ export const toolInputSchemas = {
   canvas_h3_confirmation: z.object({
     taskId: z.string().min(1).describe("原始 H3 父任务 ID；不创建新父任务"),
     action: z.enum(["confirm", "keep_first_pass", "discard"]).describe("由用户明确选择：精修二采、保留一采或放弃整个未完成运行"),
-    segmentIds: z.array(z.string().min(1)).length(1).describe("当前待确认的单个 Clip ID"),
-    firstPassFingerprint: z.string().min(1).describe("从 canvas_task_status 返回的当前一采指纹，作为确认快照前提"),
-    retry: z.boolean().optional().describe("仅二采失败后用户明确重试时设为 true"),
+    segmentId: z.string().min(1).describe("当前待确认的 Clip ID"),
+    expectedRevision: z.number().int().min(0).describe("从任务 confirmation.revision 读取的决议版本；二采失败后需重新读取"),
+    postpassParams: z.record(z.unknown()).optional().describe("仅 confirm 使用；当前二采专属参数，Backend 会按允许字段冻结"),
   }),
   generation_get_status: canvasProjectSchema.extend({
     scope: z
@@ -774,7 +784,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_inspect:
     "操作画布前的首选入口。一次返回活动画布、选区、节点摘要、可引用节点、生成目标和已配置模型能力；未选画布时返回候选画布与下一步，不要求调用方猜测隐藏状态。",
   canvas_get_state:
-    "读取当前画布的节点、连线和选区。浏览器视口中心与缩放属于页面本地状态，不通过 MCP 读取。",
+    "读取当前画布的节点与连线。默认尽量返回全部节点摘要；超出输出上限时自动分页，按 nextNodeOffset 继续读取。传 nodeIds 只取指定节点的完整数据和相关连线，完整节点超限则回摘要。H3 时间线先用 h3_get_node 读取稳定 Clip ID。",
   canvas_get_selection: "读取当前网页画布选中的节点。",
   canvas_export_snapshot: "导出当前画布快照，用于理解布局。",
   canvas_apply_ops:
@@ -816,8 +826,9 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_connect_nodes:
     "批量追加连接节点。connections 是数组，每项含 fromNodeId/toNodeId 必填，可选 role（reference/prompt/control）和 order。需要替换生成节点参考图时使用 canvas_set_generation_references，不要直接追加到旧参考输入上。",
   canvas_select_nodes: "设置当前选中节点；空数组=清空选区。",
+  canvas_image_input_manifest: "只读预检图片生成的实际输入顺序和 storageKey；角色有多张图时必须明确选图。返回指纹供 canvas_run_generation 锁定输入。",
   canvas_run_generation:
-    "触发指定节点生成，通常用于配置节点或文本/图片/视频/音频节点。若本次要换一套参考图，传 referenceNodeIds；它会先替换现有媒体参考连线，再提交生成，避免旧参考图残留。H3 节点可用 segmentId 单跑某分镜。",
+    "触发指定节点生成。图片模式提交前解析真实参考图；多图 character 节点须通过 characterImageKeys 或节点已有选择指定具体图片，可传 expectedReferenceManifestHash 锁定预检清单。referenceNodeIds 会替换现有媒体参考连线；H3 节点可用 segmentId 单跑某分镜。",
   canvas_task_status:
     "即时查询 MCP 发起的画布生成任务。优先传 taskId 精确查询；传入 taskId 后忽略 projectId/nodeId 等过滤条件。不传 taskId 时默认使用当前活动画布，可用 nodeId 缩小范围。运行中任务建议使用 canvas_wait_tasks 等待收口；本工具用于即时查看，不会提交或重试任务。",
   canvas_wait_tasks:

@@ -127,9 +127,6 @@ export type H3Segment = {
     secondPassSigma?: number;
     dedicatedAttention?: string;
     startupMode?: string;
-    faceRepairSingle?: boolean;
-    faceRepairMulti?: boolean;
-    globalRepair?: boolean;
     /** Director track -> crop -> H3 r2v resample -> stitch post-pass. */
     faceRefineEnabled?: boolean;
     faceRefineDetector?: string;

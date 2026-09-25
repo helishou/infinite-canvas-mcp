@@ -5,6 +5,7 @@ export const H3_RUNTIME_NODE_FIELDS = [
 ] as const;
 export const H3_RUNTIME_SEGMENT_FIELDS = [
     "status", "progress", "runtimeTaskId", "result", "resultStorageKey", "results", "errorDetails",
+    "firstPassReady", "firstPassResult", "firstPassStorageKey", "firstPassFingerprint", "cacheFingerprint",
 ] as const;
 export const H3_LOCAL_VIEW_FIELDS = [
     "playhead", "selectedSegmentId", "h3PlaybackAll", "h3PlayRequest", "h3Scrubbing",

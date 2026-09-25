@@ -163,6 +163,67 @@ test("分镜帧不污染 Subject 身份，摘要和持续时长从分镜轨道�
     assert.deepEqual(generated.storyboardDurations, { "storyboard-a": 5, "storyboard-b": 2.5 });
 });
 
+test("分镜图摘要只是素材名回显时不写进提示词", () => {
+    const binding = {
+        id: "binding-slot-2",
+        assetId: "asset-ep01-s0102-group-slot2-anchor",
+        label: "S01-02·沈侯持婚书单人对峙·新版分镜组第2槽",
+        role: "storyboard",
+        tags: ["EP01", "S01-02", "hard-composition-anchor"],
+        enabled: true,
+        usage: "reference",
+        mediaType: "image",
+        url: "https://example.test/slot2.png",
+    };
+    const generated = writeStoryboardPrompt({
+        referenceCatalog: [{
+            id: binding.assetId,
+            label: binding.label,
+            mediaType: "image",
+            role: "storyboard",
+            tags: binding.tags,
+            url: binding.url,
+            analysis: { summary: binding.label, model: "MCP caller" },
+        }],
+    }, {
+        id: "segment-1",
+        mode: "ref2va",
+        duration: 5,
+        referenceBindings: [binding],
+    }, {
+        summary: "",
+        openingDescription: "",
+        shots: [{ description: "沈侯站在雪院中。", pictureBindingId: binding.id }],
+        overallSoundscape: "",
+        nonDiegeticMusic: "N/A",
+    });
+
+    assert.doesNotMatch(generated.prompt, /组第2槽/u);
+    assert.doesNotMatch(generated.prompt, /沈侯持婚书单人对峙/u);
+    assert.match(generated.prompt, /Use the approved storyboard frame from <Picture 1>/u);
+});
+
+test("重新编译时剥掉正文里残留的分镜图 cue，不重复叠加", () => {
+    const binding = { id: "storyboard-a", assetId: "asset-storyboard-a", label: "分镜图 A", role: "storyboard", tags: [], enabled: true, usage: "reference", mediaType: "image", url: "https://example.test/a.png" };
+    const generated = writeStoryboardPrompt({
+        referenceCatalog: [{ id: binding.assetId, label: binding.label, mediaType: "image", role: "storyboard", tags: [], url: binding.url }],
+    }, {
+        id: "segment-1",
+        mode: "ref2va",
+        duration: 5,
+        referenceBindings: [binding],
+    }, {
+        summary: "",
+        openingDescription: "",
+        shots: [{ description: "Use the approved 分镜图 A from <Picture 1> as the target composition reference for this shot. Use the approved 分镜图 A from <Picture 1> as the shot-entry keyframe and composition anchor for this shot. After the keyframe, keep the camera setup and spatial relationship stable while allowing natural performance. 沈侯站在雪院中。", pictureBindingId: binding.id }],
+        overallSoundscape: "",
+        nonDiegeticMusic: "N/A",
+    });
+
+    assert.equal((generated.prompt.match(/Use the approved/gu) || []).length, 1);
+    assert.match(generated.prompt, /\[Shot 1\] Use the approved storyboard frame from <Picture 1> as the shot-entry keyframe and composition anchor for this shot\.[\s\S]*沈侯站在雪院中。/u);
+});
+
 test("拒绝不完整的分镜图引用句，避免生成 to the approved 残句", () => {
     assert.throws(() => writeStoryboardPrompt({}, { mode: "ref2va", duration: 5 }, {
         summary: "",

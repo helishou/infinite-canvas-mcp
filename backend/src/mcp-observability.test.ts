@@ -74,6 +74,52 @@ test("MCP 脱敏事件按 trace 保存并生成累计诊断报告", async () => 
     }
 });
 
+test("MCP 诊断支持本地日期范围并隔离恢复与调用路径边界", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "infinite-canvas-mcp-observability-range-"));
+    const database = new BackendDatabase(path.join(dir, "runtime.sqlite"));
+    const stores = createStores(database);
+    const setCreatedAt = (id: string, createdAt: string) => database.db.prepare("UPDATE mcp_observability_events SET created_at = ? WHERE id = ?").run(createdAt, id);
+    const record = (traceId: string, event: "tool.succeeded" | "tool.failed", tool: string, createdAt: string, extra: Record<string, unknown> = {}) => {
+        const saved = database.createMcpObservabilityEvent({ sessionId: "range-session", traceId, event, tool, ...extra });
+        setCreatedAt(saved.id, createdAt);
+        return saved;
+    };
+    try {
+        record("day1-failed", "tool.failed", "canvas_a", "2026-01-01T10:00:00.000Z", { errorCode: "RANGE_FAIL", recoverable: true, suggestedTool: "canvas_b", outputSummary: { outputChars: 1000 } });
+        record("day1-success", "tool.succeeded", "canvas_a", "2026-01-01T10:01:00.000Z", { outputSummary: { outputChars: 2000 } });
+        record("day2-recovery", "tool.succeeded", "canvas_b", "2026-01-02T10:00:00.000Z", { outputSummary: { outputChars: 3000 } });
+        record("day2-failed", "tool.failed", "canvas_c", "2026-01-02T10:01:00.000Z", { errorCode: "RANGE_FAIL_2", outputSummary: { outputChars: 4000 } });
+
+        const report = database.getMcpObservabilityReport({ from: "2026-01-02", to: "2026-01-02" });
+        assert.equal(report.calls.completed, 2);
+        assert.equal(report.calls.succeeded, 1);
+        assert.equal(report.calls.failed, 1);
+        assert.equal(report.daily.length, 1);
+        assert.equal(report.daily[0].calls, 2);
+        assert.equal(report.daily[0].averageOutputChars, 3500);
+        assert.deepEqual(report.dailyByTool.map((item) => item.tool), ["canvas_b", "canvas_c"]);
+        assert.deepEqual(report.errors, [{ code: "RANGE_FAIL_2", count: 1 }]);
+        assert.equal(report.payload.averageOutputChars, 3500);
+        assert.equal(report.recovery.suggested, 0);
+        assert.deepEqual(report.transitions, [{ fromTool: "canvas_b", toTool: "canvas_c", count: 1 }]);
+        assert.deepEqual(report.filters, { from: "2026-01-02", to: "2026-01-02" });
+
+        const invalid = await startServer(database, { url: "http://127.0.0.1", token: "test-token", port: 0, origins: [] }, { stores });
+        const server = invalid.app.listen(0, "127.0.0.1");
+        await new Promise<void>((resolve) => server.once("listening", resolve));
+        const port = (server.address() as AddressInfo).port;
+        const request = (pathname: string) => fetch(`http://127.0.0.1:${port}${pathname}`, { headers: { Authorization: "Bearer test-token" } });
+        const badDate = await request("/mcp/observability/report?from=2026-99-99");
+        const reverseRange = await request("/mcp/observability/report?from=2026-01-03&to=2026-01-02");
+        assert.equal(badDate.status, 400);
+        assert.equal(reverseRange.status, 400);
+        await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    } finally {
+        database.close();
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test("MCP 任务统计按 taskId 去重并保留批量与等待口径", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "infinite-canvas-mcp-observability-batch-"));
     const database = new BackendDatabase(path.join(dir, "runtime.sqlite"));

@@ -24,12 +24,8 @@ export function segmentRefsPatch(refs: H3Ref[]): Pick<H3Segment, "referenceBindi
     const normalized = refs.map((ref, index) => ensureReferenceIdentity(ref, index));
     return {
         referenceBindings: normalized.map(refToBinding),
-        refItems: normalized,
-        refs: {
-            image: normalized.filter((item) => item.type === "image"),
-            video: normalized.filter((item) => item.type === "video"),
-            audio: normalized.filter((item) => item.type === "audio"),
-        },
+        refItems: undefined,
+        refs: undefined,
     };
 }
 
@@ -149,6 +145,38 @@ function reconcileStoryboardTrack(previous: H3Segment, next: H3Segment): H3Segme
 
 // ---- 角色组：拖入角色资产/角色节点时建组，ref 槽里 image/audio ref 都标 groupId ----
 
+/**
+ * 用候选素材替换某个引用（画布替换 / 拖入替换）。
+ * 沿用被替换引用的 bindingId：引用槽身份不变，分镜轨卡片、时长分配和提示词里的
+ * <Picture N> 都留在原位，只换素材本身；候选多于 1 张时其余顺序插在原槽之后。
+ * 无可用候选（例如选了已经在本 Clip 里的素材）返回原 segment，由调用方提示。
+ */
+export function replaceSegmentReference(segment: H3Segment, reference: H3Ref, candidates: H3Ref[]): H3Segment {
+    const current = refsForSegment(segment);
+    const oldIndex = current.findIndex((ref) => reference.bindingId ? ref.bindingId === reference.bindingId : sameRef(ref, reference));
+    if (oldIndex < 0) return segment;
+    const old = current[oldIndex];
+    const base = old.groupId
+        ? applyCharacterGroupEdits(segment, old.groupId, reference.type === "audio" ? { voiceEnabled: false } : { outfitEnabled: old.outfitId ? { [old.outfitId]: false } : undefined })
+        : segment;
+    const baseRefs = refsForSegment(base).filter((ref) => !(old.bindingId ? ref.bindingId === old.bindingId : sameRef(ref, old)));
+    const replacements = candidates
+        .filter((candidate) => !baseRefs.some((ref) => sameRef(ref, candidate)))
+        .map((candidate, index) => ({
+            ...candidate,
+            ...(index === 0 && old.bindingId ? { bindingId: old.bindingId } : {}),
+            role: old.role || candidate.role,
+            usage: old.usage || candidate.usage,
+            retentionLevel: old.retentionLevel,
+            storyboardSubjectIds: old.storyboardSubjectIds || candidate.storyboardSubjectIds,
+            enabled: true,
+        }))
+        .filter((ref, index, all) => all.findIndex((other) => sameRef(other, ref)) === index);
+    if (!replacements.length) return segment;
+    const at = Math.min(oldIndex, baseRefs.length);
+    return withSegmentRefs(base, [...baseRefs.slice(0, at), ...replacements, ...baseRefs.slice(at)]);
+}
+
 function genGroupId(): string {
     return `cg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -189,7 +217,7 @@ function characterGroupCapacity(segment: H3Segment, groupId?: string) {
         if (grp.voiceEnabled) otherAudios += 1;
     }
     // 当前 group 之外的 standalone ref（用户手动拖入的非角色 ref）也参与计数
-    const standaloneRefs = (segment.refItems || []).filter((ref) => !ref.groupId);
+    const standaloneRefs = refsForSegment(segment).filter((ref) => !ref.groupId);
     otherImages += standaloneRefs.filter((ref) => ref.type === "image").length;
     otherAudios += standaloneRefs.filter((ref) => ref.type === "audio").length;
     return {

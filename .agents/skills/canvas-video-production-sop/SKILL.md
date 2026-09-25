@@ -81,24 +81,26 @@ description: >
 
 ```text
 productions/<canvasProjectId>/
-├── progress.md     # 阶段、任务、验收和下一步
+├── progress.md     # 阶段摘要、关键 ID、授权边界和下一步
+├── rework-log.md   # 问题、返修原因、尝试次数、前后任务与验收
 ├── script.md       # 剧本及逐字台词
 ├── storyboard.md   # 文字版分镜表与镜头过渡
 └── assets.md       # 角色、场景、道具、色卡和站位的引用索引
 ```
 
-首次使用时，从本 Skill 的 [进度](assets/production-progress-template.md)、[剧本](assets/script-template.md)、[文字分镜表](assets/storyboard-template.md) 和 [资产索引](assets/asset-register-template.md) 模板创建缺失文件；已有文件先读取，绝不按模板覆盖。没有画布项目 ID 时先记录本轮计划，待项目建立后再创建对应目录。已存在旧“短片制作进度”画布文本节点时，先读取并核对，再将可确认的状态并入 `progress.md`，保留原节点。
+首次使用时，从本 Skill 的 [进度](assets/production-progress-template.md)、[返修日志](assets/rework-log-template.md)、[剧本](assets/script-template.md)、[文字分镜表](assets/storyboard-template.md) 和 [资产索引](assets/asset-register-template.md) 模板创建缺失文件；已有文件先读取，绝不按模板覆盖。没有画布项目 ID 时先记录本轮计划，待项目建立后再创建对应目录。已存在旧“短片制作进度”画布文本节点时，先读取并核对，再将可确认的状态并入 `progress.md`，保留原节点。
 
 `script.md` 与 `storyboard.md` 分别是剧本和文字分镜表的当前版本；用户批准后若要大改，先复制为同目录的 `script.<旧版本>.md` 或 `storyboard.<旧版本>.md`，再更新固定文件名及 `progress.md` 中的版本。画布有序组只收纳分镜图，`progress.md` 记录其精确组 ID；可视分镜图顺序从该组的 `metadata.groupSlots` 回读。画布节点、任务、生成记录和媒体以 Backend 为准；`assets.md` 记录 nodeId、assetId 与 storageKey，不复制图片和视频到制作目录。
 
 ## 进度更新与恢复
 
 1. 开始或恢复制作时先读取该项目的 `progress.md`，再读取当前阶段需要的 `script.md`、`storyboard.md` 或 `assets.md`；文字镜头计划以 `storyboard.md` 为准，可视分镜图通过记录的组 ID 和 `metadata.groupSlots` 回读，再核对任务日志。
-2. 确定本轮范围后，记录阶段状态、已验收/目标数、关键资产 ID、镜头/Clip 状态、在途 taskId、未决问题和下一项可执行动作。没有真实结果的字段写“待生成/待核对”。
-3. 阶段产物、任务终态、验收或返修结论、用户授权范围发生变化，或本轮暂停/结束时，更新受影响的文件并回读确认。任务轮询无变化时不重复写入。
-4. 恢复在途任务时先查原 taskId 的终态，不重提生成。若记录的分镜图组 ID 不存在、组不是有序组或成员顺序无法确认，先核实画布，不凭组标题或屏幕位置重建图片顺序。文字分镜表与可视分镜图不一致时保留两边，按最新用户决定核对后修正；不得静默覆盖已批准剧本或分镜内容。
+2. 确定本轮范围后，在 `progress.md` 记录阶段状态、已验收/目标数、关键资产/画布/节点/分镜组 ID、在途 taskId、当前阶段结论和下一项可执行动作。没有真实结果的字段写“待生成/待核对”。`progress.md` 保持摘要，不逐项展开返修原因、重试次数和日志细节；具体问题与每次尝试写入 `rework-log.md`，进度文件只保留指向该日志的简短索引。
+3. 每个返修问题在 `rework-log.md` 使用稳定镜头/Clip/资产 ID 建立条目，并记录问题、证据原因、改动内容、尝试次数、前后 taskId/storageKey、独立验收结论和下一动作。H3 一次 `canvas-h3-run` 父任务计一次尝试；它的 ComfyUI 子任务属于同一次尝试，不得重复计数。任务成功不等于质量验收通过。
+4. 阶段产物、任务终态、验收或返修结论、用户授权范围发生变化，或本轮暂停/结束时，更新受影响的文件并回读确认。任务轮询无变化时不重复写入。
+5. 恢复在途任务时先查原 taskId 的终态，不重提生成。若记录的分镜图组 ID 不存在、组不是有序组或成员顺序无法确认，先核实画布，不凭组标题或屏幕位置重建图片顺序。文字分镜表与可视分镜图不一致时保留两边，按最新用户决定核对后修正；不得静默覆盖已批准剧本或分镜内容。
 
-阶段状态用 `未开始 / 进行中 / 待用户确认 / 需返修 / 已验收 / 受阻`；逐镜和逐 Clip 的 `accepted / needs-redo / waiting-user / blocked-upstream` 保留在明细中。完成数量只统计有证据且通过本阶段验收的条目；关键帧目标数只统计文字分镜表中策略为“新生成”的镜头。进度文件只写状态与证据索引，不复制完整 prompt、凭据或大段日志。
+阶段状态用 `未开始 / 进行中 / 待用户确认 / 需返修 / 已验收 / 受阻`；逐镜和逐 Clip 的 `accepted / needs-redo / waiting-user / blocked-upstream` 保留在相应明细中。完成数量只统计有证据且通过本阶段验收的条目；关键帧目标数只统计文字分镜表中策略为“新生成”的镜头。`progress.md` 只写状态与证据索引，不复制完整 prompt、凭据、大段日志或逐条返修史；具体返修追踪统一放在 `rework-log.md`。
 
 ## 通用执行节奏
 

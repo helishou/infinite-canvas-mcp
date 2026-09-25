@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
+import { loadCanvasProjectPage } from "@/lib/canvas-project-loader";
 import { cn } from "@/lib/utils";
 import { backendMediaUrl, createBackendDramaEpisode, createBackendProject, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, type DramaCustomAsset, type DramaEpisode } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
@@ -81,6 +82,9 @@ export default function DramaPage() {
             setEpisodesByDrama({});
             return;
         }
+        // The project page is by far the heaviest route chunk. Warm it while
+        // users browse episode cards, making the first click navigation cheap.
+        void loadCanvasProjectPage();
         let disposed = false;
         void Promise.all(dramaFolders.map(async (folder) => {
             try {
@@ -291,7 +295,12 @@ export default function DramaPage() {
             },
         });
     };
-    const openProject = (project: CanvasProject) => navigate(`/canvas/${project.id}`);
+    const openProject = (project: CanvasProject) => {
+        // The canvas route owns a very large lazy chunk. Start loading it before
+        // navigation so React Router can render the target page immediately.
+        void loadCanvasProjectPage();
+        navigate(`/canvas/${project.id}`);
+    };
 
     return (
         <main className="h-full overflow-y-auto bg-background text-stone-950 dark:text-stone-100">

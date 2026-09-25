@@ -1068,7 +1068,10 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     if (signal.aborted) throw new Error("任务已取消");
     params = normalizeH3Params(params, true);
     const mode = normalizeNanFengMode(params.mode ?? params.taskMode ?? (typeof input.video === "string" ? "ref2va" : "t2v"));
-    if (params.postGenerationOnly === true) return buildDecodedH3SecondPassWorkflow(input, params, upload, signal);
+    if (params.postGenerationOnly === true) {
+        params = normalizeH3Params(await resolveNanFengWorkflowParams(_comfyUrl, params, signal), true);
+        return buildDecodedH3SecondPassWorkflow(input, params, upload, signal);
+    }
     params = normalizeH3Params(await resolveNanFengWorkflowParams(_comfyUrl, params, signal), true);
     // The native V15 node has no TE-speed input. Keep the visible switch
     // effective by using the expanded graph when it is enabled, where the
@@ -1203,6 +1206,7 @@ export async function buildDecodedH3SecondPassWorkflow(input: Record<string, unk
             images, audio, model, vae: ["refine_video_vae", 0], audio_vae: ["refine_audio_vae", 0], clip: ["refine_clip", 0],
             prompt: withNoTextConstraint(String(input.prompt || ""), params.noCaption !== false), seed: resolveH3Seed(params),
             steps: Number(params.h3SecondSteps ?? params.secondPassSteps ?? 4), denoise: Number(params.secondPassDenoise ?? params.denoise ?? 0.28), sampler: String(params.secondPassSampler || params.sampler || "res_multistep"), scheduler: String(params.secondPassScheduler || params.scheduler || "simple"), target_megapixels: Number(params.latentUpscaleMegapixels ?? params.secondPassMegapixels ?? params.megapixels ?? 0.4),
+            cfg: Number(params.cfg ?? 1), shift_video: Number(params.videoSigmaShift ?? 12), shift_audio: Number(params.audioSigmaShift ?? 3),
         } };
         images = ["full_frame_refine", 0]; audio = ["full_frame_refine", 1];
     }

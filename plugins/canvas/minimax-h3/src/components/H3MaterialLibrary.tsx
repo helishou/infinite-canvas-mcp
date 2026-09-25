@@ -6,10 +6,11 @@ import { segmentsFor } from "../hooks/useH3Segments";
 import { H3Icon } from "./H3Icon";
 import { H3MaterialCard } from "./H3MaterialCard";
 import { H3PreviewLightbox } from "./H3PreviewLightbox";
+import { message } from "antd";
 
 type Props = { ctx: CanvasNodeContext; outputs: H3Ref[]; segments: H3Segment[]; selected?: H3Segment; patchSelected: (patch: Partial<H3Segment>) => void };
 
-export function H3MaterialLibrary({ ctx, outputs, segments, selected, patchSelected }: Props) {
+export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
     const [outputFilter, setOutputFilter] = useState<"all" | "current">(String(ctx.node.metadata?.minimaxOutputFilter || "") === "current" ? "current" : "all");
     const [historyOutputs, setHistoryOutputs] = useState<H3Ref[]>([]);
     const [previewRef, setPreviewRef] = useState<H3Ref | null>(null);
@@ -83,16 +84,27 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected, patchSelec
     const allOutputs = [...historyOutputs, ...outputs].filter((item, index, items) => items.findIndex((candidate) => candidate.url === item.url || (item.storageKey && candidate.storageKey === item.storageKey)) === index);
     const currentUrls = new Set((selected?.results || []).map((item) => item.url).concat(selected?.result ? [String(selected.result)] : []));
     const visibleOutputs = outputFilter === "current" ? allOutputs.filter((item) => currentUrls.has(item.url) || item.segmentId === selected?.id) : allOutputs;
-    const restoreOutput = (ref: H3Ref) => {
+    const restoreOutput = async (ref: H3Ref) => {
         // 输出卡片的点击可能发生在多个 metadata 更新之后，不能使用渲染时的旧 segments。
         // 从最新节点重新解析源 Clip，确保 prompt 和生成参数来自当前权威状态。
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
         const liveSegments = segmentsFor(liveMetadata);
-        patchSelected({ result: ref.url, resultStorageKey: ref.storageKey, results: [ref], ...buildRestoreParamsPatch(liveSegments, ref) });
+        const source = ref.generationLogId ? ref : historyOutputs.find((item) => (item.storageKey && item.storageKey === ref.storageKey) || item.url === ref.url);
+        if (!source?.generationLogId || !selected?.id) { message.error("缺少可验证的生成日志，无法还原输出"); return; }
+        try {
+            await ctx.flush();
+            await ctx.ai.restoreH3Output({
+                nodeId: ctx.node.id, segmentId: selected.id, generationLogId: source.generationLogId,
+                storageKey: source.storageKey, settings: buildRestoreParamsPatch(liveSegments, source) as Record<string, unknown>,
+            });
+            message.success("已还原当前 Clip 的输出与参数");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+        }
     };
     return <aside className="minimax-library">
         <div key="library-head" className="minimax-library-head"><H3Icon name="output" /> <span>Output</span><span className="minimax-output-actions"><button type="button" aria-label="切换输出筛选" aria-pressed={outputFilter === "current"} title={outputFilter === "all" ? "当前显示全部输出，点击只显示当前 Clip" : "当前只显示当前 Clip，点击显示全部输出"} onClick={() => changeOutputFilter(outputFilter === "all" ? "current" : "all")} className={`minimax-output-filter${outputFilter === "current" ? " active" : ""}`}><H3Icon name={outputFilter === "all" ? "filter-all" : "filter-current"} /></button></span></div>
-        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.generationLogId || ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} compact removable onRestore={() => restoreOutput(ref)} onOpenPreview={() => setPreviewRef(ref)} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>Output</span></div> : null}</div>
-        {previewRef ? <H3PreviewLightbox item={previewRef} onClose={() => setPreviewRef(null)} /> : null}
+        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.generationLogId || ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} compact removable onRestore={() => void restoreOutput(ref)} onOpenPreview={() => setPreviewRef(ref)} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>Output</span></div> : null}</div>
+        {previewRef ? <H3PreviewLightbox item={{ ...previewRef, url: previewRef.storageKey ? ctx.mediaUrl(previewRef.storageKey) : previewRef.url }} onClose={() => setPreviewRef(null)} /> : null}
     </aside>;
 }

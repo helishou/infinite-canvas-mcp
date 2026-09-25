@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { referenceBindingsOf } from "@basketikun/canvas-agent/reference-contract";
 
 export type CanvasOperation = Record<string, unknown> & { type: string };
 
@@ -342,9 +343,112 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
         results.push(result);
     }
 
+    // 绑定是用户意图；仅在素材第一次进入项目时登记媒体，不把 Clip 职责反写到共享资产。
+    const referenceNodes = new Set<string>();
+    for (const operation of operations) {
+        if (operation.type === "update_h3_segment" && Object.hasOwn(recordOf(operation.patch), "referenceBindings")) referenceNodes.add(String(operation.nodeId || ""));
+        if (["add_h3_segment", "replace_h3_segments"].includes(operation.type)) referenceNodes.add(String(operation.nodeId || ""));
+        if (operation.type === "add_node") referenceNodes.add(String(operation.id || ""));
+        if (operation.type === "update_node" && Object.hasOwn(recordOf(operation.metadata), "segments")) referenceNodes.add(String(operation.id || ""));
+    }
+    for (const nodeId of referenceNodes) {
+        const node = nodes.find((item) => String(item.id) === nodeId);
+        if (isH3CanvasNode(node)) {
+            canonicalizeH3References(node!);
+            registerH3ReferenceAssets(project, node!);
+        }
+    }
     project.nodes = nodes;
     project.connections = connections;
     return results;
+}
+
+export function canonicalizeH3References(node: Record<string, unknown>, archiveLegacy?: (segment: Record<string, unknown>, index: number) => void) {
+    const metadata = recordOf(node.metadata);
+    const segments = segmentsOf(node);
+    for (const [index, segment] of segments.entries()) {
+        const buckets = recordOf(segment.refs);
+        const legacyRefs = Array.isArray(segment.refItems) && segment.refItems.length
+            ? segment.refItems.map(recordOf)
+            : ["image", "video", "audio"].flatMap((type) => Array.isArray(buckets[type]) ? (buckets[type] as unknown[]).map(recordOf) : buckets[type] ? [recordOf(buckets[type])] : []);
+        const currentBindings = Array.isArray(segment.referenceBindings) ? segment.referenceBindings as Array<Record<string, unknown>> : [];
+        if (legacyRefs.length) archiveLegacy?.(segment, index);
+        if (currentBindings.length && legacyRefs.length) {
+            const ids = new Set(currentBindings.map((binding) => String(binding.id || "")));
+            if (!archiveLegacy && (currentBindings.length !== legacyRefs.length || legacyRefs.some((ref) => ref.bindingId && !ids.has(String(ref.bindingId))))) {
+                throw new Error(`H3 Clip ${String(segment.id || "")} 的绑定与旧参考不一致，拒绝丢弃原数据`);
+            }
+        }
+        if (!Array.isArray(segment.referenceBindings) || !segment.referenceBindings.length) {
+            const legacy = { ...segment };
+            delete legacy.referenceBindings;
+            const converted = referenceBindingsOf(legacy).bindings;
+            if (legacyRefs.length && converted.length !== legacyRefs.length) throw new Error(`H3 Clip ${String(segment.id || "")} 的旧参考无法完整迁移，原数据已保留`);
+            if (converted.length) segment.referenceBindings = converted;
+        }
+        delete segment.refItems;
+        delete segment.refs;
+    }
+    metadata.segments = segments;
+    metadata.h3DataVersion = 2;
+    node.metadata = metadata;
+}
+
+export function registerH3ReferenceAssets(project: Record<string, unknown>, node: Record<string, unknown>) {
+    const catalog = Array.isArray(project.referenceCatalog) ? project.referenceCatalog as Array<Record<string, unknown>> : [];
+    const byId = new Map(catalog.map((asset) => [String(asset.id || ""), asset]));
+    const conflicts = (asset: Record<string, unknown>, binding: Record<string, unknown>) => {
+        const assetSource = String(asset.sourceNodeId || "");
+        const bindingSource = String(binding.sourceNodeId || "");
+        if (assetSource && !bindingSource) return false; // 旧绑定可只有媒体快照；项目资产仍保有动态来源。
+        if (assetSource && bindingSource) return assetSource !== bindingSource;
+        const assetMedia = String(asset.storageKey || asset.url || "");
+        const bindingMedia = String(binding.storageKey || binding.url || "");
+        return Boolean(assetMedia && bindingMedia && assetMedia !== bindingMedia);
+    };
+    const segments = segmentsOf(node);
+    let changed = false;
+    for (const segment of segments) {
+        const bindings = Array.isArray(segment.referenceBindings) ? segment.referenceBindings as Array<Record<string, unknown>> : [];
+        for (const binding of bindings) {
+            const originalId = String(binding.assetId || "");
+            if (!originalId) continue;
+            const identity = String(binding.sourceNodeId ? `node:${binding.sourceNodeId}` : binding.storageKey || binding.url || "");
+            let id = originalId;
+            const existing = byId.get(id);
+            if (existing && conflicts(existing, binding)) {
+                id = `${originalId}-${crypto.createHash("sha256").update(identity).digest("hex").slice(0, 10)}`;
+                binding.assetId = id;
+                changed = true;
+            }
+            const resolved = byId.get(id);
+            if (resolved) {
+                if (conflicts(resolved, binding)) throw new Error(`参考资产 ID 冲突：${id}`);
+                for (const field of ["storageKey", "url", "mimeType", "sourceNodeId", "mediaType"]) {
+                    if (!resolved[field] && binding[field]) { resolved[field] = binding[field]; changed = true; }
+                }
+                continue;
+            }
+            const asset = {
+                id,
+                label: String(binding.label || id),
+                mediaType: String(binding.mediaType || "image"),
+                role: "other",
+                tags: [],
+                ...(binding.url ? { url: binding.url } : {}),
+                ...(binding.storageKey ? { storageKey: binding.storageKey } : {}),
+                ...(binding.mimeType ? { mimeType: binding.mimeType } : {}),
+                ...(binding.sourceNodeId ? { sourceNodeId: binding.sourceNodeId } : {}),
+            };
+            catalog.push(asset);
+            byId.set(id, asset);
+            changed = true;
+        }
+    }
+    if (changed) {
+        project.referenceCatalog = catalog;
+        recordOf(node.metadata).segments = segments;
+    }
 }
 
 function nodesOf(project: Record<string, unknown>) {

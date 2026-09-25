@@ -54,6 +54,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
     const [voiceStorageKey, setVoiceStorageKey] = useState("");
     const [voiceAssetId, setVoiceAssetId] = useState("");
     const [saving, setSaving] = useState(false);
+    const [replaceImageIndex, setReplaceImageIndex] = useState<number | null>(null);
     const voiceInputRef = useRef<HTMLInputElement>(null);
     const lastCanvasImagePickRef = useRef("");
 
@@ -79,8 +80,21 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
     useEffect(() => {
         if (!canvasImagePick || canvasImagePick.id === lastCanvasImagePickRef.current) return;
         lastCanvasImagePickRef.current = canvasImagePick.id;
+        if (replaceImageIndex !== null) {
+            setImages((current) => current.map((image, index) => index === replaceImageIndex
+                ? { ...image, ...canvasImagePick.image, outfit: image.outfit, outfitDescription: image.outfitDescription, role: image.role }
+                : image));
+            setReplaceImageIndex(null);
+            return;
+        }
         setImages((current) => current.some((image) => image.storageKey && image.storageKey === canvasImagePick.image.storageKey || image.url === canvasImagePick.image.url) ? current : [...current, canvasImagePick.image]);
-    }, [canvasImagePick]);
+    }, [canvasImagePick, replaceImageIndex]);
+
+    useEffect(() => {
+        if (!selectingCanvasImage && replaceImageIndex !== null && (!canvasImagePick || canvasImagePick.id === lastCanvasImagePickRef.current)) {
+            setReplaceImageIndex(null);
+        }
+    }, [canvasImagePick, replaceImageIndex, selectingCanvasImage]);
 
     const handleVoiceUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -226,6 +240,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
                                     <Button size="small" onClick={() => setPrimaryIndex(idx)} type={idx === primaryIndex ? "primary" : "default"}>
                                         {idx === primaryIndex ? t("canvas.character.primary") : t("canvas.character.setPrimary")}
                                     </Button>
+                                    <Button size="small" icon={<ImagePlus className="size-3.5" />} title={t("canvas.character.replaceImageFromCanvas")} aria-label={t("canvas.character.replaceImageFromCanvas")} onClick={() => { setReplaceImageIndex(idx); onPickCanvasImage(); }} />
                                     <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removeImage(idx)} />
                                 </div>
                             </div>

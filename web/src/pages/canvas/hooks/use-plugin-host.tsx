@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { storeGeneratedVideo } from "@/services/api/video";
 import { getLocalH3Task, getRunningHubH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
-import { backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, resolveBackendH3Confirmation, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
+import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, resolveBackendH3Confirmation, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
 import { observeCanvasGenerationTask } from "@/services/api/canvas-generation-task";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
@@ -177,6 +177,11 @@ export function usePluginHost(params: PluginHostParams) {
                 if (!response.ok || !data.task) throw new Error(data.error || `取消 H3 运行失败（HTTP ${response.status}）`);
                 return data.task;
             },
+            restoreH3Output: async (input) => {
+                const project = getProject();
+                if (!project) throw new Error("画布已关闭，无法还原历史输出");
+                await applyBackendCanvasOperations(projectId, [{ type: "restore_h3_output", ...input }], Number(project.revision || 0));
+            },
             runVideoConcat: async (videos, options) => {
                 const { endpoint, token } = resolveBackendAgentEndpoint();
                 return runVideoConcatTask(endpoint, token, videos, options?.signal);
@@ -201,6 +206,7 @@ export function usePluginHost(params: PluginHostParams) {
     const pluginHost = useMemo<CanvasPluginHost>(
         () => ({
             projectId,
+            mediaUrl: backendMediaUrl,
             getNode: (id) => getProject()?.nodes.find((node) => node.id === id) || null,
             getNodes: () => getProject()?.nodes || [],
             getConnections: () => getProject()?.connections || [],

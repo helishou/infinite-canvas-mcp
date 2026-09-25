@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Empty, Modal, Progress, Select, Tag, Tooltip, message } from "antd";
 import { ChevronDown, ChevronRight, ListChecks, RefreshCw, Square } from "lucide-react";
-import { backendMediaUrl, cancelBackendTask, fetchBackendTasks, resolveBackendH3Confirmation, retryBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
+import { backendMediaUrl, cancelBackendTask, fetchBackendProject, fetchBackendTasks, resolveBackendH3Confirmation, retryBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
 import { useRunningTaskCount } from "@/hooks/use-running-task-count";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { taskProgress } from "@/lib/canvas/task-progress";
@@ -154,7 +154,17 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
         const pending = task.result?.confirmation?.pending?.[0];
         if (!pending) { message.error("找不到待确认 Clip，请刷新任务"); return; }
         try {
-            await resolveBackendH3Confirmation(task.id, { action, segmentIds: [pending.segmentId], firstPassFingerprint: pending.firstPassFingerprint, ...(action === "confirm" && task.error ? { retry: true } : {}) });
+            let postpassParams: Record<string, unknown> | undefined;
+            if (action === "confirm") {
+                const projectId = String(task.projectId || task.input?.projectId || "");
+                const project = (await fetchBackendProject(projectId)).project as Record<string, unknown>;
+                const node = (Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : []).find((item) => item.id === pending.nodeId);
+                postpassParams = (Array.isArray((node?.metadata as Record<string, unknown> | undefined)?.segments)
+                    ? (node!.metadata as { segments: Array<Record<string, unknown>> }).segments
+                    : []).find((item) => item.id === pending.segmentId);
+                if (!postpassParams) throw new Error("找不到当前 Clip 设置，请刷新任务");
+            }
+            await resolveBackendH3Confirmation(task.id, { action, segmentId: pending.segmentId, expectedRevision: Number(task.result?.confirmation?.revision || 0), ...(postpassParams ? { postpassParams } : {}) });
             await load();
         } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
     };

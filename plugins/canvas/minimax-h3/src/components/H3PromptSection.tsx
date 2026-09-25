@@ -14,7 +14,7 @@ import { extractDialogues, stripDialogueSpeakers, injectDialogueSpeakers, parseS
 import { h3ThemeVars } from "../h3-theme";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
 import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
-import { formatShotTimestamp, normalizeRef2vaSummary, stripDuplicateTransition, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
+import { formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, stripDuplicateTransition, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
 import type { H3PromptSection, H3PromptSectionValues } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import baseReference from "../storyboard-assets/references/base-en.txt?raw";
 import refReference from "../storyboard-assets/references/ref-en.txt?raw";
@@ -157,7 +157,9 @@ function storyboardPictureDescription(ref: H3Ref, assets: CanvasReferenceAsset[]
     .replace(/^[\s,，.;。_-]+|[\s,，.;。_-]+$/gu, "");
   // 描述只取参考描述、视觉分析摘要与标签，禁止兜底到 asset.label / ref.name ——
   // 文件名（如「分镜图·seg07_v38.png」）对视频模型毫无语义，写进 prompt 只会污染。
-  const details = [description, summary, tags];
+  // 这三项本身只是素材名的回显时同样丢弃（历史数据把 label 写进过 analysis.summary）。
+  const names = [asset?.label, ref.name];
+  const details = [description, summary, tags].filter((value) => !isReferenceNameEcho(value, names));
   return details.map(clean).find((value) => value && !/^(?:the|a|an|for|of)$/iu.test(value))?.slice(0, 140) || "";
 }
 
@@ -259,6 +261,15 @@ function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment,
     role === "storyboard" || (role === "keyframe" && Boolean(ref.bindingId && shotReferenceIds.has(ref.bindingId)))
   );
   const subjects = new Map<string, { id: string; name: string; englishName?: string; aliases: Set<string>; shotMarkers: Set<string>; profile: string; outfits: Set<string>; pictures: string[]; role?: string }>();
+  const subjectKeyByName = new Map<string, string>();
+  const canonicalSubjectId = (name: string, subjectId: string) => {
+    const key = name.trim().toLocaleLowerCase();
+    if (!key) return subjectId;
+    const existing = subjectKeyByName.get(key);
+    if (existing) return existing;
+    subjectKeyByName.set(key, subjectId);
+    return subjectId;
+  };
   const referenceManifest = refs.map((ref): StoryboardPromptReference => {
     const ordinal = ++counters[ref.type];
     const tag = ref.type === "image" ? `<Picture ${ordinal}>` : ref.type === "video" ? `<Video ${ordinal}>` : `<Audio ${ordinal}>`;
@@ -280,14 +291,12 @@ function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment,
     const subjectIds = new Set<string>();
     for (const id of ids) {
       const group = groupFor(id) || Object.values(groups).find((item) => item.subjectId === id || item.characterNodeId === id);
-      const subjectId = group?.subjectId || group?.characterNodeId || id;
       const characterNode = group?.characterNodeId ? ctx.getNode(group.characterNodeId) : id === sourceCharacterId ? sourceNode : ctx.getNode(id);
       const metadata = (characterNode?.metadata || {}) as Record<string, unknown>;
-      // 非角色图片主体（场景/道具/风格等）命名禁止落到文件名——按参考用途给稳定英文名，
-      // 镜头命中判定使用结构化 referenceIds，不依赖这个展示名。
       const isCharacter = Boolean(group || characterNode?.type === "character" || role === "character_identity" || role === "character_turnaround");
       const roleFallbackName: Record<string, string> = { scene: "Scene", prop: "Prop", style: "Style", palette: "Palette", blocking: "Blocking", storyboard: "Storyboard" };
       const name = group?.characterName || String(metadata.characterName || characterNode?.title || (isCharacter ? ref.name : roleFallbackName[role] || "Reference"));
+      const subjectId = canonicalSubjectId(name, group?.subjectId || group?.characterNodeId || id);
       const englishName = typeof metadata.characterEnglishName === "string" ? metadata.characterEnglishName.trim() : "";
       const profile = [
         typeof metadata.characterDescription === "string" ? metadata.characterDescription.trim() : "",
@@ -425,6 +434,9 @@ function readPromptSection(prompt: string, section: PromptSection) {
 }
 
 
+// 分镜图 cue 的三种历史句式：前两种是插件/旧版编译产物，第三种是 MCP 编译产物（带一整段 After the keyframe 尾巴）。
+const STORYBOARD_CUE_PATTERN = /^Use the approved .+? from <Picture\s+(\d+)> as (?:the visual anchor|the target composition reference|the shot-entry keyframe and composition anchor) for this shot\.(?:\s*After the keyframe, keep the camera setup and spatial relationship stable while allowing natural performance\.)?\s*/iu;
+
 function parseStoryboardDescription(description: string, imageRefs: H3Ref[], allRefs = imageRefs) {
   const normalizedDescription = normalizeLegacyReferenceTokens(description, allRefs);
   const markers = [...normalizedDescription.matchAll(/\[Shot\s+(\d+)\](?:\s+At\s+(\d{1,2}:\d{2}(?:\.\d{1,3})?)[,，]?)?/giu)];
@@ -491,7 +503,7 @@ function parseStoryboardDescription(description: string, imageRefs: H3Ref[], all
         }
       }
       let pictureBindingId: string | undefined;
-      const pictureCue = body.match(/^Use the approved .+? from <Picture\s+(\d+)> as (?:the visual anchor|the target composition reference) for this shot\.\s*/iu);
+      const pictureCue = body.match(STORYBOARD_CUE_PATTERN);
       if (generatedTransition) {
         pictureBindingId = imageRefs[Number(generatedTransition[1]) - 1]?.bindingId;
         body = body.slice(generatedTransition[0].length);
@@ -510,7 +522,7 @@ function parseStoryboardDescription(description: string, imageRefs: H3Ref[], all
       // 旧版解析器曾把它们泄进正文（一次载入+保存即成对复制进来），每次编译还会再叠一层；
       // 这里循环剥掉所有残余副本，载入即修复。
       for (;;) {
-        const residualCue = body.match(/^Use the approved .+? from <Picture\s+(\d+)> as (?:the visual anchor|the target composition reference) for this shot\.\s*/iu);
+        const residualCue = body.match(STORYBOARD_CUE_PATTERN);
         if (residualCue) {
           if (!pictureBindingId) pictureBindingId = imageRefs[Number(residualCue[1]) - 1]?.bindingId;
           body = body.slice(residualCue[0].length);
@@ -982,9 +994,10 @@ export function H3PromptSection({
     }]
     : []);
 
-  // 实体定义的视觉来源池：当前 Clip 的**所有**图片引用（不限于分镜图，道具/场景/角色都算）。
+  // 实体定义的视觉来源池：当前 Clip 的非分镜图片引用（道具/场景/角色等）。
+  // 分镜图只用于逐镜「绑定分镜图」，不再作为实体视觉身份候选，避免污染 Subject 定义。
   // 值用 `<Picture N>` 与本字段的存储格式一致；缩略图即图片本身，不显示编号。
-  const subjectPicturePool = imageRefs.flatMap((ref, index) => (ref.url || ref.storageKey)
+  const subjectPicturePool = imageRefs.flatMap((ref, index) => (ref.url || ref.storageKey) && !isStoryboardPictureRef(ref)
     ? [{
       ref,
       value: `<Picture ${index + 1}>`,
@@ -1087,6 +1100,11 @@ export function H3PromptSection({
     }
   };
 
+  useEffect(() => {
+    if (!selected) return;
+    const savedDefinitions = selected.subjectDefinitions;
+    setSubjectDefinitions(savedDefinitions?.length ? savedDefinitions : defaultSubjectDefinitions());
+  }, [selected?.id, selected?.subjectDefinitions, imageRefs, referenceCatalog, ctx.node.id]);
   const openStoryboard = () => {
     if (mode !== "ref2va") return;
     const needsBindingSave = loadStoryboardPrompt(prompt);
@@ -1696,48 +1714,58 @@ export function H3PromptSection({
               <div className="nfh3-storyboard-detail-body">
                 <div className="nfh3-subject-hint">打开表单时已按当前 Clip 引用自动填写。Subject 不一定只能是角色——道具、场景等主体同样在此定义，编号即 &lt;Subject N&gt; 的 N。</div>
                 {subjectDefinitions.length ? subjectDefinitions.map((definition, index) => (
-                  <div className="nfh3-subject-row" key={definition.id || index}>
-                    <span className="nfh3-subject-ordinal">{`<Subject ${index + 1}>`}</span>
-                    <input
-                      className="nfh3-subject-name"
-                      value={definition.name}
-                      placeholder="主体名称（角色 / 道具 / 场景…）"
-                      onChange={(event) => updateSubjectDefinition(index, { name: event.target.value })}
-                      aria-label={`实体 ${index + 1} 名称`}
-                    />
-                    <input
-                      className="nfh3-subject-profile"
-                      value={definition.profile || ""}
-                      placeholder="视觉特征描述（可选，留空则用规则生成的描述）"
-                      onChange={(event) => updateSubjectDefinition(index, { profile: event.target.value })}
-                      aria-label={`实体 ${index + 1} 描述`}
-                    />
-                    <Select
-                      className="nfh3-subject-pictures"
-                      popupClassName="nfh3-subject-pictures-popup"
-                      mode="multiple"
-                      size="small"
-                      value={definition.pictures?.length ? definition.pictures : []}
-                      options={[
-                        ...subjectPicturePool.map(({ value, label }) => ({ value, label })),
-                        ...(definition.pictures || []).filter((tag) => !subjectPicturePool.some((option) => option.value === tag))
-                          .map((tag) => ({ value: tag, label: <span className="nfh3-storyboard-picture-option"><span>{`${tag}（已移除的参考）`}</span></span> })),
-                      ]}
-                      labelRender={({ value }) => {
-                        const option = subjectPicturePool.find((item) => item.value === value);
-                        const url = option?.ref.url;
-                        return <span className="nfh3-subject-picture-chip" title={option?.ref.name || String(value)}>
-                          {url ? <img src={url} alt="" /> : null}
-                        </span>;
-                      }}
-                      optionRender={(option) => <>{option.label}</>}
-                      onChange={(value) => updateSubjectDefinition(index, { pictures: (value as string[]).map(String) })}
-                      placeholder="选择视觉来源（可多选）"
-                      aria-label={`实体 ${index + 1} 视觉来源`}
-                      style={{ width: "100%" }}
-                    />
-                    <button type="button" className="nfh3-subject-remove" onClick={() => removeSubjectDefinition(index)} aria-label={`删除实体 ${index + 1}`}>删除</button>
-                  </div>
+                  <section className="nfh3-subject-row" key={definition.id || index}>
+                    <div className="nfh3-subject-primary">
+                      <span className="nfh3-subject-ordinal">{`<Subject ${index + 1}>`}</span>
+                      <label className="nfh3-subject-field">
+                        <span>主体名称</span>
+                        <input
+                          className="nfh3-subject-name"
+                          value={definition.name}
+                          placeholder="角色 / 道具 / 场景"
+                          onChange={(event) => updateSubjectDefinition(index, { name: event.target.value })}
+                          aria-label={`实体 ${index + 1} 名称`}
+                        />
+                      </label>
+                      <button type="button" className="nfh3-subject-remove" onClick={() => removeSubjectDefinition(index)} aria-label={`删除实体 ${index + 1}`}>删除</button>
+                    </div>
+                    <label className="nfh3-subject-field nfh3-subject-profile-field">
+                      <span>视觉特征描述 <em>可选</em></span>
+                      <input
+                        className="nfh3-subject-profile"
+                        value={definition.profile || ""}
+                        placeholder="留空时使用规则生成的描述"
+                        onChange={(event) => updateSubjectDefinition(index, { profile: event.target.value })}
+                        aria-label={`实体 ${index + 1} 描述`}
+                      />
+                    </label>
+                    <label className="nfh3-subject-field nfh3-subject-sources-field">
+                      <span>视觉来源 <em>可多选</em></span>
+                      <Select
+                        className="nfh3-subject-pictures"
+                        popupClassName="nfh3-subject-pictures-popup"
+                        mode="multiple"
+                        value={definition.pictures?.length ? definition.pictures : []}
+                        options={[
+                          ...subjectPicturePool.map(({ value, label }) => ({ value, label })),
+                          ...(definition.pictures || []).filter((tag) => !subjectPicturePool.some((option) => option.value === tag))
+                            .map((tag) => ({ value: tag, label: <span className="nfh3-storyboard-picture-option"><span>{`${tag}（已移除的参考）`}</span></span> })),
+                        ]}
+                        labelRender={({ value }) => {
+                          const option = subjectPicturePool.find((item) => item.value === value);
+                          const url = option?.ref.url;
+                          return <span className="nfh3-subject-picture-chip" title={option?.ref.name || String(value)}>
+                            {url ? <img src={url} alt="" /> : null}
+                          </span>;
+                        }}
+                        optionRender={(option) => <>{option.label}</>}
+                        onChange={(value) => updateSubjectDefinition(index, { pictures: (value as string[]).map(String) })}
+                        placeholder="选择角色、场景或道具参考"
+                        aria-label={`实体 ${index + 1} 视觉来源`}
+                        style={{ width: "100%" }}
+                      />
+                    </label>
+                  </section>
                 )) : <div className="nfh3-subject-hint">当前 Clip 未解析出实体。可点「重置为规则生成」或「添加实体」。</div>}
               </div>
             </details> : null}

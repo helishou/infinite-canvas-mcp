@@ -19,6 +19,7 @@ export const canvasGenerationCommandSchema = z
     segmentIndex: z.number().optional(),
     runFromCurrent: z.boolean().optional(),
     skipCompleted: z.boolean().optional(),
+    forceRegenerate: z.boolean().optional(),
     model: z.string().optional(),
     prompt: z.string().optional(),
     references: z.array(z.record(z.string(), z.unknown())).optional(),

@@ -2,61 +2,12 @@ import { useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref } from "../types";
 import { resultUrl } from "../services/h3-data";
-import { segmentsFor } from "../hooks/useH3Segments";
 
-export function requestH3Run(ctx: CanvasNodeContext, all = false) {
+export function requestH3Run(ctx: CanvasNodeContext, all = false, forceRegenerate = false) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const metadata = node.metadata || {};
     if (["queued", "loading", "awaiting_confirmation"].includes(String(metadata.status || ""))) return;
-    const segments = segmentsFor(metadata);
-    const selectedId = String(metadata.selectedSegmentId || segments[0]?.id || "");
-    const selected = segments.find((segment) => segment.id === selectedId) || segments[0];
-    const prompt = String(selected?.prompt || metadata.prompt || "");
-    const runtimeRunId = `h3-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    ctx.updateMetadata({
-        selectedSegmentId: selectedId,
-        prompt,
-        segments: segments.map((segment) => all || segment.id === selectedId ? { ...segment, prompt: segment.id === selectedId ? prompt : segment.prompt, status: "queued", progress: 0, runtimeTaskId: "" } : segment),
-        status: "queued",
-        runRequestId: runtimeRunId,
-        runtimeRunId,
-        runRequestAll: all,
-        runRequestConsumedId: "",
-        cancelRequested: false,
-        runtimeTaskId: "",
-        runProgress: 0,
-        runStartedAt: 0,
-    });
-    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, requestId: runtimeRunId, all });
-}
-
-export function resetAndRequestH3Run(ctx: CanvasNodeContext, all = false) {
-    const node = ctx.getNode(ctx.node.id) || ctx.node;
-    const metadata = node.metadata || {};
-    if (metadata.status === "awaiting_confirmation") return;
-    const segments = segmentsFor(metadata);
-    const selectedId = String(metadata.selectedSegmentId || segments[0]?.id || "");
-    const selected = segments.find((segment) => segment.id === selectedId) || segments[0];
-    const prompt = String(selected?.prompt || metadata.prompt || "");
-    const runtimeRunId = `h3-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    ctx.updateMetadata({
-        ...(all ? { content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined } : {}),
-        selectedSegmentId: selectedId, prompt,
-        segments: segments.map((segment) => all || segment.id === selectedId
-            ? { ...segment, prompt: segment.id === selectedId ? prompt : segment.prompt, result: "", results: [], status: "queued", progress: 0, runtimeTaskId: "" }
-            : segment),
-        status: "queued", errorDetails: "", runRequestId: runtimeRunId, runtimeRunId,
-        runRequestAll: all, runRequestConsumedId: "", cancelRequested: false, runtimeTaskId: "",
-        runProgress: 0, runStartedAt: 0,
-    });
-    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, requestId: runtimeRunId, all });
-}
-
-export function resetH3Run(ctx: CanvasNodeContext) {
-    const node = ctx.getNode(ctx.node.id) || ctx.node;
-    if (node.metadata?.status === "awaiting_confirmation") return;
-    const segments = segmentsFor(node.metadata || {}).map((segment) => ({ ...segment, result: "", results: [], status: "idle", progress: 0, runtimeTaskId: "" }));
-    ctx.updateMetadata({ content: "", mimeType: undefined, naturalWidth: undefined, naturalHeight: undefined, durationMs: undefined, segments, status: "idle", errorDetails: "", runtimeTaskId: "", runtimeRunId: "", runProgress: 0, runRequestId: "", runRequestConsumedId: "", cancelRequested: false, runFinishedAt: undefined });
+    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, all, forceRegenerate });
 }
 
 export function H3StatusBadge({ status, error, onRetry }: { status: string; error: string; onRetry: () => void }) {
@@ -407,10 +358,64 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     const activeRef = useRef(0);
     const [active, setActive] = useState(0);
     const [slotSrc, setSlotSrc] = useState<[string, string]>([url || "", ""]);
+    // 预览分辨率：图片/视频加载后把真实尺寸写进来，叠加在预览左下角（见 minimax-player-resolution）。
+    const [mediaResolution, setMediaResolution] = useState<{ width: number; height: number } | null>(null);
+    useEffect(() => { setMediaResolution(null); }, [url, kind]);
     // ⚠️ 必须放在下方所有提前 return（!url / image / audio）之前：hooks 数量在两次渲染间必须一致，
     // 否则预览源在「视频 ↔ 空/图片/音频」之间切换时（如选中有结果/无结果的 Clip）会直接抛
     // "Rendered more/fewer hooks than during the previous render"，整棵节点树被错误边界拆掉。
     const [isMuted, setIsMuted] = useState(true);
+    const [frameMenuPosition, setFrameMenuPosition] = useState<{ x: number; y: number } | null>(null);
+    const frameMenuOpen = frameMenuPosition !== null;
+    const frameMenuRef = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        if (!frameMenuOpen) return;
+        const close = (event: PointerEvent) => {
+            if (!frameMenuRef.current?.contains(event.target as Node)) setFrameMenuPosition(null);
+        };
+        document.addEventListener("pointerdown", close, true);
+        return () => document.removeEventListener("pointerdown", close, true);
+    }, [frameMenuOpen]);
+    const captureVideoFrame = async (position: "current" | "first" | "last") => {
+        const video = videosRef.current[activeRef.current] as HTMLVideoElement | null;
+        if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
+        const wasPlaying = !video.paused;
+        if (wasPlaying) video.pause();
+        try {
+            if (position !== "current") {
+                const target = position === "first" ? 0 : Math.max(0, Number(video.duration || 0) - 1 / 60);
+                video.currentTime = target;
+                await new Promise<void>((resolve) => {
+                    let settled = false;
+                    const done = () => { if (!settled) { settled = true; cleanup(); resolve(); } };
+                    const cleanup = () => {
+                        video.removeEventListener("seeked", done);
+                        window.removeEventListener("error", done);
+                    };
+                    video.addEventListener("seeked", done, { once: true });
+                    window.setTimeout(done, 1200);
+                });
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const context = canvas.getContext("2d");
+            if (!context) return;
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob((blob) => {
+                if (!blob) return;
+                const link = document.createElement("a");
+                const safeName = String(name || "video").replace(/[\\/:*?"<>|]+/g, "-");
+                link.href = URL.createObjectURL(blob);
+                link.download = `${safeName}-${position === "current" ? "当前帧" : position === "first" ? "首帧" : "尾帧"}.png`;
+                link.click();
+                window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+            }, "image/png");
+        } finally {
+            if (wasPlaying) void video.play().catch(() => undefined);
+            setFrameMenuPosition(null);
+        }
+    };
     const onEndedRef = useRef(onEnded);
     useEffect(() => { onEndedRef.current = onEnded; }, [onEnded]);
     const nextUrlRef = useRef(nextUrl);
@@ -491,7 +496,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         let raf = 0;
         const tick = () => {
             // 拖动刻度期间，scrubber 会设 data-scrubbing，rAF 立即让位给拖动 seek，避免指针抖动
-            const scrubberEl = document.querySelector(".minimax-ruler-scrubber");
+            const scrubberEl = videosRef.current[activeRef.current]?.closest(".minimax-canvas-workbench")?.querySelector(".minimax-ruler-scrubber");
             if (scrubberEl && scrubberEl.hasAttribute("data-scrubbing")) { raf = requestAnimationFrame(tick); return; }
             const v = videosRef.current[activeRef.current];
             if (v && !v.paused && !v.ended && v.readyState >= 1) {
@@ -570,7 +575,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         event.dataTransfer.setData("text/plain", payload);
     };
     if (!url) return <div className="minimax-player-content"><div className="minimax-player-empty">连接视频和角色参考图</div></div>;
-    if (kind === "image") return <div className="minimax-player-content minimax-player-image" draggable onDragStart={handleDragStart}><img src={url} alt="H3 reference" draggable={false} /></div>;
+    if (kind === "image") return <div className="minimax-player-content minimax-player-image" draggable onDragStart={handleDragStart}><img src={url} alt="H3 reference" draggable={false} onLoad={(event) => setMediaResolution({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />{mediaResolution ? <div className="minimax-player-resolution">{mediaResolution.width} × {mediaResolution.height}</div> : null}</div>;
     if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio loop={Boolean(url) && !ctx.node.metadata?.h3PlaybackAll} ref={(node) => { videosRef.current[0] = node; }} src={url} controls preload="metadata" draggable={false} onPause={(event) => { const m = event.currentTarget; const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity))); ctx.updateMetadata({ playhead: timelineOffset + localTime }); }} /></div></div>;
     // 视频：双槽交叉淡入续播。两个 video 绝对叠放，active 槽可见且有 controls，另一槽透明且不接收事件；
     // 下一段已在 inactive 槽预载就绪，ended 时切换 active 即可即时续播，无 src 重载间隙。
@@ -579,7 +584,29 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     // 用户点原生控件取消静音下一帧又被强制回 true，体感就是"老被静音"。
     // isMuted 的 useState 已提升到组件顶部 hooks 区（见上方注释），不能放在这些 return 之后。
     return (
-        <div className="minimax-player-content">
+        <div
+            className="minimax-player-content"
+            onContextMenu={(event) => {
+                if (kind !== "video") return;
+                event.preventDefault();
+                event.stopPropagation();
+                const host = event.currentTarget.getBoundingClientRect();
+                // 画布节点可能经过 transform: scale(...)。屏幕坐标必须除以缩放比例，
+                // 才是菜单这个 absolute 定位元素需要的节点本地 CSS 坐标。
+                const scaleX = host.width / Math.max(1, event.currentTarget.offsetWidth);
+                const scaleY = host.height / Math.max(1, event.currentTarget.offsetHeight);
+                const localX = (event.clientX - host.left) / (scaleX || 1);
+                const localY = (event.clientY - host.top) / (scaleY || 1);
+                const hostWidth = event.currentTarget.offsetWidth || host.width || 1;
+                const hostHeight = event.currentTarget.offsetHeight || host.height || 1;
+                const menuWidth = 220;
+                const menuHeight = 166;
+                setFrameMenuPosition({
+                    x: Math.max(6, Math.min(localX - 6, hostWidth - menuWidth - 6)),
+                    y: Math.max(6, Math.min(localY - 6, hostHeight - menuHeight - 6)),
+                });
+            }}
+        >
             {[0, 1].map((slot) => (
                 <video
                     key={slot}
@@ -599,6 +626,8 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                         // 仅 active 槽按 playhead 定位；buffer 槽固定在 0，避免被当前 playhead 误 seek 到中段
                         const local = slot === active ? Math.max(0, Math.min(playheadRef.current - timelineOffset, Number(event.currentTarget.duration || Infinity))) : 0;
                         if (Math.abs(event.currentTarget.currentTime - local) > 0.1) event.currentTarget.currentTime = local;
+                        // 任一阵列加载完元数据即记录视频真实分辨率（两槽分辨率一致，重复写无副作用）
+                        if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setMediaResolution({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight });
                     }}
                     onVolumeChange={(event) => {
                         // 用户点了原生控件的音量 / 静音：把 React 状态同步过来，
@@ -617,6 +646,12 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                     onPlay={() => { if (slot === activeRef.current) userPausedRef.current = false; }}
                 />
             ))}
+            {mediaResolution ? <div className="minimax-player-resolution">{mediaResolution.width} × {mediaResolution.height}</div> : null}
+            {frameMenuPosition ? <div ref={frameMenuRef} className="minimax-frame-menu" role="menu" style={{ left: frameMenuPosition.x, top: frameMenuPosition.y }}>
+                <button type="button" role="menuitem" onClick={() => void captureVideoFrame("current")}>截取当前帧</button>
+                <button type="button" role="menuitem" onClick={() => void captureVideoFrame("last")}>截取尾帧</button>
+                <button type="button" role="menuitem" onClick={() => void captureVideoFrame("first")}>截取首帧</button>
+            </div> : null}
         </div>
     );
 }

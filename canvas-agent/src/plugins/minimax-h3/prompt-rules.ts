@@ -1,8 +1,53 @@
 // 网页和 MCP 共用的确定性规则；不推断人物身份、服装冲突或剧情。
 const INTERNAL_TAGS = new Set(["character-group", "character_identity", "character_turnaround", "character_voice", "motion_reference"]);
+// 归档用的编号/批次/锚点标记（如 EP01、S01-02、group-ep01-storyboard-new-batch-v1、hard-composition-anchor），
+// 只有检索价值、没有画面语义，写进提示词就是噪声。
+const INTERNAL_TAG_PATTERNS = [/^(?:group|asset|binding|slot)[-_]/iu, /^ep\d/iu, /^s\d{1,3}[-_]\d{1,3}/iu, /^v\d+[-_]/iu, /[-_]anchor$/iu, /[-_]batch[-_]/iu];
 
 export function visualReferenceTags(tags: string[]) {
-    return [...new Set(tags.map((tag) => tag.trim()).filter((tag) => tag && !INTERNAL_TAGS.has(tag.toLowerCase())))];
+    return [...new Set(tags.map((tag) => tag.trim()).filter((tag) => {
+        if (!tag) return false;
+        const normalized = tag.toLowerCase();
+        return !INTERNAL_TAGS.has(normalized) && !INTERNAL_TAG_PATTERNS.some((pattern) => pattern.test(normalized));
+    }))];
+}
+
+/** 素材名指纹：去掉扩展名、标点与空白，用于判断描述是否只是素材名的回显。 */
+export function referenceNameKey(value: string) {
+    return String(value || "")
+        .toLowerCase()
+        .replace(/\.(?:png|jpe?g|webp|gif|bmp|tiff?|mp4|mov|webm|wav|mp3|m4a|flac)$/u, " ")
+        .replace(/[\s·•|:/\\_+.,，。;；!！?？\-—~()（）[\]{}"'’“”]+/gu, "")
+        .trim();
+}
+
+/**
+ * 摘要/标签只是素材名（文件名、label）的回显时对视频模型毫无语义，写进提示词只会污染。
+ * names 传素材 label / 绑定名 / 文件名。
+ */
+export function isReferenceNameEcho(value: string, names: unknown[]) {
+    const key = referenceNameKey(value);
+    if (!key) return true;
+    return names
+        .map((name) => referenceNameKey(String(name ?? "")))
+        .filter((name) => name.length >= 4)
+        .some((name) => name === key || (Math.min(name.length, key.length) >= 8 && (name.includes(key) || key.includes(name))));
+}
+
+// 编译期注入的分镜图 cue 句。旧提示词被解析回可编辑正文后会带着这些句子，
+// 再次编译时又叠一层，正文里因此出现成对的重复句；编译前先剥掉所有副本。
+const GENERATED_STORYBOARD_CUES = [
+    /^Use the approved .+? from <Picture\s+(\d+)> as (?:the visual anchor|the target composition reference) for this shot\.\s*/iu,
+    /^Use the approved .+? from <Picture\s+(\d+)> as the shot-entry keyframe and composition anchor for this shot\.\s*After the keyframe, keep the camera setup and spatial relationship stable while allowing natural performance\.\s*/iu,
+];
+
+export function stripStoryboardCues(description: string) {
+    let body = String(description || "");
+    for (;;) {
+        const next = GENERATED_STORYBOARD_CUES.reduce((text, pattern) => text.replace(pattern, ""), body);
+        if (next === body) return body;
+        body = next;
+    }
 }
 
 export function promptDetails(values: string[]) {
@@ -128,6 +173,7 @@ export function validatePromptReferences(text: string, references: Array<{ type:
         subject: subjectCount,
     };
     for (const match of body.matchAll(/<(Picture|Video|Audio|Subject)\s+(\d+)>/giu)) {
+        if (match[1].toLowerCase() === "subject") continue;
         const count = counts[match[1].toLowerCase()];
         if (count !== undefined && (Number(match[2]) < 1 || Number(match[2]) > count)) {
             throw new Error(`提示词引用 ${match[0]} 不存在，请核对当前 Clip 的素材和主体编号。`);

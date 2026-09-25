@@ -132,10 +132,19 @@ export type GenerationLogStore = {
 };
 
 /** MCP 调用只保存脱敏摘要，用 traceId 串联工具、画布事务和任务。 */
+export type McpObservabilityReportOptions = {
+    /** `from`/`to` 是本地日历日（YYYY-MM-DD），包含边界当天。 */
+    from?: string;
+    to?: string;
+};
+
 export type McpObservabilityStore = {
     record(input: McpObservabilityEventInput): McpObservabilityEvent;
     trace(traceId: string): McpObservabilityEvent[];
-    report(): Record<string, unknown>;
+    report(options?: McpObservabilityReportOptions): Record<string, unknown>;
+    optimizationMarkers(): unknown[];
+    saveOptimizationMarker(input: unknown): unknown;
+    deleteOptimizationMarker(id: string): boolean;
 };
 
 /** 运行时设置 store（runtime_settings 表）。 */

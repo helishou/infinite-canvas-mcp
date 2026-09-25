@@ -97,7 +97,7 @@ async function mockBackend(t: import("node:test").TestContext, onMcpEvent?: (eve
       },
     }),
   );
-  const h3Task = { id: "h3-parent", kind: "canvas-h3-run", status: "awaiting_confirmation", progress: 0.5, input: { projectId: "canvas-1", nodeId: "h3-node" }, result: { confirmation: { pending: [{ nodeId: "h3-node", segmentId: "clip-1", firstPassFingerprint: "fp-1", firstPassResult: "/media/first.mp4" }] } }, createdAt: "2026-09-17T00:00:00.000Z", updatedAt: "2026-09-17T00:00:01.000Z" };
+  const h3Task = { id: "h3-parent", kind: "canvas-h3-run", status: "awaiting_confirmation", progress: 0.5, input: { projectId: "canvas-1", nodeId: "h3-node" }, result: { confirmation: { revision: 2, pending: [{ nodeId: "h3-node", segmentId: "clip-1", firstPassFingerprint: "fp-1", firstPassResult: "/media/first.mp4" }] } }, createdAt: "2026-09-17T00:00:00.000Z", updatedAt: "2026-09-17T00:00:01.000Z" };
   app.post("/tasks/:id/h3-confirmation", (req, res) => res.json({ ok: true, task: { ...h3Task, status: "running", result: { ...h3Task.result, phase: "second_pass" }, input: h3Task.input, decision: req.body } }));
   app.get("/tasks", (_req, res) =>
     res.json({
@@ -205,6 +205,55 @@ async function mockOversizedBackend(t: import("node:test").TestContext, onMcpEve
     server.close();
     await once(server, "close");
   });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("missing port");
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function mockH3ReadBackend(t: import("node:test").TestContext) {
+  const app = express();
+  app.use(express.json());
+  const project = {
+    id: "h3-project", title: "H3 测试", revision: 1, nodes: [
+      { id: "h3-1", type: "minimax-h3", title: "视频节点", metadata: { segments: [{ id: "clip-1", title: "第一段", status: "idle" }] } },
+      { id: "image-1", type: "image", title: "参考图", metadata: { storageKey: "image:1" } },
+      { id: "image-2", type: "image", title: "其他图片", metadata: { storageKey: "image:2" } },
+    ], connections: [
+      { id: "edge-1", fromNodeId: "h3-1", toNodeId: "image-1" },
+      { id: "edge-2", fromNodeId: "image-1", toNodeId: "image-2" },
+    ],
+  };
+  app.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [{ id: "minimax-h3", name: "MiniMax H3", version: "1.5.5", enabled: true, tools: [] }] }));
+  app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
+  app.get("/canvas/projects/:id", (_req, res) => res.json({ ok: true, project }));
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => { server.close(); await once(server, "close"); });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("missing port");
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function mockManyNodesBackend(t: import("node:test").TestContext, count: number, titleLength: number) {
+  const app = express();
+  app.use(express.json());
+  const project = {
+    id: "canvas-many", title: "多节点画布", revision: 7,
+    nodes: Array.from({ length: count }, (_, index) => ({
+      id: `node-${index}`, type: "text", title: `节点 ${index} ${"x".repeat(titleLength)}`,
+      position: { x: index * 10, y: 0 }, metadata: { content: "不进入摘要" },
+    })),
+    connections: Array.from({ length: 488 }, (_, index) => ({
+      id: `edge-${index}`, fromNodeId: `node-${index % count}`, toNodeId: `node-${(index + 1) % count}`,
+    })),
+  };
+  app.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => { server.close(); await once(server, "close"); });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("missing port");
   return `http://127.0.0.1:${address.port}`;
@@ -396,6 +445,7 @@ test("canvas_inspect returns one actionable canvas context", async (t) => {
   assert.equal(payload.currentState.project.id, "canvas-1");
   assert.deepEqual(payload.selection.map((node: { id: string }) => node.id), ["image-1"]);
   assert.equal(payload.referenceCandidates[0].storageKey, "media/image-1.png");
+  assert.equal("position" in payload.referenceCandidates[0], false, "候选列表复用 nodes 中的位置，不重复返回");
   assert.equal(payload.capabilities.find((item: { capability: string }) => item.capability === "image").available, true);
   assert.equal(typeof payload.traceId, "string");
   assert.deepEqual(events.map((event) => event.event), ["tool.started", "tool.succeeded"]);
@@ -464,7 +514,7 @@ test("H3 MCP 暂停态返回待确认 Clip，等待立即返回且确认命令�
   assert.equal(wait.summary.needsAction, 1);
   assert.equal(wait.summary.workflowComplete, 0);
   assert.equal(wait.next.tool, "canvas_h3_confirmation");
-  const decision = textPayload(await client.callTool({ name: "canvas_h3_confirmation", arguments: { taskId: "h3-parent", segmentIds: ["clip-1"], firstPassFingerprint: "fp-1", action: "keep_first_pass" } }));
+  const decision = textPayload(await client.callTool({ name: "canvas_h3_confirmation", arguments: { taskId: "h3-parent", segmentId: "clip-1", expectedRevision: 2, action: "keep_first_pass" } }));
   assert.equal(decision.task.taskId, "h3-parent");
   assert.equal(decision.task.status, "running");
 });
@@ -744,6 +794,47 @@ test("canvas_get_state 默认回节点摘要，而不是整幅节点 metadata", 
   assert.equal(JSON.stringify(payload).includes("generationSnapshot"), false);
 });
 
+test("canvas_get_state 在现有规模画布默认返回全部节点摘要", async (t) => {
+  const backendUrl = await mockManyNodesBackend(t, 449, 12);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many" } });
+  const payload = textPayload(result);
+  assert.notEqual(result.isError, true);
+  assert.equal(payload.nodes.length, 449);
+  assert.equal(payload.connections.length, 488);
+  assert.equal(payload.truncated, false);
+  assert.equal(payload.nextNodeOffset, undefined);
+  const limited = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", nodeLimit: 200 } }));
+  assert.equal(limited.nodes.length, 200);
+  assert.equal(limited.nextNodeOffset, 200);
+  assert.equal(limited.connectionsTruncated, true);
+  const next = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", nodeOffset: 200, nodeLimit: 200 } }));
+  assert.equal(next.nodes.length, 200);
+  assert.equal(next.nextNodeOffset, 400);
+});
+
+test("canvas_get_state 超过输出上限时自动分页并可取完全部节点", async (t) => {
+  const backendUrl = await mockManyNodesBackend(t, 1200, 700);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const ids: string[] = [];
+  let nodeOffset = 0;
+  for (let page = 0; page < 10; page++) {
+    const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", nodeOffset } });
+    const payload = textPayload(result);
+    assert.notEqual(result.isError, true);
+    assert.equal(payload.nodeOffset, nodeOffset);
+    assert.ok(payload.nodes.length > 0);
+    assert.ok(Buffer.byteLength(JSON.stringify(payload), "utf8") <= 512 * 1024);
+    ids.push(...payload.nodes.map((node: { id: string }) => node.id));
+    if (payload.nextNodeOffset == null) break;
+    assert.equal(payload.truncated, true);
+    assert.ok(payload.nextNodeOffset > nodeOffset);
+    nodeOffset = payload.nextNodeOffset;
+  }
+  assert.equal(ids.length, 1200);
+  assert.equal(new Set(ids).size, 1200);
+});
+
 test("canvas_get_state 显式传 nodeIds 时回完整节点", async (t) => {
   const backendUrl = await mockBackend(t);
   const client = await mcpClient(t, await fixture(t, backendUrl));
@@ -754,4 +845,41 @@ test("canvas_get_state 显式传 nodeIds 时回完整节点", async (t) => {
   assert.equal(nodes.length, 1, "只应回请求的节点");
   assert.equal(nodes[0].id, "image-1");
   assert.equal((nodes[0].metadata as Record<string, unknown>).storageKey, "media/image-1.png", "显式索取时应回完整 metadata");
+});
+
+test("canvas_get_state 显式节点过大时退回摘要，不报 OUTPUT_TOO_LARGE", async (t) => {
+  const events: Array<Record<string, unknown>> = [];
+  const backendUrl = await mockOversizedBackend(t, (event) => events.push(event));
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-oversized", nodeIds: ["node-huge"] } });
+  const payload = textPayload(result);
+
+  assert.notEqual(result.isError, true);
+  assert.equal(payload.metadataTruncated, true);
+  assert.equal(payload.nodes[0].id, "node-huge");
+  assert.equal("metadata" in payload.nodes[0], false);
+  assert.deepEqual(events.map((event) => event.event), ["tool.started", "tool.succeeded"]);
+});
+
+test("H3 Clip ID 失效时建议重读当前 Clip 索引", async (t) => {
+  const backendUrl = await mockH3ReadBackend(t);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const missing = await client.callTool({ name: "h3_get_clip", arguments: { projectId: "h3-project", nodeId: "h3-1", segmentId: "old-clip" } });
+  const error = textPayload(missing);
+  assert.equal(missing.isError, true);
+  assert.equal(error.error.code, "SEGMENT_NOT_FOUND");
+  assert.equal(error.error.recoverable, true);
+  assert.equal(error.suggestedAction.tool, "h3_get_node");
+  const node = textPayload(await client.callTool({ name: "h3_get_node", arguments: { projectId: "h3-project", nodeId: "h3-1" } }));
+  assert.deepEqual(node.segments.map((segment: { id: string }) => segment.id), ["clip-1"]);
+});
+
+test("canvas_get_state 指定节点只返回相关连线", async (t) => {
+  const backendUrl = await mockH3ReadBackend(t);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const scoped = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "h3-project", nodeIds: ["h3-1"] } }));
+  assert.deepEqual(scoped.connections.map((edge: { id: string }) => edge.id), ["edge-1"]);
+  assert.equal(scoped.connectionCount, 2, "项目总连线数仍可见");
+  const all = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "h3-project" } }));
+  assert.deepEqual(all.connections.map((edge: { id: string }) => edge.id), ["edge-1", "edge-2"]);
 });

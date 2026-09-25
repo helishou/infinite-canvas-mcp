@@ -76,6 +76,7 @@ export class CanvasGenerationService {
             ...(command.segmentIndex !== undefined ? { segmentIndex: command.segmentIndex } : {}),
             ...(command.runFromCurrent !== undefined ? { runFromCurrent: command.runFromCurrent } : {}),
             ...(command.skipCompleted !== undefined ? { skipCompleted: command.skipCompleted } : {}),
+            ...(command.forceRegenerate !== undefined ? { forceRegenerate: command.forceRegenerate } : {}),
             ...(command.params ? { params: command.params } : {}),
         }, command.idempotencyKey || command.clientTaskId);
         return { task, taskId: task.id, executor: "h3" };

@@ -94,6 +94,42 @@ export function removeStoryboardShot(segment: H3Segment, shotId: string) {
     return { ...updated, storyboardModeEnabled: true, storyboardShots: shotsFromItems(merged) };
 }
 
+/**
+ * 被替换的引用曾经挂在某张分镜卡上时，把这张卡改绑到替换后的 bindingId，
+ * 卡片位置、序号与时长分配都保持不变（角色组替换这类拿不到原 bindingId 的分支走这里）。
+ */
+export function rebindStoryboardShot(segment: H3Segment, oldBindingId: string | undefined, nextBindingId: string | undefined, duration?: number): H3Segment {
+    if (!oldBindingId || !nextBindingId || oldBindingId === nextBindingId) return segment;
+    // 只改写已存下来的 storyboardShots：不再从 storyboardTrackItems 取（它会自动把未挂载的分镜
+    // 引用追加到末尾，换图后会和改绑后的原卡片重复出现一张）。
+    const stored = segment.storyboardShots;
+    if (!stored?.some((shot) => shot.referenceBindingId === oldBindingId)) return segment;
+    const storyboardShots = stored.map((shot) => shot.referenceBindingId === oldBindingId ? { ...shot, referenceBindingId: nextBindingId } : shot);
+    const storyboardDurations = { ...(segment.storyboardDurations || {}) };
+    // 替换前原分镜卡的时长由调用方带进来：引用已在前面被摘掉，这里拿不到原值。
+    const inherited = duration ?? storyboardDurations[oldBindingId];
+    if (inherited !== undefined) storyboardDurations[nextBindingId] = inherited;
+    delete storyboardDurations[oldBindingId];
+    return withSegmentRefs({ ...segment, storyboardShots, storyboardDurations }, refsForSegment(segment));
+}
+
+/**
+ * 自愈：storyboardShots 里指向已不存在 / 已不是分镜职责引用的 bindingId（旧版本替换或删除留下的
+ * 孤儿），清掉标记让这一格变成干净的「单击绑图」空卡，而不是永远读不到素材的坏卡。
+ */
+export function dropUnboundStoryboardReferences(segment: H3Segment): H3Segment {
+    const shots = segment.storyboardShots;
+    if (!shots?.length) return segment;
+    const ids = new Set(storyboardRefsForSegment(segment).flatMap((ref) => ref.bindingId ? [ref.bindingId] : []));
+    if (!shots.some((shot) => shot.referenceBindingId && !ids.has(shot.referenceBindingId))) return segment;
+    return {
+        ...segment,
+        storyboardShots: shots.map((shot) => shot.referenceBindingId && !ids.has(shot.referenceBindingId)
+            ? { id: shot.id, duration: shot.duration }
+            : shot),
+    };
+}
+
 export function removeStoryboardImageReference(segment: H3Segment, reference: H3Ref) {
     if (reference.type !== "image" || inferReferenceRole(reference) !== "storyboard") return segment;
     const refs = refsForSegment(segment);
@@ -138,6 +174,25 @@ export function reorderStoryboardShots(segment: H3Segment, sourceId: string, tar
     const reordered = [...storyboard];
     [reordered[from], reordered[to]] = [reordered[to], reordered[from]];
     return { ...segment, storyboardShots: shotsFromItems(reordered) };
+}
+
+/** Move a storyboard card (and its bound image reference) between clips. */
+export function moveStoryboardShotBetweenSegments(source: H3Segment, target: H3Segment, sourceId: string, targetId?: string) {
+    const sourceItems = storyboardTrackItems(source);
+    const sourceItem = sourceItems.find((item) => item.id === sourceId);
+    if (!sourceItem?.ref?.bindingId) return { source, target };
+    const targetItems = storyboardTrackItems(target);
+    const insertionIndex = targetId ? Math.max(0, targetItems.findIndex((item) => item.id === targetId)) : targetItems.length;
+    const targetRefs = refsForSegment(target);
+    const movedRef = sourceItem.ref;
+    const nextTargetRefs = targetRefs.some((ref) => sameRef(ref, movedRef)) ? targetRefs : [...targetRefs, movedRef];
+    const targetShot = { id: `storyboard-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, duration: sourceItem.duration, referenceBindingId: movedRef.bindingId };
+    const targetShots: H3StoryboardShot[] = [...targetItems.map(({ id, duration, referenceBindingId }) => ({ id, duration, ...(referenceBindingId ? { referenceBindingId } : {}) }))];
+    targetShots.splice(Math.min(insertionIndex, targetShots.length), 0, targetShot);
+    const nextTarget = withSegmentRefs({ ...target, storyboardModeEnabled: true, storyboardShots: targetShots }, nextTargetRefs);
+    const nextSourceItems = sourceItems.filter((item) => item.id !== sourceId);
+    const nextSource = { ...source, storyboardModeEnabled: true, storyboardShots: shotsFromItems(nextSourceItems) };
+    return { source: nextSource, target: nextTarget };
 }
 
 export function swapStoryboardReferences(segment: H3Segment, sourceBindingId: string, targetBindingId: string) {

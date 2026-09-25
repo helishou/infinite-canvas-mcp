@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Button, Checkbox, Input, Modal, Select, Switch } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { Alert, Button, Checkbox, Input, Modal, Select, Switch } from "antd";
 import { ImagePlus, Play, Trash2 } from "lucide-react";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3Ref, H3ReferenceRole, H3ReferenceUsage } from "../types";
@@ -37,9 +37,12 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const [storyboardSubjectIds, setStoryboardSubjectIds] = useState<string[]>(refItem.storyboardSubjectIds || []);
     const [voiceEnabled, setVoiceEnabled] = useState(group?.voiceEnabled ?? false);
     const [analyzing, setAnalyzing] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [saveError, setSaveError] = useState("");
     const [analysis, setAnalysis] = useState("");
     const [analysisSummary, setAnalysisSummary] = useState(typeof refItem.analysis?.summary === "string" ? refItem.analysis.summary : "");
     const [analysisMetadata, setAnalysisMetadata] = useState<Record<string, unknown>>(refItem.analysis || {});
+    const persistedAnalysis = useRef<Record<string, unknown>>(refItem.analysis || {});
     const [previewItem, setPreviewItem] = useState<H3Ref | null>(null);
 
     useEffect(() => {
@@ -49,11 +52,13 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         setStoryboardSubjectIds(refItem.storyboardSubjectIds || []);
         setVoiceEnabled(group?.voiceEnabled ?? false);
         setAnalysis("");
+        setSaveError("");
         setPreviewItem(null);
         let cancelled = false;
         void ctx.references.list().then((assets) => {
             const metadata = assets.find((asset) => asset.id === refItem.assetId)?.analysis || refItem.analysis || {};
             if (!cancelled) {
+                persistedAnalysis.current = metadata;
                 setAnalysisMetadata(metadata);
                 setAnalysisSummary(typeof metadata.summary === "string" ? metadata.summary : "");
                 setAnalysis(typeof metadata.summary === "string" ? metadata.summary : "");
@@ -65,6 +70,9 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const isStoryboardImage = role === "storyboard" && refItem.type === "image";
     const canRemoveStoryboardImage = refItem.type === "image" && inferReferenceRole(refItem) === "storyboard";
     const apply = async () => {
+        setSaving(true);
+        setSaveError("");
+        try {
         const nextAnalysis = analysisSummary.trim() ? { ...analysisMetadata, summary: analysisSummary.trim() } : analysisMetadata;
         const appliedRole = characterReference ? sourceRole : role;
         const appliedUsage = characterReference ? "reference" : usage;
@@ -72,12 +80,22 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         if (appliedRole !== "storyboard" || refItem.type !== "image") delete next.retentionLevel;
         if (appliedRole === "storyboard" && refItem.type === "image") next.storyboardSubjectIds = storyboardSubjectIds.filter((id) => characters.some((character) => character.id === id));
         else delete next.storyboardSubjectIds;
-        if (next.assetId) await ctx.references.upsert({ id: next.assetId, label: next.name, mediaType: next.type, role: appliedRole, tags: next.tags || [], url: next.url, storageKey: next.storageKey, mimeType: next.mimeType, sourceNodeId: next.nodeId, subjectId: next.subjectId, ...(Object.keys(nextAnalysis).length ? { analysis: nextAnalysis } : {}) }).catch(() => undefined);
+        if (JSON.stringify(nextAnalysis) !== JSON.stringify(persistedAnalysis.current)) {
+            if (!next.assetId) throw new Error("参考素材缺少资产 ID，无法保存分析");
+            await ctx.flush();
+            await ctx.references.upsert({ id: next.assetId, analysis: nextAnalysis });
+            persistedAnalysis.current = nextAnalysis;
+        }
         // 服装选择区已在 UI 中移除：patch 里不带 outfitEnabled，避免覆盖存量的 outfit.enabled；
         // 声线开关保留，照旧提交 voiceEnabled。
         const characterPatch = group ? { voiceEnabled } : undefined;
         onApply(next, characterPatch);
         onClose();
+        } catch (error) {
+            setSaveError(error instanceof Error ? error.message : String(error));
+        } finally {
+            setSaving(false);
+        }
     };
 
     const analyze = async () => {
@@ -104,7 +122,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const openPreview = () => setPreviewItem(refItem);
 
     return <>
-        <Modal open title="参考素材职责" onCancel={onClose} onOk={() => void apply()} okText="应用到当前 Clip" cancelText="取消" width={560} destroyOnHidden keyboard={!previewItem}>
+        <Modal open title="参考素材职责" onCancel={onClose} onOk={() => void apply()} confirmLoading={saving} okText="应用到当前 Clip" cancelText="取消" width={560} destroyOnHidden keyboard={!previewItem}>
             <div style={{ display: "grid", gridTemplateColumns: "144px 1fr", gap: 18, paddingTop: 8 }}>
                 <div style={{ position: "relative", alignSelf: "start", border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 8, overflow: "hidden", background: ctx.theme.node.panel, minHeight: 110 }}>
                     {refItem.type === "image" ? <img src={refItem.url} alt={refItem.name} style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }} /> : refItem.type === "video" && refItem.url ? <video src={`${refItem.url}${refItem.url.includes("?") ? "&" : "?"}t=0.001`} preload="metadata" muted playsInline style={{ width: "100%", height: 110, objectFit: "cover", display: "block", background: "#000" }} /> : <div style={{ display: "grid", placeItems: "center", height: 110, fontSize: 12, opacity: 0.65 }}>{refItem.type === "video" ? "视频参考" : "音频参考"}</div>}
@@ -147,6 +165,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                         {!isStoryboardImage ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>描述</span><Input.TextArea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述这份参考素材的职责与用法，生成时会作为参考说明进入提示词" autoSize={{ minRows: 2, maxRows: 5 }} /></label> : null}
                     </> : null}
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}><Button type="text" loading={analyzing} onClick={() => void analyze()}>用模型分析</Button><span style={{ minWidth: 0, fontSize: 13, opacity: 0.6 }}>{analysis}</span></div>
+                    {saveError ? <Alert type="error" showIcon message={saveError} /> : null}
                     {group && onDeleteGroup ? <Button type="text" danger size="small" style={{ alignSelf: "flex-start", paddingInline: 0 }} onClick={onDeleteGroup}>从本段移除整组</Button> : null}
                 </div>
             </div>

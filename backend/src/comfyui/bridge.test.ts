@@ -175,3 +175,18 @@ test("decoded-video confirmation phase reads cached video and never contains V15
     assert.equal(graph.face_refine_reference_2.inputs.image, "uploaded-storyboard.png");
     assert.deepEqual(graph.nf_output.inputs.audio, ["face_refine", 1]);
 });
+
+test("decoded-video confirmation uses the packaged full-frame refiner when face refinement is off", async () => {
+    const graph = await buildNativeNanFengV15Workflow(
+        { prompt: "confirmed shot", video: "cached-first-pass.mp4" },
+        { postGenerationOnly: true, h3SecondSteps: 3, secondPassDenoise: 0.3, latentUpscaleMegapixels: 0.4 },
+        upload, "http://comfy.local", new AbortController().signal,
+    );
+    assert.equal(graph.nf_v15, undefined);
+    assert.equal(graph.full_frame_refine.class_type, "MiniMaxH3PostGenerationFullFrameRefine");
+    assert.deepEqual(graph.full_frame_refine.inputs.images, ["cached_parts", 0]);
+    assert.deepEqual(graph.full_frame_refine.inputs.audio, ["cached_parts", 1]);
+    assert.equal(graph.full_frame_refine.inputs.steps, 3);
+    assert.equal(graph.full_frame_refine.inputs.target_megapixels, 0.4);
+    assert.deepEqual(graph.nf_output.inputs.audio, ["full_frame_refine", 1]);
+});

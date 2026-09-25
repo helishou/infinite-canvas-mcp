@@ -10,7 +10,7 @@ import { defaultConfig, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL }
 import { resolveComfyImageSize } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { backendMediaUrl, fetchBackendCanvasDrama, type BackendMediaResult } from "@/services/backend-api";
+import { backendMediaUrl, fetchBackendCanvasDrama, syncBackendCanvasCharacterAssets, type BackendMediaResult } from "@/services/backend-api";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
 import { runCanvasAudioTask } from "@/services/api/canvas-audio";
@@ -28,6 +28,8 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { arrangeGroupMembers, computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
 import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
+import { retainCharacterPrimaryIndex } from "@/lib/canvas/character-primary";
+import { findCanvasCompareReference } from "@/lib/canvas/image-compare-reference";
 import { needsViewportCull, normalizeViewportTransform, viewportRenderPadding } from "@/lib/canvas/canvas-viewport";
 import { queryCanvasSpatialIndex, type CanvasSpatialBounds } from "@/lib/canvas/canvas-spatial-index";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
@@ -58,7 +60,7 @@ import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/a
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration, useCanvasStore, type CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
+import { applyBackendCanvasEvent, ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration, useCanvasStore, type CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
 import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { emitCanvasEvent } from "@/lib/canvas/canvas-event-bus";
 import { setBackendCanvasPresence } from "@/stores/use-backend-store";
@@ -683,8 +685,16 @@ function InfiniteCanvasPage() {
         const loaded = openProject(projectId);
         const ready = loaded && !loaded.summary ? Promise.resolve(loaded) : ensureCanvasProjectLoaded(projectId);
         void ready
-            .then((project) => {
+            .then(async (project) => {
                 if (generation !== restoreGenerationRef.current) return;
+                try {
+                    const synced = await syncBackendCanvasCharacterAssets(projectId);
+                    if (generation !== restoreGenerationRef.current) return;
+                    if (synced.operations.length) applyBackendCanvasEvent({ type: "canvas.updated", entityId: projectId, revision: synced.revision, payload: { operations: synced.operations, updatedAt: synced.updatedAt } });
+                } catch (error) {
+                    if (generation !== restoreGenerationRef.current) return;
+                    void message.warning(`角色资产同步失败：${error instanceof Error ? error.message : String(error)}`);
+                }
                 suppressNextViewportPersistRef.current = true;
                 commitViewport(project.viewport);
                 setSelectedNodeIds(new Set());
@@ -1030,36 +1040,10 @@ function InfiniteCanvasPage() {
     const previewImage = previewImageId ? previewNode?.metadata?.images?.find((image) => image.id === previewImageId) : undefined;
     const previewStorageKey = previewImage?.storageKey || previewNode?.metadata?.storageKey;
     const previewRawContent = previewImage?.content || previewNode?.metadata?.content || "";
-    const previewBeforeReference = useMemo(() => {
-        if (!previewNode || !previewRawContent) return null;
-        // 向上游查找最近的图片节点作为对比的「之前」图，
-        // 允许中间隔着 Config 等中转节点（[Image1] → [Config] → [Image2]）。
-        const upstreamByNode = new Map<string, string[]>();
-        for (const connection of connections) {
-            const list = upstreamByNode.get(connection.toNodeId);
-            if (list) list.push(connection.fromNodeId);
-            else upstreamByNode.set(connection.toNodeId, [connection.fromNodeId]);
-        }
-        const maxHops = 16;
-        const queue: Array<{ id: string; depth: number }> = [{ id: previewNode.id, depth: 0 }];
-        const visited = new Set<string>([previewNode.id]);
-        while (queue.length) {
-            const { id, depth } = queue.shift()!;
-            if (depth >= maxHops) continue;
-            for (const upstreamId of upstreamByNode.get(id) || []) {
-                if (visited.has(upstreamId)) continue;
-                visited.add(upstreamId);
-                const source = nodeById.get(upstreamId);
-                if (source?.type === CanvasNodeType.Image && source.metadata?.content) {
-                    return { storageKey: source.metadata.storageKey, content: source.metadata.content };
-                }
-                if (source?.type === CanvasNodeType.Config) {
-                    queue.push({ id: upstreamId, depth: depth + 1 });
-                }
-            }
-        }
-        return null;
-    }, [previewNode, previewRawContent, connections, nodeById]);
+    const previewBeforeReference = useMemo(
+        () => previewNode ? findCanvasCompareReference(previewNode, nodes, connections, previewImage?.generationSnapshot?.references) : null,
+        [connections, nodes, previewNode, previewImage?.generationSnapshot?.references, previewRawContent],
+    );
     const [previewContent, setPreviewContent] = useState("");
     const [previewBeforeContent, setPreviewBeforeContent] = useState<string | null>(null);
 
@@ -3492,7 +3476,7 @@ function InfiniteCanvasPage() {
                 ),
             );
         },
-        [characterEditNodeId],
+        [characterEditNodeId, setNodes],
     );
 
     // 单个角色节点保存为角色资产：按 name 去重（同名就替换，否则新建）。
@@ -3504,13 +3488,13 @@ function InfiniteCanvasPage() {
                 message.warning(t("assets.characterRequireOneImage"));
                 return;
             }
-            const primary = images[Math.min(node.metadata?.characterPrimaryIndex || 0, images.length - 1)];
             const name = (node.title || "").trim();
             if (!name) {
                 message.warning(t("canvas.character.saveNameRequired"));
                 return;
             }
-            const existing = useAssetStore.getState().assets.find((asset) => asset.kind === "character" && (asset.data.name || asset.title) === name);
+            const existing = useAssetStore.getState().assets.find((asset) => asset.kind === "character" && asset.id === node.metadata?.characterAssetId)
+                || useAssetStore.getState().assets.find((asset) => asset.kind === "character" && (asset.data.name || asset.title) === name);
             const voiceUrl = node.metadata?.characterVoiceUrl || "";
             const voiceStorageKey = node.metadata?.characterVoiceStorageKey || "";
             const voiceAssetId = node.metadata?.characterVoiceAssetId || "";
@@ -3518,7 +3502,10 @@ function InfiniteCanvasPage() {
                 useAssetStore.getState().assets.filter((asset): asset is AudioAsset => asset.kind === "audio"),
                 { assetId: voiceAssetId, storageKey: voiceStorageKey, url: voiceUrl },
             );
-            const coverUrl = primary?.url || images[0].url;
+            const assetPrimaryIndex = existing?.kind === "character"
+                ? retainCharacterPrimaryIndex(existing.data.images, existing.data.primaryIndex || 0, images)
+                : Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), images.length - 1);
+            const coverUrl = images[assetPrimaryIndex]?.url || images[0].url;
             const data = {
                 name,
                 englishName: node.metadata?.characterEnglishName || "",
@@ -3529,20 +3516,21 @@ function InfiniteCanvasPage() {
                 voiceStorageKey: voiceStorageKey || voiceAsset?.data.storageKey,
                 voiceAssetId: voiceAssetId || voiceAsset?.id || "",
                 images,
-                primaryIndex: Math.min(node.metadata?.characterPrimaryIndex || 0, images.length - 1),
+                primaryIndex: assetPrimaryIndex,
             };
             try {
                 const dramaId = await getCurrentCanvasDramaId();
+                let assetId = existing?.id;
                 if (existing) {
                     useAssetStore.getState().updateAsset(existing.id, {
                         title: name,
                         coverUrl,
                         ...(dramaId ? { dramaId } : {}),
                         data,
-                        metadata: { source: "canvas", nodeId: node.id, replaced: true },
+                        metadata: { source: "canvas", projectId, nodeId: node.id, replaced: true },
                     });
                 } else {
-                    useAssetStore.getState().addAsset({
+                    assetId = useAssetStore.getState().addAsset({
                         kind: "character",
                         title: name,
                         coverUrl,
@@ -3550,16 +3538,19 @@ function InfiniteCanvasPage() {
                         dramaId,
                         source: "Canvas",
                         data,
-                        metadata: { source: "canvas", nodeId: node.id },
+                        metadata: { source: "canvas", projectId, nodeId: node.id },
                     });
                 }
+                setNodes((prev) => prev.map((item) => item.id === node.id
+                    ? { ...item, metadata: { ...item.metadata, characterAssetId: assetId } }
+                    : item));
                 message.success(t("canvas.character.saveToAssetsSuccess"));
             } catch (error) {
                 const message_ = error instanceof Error ? error.message : String(error);
                 message.error(t("canvas.character.saveToAssetsFailed", { error: message_ }));
             }
         },
-        [getCurrentCanvasDramaId, message, t],
+        [getCurrentCanvasDramaId, message, projectId, setNodes, t],
     );
 
     const openSceneEditor = useCallback((node: CanvasNodeData) => {
@@ -3846,6 +3837,52 @@ function InfiniteCanvasPage() {
         setSelectedNodeIds(new Set([childId]));
         setDialogNodeId(childId);
     }, []);
+
+    const autoLevelsImageNode = useCallback(async (node: CanvasNodeData) => {
+        const content = String(node.metadata?.content || "");
+        const storageKey = String(node.metadata?.storageKey || "");
+        if (!content && !storageKey) return;
+        const activeRequest = generationRequestsRef.current.get(node.id);
+        if (activeRequest && !activeRequest.controller.signal.aborted) return;
+        const reference = {
+            id: node.id,
+            name: `${node.title || node.id}.png`,
+            mimeType: node.metadata?.mimeType && !node.metadata.mimeType.endsWith("/*") ? node.metadata.mimeType : "image/png",
+            ...(storageKey ? { storageKey } : {}),
+            ...(content.startsWith("data:") ? { dataUrl: content } : /^(https?:\/\/|\/media\/)/.test(content) ? { url: content } : {}),
+        };
+        if (!storageKey && !("dataUrl" in reference) && !("url" in reference)) {
+            message.error(t("canvas.projectPage.generationFailed"));
+            return;
+        }
+        const controller = startGenerationRequest(node.id, node.id, node.id);
+        setRunningNodeId(node.id);
+        try {
+            await flushCanvasProjectBeforeGeneration(projectId);
+            await runCanvasImageTask(
+                {
+                    mode: "image",
+                    model: "moyou-自动色阶",
+                    prompt: t("canvas.imageTools.autoLevels"),
+                    references: [reference],
+                    count: 1,
+                    clientTaskId: crypto.randomUUID(),
+                    projectId,
+                    nodeId: node.id,
+                    sourceNodeId: node.id,
+                },
+                controller.signal,
+            );
+        } catch (error) {
+            if (!isGenerationCanceled(error)) {
+                message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+            }
+        } finally {
+            const isCurrentRequest = generationRequestsRef.current.get(node.id)?.controller === controller;
+            finishGenerationRequest(node.id, controller);
+            if (isCurrentRequest) setRunningNodeId(null);
+        }
+    }, [finishGenerationRequest, flushCanvasProjectBeforeGeneration, message, projectId, startGenerationRequest, t]);
 
     const generateAngleNode = useCallback(
         async (node: CanvasNodeData, params: CanvasImageAngleParams) => {
@@ -5288,6 +5325,7 @@ function InfiniteCanvasPage() {
                     onSplit={(node) => setSplitNodeId(node.id)}
                     onUpscale={(node) => setUpscaleNodeId(node.id)}
                     onSuperResolve={(node) => setSuperResolveNodeId(node.id)}
+                    onAutoLevels={(node) => void autoLevelsImageNode(node)}
                     onAngle={(node) => setAngleNodeId(node.id)}
                     onViewImage={handleNodeViewImage}
                     onReversePrompt={createImageReversePromptNodes}

@@ -22,7 +22,7 @@ const REFERENCE_ROLE_LABELS: Record<string, string> = {
 import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
 import { inferReferenceRole, refsForSegment, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
-import { addStoryboardShot, assignStoryboardShotRef, H3_STORYBOARD_MIN_DURATION, insertStoryboardShotAfter, isStoryboardModeEnabled, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences } from "../services/h3-storyboard-track";
+import { addStoryboardShot, assignStoryboardShotRef, H3_STORYBOARD_MIN_DURATION, insertStoryboardShotAfter, isStoryboardModeEnabled, moveStoryboardShotBetweenSegments, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences } from "../services/h3-storyboard-track";
 import { sameRef } from "../services/h3-compatibility";
 import { H3_RUNTIME_REF_LIMITS, normalizeDroppedH3Ref, readCharacterGroupFromDrop } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
@@ -60,7 +60,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
     const pendingScrollIdRef = useRef<string | null>(null);
     const restoredRef = useRef(false);
-    const scrollPersistRafRef = useRef<number | null>(null);
+    const scrollPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingScrollLeftRef = useRef(0);
     const [storyboardResize, setStoryboardResize] = useState<{ segmentId: string; index: number; leftDuration: number } | null>(null);
     const storyboardResizeRef = useRef<{ segmentId: string; index: number; leftDuration: number; startX: number; startDuration: number; pairDuration: number } | null>(null);
     // 时间轴右键菜单（两种 kind）：
@@ -302,27 +303,20 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     for (let t = 0; t <= containerSeconds + 0.0001; t += tickInterval) {
         tickPositions.push(Math.round(t * 10) / 10);
     }
-    // 末端对齐：最后一个刻度距离容器右边缘 > 2s 时再加一个末端刻度
+    // 末端对齐：距离最后刻度至少 2 秒时补一个末端刻度。
     const lastTick = tickPositions[tickPositions.length - 1] ?? 0;
-    if (containerSeconds - lastTick > 2 && lastTick + 5 > containerSeconds + 0.0001) {
-        // 上面的循环已经跳过了末端 5s 倍数，但 0..containerSeconds 之间本应该有刻度
-        // 实际上 tickPositions 一直会到 lastTick ≤ containerSeconds 但最后一个 5s 倍数 > containerSeconds 时不加入
-        // 比如 containerSeconds=22, lastTick=20, 20+5=25>22 — 22 距离 lastTick 2s 不加末端
-        // 比如 containerSeconds=42, lastTick=40, 40+5=45>42, 42 距离 lastTick 2s 不加末端
-    }
     if (containerSeconds - lastTick >= 2 && lastTick + tickInterval > containerSeconds + 0.0001) {
         tickPositions.push(Math.round(containerSeconds * 10) / 10);
     }
     const majorTicks = tickPositions.map((t) => ({ time: t, left: t * 100 }));
-    const minorTicks: Array<{ left: number }> = [];
-
-    // 节流持久化时间轴滚动位置，刷新后可恢复（避免每次 onScroll 都 updateMetadata）
+    // DOM 滚动实时发生；只在停下后保存个人视图，避免逐帧重渲染整个工作台。
     const persistScroll = useCallback((left: number) => {
-        if (scrollPersistRafRef.current != null) return;
-        scrollPersistRafRef.current = requestAnimationFrame(() => {
-            scrollPersistRafRef.current = null;
-            ctx.updateMetadata({ timelineScrollLeft: Math.round(left) });
-        });
+        pendingScrollLeftRef.current = left;
+        if (scrollPersistTimerRef.current) clearTimeout(scrollPersistTimerRef.current);
+        scrollPersistTimerRef.current = setTimeout(() => {
+            scrollPersistTimerRef.current = null;
+            ctx.updateMetadata({ timelineScrollLeft: Math.round(pendingScrollLeftRef.current) });
+        }, 180);
     }, [ctx]);
     // 把时间轴滚动到指定 clip：使其右边缘与可见区最右侧对齐（右侧对齐该 clip 最右侧）
     // 整个时间线（Ruler+Video+Refs）共用单一滚动容器，无需跨容器同步
@@ -357,7 +351,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     // 卸载时清理 rAF，避免内存泄漏或已卸载组件的状态更新
     useEffect(() => {
         return () => {
-            if (scrollPersistRafRef.current != null) cancelAnimationFrame(scrollPersistRafRef.current);
+            if (scrollPersistTimerRef.current) clearTimeout(scrollPersistTimerRef.current);
         };
     }, []);
     const startRefDrag = (event: React.DragEvent<HTMLDivElement>) => {
@@ -517,8 +511,6 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             progress: 0,
             result: "",
             results: [],
-            refs: { image: [], video: [], audio: [] },
-            refItems: [],
             referenceBindings: [],
             runtimeTaskId: "",
         } as H3Segment;
@@ -596,7 +588,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                 }}
                 className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isAddSlot ? "is-add-slot" : ""} ${pickingKey === `${segment.id}:${refIndex}` ? "is-picking" : ""} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""} ${overLimit ? "is-over-limit" : ""} ${dropTargetKey === `${segment.id}:${refIndex}` ? "is-drop-target" : ""}`}
                 title={ref ? `双击编辑参考素材职责${overLimit ? `（已超出 H3 运行上限：图片最多 ${H3_RUNTIME_REF_LIMITS.image} 张、视频/音频最多 ${H3_RUNTIME_REF_LIMITS.video} 个，运行会报错）` : ""}` : pickingKey === `${segment.id}:${refIndex}` ? "在画布上点选节点作为参考（Esc 取消）" : "点击进入画布选节点模式，挑一个节点作为参考（也可直接拖素材进来）"}
-            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-role" title="参考职责">{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
+            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-role" title="参考职责">{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
         })}</div>;
     };
     const renderStoryboardTrack = (segment: H3Segment) => {
@@ -630,7 +622,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                     draggable
                     style={{ left: `${start * 100}px`, width: `${imageWidth}px` }}
                     title={`${item.ref?.name || `分镜 ${index + 1}`} · ${item.duration.toFixed(2)} 秒 · ${item.ref ? "双击编辑参考素材职责" : "单击进入画布选节点，为该分镜绑定参考图"} · 右键插入/移除`}
-                    onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-h3-storyboard", item.id); }}
+                    onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-h3-storyboard", item.id); event.dataTransfer.setData("application/x-h3-storyboard-source", segment.id); }}
                     onDragOver={(event) => {
                         if (event.dataTransfer.types.includes("application/x-h3-storyboard")) { event.preventDefault(); event.stopPropagation(); return; }
                         // 空分镜接受外部图片素材拖入直接绑定
@@ -639,9 +631,18 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                     onDrop={(event) => {
                         const sourceId = event.dataTransfer.getData("application/x-h3-storyboard");
                         if (sourceId) {
-                            if (sourceId === item.id) return;
                             event.preventDefault();
                             event.stopPropagation();
+                            const sourceSegmentId = event.dataTransfer.getData("application/x-h3-storyboard-source");
+                            if (sourceSegmentId && sourceSegmentId !== segment.id) {
+                                const sourceSegment = segments.find((candidate) => candidate.id === sourceSegmentId);
+                                if (sourceSegment) {
+                                    const moved = moveStoryboardShotBetweenSegments(sourceSegment, segment, sourceId, item.id);
+                                    ctx.updateMetadata({ segments: segments.map((candidate) => candidate.id === sourceSegmentId ? moved.source : candidate.id === segment.id ? moved.target : candidate), selectedSegmentId: segment.id });
+                                    return;
+                                }
+                            }
+                            if (sourceId === item.id) return;
                             onSegmentChange(reorderStoryboardShots(segment, sourceId, item.id));
                             return;
                         }
@@ -666,7 +667,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                         onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setTimelineMenu({ kind: "storyboard", segmentId: segment.id, x: event.clientX, y: event.clientY, afterId: item.id, index }); }}
                     >
                         <div className="minimax-storyboard-card-visual">
-                            {item.ref ? <img src={item.ref.url} alt={item.ref.name} draggable={false} /> : <div className="minimax-storyboard-placeholder">分镜 {index + 1} · 单击绑图</div>}
+                            {item.ref ? <img src={item.ref.storageKey ? ctx.mediaUrl(item.ref.storageKey) : item.ref.url} alt={item.ref.name} draggable={false} /> : <div className="minimax-storyboard-placeholder">分镜 {index + 1} · 单击绑图</div>}
                             {index > 0 ? <span className="minimax-storyboard-time" title="切镜点 · 前序分镜累计时长">{start.toFixed(2)}s</span> : null}
                             {item.ref ? <span className="minimax-storyboard-role" style={{ cursor: "default" }}>分镜 {index + 1}</span> : null}
                             <button type="button" className="minimax-storyboard-remove" title="移除分镜" onClick={(event) => { event.stopPropagation(); onSegmentChange(removeStoryboardShot(segment, item.id)); }} onDoubleClick={(event) => event.stopPropagation()}>×</button>

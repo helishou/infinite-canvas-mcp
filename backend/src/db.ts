@@ -5,13 +5,15 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { completedImageSlots, imageSlotStatus, imageSourceStatus } from "./canvas/image-result-slots.js";
-import { applyCanvasProjectOperations, type CanvasOperation } from "./canvas/project-ops.js";
+import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation } from "./canvas/project-ops.js";
 import { prepareClientCanvasOperation, stripCanvasLocalViewState } from "./canvas/operation-authority.js";
 import { collaborationError, commandFingerprint, concurrentCommandConflicts, type CanvasCommandContext, type CanvasCommit } from "./canvas/collaboration.js";
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 import * as Y from "yjs";
 import { textSuggestionInputSchema, type CanvasTextSuggestion } from "@basketikun/canvas-agent/schemas";
+import { H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, textOperation, textTargetSchema, type CanvasTextTarget } from "./canvas/collaborative-text.js";
+import type { McpObservabilityReportOptions } from "./stores/types.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -31,6 +33,18 @@ export type RuntimeTask = {
     model?: string;
     outputs: Array<Record<string, unknown>>;
 };
+
+function taskSearchFields(kind: string, input: Record<string, unknown>, params: Record<string, unknown>) {
+    const inputParams = recordOf(input.params);
+    const binding = recordOf(params.canvasBinding);
+    const projectId = String(input.projectId || params.projectId || binding.projectId || "") || null;
+    const nodeId = String(input.nodeId || inputParams.nodeId || params.nodeId || binding.nodeId || "") || null;
+    const segmentId = String(input.segmentId || inputParams.segmentId || params.segmentId || binding.segmentId || "") || null;
+    const model = String(params.model || params.modelName || input.model || "") || null;
+    const executor = String(params.executor || (kind.startsWith("comfyui:") ? "comfy" : kind));
+    const search = `${kind} ${executor} ${model || ""}`;
+    return { projectId, nodeId, segmentId, model, isImage: /image/i.test(search) ? 1 : 0, isVideo: /video|h3/i.test(search) ? 1 : 0 };
+}
 export type RuntimeTaskEvent = {
     id: number; taskId: string; type: string;
     payload: Record<string, unknown>; createdAt: string;
@@ -131,16 +145,19 @@ export type WorkflowConfigRow = {
 
 export class BackendDatabase {
     readonly db: DatabaseSync;
+    private readonly filePath: string;
     private canvasCommitListener?: (commit: CanvasCommit) => void;
 
     onCanvasCommit(listener: (commit: CanvasCommit) => void) { this.canvasCommitListener = listener; }
 
     constructor(file: string = DB_FILE) {
+        this.filePath = file;
         ensureDataDirs();
         fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
         this.db = new DatabaseSync(file);
         this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
-        this.migrate();
+        try { this.migrate(); }
+        catch (error) { this.db.close(); throw error; }
     }
 
     close() { this.db.close(); }
@@ -430,6 +447,101 @@ export class BackendDatabase {
             this.migrateMiniMaxH3WorkflowFields();
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (12, ?)").run(new Date().toISOString());
         }
+        if (currentVersion < 13) {
+            if (currentVersion > 0) this.backupBeforeH3Migration();
+            this.indexTaskQueries();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (13, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 14) {
+            if (currentVersion === 13) this.backupBeforeH3Migration("v14-reference-archive");
+            this.migrateH3References();
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (14, ?)").run(new Date().toISOString());
+        }
+    }
+
+    private backupBeforeH3Migration(version = "v13") {
+        const file = this.filePath;
+        if (!file || file === ":memory:") return;
+        const backup = `${file}.pre-h3-${version}.sqlite`;
+        if (fs.existsSync(backup)) throw new Error(`已有 H3 迁移备份，拒绝覆盖：${backup}`);
+        this.db.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`);
+        if (fs.statSync(backup).size === 0) throw new Error("H3 数据库迁移备份为空");
+        const copy = new DatabaseSync(backup, { readOnly: true });
+        try {
+            const check = copy.prepare("PRAGMA integrity_check").get() as { integrity_check?: string };
+            if (check.integrity_check !== "ok") throw new Error("H3 数据库迁移备份完整性校验失败");
+        } finally { copy.close(); }
+    }
+
+    private migrateH3References() {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            this.db.exec(`CREATE TABLE IF NOT EXISTS h3_reference_legacy_archive (
+                project_id TEXT NOT NULL REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                node_id TEXT NOT NULL,
+                segment_id TEXT NOT NULL,
+                legacy_json TEXT NOT NULL,
+                archived_at TEXT NOT NULL,
+                PRIMARY KEY(project_id, node_id, segment_id)
+            )`);
+            const rows = this.db.prepare("SELECT id, data_json FROM canvas_projects").all() as Array<{ id: string; data_json: string }>;
+            const update = this.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?");
+            const findArchive = this.db.prepare("SELECT legacy_json FROM h3_reference_legacy_archive WHERE project_id = ? AND node_id = ? AND segment_id = ?");
+            const saveArchive = this.db.prepare("INSERT INTO h3_reference_legacy_archive (project_id, node_id, segment_id, legacy_json, archived_at) VALUES (?, ?, ?, ?, ?)");
+            for (const row of rows) {
+                const project = JSON.parse(row.data_json) as Record<string, unknown>;
+                const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+                let changed = false;
+                for (const node of nodes) {
+                    if (!isH3CanvasNode(node)) continue;
+                    const before = JSON.stringify(node);
+                    canonicalizeH3References(node, (segment, index) => {
+                        const segmentId = String(segment.id || `index:${index}`);
+                        const legacy = JSON.stringify({ refItems: segment.refItems, refs: segment.refs });
+                        const existing = findArchive.get(row.id, String(node.id || ""), segmentId) as { legacy_json: string } | undefined;
+                        if (existing && existing.legacy_json !== legacy) throw new Error(`H3 旧参考归档冲突：${row.id}/${String(node.id || "")}/${segmentId}`);
+                        if (!existing) saveArchive.run(row.id, String(node.id || ""), segmentId, legacy, new Date().toISOString());
+                    });
+                    const metadata = recordOf(node.metadata);
+                    const segments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
+                    for (const segment of segments) {
+                        for (const key of ["faceRepairSingle", "faceRepairMulti", "globalRepair"]) {
+                            if (key in segment) { delete segment[key]; changed = true; }
+                        }
+                    }
+                    metadata.segments = segments;
+                    node.metadata = metadata;
+                    if (JSON.stringify(node) !== before) changed = true;
+                    const beforeCatalog = JSON.stringify(project.referenceCatalog || []);
+                    registerH3ReferenceAssets(project, node);
+                    if (JSON.stringify(project.referenceCatalog || []) !== beforeCatalog) changed = true;
+                }
+                if (changed) update.run(JSON.stringify(project), row.id);
+            }
+            this.db.exec("COMMIT");
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    }
+
+    private indexTaskQueries() {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            for (const [name, type] of [["project_id", "TEXT"], ["node_id", "TEXT"], ["segment_id", "TEXT"], ["model", "TEXT"], ["is_image", "INTEGER NOT NULL DEFAULT 0"], ["is_video", "INTEGER NOT NULL DEFAULT 0"]]) {
+                this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
+            }
+            const rows = this.db.prepare("SELECT id FROM tasks").all() as Array<{ id: string }>;
+            const update = this.db.prepare("UPDATE tasks SET project_id = ?, node_id = ?, segment_id = ?, model = ?, is_image = ?, is_video = ? WHERE id = ?");
+            for (const row of rows) {
+                const task = this.getTask(row.id);
+                if (!task) continue;
+                const fields = taskSearchFields(task.kind, task.input, task.params);
+                update.run(fields.projectId, fields.nodeId, fields.segmentId, fields.model, fields.isImage, fields.isVideo, row.id);
+            }
+            this.db.exec("CREATE INDEX IF NOT EXISTS tasks_project_kind_status_created ON tasks(project_id, kind, status, created_at DESC)");
+            this.db.exec("CREATE INDEX IF NOT EXISTS tasks_status_created ON tasks(status, created_at DESC)");
+            this.db.exec("CREATE INDEX IF NOT EXISTS tasks_project_node_segment_created ON tasks(project_id, node_id, segment_id, created_at DESC)");
+            this.db.exec("CREATE INDEX IF NOT EXISTS tasks_model_created ON tasks(model, created_at DESC)");
+            this.db.exec("COMMIT");
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     }
 
     private attachFullPlotToDramaEpisodes() {
@@ -873,6 +985,16 @@ export class BackendDatabase {
     createCanvasProject(input: CanvasProject) {
         if (typeof input?.id !== "string" || !input.id.trim()) throw new Error("project.id 必填");
         const project = stripCanvasLocalViewState(input as unknown as Record<string, unknown>) as unknown as CanvasProject;
+        const referenceArchives: Array<{ nodeId: string; segmentId: string; legacy: string }> = [];
+        for (const node of Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : []) {
+            if (!isH3CanvasNode(node)) continue;
+            canonicalizeH3References(node, (segment, index) => referenceArchives.push({
+                nodeId: String(node.id || ""),
+                segmentId: String(segment.id || `index:${index}`),
+                legacy: JSON.stringify({ refItems: segment.refItems, refs: segment.refs }),
+            }));
+            registerH3ReferenceAssets(project as unknown as Record<string, unknown>, node);
+        }
         delete project.folderId;
         // revision 是后台权威顺序；导入/新建均从零开始，不能把外部版本带进本地日志。
         project.revision = 0;
@@ -896,6 +1018,8 @@ export class BackendDatabase {
             project.updatedAt = now;
             const json = JSON.stringify(project);
             this.db.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)").run(project.id, json, now);
+            const archive = this.db.prepare("INSERT INTO h3_reference_legacy_archive (project_id, node_id, segment_id, legacy_json, archived_at) VALUES (?, ?, ?, ?, ?)");
+            for (const item of referenceArchives) archive.run(project.id, item.nodeId, item.segmentId, item.legacy, now);
             this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, 0, ?)").run(project.id, json);
             this.db.exec("COMMIT");
             return { project, created: true };
@@ -987,6 +1111,34 @@ export class BackendDatabase {
         return { ...canonical, textSuggestion: suggestion };
     }
 
+    private restoreH3OutputOperation(projectId: string, project: Record<string, unknown>, operation: CanvasOperation): CanvasOperation {
+        const nodeId = String(operation.nodeId || "");
+        const segmentId = String(operation.segmentId || "");
+        const log = this.getGenerationLog(String(operation.generationLogId || ""));
+        if (!log || log.projectId !== projectId || log.nodeId !== nodeId) throw new Error("历史输出不属于当前 H3 节点");
+        const node = (Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : []).find((item) => String(item.id) === nodeId);
+        if (!isH3CanvasNode(node)) throw new Error("找不到目标 H3 节点");
+        const activeTaskId = String(recordOf(node!.metadata).runtimeTaskId || "");
+        if (activeTaskId && ["queued", "running", "awaiting_confirmation"].includes(this.getTask(activeTaskId)?.status || "")) throw new Error("H3 节点正在运行，不能还原历史输出");
+        const segment = (Array.isArray(recordOf(node!.metadata).segments) ? recordOf(node!.metadata).segments as Array<Record<string, unknown>> : []).find((item) => String(item.id) === segmentId);
+        if (!segment) throw new Error("找不到目标 Clip");
+        if (["queued", "loading", "awaiting_confirmation"].includes(String(segment.status || ""))) throw new Error("Clip 正在运行，不能还原历史输出");
+        const requestedKey = String(operation.storageKey || "");
+        const output = log.outputs.find((item) => (!requestedKey || item.storageKey === requestedKey) && String(item.mimeType || "video/mp4").startsWith("video/"));
+        const storageKey = String(output?.storageKey || "");
+        const media = storageKey ? this.getMediaFile(storageKey) : null;
+        if (!media || !fs.existsSync(media.filePath)) throw new Error("历史输出媒体已丢失，不能还原");
+        const settings = recordOf(operation.settings);
+        if (Object.keys(settings).some((key) => key === "id" || H3_RUNTIME_SEGMENT_FIELDS.includes(key as typeof H3_RUNTIME_SEGMENT_FIELDS[number]))) throw new Error("历史参数包含后台运行字段");
+        const url = `/media/${encodeURIComponent(storageKey)}`;
+        return { type: "update_h3_segment", nodeId, segmentId, patch: {
+            ...settings,
+            result: url, resultStorageKey: storageKey, results: [{ url, storageKey, mimeType: String(output?.mimeType || "video/mp4") }],
+            status: "success", progress: 1, runtimeTaskId: "", cacheFingerprint: "",
+            firstPassReady: false, firstPassResult: "", firstPassStorageKey: "", firstPassFingerprint: "",
+        } };
+    }
+
     readCanvasChanges(id: string, afterRevision: number) {
         const project = this.getCanvasProject(id);
         if (!project) throw new Error(`画布不存在: ${id}`);
@@ -1054,9 +1206,10 @@ export class BackendDatabase {
                 delete operation.textSuggestion;
                 const isSuggestion = operation.type === "save_text_suggestion" || operation.type === "resolve_text_suggestion";
                 const isText = isSuggestion || operation.type === "text_update" || operation.type === "text_replace";
+                if (operation.type === "restore_h3_output") operations[index] = this.restoreH3OutputOperation(id, project, operation);
                 if (isSuggestion) operations[index] = this.applyTextSuggestion(id, project, operation);
                 else if (isText) operations[index] = this.applyCanvasTextOperation(id, project, operation);
-                if (!context?.runtimeWrite) prepareClientCanvasOperation(project, operations[index]);
+                if (!context?.runtimeWrite && operation.type !== "restore_h3_output") prepareClientCanvasOperation(project, operations[index]);
                 const result = applyCanvasProjectOperations(project, [operations[index]]);
                 if (!isText) {
                     // 每一步删除后立即清理；同批 delete + add 同 ID 也必须得到新文本身份。
@@ -1068,7 +1221,7 @@ export class BackendDatabase {
                             catch { this.db.prepare("DELETE FROM canvas_text_documents WHERE project_id = ? AND target_key = ?").run(id, target_key); }
                         }
                     }
-                    const textUpdates = editedTextTargets(operation, project).flatMap((target) => {
+                    const textUpdates = editedTextTargets(operations[index], project).flatMap((target) => {
                         const row = this.db.prepare("SELECT state FROM canvas_text_documents WHERE project_id = ? AND target_key = ?").get(id, textKey(target)) as { state: Uint8Array } | undefined;
                         if (!row) return [];
                         const doc = loadTextDocument(row.state, "");
@@ -1909,7 +2062,31 @@ export class BackendDatabase {
         return rows.map(mcpObservabilityEventFromRow);
     }
 
-    getMcpObservabilityReport() {
+    listMcpOptimizationMarkers() {
+        const value = this.getSetting("mcp.optimizationMarkers");
+        return Array.isArray(value) ? value : [];
+    }
+
+    saveMcpOptimizationMarker(input: { at?: string; label?: string }) {
+        const at = new Date(input.at || Date.now());
+        if (!Number.isFinite(at.getTime())) throw new Error("优化标记时间无效");
+        const label = String(input.label || "").trim() || "MCP 优化";
+        const current = this.listMcpOptimizationMarkers().filter((item) => item && typeof item === "object") as Array<Record<string, unknown>>;
+        const marker = { id: crypto.randomUUID(), at: at.toISOString(), label: label.slice(0, 120), createdAt: new Date().toISOString() };
+        this.setSetting("mcp.optimizationMarkers", [...current, marker].sort((left, right) => String(left.at).localeCompare(String(right.at))));
+        return marker;
+    }
+
+    deleteMcpOptimizationMarker(id: string) {
+        const existing = this.listMcpOptimizationMarkers();
+        const current = existing.filter((item) => item && typeof item === "object" && (item as Record<string, unknown>).id !== id) as unknown[];
+        if (current.length === existing.length) return false;
+        this.setSetting("mcp.optimizationMarkers", current);
+        return true;
+    }
+
+    getMcpObservabilityReport(options: McpObservabilityReportOptions = {}) {
+        const dateFilter = mcpObservabilityDateFilter(options);
         const totals = this.db.prepare(`
             SELECT
                 SUM(CASE WHEN event = 'tool.started' THEN 1 ELSE 0 END) AS started,
@@ -1926,7 +2103,8 @@ export class BackendDatabase {
                 SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(input_summary_json, '$.inputChars') IS NOT NULL THEN 1 ELSE 0 END) AS input_sized_calls,
                 SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') AND json_extract(output_summary_json, '$.outputChars') >= 100000 THEN 1 ELSE 0 END) AS oversized_calls
             FROM mcp_observability_events
-        `).get() as Record<string, unknown>;
+            ${dateFilter.whereWhere}
+        `).get(...dateFilter.params) as Record<string, unknown>;
         const byTool = this.db.prepare(`
             WITH terminal AS (
                 SELECT *,
@@ -1934,6 +2112,7 @@ export class BackendDatabase {
                     COUNT(*) OVER (PARTITION BY tool) AS tool_count
                 FROM mcp_observability_events
                 WHERE event IN ('tool.succeeded', 'tool.failed')
+                  ${dateFilter.where}
             )
             SELECT tool,
                 COUNT(*) AS calls,
@@ -1951,20 +2130,22 @@ export class BackendDatabase {
                 SUM(json_extract(input_summary_json, '$.inputChars')) AS total_input_chars
             FROM terminal
             GROUP BY tool ORDER BY calls DESC, tool
-        `).all() as Array<Record<string, unknown>>;
+        `).all(...dateFilter.params) as Array<Record<string, unknown>>;
         const errors = this.db.prepare(`
             SELECT error_code AS code, COUNT(*) AS count
             FROM mcp_observability_events
             WHERE event = 'tool.failed' AND error_code IS NOT NULL
+              ${dateFilter.where}
             GROUP BY error_code ORDER BY count DESC, error_code
-        `).all() as Array<Record<string, unknown>>;
+        `).all(...dateFilter.params) as Array<Record<string, unknown>>;
         const taskObservationEvents = this.db.prepare(`
             SELECT tool, task_id, event, output_summary_json, created_at, id
             FROM mcp_observability_events
             WHERE event IN ('tool.succeeded', 'tool.failed')
               AND (task_id IS NOT NULL OR output_summary_json != '{}')
+              ${dateFilter.where}
             ORDER BY created_at, id
-        `).all() as Array<Record<string, unknown>>;
+        `).all(...dateFilter.params) as Array<Record<string, unknown>>;
         const observedTasks = collectObservedTaskLinks(taskObservationEvents);
         const taskStatusQuery = this.db.prepare("SELECT status FROM tasks WHERE id = ?");
         const taskStatusesByStatus = new Map<string, number>();
@@ -1983,26 +2164,29 @@ export class BackendDatabase {
                     LEAD(tool) OVER (PARTITION BY session_id ORDER BY created_at, id) AS next_tool
                 FROM mcp_observability_events
                 WHERE event IN ('tool.succeeded', 'tool.failed')
+                  ${dateFilter.where}
             )
             SELECT COUNT(*) AS suggested,
                 SUM(CASE WHEN next_tool = suggested_tool THEN 1 ELSE 0 END) AS followed,
                 SUM(CASE WHEN next_event = 'tool.succeeded' AND next_tool = suggested_tool THEN 1 ELSE 0 END) AS succeeded
             FROM terminal WHERE event = 'tool.failed' AND suggested_tool IS NOT NULL
-        `).get() as Record<string, unknown>;
+        `).get(...dateFilter.params) as Record<string, unknown>;
         const sessions = this.db.prepare(`
             SELECT COUNT(*) AS total, AVG(calls) AS average_calls, MAX(calls) AS max_calls
             FROM (
                 SELECT session_id, COUNT(*) AS calls
                 FROM mcp_observability_events
                 WHERE event IN ('tool.succeeded', 'tool.failed')
+                  ${dateFilter.where}
                 GROUP BY session_id
             )
-        `).get() as Record<string, unknown>;
+        `).get(...dateFilter.params) as Record<string, unknown>;
         const terminalDurationRows = this.db.prepare(`
             SELECT tool, duration_ms, output_summary_json
             FROM mcp_observability_events
             WHERE event IN ('tool.succeeded', 'tool.failed') AND duration_ms IS NOT NULL
-        `).all() as Array<Record<string, unknown>>;
+              ${dateFilter.where}
+        `).all(...dateFilter.params) as Array<Record<string, unknown>>;
         const allLatency = summarizeDurations(terminalDurationRows);
         const ordinaryLatency = summarizeDurations(terminalDurationRows.filter((row) => !waitsForTasks(row.output_summary_json, row.tool)));
         const waitingLatency = summarizeDurations(terminalDurationRows.filter((row) => waitsForTasks(row.output_summary_json, row.tool)));
@@ -2019,11 +2203,26 @@ export class BackendDatabase {
                 COUNT(*) AS calls,
                 SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
                 SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
-                AVG(duration_ms) AS average_duration_ms
+                AVG(duration_ms) AS average_duration_ms,
+                AVG(CASE WHEN json_extract(output_summary_json, '$.outputChars') IS NOT NULL THEN json_extract(output_summary_json, '$.outputChars') END) AS average_output_chars
             FROM mcp_observability_events
             WHERE event IN ('tool.succeeded', 'tool.failed')
+              ${dateFilter.where}
             GROUP BY date(created_at, 'localtime') ORDER BY date
-        `).all() as Array<Record<string, unknown>>;
+        `).all(...dateFilter.params) as Array<Record<string, unknown>>;
+        const dailyByTool = this.db.prepare(`
+            SELECT date(created_at, 'localtime') AS date, tool,
+                COUNT(*) AS calls,
+                SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
+                AVG(duration_ms) AS average_duration_ms,
+                AVG(CASE WHEN json_extract(output_summary_json, '$.outputChars') IS NOT NULL THEN json_extract(output_summary_json, '$.outputChars') END) AS average_output_chars
+            FROM mcp_observability_events
+            WHERE event IN ('tool.succeeded', 'tool.failed')
+              ${dateFilter.where}
+            GROUP BY date(created_at, 'localtime'), tool
+            ORDER BY date, tool
+        `).all(...dateFilter.params) as Array<Record<string, unknown>>;
         const failuresByTool = this.db.prepare(`
             SELECT tool, COALESCE(error_code, 'UNKNOWN') AS code, COUNT(*) AS count,
                 (
@@ -2032,27 +2231,30 @@ export class BackendDatabase {
                     WHERE latest.event = 'tool.failed'
                       AND latest.tool = events.tool
                       AND COALESCE(latest.error_code, 'UNKNOWN') = COALESCE(events.error_code, 'UNKNOWN')
+                      ${dateFilter.where}
                     ORDER BY latest.created_at DESC, latest.id DESC
                     LIMIT 1
                 ) AS latest_trace_id
             FROM mcp_observability_events AS events
             WHERE event = 'tool.failed'
+              ${dateFilter.where}
             GROUP BY tool, COALESCE(error_code, 'UNKNOWN')
             ORDER BY count DESC, tool, code
-        `).all() as Array<Record<string, unknown>>;
+        `).all(...dateFilter.params, ...dateFilter.params) as Array<Record<string, unknown>>;
         const transitions = this.db.prepare(`
             WITH terminal AS (
                 SELECT session_id, tool,
                     LEAD(tool) OVER (PARTITION BY session_id ORDER BY created_at, id) AS next_tool
                 FROM mcp_observability_events
                 WHERE event IN ('tool.succeeded', 'tool.failed')
+                  ${dateFilter.where}
             )
             SELECT tool AS from_tool, next_tool AS to_tool, COUNT(*) AS count
             FROM terminal
             WHERE next_tool IS NOT NULL
             GROUP BY tool, next_tool
             ORDER BY count DESC, from_tool, to_tool
-        `).all() as Array<Record<string, unknown>>;
+        `).all(...dateFilter.params) as Array<Record<string, unknown>>;
         const taskOutcomesByTool = [...taskOutcomesByToolMap.entries()]
             .map(([key, count]) => {
                 const [tool, status] = key.split("\u0000");
@@ -2071,6 +2273,20 @@ export class BackendDatabase {
                 ? summarizeDurations(ordinaryByTool.get(String(row.tool || "")) || []).p95DurationMs
                 : null,
         }));
+        const dailyByToolMetrics = dailyByTool.map((row) => {
+            const calls = Number(row.calls || 0);
+            const succeeded = Number(row.succeeded || 0);
+            return {
+                date: String(row.date || ""),
+                tool: String(row.tool || ""),
+                calls,
+                succeeded,
+                failed: Number(row.failed || 0),
+                successRate: calls ? succeeded / calls : null,
+                averageDurationMs: row.average_duration_ms == null ? null : Math.round(Number(row.average_duration_ms)),
+                averageOutputChars: row.average_output_chars == null ? null : Math.round(Number(row.average_output_chars)),
+            };
+        });
         const taskOutcomeMetrics = taskOutcomesByTool.map((row) => ({ tool: String(row.tool || ""), status: String(row.status || "unknown"), count: Number(row.count || 0) }));
         // 单次返回体超过该字符数即视为「会显著占用模型上下文」。实测 canvas_get_state 单次
         // 可达 2.2M 字符（≈55 万 tokens），阈值取 100k 字符以覆盖严重情形而不误报普通工具。
@@ -2167,8 +2383,14 @@ export class BackendDatabase {
                     failed: Number(row.failed || 0),
                     successRate: calls ? dailySucceeded / calls : null,
                     averageDurationMs: row.average_duration_ms == null ? null : Math.round(Number(row.average_duration_ms)),
+                    averageOutputChars: row.average_output_chars == null ? null : Math.round(Number(row.average_output_chars)),
                 };
             }),
+            dailyByTool: dailyByToolMetrics,
+            filters: {
+                from: options.from || null,
+                to: options.to || null,
+            },
             diagnostics,
         };
     }
@@ -2198,9 +2420,10 @@ export class BackendDatabase {
         }
         const now = new Date().toISOString();
         try {
+            const fields = taskSearchFields(kind, input, params);
             this.db.prepare(
-                "INSERT INTO tasks (id, kind, status, progress, input_json, params_json, created_at, updated_at) VALUES (?, ?, 'queued', 0, ?, ?, ?, ?)"
-            ).run(id, kind, JSON.stringify(input), JSON.stringify(params), now, now);
+                "INSERT INTO tasks (id, kind, status, progress, input_json, params_json, created_at, updated_at, project_id, node_id, segment_id, model, is_image, is_video) VALUES (?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ).run(id, kind, JSON.stringify(input), JSON.stringify(params), now, now, fields.projectId, fields.nodeId, fields.segmentId, fields.model, fields.isImage, fields.isVideo);
         } catch (error) {
             // 客户端传来的 id 已存在（重试 / 多标签）→ 直接复用该任务，让新请求接上同一行记录。
             const existing = this.getTask(id);
@@ -2252,7 +2475,34 @@ export class BackendDatabase {
 
     getTask(id: string): RuntimeTask | null {
         const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Record<string, unknown> | undefined;
-        if (!row) return null;
+        return row ? this.taskFromRow(row) : null;
+    }
+
+    listTasks(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {
+        const clauses: string[] = [];
+        const values: Array<string | number> = [];
+        if (filter.status) { clauses.push("status = ?"); values.push(filter.status); }
+        if (filter.kind) { clauses.push("kind = ?"); values.push(filter.kind); }
+        if (filter.model) { clauses.push("model = ?"); values.push(filter.model); }
+        if (filter.projectId) { clauses.push("project_id = ?"); values.push(filter.projectId); }
+        if (filter.scope === "canvas") clauses.push("project_id IS NOT NULL");
+        if (filter.scope === "image") clauses.push("is_image = 1");
+        if (filter.scope === "video") clauses.push("is_video = 1");
+        if (filter.nodeIds?.length) {
+            clauses.push(`node_id IN (${filter.nodeIds.map(() => "?").join(",")})`);
+            values.push(...filter.nodeIds.map(String));
+        }
+        if (filter.segmentIds?.length) {
+            clauses.push(`segment_id IN (${filter.segmentIds.map(() => "?").join(",")})`);
+            values.push(...filter.segmentIds.map(String));
+        }
+        const limit = Math.max(1, Math.min(500, Number(filter.limit || 500)));
+        const offset = Math.max(0, Number(filter.offset || 0));
+        const rows = this.db.prepare(`SELECT * FROM tasks ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...values, limit, offset) as Array<Record<string, unknown>>;
+        return rows.map((row) => this.taskFromRow(row));
+    }
+
+    private taskFromRow(row: Record<string, unknown>): RuntimeTask {
         const input = parseJsonObject(row.input_json);
         const params = parseJsonObject(row.params_json);
         // 插件文本等调用把归属节点/Clip 放在 input.params 里（顶层 nodeId 会触发画布回写绑定，不能放）
@@ -2280,27 +2530,6 @@ export class BackendDatabase {
         };
     }
 
-    listTasks(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {
-        const clauses: string[] = [];
-        const values: string[] = [];
-        if (filter.status) { clauses.push("status = ?"); values.push(filter.status); }
-        if (filter.kind) { clauses.push("kind = ?"); values.push(filter.kind); }
-        const limit = Math.max(1, Math.min(500, Number(filter.limit || 500)));
-        const offset = Math.max(0, Number(filter.offset || 0));
-        const rows = this.db.prepare(`SELECT id FROM tasks ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at DESC`).all(...values) as Array<{ id: string }>;
-        const nodeIds = new Set((filter.nodeIds || []).map(String));
-        const segmentIds = new Set((filter.segmentIds || []).map(String));
-        return rows.map((row) => this.getTask(String(row.id))).filter((task): task is RuntimeTask => Boolean(task)).filter((task) => {
-            if (filter.scope === "canvas" && !task.projectId) return false;
-            if (filter.scope === "image" && !/image/i.test(`${task.kind} ${task.executor || ""} ${task.model || ""}`)) return false;
-            if (filter.scope === "video" && !/video|h3/i.test(`${task.kind} ${task.executor || ""} ${task.model || ""}`)) return false;
-            if (filter.model && task.model !== filter.model) return false;
-            if (filter.projectId && task.projectId !== filter.projectId) return false;
-            if (nodeIds.size && (!task.nodeId || !nodeIds.has(task.nodeId))) return false;
-            if (segmentIds.size && (!task.segmentId || !segmentIds.has(task.segmentId))) return false;
-            return true;
-        }).slice(offset, offset + limit);
-    }
 
     /**
      * 历史维护：把旧任务和生成日志中的内联媒体改成摘要。
@@ -2375,6 +2604,24 @@ export class BackendDatabase {
     deleteSetting(key: string) {
         this.db.prepare("DELETE FROM runtime_settings WHERE key = ?").run(key);
     }
+}
+
+function mcpObservabilityDateFilter(options: McpObservabilityReportOptions) {
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (options.from) {
+        clauses.push("date(created_at, 'localtime') >= ?");
+        params.push(options.from);
+    }
+    if (options.to) {
+        clauses.push("date(created_at, 'localtime') <= ?");
+        params.push(options.to);
+    }
+    return {
+        where: clauses.length ? `AND ${clauses.join(" AND ")}` : "",
+        whereWhere: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "",
+        params,
+    };
 }
 
 function redactJsonColumn(value: unknown) {

@@ -5,6 +5,61 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## MCP 分镜换槽与图片输入预检
+
+- 对有多张图的角色节点调用 `canvas_image_input_manifest`，确认返回实际参考顺序与 storageKey，并提示未明确选择的角色图；提供 `characterImageKeys` 后再提交图片生成，输入清单应与生成快照一致。
+- 用 `canvas_replace_storyboard_slots` 一次替换有序分镜组的指定槽位及参考资产，确认只改指定槽位、画幅校验生效，旧图片与结果历史仍可读取。
+- 用 `h3_replace_storyboard_binding` 替换一个 Clip 的分镜绑定，确认人物、服装、声音和其他分镜绑定保持原值，旧 storageKey 不匹配时拒绝写入。
+
+## 角色资产与画布节点同步
+
+- 编辑角色的一张参考图并点击卡片上的替换按钮，从画布选择另一张图片后保存；确认新图片来源和尺寸已替换，卡片原有职责、服装说明、顺序及主图选择保留。取消画布选图后再用顶部“从画布添加”，确认此次操作会追加而不会误替换。
+- 将角色节点存为角色资产，在两个画布中插入同一角色；修改资产描述、名称、参考图或声线后，已打开的画布不立即改动，分别重新打开画布时更新各自的关联节点，未关联节点不变。重复打开且资产未变时不应增加 revision。
+- 在画布上修改已关联角色节点的描述，确认资产库仍保留原值；点击该节点“存为角色资产”后，资产库才更新，其他画布要重新打开后才读取新版本。
+- 在两个关联节点分别选择不同主图，再修改资产描述或资产主图并重新打开画布；两个节点应继续显示各自选中的主图。重排资产参考图后，节点仍应选中原来那张图片。
+
+## MCP canvas state pagination
+
+- A 449-node canvas should return all node summaries and connections in one default `canvas_get_state` call, with `truncated: false` and no `nextNodeOffset`.
+- When the summary would exceed the configured MCP output limit (512 KiB by default), the tool should return a page with `nextNodeOffset`; repeat the call with that offset until all IDs are read. Keep the same project revision across pages and deduplicate connections by ID when combining them.
+- `nodeLimit` should cap a caller-requested page for token control. A single node summary that cannot fit even without connections should still return `OUTPUT_TOO_LARGE` rather than a non-advancing page.
+
+## H3 分镜提示词不再泄漏素材名
+
+- 打开一个分镜图素材名被写进过 `analysis.summary` 的 Clip（例如素材名「S01-02·沈侯持婚书单人对峙·新版分镜组第2槽」），重新保存分镜后确认 `subject_definitions` 与 `detailed_description` 里只剩通用 storyboard frame / storyboard keyframe 描述，不再出现素材名、槽位号或 EP01 / S01-02 / group-… 这类归档标签。
+- 确认同一镜的正文里不再出现两条「Use the approved … from <Picture N> …」cue（旧 cue 应被剥掉，只保留本次编译生成的一条）。
+- MCP `canvas_analyze_reference_asset` 传入与素材名相同的 `summary` 时应报错拒绝写入，而不是把文件名存成视觉摘要。
+
+## MCP scoped canvas reads
+
+- `canvas_get_state({ nodeIds: ["<node id>"] })` should include only connections touching that node while retaining the project's `connectionCount`; omitting `nodeIds` should still include all connections.
+- `canvas_inspect` should keep full node summaries in `nodes` while `referenceCandidates` and `generationTargets` contain only their selection fields. Check that a reference candidate still exposes its `storageKey` and a generation target still exposes its model and status.
+
+## MCP large-node reads and stale Clip IDs
+
+- On a canvas with a large H3 node, `h3_get_node` should return the current Clip IDs and order without full segment metadata; use a returned ID with `h3_get_clip` to read one Clip.
+- `canvas_get_state({ nodeIds: ["<large node id>"] })` should return a node summary with `metadataTruncated: true` instead of `OUTPUT_TOO_LARGE`. Small nodes should still return full metadata.
+- A removed or mistyped Clip ID should report `SEGMENT_NOT_FOUND` and suggest `h3_get_node`; re-read the index before retrying. Reload the MCP client after updating Backend and canvas-agent runtime output.
+
+## H3 MCP 按锚点插入结构化视频计划
+
+- 使用 `h3_apply_video_plan` 并设 `replaceSegments: false`，传 `beforeSegmentId` 或 `afterSegmentId`；新增 Clip 应在单次 Backend 画布操作后出现在锚点位置，返回的 `positions` 应与读回的时间线索引一致。
+- 同批追加多个 Clip 时应保持 `segments` 输入顺序；两个插入锚点同时提供、替换模式下提供锚点、锚点不存在或新增 ID 重复时应明确失败且不留下部分写入。
+- 不传锚点时维持原有追加到末尾行为；`replaceSegments: true` 的整体替换行为保持不变。
+
+## H3 architecture refactor
+
+- Browser verified on isolated data: a canonical 30-clip node mounts, reloads, switches clips, and scrolls without extra revisions or reference writes; two tabs keep separate clip selection and receive each other's persisted mode edits. Historical output restoration, offline edit recovery, and the rebuilt static site were also verified.
+- Real local ComfyUI runs completed for T2V (including first-pass confirmation and full-frame second pass), I2V, FL2V, Ref2VA, a two-clip Motion Context chain, and a two-image 1×2 storyboard composite. Browser actions covered confirm, keep first pass, discard, duplicate click, cancel, second-pass failure, Backend restart, and frozen later-clip input. The three reference modes and the composite each produced an archived, playable video. A local mock verified RunningHub upload, submission, polling, media archival, and confirmation; the real RunningHub cloud workflow remains untested because this machine has no RunningHub API key or workflow ID configured. Artistic quality of generated outputs still needs human review.
+- In a 2,000-task in-memory fixture, a 50-task filtered page took 0.173 ms median using SQLite filtering, versus 36.599 ms median for the former read-all/filter algorithm (20 warmed iterations, same process). A separate startup fixture processed all 1,101 active orphan tasks beyond the former 500-item boundary, giving each an explicit failure outcome.
+- Open a 30-clip H3 node, switch clips, enter and leave overview, and scroll the timeline. Mounting and scrolling should produce no reference-catalog writes or extra canvas revisions; prompt and settings should not commit on every scroll frame.
+- Reuse one asset with different labels, roles, and subjects across clips. Reopen the canvas to verify isolation. Regenerate a source image: a new run should use its latest primary image, while an already-started run keeps its frozen reference.
+- During a paused multi-clip run, edit a later clip and the current clip's refinement settings. The later clip should use its start-time prompt; confirmation should use the new postpass settings. Check keep, discard, failed postpass retry, and Backend restart on the original parent task.
+- Restore a historical Output to the current clip and verify its result and inputs survive refresh and another window. Failed asset-analysis or default-settings saves should remain visible and must not claim success.
+- Import a legacy H3 canvas with `refItems` / `refs`; verify the SQLite backup, reference order, media, and per-clip semantics. Conflicting asset IDs must split by media identity. When current `referenceBindings` differ from old lists, keep the bindings authoritative and archive the exact old lists in `h3_reference_legacy_archive` rather than blocking startup.
+- The local database copy was rehearsed across 79 H3 clips with unchanged compiled inputs and 61 archived legacy reference snapshots; the actual database reached schema v14. Reopen the affected canvas for manual verification.
+- Review the visual and audio quality of the generated ComfyUI samples and verify the same modes against a configured real RunningHub cloud workflow. Automated tests cover pagination, confirmation, and migration.
+
 ## H3 first-pass confirmation
 
 - Run a confirmation-mode clip on a test canvas. After the first pass, the original parent task, node, and clip should show `awaiting_confirmation`; the task center should preview the first pass and offer confirm second pass, keep first pass, and discard. Refresh and restart Backend normally, then confirm that the same task ID can continue.
@@ -22,8 +77,8 @@ description: Implemented changes that still need manual verification
 
 **MCP 返回体瘦身**
 
-- 调 `canvas_get_state`（不带参数）：返回节点摘要（`totalNodes` 为真实节点总数，节点项不含 `metadata`），231 节点画布应在几百 KB 以内、不再报 `OUTPUT_TOO_LARGE`。
-- 调 `canvas_get_state({ nodeIds: ["<某节点 id>"] })`：只回该节点的完整 metadata。
+- 调 `canvas_get_state`（不带参数）：尽量返回全部节点摘要（`totalNodes` 为真实节点总数，节点项不含 `metadata`）；超出输出上限时返回 `nextNodeOffset`，按同一 revision 继续翻页。
+- 调 `canvas_get_state({ nodeIds: ["<某节点 id>"] })`：小节点返回完整 metadata；超过现有输出上限时返回摘要并标记 `metadataTruncated`。
 - 调 `canvas_export_snapshot`：仍返回完整画布（契约未变）；在超大画布上会返回可自助恢复的 `OUTPUT_TOO_LARGE` 错误并给出缩小范围建议。
 - 调 `assets_list`：不再返回内联 base64（`coverUrl` 显示为 `[inline-media:image/png]`），`pageSize`/`page`/`keyword` 真正生效。
 - **后端进程需要重启后上述 MCP 改动才生效**（backend 是 `tsx src/index.ts`，无热重载）。
@@ -275,7 +330,9 @@ description: Implemented changes that still need manual verification
 - 挂载一张由角色节点参与生成的分镜图，打开其「参考素材职责」弹窗，确认「分镜中出现的人物」已自动勾选本次生成实际引用的角色；未参与生成的角色不应被勾选。分别通过画布选节点和拖拽挂载验证，旧图片节点沿参考连线回溯角色的场景也应生效。
 - 对分镜图片点击预览左上角删除按钮，确认只移除当前 Clip 的图片引用，分镜卡片及其时长保留为空分镜，画布上的原始素材不受影响；「去除素材」仍移除整个当前引用。
 
-- 在 H3 Clip 的 Refs 行双击普通素材、角色参考和分镜素材，确认均打开「参考素材职责」；单击职责标签不再打开弹窗。点击「从画布替换」并选取相同类型素材，确认替换发生在原引用位置且原职责/用途保留；点击「去除素材」只移除当前引用。双击素材卡片左侧预览的放大按钮后，灯箱展示完整图片/视频/音频，点遮罩、点关闭按钮、按 Esc 都能关闭。
+- 在 H3 Clip 的 Refs 行双击普通素材、角色参考和分镜素材，确认均打开「参考素材职责」；单击职责标签不再打开弹窗。点击「从画布替换」并选取相同类型素材，确认替换发生在原引用位置且原职责/用途保留；点击「去除素材」只移除当前引用。
+- 双击分镜轨上的分镜卡 → 「从画布替换」选中另一张图片节点，确认**卡片留在原位置**（序号、时长不变）只换成新图，不会多出一格、原格不变成空卡，提示词里的 `<Picture N>` 仍指向该格；用角色节点替换时该分镜卡同样保留原位与原时长。
+- 在参考行直接点分镜图的 × 删除，确认轨道上留的是一张空的分镜卡（可再次绑图），而不是指向已删素材的坏卡；刷新后仍一致。存量项目里已经坏掉的卡片（例如 ep01-v07 第二格）重新打开画布后应自动变成可绑图的空卡。双击素材卡片左侧预览的放大按钮后，灯箱展示完整图片/视频/音频，点遮罩、点关闭按钮、按 Esc 都能关闭。
 - 双击角色组引用确认仍显示服装目录和声线开关；逐项启用/停用服装、切换声线后应用，确认 Refs 与提交输入同步更新；“从本段移除整组”仍能移除该角色组。
 - 确认每套服装缩略图的放大按钮可查看未裁切原图，点击缩略图切换启用状态、点击放大按钮不会改变启用状态。
 - 角色参考图的职责与提交用途仍由源角色节点控制并固定为普通参考；打开角色参考素材编辑时不再显示职责、提交用途说明和标签字段，在浅色与深色主题下确认预览和控制清晰可用。
@@ -522,6 +579,7 @@ description: Implemented changes that still need manual verification
   - **文本类**（专用文本生成节点 / 智能生成选 text）：渲染为**文本格**——文本图标 + 角色名角标。
   - **视频类**（H3 等）：维持原角色专用卡片，声线可开关。
 - 打开角色参考弹窗时，引用方为图像类或文本类会隐藏「声线」开关（这两类不消费声线）。
+- 图像类/视频类角色卡支持 hover 预览：与图片引用一致，悬停弹出所选角色图的大图缩略（未选图时显示角色名）；音频格、文本格维持图标形态不加大图。
 - 角色节点本体**始终显示主图**（`metadata.characterPrimaryIndex` 指向的那张），画布上其它生成节点选了哪张角色参考图都不会改写角色节点封面；参考选择只在生成节点的参考卡上体现。
 - 验证：同一角色节点分别连到生图节点、音频模式智能节点、文本模式智能节点，确认参考栏格子随模式切换；再改连 H3 视频节点，确认恢复角色卡片与声线开关。切换过程中控制台不应出现「Rendered more hooks than during the previous render」。浅色/深色主题各验一次。
 - 再验角色封面：给多个生图节点分别选不同服装图（含四视图那张）作角色参考，角色节点封面应始终是主图（底部缩略图条里高亮第 1 张），不会被后选的分镜节点改掉。
@@ -1269,9 +1327,9 @@ The current release needs manual verification in these areas:
 
 + H3 南风 V15 新字段默认行为：确认未配置 TRT、DLSS、TAEH3、Motion Context 和 ER 采样器时任务仍按原流程运行；通过 MCP 透传这些字段时，确认 V15 主节点收到对应值，且未把现有的尾帧接续误当成潜空间续写。
 
-+ H3 南风 V15 设置面板：在 Clip settings 的「南风 V15 增强」中分别切换 TAEH3 彩色预览、DLSS 超分模式、DLSS 输出细节强度、DLSS 补帧、TRT 视频 VAE 和「南风采样器」，确认值写回当前 Clip；DLSS/补帧的帧率、引擎、编码和 TRT 的 encoder/decoder 选项应来自 `/comfy/models` 的真实 schema，不应凭空显示本机不存在的引擎。
++ H3 南风 V15 设置面板：这些 V15 开关已并入各自分区，不再有独立的「南风 V15 增强」菜单——分别在「模型与基础参数」切换 TRT 视频 VAE、「实时预览」切换 TAEH3 彩色预览、「RTX 视频超分」切换 DLSS 超分模式/输出细节强度/DLSS 补帧、「采样设置」选中「南风采样器」后切换 ER 求解参数，确认值写回当前 Clip；DLSS/补帧的帧率、引擎、编码和 TRT 的 encoder/decoder 选项应来自 `/comfy/models` 的真实 schema，不应凭空显示本机不存在的引擎；各分区摘要（RTX/实时预览/采样设置）也要跟着反映这些开关。
 
-+ H3 南风 V15 Motion Context 提示：确认 Clip 卡片保留唯一的 Motion Context 开关，设置面板不再出现第二个同义开关，并明确说明它就是潜空间续写；在画布单段运行中不会自动把尾帧接续转换成 V15 潜空间续写。
++ H3 南风 V15 Motion Context 提示：确认 Clip 卡片保留唯一的 Motion Context 开关，设置面板不再出现第二个同义开关，并明确说明它就是潜空间续写；开启后「采样设置」底部才出现 Motion Context 帧数/音频上下文帧数/续写音频精修，且该分区摘要带「潜空间续写」标记；在画布单段运行中不会自动把尾帧接续转换成 V15 潜空间续写。
 
 + H3 南风 V15 Motion Context 连续组：在连续分镜首段开启「Motion Context（潜空间续写）」，使用「运行当前及后续分镜」提交；确认描述符的 `node` 固定为 ComfyUI 图节点 `nf_v15`，各段收到同一 workflow/group/run 与递增 index，首段保存 AV latent、后续段加载上一段 latent；直接运行单段时应明确提示必须使用批量入口。
 
@@ -1657,3 +1715,17 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - 拖动滑块本体：拖动比例应与光标位移一致，且拖到两端时能到达最左/最右。
 - H3 主提示词右侧竖向滚动条：确认不再有彩色区块刻度；按下轨道即瞬时跳位，按住可连续拖动，不再出现「点空白处却滚到某个区块居中就停」。
 - 两条滚动条在画布缩放（建议 30% 与 100% 各试一次）下都应指哪打哪，不出现点位与内容位置错位。
+
+### H3 MCP 按计划追加 Clip
+
+- 使用 `h3_apply_video_plan` 的 append 模式向现有 H3 节点新增一个或多个 Clip，确认追加成功且不会重置节点运行状态。
+- 新增片段后检查原有 Clip 的顺序、状态、结果和任务历史均保留；再生成新增片段并确认 Backend 正常回写运行状态。
+- 使用 H3「删除片段」工具移除一个 Clip，确认该段退出当前时间线，而对应生成任务、日志和已归档媒体仍可查询。
+- MCP 重载后确认 `h3_delete_clip` 出现在工具列表中；调用时按项目、H3 节点和稳定 Clip ID 删除目标，其他片段的顺序与结果不变。
+
+
+### 画布图像自动色阶工作流
+
+- 在 ComfyUI 已启动且 moyou 自动色阶节点可用时，对画布图片点击「自动色阶」；确认 Backend 提交任务后，在原图右侧创建并连接一个结果图片节点，原图保持不变。
+- 确认结果节点只包含色阶校正后的图片，不额外创建直方图或前后对比图；刷新画布后结果仍可读取。
+- 使用已有图片工具栏自定义配置的用户刷新画布后，确认「自动色阶」已加入工具栏，之后仍可自行隐藏或显示。

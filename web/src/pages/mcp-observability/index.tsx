@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Activity, Download, RefreshCw, Search, Upload } from "lucide-react";
-import { Alert, App, Button, Card, Input, Space, Statistic, Table, Tag, Typography } from "antd";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Activity, Download, Plus, RefreshCw, Search } from "lucide-react";
+import { Alert, App, Button, Card, Checkbox, DatePicker, Input, Select, Space, Statistic, Table, Tabs, Tag, Typography } from "antd";
+import dayjs, { type Dayjs } from "dayjs";
 
-import { fetchMcpObservabilityReport, fetchMcpObservabilityTrace, type McpObservabilityEvent, type McpObservabilityReport } from "@/services/api/mcp-observability";
+import { deleteMcpOptimizationMarker, fetchMcpObservabilityReport, fetchMcpObservabilityTrace, fetchMcpOptimizationMarkers, saveMcpOptimizationMarker, type McpOptimizationMarker, type McpObservabilityEvent, type McpObservabilityReport } from "@/services/api/mcp-observability";
 
 const percent = (value: number | null) => (value == null ? "—" : `${(value * 100).toFixed(1)}%`);
 const duration = (value: number | null | undefined) => (value == null ? "—" : `${value} ms`);
@@ -11,12 +12,86 @@ const signed = (value: number | null, digits = 0, suffix = "") => (value == null
 const chars = (value: number | null | undefined) => (value == null ? "—" : `${value.toLocaleString("en-US")} 字符`);
 const approxTokens = (value: number | null | undefined) => (value == null ? "—" : `≈${Math.round(value / 4).toLocaleString("en-US")} tokens`);
 
-function parseBaselineReport(payload: unknown): McpObservabilityReport | null {
-    if (!payload || typeof payload !== "object") return null;
-    const candidate = "report" in payload ? payload.report : payload;
-    if (!candidate || typeof candidate !== "object" || !("calls" in candidate) || !("byTool" in candidate)) return null;
-    const calls = candidate.calls;
-    return calls && typeof calls === "object" && Array.isArray(candidate.byTool) ? (candidate as McpObservabilityReport) : null;
+const dateText = (value: Dayjs) => value.format("YYYY-MM-DD");
+
+type TrendMetric = "calls" | "successRate" | "failedPerThousand" | "averageDurationMs" | "averageOutputChars";
+
+const trendMetricLabel: Record<TrendMetric, string> = {
+    calls: "调用量",
+    successRate: "成功率",
+    failedPerThousand: "每千次失败",
+    averageDurationMs: "平均耗时",
+    averageOutputChars: "返回体均值",
+};
+
+type TrendSeries = { metric: TrendMetric; color: string; axis: "left" | "right"; percent: boolean };
+
+function TrendLineChart({ data, metrics, markers, tool }: { data: Array<Record<string, unknown>>; metrics: TrendSeries[]; markers: McpOptimizationMarker[]; tool: string }) {
+    const seriesData = metrics.map((series) => ({
+        ...series,
+        values: data.map((item) => {
+            if (series.metric === "failedPerThousand") return Number(item.calls) > 0 ? Number(item.failed) / Number(item.calls) * 1000 : 0;
+            const value = Number(item[series.metric]);
+            return Number.isFinite(value) ? value : null;
+        }),
+    })).filter((series) => series.values.some((value) => value != null));
+    if (!seriesData.length || !data.length) return <div className="py-12 text-center text-sm text-muted-foreground">当前范围暂无该指标数据</div>;
+    const width = 900, height = 300, pad = { left: 64, right: 64, top: 22, bottom: 42 };
+    const x = (index: number) => pad.left + (data.length === 1 ? (width - pad.left - pad.right) / 2 : index * (width - pad.left - pad.right) / (data.length - 1));
+    const scales = (axis: "left" | "right") => {
+        const values = seriesData.filter((item) => item.axis === axis).flatMap((item) => item.values.filter((value): value is number => value != null));
+        const min = Math.min(...values), max = Math.max(...values), span = max - min || 1;
+        return { min: min - span * 0.1, max: max + span * 0.1 };
+    };
+    const left = scales("left"), right = scales("right");
+    const y = (value: number, axis: "left" | "right") => { const s = axis === "left" ? left : right; return height - pad.bottom - ((value - s.min) / (s.max - s.min || 1)) * (height - pad.top - pad.bottom); };
+    const markerX = (marker: McpOptimizationMarker) => { const days = data.map((item) => dayjs(String(item.date)).valueOf()); const at = dayjs(marker.at).valueOf(); const first = days[0] ?? at, last = days[days.length - 1] ?? at; return pad.left + ((at - first) / (last - first || 1)) * (width - pad.left - pad.right); };
+    return (
+        <div className="space-y-2">
+            <div className="flex flex-wrap gap-3">{seriesData.map((series) => <Tag key={series.metric} color={series.color}>{trendMetricLabel[series.metric]}</Tag>)}</div>
+            <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${tool === "*" ? "全部工具" : tool}多指标折线图`} className="h-[300px] w-full">
+                {[0, 0.5, 1].map((ratio) => {
+                    const leftValue = left.min + (left.max - left.min) * ratio, rightValue = right.min + (right.max - right.min) * ratio;
+                    return <g key={ratio}><line x1={pad.left} x2={width - pad.right} y1={y(leftValue, "left")} y2={y(leftValue, "left")} stroke="var(--border)" strokeDasharray="3 4" /><text x={pad.left - 7} y={y(leftValue, "left") + 4} textAnchor="end" fontSize="10" fill="var(--muted-foreground)">{leftValue.toFixed(0)}</text><text x={width - pad.right + 7} y={y(rightValue, "right") + 4} fontSize="10" fill="var(--muted-foreground)">{rightValue.toFixed(0)}</text></g>;
+                })}
+                {markers.map((marker) => <g key={marker.id}><line x1={markerX(marker)} x2={markerX(marker)} y1={pad.top} y2={height - pad.bottom} stroke="var(--destructive)" strokeDasharray="5 4"><title>{`${marker.label} · ${new Date(marker.at).toLocaleString()}`}</title></line><text x={markerX(marker) + 4} y={pad.top + 12} fontSize="10" fill="var(--destructive)">{marker.label}</text></g>)}
+                {data.map((item, index) => <text key={String(item.date)} x={x(index)} y={height - 12} textAnchor="middle" fontSize="10" fill="var(--muted-foreground)">{String(item.date).slice(5)}</text>)}
+                {seriesData.map((series) => <g key={series.metric}><polyline points={series.values.map((value, index) => value == null ? "" : `${x(index)},${y(series.percent ? value * 100 : value, series.axis)}`).filter(Boolean).join(" ")} fill="none" stroke={series.color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />{series.values.map((value, index) => value == null ? null : <circle key={`${series.metric}-${data[index]?.date}`} cx={x(index)} cy={y(series.percent ? value * 100 : value, series.axis)} r="3.5" fill="var(--background)" stroke={series.color} strokeWidth="2"><title>{`${data[index]?.date} · ${trendMetricLabel[series.metric]}: ${series.percent ? `${(value * 100).toFixed(1)}%` : value.toLocaleString("en-US")}`}</title></circle>)}</g>)}
+            </svg>
+            <Typography.Text type="secondary" className="block text-xs">左轴：调用量；右轴：标准化失败率、耗时与返回体。红色竖线为优化标记。</Typography.Text>
+        </div>
+    );
+}
+
+function defaultRange(): [Dayjs, Dayjs] {
+    const to = dayjs();
+    return [to.subtract(6, "day").startOf("day"), to.startOf("day")];
+}
+
+function previousRange(range: [Dayjs, Dayjs]): [string, string] {
+    const days = range[1].startOf("day").diff(range[0].startOf("day"), "day") + 1;
+    return [dateText(range[0].subtract(days, "day")), dateText(range[1].subtract(days, "day"))];
+}
+
+function comparison(current: McpObservabilityReport, previous: McpObservabilityReport | null) {
+    const successDelta = current.calls.successRate != null && previous != null && previous.calls.successRate != null
+        ? (current.calls.successRate - previous.calls.successRate) * 100
+        : null;
+    const p95Delta = current.calls.p95DurationMs != null && previous != null && previous.calls.p95DurationMs != null
+        ? current.calls.p95DurationMs - previous.calls.p95DurationMs
+        : null;
+    const outputDelta = current.payload?.averageOutputChars != null && previous?.payload?.averageOutputChars != null
+        ? current.payload.averageOutputChars - previous.payload.averageOutputChars
+        : null;
+    const currentCalls = current.calls.completed;
+    const previousCalls = previous?.calls.completed ?? 0;
+    const failedRate = previous && previousCalls ? previous.calls.failed / previousCalls : 0;
+    const currentFailedRate = currentCalls ? current.calls.failed / currentCalls : 0;
+    const hasBaseline = Boolean(previous && previousCalls > 0 && currentCalls > 0);
+    let verdict = "样本不足，无法判断";
+    if (hasBaseline && successDelta != null && Math.abs(successDelta) < 0.05 && Math.abs(p95Delta ?? 0) < 1 && Math.abs(outputDelta ?? 0) < 1) verdict = "无明显变化";
+    else if (hasBaseline && successDelta != null) verdict = successDelta > 0 ? "可靠性改善" : "可靠性回退";
+    return { successDelta, p95Delta, outputDelta, currentCalls, previousCalls, currentFailedRate, failedRate, hasBaseline, verdict };
 }
 
 export default function McpObservabilityPage() {
@@ -26,24 +101,77 @@ export default function McpObservabilityPage() {
     const [traceLoading, setTraceLoading] = useState(false);
     const [traceId, setTraceId] = useState("");
     const [traceEvents, setTraceEvents] = useState<McpObservabilityEvent[]>([]);
-    const [baselineReport, setBaselineReport] = useState<McpObservabilityReport | null>(null);
-    const [baselineName, setBaselineName] = useState("");
-    const baselineInputRef = useRef<HTMLInputElement>(null);
+    const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>(defaultRange);
+    const [previousReport, setPreviousReport] = useState<McpObservabilityReport | null>(null);
+    const [trendTool, setTrendTool] = useState("*");
+    const [trendMetrics, setTrendMetrics] = useState<TrendMetric[]>(["calls", "successRate"]);
+    const [markers, setMarkers] = useState<McpOptimizationMarker[]>([]);
+    const [markerLabel, setMarkerLabel] = useState("");
+    const [markerAt, setMarkerAt] = useState<Dayjs>(dayjs());
+    const trendSeries: TrendSeries[] = [
+        { metric: "calls", color: "blue", axis: "left", percent: false },
+        { metric: "successRate", color: "green", axis: "right", percent: true },
+        { metric: "failedPerThousand", color: "red", axis: "right", percent: false },
+        { metric: "averageDurationMs", color: "orange", axis: "right", percent: false },
+        { metric: "averageOutputChars", color: "purple", axis: "right", percent: false },
+    ].filter((series) => trendMetrics.includes(series.metric));
+    const trendTools = useMemo(() => [...new Set((report?.dailyByTool ?? []).map((item) => item.tool))].sort(), [report?.dailyByTool]);
+    const trendData = useMemo(() => trendTool === "*" ? (report?.daily ?? []) : (report?.dailyByTool ?? []).filter((item) => item.tool === trendTool), [report?.daily, report?.dailyByTool, trendTool]);
+    const toolComparison = useMemo(() => {
+        const previousByTool = new Map((previousReport?.byTool ?? []).map((item) => [item.tool, item]));
+        return (report?.byTool ?? []).map((item) => {
+            const previous = previousByTool.get(item.tool);
+            return {
+                ...item,
+                previousCalls: previous?.calls ?? 0,
+                previousSuccessRate: previous?.successRate ?? null,
+                previousP95DurationMs: previous?.p95DurationMs ?? null,
+                previousAverageOutputChars: previous?.averageOutputChars ?? null,
+                successRateDelta: item.successRate != null && previous?.successRate != null ? item.successRate - previous.successRate : null,
+                p95Delta: item.p95DurationMs != null && previous?.p95DurationMs != null ? item.p95DurationMs - previous.p95DurationMs : null,
+                outputDelta: item.averageOutputChars != null && previous?.averageOutputChars != null ? item.averageOutputChars - previous.averageOutputChars : null,
+            };
+        }).filter((item) => item.calls > 0 || item.previousCalls > 0);
+    }, [report?.byTool, previousReport?.byTool]);
+    const dataRangeStartIso = () => dateRange[0].startOf("day").toISOString();
+    const dataRangeEndIso = () => dateRange[1].endOf("day").toISOString();
 
-    const loadReport = useCallback(async () => {
+    const loadReport = useCallback(async (requestedRange = dateRange) => {
         setLoading(true);
         try {
-            setReport(await fetchMcpObservabilityReport());
+            const options = { from: dateText(requestedRange[0]), to: dateText(requestedRange[1]) };
+            const [current, previous] = await Promise.all([
+                fetchMcpObservabilityReport(options),
+                (async () => {
+                    const previousRangeValue = previousRange(requestedRange);
+                    return fetchMcpObservabilityReport({ from: previousRangeValue[0], to: previousRangeValue[1] });
+                })(),
+            ]);
+            setReport(current);
+            setPreviousReport(previous);
         } catch (error) {
             message.error(error instanceof Error ? error.message : "读取 MCP 诊断失败");
         } finally {
             setLoading(false);
         }
-    }, [message]);
+    }, [dateRange, message]);
 
     useEffect(() => {
         void loadReport();
+        void fetchMcpOptimizationMarkers().then(setMarkers).catch(() => undefined);
     }, [loadReport]);
+
+    const addMarker = async () => {
+        const marker = await saveMcpOptimizationMarker({ at: markerAt.toISOString(), label: markerLabel });
+        setMarkers((current) => [...current, marker].sort((left, right) => left.at.localeCompare(right.at)));
+        setMarkerLabel("");
+        message.success("优化标记已保存");
+    };
+
+    const removeMarker = async (id: string) => {
+        await deleteMcpOptimizationMarker(id);
+        setMarkers((current) => current.filter((item) => item.id !== id));
+    };
 
     const queryTrace = async (requestedTraceId = traceId) => {
         const id = requestedTraceId.trim();
@@ -93,21 +221,6 @@ export default function McpObservabilityPage() {
         window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
     };
 
-    const loadBaseline = async (event: ChangeEvent<HTMLInputElement>) => {
-        const file = event.target.files?.[0];
-        event.target.value = "";
-        if (!file) return;
-        try {
-            const parsed = parseBaselineReport(JSON.parse(await file.text()));
-            if (!parsed) throw new Error("文件不是有效的 MCP 汇总格式");
-            setBaselineReport(parsed);
-            setBaselineName(file.name);
-            message.success("已载入基线，仅用于当前页面对比");
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : "载入基线失败");
-        }
-    };
-
     return (
         <main className="h-full overflow-y-auto bg-background">
             <div className="mx-auto max-w-7xl space-y-5 px-6 py-6">
@@ -119,27 +232,36 @@ export default function McpObservabilityPage() {
                         </div>
                         <p className="mt-1 text-sm text-muted-foreground">查看本机 MCP 工具调用、失败恢复和任务状态；这里只保存脱敏摘要。</p>
                     </div>
-                    <Space>
-                        <input ref={baselineInputRef} className="hidden" type="file" accept="application/json" aria-label="载入 MCP 诊断基线" onChange={(event) => void loadBaseline(event)} />
-                        <Button icon={<Upload className="size-4" />} onClick={() => baselineInputRef.current?.click()}>
-                            载入基线
-                        </Button>
-                        <Button icon={<Download className="size-4" />} disabled={!report} onClick={exportReport}>
-                            导出汇总
-                        </Button>
+                    <Space wrap>
+                        <DatePicker.RangePicker
+                            allowClear={false}
+                            value={dateRange}
+                            onChange={(value) => {
+                                if (!value?.[0] || !value?.[1]) return;
+                                const next = [value[0].startOf("day"), value[1].startOf("day")] as [Dayjs, Dayjs];
+                                setDateRange(next);
+                                void loadReport(next);
+                            }}
+                        />
+                        <Button icon={<Download className="size-4" />} disabled={!report} onClick={exportReport}>导出</Button>
                         <Button icon={<RefreshCw className="size-4" />} loading={loading} onClick={() => void loadReport()}>
                             刷新
                         </Button>
                     </Space>
                 </div>
 
-                <Alert type="info" showIcon title="数据仅保存在本地 Backend SQLite；当前不会自动上传、轮询刷新或清理历史。载入的基线只留在当前浏览器页面。" />
+                <Alert type="info" showIcon title="数据仅保存在本地 Backend SQLite；日期范围与紧邻的上一等长周期自动比较，无需手工导入基线。" />
                 {report?.taskAssociation?.incomplete ? <Alert type="warning" showIcon title="任务关联数据不完整" description={report.taskAssociation.note} /> : null}
 
+                <Tabs
+                    defaultActiveKey="overview"
+                    items={[
+                        { key: "overview", label: "概览与效果", children: (
+                            <div className="space-y-5">
                 <section className="space-y-3">
                     <div>
                         <h2 className="text-base font-medium">诊断结论</h2>
-                        <p className="mt-0.5 text-sm text-muted-foreground">根据累计数据自动指出优先处理的可靠性和性能问题。</p>
+                        <p className="mt-0.5 text-sm text-muted-foreground">根据所选日期范围的可靠性、延迟和返回体变化自动判断优化效果。</p>
                     </div>
                     <div className="grid gap-3 lg:grid-cols-2">
                         {(report?.diagnostics ?? []).map((item) => (
@@ -210,65 +332,72 @@ export default function McpObservabilityPage() {
                     ) : null}
                 </Card>
 
-                {baselineReport ? (
-                    <Card title="基线对比" extra={<Typography.Text type="secondary">{baselineName}</Typography.Text>}>
-                        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                            <Statistic title="完成调用变化" value={signed(report ? report.calls.completed - baselineReport.calls.completed : null)} />
-                            <Statistic
-                                title="成功率变化"
-                                value={signed(report && report.calls.successRate != null && baselineReport.calls.successRate != null ? (report.calls.successRate - baselineReport.calls.successRate) * 100 : null, 1, " 个百分点")}
-                            />
-                            <Statistic title="失败调用变化" value={signed(report ? report.calls.failed - baselineReport.calls.failed : null)} />
-                            <Statistic title="P95 变化" value={signed(report && report.calls.p95DurationMs != null && baselineReport.calls.p95DurationMs != null ? report.calls.p95DurationMs - baselineReport.calls.p95DurationMs : null, 0, " ms")} />
-                        </div>
-                    </Card>
-                ) : null}
-
-                <Card title="按工具统计" extra={report ? <Typography.Text type="secondary">统计生成于 {new Date(report.generatedAt).toLocaleString()}</Typography.Text> : null}>
-                    <Table
-                        rowKey="tool"
-                        loading={loading}
-                        dataSource={report?.byTool ?? []}
-                        pagination={false}
-                        scroll={{ x: 1360 }}
-                        columns={[
-                            { title: "工具", dataIndex: "tool" },
-                            { title: "调用", dataIndex: "calls", width: 80 },
-                            { title: "成功率", dataIndex: "successRate", width: 90, render: percent },
-                            { title: "失败", dataIndex: "failed", width: 70 },
-                            {
-                                title: "最大返回体",
-                                dataIndex: "maxOutputChars",
-                                width: 190,
-                                render: (value: number | null | undefined) =>
-                                    value == null ? <Typography.Text type="secondary">未采集</Typography.Text> : (
-                                        <Space direction="vertical" size={0}>
-                                            <Typography.Text type={value >= 100000 ? "danger" : undefined}>{chars(value)}</Typography.Text>
-                                            <Typography.Text type="secondary" className="text-xs">{approxTokens(value)}</Typography.Text>
-                                        </Space>
-                                    ),
-                            },
-                            { title: "返回均值", dataIndex: "averageOutputChars", width: 120, render: (value: number | null | undefined) => (value == null ? "—" : chars(value)) },
-                            { title: "最大入参", dataIndex: "maxInputChars", width: 110, render: (value: number | null | undefined) => (value == null ? "—" : chars(value)) },
-                            { title: "平均耗时", dataIndex: "averageDurationMs", width: 110, render: duration },
-                            { title: "P95", dataIndex: "p95DurationMs", width: 100, render: duration },
-                            { title: "最长耗时", dataIndex: "maxDurationMs", width: 110, render: duration },
-                        ]}
-                    />
+                <Card title="优化标记" extra={<Typography.Text type="secondary">用红色竖线标记代码优化上线时间</Typography.Text>}>
+                    <div className="flex flex-wrap items-center gap-2">
+                        <DatePicker showTime value={markerAt} onChange={(value) => value && setMarkerAt(value)} />
+                        <Input value={markerLabel} onChange={(event) => setMarkerLabel(event.target.value)} placeholder="例如：MCP 返回体上限优化" style={{ width: 280 }} />
+                        <Button type="primary" icon={<Plus className="size-4" />} onClick={() => void addMarker()}>添加标记</Button>
+                    </div>
+                    <Space wrap className="mt-3">
+                        {markers.map((marker) => <Tag key={marker.id} closable color="error" onClose={(event) => { event.preventDefault(); void removeMarker(marker.id); }}>{marker.label} · {new Date(marker.at).toLocaleString()}</Tag>)}
+                    </Space>
                 </Card>
 
+                {report ? (() => {
+                    const compare = comparison(report, previousReport);
+                    const priorRange = previousRange(dateRange);
+                    return (
+                        <Card title="优化效果对比" extra={<Space wrap><Tag>{`${dateText(dateRange[0])} ~ ${dateText(dateRange[1])}`}</Tag><Tag>对比 {priorRange[0]} ~ {priorRange[1]}</Tag><Tag color={compare.verdict === "可靠性改善" ? "success" : compare.verdict === "可靠性回退" ? "error" : undefined}>{compare.verdict}</Tag></Space>}>
+                            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                                <Statistic title="完成调用" value={compare.currentCalls} suffix={compare.hasBaseline ? `对比 ${compare.previousCalls}（${signed(compare.currentCalls - compare.previousCalls)}）` : "上一周期无样本"} />
+                                <Statistic title="成功率" value={percent(report.calls.successRate)} suffix={compare.hasBaseline ? `${signed(compare.successDelta, 1, " 个百分点")} · 对比 ${percent(previousReport?.calls.successRate ?? null)}` : "上一周期无样本"} />
+                                <Statistic title="P95 耗时" value={duration(report.calls.p95DurationMs)} suffix={compare.hasBaseline ? `${signed(compare.p95Delta, 0, " ms")} · 对比 ${duration(previousReport?.calls.p95DurationMs ?? null)}` : "上一周期无样本"} />
+                                <Statistic title="返回体均值" value={chars(report.payload?.averageOutputChars ?? null)} suffix={compare.hasBaseline ? `${signed(compare.outputDelta)} 字符 · 对比 ${chars(previousReport?.payload?.averageOutputChars ?? null)}` : "上一周期无样本"} />
+                            </div>
+                            <Typography.Text type="secondary" className="mt-3 block text-xs">结论以相同自然日长度的两个窗口为基础；调用量会同时展示。失败数不能脱离调用量解释，空窗口不判定为改善。</Typography.Text>
+                        </Card>
+                    );
+                })() : null}
+                            </div>
+                        ) },
+                        { key: "trends", label: "趋势与工具", children: (
+                            <div className="space-y-4">
                 <div className="grid gap-4 xl:grid-cols-2">
-                    <Card title="每日趋势">
+                    <Card
+                        title="每日趋势"
+                        extra={<Space wrap>
+                            <Select
+                                aria-label="趋势工具"
+                                value={trendTool}
+                                style={{ width: 220 }}
+                                onChange={setTrendTool}
+                                options={[{ value: "*", label: "全部工具" }, ...trendTools.map((tool) => ({ value: tool, label: tool }))]}
+                            />
+                            <Select
+                                aria-label="趋势指标"
+                                mode="multiple"
+                                value={trendMetrics}
+                                style={{ minWidth: 260 }}
+                                onChange={(values) => setTrendMetrics(values.length ? values : ["successRate"])}
+                                options={Object.entries(trendMetricLabel).map(([value, label]) => ({ value, label }))}
+                            />
+                        </Space>}
+                    >
+                        <TrendLineChart data={trendData as unknown as Array<Record<string, unknown>>} metrics={trendSeries} markers={markers.filter((marker) => marker.at >= dataRangeStartIso() && marker.at <= dataRangeEndIso())} tool={trendTool} />
                         <Table
-                            rowKey="date"
+                            rowKey={(item) => `${item.date}-${"tool" in item ? item.tool : "all"}`}
                             size="small"
-                            dataSource={report?.daily ?? []}
+                            loading={loading}
+                            dataSource={trendData}
                             pagination={false}
                             columns={[
+                                ...(trendTool === "*" ? [] : [{ title: "工具", dataIndex: "tool" }]),
                                 { title: "日期", dataIndex: "date" },
                                 { title: "调用", dataIndex: "calls", width: 80 },
                                 { title: "成功率", dataIndex: "successRate", width: 100, render: percent },
+                                { title: "失败", dataIndex: "failed", width: 70 },
                                 { title: "平均耗时", dataIndex: "averageDurationMs", width: 110, render: duration },
+                                { title: "返回均值", dataIndex: "averageOutputChars", width: 130, render: (value: number | null | undefined) => value == null ? <Typography.Text type="secondary">未采集</Typography.Text> : chars(value) },
                             ]}
                         />
                     </Card>
@@ -293,7 +422,29 @@ export default function McpObservabilityPage() {
                         />
                     </Card>
                 </div>
-
+                            </div>
+                        ) },
+                        { key: "tools", label: "工具与失败", children: (
+                            <div className="space-y-4">
+                                <Card title="工具优化对比" extra={<Typography.Text type="secondary">当前周期与紧邻上一等长周期</Typography.Text>}>
+                                    <Table rowKey="tool" loading={loading} dataSource={toolComparison} pagination={{ pageSize: 15 }} scroll={{ x: 1000 }} columns={[
+                                        { title: "工具", dataIndex: "tool" },
+                                        { title: "当前调用", dataIndex: "calls", width: 90 }, { title: "对比调用", dataIndex: "previousCalls", width: 90 },
+                                        { title: "成功率变化", dataIndex: "successRateDelta", width: 120, render: (value: number | null) => value == null ? "—" : <Tag color={value > 0 ? "success" : value < 0 ? "error" : undefined}>{signed(value * 100, 1, " 个百分点")}</Tag> },
+                                        { title: "P95 变化", dataIndex: "p95Delta", width: 110, render: (value: number | null) => value == null ? "—" : <Tag color={value < 0 ? "success" : value > 0 ? "error" : undefined}>{signed(value, 0, " ms")}</Tag> },
+                                        { title: "返回均值变化", dataIndex: "outputDelta", width: 130, render: (value: number | null) => value == null ? "—" : <Tag color={value < 0 ? "success" : value > 0 ? "error" : undefined}>{signed(value)} 字符</Tag> },
+                                    ]} />
+                                </Card>
+                                <Card title="按工具统计"><Table rowKey="tool" loading={loading} dataSource={report?.byTool ?? []} pagination={false} scroll={{ x: 1360 }} columns={[
+                                    { title: "工具", dataIndex: "tool" }, { title: "调用", dataIndex: "calls", width: 80 }, { title: "成功率", dataIndex: "successRate", width: 90, render: percent }, { title: "失败", dataIndex: "failed", width: 70 },
+                                    { title: "最大返回体", dataIndex: "maxOutputChars", width: 190, render: (value: number | null | undefined) => value == null ? <Typography.Text type="secondary">未采集</Typography.Text> : <Space direction="vertical" size={0}><Typography.Text type={value >= 100000 ? "danger" : undefined}>{chars(value)}</Typography.Text><Typography.Text type="secondary" className="text-xs">{approxTokens(value)}</Typography.Text></Space> },
+                                    { title: "返回均值", dataIndex: "averageOutputChars", width: 120, render: (value: number | null | undefined) => value == null ? "—" : chars(value) }, { title: "最大入参", dataIndex: "maxInputChars", width: 110, render: (value: number | null | undefined) => value == null ? "—" : chars(value) },
+                                    { title: "平均耗时", dataIndex: "averageDurationMs", width: 110, render: duration }, { title: "P95", dataIndex: "p95DurationMs", width: 100, render: duration }, { title: "最长耗时", dataIndex: "maxDurationMs", width: 110, render: duration },
+                                ]} /></Card>
+                            </div>
+                        ) },
+                        { key: "details", label: "链路与明细", children: (
+                            <div className="space-y-4">
                 <div className="grid gap-4 xl:grid-cols-2">
                     <Card title="真实调用路径" extra={<Typography.Text type="secondary">同一 MCP 会话内的相邻工具</Typography.Text>}>
                         <Table
@@ -409,6 +560,10 @@ export default function McpObservabilityPage() {
                         ]}
                     />
                 </Card>
+                            </div>
+                        ) },
+                    ]}
+                />
             </div>
         </main>
     );

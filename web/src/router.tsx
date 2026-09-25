@@ -4,8 +4,10 @@ import { createBrowserRouter, Outlet } from "react-router-dom";
 import { AnalyticsTracker } from "@/components/layout/analytics-tracker";
 import UserLayout from "@/layouts/user-layout";
 const AssetsPage = lazy(() => import("@/pages/assets"));
+import { loadCanvasProjectPage } from "@/lib/canvas-project-loader";
+
 const CanvasPage = lazy(() => import("@/pages/canvas"));
-const CanvasProjectPage = lazy(() => import("@/pages/canvas/project"));
+const CanvasProjectPage = lazy(loadCanvasProjectPage);
 const CanvasPerformanceFixture = lazy(() => import("@/pages/canvas/performance-fixture"));
 const DramaPage = lazy(() => import("@/pages/drama"));
 const ConfigPage = lazy(() => import("@/pages/config"));

@@ -33,6 +33,11 @@ function fixture(t: TestContext, count = 1, previousOutput = false, failSecondPa
     return { db, stores, events, comfy, runner, submitted, segment, node, settle };
 }
 
+function decision(db: BackendDatabase, taskId: string, action: "confirm" | "keep_first_pass" | "discard", segmentId = "clip-1") {
+    const confirmation = db.getTask(taskId)?.result?.confirmation as { revision: number } | undefined;
+    return { action, segmentId, expectedRevision: Number(confirmation?.revision || 0) };
+}
+
 test("一采就绪使同一父任务持久暂停，保留绑定且不提前提交后一段", async (t) => {
     const { db, runner, submitted, segment, node, settle } = fixture(t, 2);
     const task = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true }, "parent");
@@ -48,6 +53,28 @@ test("一采就绪使同一父任务持久暂停，保留绑定且不提前提�
     assert.equal(db.getTask(task.id)?.status, "awaiting_confirmation");
 });
 
+test("两个窗口同时提交相同 H3 命令时接回同一活动父任务", async (t) => {
+    const { db, runner, submitted, settle } = fixture(t);
+    const input = { projectId: "p", nodeId: "n", segmentId: "clip-1" };
+    const first = runner.start(input, "first-window");
+    const second = runner.start(input, "second-window");
+    assert.equal(second.id, first.id);
+    assert.equal(db.getTask("second-window"), null);
+    await settle(first.id, "awaiting_confirmation");
+    assert.equal(submitted.length, 1);
+});
+
+test("首段单跑忽略无前段可接的 Motion Context 开关", async (t) => {
+    const { db, stores, runner, submitted, settle } = fixture(t);
+    const project = stores.projects.get("p")!;
+    stores.projects.applyOperations("p", Number(project.revision || 0), [
+        { type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: { motionContextEnabled: true } },
+    ]);
+    const task = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1" }, "first-only");
+    await settle(task.id, "awaiting_confirmation");
+    assert.equal(submitted.length, 1);
+});
+
 test("跳过已完成模式一采暂停后仍锁住原 Clip，不会因一采回写结果而漏判重叠", async (t) => {
     const { db, stores, events, comfy, runner, submitted, segment, settle } = fixture(t);
     const task = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", skipCompleted: true }, "parent");
@@ -56,7 +83,7 @@ test("跳过已完成模式一采暂停后仍锁住原 Clip，不会因一采回
     assert.equal(repeat.id, task.id);
     const replacement = new CanvasH3Runner(stores, events, comfy as never, {} as never);
     await replacement.reconcileTerminal(db.getTask(task.id)!);
-    replacement.resolveConfirmation(task.id, { action: "keep_first_pass", segmentIds: ["clip-1"], firstPassFingerprint: String(segment().firstPassFingerprint) });
+    replacement.resolveConfirmation(task.id, decision(db, task.id, "keep_first_pass"));
     await settle(task.id, "succeeded");
     assert.equal(submitted.length, 1);
 });
@@ -77,9 +104,9 @@ test("确认二采复用原父任务；重复请求不重复提交；后段串�
     const { db, runner, submitted, segment, settle } = fixture(t, 2);
     const task = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true }, "parent");
     await settle(task.id, "awaiting_confirmation");
-    const fingerprint = String(segment().firstPassFingerprint);
-    runner.resolveConfirmation(task.id, { action: "confirm", segmentIds: ["clip-1"], firstPassFingerprint: fingerprint });
-    runner.resolveConfirmation(task.id, { action: "confirm", segmentIds: ["clip-1"], firstPassFingerprint: fingerprint });
+    const request = decision(db, task.id, "confirm");
+    runner.resolveConfirmation(task.id, request);
+    runner.resolveConfirmation(task.id, request);
     for (let i = 0; i < 100 && submitted.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     await settle(task.id, "awaiting_confirmation");
     assert.equal(submitted.length, 3, "one first pass and one second pass for clip-1, then one first pass for clip-2");
@@ -87,10 +114,27 @@ test("确认二采复用原父任务；重复请求不重复提交；后段串�
     assert.equal(segment().status, "success");
     assert.equal(submitted.length, 3, "next clip begins only after first is settled");
     assert.equal(db.getTask(task.id)?.status, "awaiting_confirmation");
-    runner.resolveConfirmation(task.id, { action: "keep_first_pass", segmentIds: ["clip-2"], firstPassFingerprint: String(segment("clip-2").firstPassFingerprint) });
+    runner.resolveConfirmation(task.id, decision(db, task.id, "keep_first_pass", "clip-2"));
     await settle(task.id, "succeeded");
     assert.equal(submitted.length, 3);
     assert.equal(segment("clip-2").status, "success");
+});
+
+test("批量运行冻结后续 Clip，确认时只采纳二采专属参数", async (t) => {
+    const { db, stores, runner, submitted, settle } = fixture(t, 2);
+    const task = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true }, "frozen-parent");
+    await settle(task.id, "awaiting_confirmation");
+    const project = stores.projects.get("p")!;
+    stores.projects.applyOperations("p", Number(project.revision || 0), [
+        { type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: { faceRefineDenoise: 0.27 } },
+        { type: "update_h3_segment", nodeId: "n", segmentId: "clip-2", patch: { prompt: "new prompt for next run" } },
+    ]);
+    runner.resolveConfirmation(task.id, { ...decision(db, task.id, "confirm"), postpassParams: { faceRefineDenoise: 0.27, prompt: "must not replace frozen prompt" } });
+    for (let i = 0; i < 100 && submitted.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(submitted.length, 3);
+    assert.equal(db.getTask(submitted[1].id)?.params.faceRefineDenoise, 0.27);
+    assert.equal(submitted[2].input.prompt, "a video");
+    assert.equal(submitted[1].input.prompt, "a video");
 });
 
 test("重启后保留一采沿用原任务，决议幂等且节点收口", async (t) => {
@@ -101,10 +145,10 @@ test("重启后保留一采沿用原任务，决议幂等且节点收口", async
     await replacement.reconcileTerminal(db.getTask(task.id)!);
     assert.equal(replacement.resume(db.getTask(task.id)!).status, "awaiting_confirmation");
     const firstPassResult = String(segment().firstPassResult);
-    const decision = { action: "keep_first_pass" as const, segmentIds: ["clip-1"], firstPassFingerprint: String(segment().firstPassFingerprint) };
-    replacement.resolveConfirmation(task.id, decision);
+    const request = decision(db, task.id, "keep_first_pass");
+    replacement.resolveConfirmation(task.id, request);
     await settle(task.id, "succeeded");
-    replacement.resolveConfirmation(task.id, decision);
+    replacement.resolveConfirmation(task.id, request);
     assert.equal(submitted.length, 1);
     assert.equal(segment().result, firstPassResult);
     assert.equal(segment().firstPassReady, false);
@@ -137,10 +181,10 @@ test("放弃恢复旧输出、取消同一父任务且不删除历史媒体", as
     const { db, runner, stores, submitted, segment, node, settle } = fixture(t, 1, true);
     const task = runner.start({ projectId: "p", nodeId: "n" }, "parent");
     await settle(task.id, "awaiting_confirmation");
-    const decision = { action: "discard" as const, segmentIds: ["clip-1"], firstPassFingerprint: String(segment().firstPassFingerprint) };
-    assert.throws(() => runner.resolveConfirmation(task.id, { ...decision, firstPassFingerprint: "stale" }), /快照/);
-    runner.resolveConfirmation(task.id, decision);
-    runner.resolveConfirmation(task.id, decision);
+    const request = decision(db, task.id, "discard");
+    assert.throws(() => runner.resolveConfirmation(task.id, { ...request, expectedRevision: request.expectedRevision - 1 }), /快照/);
+    runner.resolveConfirmation(task.id, request);
+    runner.resolveConfirmation(task.id, request);
     assert.equal(db.getTask(task.id)!.status, "cancelled");
     assert.equal(segment().result, "old-video.mp4");
     assert.equal(segment().cacheFingerprint, "old:fingerprint");
@@ -154,10 +198,10 @@ test("保留一采后重新串行运行，复用的已收口 Clip 仍计入父�
     const { db, runner, submitted, segment, settle } = fixture(t, 2);
     const first = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true }, "first");
     await settle(first.id, "awaiting_confirmation");
-    runner.resolveConfirmation(first.id, { action: "keep_first_pass", segmentIds: ["clip-1"], firstPassFingerprint: String(segment().firstPassFingerprint) });
+    runner.resolveConfirmation(first.id, decision(db, first.id, "keep_first_pass"));
     for (let i = 0; i < 100 && segment("clip-2").status !== "awaiting_confirmation"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     await settle(first.id, "awaiting_confirmation");
-    runner.resolveConfirmation(first.id, { action: "discard", segmentIds: ["clip-2"], firstPassFingerprint: String(segment("clip-2").firstPassFingerprint) });
+    runner.resolveConfirmation(first.id, decision(db, first.id, "discard", "clip-2"));
     const second = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true }, "second");
     await settle(second.id, "awaiting_confirmation");
     assert.equal(submitted.length, 3, "已收口的首 Clip 不应重跑");
@@ -166,25 +210,41 @@ test("保留一采后重新串行运行，复用的已收口 Clip 仍计入父�
 });
 
 test("二采失败返回同父任务待确认；显式重试使用新子任务，仍可保留一采", async (t) => {
-    const { db, runner, submitted, segment, settle } = fixture(t, 1, false, true);
+    const { db, runner, submitted, segment, node, settle } = fixture(t, 1, false, true);
     const task = runner.start({ projectId: "p", nodeId: "n" }, "parent");
     await settle(task.id, "awaiting_confirmation");
-    const fingerprint = String(segment().firstPassFingerprint);
-    const confirm = { action: "confirm" as const, segmentIds: ["clip-1"], firstPassFingerprint: fingerprint };
+    const confirm = decision(db, task.id, "confirm");
     runner.resolveConfirmation(task.id, confirm);
     for (let i = 0; i < 100 && !db.getTask(task.id)?.error; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.match(db.getTask(task.id)?.error || "", /二采模拟失败/);
     assert.equal(db.getTask(task.id)?.status, "awaiting_confirmation");
+    assert.equal(segment().status, "awaiting_confirmation");
+    assert.equal(segment().runtimeTaskId, task.id);
+    assert.equal(node().status, "awaiting_confirmation");
     assert.equal(submitted.length, 2);
     runner.resolveConfirmation(task.id, confirm);
     assert.equal(submitted.length, 2, "不带 retry 的重复决议不得再次提交");
-    runner.resolveConfirmation(task.id, { ...confirm, retry: true });
+    runner.resolveConfirmation(task.id, decision(db, task.id, "confirm"));
     for (let i = 0; i < 100 && submitted.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(submitted.length, 3);
     assert.notEqual(submitted[1].id, submitted[2].id);
     for (let i = 0; i < 100 && !db.getTask(task.id)?.error; i++) await new Promise((resolve) => setTimeout(resolve, 10));
-    runner.resolveConfirmation(task.id, { action: "keep_first_pass", segmentIds: ["clip-1"], firstPassFingerprint: fingerprint });
+    runner.resolveConfirmation(task.id, decision(db, task.id, "keep_first_pass"));
     await settle(task.id, "succeeded");
     assert.equal(segment().status, "success");
     assert.equal(submitted.length, 3);
+});
+
+test("明确重新生成绕过缓存，普通再次运行仍可复用成品", async (t) => {
+    const { db, runner, submitted, settle } = fixture(t);
+    const first = runner.start({ projectId: "p", nodeId: "n" }, "first");
+    await settle(first.id, "awaiting_confirmation");
+    runner.resolveConfirmation(first.id, decision(db, first.id, "keep_first_pass"));
+    await settle(first.id, "succeeded");
+    const reused = runner.start({ projectId: "p", nodeId: "n" }, "reused");
+    await settle(reused.id, "succeeded");
+    assert.equal(submitted.length, 1);
+    const forced = runner.start({ projectId: "p", nodeId: "n", forceRegenerate: true }, "forced");
+    await settle(forced.id, "awaiting_confirmation");
+    assert.equal(submitted.length, 2);
 });

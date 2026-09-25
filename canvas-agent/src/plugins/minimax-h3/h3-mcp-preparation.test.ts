@@ -133,3 +133,14 @@ test("h3_get_clip 默认只返回总览，详细内容由定向工具读取", as
     const references: any = await handlers.h3_get_clip_references!(input);
     assert.deepEqual(references.references, []);
 });
+
+test("h3_get_node 只返回当前 Clip 索引，不泄漏整段 metadata", async () => {
+    const { project, handlers } = fixture();
+    project.nodes[0].metadata.segments[0].prompt = "长提示词".repeat(100_000);
+    const node: any = await handlers.h3_get_node!({ projectId: "project-1", nodeId: "h3-1" });
+    assert.deepEqual(node.segments.map((segment: any) => [segment.id, segment.index]), [["s1", 0], ["s2", 1]]);
+    assert.equal(node.segments[0].hasResult, true);
+    assert.equal("metadata" in node, false);
+    assert.ok(JSON.stringify(node).length < 1_000);
+    await assert.rejects(() => handlers.h3_get_clip!({ projectId: "project-1", nodeId: "h3-1", segmentId: "stale" }), /当前 Clip ID：s1、s2.*h3_get_node/);
+});

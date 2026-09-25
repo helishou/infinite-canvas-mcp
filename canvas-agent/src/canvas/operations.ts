@@ -94,11 +94,19 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
     }
     if (name === "canvas_select_nodes") return applyOps([{ type: "select_nodes", ids: (input as { ids: string[] }).ids }]);
     if (name === "canvas_run_generation") {
-        const data = input as { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append"; segmentId?: string };
+        const data = input as { nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string; referenceNodeIds?: string[]; characterImageKeys?: Record<string, string[]>; params?: Record<string, unknown>; idempotencyKey?: string; resultPolicy?: "replace-active" | "append"; segmentId?: string };
         const referenceNodeIds = [...new Set(data.referenceNodeIds || [])];
         const prompt = String(data.prompt || "").trim();
         const promptOp = prompt ? [{ type: "update_node", id: data.nodeId, metadata: { composerContent: prompt, prompt } }] : [];
+        const selections = data.characterImageKeys || {};
+        const current = findNode(state, data.nodeId);
+        const previous = current?.metadata?.characterReferences && typeof current.metadata.characterReferences === "object" ? current.metadata.characterReferences as Record<string, Record<string, unknown>> : {};
+        const characterOps = Object.keys(selections).length ? [{ type: "update_node", id: data.nodeId, metadata: { characterReferences: Object.fromEntries([
+            ...Object.entries(previous),
+            ...Object.entries(selections).map(([id, imageKeys]) => [id, { ...(previous[id] || {}), imageKeys }]),
+        ]) } }] : [];
         if (!referenceNodeIds.length) return applyOps([
+            ...characterOps,
             ...promptOp,
             runGenerationOp({ ...data, mode: generationMode(data.mode) }),
         ]);
@@ -112,6 +120,7 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
         return applyOps([
             ...(oldReferenceConnectionIds.length ? [{ type: "delete_connections", ids: oldReferenceConnectionIds }] : []),
             ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: data.nodeId, role: "reference", order })),
+            ...characterOps,
             ...promptOp,
             runGenerationOp({ ...data, mode: generationMode(data.mode), referenceNodeIds: undefined }),
         ]);

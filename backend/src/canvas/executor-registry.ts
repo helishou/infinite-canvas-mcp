@@ -43,6 +43,13 @@ const modelRegistry: CanvasModelDeclaration[] = [
     matches: (model) => /^flux2-klein$/i.test(model),
   },
   {
+    id: "moyou-自动色阶",
+    modes: ["image"],
+    inputRoles: ["image"],
+    executor: "comfy-workflow",
+    matches: (model) => /^moyou-自动色阶$/i.test(model),
+  },
+  {
     id: "minimax-h3:video",
     modes: ["video"],
     inputRoles: [

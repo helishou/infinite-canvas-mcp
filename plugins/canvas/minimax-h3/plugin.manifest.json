@@ -1,7 +1,7 @@
 {
   "id": "minimax-h3",
   "name": "MiniMax H3",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "trust": "first-party",
   "entries": {
     "browser": "/plugins/minimax-h3.js",
@@ -27,6 +27,8 @@
       "canvas_update_reference_asset",
       "canvas_analyze_reference_asset",
       "h3_set_reference_bindings",
+      "h3_replace_storyboard_binding",
+      "canvas_replace_storyboard_slots",
       "canvas_validate_generation"
     ]
   },

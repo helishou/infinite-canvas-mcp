@@ -255,13 +255,20 @@ async function startBackendHttpServer() {
     stores.mcpObservability,
     () => canvasRealtime.focusedProjectId(),
   );
-  // Backend 重启后继续观察已提交但尚未结束的 ComfyUI 任务；绑定信息在 SQLite 中。
-  // 注意：stores.tasks.list() 默认按 created_at DESC LIMIT 500，仅含最近任务；
-  // 老任务（含孤儿）会被截断，必须用 status 过滤才能覆盖全部 running/queued。
+  // 先完整取出每种活动状态，再启动恢复循环；处理期间状态会变化，不能边处理边 OFFSET 分页。
+  const tasksWithStatus = (status: "running" | "queued" | "awaiting_confirmation") => {
+    const found: ReturnType<typeof stores.tasks.list> = [];
+    for (let offset = 0; ; offset += 500) {
+      const page = stores.tasks.list({ status, limit: 500, offset });
+      found.push(...page);
+      if (page.length < 500) return found;
+    }
+  };
+  // Backend 重启后继续观察已提交但尚未结束的任务；绑定信息在 SQLite 中。
   for (const task of [
-    ...stores.tasks.list({ status: "running" }),
-    ...stores.tasks.list({ status: "queued" }),
-    ...stores.tasks.list({ status: "awaiting_confirmation", kind: "canvas-h3-run" }),
+    ...tasksWithStatus("running"),
+    ...tasksWithStatus("queued"),
+    ...tasksWithStatus("awaiting_confirmation").filter((task) => task.kind === "canvas-h3-run"),
   ]) {
     if (
       ["queued", "running"].includes(task.status) &&
@@ -351,8 +358,8 @@ async function startBackendHttpServer() {
   // 有处理器但从未提交的 comfyui 任务、无恢复处理器的画布任务）是僵尸任务，
   // 会在列表里无限堆积。此处（尚未监听端口、不会有新任务）统一置为 failed。
   for (const task of [
-    ...stores.tasks.list({ status: "running" }),
-    ...stores.tasks.list({ status: "queued" }),
+    ...tasksWithStatus("running"),
+    ...tasksWithStatus("queued"),
   ]) {
     if (task.status !== "queued" && task.status !== "running") continue;
     const hasHandler =

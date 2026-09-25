@@ -28,24 +28,28 @@ export class CanvasReferenceService {
     upsertMany(projectId: string, inputs: Array<Record<string, unknown>>) {
         const project = this.project(projectId);
         const existing = new Map(referenceCatalogOf(project).map((asset) => [asset.id, asset]));
-        const assets: ProjectReferenceAsset[] = [];
+        const latest = new Map<string, Record<string, unknown>>();
+        const ids = inputs.map((input) => {
+            const id = String(input.id || `reference-${crypto.randomUUID()}`);
+            latest.set(id, { ...input, id });
+            return id;
+        });
         const operations: Array<{ type: "upsert_reference_asset"; asset: ProjectReferenceAsset }> = [];
-        for (const input of inputs) {
+        for (const input of latest.values()) {
             const result = this.buildUpsert(projectId, project, input, existing);
-            assets.push(result.asset);
             if (result.changed) operations.push({ type: "upsert_reference_asset", asset: result.asset });
             existing.set(result.asset.id, result.asset);
         }
         if (operations.length) {
             this.stores.projects.applyOperations(projectId, undefined, operations, { source: { clientId: "system:references", kind: "system", label: "参考资产" } });
         }
-        return assets;
+        return ids.map((id) => existing.get(id)!);
     }
 
     private buildUpsert(projectId: string, project: ReturnType<CanvasReferenceService["project"]>, input: Record<string, unknown>, existingById?: Map<string, ProjectReferenceAsset>) {
         const now = new Date().toISOString();
         const id = String(input.id || `reference-${crypto.randomUUID()}`);
-        const existing = existingById?.get(id) || referenceCatalogOf(project).find((asset) => asset.id === id);
+        const existing = existingById ? existingById.get(id) : referenceCatalogOf(project).find((asset) => asset.id === id);
         // subjectId belongs to the binding context. One project asset can be reused
         // by clips that map the same media to different character subjects; do not
         // let those bindings overwrite each other in the shared catalog.

@@ -35,6 +35,20 @@ export function h3ClipCacheFingerprint(input: {
 }) {
     const { segment, params, references, compiledPrompt, previousFingerprint } = input;
     const dependency = h3ClipDependsOnPrevious(segment, params) ? String(previousFingerprint || "missing") : "independent";
+    const segmentInputs = Object.fromEntries([
+        "confirmationMode", "motionContextEnabled", "previousVideoAsReference", "tailFrameContinuation",
+        "previousTailFrameContinuation", "storyboardCompositeEnabled", "storyboardDurations", "storyboardShots",
+    ].filter((key) => segment[key] !== undefined).map((key) => [key, segment[key]]));
+    const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly"].includes(key)));
+    return stableH3Fingerprint({ version: 2, segment: segmentInputs, params: fingerprintParams, references, compiledPrompt, dependency });
+}
+
+/** 仅用于恢复升级前已暂停的一采任务；新任务一律使用 v2 实际输入指纹。 */
+export function h3ClipCacheFingerprintV1(input: {
+    segment: Record<string, unknown>; params: Record<string, unknown>; references: unknown[]; compiledPrompt: string; previousFingerprint?: string;
+}) {
+    const { segment, params, references, compiledPrompt, previousFingerprint } = input;
+    const dependency = h3ClipDependsOnPrevious(segment, params) ? String(previousFingerprint || "missing") : "independent";
     const segmentInputs = Object.fromEntries(Object.entries(segment).filter(([key]) => ![
         "result", "resultStorageKey", "results", "status", "progress", "runtimeTaskId", "errorDetails",
         "cacheFingerprint", "firstPassFingerprint", "firstPassReady", "firstPassResult", "firstPassStorageKey",
@@ -59,6 +73,7 @@ export function h3ConfirmationPhaseParams(segment: Record<string, unknown>, para
 // These values are only consumed by the decoded-video postpass. They must not
 // invalidate the phase-A cache when the user configures phase B before confirming.
 const CONFIRMATION_POSTPASS_KEYS = [
+    "faceRefineEnabled", "latentUpscaleEnabled", "rtxEnabled", "dlssUpscaleMode", "dlssFrameInterpolationEnabled",
     "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise",
     "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation",
     "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs",
@@ -70,6 +85,10 @@ const CONFIRMATION_POSTPASS_KEYS = [
     "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine",
     "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode",
 ] as const;
+
+export function pickH3PostpassParams(value: Record<string, unknown>) {
+    return Object.fromEntries(CONFIRMATION_POSTPASS_KEYS.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]));
+}
 
 export function h3ConfirmationFingerprintParams(segment: Record<string, unknown>, params: Record<string, unknown>): Record<string, unknown> {
     const normalized = h3ConfirmationPhaseParams(segment, params, false);

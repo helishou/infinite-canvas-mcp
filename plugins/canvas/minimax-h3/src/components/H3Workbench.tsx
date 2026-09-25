@@ -4,13 +4,12 @@ import { message } from "antd";
 import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
-import { applyCharacterGroupEdits, refsForSegment, removeCharacterGroup, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
+import { applyCharacterGroupEdits, inferReferenceRole, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
-import { referenceCatalogSignature, syncReferenceCatalog } from "../services/h3-reference-sync";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { h3ThemeVars } from "../h3-theme";
-import { assignStoryboardShotRef, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
+import { assignStoryboardShotRef, dropUnboundStoryboardReferences, rebindStoryboardShot, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, H3_TIMELINE_MIN, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
@@ -24,7 +23,16 @@ import { H3ReferenceModal } from "./H3ReferenceModal";
 export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const ctx = useH3LocalView(sharedContext);
     const metadata = ctx.node.metadata || {};
-    const segments = segmentsFor(metadata);
+    const sharedMetadata = sharedContext.node.metadata || {};
+    const segmentFallbacks = JSON.stringify([
+        sharedMetadata.prompt, sharedMetadata.duration, sharedMetadata.seed, sharedMetadata.noiseSeed,
+        sharedMetadata.mode, sharedMetadata.taskMode, sharedMetadata.modelName, sharedMetadata.loraName,
+        sharedMetadata.aspectRatio, sharedMetadata.megapixels, sharedMetadata.videoSteps, sharedMetadata.denoise,
+        sharedMetadata.teAccel, sharedMetadata.noDub, sharedMetadata.noCaption, sharedMetadata.audioMode,
+    ]);
+    const segments = useMemo(() => segmentsFor(sharedMetadata), [sharedMetadata.segments, segmentFallbacks]);
+    const ctxRef = useRef(ctx);
+    ctxRef.current = ctx;
     const storedSelectedId = String(metadata.selectedSegmentId || "");
     const selected = segments.find((item) => item.id === storedSelectedId) || segments[0];
     const selectedIndex = Math.max(0, segments.findIndex((item) => item.id === selected?.id));
@@ -134,9 +142,9 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     });
     // 空 ref 槽添加或在职责弹窗内替换引用时，复用画布既有的「选节点作参考」模式；选中节点通过 canvas-reference-pick 回抛。
     const [pickingRef, setPickingRef] = useState<{ segmentId: string; slotIndex: number; types: H3Ref["type"][]; replaceRef?: H3Ref; shotId?: string } | null>(null);
-    const catalogSyncedRef = useRef(new Map<string, string>());
     useEffect(() => {
         const syncReferences = (changedNodeIds?: Set<string>) => {
+            const ctx = ctxRef.current;
             const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
             const currentSegments = segmentsFor(liveMetadata);
             let changed = false;
@@ -161,35 +169,35 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             if (changed) ctx.updateMetadata({ segments: nextSegments });
         };
         syncReferences();
-        return ctx.on("canvas:node-metadata-updated", (payload) => {
+        return ctxRef.current.on("canvas:node-metadata-updated", (payload) => {
+            const ctx = ctxRef.current;
             const event = payload && typeof payload === "object" ? payload as { projectId?: string; nodeIds?: unknown } : {};
             if (event.projectId !== ctx.projectId || !Array.isArray(event.nodeIds)) return;
             syncReferences(new Set(event.nodeIds.filter((id): id is string => typeof id === "string")));
         });
-    }, [ctx.getNode, ctx.node.id, ctx.node.metadata, ctx.on, ctx.projectId, ctx.updateMetadata]);
-    const catalogSignature = useMemo(() => referenceCatalogSignature(segments), [segments]);
+    }, [sharedContext.node.id, sharedContext.projectId]);
     useEffect(() => {
-        void syncReferenceCatalog(segments, catalogSyncedRef.current, ctx.references.upsert, ctx.references.upsertMany);
-    }, [catalogSignature, ctx.references]);
-    useEffect(() => {
+        const ctx = ctxRef.current;
         let changed = false;
         const next = segments.map((segment) => {
-            const hasStoryboards = storyboardRefsForSegment(segment).length > 0;
-            if (!hasStoryboards && !Object.keys(segment.storyboardDurations || {}).length) return segment;
+            // 先清掉指向已不存在引用的分镜绑定（旧版本遗留的孤儿卡），再做常规归一化。
+            const healed = dropUnboundStoryboardReferences(segment);
+            const hasStoryboards = storyboardRefsForSegment(healed).length > 0;
+            if (!hasStoryboards && !Object.keys(healed.storyboardDurations || {}).length) return healed;
             const normalized = hasStoryboards
-                ? withSegmentRefs(segment, refsForSegment(segment))
-                : segment.storyboardShots !== undefined
-                    ? { ...segment, storyboardDurations: {} }
-                    : { ...segment, storyboardModeEnabled: undefined, storyboardDurations: {} };
-            const missingIds = storyboardRefsForSegment(segment).some((ref) => !ref.bindingId);
-            if (!missingIds && normalized.storyboardModeEnabled === segment.storyboardModeEnabled
-                && JSON.stringify(normalized.storyboardDurations) === JSON.stringify(segment.storyboardDurations)) return segment;
+                ? withSegmentRefs(healed, refsForSegment(healed))
+                : healed.storyboardShots !== undefined
+                    ? { ...healed, storyboardDurations: {} }
+                    : { ...healed, storyboardModeEnabled: undefined, storyboardDurations: {} };
+            const missingIds = storyboardRefsForSegment(healed).some((ref) => !ref.bindingId);
+            if (!missingIds && normalized.storyboardModeEnabled === healed.storyboardModeEnabled
+                && JSON.stringify(normalized.storyboardDurations) === JSON.stringify(healed.storyboardDurations)) return healed;
             changed = true;
             void syncStoryboardPrompt(ctx, normalized);
             return normalized;
         });
         if (changed) ctx.updateMetadata({ segments: next });
-    }, [ctx, segments]);
+    }, [segments, sharedContext.node.id]);
     const commitSegmentChange = useCallback((updated: H3Segment, select = false) => {
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = segmentsFor(liveMetadata);
@@ -219,6 +227,12 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const removeTimelineRef = (segmentId: string, ref: H3Ref) => {
         const segment = segments.find((item) => item.id === segmentId);
         if (!segment) return;
+        // 分镜图走专用入口（摘掉分镜卡上的图、保留分镜格），否则 storyboardShots 会留下指向已删
+        // bindingId 的孤立引用 → 轨道上出现一张永远空着的分镜卡。
+        if (ref.type === "image" && inferReferenceRole(ref) === "storyboard") {
+            commitSegmentChange(removeStoryboardImageReference(segment, ref));
+            return;
+        }
         // 属于角色组的 ref：把对应 outfit 设为 disabled / 关闭 voice，由 group → refs 派生逻辑重写
         if (ref.groupId) {
             const group = segment.h3CharacterGroups?.[ref.groupId];
@@ -297,6 +311,11 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             const current = refsForSegment(segment);
             const oldIndex = current.findIndex((ref) => pick.replaceRef?.bindingId ? ref.bindingId === pick.replaceRef.bindingId : sameRef(ref, pick.replaceRef!));
             if (oldIndex < 0) return;
+            // 被替换的图若挂在分镜轨卡片上，先把原卡片时长取出来，换图后沿用（这段时间此后拿不到）。
+            const oldShotId = pick.replaceRef.bindingId;
+            const oldShotDuration = oldShotId
+                ? storyboardTrackItems(segment).find((item) => item.referenceBindingId === oldShotId)?.duration
+                : undefined;
             const groupReplacementIndex = current.slice(0, oldIndex).filter((ref) => !pick.replaceRef?.groupId || ref.groupId !== pick.replaceRef.groupId).length;
             if (node.type === "character" && pick.types.includes("image")) {
                 const sourceGroup = readCharacterGroupFromNode(node);
@@ -311,25 +330,24 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 const inserted = allRefs.filter((ref) => ref.groupId === replacementGroup.id);
                 if (!inserted.length) { message.warning("当前 Clip 没有可用的角色参考图，未替换素材"); return; }
                 const others = allRefs.filter((ref) => ref.groupId !== replacementGroup.id);
+                // 原引用是分镜图时把原分镜卡改绑到替换后的角色图（角色组 refs 拿不到原 bindingId）
+                const replacement = inserted.find((ref) => ref.type === "image");
+                let rebound = withSegmentRefs(updated, [...others.slice(0, groupReplacementIndex), ...inserted, ...others.slice(groupReplacementIndex)]);
+                if (inferReferenceRole(pick.replaceRef) === "storyboard" && replacement?.bindingId) {
+                    rebound = rebindStoryboardShot(rebound, pick.replaceRef.bindingId, replacement.bindingId, oldShotDuration);
+                    rebound = withSegmentRefs(rebound, refsForSegment(rebound).map((ref) => ref.bindingId === replacement.bindingId ? { ...ref, role: "storyboard" as const } : ref));
+                }
                 setEditingRef(null);
-                commitSegmentChange(withSegmentRefs(updated, [...others.slice(0, groupReplacementIndex), ...inserted, ...others.slice(groupReplacementIndex)]), true);
+                commitSegmentChange(rebound, true);
                 return;
             }
             const candidates = h3RefCandidates([node], ctx.node.id, ctx.getNodes(), ctx.getConnections()).map((item) => item.ref).filter((ref) => pick.types.includes(ref.type));
             if (!candidates.length) { message.warning("所选节点没有相同类型的素材，未替换当前引用"); return; }
-            const withoutOld = pick.replaceRef.groupId
-                ? applyCharacterGroupEdits(segment, pick.replaceRef.groupId, pick.replaceRef.type === "audio"
-                    ? { voiceEnabled: false }
-                    : { outfitEnabled: pick.replaceRef.outfitId ? { [pick.replaceRef.outfitId]: false } : undefined })
-                : withSegmentRefs(segment, current.filter((ref, index) => index !== oldIndex));
-            const baseRefs = refsForSegment(withoutOld);
-            const fresh = candidates
-                .filter((candidate) => !baseRefs.some((ref) => sameRef(ref, candidate)))
-                .map((candidate) => ({ ...candidate, role: pick.replaceRef?.role || candidate.role, usage: pick.replaceRef?.usage || candidate.usage, retentionLevel: pick.replaceRef?.retentionLevel, storyboardSubjectIds: candidate.storyboardSubjectIds || pick.replaceRef?.storyboardSubjectIds }));
-            if (!fresh.length) { message.warning("所选素材已存在于当前 Clip，未替换引用"); return; }
-            const insertIndex = Math.min(oldIndex, baseRefs.length);
+            // 复用原 bindingId 与职责：分镜轨卡片留在原位只换素材，不会留下空卡也不会多出一格。
+            const updated = replaceSegmentReference(segment, pick.replaceRef, candidates);
+            if (updated === segment) { message.warning("所选素材已存在于当前 Clip，未替换引用"); return; }
             setEditingRef(null);
-            commitSegmentChange(withSegmentRefs(withoutOld, [...baseRefs.slice(0, insertIndex), ...fresh, ...baseRefs.slice(insertIndex)]), true);
+            commitSegmentChange(updated, true);
             return;
         }
         if (node.type === "character" && pick.types.includes("image")) {
@@ -520,8 +538,15 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         }
     };
     const nextSegment = segments.slice(selectedIndex + 1).find((item) => Boolean(resultUrl(item.result)));
-    const nextUrl = nextSegment ? resultUrl(nextSegment.result) : undefined;
-    const themeStyle = h3ThemeVars(ctx.theme);
+    const nextUrl = nextSegment ? (nextSegment.resultStorageKey ? ctx.mediaUrl(nextSegment.resultStorageKey) : resultUrl(nextSegment.result)) : undefined;
+    const themeStyle = {
+        ...h3ThemeVars(ctx.theme),
+        "--minimax-prompt-w": `${promptW}px`,
+        "--minimax-preview-w": `${previewW}px`,
+        "--minimax-preview-h": `${effPreviewH}px`,
+        "--minimax-timeline-h": `${effTimelineH}px`,
+        "--minimax-ref-h": `${effRefLaneH}px`,
+    };
     return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
         <H3Runner key="runner" ctx={ctx} />
         <H3PaneHandles key="pane-handles" ctx={ctx} />
@@ -529,14 +554,13 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} outputs={outputs} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} />
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
         {editingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={editingRef.ref} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
-        <style key="workbench-style">{`.minimax-canvas-workbench{--minimax-prompt-w:${promptW}px;--minimax-preview-w:${previewW}px;--minimax-preview-h:${effPreviewH}px;--minimax-timeline-h:${effTimelineH}px;--minimax-ref-h:${effRefLaneH}px}`}</style>
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
-            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
+            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={previewStorageKey ? ctx.mediaUrl(previewStorageKey) : preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} /></div>
         <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestReplaceRef={beginCanvasRefReplace} onRequestPickRef={requestCanvasRefPick} onRequestPickStoryboardShot={requestStoryboardShotPick} pickingShotKey={pickingRef?.shotId ? `${pickingRef.segmentId}:${pickingRef.shotId}` : undefined} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         </div>
-        <div key="status" className="minimax-wb-status"><H3StatusBadge status={String(metadata.status || selected?.status || "idle")} error={String(metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx)} />{String(metadata.smartStoryboardStatus || "") === "loading" ? <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 24 }}>智能分镜正在分析参考图并生成提示词，请稍候…</span> : null}{String(metadata.smartStoryboardStatus || "") === "success" ? <span style={{ marginLeft: 8, color: "#22c55e", fontSize: 24 }}>智能分镜已完成</span> : null}{String(metadata.smartStoryboardStatus || "") === "error" ? <span style={{ marginLeft: 8, color: "#ef4444", fontSize: 24 }}>智能分镜生成失败</span> : null}</div>
+        <div key="status" className="minimax-wb-status"><H3StatusBadge status={String(metadata.status || selected?.status || "idle")} error={String(metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx, false, true)} />{String(metadata.smartStoryboardStatus || "") === "loading" ? <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 24 }}>智能分镜正在分析参考图并生成提示词，请稍候…</span> : null}{String(metadata.smartStoryboardStatus || "") === "success" ? <span style={{ marginLeft: 8, color: "#22c55e", fontSize: 24 }}>智能分镜已完成</span> : null}{String(metadata.smartStoryboardStatus || "") === "error" ? <span style={{ marginLeft: 8, color: "#ef4444", fontSize: 24 }}>智能分镜生成失败</span> : null}</div>
     </div>;
 }

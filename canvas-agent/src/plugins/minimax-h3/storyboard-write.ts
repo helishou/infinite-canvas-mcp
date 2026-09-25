@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf } from "../../canvas/reference-contract.js";
 import { assembleH3Prompt } from "./prompt-sections.js";
-import { deriveStoryboardDurations, formatShotTimestamp, normalizeRef2vaSummary, promptDetails, stripDuplicateTransition, validateDefinitionCoverage, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "./prompt-rules.js";
+import { deriveStoryboardDurations, formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, promptDetails, stripDuplicateTransition, stripStoryboardCues, validateDefinitionCoverage, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "./prompt-rules.js";
 
 type RecordValue = Record<string, unknown>;
 type Transition = "continuous" | "cut" | "dissolve" | "fade_black";
@@ -71,8 +71,10 @@ function pictureDescription(ref: RecordValue, catalog: ReturnType<typeof referen
         .replace(/[|·:：]+/gu, " ")
         .replace(/\s+/gu, " ")
         .replace(/^[\s,，.;。_-]+|[\s,，.;。_-]+$/gu, "");
-    // 描述只取视觉分析摘要与标签，禁止兜底到 asset.label / ref.name（文件名对模型无语义）。
-    const details = [summary, tags];
+    // 描述只取视觉分析摘要与标签，禁止兜底到 asset.label / ref.name（文件名对模型无语义）；
+    // 摘要或标签本身只是素材名的回显时同样丢弃（历史数据里存在把 label 写进 analysis.summary 的情况）。
+    const names = [asset?.label, ref.name, ref.label];
+    const details = [summary, tags].filter((value) => !isReferenceNameEcho(String(value || ""), names));
     return details.map((value) => clean(String(value || ""))).find((value) => value && !/^(?:the|a|an|for|of)$/iu.test(value))?.slice(0, 140) || "";
 }
 
@@ -109,7 +111,7 @@ function promptForShots(input: StoryboardInput, refs: RecordValue[], catalog: Re
             const position = panel ? ` In the composite storyboard image, this is Panel ${panel.index} (row ${panel.row}, column ${panel.column}), shared by ${panel.shotNumbers.map((number) => `[Shot ${number}]`).join(", ")}.` : "";
             picture = ` Use the approved ${pictureDescription(binding, catalog) || "storyboard frame"} from ${pictureTagForId(pictureId)} as the shot-entry keyframe and composition anchor for this shot. After the keyframe, keep the camera setup and spatial relationship stable while allowing natural performance.${position}`;
         }
-        const normalizedDescription = normalizeLegacyReferences(index ? stripDuplicateTransition(string(shot.description), transitionType) : string(shot.description));
+        const normalizedDescription = stripStoryboardCues(normalizeLegacyReferences(index ? stripDuplicateTransition(string(shot.description), transitionType) : string(shot.description)));
         const extraPanelIds = [...new Set(Array.from(normalizedDescription.matchAll(/<Picture\s+(\d+)>/giu), (match) => originalPictureRefs[Number(match[1]) - 1]?.bindingId).filter((id): id is string => Boolean(id)))];
         const extraPanels = composite ? extraPanelIds
             .filter((id) => id !== pictureId).map((id) => composite.panels.find((panel) => panel.bindingId === id)).filter(Boolean)
