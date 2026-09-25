@@ -181,17 +181,19 @@ export function moveStoryboardShotBetweenSegments(source: H3Segment, target: H3S
     const sourceItems = storyboardTrackItems(source);
     const sourceItem = sourceItems.find((item) => item.id === sourceId);
     if (!sourceItem?.ref?.bindingId) return { source, target };
+    const sourceRef = sourceItem.ref;
     const targetItems = storyboardTrackItems(target);
     const insertionIndex = targetId ? Math.max(0, targetItems.findIndex((item) => item.id === targetId)) : targetItems.length;
     const targetRefs = refsForSegment(target);
-    const movedRef = sourceItem.ref;
+    const movedRef = sourceRef;
     const nextTargetRefs = targetRefs.some((ref) => sameRef(ref, movedRef)) ? targetRefs : [...targetRefs, movedRef];
     const targetShot = { id: `storyboard-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, duration: sourceItem.duration, referenceBindingId: movedRef.bindingId };
     const targetShots: H3StoryboardShot[] = [...targetItems.map(({ id, duration, referenceBindingId }) => ({ id, duration, ...(referenceBindingId ? { referenceBindingId } : {}) }))];
     targetShots.splice(Math.min(insertionIndex, targetShots.length), 0, targetShot);
     const nextTarget = withSegmentRefs({ ...target, storyboardModeEnabled: true, storyboardShots: targetShots }, nextTargetRefs);
     const nextSourceItems = sourceItems.filter((item) => item.id !== sourceId);
-    const nextSource = { ...source, storyboardModeEnabled: true, storyboardShots: shotsFromItems(nextSourceItems) };
+    const nextSourceRefs = refsForSegment(source).map((ref) => ref.bindingId === sourceRef.bindingId ? { ...ref, role: "other" as const } : ref);
+    const nextSource = withSegmentRefs({ ...source, storyboardModeEnabled: true, storyboardShots: shotsFromItems(nextSourceItems) }, nextSourceRefs);
     return { source: nextSource, target: nextTarget };
 }
 
