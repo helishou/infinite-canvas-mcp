@@ -78,6 +78,29 @@ test("旧绑定与参考不一致时保留绑定真值并原样归档旧字段",
     assert.ok(fs.statSync(`${file}.pre-h3-v14-reference-archive.sqlite`).size > 0);
 });
 
+test("关闭角色服装后前端重发旧 refItems 不应被当作丢弃原数据", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    // 存储态：只有 referenceBindings（5 个），没有任何旧字段。
+    const bindings = [
+        { id: "b1", role: "storyboard", label: "分镜图1", storageKey: "image:1", assetId: "a1" },
+        { id: "b2", role: "storyboard", label: "分镜图2", storageKey: "image:2", assetId: "a2" },
+        { id: "b3", role: "character_turnaround", label: "沈侯服装", storageKey: "image:3", assetId: "a3" },
+        { id: "b4", role: "character_voice", label: "沈侯声线", storageKey: "audio:4", assetId: "a4" },
+        { id: "b5", role: "character_turnaround", label: "沈昭宁服装", storageKey: "image:5", assetId: "a5" },
+    ];
+    db.createCanvasProject({ id: "p", nodes: [{ id: "h3", type: "minimax-h3", metadata: { segments: [{ id: "clip", title: "V02", referenceBindings: bindings }] } }], connections: [] });
+    const stores = createStores(db);
+    // 用户在 UI 关闭沈侯服装：内存里 referenceBindings 仍是 5，但 refItems 只剩 3。
+    const withoutShenhouOutfit = bindings.filter((binding) => binding.id !== "b3");
+    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), [
+        { type: "update_h3_segment", nodeId: "h3", segmentId: "clip", patch: { referenceBindings: bindings, refItems: withoutShenhouOutfit } },
+    ]);
+    const segment = (stores.projects.get("p")!.nodes as unknown as Array<{ metadata: { segments: Array<Record<string, unknown>> } }>)[0].metadata.segments[0];
+    assert.equal("refItems" in segment, false, "旧字段必须被清掉");
+    assert.equal((segment.referenceBindings as unknown[]).length, 5, "关闭服装不应误删 referenceBindings");
+});
+
 test("导入旧 H3 画布时也归档不一致的参考快照", (t) => {
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());

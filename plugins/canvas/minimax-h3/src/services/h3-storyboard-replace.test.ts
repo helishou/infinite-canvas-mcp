@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { refsForSegment, replaceSegmentReference, withSegmentRefs } from "./h3-data";
-import { dropUnboundStoryboardReferences, rebindStoryboardShot, storyboardTrackItems } from "./h3-storyboard-track";
+import { dropUnboundStoryboardReferences, rebindStoryboardShot, removeStoryboardShot, storyboardTrackItems } from "./h3-storyboard-track";
 import type { H3Ref, H3Segment } from "../types";
 
 function storyboardSegment(): H3Segment {
@@ -110,6 +110,22 @@ test("自愈：指向已删引用的分镜卡清掉绑定后变成可绑图的�
     assert.equal(first.duration, 3);
     // 仍然保持一张空卡（可以重新绑图），而不是整格消失。
     assert.deepEqual(boardsOf(healed).map((item) => item.image ?? null), [null, "image:board-b"]);
+});
+
+test("删除分镜卡时同步删掉它的参考素材，不该残留在 ref 区", () => {
+    const segment = storyboardSegment();
+    const updated = removeStoryboardShot(segment, "shot-1");
+    // 分镜轨只剩一张。
+    assert.deepEqual(boardsOf(updated).map((item) => item.image), ["image:board-b"]);
+    // 被删分镜图的引用必须一起消失，不能靠改 role 躲进 ref 区。
+    const remaining = refsForSegment(updated) as H3Ref[];
+    assert.equal(remaining.some((ref) => ref.storageKey === "image:board-a"), false, "被删分镜图仍留在 refs 里");
+    assert.deepEqual(remaining.map((ref) => [ref.storageKey, ref.role]), [
+        ["image:scene", "scene"],
+        ["image:board-b", "storyboard"],
+    ]);
+    // 剩余分镜卡的时长吸收被删卡的时长，总时长不变。
+    assert.equal(Number((updated.storyboardShots || []).reduce((sum, shot) => sum + Number(shot.duration || 0), 0).toFixed(6)), 8);
 });
 
 test("替换出的第一个候选沿用原 bindingId，后续候选顺序插在其后", () => {

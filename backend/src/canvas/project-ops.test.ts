@@ -297,6 +297,19 @@ test("新建 H3 Clip 的空绑定列表仍可从旧参考完整迁移", () => {
     assert.equal("refItems" in segment, false);
 });
 
+test("已提交历史的绑定扩充可重放，新的同形状写入仍受校验", () => {
+    const oldBindings = ["one", "two"].map((name) => ({ id: `binding-${name}`, storageKey: `image:${name}`, mediaType: "image" }));
+    const legacy = oldBindings.map((binding) => ({ bindingId: binding.id, storageKey: binding.storageKey, type: "image" }));
+    const original = makeProject([makeH3Node({ segments: [{ id: "ep01-v02", referenceBindings: oldBindings, refItems: legacy }] })]);
+    const operation = { type: "update_h3_segment", nodeId: "h3-1", segmentId: "ep01-v02", patch: { referenceBindings: [...oldBindings, { id: "binding-three", storageKey: "image:three", mediaType: "image" }] } };
+    assert.throws(() => applyCanvasProjectOperations(structuredClone(original) as Record<string, unknown>, [structuredClone(operation)]), /绑定与旧参考不一致/);
+    const replayed = structuredClone(original);
+    applyCanvasProjectOperations(replayed as Record<string, unknown>, [operation], { committedReplay: true });
+    const segment = ((replayed.nodes[0].metadata as Record<string, unknown>).segments as Array<Record<string, unknown>>)[0];
+    assert.equal((segment.referenceBindings as unknown[]).length, 3);
+    assert.equal("refItems" in segment, false);
+});
+
 test("add_node：省略坐标时按当前画布向右排布，同批节点不重叠", () => {
     const project = makeProject([]);
     applyCanvasProjectOperations(project as Record<string, unknown>, [

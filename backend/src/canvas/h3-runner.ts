@@ -118,7 +118,7 @@ export class CanvasH3Runner {
         const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
         const wanted = input.nodeIds?.length ? new Set(input.nodeIds) : input.nodeId ? new Set([input.nodeId]) : null;
         // 逐 Clip 收集：坏 Clip 只影响自己，不能因为一个 Clip 而否掉整批计划。
-        const blocked: Array<{ nodeId: string; segmentId: string; reason: string }> = [];
+        const blocked: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }> = [];
         for (const node of nodes.filter((item) => String(item.type || "").includes("minimax") && (!wanted || wanted.has(String(item.id || ""))))) {
             const segments = Array.isArray(recordOf(node.metadata).segments) ? recordOf(node.metadata).segments as H3Segment[] : [];
             for (const plan of this.planNode(node, input)) {
@@ -128,7 +128,7 @@ export class CanvasH3Runner {
                 try {
                     assertReferenceCompilation(compileH3Submission(project, segment, taskMode).compilation);
                 } catch (error) {
-                    blocked.push({ nodeId: String(node.id || ""), segmentId: String(plan.segmentId || ""), reason: (error as Error).message });
+                    blocked.push({ nodeId: String(node.id || ""), segmentId: String(plan.segmentId || ""), clipNumber: plan.segmentIndex + 1, reason: (error as Error).message });
                 }
             }
         }
@@ -246,10 +246,12 @@ export class CanvasH3Runner {
         return nodes.filter((node) => String(node.type || "").includes("minimax") && (!wanted || wanted.has(String(node.id || "")))).flatMap((node) => this.planNode(node, input));
     }
 
-    private buildRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string }> = []): H3RunPlan {
+    private buildRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }> = []): H3RunPlan {
         const blockedKeys = new Set(blockedPlans.map((item) => `${item.nodeId}:${item.segmentId}`));
         const plans = this.plansFor(input).filter((plan) => !blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`));
-        if (!plans.length) throw new Error(blockedPlans.length ? "没有可运行的 H3 Clip：所选 Clip 的参考素材绑定均不完整，请先修复素材绑定" : "没有符合条件的 H3 Clip");
+        if (!plans.length) throw new Error(blockedPlans.length
+            ? `没有可运行的 H3 Clip：${blockedPlans.slice(0, 3).map((item) => `Clip ${item.clipNumber}：${item.reason}`).join("；")}`
+            : "没有符合条件的 H3 Clip");
         const before = this.stores.projects.get(input.projectId)!;
         const canonicalOps = plans.flatMap((plan) => {
             const patch = this.canonicalSegmentPatch(before, plan, input.params || {});
@@ -522,7 +524,7 @@ export class CanvasH3Runner {
         const selected = input.segmentId
             ? segments.findIndex((segment) => String(segment.id || "") === input.segmentId)
             : input.segmentIndex ?? Math.max(0, segments.findIndex((segment) => !segment.result));
-        if (selected < 0) throw new Error(`找不到 H3 片段: ${input.segmentId}`);
+        if (selected < 0) throw new Error("找不到所选 Clip，请刷新画布后重试");
         const selectedSegment = segments[selected];
         const continuationMode = selectedSegment.motionContextEnabled === true && input.runFromCurrent === true;
         if (selectedSegment.motionContextEnabled === true && !input.runFromCurrent && selected > 0) throw new Error("V15 潜空间续写必须使用「运行当前及后续分镜」，不能单独运行一个 Clip。");
@@ -777,7 +779,7 @@ export class CanvasH3Runner {
         const node = project && (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId);
         const segment = Array.isArray(recordOf(node?.metadata).segments)
             ? (recordOf(node?.metadata).segments as H3Segment[]).find((item) => item.id === plan.segmentId) : undefined;
-        if (!segment) throw new Error(`找不到 H3 Clip: ${plan.segmentId}`);
+        if (!segment) throw new Error(`Clip ${plan.segmentIndex + 1} 已不存在，请刷新画布后重试`);
         return segment;
     }
 

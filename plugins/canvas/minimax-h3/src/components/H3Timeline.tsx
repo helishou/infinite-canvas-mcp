@@ -430,12 +430,20 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             // 没落到具体 cell，targetIndex 留 -1 表示"追加到末尾"
         }
         if (!target) {
+            // 横向滚动发生在祖先 .minimax-tracks-scroll 上（.minimax-ref-row 自己 overflow:hidden），
+            // 且 ref 内容还要减去左侧固定轨道槽的偏移；直接用 ref-row 的 scrollLeft/clientX
+            // 会在长时间轴上算出完全错误的时间，把素材落到别的 Clip 上。
+            const content = refContentRef.current;
             const track = event.currentTarget as HTMLDivElement;
-            const rect = track.getBoundingClientRect();
-            // 内容坐标 = 已滚动偏移 + 鼠标在可见区内偏移；每单位 100px
-            const contentX = track.scrollLeft + (event.clientX - rect.left);
+            const scroller = track.closest<HTMLElement>(".minimax-tracks-scroll") || track;
+            const rect = (content || track).getBoundingClientRect();
+            // 内容坐标 = 已滚动偏移 + 鼠标在内容内的偏移；每单位 100px
+            const contentX = scroller.scrollLeft + (event.clientX - rect.left);
             const time = Math.max(0, Math.min(total, contentX / 100));
             target = segments.find((item) => time >= Number(item.start || 0) && time < Number(item.start || 0) + Math.max(0.5, Number(item.duration || 1))) || selected;
+            // 按位置推算只允许用于「确实没落在任何 Clip 网格上」的情况；
+            // 落在某个 ref-grid 上却没解析出 segmentId 时必须放弃，不能猜一个 Clip。
+            if (target && (clipEl || gridEl)) return;
         }
         if (!target) return;
         const mode = String(target.mode || target.taskMode || "ref2va");
@@ -646,11 +654,14 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                             onSegmentChange(reorderStoryboardShots(segment, sourceId, item.id));
                             return;
                         }
+                        // 已绑定的分镜卡片也要吞掉 Ref 拖放：否则事件冒泡到 ref-row 的
+                        // addRef，会按光标 X 坐标回退到「时间轴位置推算目标 Clip」，
+                        // 素材就被落到光标附近的另一个 Clip 上（错位）。
+                        event.preventDefault();
+                        event.stopPropagation();
                         if (item.ref) return;
                         const dropped = normalizeDroppedH3Ref(event);
                         if (!dropped || dropped.type !== "image") return;
-                        event.preventDefault();
-                        event.stopPropagation();
                         onSegmentChange(assignStoryboardShotRef(segment, item.id, dropped));
                     }}
                     onClick={(event) => {

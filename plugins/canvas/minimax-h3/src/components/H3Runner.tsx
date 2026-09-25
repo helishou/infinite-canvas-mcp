@@ -40,6 +40,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         const initialMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
         const initialSegments = segmentsFor(initialMetadata);
         const segmentId = String(requestedSegmentId || initialMetadata.selectedSegmentId || initialSegments[0]?.id || "");
+        const clipNumber = initialSegments.findIndex((segment) => segment.id === segmentId) + 1;
         if (!segmentId || runInFlight.current.has(segmentId)) return;
         runInFlight.current.add(segmentId);
         try {
@@ -54,7 +55,11 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             await ctx.flush();
             await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent, forceRegenerate });
         } catch (error) {
-            message.error(error instanceof Error ? error.message : String(error));
+            const detail = error instanceof Error ? error.message : String(error);
+            const readable = clipNumber > 0
+                ? detail.replaceAll(`H3 Clip ${segmentId}`, `Clip ${clipNumber}`).replaceAll(segmentId, `Clip ${clipNumber}`)
+                : detail;
+            message.error(!runFromCurrent && clipNumber > 0 && !/\bClip\s+\d+\b/iu.test(readable) ? `Clip ${clipNumber}：${readable}` : readable);
         } finally {
             runInFlight.current.delete(segmentId);
         }

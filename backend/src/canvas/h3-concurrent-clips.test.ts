@@ -85,3 +85,19 @@ test("一个 Clip 的参考素材绑定不完整时，只跳过它自己，其�
     for (let i = 0; i < 100 && !["succeeded", "failed", "cancelled"].includes(db.getTask(task.id)?.status || ""); i++) await new Promise((resolve) => setTimeout(resolve, 5));
     assert.equal(db.getTask(task.id)?.status, "succeeded", db.getTask(task.id)?.error || "好 Clip 未成功");
 });
+
+test("单独生成坏 Clip 时错误使用前端 Clip 序号并给出具体原因", (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+        { id: "internal-first", prompt: "正常镜头", mode: "t2v" },
+        { id: "internal-second", prompt: "缺少首帧", mode: "i2v" },
+    ] } }], connections: [] });
+    const runner = new CanvasH3Runner(createStores(db), new BackendEventBus(), {} as never, {} as never);
+    assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "internal-second" }), (error: Error) => {
+        assert.match(error.message, /Clip 2：/);
+        assert.match(error.message, /首帧|图片/i);
+        assert.doesNotMatch(error.message, /internal-second/);
+        return true;
+    });
+});

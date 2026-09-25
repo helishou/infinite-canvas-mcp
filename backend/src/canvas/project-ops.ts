@@ -63,7 +63,7 @@ function assertFullSegmentsReplacement(node: Record<string, unknown>, incomingSe
     }
 }
 
-export function applyCanvasProjectOperations(project: Record<string, unknown>, operations: CanvasOperation[]) {
+export function applyCanvasProjectOperations(project: Record<string, unknown>, operations: CanvasOperation[], options: { committedReplay?: boolean } = {}) {
     const nodes = nodesOf(project);
     const connections = connectionsOf(project);
     const results: CanvasOperationResult[] = [];
@@ -369,7 +369,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
     for (const nodeId of referenceNodes) {
         const node = nodes.find((item) => String(item.id) === nodeId);
         if (isH3CanvasNode(node)) {
-            canonicalizeH3References(node!, undefined, previousH3Segments.get(nodeId));
+            canonicalizeH3References(node!, undefined, previousH3Segments.get(nodeId), options.committedReplay === true);
             registerH3ReferenceAssets(project, node!);
         }
     }
@@ -395,7 +395,7 @@ function legacyMirrorsBindings(refs: Array<Record<string, unknown>>, bindings: A
     return true;
 }
 
-export function canonicalizeH3References(node: Record<string, unknown>, archiveLegacy?: (segment: Record<string, unknown>, index: number) => void, previousSegments?: Map<string, Record<string, unknown>>) {
+export function canonicalizeH3References(node: Record<string, unknown>, archiveLegacy?: (segment: Record<string, unknown>, index: number) => void, previousSegments?: Map<string, Record<string, unknown>>, committedReplay = false) {
     const metadata = recordOf(node.metadata);
     const segments = segmentsOf(node);
     for (const [index, segment] of segments.entries()) {
@@ -407,7 +407,7 @@ export function canonicalizeH3References(node: Record<string, unknown>, archiveL
         const currentBindings = hasBindings ? segment.referenceBindings as Array<Record<string, unknown>> : [];
         const previous = previousSegments?.get(String(segment.id || ""));
         if (legacyRefs.length) archiveLegacy?.(segment, index);
-        if (hasBindings && legacyRefs.length && !archiveLegacy && (currentBindings.length || previous)) {
+        if (hasBindings && legacyRefs.length && !archiveLegacy && !committedReplay && (currentBindings.length || previous)) {
             const previousBindings = Array.isArray(previous?.referenceBindings) ? previous.referenceBindings.map(recordOf) : [];
             const previousBuckets = recordOf(previous?.refs);
             const previousHadLegacy = Boolean((Array.isArray(previous?.refItems) && previous.refItems.length)
@@ -421,11 +421,18 @@ export function canonicalizeH3References(node: Record<string, unknown>, archiveL
             const unchangedExisting = previousHadLegacy && JSON.stringify(previousBindings) === JSON.stringify(currentBindings)
                 && currentBindings.length === legacyRefs.length
                 && legacyRefs.every((ref) => !ref.bindingId || currentBindings.some((binding) => String(binding.id || "") === String(ref.bindingId)));
-            if (!mirrorsPrevious && !mirrorsCurrent && !unchangedExisting) {
+            // 旧字段是绑定的历史镜像，不是一次独立意图。只有在「上一版本来就是干净的绑定」
+            // 时，本批夹带的旧字段才必然是过期残留（关掉服装/声线后前端仍会重发它）：
+            // 此时没有绑定被丢弃，按当前绑定放行。上一版仍带旧字段说明真在迁移或扩充，
+            // 继续按原有规则校验。
+            const legacyIsStaleSubset = !previousHadLegacy
+                && legacyRefs.every((ref) => !ref.bindingId || currentBindings.some((binding) => String(binding.id || "") === String(ref.bindingId)))
+                && bucketRefs.every((ref) => !ref.bindingId || currentBindings.some((binding) => String(binding.id || "") === String(ref.bindingId)));
+            if (!mirrorsPrevious && !mirrorsCurrent && !unchangedExisting && !legacyIsStaleSubset) {
                 throw new Error(`H3 Clip ${String(segment.id || "")} 的绑定与旧参考不一致，拒绝丢弃原数据`);
             }
         }
-        if (!hasBindings || !currentBindings.length && (archiveLegacy || !previous)) {
+        if (!hasBindings || !currentBindings.length && (archiveLegacy || !previous || committedReplay)) {
             const legacy = { ...segment };
             delete legacy.referenceBindings;
             const converted = referenceBindingsOf(legacy).bindings;

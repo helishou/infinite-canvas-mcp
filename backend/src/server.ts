@@ -479,6 +479,15 @@ export function startServer(
     res.json({ ok: true, projects });
   });
   app.get("/canvas/projects/:id", (req, res) => {
+    if (req.query.view === "index") {
+      const rawRevision = req.query.ifRevision;
+      const ifRevision = typeof rawRevision === "string" && /^\d+$/.test(rawRevision) ? Number(rawRevision) : undefined;
+      if (rawRevision !== undefined && (ifRevision === undefined || !Number.isSafeInteger(ifRevision)))
+        return void res.status(400).json({ ok: false, error: "ifRevision 必须是非负整数" });
+      const project = db.getCanvasProjectIndex(req.params.id, ifRevision);
+      if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
+      return void res.json({ ok: true, project });
+    }
     const project =
       req.query.summary === "true"
         ? db.listCanvasProjectSummaries({ id: req.params.id })[0]
@@ -602,6 +611,11 @@ export function startServer(
         });
     }
   });
+  app.get("/canvas/projects/:id/ops/:operationId/receipt", (req, res) => {
+    if (db.getCanvasProjectRevision(req.params.id) === null)
+      return void res.status(404).json({ ok: false, error: "画布不存在" });
+    res.json({ ok: true, ...db.getCanvasOperationReceipt(req.params.id, req.params.operationId) });
+  });
   app.post("/canvas/projects/:id/ops", (req, res) => {
     const expectedRevision =
       req.body?.expectedRevision === undefined
@@ -682,6 +696,17 @@ export function startServer(
             operation?.id || operation?.nodeId || operation?.assetId || "",
           ),
           segmentId: String(operation?.segmentId || ""),
+          // 排查 H3 参考绑定冲突：必须能看到真正提交的 patch/refs 形状。
+          patchKeys: operation?.patch ? Object.keys(operation.patch as object) : undefined,
+          segmentIdsInMetadata: Array.isArray((operation?.metadata as { segments?: Array<{ id?: unknown }> } | undefined)?.segments)
+            ? ((operation?.metadata as { segments?: Array<{ id?: unknown }> }).segments || []).map((segment) => String(segment.id || ""))
+            : undefined,
+          legacyRefsInPatch: ["refItems", "refs"].filter((key) => key in ((operation?.patch as object) || {})),
+          legacyRefsInMetadataSegments: Array.isArray((operation?.metadata as { segments?: Array<Record<string, unknown>> } | undefined)?.segments)
+            ? ((operation?.metadata as { segments?: Array<Record<string, unknown>> }).segments || [])
+                .flatMap((segment) => ["refItems", "refs"].filter((key) => key in segment).map((key) => `${String(segment.id || "?")}.${key}`))
+            : undefined,
+          targetNodeIdForText: operation?.target ? { nodeId: String((operation.target as { nodeId?: unknown }).nodeId || ""), segmentId: String((operation.target as { segmentId?: unknown }).segmentId || ""), field: String((operation.target as { field?: unknown }).field || "") } : undefined,
         })),
       });
       res

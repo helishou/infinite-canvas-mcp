@@ -9,7 +9,7 @@ import type { StoryboardSpeakerOption } from "./StoryboardDialogueStrip";
 import { inferReferenceRole, refsForSegment, segmentRefsPatch } from "../services/h3-data";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { persistPromptCandidate, promptJobs, setPromptJob } from "../services/h3-prompt-jobs";
-import { buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, storyboardPromptFingerprint, toSubjectDefinitions } from "../services/storyboard-prompt";
+import { buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, storyboardPromptFingerprint, stripGeneratedPromptSections, toSubjectDefinitions } from "../services/storyboard-prompt";
 import { extractDialogues, stripDialogueSpeakers, injectDialogueSpeakers, parseSubjectSpeakerMap, collectSpeakerIds } from "../services/storyboard-dialogue";
 import { h3ThemeVars } from "../h3-theme";
 import { promptEnhanceImagePayload } from "../services/prompt-enhance-references";
@@ -1219,8 +1219,17 @@ export function H3PromptSection({
     const targetSegmentId = selected?.id;
     const promptAtCall = prompt;
     if (!targetSegmentId || promptJobs(ctx)[targetSegmentId]?.status === "running") return;
+    // 增强时只把**用户自己写的自由文本**喂回模型。上一轮生成的六段产物（含模型臆造的
+    // <Subject N>）不是用户输入；原样回喂会让幻觉被当成既定事实固化，用户之后删掉
+    // 人物引用也清不掉。用 candidate base 记录原文，供 diff 展示与采用。
+    const userIntent = stripGeneratedPromptSections(promptAtCall);
     const requestId = crypto.randomUUID();
-    const job = { requestId, base: promptAtCall, documentId: textDocument.getDocumentId() };
+    const job = { requestId, base: promptAtCall, userIntent, documentId: textDocument.getDocumentId() };
+    // prompt 里只剩上一轮的生成段落 = 用户没写任何意图：此时增强只会让模型自由发挥。
+    if (!userIntent) {
+      setPromptJob(ctx, targetSegmentId, { ...job, status: "error", error: "提示词里只有上一轮生成的段落，没有你自己的描述，无法增强" });
+      return;
+    }
     setPromptJob(ctx, targetSegmentId, { ...job, status: "running" });
     try {
       const model = String(
@@ -1265,7 +1274,7 @@ export function H3PromptSection({
       const storyboardImageRefs = references
         .filter((ref) => ref.type === "image" && isStoryboardPictureRef(ref))
         .sort((left, right) => (storyboardOrder.get(left.bindingId || "") ?? Number.MAX_SAFE_INTEGER) - (storyboardOrder.get(right.bindingId || "") ?? Number.MAX_SAFE_INTEGER));
-      const hasExplicitHardCut = /(?:\b(?:hard[- ]cut|the\s+(?:shot|camera)\s+cuts?\s+to)\b|\[Transition:\s*cut\]|硬切)/iu.test(promptAtCall);
+      const hasExplicitHardCut = /(?:\b(?:hard[- ]cut|the\s+(?:shot|camera)\s+cuts?\s+to)\b|\[Transition:\s*cut\]|硬切)/iu.test(userIntent);
       let transitionPlan = "";
       let transitionInstruction = "";
       if (storyboardMode && storyboardImageRefs.length >= 2) {
@@ -1309,7 +1318,7 @@ export function H3PromptSection({
       if (transitionInstruction) systemParts.push(`Storyboard image reference transition instruction:\n${transitionInstruction}`);
       const system = systemParts.join("\n\n");
       const userPromptParts = [
-        promptAtCall.trim(),
+        userIntent,
         String(ctx.node.metadata?.globalPrompt || "").trim(),
         `Reference manifest (fixed numbering; do not reorder):\n${manifest}`,
       ];

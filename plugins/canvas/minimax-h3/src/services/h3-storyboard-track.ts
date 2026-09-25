@@ -87,10 +87,14 @@ export function removeStoryboardShot(segment: H3Segment, shotId: string) {
     const remaining = items.filter((item) => item.id !== shotId);
     const recipientId = items[targetIndex + 1]?.id || items[targetIndex - 1]?.id;
     const merged = remaining.map((item) => item.id === recipientId ? { ...item, duration: item.duration + target.duration } : item);
+    // 删分镜卡就是删这张分镜图：必须把它的引用一起摘掉。
+    // 旧实现只把 role 改成 other，素材就「从分镜轨掉进 ref 区」，用户还得再删一次。
     const refs = target.ref?.bindingId
-        ? refsForSegment(segment).map((ref) => ref.bindingId === target.ref?.bindingId ? { ...ref, role: "other" as const } : ref)
+        ? refsForSegment(segment).filter((ref) => ref.bindingId !== target.ref?.bindingId)
         : refsForSegment(segment);
-    const updated = withSegmentRefs(segment, refs);
+    const durations = { ...(segment.storyboardDurations || {}) };
+    if (target.ref?.bindingId) delete durations[target.ref.bindingId];
+    const updated = withSegmentRefs({ ...segment, storyboardDurations: durations }, refs);
     return { ...updated, storyboardModeEnabled: true, storyboardShots: shotsFromItems(merged) };
 }
 
