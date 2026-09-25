@@ -90,15 +90,8 @@
 .minimax-tick-extended b { color:#6b7787; }
 .minimax-motion-label,.minimax-motion-track,.minimax-motion-add { display:none; }
 .minimax-motion-segment { position:absolute; top:5px; bottom:5px; border-radius:4px; background:repeating-linear-gradient(135deg,#1d2935 0 4px,#253646 4px 8px); border:1px solid #334155; color:#7dd3fc; text-align:center; font-size:26px; display:flex; align-items:center; justify-content:center; }
-/* Clip 卡片 Motion Context 切换：左上角；off 状态灰显
-   大小 = 卡片高度 1/10（width:10% + aspect-ratio:1）、离边 = 卡片高度 1/20（inset 5%） */
-.minimax-clip-motion { position:absolute; left:5%; top:5%; z-index:4; width:10%; aspect-ratio:1/1; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#7dd3fc; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:65%; line-height:1; opacity:.55; transition:opacity .12s ease; }
-.minimax-clip-motion:hover { opacity:1; }
-.minimax-clip-motion.off { color:#64748b; opacity:.5; }
-.minimax-clip-motion.off:hover { opacity:.85; color:#94a3b8; }
-/* Motion Context「开启」状态：实心天蓝 + 发光，和关闭态明显区分。 */
-.minimax-clip-motion.on { color:#082f49; background:#38bdf8; opacity:1; box-shadow:0 0 0 1px #7dd3fc, 0 0 8px rgba(56,189,248,.55); }
-.minimax-clip-motion.on:hover { background:#7dd3fc; color:#082f49; }
+/* 尾帧接续与潜空间续写开关已移到 Clip 设置栏（ClipSettings「续段衔接」），
+   Clip 卡片不再有这两个角标，样式一并移除。 */
 
 .minimax-tl-clip { position:absolute; top:10px; bottom:10px; min-width:54px; border:1px solid #334155; border-radius:5px; background:#24272b; color:#e5e7eb; overflow:hidden; cursor:pointer; }
 .minimax-tl-clip.active { border-color:#ef4444; background:#334155; box-shadow:0 0 0 1px #ef4444 inset; }
@@ -113,18 +106,13 @@
 .minimax-clip-empty { height:100%; display:flex; align-items:center; justify-content:center; color:#64748b; }
 .minimax-clip-meta { position:absolute; left:7px; right:7px; bottom:7px; z-index:2; display:flex; flex-direction:column; align-items:center; gap:4px; text-align:center; text-shadow:0 1px 3px #000; pointer-events:none; }
 .minimax-clip-meta b { font-size:22px; color:#f8fafc; font-weight:700; }.minimax-clip-meta span { font-size:22px; color:#cbd5e1; }
-/* ❌ 删除按钮：与 motion 按钮对称右上方；大小 = 卡片高度 1/10、离边 1/20 */
-.minimax-clip-delete { position:absolute; right:5%; top:5%; z-index:4; width:10%; aspect-ratio:1/1; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#e2e8f0; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:65%; line-height:1; opacity:.6; transition:opacity .12s ease; }
-/* 截取尾帧按钮：顶部居中（位于 motion 与 delete 两个角按钮之间），样式与 motion 一致 */
-.minimax-clip-tailframe { position:absolute; left:50%; top:5%; transform:translateX(-50%); z-index:4; width:10%; aspect-ratio:1/1; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.82); color:#a7f3d0; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:65%; line-height:1; opacity:.55; transition:opacity .12s ease; }
-.minimax-clip-tailframe:hover { opacity:1; color:#6ee7b7; }
-/* 尾帧接续开关「开启」状态：用强调色（翡翠绿）实心填充 + 发光，和关闭态明显区分 */
-.minimax-clip-tailframe.on { color:#052e1a; background:#34d399; opacity:1; box-shadow:0 0 0 1px #6ee7b7, 0 0 8px rgba(52,211,153,.55); }
-.minimax-clip-tailframe.on:hover { background:#6ee7b7; }
-/* 截取尾帧的瞬时反馈 toast（自包含，不依赖 antd App 上下文） */
-.minimax-clip-flash { position:absolute; left:50%; bottom:5px; transform:translateX(-50%); z-index:6; max-width:92%; padding:2px 6px; border-radius:4px; font-size:22px; line-height:1.25; text-align:center; background:rgba(15,23,42,.92); color:#e2e8f0; pointer-events:none; white-space:normal; }
-.minimax-clip-flash.ok { color:#86efac; }
-.minimax-clip-flash.err { color:#fca5a5; }
+/* ❌ 删除按钮：右上角。
+   尺寸必须用固定 px：这里曾经是 width:10%（相对 Clip 卡片宽度），
+   而 Clip 宽度按时长变化，于是同一行里时长越长的 Clip 按钮越大。
+   行高固定（clip 卡片 top/bottom 各 10px），按它取常量，视觉尺寸对所有 Clip 一致。 */
+.minimax-clip-delete { position:absolute; right:6px; top:6px; z-index:4; width:32px; height:32px; padding:0; border:0; border-radius:50%; background:rgba(15,23,42,.86); color:#e2e8f0; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:18px; line-height:1; opacity:.72; transition:opacity .12s ease,background .12s ease; }
+.minimax-clip-delete svg { width:18px; height:18px; stroke-width:2.4; }
+.minimax-clip-delete:hover { opacity:1; background:rgba(15,23,42,.97); color:#fff; }
 .minimax-current-panel { min-width:0; min-height:0; position:relative; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:72px minmax(0,1fr); overflow:hidden; border:1px solid #111827; border-radius:6px; background:#17191c; }
 .minimax-current-head { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; padding:0 10px; border-bottom:1px solid #2f3338; background:#202328; }
 .minimax-current-title,.minimax-current-refs { display:flex; align-items:center; gap:14px; color:#f8fafc; font-size:23px; }.minimax-current-title span:last-child { color:#94a3b8; }
@@ -589,9 +577,8 @@
 .minimax-library-list,.minimax-edit-timeline,.minimax-current-panel { color:var(--h3-text); }
 .minimax-material-card { border-color:var(--h3-border) !important; background:var(--h3-fill) !important; box-shadow:none !important; }
 .minimax-material-card:hover { border-color:var(--h3-muted) !important; background:var(--h3-hover) !important; box-shadow:none !important; }
-.minimax-clip-delete,.minimax-clip-motion { background:var(--h3-toolbar); color:var(--h3-text); }
-.minimax-clip-motion { color:#38bdf8; }
-.minimax-clip-motion.off { color:#94a3b8; }
+/* 删除按钮主题化：跟随面板底色，但不改尺寸/定位（尺寸在基础规则里已固定为 px）。 */
+.minimax-clip-delete { background:var(--h3-toolbar); color:var(--h3-text); }
 .minimax-clip-delete:hover { opacity:1; background:rgba(15,23,42,.95); color:#fff; }
 .minimax-player-stage { border-color:var(--h3-border); background:var(--h3-fill); box-shadow:none; }
 .minimax-player-stage video,.minimax-player-stage img { background:var(--h3-fill); }
@@ -754,19 +741,10 @@
 .minimax-playhead { position:absolute; top:0; bottom:0; z-index:14; width:4px; margin-left:-1px; background:#3b82f6; pointer-events:none; box-shadow:0 0 0 1px rgba(0,0,0,.22); }
 .minimax-playhead-marker { z-index:15; top:0; bottom:auto; width:0; height:0; margin-left:-6px; border-left:6px solid transparent; border-right:6px solid transparent; border-top:8px solid #3b82f6; background:transparent; box-shadow:none; }
 
-/* Output 区域双击放大预览（lightbox） */
-.minimax-lightbox { position:fixed; inset:0; z-index:9999; display:flex; align-items:center; justify-content:center; background:rgba(2,6,23,.82); backdrop-filter:blur(2px); }
-.minimax-lightbox-body { position:relative; display:flex; flex-direction:column; align-items:center; gap:8px; max-width:94vw; max-height:92vh; }
-.minimax-lightbox-body video,.minimax-lightbox-body img { display:block; max-width:92vw; max-height:84vh; border-radius:8px; background:#000; box-shadow:0 18px 60px rgba(0,0,0,.6); }
+/* 放大预览已统一交给宿主的统一预览弹窗（ctx.openMediaPreview），这里不再维护插件侧灯箱样式。 */
 .minimax-frame-menu { position:absolute; z-index:9999; width:220px; padding:6px; border:1px solid #4b5563; border-radius:8px; background:#24272b; box-shadow:0 10px 30px rgba(0,0,0,.48); font-size:20px; }
 .minimax-frame-menu button { display:block; width:100%; height:48px; padding:0 12px; border:0; border-radius:5px; background:transparent; color:#d1d5db; font-size:20px; font-weight:600; line-height:48px; text-align:left; cursor:pointer; }
 .minimax-frame-menu button:hover,.minimax-frame-menu button:focus-visible { background:#343a40; color:#fff; outline:none; }
-.minimax-lightbox-name { color:#e2e8f0; font-size:24px; font-weight:700; padding:2px 10px; border-radius:999px; background:rgba(15,23,42,.7); }
-/* 灯箱预览文件名旁的分辨率：图片/视频加载后显示真实尺寸 */
-.minimax-lightbox-resolution { margin-left:10px; font-size:20px; font-weight:600; color:#94a3b8; opacity:.9; font-variant-numeric:tabular-nums; }
-.minimax-lightbox-close { position:fixed; top:16px; right:18px; width:36px; height:36px; border:1px solid rgba(255,255,255,.22); border-radius:9px; background:rgba(15,23,42,.86); color:#e2e8f0; cursor:pointer; display:flex; align-items:center; justify-content:center; }
-.minimax-lightbox-close:hover { border-color:rgba(125,211,252,.7); background:#16445b; color:#e0f2fe; }
-.minimax-lightbox-close svg { width:18px; height:18px; }
 
 /* H3 参考素材职责弹窗内服装缩略图右上角的放大预览按钮：
    浮在缩略图上，用固定深色浮层配色，保证任意服装图下都清晰可读。 */

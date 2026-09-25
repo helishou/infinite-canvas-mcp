@@ -5,7 +5,6 @@ import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3Ref, H3ReferenceRole, H3ReferenceUsage } from "../types";
 import { inferReferenceRole } from "../services/h3-data";
 import { H3Icon } from "./H3Icon";
-import { H3PreviewLightbox } from "./H3PreviewLightbox";
 
 const ROLE_OPTIONS: Array<{ value: H3ReferenceRole; label: string }> = [
     ["character_identity", "人物形象"], ["character_turnaround", "人物四视图"], ["scene", "场景基准"],
@@ -35,6 +34,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const [usage, setUsage] = useState<H3ReferenceUsage>(characterReference ? "reference" : refItem.usage || "reference");
     const [description, setDescription] = useState(refItem.description || "");
     const [storyboardSubjectIds, setStoryboardSubjectIds] = useState<string[]>(refItem.storyboardSubjectIds || []);
+    const [outfitEnabled, setOutfitEnabled] = useState(group?.outfitEnabled ?? Boolean(group?.outfits.some((outfit) => outfit.enabled)));
     const [voiceEnabled, setVoiceEnabled] = useState(group?.voiceEnabled ?? false);
     const [analyzing, setAnalyzing] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -43,17 +43,16 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const [analysisSummary, setAnalysisSummary] = useState(typeof refItem.analysis?.summary === "string" ? refItem.analysis.summary : "");
     const [analysisMetadata, setAnalysisMetadata] = useState<Record<string, unknown>>(refItem.analysis || {});
     const persistedAnalysis = useRef<Record<string, unknown>>(refItem.analysis || {});
-    const [previewItem, setPreviewItem] = useState<H3Ref | null>(null);
 
     useEffect(() => {
         setRole(characterReference ? sourceRole : inferReferenceRole(refItem));
         setUsage(characterReference ? "reference" : refItem.usage || "reference");
         setDescription(refItem.description || "");
         setStoryboardSubjectIds(refItem.storyboardSubjectIds || []);
+        setOutfitEnabled(group?.outfitEnabled ?? Boolean(group?.outfits.some((outfit) => outfit.enabled)));
         setVoiceEnabled(group?.voiceEnabled ?? false);
         setAnalysis("");
         setSaveError("");
-        setPreviewItem(null);
         let cancelled = false;
         void ctx.references.list().then((assets) => {
             const metadata = assets.find((asset) => asset.id === refItem.assetId)?.analysis || refItem.analysis || {};
@@ -86,9 +85,8 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
             await ctx.references.upsert({ id: next.assetId, analysis: nextAnalysis });
             persistedAnalysis.current = nextAnalysis;
         }
-        // 服装选择区已在 UI 中移除：patch 里不带 outfitEnabled，避免覆盖存量的 outfit.enabled；
-        // 声线开关保留，照旧提交 voiceEnabled。
-        const characterPatch = group ? { voiceEnabled } : undefined;
+        // 服装与声线分别开关：只提交总开关，不覆盖逐套服装的 enabled 目录状态。
+        const characterPatch = group ? { outfitEnabled, voiceEnabled } : undefined;
         onApply(next, characterPatch);
         onClose();
         } catch (error) {
@@ -119,10 +117,11 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         } finally { setAnalyzing(false); }
     };
 
-    const openPreview = () => setPreviewItem(refItem);
+    // 放大预览走宿主的统一预览弹窗（ctx.openMediaPreview），插件不自带灯箱。
+    const openPreview = () => ctx.openMediaPreview({ url: refItem.url, name: refItem.name, type: refItem.type });
 
     return <>
-        <Modal open title="参考素材职责" onCancel={onClose} onOk={() => void apply()} confirmLoading={saving} okText="应用到当前 Clip" cancelText="取消" width={560} destroyOnHidden keyboard={!previewItem}>
+        <Modal open title="参考素材职责" onCancel={onClose} onOk={() => void apply()} confirmLoading={saving} okText="应用到当前 Clip" cancelText="取消" width={560} destroyOnHidden>
             <div style={{ display: "grid", gridTemplateColumns: "144px 1fr", gap: 18, paddingTop: 8 }}>
                 <div style={{ position: "relative", alignSelf: "start", border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 8, overflow: "hidden", background: ctx.theme.node.panel, minHeight: 110 }}>
                     {refItem.type === "image" ? <img src={refItem.url} alt={refItem.name} style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }} /> : refItem.type === "video" && refItem.url ? <video src={`${refItem.url}${refItem.url.includes("?") ? "&" : "?"}t=0.001`} preload="metadata" muted playsInline style={{ width: "100%", height: 110, objectFit: "cover", display: "block", background: "#000" }} /> : <div style={{ display: "grid", placeItems: "center", height: 110, fontSize: 12, opacity: 0.65 }}>{refItem.type === "video" ? "视频参考" : "音频参考"}</div>}
@@ -136,14 +135,19 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                     {!characterReference ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>主要职责</span><Select value={role} options={ROLE_OPTIONS} onChange={setRole} /></label> : null}
-                    {/* 服装缩略图选择区已移除：角色节点连 H3 时按 characterPrimaryIndex 自动取主图，不再在 modal 里展示/勾选服装。 */}
+                    {/* 服装与声线是两个独立参考；关闭服装不会删除声线或角色组。 */}
+                    {group ? <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 8, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
+                        <span style={{ fontSize: 12 }}>服装参考</span>
+                        <span style={{ flex: 1, minWidth: 0, fontSize: 12, opacity: group.outfits.length ? 0.8 : 0.45 }}>{group.outfits.length ? `${group.outfits.length} 套服装` : "暂无服装，仅使用声线"}</span>
+                        <Switch size="small" checked={outfitEnabled && group.outfits.length > 0} disabled={!group.outfits.length} onChange={setOutfitEnabled} />
+                    </div> : null}
                     {group?.voice ? <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 8, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
                         <span style={{ fontSize: 12 }}>声线</span>
                         <span style={{ flex: 1, minWidth: 0 }}>
                             <span style={{ display: "block", fontSize: 12, opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.voice.name}</span>
                             {group.voice.description ? <span style={{ display: "block", marginTop: 2, fontSize: 11, opacity: 0.55 }}>{group.voice.description}</span> : null}
                         </span>
-                        <Button type="text" size="small" icon={<Play className="size-3.5" />} onClick={() => setPreviewItem({ ...group.voice!, type: "audio" })}>试听</Button>
+                        <Button type="text" size="small" icon={<Play className="size-3.5" />} onClick={() => ctx.openMediaPreview({ url: group.voice!.url, name: group.voice!.name, type: "audio" })}>试听</Button>
                         <Switch size="small" checked={voiceEnabled} onChange={setVoiceEnabled} />
                     </div> : null}
                     {isStoryboardImage ? <div style={{ display: "grid", gap: 6 }}>
@@ -170,6 +174,5 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                 </div>
             </div>
         </Modal>
-        <H3PreviewLightbox item={previewItem} onClose={() => setPreviewItem(null)} />
     </>;
 }

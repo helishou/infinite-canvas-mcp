@@ -40,6 +40,7 @@ export function buildNodeContext(host: CanvasPluginHost, node: CanvasNodeData, t
         openPanel: () => host.openPanel(node.id),
         closePanel: () => host.closePanel(),
         openAssetPicker: (options) => host.openAssetPicker(options),
+        openMediaPreview: (item) => host.openMediaPreview(item),
         storage,
         generationLogs: host.generationLogs,
     };

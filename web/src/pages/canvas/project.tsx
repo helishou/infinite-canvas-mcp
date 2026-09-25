@@ -50,7 +50,8 @@ import { CanvasLoopNode } from "@/components/canvas/canvas-loop-node";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { CharacterNodeEditModal } from "@/components/canvas/character-node-edit-modal";
 import { SceneNodeEditModal } from "@/components/canvas/scene-node-edit-modal";
-import { ImageCompareModal } from "@/components/canvas/image-compare-modal";
+import { MediaPreviewModal } from "@/components/canvas/media-preview-modal";
+import type { CanvasMediaPreview } from "@/types/canvas-plugin";
 import { InfiniteCanvas, type ViewportChangeOptions } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNodeViewportItem } from "@/components/canvas/canvas-node";
@@ -72,7 +73,7 @@ import { useCopyText } from "@/hooks/use-copy-text";
 import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
-import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, insertOrderedGroupSlot, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupMemberPosition, orderedGroupMemberSize, orderedGroupResizeLayout, orderedGroupSlots, replaceOrderedGroupSlot, swapOrderedGroupSlot, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
+import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, insertOrderedGroupSlot, moveOrderedGroupSlot, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupMemberPosition, orderedGroupMemberSize, orderedGroupResizeLayout, orderedGroupSlots, replaceOrderedGroupSlot, swapOrderedGroupSlot, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
 import { clearCanvasDragPreview, clearCanvasResizePreview, writeCanvasDragPreview, writeCanvasResizePreview, type CanvasResizePreviewBounds } from "@/lib/canvas/canvas-drag-preview";
 import {
     audioExtension,
@@ -1046,6 +1047,18 @@ function InfiniteCanvasPage() {
     );
     const [previewContent, setPreviewContent] = useState("");
     const [previewBeforeContent, setPreviewBeforeContent] = useState<string | null>(null);
+    // 插件经 ctx.openMediaPreview 打开的宿主预览，与节点双击预览共用同一个 MediaPreviewModal。
+    const [hostMediaPreview, setHostMediaPreview] = useState<CanvasMediaPreview | null>(null);
+    const mediaPreviewItem = hostMediaPreview
+        || (previewContent ? { url: previewContent, beforeUrl: previewBeforeContent || undefined, name: previewNode?.title || t("assets.kinds.image"), type: "image" as const } : null);
+    const closeMediaPreview = useCallback(() => {
+        if (hostMediaPreview) {
+            setHostMediaPreview(null);
+            return;
+        }
+        setPreviewNodeId(null);
+        setPreviewImageId(null);
+    }, [hostMediaPreview]);
 
     useEffect(() => {
         let cancelled = false;
@@ -1231,6 +1244,8 @@ function InfiniteCanvasPage() {
             }),
         [],
     );
+    // 插件预览统一交给宿主的 MediaPreviewModal：插件不再自带灯箱，避免画布里出现多套预览弹窗。
+    const openMediaPreview = useCallback((item: CanvasMediaPreview) => setHostMediaPreview(item), []);
     const { pluginHost, renderPluginPanel, buildNodeToolbarItems } = usePluginHost({
         projectId,
         effectiveConfig,
@@ -1243,6 +1258,7 @@ function InfiniteCanvasPage() {
         setNodes,
         setDialogNodeId,
         openAssetPicker,
+        openMediaPreview,
         applyAgentOps,
     });
     const pluginToolbarItems = useMemo(() => (toolbarNode ? buildNodeToolbarItems(toolbarNode) : undefined), [buildNodeToolbarItems, toolbarEditing, toolbarNode]);
@@ -1963,22 +1979,20 @@ function InfiniteCanvasPage() {
                     // Character 节点：作为单个 character 派发到 H3 ref 槽，由 H3 端建/复用角色组并把 outfit/voice 拆为 refs。
                     if (node.type === CanvasNodeType.Character) {
                         const images = (node.metadata?.characterImages || []).filter((image) => image.url);
-                        return images.length
-                            ? {
-                                  nodeId: node.id,
-                                  type: "character" as const,
-                                  kind: "character" as const,
-                                  characterNodeId: node.id,
-                                  characterName: node.title || "角色",
-                                  characterImages: images.map((image) => ({ url: image.url, name: image.outfit || image.name || "outfit", storageKey: image.storageKey, mimeType: image.mimeType })),
-                                  characterPrimaryIndex: node.metadata?.characterPrimaryIndex || 0,
-                                  characterVoiceUrl: node.metadata?.characterVoiceUrl,
-                                  characterVoiceName: node.metadata?.characterVoiceName,
-                                  characterVoiceDescription: node.metadata?.characterVoiceDescription,
-                                  characterVoiceStorageKey: node.metadata?.characterVoiceStorageKey,
-                                  characterVoiceAssetId: node.metadata?.characterVoiceAssetId,
-                              }
-                            : undefined;
+                        return {
+                            nodeId: node.id,
+                            type: "character" as const,
+                            kind: "character" as const,
+                            characterNodeId: node.id,
+                            characterName: node.title || "角色",
+                            characterImages: images.map((image) => ({ url: image.url, name: image.outfit || image.name || "outfit", storageKey: image.storageKey, mimeType: image.mimeType })),
+                            characterPrimaryIndex: node.metadata?.characterPrimaryIndex || 0,
+                            characterVoiceUrl: node.metadata?.characterVoiceUrl,
+                            characterVoiceName: node.metadata?.characterVoiceName,
+                            characterVoiceDescription: node.metadata?.characterVoiceDescription,
+                            characterVoiceStorageKey: node.metadata?.characterVoiceStorageKey,
+                            characterVoiceAssetId: node.metadata?.characterVoiceAssetId,
+                        };
                     }
                     if (node.type === CanvasNodeType.Scene) {
                         const image = node.metadata?.sceneImage;
@@ -1997,30 +2011,29 @@ function InfiniteCanvasPage() {
         [projectId],
     );
 
-    const applyOrderedGroupDrop = useCallback((draggedId: string, point: Position, pointerPoint: Position = point) => {
+    const applyOrderedGroupDrop = useCallback((draggedId: string, point: Position) => {
         const current = nodesRef.current;
         const dragged = current.find((item) => item.id === draggedId);
         if (!dragged || dragged.type === CanvasNodeType.Group) return false;
-        const targetGroup = current.find((item) => item.type === CanvasNodeType.Group && item.metadata?.orderedGroup && pointerPoint.x >= item.position.x && pointerPoint.x <= item.position.x + item.width && pointerPoint.y >= item.position.y && pointerPoint.y <= item.position.y + item.height);
+        const targetGroup = current.find((item) => item.type === CanvasNodeType.Group && item.metadata?.orderedGroup && point.x >= item.position.x && point.x <= item.position.x + item.width && point.y >= item.position.y && point.y <= item.position.y + item.height);
         if (!targetGroup) return false;
+        const displaySlots = orderedGroupDisplaySlots(orderedGroupSlots(targetGroup, current), orderedGroupColumnCount(targetGroup));
+        const slotAreas = orderedGroupLayout(targetGroup, displaySlots.length).flatMap((cell, index) => {
+            const memberId = displaySlots[index];
+            if (!memberId) return [{ ...cell, x: targetGroup.position.x + cell.x, y: targetGroup.position.y + cell.y }];
+            const member = current.find((item) => item.id === memberId);
+            return member ? [{ index, x: member.position.x, y: member.position.y, width: member.width, height: member.height }] : [];
+        });
+        // 图片通常从边角/标题处拖入，按图片中心而非鼠标抓取点确定槽位。
+        const drop = orderedGroupDropTarget(targetGroup, displaySlots.length, point, slotAreas);
+        if (!drop) return false;
         let inheritedOutputSourceId: string | undefined;
         setNodes((prev) => {
-            const sourceGroup = prev.find((item) => item.id === draggedId ? false : item.id === dragged.metadata?.groupId && item.metadata?.orderedGroup);
+            const sourceGroup = prev.find((item) => item.type === CanvasNodeType.Group && item.metadata?.orderedGroup && orderedGroupSlots(item, prev).includes(draggedId));
             const target = prev.find((item) => item.id === targetGroup.id);
             if (!target) return prev;
             const sourceSlots = sourceGroup ? orderedGroupSlots(sourceGroup, prev) : null;
             const targetSlots = orderedGroupSlots(target, prev);
-            const targetDisplaySlots = orderedGroupDisplaySlots(targetSlots, orderedGroupColumnCount(target));
-            const targetLayouts = orderedGroupLayout(target, targetDisplaySlots.length);
-            const slotAreas = targetLayouts.flatMap((cell, index) => {
-                const memberId = targetDisplaySlots[index];
-                if (!memberId) return [{ ...cell, x: target.position.x + cell.x, y: target.position.y + cell.y }];
-                const member = prev.find((item) => item.id === memberId);
-                return member ? [{ index, x: member.position.x, y: member.position.y, width: member.width, height: member.height }] : [];
-            });
-            const dropPoint = sourceGroup ? point : pointerPoint;
-            const drop = orderedGroupDropTarget(target, targetDisplaySlots.length, dropPoint, slotAreas);
-            if (!drop) return prev;
             const sourceIndex = sourceSlots?.indexOf(draggedId) ?? -1;
             const targetIndex = Math.max(0, Math.min(drop.index, targetSlots.length));
             let nextTargetSlots = [...targetSlots];
@@ -2030,7 +2043,7 @@ function InfiniteCanvasPage() {
                 if (drop.kind === "slot" && nextTargetSlots[targetIndex] && nextTargetSlots[targetIndex] !== draggedId) {
                     nextTargetSlots = swapOrderedGroupSlot(nextTargetSlots, sourceIndex, targetIndex);
                 } else {
-                    nextTargetSlots = insertOrderedGroupSlot(nextTargetSlots, draggedId, targetIndex);
+                    nextTargetSlots = moveOrderedGroupSlot(nextTargetSlots, sourceIndex, targetIndex);
                 }
             } else {
                 if (drop.kind === "slot" && targetIndex < nextTargetSlots.length) {
@@ -2128,7 +2141,7 @@ function InfiniteCanvasPage() {
                 const draggedInitialPosition = draggedId ? initialPositions.get(draggedId) || draggedNode?.position : undefined;
                 const pointerPoint = screenToCanvas(clientX, clientY);
                 const orderedDropPoint = draggedNode && draggedInitialPosition ? orderedGroupDraggedCenter(draggedInitialPosition, { x: dx, y: dy }, draggedNode) : pointerPoint;
-                const orderedHandled = draggedId ? applyOrderedGroupDrop(draggedId, orderedDropPoint, pointerPoint) : false;
+                const orderedHandled = draggedId ? applyOrderedGroupDrop(draggedId, orderedDropPoint) : false;
                 if (!orderedHandled) setNodes((prev) => {
                     const moved = prev.map((node) => {
                         const initial = initialPositions.get(node.id);
@@ -3484,8 +3497,10 @@ function InfiniteCanvasPage() {
         async (node: CanvasNodeData) => {
             if (node.type !== CanvasNodeType.Character) return;
             const images = node.metadata?.characterImages || [];
-            if (!images.length) {
-                message.warning(t("assets.characterRequireOneImage"));
+            const voiceUrl = node.metadata?.characterVoiceUrl || "";
+            const voiceStorageKey = node.metadata?.characterVoiceStorageKey || "";
+            if (!images.length && !voiceUrl && !voiceStorageKey) {
+                message.warning(t("assets.characterRequireReference"));
                 return;
             }
             const name = (node.title || "").trim();
@@ -3495,17 +3510,17 @@ function InfiniteCanvasPage() {
             }
             const existing = useAssetStore.getState().assets.find((asset) => asset.kind === "character" && asset.id === node.metadata?.characterAssetId)
                 || useAssetStore.getState().assets.find((asset) => asset.kind === "character" && (asset.data.name || asset.title) === name);
-            const voiceUrl = node.metadata?.characterVoiceUrl || "";
-            const voiceStorageKey = node.metadata?.characterVoiceStorageKey || "";
             const voiceAssetId = node.metadata?.characterVoiceAssetId || "";
             const voiceAsset = findCharacterVoiceAsset(
                 useAssetStore.getState().assets.filter((asset): asset is AudioAsset => asset.kind === "audio"),
                 { assetId: voiceAssetId, storageKey: voiceStorageKey, url: voiceUrl },
             );
-            const assetPrimaryIndex = existing?.kind === "character"
-                ? retainCharacterPrimaryIndex(existing.data.images, existing.data.primaryIndex || 0, images)
-                : Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), images.length - 1);
-            const coverUrl = images[assetPrimaryIndex]?.url || images[0].url;
+            const assetPrimaryIndex = images.length
+                ? existing?.kind === "character"
+                    ? retainCharacterPrimaryIndex(existing.data.images, existing.data.primaryIndex || 0, images)
+                    : Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), images.length - 1)
+                : 0;
+            const coverUrl = images[assetPrimaryIndex]?.url || "";
             const data = {
                 name,
                 englishName: node.metadata?.characterEnglishName || "",
@@ -5453,7 +5468,7 @@ function InfiniteCanvasPage() {
                     onSave={saveSceneEdit}
                 />
 
-                <ImageCompareModal open={Boolean(previewContent)} beforeUrl={previewBeforeContent} afterUrl={previewContent || ""} title={previewNode?.title || t("assets.kinds.image")} onClose={() => setPreviewNodeId(null)} />
+                <MediaPreviewModal item={mediaPreviewItem} onClose={closeMediaPreview} />
 
                 <Modal
                     title={t("canvas.projectPage.clearTitle")}

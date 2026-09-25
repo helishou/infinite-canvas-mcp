@@ -5,7 +5,6 @@ import { buildRestoreParamsPatch } from "../services/h3-segment-utils";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { H3Icon } from "./H3Icon";
 import { H3MaterialCard } from "./H3MaterialCard";
-import { H3PreviewLightbox } from "./H3PreviewLightbox";
 import { message } from "antd";
 
 type Props = { ctx: CanvasNodeContext; outputs: H3Ref[]; segments: H3Segment[]; selected?: H3Segment; patchSelected: (patch: Partial<H3Segment>) => void };
@@ -13,7 +12,6 @@ type Props = { ctx: CanvasNodeContext; outputs: H3Ref[]; segments: H3Segment[]; 
 export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
     const [outputFilter, setOutputFilter] = useState<"all" | "current">(String(ctx.node.metadata?.minimaxOutputFilter || "") === "current" ? "current" : "all");
     const [historyOutputs, setHistoryOutputs] = useState<H3Ref[]>([]);
-    const [previewRef, setPreviewRef] = useState<H3Ref | null>(null);
     // Output 固定单行横向滚动：卡片高度实测面板可用高度自适应（78–380px），宽度=高度×2 保持 2:1。
     const listRef = useRef<HTMLDivElement | null>(null);
     const [cardH, setCardH] = useState(78);
@@ -95,7 +93,7 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
             await ctx.flush();
             await ctx.ai.restoreH3Output({
                 nodeId: ctx.node.id, segmentId: selected.id, generationLogId: source.generationLogId,
-                storageKey: source.storageKey, settings: buildRestoreParamsPatch(liveSegments, source) as Record<string, unknown>,
+                storageKey: source.storageKey, settings: buildRestoreParamsPatch(liveSegments, source, selected) as Record<string, unknown>,
             });
             message.success("已还原当前 Clip 的输出与参数");
         } catch (error) {
@@ -104,7 +102,6 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
     };
     return <aside className="minimax-library">
         <div key="library-head" className="minimax-library-head"><H3Icon name="output" /> <span>Output</span><span className="minimax-output-actions"><button type="button" aria-label="切换输出筛选" aria-pressed={outputFilter === "current"} title={outputFilter === "all" ? "当前显示全部输出，点击只显示当前 Clip" : "当前只显示当前 Clip，点击显示全部输出"} onClick={() => changeOutputFilter(outputFilter === "all" ? "current" : "all")} className={`minimax-output-filter${outputFilter === "current" ? " active" : ""}`}><H3Icon name={outputFilter === "all" ? "filter-all" : "filter-current"} /></button></span></div>
-        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.generationLogId || ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} compact removable onRestore={() => void restoreOutput(ref)} onOpenPreview={() => setPreviewRef(ref)} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>Output</span></div> : null}</div>
-        {previewRef ? <H3PreviewLightbox item={{ ...previewRef, url: previewRef.storageKey ? ctx.mediaUrl(previewRef.storageKey) : previewRef.url }} onClose={() => setPreviewRef(null)} /> : null}
+        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.generationLogId || ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} compact removable onRestore={() => void restoreOutput(ref)} onOpenPreview={() => ctx.openMediaPreview({ url: ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url, name: ref.name, type: ref.type })} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>Output</span></div> : null}</div>
     </aside>;
 }
