@@ -76,6 +76,26 @@ test("旧页面移除 H3 参考时携带旧字段副本，事务保留删除意�
     assert.deepEqual(db.getCanvasProject("legacy-retry"), receipt.project);
 });
 
+test("旧检查点含参考副本时仍能重取已提交 H3 操作的原回执", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    const oldBindings = ["first", "second"].map((name) => ({ id: `binding-${name}`, assetId: `asset-${name}`, storageKey: `image:${name}`, mediaType: "image" }));
+    db.createCanvasProject({ id: "history-replay", nodes: [{ id: "h3", type: "minimax-h3:video", metadata: { segments: [{ id: "ep01-v02", referenceBindings: oldBindings }] } }], connections: [] });
+    const operation = { type: "update_h3_segment", nodeId: "h3", segmentId: "ep01-v02", patch: {
+        referenceBindings: [...oldBindings, { id: "binding-third", assetId: "asset-third", storageKey: "image:third", mediaType: "image" }],
+    } };
+    const first = db.applyCanvasProjectOperations("history-replay", undefined, [operation], { operationId: "already-committed" });
+    const rawDb = (db as unknown as { db: { prepare: (sql: string) => { get: (...values: unknown[]) => { data_json: string }; run: (...values: unknown[]) => void } } }).db;
+    const checkpoint = JSON.parse(rawDb.prepare("SELECT data_json FROM canvas_collaboration_checkpoints WHERE project_id = ?").get("history-replay").data_json) as Record<string, any>;
+    checkpoint.nodes[0].metadata.segments[0].refItems = oldBindings.map((binding) => ({ bindingId: binding.id, storageKey: binding.storageKey, type: "image" }));
+    rawDb.prepare("UPDATE canvas_collaboration_checkpoints SET data_json = ? WHERE project_id = ?").run(JSON.stringify(checkpoint), "history-replay");
+
+    const duplicate = db.applyCanvasProjectOperations("history-replay", undefined, [operation], { operationId: "already-committed" });
+    assert.equal(duplicate.duplicated, true);
+    assert.deepEqual(duplicate.project, first.project);
+    assert.deepEqual(db.getCanvasProject("history-replay"), first.project);
+});
+
 test("进程内任务权限可更新状态，普通提示词/布局仍可编辑", (t) => {
     const db = fixture(t);
     db.applyCanvasProjectOperations("p", undefined, [

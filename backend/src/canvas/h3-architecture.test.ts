@@ -101,6 +101,56 @@ test("关闭角色服装后前端重发旧 refItems 不应被当作丢弃原数�
     assert.equal((segment.referenceBindings as unknown[]).length, 5, "关闭服装不应误删 referenceBindings");
 });
 
+/** Clip 参考绑定夹具：5 条真实角色/分镜/声线绑定。 */
+const H3_REF_BINDINGS = [
+    { id: "b1", assetId: "a1", label: "分镜图1", role: "storyboard", mediaType: "image", storageKey: "image:1" },
+    { id: "b2", assetId: "a2", label: "分镜图2", role: "storyboard", mediaType: "image", storageKey: "image:2" },
+    { id: "b3", assetId: "a3", label: "沈侯服装", role: "character_turnaround", mediaType: "image", storageKey: "image:3" },
+    { id: "b4", assetId: "a4", label: "沈侯声线", role: "character_voice", mediaType: "audio", storageKey: "audio:4" },
+    { id: "b5", assetId: "a5", label: "沈昭宁服装", role: "character_turnaround", mediaType: "image", storageKey: "image:5" },
+];
+const h3PickBindings = (ids: string[]) => H3_REF_BINDINGS.filter((binding) => ids.includes(String(binding.id)));
+const h3LegacyRefs = (ids: string[]) => h3PickBindings(ids).map((binding) => ({ bindingId: binding.id, assetId: binding.assetId, storageKey: binding.storageKey, type: binding.mediaType, name: binding.label, role: binding.role }));
+
+function h3SegmentNode(nextIds: string[], legacyIds: string[]): Record<string, unknown> {
+    return {
+        id: "h3",
+        type: "minimax-h3:video",
+        metadata: { segments: [{ id: "ep01-v02", title: "V02", referenceBindings: h3PickBindings(nextIds), refItems: h3LegacyRefs(legacyIds) }] },
+    };
+}
+
+test("关闭服装后前端重发夹带已移除绑定的旧镜像按当前绑定放行", () => {
+    // 存储态干净（5 绑定、无旧字段）；用户关掉沈侯服装后前端把 b3 从绑定移除，
+    // 但内存里的旧字段仍夹带 b3 且已不含 b4 —— 既不是上一版的镜像，也不是当前绑定的镜像。
+    const previousSegments = new Map([["ep01-v02", { id: "ep01-v02", referenceBindings: h3PickBindings(["b1", "b2", "b3", "b4", "b5"]) }]]);
+    const node = h3SegmentNode(["b1", "b2", "b4", "b5"], ["b1", "b2", "b3", "b5"]);
+    canonicalizeH3References(node, undefined, previousSegments);
+    const segment = (node.metadata as { segments: Array<Record<string, unknown>> }).segments[0];
+    assert.equal("refItems" in segment, false, "旧字段必须被清掉");
+    assert.equal("refs" in segment, false, "旧字段必须被清掉");
+    assert.deepEqual((segment.referenceBindings as Array<{ id: string }>).map((binding) => binding.id), ["b1", "b2", "b4", "b5"], "绑定真值不被旧字段改写");
+});
+
+test("关闭声线后前端重发夹带已移除绑定的旧镜像同样放行", () => {
+    const previousSegments = new Map([["ep01-v02", { id: "ep01-v02", referenceBindings: h3PickBindings(["b1", "b2", "b3", "b4", "b5"]) }]]);
+    assert.doesNotThrow(() => canonicalizeH3References(h3SegmentNode(["b1", "b2", "b3", "b5"], ["b1", "b2", "b3", "b5"]), undefined, previousSegments));
+});
+
+test("放行后引用两版绑定都不存在的旧字段仍然拒绝", () => {
+    // 没有上一版可对照（导入 / 迁移路径）：旧字段是唯一记录，引用不存在的 binding 必须拒绝。
+    assert.throws(() => canonicalizeH3References(h3SegmentNode(["b1"], ["b1", "b2"]), undefined, undefined), /拒绝丢弃原数据/);
+});
+
+test("上一版本身就带旧字段时仍按迁移规则校验", () => {
+    const previousSegments = new Map([["ep01-v02", {
+        id: "ep01-v02",
+        referenceBindings: h3PickBindings(["b1"]),
+        refItems: h3LegacyRefs(["b1", "b2"]),
+    }]]);
+    assert.throws(() => canonicalizeH3References(h3SegmentNode(["b1"], ["b1", "b2"]), undefined, previousSegments), /拒绝丢弃原数据/);
+});
+
 test("导入旧 H3 画布时也归档不一致的参考快照", (t) => {
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());

@@ -230,6 +230,12 @@ export function applyBackendCanvasOperations(projectId: string, operations: Arra
     );
 }
 
+export function fetchBackendCanvasOperationReceipt(projectId: string, operationId: string) {
+    return request<{ ok: boolean; committed: boolean; revision?: number }>(
+        "GET", `/canvas/projects/${encodeURIComponent(projectId)}/ops/${encodeURIComponent(operationId)}/receipt`,
+    );
+}
+
 export function deleteBackendProject(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/projects/${encodeURIComponent(id)}`);
 }

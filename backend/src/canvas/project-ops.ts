@@ -423,11 +423,20 @@ export function canonicalizeH3References(node: Record<string, unknown>, archiveL
                 && legacyRefs.every((ref) => !ref.bindingId || currentBindings.some((binding) => String(binding.id || "") === String(ref.bindingId)));
             // 旧字段是绑定的历史镜像，不是一次独立意图。只有在「上一版本来就是干净的绑定」
             // 时，本批夹带的旧字段才必然是过期残留（关掉服装/声线后前端仍会重发它）：
-            // 此时没有绑定被丢弃，按当前绑定放行。上一版仍带旧字段说明真在迁移或扩充，
-            // 继续按原有规则校验。
+            // 此时按当前绑定放行。上一版仍带旧字段说明真在迁移或扩充，继续按原有规则校验。
+            //
+            // 可放行的旧字段可以引用「上一版或当前版绑定里存在过」的 binding：用户在 UI 关闭
+            // 服装/声线后，前端内存里的旧字段仍夹带着刚被移除的那条 bindingId，而它的真值
+            // （当前绑定）已经完整表达了用户意图。只有旧字段引用了两版绑定都没有的 binding，
+            // 才可能丢掉唯一一份原数据，那种情况仍然拒绝。
+            const knownBindingIds = new Set([
+                ...previousBindings.map((binding) => String(binding.id || "")),
+                ...currentBindings.map((binding) => String(binding.id || "")),
+            ]);
+            const mirrorsKnownBinding = (ref: Record<string, unknown>) => !ref.bindingId || knownBindingIds.has(String(ref.bindingId));
             const legacyIsStaleSubset = !previousHadLegacy
-                && legacyRefs.every((ref) => !ref.bindingId || currentBindings.some((binding) => String(binding.id || "") === String(ref.bindingId)))
-                && bucketRefs.every((ref) => !ref.bindingId || currentBindings.some((binding) => String(binding.id || "") === String(ref.bindingId)));
+                && legacyRefs.every(mirrorsKnownBinding)
+                && bucketRefs.every(mirrorsKnownBinding);
             if (!mirrorsPrevious && !mirrorsCurrent && !unchangedExisting && !legacyIsStaleSubset) {
                 throw new Error(`H3 Clip ${String(segment.id || "")} 的绑定与旧参考不一致，拒绝丢弃原数据`);
             }

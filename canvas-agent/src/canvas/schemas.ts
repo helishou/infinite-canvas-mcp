@@ -315,14 +315,16 @@ export const toolInputSchemas = {
       .describe("最多返回多少个节点摘要，默认 100，最大 500"),
   }),
   canvas_get_state: canvasProjectSchema.passthrough().extend({
+    view: z.enum(["index", "graph"]).optional().describe("默认 index：全部节点的 ID、类型、标题及生成模式；graph：节点布局摘要和连线"),
+    ifRevision: z.number().int().min(0).optional().describe("只用于指定 projectId 的默认完整节点目录；revision 相同则返回 unchanged"),
     nodeIds: z
       .array(z.string())
       .optional()
       .describe(
         "只取这些节点的完整数据及其相关连线；超出输出上限时返回节点摘要并标记 metadataTruncated。传 nodeIds 时忽略分页参数",
       ),
-    nodeOffset: z.number().int().min(0).optional().describe("摘要分页起点；返回 nextNodeOffset 时用该值继续读取"),
-    nodeLimit: z.number().int().min(1).optional().describe("可选的本次节点数上限；省略则尽量返回全部节点摘要，超出当前 MCP 输出上限（默认 512 KiB）时自动分页"),
+    nodeOffset: z.number().int().min(0).optional().describe("目录/图关系分页起点；返回 nextNodeOffset 时用该值继续读取"),
+    nodeLimit: z.number().int().min(1).optional().describe("可选的本次节点数上限；省略则尽量返回全部，超出 MCP 输出上限时自动分页"),
   }),
   canvas_get_selection: canvasProjectSchema.passthrough(),
   canvas_export_snapshot: canvasProjectSchema.passthrough(),
@@ -782,9 +784,9 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_list_projects:
     "列出用户全部画布（仅标题、创建/更新时间、节点数、连线数，不含完整数据），支持 keyword 搜索和 page/pageSize 分页。返回的 id 可配合 site_navigate 跳转到 /canvas/:id 打开对应画布。",
   canvas_inspect:
-    "操作画布前的首选入口。一次返回活动画布、选区、节点摘要、可引用节点、生成目标和已配置模型能力；未选画布时返回候选画布与下一步，不要求调用方猜测隐藏状态。",
+    "需要选择画布或检查已配置模型能力时使用。返回活动画布、选区、部分节点摘要、参考候选和生成目标；已知节点 ID 的操作可直接执行。",
   canvas_get_state:
-    "读取当前画布的节点与连线。默认尽量返回全部节点摘要；超出输出上限时自动分页，按 nextNodeOffset 继续读取。传 nodeIds 只取指定节点的完整数据和相关连线，完整节点超限则回摘要。H3 时间线先用 h3_get_node 读取稳定 Clip ID。",
+    "读取当前画布。默认返回全部节点目录（id/type/title/generationMode），无需布局或连线时用此模式；view: graph 读取节点布局和连线。超限按 nextNodeOffset 分页。已知 nodeIds 时只取指定节点的完整数据和相关连线。完整目录可用 projectId + ifRevision 复查是否变化。H3 时间线用 h3_get_node 读取稳定 Clip ID。",
   canvas_get_selection: "读取当前网页画布选中的节点。",
   canvas_export_snapshot: "导出当前画布快照，用于理解布局。",
   canvas_apply_ops:

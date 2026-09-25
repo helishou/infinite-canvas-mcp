@@ -6,7 +6,7 @@ import i18n from "@/i18n";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { normalizeViewportTransform } from "@/lib/canvas/canvas-viewport";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
-import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, createBackendProject, deleteBackendCanvasFolder, deleteBackendDramaProject, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder } from "@/services/backend-api";
+import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, createBackendProject, deleteBackendCanvasFolder, deleteBackendDramaProject, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendCanvasOperationReceipt, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId } from "@/services/backend-api";
 import { CanvasCommandQueue, type CanvasCommand } from "@/lib/canvas/canvas-command-queue";
@@ -314,6 +314,17 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
             while ((active = pendingCommands.list(project.id)[0])) {
                 if (!active.operations.length) { await pendingCommands.acknowledge(active.operationId); continue; }
                 if (active.rejected) {
+                    // 旧 Backend 曾在“已提交命令重取回执”时误报 400。只在服务端确认
+                    // 原 ID 已提交后解除拒绝，再用原请求取回执；未提交的拒绝仍须用户决策。
+                    if (active.baseRevision !== undefined) {
+                        try {
+                            const receipt = await fetchBackendCanvasOperationReceipt(project.id, active.operationId);
+                            if (receipt.committed) {
+                                await pendingCommands.retryCommittedReceipt(active.operationId);
+                                continue;
+                            }
+                        } catch (error) { console.error("未能核对画布原操作回执，拒绝草稿仍保留", error); }
+                    }
                     setCanvasCommandConflict(project.id, base, active.rejected);
                     break;
                 }

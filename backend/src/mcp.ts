@@ -8,6 +8,7 @@ import {
   executeCollaborationTool,
   isCollaborationTool,
 } from "@basketikun/canvas-agent/collaboration-tools";
+import { CanvasStateOverflowError, summarizeCanvasState, validateCanvasStateInput } from "@basketikun/canvas-agent/state-summary";
 import { nanoid } from "nanoid";
 import type { Express, Request, Response } from "express";
 
@@ -614,12 +615,17 @@ async function executeDirectCanvasTool(
   if (name === "canvas_inspect")
     return inspectCanvasContext(config, backendApi, state, input, getBrowserActiveProjectId);
   const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
+  if (name === "canvas_get_state") {
+    validateCanvasStateInput(input);
+    const project = input.nodeIds || input.view === "graph"
+      ? await fetchCurrentCanvasProject(config, projectId)
+      : await fetchCanvasProjectIndex(config, projectId, input.ifRevision as number | undefined);
+    return compactProjectSummary(project as Record<string, unknown>, input);
+  }
   const project = await fetchCurrentCanvasProject(config, projectId);
   const projectState = project as Record<string, unknown>;
   if (name === "canvas_image_input_manifest")
     return buildCanvasImageInputManifest(project, input);
-  if (name === "canvas_get_state")
-    return compactProjectSummary(projectState, input);
   if (name === "canvas_export_snapshot")
     return compactProject(projectState);
   if (name === "canvas_get_selection") {
@@ -2329,7 +2335,7 @@ async function inspectCanvasContext(
   input: Record<string, unknown>,
   getBrowserActiveProjectId?: BrowserActiveProjectResolver,
 ) {
-  const projects = await fetchCanvasProjects(config);
+  const projects = await fetchCanvasProjects(config, undefined, { summary: true });
   const requestedId = String(input.projectId || "");
   const target = resolveMcpProjectId(state, requestedId, getBrowserActiveProjectId);
   const selectedId = target.projectId;
@@ -2373,6 +2379,7 @@ async function inspectCanvasContext(
     state.activeProjectId = project.id;
     state.activeProjectSource = "session";
   }
+  project = await fetchCurrentCanvasProject(config, project.id);
   const projectState = project as Record<string, unknown>;
   const nodes = nodesOf(projectState);
   const selectedIds = new Set(
@@ -2423,13 +2430,14 @@ async function inspectCanvasContext(
 }
 
 function projectSummary(project: CanvasProject) {
+  const summary = project as Record<string, unknown>;
   return {
     id: project.id,
     title: project.title,
     revision: Number(project.revision || 0),
     updatedAt: project.updatedAt,
-    nodeCount: Array.isArray(project.nodes) ? project.nodes.length : 0,
-    connectionCount: Array.isArray(project.connections)
+    nodeCount: typeof summary.nodeCount === "number" ? summary.nodeCount : Array.isArray(project.nodes) ? project.nodes.length : 0,
+    connectionCount: typeof summary.connectionCount === "number" ? summary.connectionCount : Array.isArray(project.connections)
       ? project.connections.length
       : 0,
   };
@@ -2531,15 +2539,28 @@ async function fetchCurrentCanvasProject(
   config: ReturnType<typeof loadConfig>,
   projectId: string,
 ): Promise<CanvasProject> {
-  const projects = await fetchCanvasProjects(config);
-  if (projectId) {
-    const found = projects.find((project) => project.id === projectId);
-    if (found) return found;
-    throw new Error(`画布不存在: ${projectId}`);
-  }
-  if (projects.length !== 1)
-    throw new Error("请显式指定 projectId 或先设置唯一活动画布");
-  return projects[0];
+  const id = projectId || await onlyCanvasProjectId(config);
+  return fetchCanvasProjectById(config, id);
+}
+
+async function onlyCanvasProjectId(config: ReturnType<typeof loadConfig>): Promise<string> {
+  const projects = await fetchCanvasProjects(config, undefined, { summary: true });
+  if (projects.length !== 1) throw new Error("请显式指定 projectId 或先设置唯一活动画布");
+  return projects[0].id;
+}
+
+async function fetchCanvasProjectById(config: ReturnType<typeof loadConfig>, id: string, query = "") {
+  const url = `${config.url.replace(/\/$/, "")}/canvas/projects/${encodeURIComponent(id)}?token=${encodeURIComponent(config.token)}${query}`;
+  const response = await fetch(url);
+  const body = (await response.json().catch(() => ({}))) as { project?: CanvasProject; error?: string };
+  if (response.status === 404) throw new Error(`画布不存在: ${id}`);
+  if (!response.ok || !body.project) throw new Error(body.error || `读取画布失败: HTTP ${response.status}`);
+  return body.project;
+}
+
+async function fetchCanvasProjectIndex(config: ReturnType<typeof loadConfig>, projectId: string, ifRevision?: number) {
+  const id = projectId || await onlyCanvasProjectId(config);
+  return fetchCanvasProjectById(config, id, `&view=index${ifRevision === undefined ? "" : `&ifRevision=${ifRevision}`}`);
 }
 
 /**
@@ -2735,57 +2756,14 @@ function compactProject(project: Record<string, unknown>) {
   };
 }
 
-/** 默认尽量返回全部节点摘要；超出 MCP 输出上限时自动分页。完整 metadata 只通过 nodeIds 定向读取。 */
+/** 单一的目录/图关系投影与分页契约由 canvas-agent 共享包提供。 */
 function compactProjectSummary(project: Record<string, unknown>, input: Record<string, unknown>) {
-  const nodes = nodesOf(project);
-  const wanted = Array.isArray(input.nodeIds) ? new Set(input.nodeIds.map(String)) : null;
-  const connections = connectionsOf(project);
-  const base = {
-    ...projectSummary(project as unknown as CanvasProject),
-    totalNodes: nodes.length,
-  };
-  if (wanted) {
-    const selected = nodes.filter((node) => wanted.has(String(node.id)));
-    const related = connections.filter((edge) => wanted.has(String(edge.fromNodeId)) || wanted.has(String(edge.toNodeId)));
-    const result = { ...base, nodes: selected, connections: related, truncated: false,
-      hint: 'H3 Clip 详情可用 h3_get_clip 定向读取；导出整图用 canvas_export_snapshot' };
-    if (MAX_TOOL_OUTPUT_BYTES <= 0 || measureToolResultSize(result).bytes <= MAX_TOOL_OUTPUT_BYTES) return result;
-    return { ...result, nodes: selected.map(nodeSummary), metadataTruncated: true,
-      hint: "所选节点的完整 metadata 超过 MCP 输出上限，已返回节点摘要；H3 Clip 请用 h3_get_node 获取片段 ID，再用 h3_get_clip 定向读取。" };
+  try {
+    return summarizeCanvasState(project, input, MAX_TOOL_OUTPUT_BYTES);
+  } catch (error) {
+    if (error instanceof CanvasStateOverflowError) throw new McpPayloadOverflowError(error.bytes, error.chars, MAX_TOOL_OUTPUT_BYTES, "canvas_get_state");
+    throw error;
   }
-  const nodeOffset = Math.min(nodes.length, Math.max(0, Number(input.nodeOffset || 0)));
-  const nodeLimit = input.nodeLimit == null ? nodes.length : Number(input.nodeLimit);
-  const available = nodes.slice(nodeOffset, nodeOffset + nodeLimit).map(nodeSummary);
-  const page = (count: number) => {
-    const chosen = available.slice(0, count);
-    const nextNodeOffset = nodeOffset + count < nodes.length ? nodeOffset + count : undefined;
-    const allNodes = nodeOffset === 0 && nextNodeOffset === undefined;
-    const ids = new Set(chosen.map((node) => node.id));
-    const pageConnections = allNodes ? connections : connections.filter((edge) => ids.has(String(edge.fromNodeId)) || ids.has(String(edge.toNodeId)));
-    return { ...base, nodes: chosen, connections: pageConnections, nodeOffset,
-      truncated: nextNodeOffset !== undefined,
-      ...(nextNodeOffset !== undefined ? { nextNodeOffset } : {}),
-      ...(pageConnections.length < connections.length ? { connectionsTruncated: true } : {}),
-      hint: nextNodeOffset !== undefined
-        ? `还有节点未返回；用 nodeOffset: ${nextNodeOffset} 读取下一页，同一 revision 下逐页合并并按连线 id 去重。`
-        : '需要某节点的完整 metadata 时传 nodeIds: ["<id>"]；H3 Clip 详情用 h3_get_clip',
-    };
-  };
-  const full = page(available.length);
-  if (MAX_TOOL_OUTPUT_BYTES <= 0 || measureToolResultSize(full).bytes <= MAX_TOOL_OUTPUT_BYTES) return full;
-  let low = 0;
-  let high = available.length;
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    if (measureToolResultSize(page(middle)).bytes <= MAX_TOOL_OUTPUT_BYTES) low = middle;
-    else high = middle - 1;
-  }
-  if (low > 0) return page(low);
-  const first = { ...page(1), connections: [], connectionsTruncated: true,
-    hint: `当前节点相关连线超过输出上限；用 nodeOffset: ${nodeOffset + 1} 继续读取节点。` };
-  if (measureToolResultSize(first).bytes <= MAX_TOOL_OUTPUT_BYTES) return first;
-  const size = measureToolResultSize(first);
-  throw new McpPayloadOverflowError(size.bytes, size.chars, MAX_TOOL_OUTPUT_BYTES, "canvas_get_state");
 }
 
 function textResult(value: unknown) {
@@ -3336,6 +3314,12 @@ function mcpToolResultContext(
       waitsForTasks: tool === "canvas_wait_tasks" || Boolean(result.wait) || input.waitForCompletion === true,
       operationCount: operationResults.length,
       returnedNodeCount: Array.isArray(result.nodes) ? result.nodes.length : undefined,
+      ...(tool === "canvas_get_state" ? {
+        readView: Array.isArray(input.nodeIds) ? "nodes" : input.view === "graph" ? "graph" : "index",
+        requestedNodeCount: Array.isArray(input.nodeIds) ? input.nodeIds.length : 0,
+        returnedConnectionCount: Array.isArray(result.connections) ? result.connections.length : 0,
+        unchanged: result.unchanged === true,
+      } : {}),
       ready: typeof result.ready === "boolean" ? result.ready : undefined,
       ...(Object.keys(timings).length ? { timings } : {}),
       ...(typeof result.elapsedMs === "number" ? { elapsedMs: result.elapsedMs } : {}),

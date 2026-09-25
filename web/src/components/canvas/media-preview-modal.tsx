@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { Modal } from "antd";
+import { BetweenHorizontalStart, GalleryHorizontal, GalleryHorizontalEnd, Video } from "lucide-react";
 
+import { captureVideoFrame } from "@/lib/canvas/canvas-video-frame";
 import type { CanvasMediaPreview } from "@/types/canvas-plugin";
 
 /**
@@ -27,6 +30,12 @@ function formatSize(size?: Size) {
     return size ? `${size.width} × ${size.height}` : "";
 }
 
+function MenuButton({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
+    return <button type="button" role="menuitem" className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs transition-colors hover:bg-white/10" style={{ color: "#f8fafc" }} onClick={onClick}>
+        {icon}<span>{label}</span>
+    </button>;
+}
+
 export function MediaPreviewModal({ item, onClose }: { item: MediaPreviewItem | null; onClose: () => void }) {
     const url = item?.url || "";
     const beforeUrl = item?.beforeUrl || "";
@@ -38,6 +47,50 @@ export function MediaPreviewModal({ item, onClose }: { item: MediaPreviewItem | 
     const [sliderPos, setSliderPos] = useState(0);
     const containerRef = useRef<HTMLDivElement>(null);
     const draggingRef = useRef(false);
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const [videoMenu, setVideoMenu] = useState<{ x: number; y: number } | null>(null);
+    const [copying, setCopying] = useState<string | null>(null);
+
+    const closeVideoMenu = useCallback(() => setVideoMenu(null), []);
+    const copyVideo = useCallback(async () => {
+        closeVideoMenu();
+        setCopying("视频");
+        try {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error("video fetch failed");
+            const blob = await response.blob();
+            await navigator.clipboard.write([new ClipboardItem({ [blob.type || "video/mp4"]: blob })]);
+        } catch {
+            await navigator.clipboard.writeText(url).catch(() => undefined);
+        } finally {
+            setCopying(null);
+        }
+    }, [closeVideoMenu, url]);
+    const copyVideoFrame = useCallback(async (position: "first" | "last" | "current") => {
+        const label = position === "first" ? "首帧" : position === "last" ? "尾帧" : "当前帧";
+        closeVideoMenu();
+        setCopying(label);
+        try {
+            const blob = await captureVideoFrame(url, position, videoRef.current?.currentTime || 0);
+            await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        } catch {
+            setCopying(null);
+            return;
+        } finally {
+            setCopying(null);
+        }
+    }, [closeVideoMenu, url]);
+
+    useEffect(() => {
+        if (!videoMenu) return;
+        const close = (event: PointerEvent) => {
+            const target = event.target;
+            if (target instanceof Element && target.closest(".media-preview-video-menu")) return;
+            closeVideoMenu();
+        };
+        window.addEventListener("pointerdown", close, true);
+        return () => window.removeEventListener("pointerdown", close, true);
+    }, [closeVideoMenu, videoMenu]);
 
     // 换素材时清掉上一份测量结果，避免旧分辨率短暂串图
     useEffect(() => {
@@ -153,11 +206,17 @@ export function MediaPreviewModal({ item, onClose }: { item: MediaPreviewItem | 
                 <audio src={url} controls autoPlay style={{ width: "min(640px, 92vw)", margin: 24 }} />
             ) : type === "video" ? (
                 <video
+                    ref={videoRef}
                     src={url}
                     controls
                     autoPlay
                     playsInline
                     style={{ maxWidth: "100%", maxHeight: "80vh", background: "#000" }}
+                    onContextMenu={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setVideoMenu({ x: event.clientX, y: event.clientY });
+                    }}
                     onLoadedMetadata={(event) => {
                         const { videoWidth, videoHeight } = event.currentTarget;
                         if (videoWidth && videoHeight) setResolution({ after: { width: videoWidth, height: videoHeight } });
@@ -191,6 +250,32 @@ export function MediaPreviewModal({ item, onClose }: { item: MediaPreviewItem | 
             ) : (
                 <img src={url} alt={item?.name} style={{ maxWidth: "100%", maxHeight: "80vh", objectFit: "contain" }} />
             )}
+            {type === "video" && videoMenu ? (
+                <div
+                    className="media-preview-video-menu"
+                    role="menu"
+                    style={{
+                        position: "fixed",
+                        left: Math.min(videoMenu.x, window.innerWidth - 190),
+                        top: Math.min(videoMenu.y, window.innerHeight - 190),
+                        zIndex: 1200,
+                        minWidth: 176,
+                        padding: 4,
+                        borderRadius: 8,
+                        background: "rgba(15, 23, 42, .97)",
+                        border: "1px solid rgba(148, 163, 184, .35)",
+                        boxShadow: "0 10px 30px rgba(0, 0, 0, .4)",
+                        color: "#f8fafc",
+                        fontSize: 12,
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                >
+                    <MenuButton icon={<Video className="size-4" />} label={copying === "视频" ? "正在复制视频…" : "复制视频"} onClick={() => void copyVideo()} />
+                    <MenuButton icon={<BetweenHorizontalStart className="size-4" />} label={copying === "首帧" ? "正在复制首帧…" : "复制首帧"} onClick={() => void copyVideoFrame("first")} />
+                    <MenuButton icon={<GalleryHorizontalEnd className="size-4" />} label={copying === "尾帧" ? "正在复制尾帧…" : "复制尾帧"} onClick={() => void copyVideoFrame("last")} />
+                    <MenuButton icon={<GalleryHorizontal className="size-4" />} label={copying === "当前帧" ? "正在复制当前帧…" : "复制当前帧"} onClick={() => void copyVideoFrame("current")} />
+                </div>
+            ) : null}
         </Modal>
     );
 }

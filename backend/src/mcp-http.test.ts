@@ -9,6 +9,19 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { registerBackendMcpHttpRoutes } from "./mcp.js";
 import type { ResolvedConfig } from "./config.js";
 
+function indexFixture(project: Record<string, unknown>, ifRevision: unknown) {
+  const nodes = (project.nodes || []) as Array<Record<string, unknown>>;
+  const connections = (project.connections || []) as unknown[];
+  return {
+    id: project.id, title: project.title, revision: project.revision, updatedAt: project.updatedAt,
+    nodeCount: nodes.length, connectionCount: connections.length,
+    nodes: Number(ifRevision) === project.revision && ifRevision !== undefined ? [] : nodes.map((node) => ({
+      id: node.id, type: node.type, title: node.title,
+      ...((node.metadata as Record<string, unknown> | undefined)?.generationMode ? { generationMode: (node.metadata as Record<string, unknown>).generationMode } : {}),
+    })),
+  };
+}
+
 async function fixture(t: import("node:test").TestContext, backendUrl = "http://127.0.0.1:1", onRoutes?: (routes: ReturnType<typeof registerBackendMcpHttpRoutes>) => void) {
   const app = express();
   app.use(express.json());
@@ -40,11 +53,7 @@ async function mockBackend(t: import("node:test").TestContext, onMcpEvent?: (eve
     res.status(201).json({ ok: true });
   });
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
-  app.get("/canvas/projects", (_req, res) =>
-    res.json({
-      ok: true,
-      projects: [
-        {
+  const project = {
           id: "canvas-1",
           title: "测试画布",
           revision: 3,
@@ -67,10 +76,12 @@ async function mockBackend(t: import("node:test").TestContext, onMcpEvent?: (eve
           ],
           connections: [],
           selectedNodeIds: ["image-1"],
-        },
-      ],
-    }),
-  );
+        };
+  app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
+  app.get("/canvas/projects/:id", (req, res) => {
+    if (req.params.id !== project.id) return void res.status(404).json({ ok: false, error: "画布不存在" });
+    res.json({ ok: true, project: req.query.view === "index" ? indexFixture(project, req.query.ifRevision) : project });
+  });
   app.get("/canvas/projects/:id/collaboration", (req, res) => {
     if (req.params.id === "missing-canvas") {
       res.status(404).json({ ok: false, error: "画布不存在" });
@@ -172,11 +183,7 @@ async function mockOversizedBackend(t: import("node:test").TestContext, onMcpEve
       })),
     }),
   );
-  app.get("/canvas/projects", (_req, res) =>
-    res.json({
-      ok: true,
-      projects: [
-        {
+  const project = {
           id: "canvas-oversized",
           title: "超大画布",
           revision: 3,
@@ -192,10 +199,9 @@ async function mockOversizedBackend(t: import("node:test").TestContext, onMcpEve
           ],
           connections: [],
           selectedNodeIds: [],
-        },
-      ],
-    }),
-  );
+        };
+  app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
+  app.get("/canvas/projects/:id", (_req, res) => res.json({ ok: true, project }));
   app.get("/canvas/projects/:id/collaboration", (req, res) =>
     res.json({ ok: true, projectId: req.params.id, revision: 3, participants: [] }),
   );
@@ -235,22 +241,29 @@ async function mockH3ReadBackend(t: import("node:test").TestContext) {
   return `http://127.0.0.1:${address.port}`;
 }
 
-async function mockManyNodesBackend(t: import("node:test").TestContext, count: number, titleLength: number) {
+async function mockManyNodesBackend(t: import("node:test").TestContext, count: number, titleLength: number, onRead?: (path: string) => void, withPeer = false) {
   const app = express();
   app.use(express.json());
   const project = {
     id: "canvas-many", title: "多节点画布", revision: 7,
     nodes: Array.from({ length: count }, (_, index) => ({
       id: `node-${index}`, type: "text", title: `节点 ${index} ${"x".repeat(titleLength)}`,
-      position: { x: index * 10, y: 0 }, metadata: { content: "不进入摘要" },
+      position: { x: index * 10, y: 0 }, width: 320, height: 240, metadata: { content: "不进入摘要" },
     })),
     connections: Array.from({ length: 488 }, (_, index) => ({
       id: `edge-${index}`, fromNodeId: `node-${index % count}`, toNodeId: `node-${(index + 1) % count}`,
     })),
   };
+  const peer = { ...project, id: "canvas-peer", title: "另一个画布", nodes: [{ id: "peer-node", type: "text", title: "独有节点" }], connections: [] };
   app.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
-  app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
+  app.get("/canvas/projects", (_req, res) => { onRead?.("list"); res.json({ ok: true, projects: withPeer ? [project, peer] : [project] }); });
+  app.get("/canvas/projects/:id", (_req, res) => {
+    onRead?.(_req.query.view === "index" ? "index" : "project");
+    const chosen = _req.params.id === project.id ? project : withPeer && _req.params.id === peer.id ? peer : null;
+    if (!chosen) return void res.status(404).json({ ok: false, error: "画布不存在" });
+    res.json({ ok: true, project: _req.query.view === "index" ? indexFixture(chosen, _req.query.ifRevision) : chosen });
+  });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(async () => { server.close(); await once(server, "close"); });
@@ -292,6 +305,7 @@ async function mockGenerationBackend(
   });
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
   app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
+  app.get("/canvas/projects/:id", (_req, res) => res.json({ ok: true, project }));
   app.get("/settings/ai-config", (_req, res) => {
     aiConfigRequests += 1;
     res.json({
@@ -777,7 +791,7 @@ test("assets_upsert_batch writes complete assets and verifies them by id", async
   assert.equal(payload.assets[0].id, "asset-scene-1");
 });
 
-test("canvas_get_state 默认回节点摘要，而不是整幅节点 metadata", async (t) => {
+test("canvas_get_state 默认回完整节点目录，而不是布局和 metadata", async (t) => {
   const backendUrl = await mockBackend(t);
   const client = await mcpClient(t, await fixture(t, backendUrl));
   const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-1" } });
@@ -788,29 +802,86 @@ test("canvas_get_state 默认回节点摘要，而不是整幅节点 metadata", 
   assert.equal(typeof payload.totalNodes, "number", "应报告总数");
   assert.equal(payload.totalNodes, 2);
   assert.equal(payload.truncated, false);
+  assert.equal(payload.connectionCount, 0);
+  assert.equal("connections" in payload, false);
+  assert.deepEqual(Object.keys(payload.nodes[0]).sort(), ["id", "title", "type"]);
+  assert.equal(payload.nodes[1].generationMode, "image");
   for (const node of payload.nodes as Array<Record<string, unknown>>) {
     assert.ok(!("metadata" in node), "摘要节点不得携带完整 metadata");
   }
   assert.equal(JSON.stringify(payload).includes("generationSnapshot"), false);
 });
 
-test("canvas_get_state 在现有规模画布默认返回全部节点摘要", async (t) => {
-  const backendUrl = await mockManyNodesBackend(t, 449, 12);
+test("canvas_get_state 在现有规模画布默认返回全部目录，graph 返回布局和连线", async (t) => {
+  const reads: string[] = [];
+  const backendUrl = await mockManyNodesBackend(t, 449, 12, (path) => reads.push(path));
   const client = await mcpClient(t, await fixture(t, backendUrl));
   const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many" } });
   const payload = textPayload(result);
   assert.notEqual(result.isError, true);
   assert.equal(payload.nodes.length, 449);
-  assert.equal(payload.connections.length, 488);
+  assert.equal(payload.connectionCount, 488);
+  assert.equal("connections" in payload, false);
   assert.equal(payload.truncated, false);
   assert.equal(payload.nextNodeOffset, undefined);
+  const graph = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", view: "graph" } }));
+  assert.equal(graph.connections.length, 488);
+  assert.equal(graph.nodes[0].position.x, 0);
+  assert.equal(typeof graph.nodes[0].width, "number");
+  assert.ok(Buffer.byteLength(JSON.stringify(payload), "utf8") < Buffer.byteLength(JSON.stringify(graph), "utf8"));
+  assert.deepEqual(reads, ["index", "project"], "指定画布不应读取完整项目列表");
   const limited = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", nodeLimit: 200 } }));
   assert.equal(limited.nodes.length, 200);
   assert.equal(limited.nextNodeOffset, 200);
-  assert.equal(limited.connectionsTruncated, true);
+  assert.equal("connectionsTruncated" in limited, false);
   const next = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", nodeOffset: 200, nodeLimit: 200 } }));
   assert.equal(next.nodes.length, 200);
   assert.equal(next.nextNodeOffset, 400);
+  const graphPage = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", view: "graph", nodeLimit: 200 } }));
+  assert.equal(graphPage.nodes.length, 200);
+  assert.equal(graphPage.connectionsTruncated, true);
+  assert.equal(graphPage.nextNodeOffset, 200);
+});
+
+test("canvas_get_state 条件读取只在指定项目 revision 相同时省略目录", async (t) => {
+  const backendUrl = await mockBackend(t);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const same = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-1", ifRevision: 3 } }));
+  assert.equal(same.id, "canvas-1");
+  assert.equal(same.revision, 3);
+  assert.equal(same.unchanged, true);
+  assert.equal("nodes" in same, false);
+  const changed = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-1", ifRevision: 2 } }));
+  assert.equal(changed.nodes.length, 2);
+  assert.equal("unchanged" in changed, false);
+  const invalid = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-1", ifRevision: 3, nodeLimit: 1 } });
+  assert.equal(invalid.isError, true);
+  const missing = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "missing-canvas", ifRevision: 3 } });
+  assert.equal(missing.isError, true);
+});
+
+test("相同 revision 的两个画布仍按 projectId 分别读取目录", async (t) => {
+  const backendUrl = await mockManyNodesBackend(t, 1, 4, undefined, true);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const first = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many" } }));
+  const peer = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-peer" } }));
+  assert.equal(first.revision, peer.revision);
+  assert.deepEqual(first.nodes.map((node: { id: string }) => node.id), ["node-0"]);
+  assert.deepEqual(peer.nodes.map((node: { id: string }) => node.id), ["peer-node"]);
+  const unchanged = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-peer", ifRevision: peer.revision } }));
+  assert.equal(unchanged.id, "canvas-peer");
+  assert.equal(unchanged.unchanged, true);
+});
+
+test("canvas_get_state 在 tools/list 中声明按需读取参数", async (t) => {
+  const backendUrl = await mockBackend(t);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const listed = await client.listTools();
+  const state = listed.tools.find((tool) => tool.name === "canvas_get_state");
+  assert.ok(state);
+  const properties = state.inputSchema.properties as Record<string, { description?: string; enum?: string[] }>;
+  assert.deepEqual(properties.view.enum, ["index", "graph"]);
+  assert.match(String(properties.ifRevision.description), /revision/);
 });
 
 test("canvas_get_state 超过输出上限时自动分页并可取完全部节点", async (t) => {
@@ -833,6 +904,15 @@ test("canvas_get_state 超过输出上限时自动分页并可取完全部节点
   }
   assert.equal(ids.length, 1200);
   assert.equal(new Set(ids).size, 1200);
+});
+
+test("单个目录项超过上限时返回可恢复的 OUTPUT_TOO_LARGE", async (t) => {
+  const backendUrl = await mockManyNodesBackend(t, 1, 600 * 1024);
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many" } });
+  const payload = textPayload(result);
+  assert.equal(result.isError, true);
+  assert.equal(payload.error.code, "OUTPUT_TOO_LARGE");
 });
 
 test("canvas_get_state 显式传 nodeIds 时回完整节点", async (t) => {
@@ -880,6 +960,6 @@ test("canvas_get_state 指定节点只返回相关连线", async (t) => {
   const scoped = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "h3-project", nodeIds: ["h3-1"] } }));
   assert.deepEqual(scoped.connections.map((edge: { id: string }) => edge.id), ["edge-1"]);
   assert.equal(scoped.connectionCount, 2, "项目总连线数仍可见");
-  const all = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "h3-project" } }));
+  const all = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "h3-project", view: "graph" } }));
   assert.deepEqual(all.connections.map((edge: { id: string }) => edge.id), ["edge-1", "edge-2"]);
 });

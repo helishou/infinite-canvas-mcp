@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Download, Plus, RefreshCw, Search } from "lucide-react";
 import { Alert, App, Button, Card, Checkbox, DatePicker, Input, Select, Space, Statistic, Table, Tabs, Tag, Typography } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 
+import { numberSorter, sortRows, stringSorter, type SortOrder } from "@/lib/mcp-observability/table-sort";
+import { clientToViewBox, trendHoverIndex } from "@/lib/mcp-observability/trend-hover";
 import { deleteMcpOptimizationMarker, fetchMcpObservabilityReport, fetchMcpObservabilityTrace, fetchMcpOptimizationMarkers, saveMcpOptimizationMarker, type McpOptimizationMarker, type McpObservabilityEvent, type McpObservabilityReport } from "@/services/api/mcp-observability";
 
 const percent = (value: number | null) => (value == null ? "—" : `${(value * 100).toFixed(1)}%`);
@@ -26,18 +28,33 @@ const trendMetricLabel: Record<TrendMetric, string> = {
 
 type TrendSeries = { metric: TrendMetric; color: string; axis: "left" | "right"; percent: boolean };
 
+function trendSeriesValue(series: TrendSeries, item: Record<string, unknown>): number | null {
+    if (series.metric === "failedPerThousand") return Number(item.calls) > 0 ? Number(item.failed) / Number(item.calls) * 1000 : 0;
+    const value = Number(item[series.metric]);
+    return Number.isFinite(value) ? value : null;
+}
+
+const trendValueText = (series: TrendSeries, value: number | null) => {
+    if (value == null) return "—";
+    if (series.percent) return `${(value * 100).toFixed(1)}%`;
+    if (series.metric === "averageDurationMs") return `${Math.round(value)} ms`;
+    return value.toLocaleString("en-US");
+};
+
+/** 排序列：工具名用中文比较，其余列都是数值列。 */
+const toolColumnCompare = (key: string | null) => (key === "tool" ? stringSorter : numberSorter("ascend"));
+
 function TrendLineChart({ data, metrics, markers, tool }: { data: Array<Record<string, unknown>>; metrics: TrendSeries[]; markers: McpOptimizationMarker[]; tool: string }) {
-    const seriesData = metrics.map((series) => ({
+    const [hoverIndex, setHoverIndex] = useState<number>(-1);
+    const svgRef = useRef<SVGSVGElement | null>(null);
+    const seriesData = useMemo(() => metrics.map((series) => ({
         ...series,
-        values: data.map((item) => {
-            if (series.metric === "failedPerThousand") return Number(item.calls) > 0 ? Number(item.failed) / Number(item.calls) * 1000 : 0;
-            const value = Number(item[series.metric]);
-            return Number.isFinite(value) ? value : null;
-        }),
-    })).filter((series) => series.values.some((value) => value != null));
-    if (!seriesData.length || !data.length) return <div className="py-12 text-center text-sm text-muted-foreground">当前范围暂无该指标数据</div>;
+        values: data.map((item) => trendSeriesValue(series, item)),
+    })).filter((series) => series.values.some((value) => value != null)), [data, metrics]);
     const width = 900, height = 300, pad = { left: 64, right: 64, top: 22, bottom: 42 };
-    const x = (index: number) => pad.left + (data.length === 1 ? (width - pad.left - pad.right) / 2 : index * (width - pad.left - pad.right) / (data.length - 1));
+    const chartRef = useMemo(() => ({ width, height, padLeft: pad.left, padRight: pad.right }), []);
+    const inner = width - pad.left - pad.right;
+    const x = (index: number) => pad.left + (data.length === 1 ? inner / 2 : index * inner / (data.length - 1));
     const scales = (axis: "left" | "right") => {
         const values = seriesData.filter((item) => item.axis === axis).flatMap((item) => item.values.filter((value): value is number => value != null));
         const min = Math.min(...values), max = Math.max(...values), span = max - min || 1;
@@ -45,20 +62,57 @@ function TrendLineChart({ data, metrics, markers, tool }: { data: Array<Record<s
     };
     const left = scales("left"), right = scales("right");
     const y = (value: number, axis: "left" | "right") => { const s = axis === "left" ? left : right; return height - pad.bottom - ((value - s.min) / (s.max - s.min || 1)) * (height - pad.top - pad.bottom); };
-    const markerX = (marker: McpOptimizationMarker) => { const days = data.map((item) => dayjs(String(item.date)).valueOf()); const at = dayjs(marker.at).valueOf(); const first = days[0] ?? at, last = days[days.length - 1] ?? at; return pad.left + ((at - first) / (last - first || 1)) * (width - pad.left - pad.right); };
+    const markerX = (marker: McpOptimizationMarker) => { const days = data.map((item) => dayjs(String(item.date)).valueOf()); const at = dayjs(marker.at).valueOf(); const first = days[0] ?? at, last = days[days.length - 1] ?? at; return pad.left + ((at - first) / (last - first || 1)) * inner; };
+    const updateHover = useCallback((event: React.MouseEvent<SVGSVGElement>) => {
+        const svg = svgRef.current;
+        if (!svg) return;
+        const point = clientToViewBox(svg.getBoundingClientRect(), chartRef, event.clientX, event.clientY);
+        setHoverIndex(trendHoverIndex(point.x, data.length, chartRef, 14));
+    }, [chartRef, data.length]);
+    if (!seriesData.length || !data.length) return <div className="py-12 text-center text-sm text-muted-foreground">当前范围暂无该指标数据</div>;
+    const hoverItem = hoverIndex >= 0 ? data[hoverIndex] : undefined;
     return (
         <div className="space-y-2">
             <div className="flex flex-wrap gap-3">{seriesData.map((series) => <Tag key={series.metric} color={series.color}>{trendMetricLabel[series.metric]}</Tag>)}</div>
-            <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${tool === "*" ? "全部工具" : tool}多指标折线图`} className="h-[300px] w-full">
-                {[0, 0.5, 1].map((ratio) => {
-                    const leftValue = left.min + (left.max - left.min) * ratio, rightValue = right.min + (right.max - right.min) * ratio;
-                    return <g key={ratio}><line x1={pad.left} x2={width - pad.right} y1={y(leftValue, "left")} y2={y(leftValue, "left")} stroke="var(--border)" strokeDasharray="3 4" /><text x={pad.left - 7} y={y(leftValue, "left") + 4} textAnchor="end" fontSize="10" fill="var(--muted-foreground)">{leftValue.toFixed(0)}</text><text x={width - pad.right + 7} y={y(rightValue, "right") + 4} fontSize="10" fill="var(--muted-foreground)">{rightValue.toFixed(0)}</text></g>;
-                })}
-                {markers.map((marker) => <g key={marker.id}><line x1={markerX(marker)} x2={markerX(marker)} y1={pad.top} y2={height - pad.bottom} stroke="var(--destructive)" strokeDasharray="5 4"><title>{`${marker.label} · ${new Date(marker.at).toLocaleString()}`}</title></line><text x={markerX(marker) + 4} y={pad.top + 12} fontSize="10" fill="var(--destructive)">{marker.label}</text></g>)}
-                {data.map((item, index) => <text key={String(item.date)} x={x(index)} y={height - 12} textAnchor="middle" fontSize="10" fill="var(--muted-foreground)">{String(item.date).slice(5)}</text>)}
-                {seriesData.map((series) => <g key={series.metric}><polyline points={series.values.map((value, index) => value == null ? "" : `${x(index)},${y(series.percent ? value * 100 : value, series.axis)}`).filter(Boolean).join(" ")} fill="none" stroke={series.color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />{series.values.map((value, index) => value == null ? null : <circle key={`${series.metric}-${data[index]?.date}`} cx={x(index)} cy={y(series.percent ? value * 100 : value, series.axis)} r="3.5" fill="var(--background)" stroke={series.color} strokeWidth="2"><title>{`${data[index]?.date} · ${trendMetricLabel[series.metric]}: ${series.percent ? `${(value * 100).toFixed(1)}%` : value.toLocaleString("en-US")}`}</title></circle>)}</g>)}
-            </svg>
-            <Typography.Text type="secondary" className="block text-xs">左轴：调用量；右轴：标准化失败率、耗时与返回体。红色竖线为优化标记。</Typography.Text>
+            <div className="relative">
+                {hoverItem ? (
+                    <div
+                        role="status"
+                        className="pointer-events-none absolute top-1 z-10 min-w-44 rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md"
+                        style={{ left: `clamp(0px, ${(x(hoverIndex) / width) * 100}% , calc(100% - 11rem))` }}
+                    >
+                        <div className="mb-1 font-medium text-foreground">{String(hoverItem.date)}</div>
+                        {seriesData.map((series) => (
+                            <div key={series.metric} className="flex items-center justify-between gap-4">
+                                <span className="flex items-center gap-1 text-muted-foreground">
+                                    <span className="inline-block size-2 rounded-full" style={{ background: series.color === "purple" ? "#a855f7" : series.color === "orange" ? "#f97316" : series.color === "blue" ? "#3b82f6" : series.color === "green" ? "#22c55e" : "#ef4444" }} />
+                                    {trendMetricLabel[series.metric]}
+                                </span>
+                                <span className="tabular-nums text-foreground">{trendValueText(series, series.values[hoverIndex] ?? null)}</span>
+                            </div>
+                        ))}
+                    </div>
+                ) : null}
+                <svg
+                    ref={svgRef}
+                    viewBox={`0 0 ${width} ${height}`}
+                    role="img"
+                    aria-label={`${tool === "*" ? "全部工具" : tool}多指标折线图`}
+                    className="h-[300px] w-full"
+                    onMouseMove={updateHover}
+                    onMouseLeave={() => setHoverIndex(-1)}
+                >
+                    {[0, 0.5, 1].map((ratio) => {
+                        const leftValue = left.min + (left.max - left.min) * ratio, rightValue = right.min + (right.max - right.min) * ratio;
+                        return <g key={ratio}><line x1={pad.left} x2={width - pad.right} y1={y(leftValue, "left")} y2={y(leftValue, "left")} stroke="var(--border)" strokeDasharray="3 4" /><text x={pad.left - 7} y={y(leftValue, "left") + 4} textAnchor="end" fontSize="10" fill="var(--muted-foreground)">{leftValue.toFixed(0)}</text><text x={width - pad.right + 7} y={y(rightValue, "right") + 4} fontSize="10" fill="var(--muted-foreground)">{rightValue.toFixed(0)}</text></g>;
+                    })}
+                    {markers.map((marker) => <g key={marker.id}><line x1={markerX(marker)} x2={markerX(marker)} y1={pad.top} y2={height - pad.bottom} stroke="var(--destructive)" strokeDasharray="5 4"><title>{`${marker.label} · ${new Date(marker.at).toLocaleString()}`}</title></line><text x={markerX(marker) + 4} y={pad.top + 12} fontSize="10" fill="var(--destructive)">{marker.label}</text></g>)}
+                    {data.map((item, index) => <text key={String(item.date)} x={x(index)} y={height - 12} textAnchor="middle" fontSize="10" fill="var(--muted-foreground)">{String(item.date).slice(5)}</text>)}
+                    {hoverItem ? <line x1={x(hoverIndex)} x2={x(hoverIndex)} y1={pad.top} y2={height - pad.bottom} stroke="var(--foreground)" strokeOpacity="0.35" strokeWidth="1" /> : null}
+                    {seriesData.map((series) => <g key={series.metric}><polyline points={series.values.map((value, index) => value == null ? "" : `${x(index)},${y(series.percent ? value * 100 : value, series.axis)}`).filter(Boolean).join(" ")} fill="none" stroke={series.color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />{series.values.map((value, index) => value == null ? null : <circle key={`${series.metric}-${data[index]?.date}`} cx={x(index)} cy={y(series.percent ? value * 100 : value, series.axis)} r={hoverIndex === index ? 5.5 : 3.5} fill="var(--background)" stroke={series.color} strokeWidth="2"><title>{`${data[index]?.date} · ${trendMetricLabel[series.metric]}: ${trendValueText(series, value)}`}</title></circle>)}</g>)}
+                </svg>
+            </div>
+            <Typography.Text type="secondary" className="block text-xs">左轴：调用量；右轴：标准化失败率、耗时与返回体。红色竖线为优化标记。悬停折线可查看该日各指标具体值。</Typography.Text>
         </div>
     );
 }
@@ -108,13 +162,13 @@ export default function McpObservabilityPage() {
     const [markers, setMarkers] = useState<McpOptimizationMarker[]>([]);
     const [markerLabel, setMarkerLabel] = useState("");
     const [markerAt, setMarkerAt] = useState<Dayjs>(dayjs());
-    const trendSeries: TrendSeries[] = [
+    const trendSeries: TrendSeries[] = ([
         { metric: "calls", color: "blue", axis: "left", percent: false },
         { metric: "successRate", color: "green", axis: "right", percent: true },
         { metric: "failedPerThousand", color: "red", axis: "right", percent: false },
         { metric: "averageDurationMs", color: "orange", axis: "right", percent: false },
         { metric: "averageOutputChars", color: "purple", axis: "right", percent: false },
-    ].filter((series) => trendMetrics.includes(series.metric));
+    ] satisfies TrendSeries[]).filter((series) => trendMetrics.includes(series.metric));
     const trendTools = useMemo(() => [...new Set((report?.dailyByTool ?? []).map((item) => item.tool))].sort(), [report?.dailyByTool]);
     const trendData = useMemo(() => trendTool === "*" ? (report?.daily ?? []) : (report?.dailyByTool ?? []).filter((item) => item.tool === trendTool), [report?.daily, report?.dailyByTool, trendTool]);
     const toolComparison = useMemo(() => {
@@ -133,6 +187,12 @@ export default function McpObservabilityPage() {
             };
         }).filter((item) => item.calls > 0 || item.previousCalls > 0);
     }, [report?.byTool, previousReport?.byTool]);
+    // 两张工具表各自记住排序状态；antd 的 sorter 降序会直接对比较结果取反，
+    // 缺失值会被翻到榜首，所以用 sorter: true + 自行排序。
+    const [comparisonSort, setComparisonSort] = useState<{ key: string; order: SortOrder }>({ key: "calls", order: "descend" });
+    const [byToolSort, setByToolSort] = useState<{ key: string; order: SortOrder }>({ key: "calls", order: "descend" });
+    const sortedToolComparison = useMemo(() => sortRows(toolComparison, comparisonSort.key, comparisonSort.order, toolColumnCompare(comparisonSort.key)), [toolComparison, comparisonSort]);
+    const sortedByTool = useMemo(() => sortRows(report?.byTool ?? [], byToolSort.key, byToolSort.order, toolColumnCompare(byToolSort.key)), [report?.byTool, byToolSort]);
     const dataRangeStartIso = () => dateRange[0].startOf("day").toISOString();
     const dataRangeEndIso = () => dateRange[1].endOf("day").toISOString();
 
@@ -427,19 +487,47 @@ export default function McpObservabilityPage() {
                         { key: "tools", label: "工具与失败", children: (
                             <div className="space-y-4">
                                 <Card title="工具优化对比" extra={<Typography.Text type="secondary">当前周期与紧邻上一等长周期</Typography.Text>}>
-                                    <Table rowKey="tool" loading={loading} dataSource={toolComparison} pagination={{ pageSize: 15 }} scroll={{ x: 1000 }} columns={[
-                                        { title: "工具", dataIndex: "tool" },
-                                        { title: "当前调用", dataIndex: "calls", width: 90 }, { title: "对比调用", dataIndex: "previousCalls", width: 90 },
-                                        { title: "成功率变化", dataIndex: "successRateDelta", width: 120, render: (value: number | null) => value == null ? "—" : <Tag color={value > 0 ? "success" : value < 0 ? "error" : undefined}>{signed(value * 100, 1, " 个百分点")}</Tag> },
-                                        { title: "P95 变化", dataIndex: "p95Delta", width: 110, render: (value: number | null) => value == null ? "—" : <Tag color={value < 0 ? "success" : value > 0 ? "error" : undefined}>{signed(value, 0, " ms")}</Tag> },
-                                        { title: "返回均值变化", dataIndex: "outputDelta", width: 130, render: (value: number | null) => value == null ? "—" : <Tag color={value < 0 ? "success" : value > 0 ? "error" : undefined}>{signed(value)} 字符</Tag> },
-                                    ]} />
+                                    <Table
+                                        rowKey="tool"
+                                        loading={loading}
+                                        dataSource={sortedToolComparison}
+                                        pagination={{ pageSize: 15 }}
+                                        scroll={{ x: 1000 }}
+                                        onChange={(_pagination, _filters, sorter) => {
+                                            const next = Array.isArray(sorter) ? sorter[0] : sorter;
+                                            setComparisonSort({ key: String(next?.columnKey ?? "calls"), order: next?.order ?? null });
+                                        }}
+                                        columns={[
+                                            { title: "工具", dataIndex: "tool", key: "tool", sorter: true, sortOrder: comparisonSort.key === "tool" ? comparisonSort.order : null },
+                                            { title: "当前调用", dataIndex: "calls", key: "calls", width: 90, sorter: true, sortOrder: comparisonSort.key === "calls" ? comparisonSort.order : null },
+                                            { title: "对比调用", dataIndex: "previousCalls", key: "previousCalls", width: 90, sorter: true, sortOrder: comparisonSort.key === "previousCalls" ? comparisonSort.order : null },
+                                            { title: "成功率变化", dataIndex: "successRateDelta", key: "successRateDelta", width: 120, sorter: true, sortOrder: comparisonSort.key === "successRateDelta" ? comparisonSort.order : null, render: (value: number | null) => value == null ? "—" : <Tag color={value > 0 ? "success" : value < 0 ? "error" : undefined}>{signed(value * 100, 1, " 个百分点")}</Tag> },
+                                            { title: "P95 变化", dataIndex: "p95Delta", key: "p95Delta", width: 110, sorter: true, sortOrder: comparisonSort.key === "p95Delta" ? comparisonSort.order : null, render: (value: number | null) => value == null ? "—" : <Tag color={value < 0 ? "success" : value > 0 ? "error" : undefined}>{signed(value, 0, " ms")}</Tag> },
+                                            { title: "返回均值变化", dataIndex: "outputDelta", key: "outputDelta", width: 130, sorter: true, sortOrder: comparisonSort.key === "outputDelta" ? comparisonSort.order : null, render: (value: number | null) => value == null ? "—" : <Tag color={value < 0 ? "success" : value > 0 ? "error" : undefined}>{signed(value)} 字符</Tag> },
+                                        ]}
+                                    />
                                 </Card>
-                                <Card title="按工具统计"><Table rowKey="tool" loading={loading} dataSource={report?.byTool ?? []} pagination={false} scroll={{ x: 1360 }} columns={[
-                                    { title: "工具", dataIndex: "tool" }, { title: "调用", dataIndex: "calls", width: 80 }, { title: "成功率", dataIndex: "successRate", width: 90, render: percent }, { title: "失败", dataIndex: "failed", width: 70 },
-                                    { title: "最大返回体", dataIndex: "maxOutputChars", width: 190, render: (value: number | null | undefined) => value == null ? <Typography.Text type="secondary">未采集</Typography.Text> : <Space direction="vertical" size={0}><Typography.Text type={value >= 100000 ? "danger" : undefined}>{chars(value)}</Typography.Text><Typography.Text type="secondary" className="text-xs">{approxTokens(value)}</Typography.Text></Space> },
-                                    { title: "返回均值", dataIndex: "averageOutputChars", width: 120, render: (value: number | null | undefined) => value == null ? "—" : chars(value) }, { title: "最大入参", dataIndex: "maxInputChars", width: 110, render: (value: number | null | undefined) => value == null ? "—" : chars(value) },
-                                    { title: "平均耗时", dataIndex: "averageDurationMs", width: 110, render: duration }, { title: "P95", dataIndex: "p95DurationMs", width: 100, render: duration }, { title: "最长耗时", dataIndex: "maxDurationMs", width: 110, render: duration },
+                                <Card title="按工具统计"><Table
+                                    rowKey="tool"
+                                    loading={loading}
+                                    dataSource={sortedByTool}
+                                    pagination={false}
+                                    scroll={{ x: 1360 }}
+                                    onChange={(_pagination, _filters, sorter) => {
+                                        const next = Array.isArray(sorter) ? sorter[0] : sorter;
+                                        setByToolSort({ key: String(next?.columnKey ?? "calls"), order: next?.order ?? null });
+                                    }}
+                                    columns={[
+                                    { title: "工具", dataIndex: "tool", key: "tool", sorter: true, sortOrder: byToolSort.key === "tool" ? byToolSort.order : null },
+                                    { title: "调用", dataIndex: "calls", key: "calls", width: 80, sorter: true, sortOrder: byToolSort.key === "calls" ? byToolSort.order : null },
+                                    { title: "成功率", dataIndex: "successRate", key: "successRate", width: 90, sorter: true, sortOrder: byToolSort.key === "successRate" ? byToolSort.order : null, render: percent },
+                                    { title: "失败", dataIndex: "failed", key: "failed", width: 70, sorter: true, sortOrder: byToolSort.key === "failed" ? byToolSort.order : null },
+                                    { title: "最大返回体", dataIndex: "maxOutputChars", key: "maxOutputChars", width: 190, sorter: true, sortOrder: byToolSort.key === "maxOutputChars" ? byToolSort.order : null, render: (value: number | null | undefined) => value == null ? <Typography.Text type="secondary">未采集</Typography.Text> : <Space direction="vertical" size={0}><Typography.Text type={value >= 100000 ? "danger" : undefined}>{chars(value)}</Typography.Text><Typography.Text type="secondary" className="text-xs">{approxTokens(value)}</Typography.Text></Space> },
+                                    { title: "返回均值", dataIndex: "averageOutputChars", key: "averageOutputChars", width: 120, sorter: true, sortOrder: byToolSort.key === "averageOutputChars" ? byToolSort.order : null, render: (value: number | null | undefined) => value == null ? "—" : chars(value) },
+                                    { title: "最大入参", dataIndex: "maxInputChars", key: "maxInputChars", width: 110, sorter: true, sortOrder: byToolSort.key === "maxInputChars" ? byToolSort.order : null, render: (value: number | null | undefined) => value == null ? "—" : chars(value) },
+                                    { title: "平均耗时", dataIndex: "averageDurationMs", key: "averageDurationMs", width: 110, sorter: true, sortOrder: byToolSort.key === "averageDurationMs" ? byToolSort.order : null, render: duration },
+                                    { title: "P95", dataIndex: "p95DurationMs", key: "p95DurationMs", width: 100, sorter: true, sortOrder: byToolSort.key === "p95DurationMs" ? byToolSort.order : null, render: duration },
+                                    { title: "最长耗时", dataIndex: "maxDurationMs", key: "maxDurationMs", width: 110, sorter: true, sortOrder: byToolSort.key === "maxDurationMs" ? byToolSort.order : null, render: duration },
                                 ]} /></Card>
                             </div>
                         ) },

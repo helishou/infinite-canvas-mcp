@@ -23,6 +23,19 @@ test("MCP 读取当前激活网页的画布", async (t) => {
     assert.equal(field(await session.callTool("canvas_get_state", {}), "projectId"), "canvas-second");
 });
 
+test("兼容入口返回目录，缺少持久 revision 时不宣称画布未变化", async (t) => {
+    const session = new CanvasSession();
+    const client = connect(session, "first");
+    t.after(() => client.close());
+    session.updateState({ ...snapshot("canvas-first"), nodes: [
+        { id: "image-1", type: "image", title: "图片", position: { x: 1, y: 2 }, width: 320, height: 240, metadata: { storageKey: "media/private.png" } },
+    ] }, "first");
+    const result = await session.callTool("canvas_get_state", { projectId: "canvas-first", ifRevision: 0 });
+    assert.equal(field(result, "unchanged"), undefined);
+    assert.deepEqual(field(result, "nodes"), [{ id: "image-1", type: "image", title: "图片" }]);
+    assert.equal("connections" in (result as Record<string, unknown>), false);
+});
+
 test("按精确 clientId 读取画布快照，不受当前焦点影响", (t) => {
     const session = new CanvasSession();
     const first = connect(session, "first");

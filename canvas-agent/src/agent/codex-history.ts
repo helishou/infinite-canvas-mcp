@@ -533,9 +533,16 @@ function toolHistorySummary(tool: string, item: unknown, input: unknown) {
     if (tool === "site_navigate") return `已打开${routeName(String(field(input, "path") || "/"))}`;
     if (tool === "canvas_list_projects") return `共 ${numberValue(field(result, "total"))} 个画布`;
     if (tool === "canvas_get_state") {
+        if (field(result, "unchanged") === true) return "画布状态未变化";
         const nodes = arrayValue(field(result, "nodes"));
         const connections = arrayValue(field(result, "connections"));
-        return Array.isArray(field(result, "nodes")) || Array.isArray(field(result, "connections")) ? canvasContentSummary(nodes, connections.length) : "已读取当前画布内容";
+        if (!Array.isArray(field(result, "nodes"))) return "已读取当前画布内容";
+        const count = numberValue(field(result, "connectionCount"));
+        const relation = !Array.isArray(field(result, "connections")) ? `连线未读取（共 ${count} 条）`
+            : connections.length === 0 ? "连线为 0 条"
+            : connections.length < count ? `本页 ${connections.length}/${count} 条连线` : "";
+        const page = field(result, "truncated") === true ? `本页 ${nodes.length}/${numberValue(field(result, "totalNodes"))} 个节点` : "";
+        return [page, canvasContentSummary(nodes, connections.length), relation].filter(Boolean).join("、");
     }
     if (tool === "canvas_get_selection") return "已读取当前选中内容";
     if (tool === "prompts_search") return `找到 ${numberValue(field(result, "total"))} 条提示词`;

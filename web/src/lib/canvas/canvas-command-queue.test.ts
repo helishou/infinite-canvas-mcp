@@ -38,6 +38,14 @@ test("落盘失败不能发送；后续动作仍保留；确定拒绝在刷新�
     const restored = new CanvasCommandQueue(storage);
     saved.forEach((item) => restored.restore(item));
     await assert.rejects(restored.prepare("a", 5), /确定拒绝/);
+    await restored.retryCommittedReceipt("a");
+    const original = await restored.prepare("a", 5);
+    assert.equal(original.operationId, "a");
+    assert.equal(original.baseRevision, 3);
+    assert.deepEqual(original.operations, command("a", 1).operations);
+    assert.equal(saved.get("a")?.rejected, undefined);
+    await restored.acknowledge("a");
+    assert.equal(saved.has("a"), false);
 });
 
 test("冲突选择先保存替代记录，清理中断后刷新仍只恢复新意图", async () => {

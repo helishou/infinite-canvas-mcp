@@ -13,6 +13,7 @@ import { buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, 
 import { extractDialogues, stripDialogueSpeakers, injectDialogueSpeakers, parseSubjectSpeakerMap, collectSpeakerIds } from "../services/storyboard-dialogue";
 import { h3ThemeVars } from "../h3-theme";
 import { promptEnhanceImagePayload } from "../services/prompt-enhance-references";
+import { literalPromptSubjects } from "../services/prompt-subject-definitions";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
 import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import { formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, stripDuplicateTransition, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
@@ -708,6 +709,8 @@ export function H3PromptSection({
   const suggestions = useMemo(() => ctx.textSuggestions(textTarget), [ctx.projectId, ctx.node.id, selected?.id]);
   const suggestionState = getReact().useSyncExternalStore(suggestions.subscribe, suggestions.getSnapshot);
   const prompt = textStatus.ready ? textStatus.text : String(selected?.prompt || "");
+  const promptSubjectSection = readPromptSection(prompt, "subject_definitions");
+  const literalSubjects = useMemo(() => literalPromptSubjects(`subject_definitions:\n${promptSubjectSection}`), [promptSubjectSection]);
   const TextEditor = ctx.TextEditor;
   const mode = String(selected?.mode || selected?.taskMode || "ref2va");
   const promptMode = mode in H3_PROMPT_MODE_CONFIG ? mode as keyof typeof H3_PROMPT_MODE_CONFIG : "ref2va";
@@ -1481,8 +1484,25 @@ export function H3PromptSection({
         tokens: [referenceTag, legacyReferenceTag].filter(Boolean),
       });
     });
+    // 粘贴的官方 Ref2VA 提示词可以在正文中定义道具、场景等 Subject，
+    // 它们不一定存在于 Clip 的角色组或结构化实体清单中。
+    const knownSubjects = new Set(references.flatMap((reference) => reference.tokens || []).filter((token) => /^<Subject\s+\d+>$/iu.test(token)).map((token) => token.toLocaleLowerCase()));
+    for (const definition of literalSubjects) {
+      const token = `<Subject ${definition.ordinal}>`;
+      if (knownSubjects.has(token.toLocaleLowerCase())) continue;
+      const pictureRef = definition.pictureOrdinal ? imageRefs[definition.pictureOrdinal - 1] : undefined;
+      references.push({
+        label: `主体 · Subject ${definition.ordinal}`,
+        displayLabel: `主体 · Subject ${definition.ordinal}`,
+        title: definition.description,
+        kind: "image",
+        previewUrl: pictureRef?.url,
+        insert: token,
+        tokens: [token],
+      });
+    }
     return references;
-  }, [ctx, mentionItems, promptMode, referenceCatalog, selected, subjectDefinitions]);
+  }, [ctx, imageRefs, literalSubjects, mentionItems, promptMode, referenceCatalog, selected, subjectDefinitions]);
   const unresolvedReferenceMarkers = useMemo(() => {
     if (!textStatus.ready) return [];
     const knownTokens = new Set(editorReferences.flatMap((reference) => reference.tokens || []).map((token) => token.toLocaleLowerCase()));
@@ -1702,7 +1722,7 @@ export function H3PromptSection({
         </span>
       </div> : null}
       {unresolvedReferenceMarkers.length ? <div className="minimax-prompt-reference-error" role="alert">
-        发现 {unresolvedReferenceMarkers.length} 处未匹配的人物或素材引用（见红色标记）。点击红色标记可从当前 Clip 引用中重新选择，也可以删除。
+        发现 {unresolvedReferenceMarkers.length} 处未匹配的主体或素材引用（见红色标记）。点击红色标记可从当前 Clip 引用中重新选择，也可以删除。
       </div> : null}
       <div key="prompt-textarea-wrap" className={`minimax-prompt-translate-wrap${!isTranslated && selected ? " has-line-map" : ""}`}>
         {isTranslated && translation && translation.segmentId === selected?.id && translation.prompt === prompt

@@ -9,6 +9,7 @@
     "./http": "./dist/server/http.js",
     "./plugin-mcp": "./dist/server/plugin-mcp.js",
     "./schemas": "./dist/canvas/schemas.js",
+    "./state-summary": "./dist/canvas/state-summary.js",
     "./collaboration-tools": "./dist/canvas/collaboration-tools.js",
     "./runtime-fields": "./dist/canvas/runtime-fields.js",
     "./operations": "./dist/canvas/operations.js",

@@ -421,7 +421,7 @@ class UnresolvedReferenceChip extends WidgetType {
     toDOM() {
         const span = document.createElement("span");
         const match = /^<(Subject|Picture|Video|Audio)\s+(\d+)>$/iu.exec(this.token);
-        const kind = match?.[1].toLowerCase() === "subject" ? "人物" : match ? "图片/视频/音频" : "引用";
+        const kind = match?.[1].toLowerCase() === "subject" ? "主体" : match ? "图片/视频/音频" : "引用";
         const id = match ? `${match[1]} ${match[2]}` : this.token;
         span.className = "cm-canvas-reference cm-canvas-reference-error";
         span.title = `未找到对应的${kind}引用（${id}），点击后从当前 Clip 引用中重新选择，或删除此标记`;

@@ -109,7 +109,8 @@ export function validateH3CharacterGroups(project: Record<string, unknown>, segm
         }
 
         const expectedSubjectId = String(group.subjectId || "").trim() || characterNodeId;
-        const enabledOutfits = outfitItems.filter((outfit) => outfit.enabled !== false);
+        // 总开关关闭时保留完整服装目录，但当前 Clip 不再要求这些图片的派生 binding。
+        const enabledOutfits = group.outfitEnabled === false ? [] : outfitItems.filter((outfit) => outfit.enabled !== false);
         for (const outfit of enabledOutfits) {
             const key = mediaKey(outfit);
             if (!key) continue;

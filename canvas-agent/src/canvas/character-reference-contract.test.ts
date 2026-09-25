@@ -23,6 +23,7 @@ function completeSegment(bindingPatch: Record<string, unknown> = {}) {
                 characterAssetId: "asset-1",
                 characterNodeId: "character-1",
                 subjectId: "subject-1",
+                outfitEnabled: true,
                 outfits: sourceImages.map((image, index) => ({
                     id: `outfit-${index + 1}`,
                     url: image.url,
@@ -89,4 +90,12 @@ test("角色 binding 只有 storageKey 时预检报缺少预览 URL", () => {
 test("完整角色组和角色 binding 通过预检", () => {
     const issues = validateH3CharacterGroups(project(), completeSegment());
     assert.deepEqual(issues.filter((issue) => issue.severity === "error"), []);
+});
+
+test("服装总开关关闭时不要求旧目录中单件仍启用的图片 binding", () => {
+    const segment = completeSegment();
+    segment.h3CharacterGroups["group-1"].outfitEnabled = false;
+    segment.referenceBindings = [];
+    const issues = validateH3CharacterGroups(project(), segment);
+    assert.equal(issues.some((issue) => issue.code === "character_group_binding_count"), false);
 });

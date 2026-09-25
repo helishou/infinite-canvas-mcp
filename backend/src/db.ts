@@ -982,6 +982,37 @@ export class BackendDatabase {
             FROM canvas_projects ${whereClause} ORDER BY updated_at DESC`).all(...params) as CanvasProject[];
     }
 
+    /** 同一条 SQLite 查询取得 revision 与节点目录，避免把完整 metadata 载入 MCP。 */
+    getCanvasProjectIndex(id: string, ifRevision?: number): Record<string, unknown> | null {
+        const rows = this.db.prepare(`SELECT p.id, p.updated_at AS updatedAt,
+            json_extract(p.data_json, '$.title') AS title,
+            COALESCE(json_extract(p.data_json, '$.revision'), 0) AS revision,
+            COALESCE(json_array_length(p.data_json, '$.nodes'), 0) AS nodeCount,
+            COALESCE(json_array_length(p.data_json, '$.connections'), 0) AS connectionCount,
+            json_extract(n.value, '$.id') AS nodeId,
+            json_extract(n.value, '$.type') AS nodeType,
+            json_extract(n.value, '$.title') AS nodeTitle,
+            json_extract(n.value, '$.metadata.generationMode') AS generationMode
+            FROM canvas_projects p
+            LEFT JOIN json_each(p.data_json, '$.nodes') n
+                ON COALESCE(json_extract(p.data_json, '$.revision'), 0) <> ?
+            WHERE p.id = ? ORDER BY CAST(n.key AS INTEGER)`)
+            .all(ifRevision ?? -1, id) as Array<Record<string, unknown>>;
+        if (!rows.length) return null;
+        const first = rows[0];
+        return {
+            id: first.id, title: first.title, updatedAt: first.updatedAt,
+            revision: Number(first.revision), nodeCount: Number(first.nodeCount),
+            connectionCount: Number(first.connectionCount),
+            ...(ifRevision === Number(first.revision) ? { unchanged: true } : {
+                nodes: rows.filter((row) => row.nodeId != null).map((row) => ({
+                    id: row.nodeId, type: row.nodeType, title: row.nodeTitle,
+                    ...(row.generationMode ? { generationMode: row.generationMode } : {}),
+                })),
+            }),
+        };
+    }
+
     createCanvasProject(input: CanvasProject) {
         if (typeof input?.id !== "string" || !input.id.trim()) throw new Error("project.id 必填");
         const project = stripCanvasLocalViewState(input as unknown as Record<string, unknown>) as unknown as CanvasProject;
@@ -1157,11 +1188,18 @@ export class BackendDatabase {
         const rows = this.db.prepare("SELECT revision, operations_json, created_at FROM canvas_operation_batches WHERE project_id = ? AND revision > ? AND revision <= ? ORDER BY revision").all(id, row.revision, revision) as Array<{ revision: number; operations_json: string; created_at: string }>;
         if (rows.length !== revision - row.revision) throw collaborationError("RECEIPT_UNAVAILABLE", "操作历史不连续，不能还原旧请求回执");
         for (const entry of rows) {
-            applyCanvasProjectOperations(project, JSON.parse(entry.operations_json));
+            // 这里只重建已经提交过的回执；历史格式与当前新写入校验可能不同。
+            applyCanvasProjectOperations(project, JSON.parse(entry.operations_json), { committedReplay: true });
             project.revision = entry.revision;
             project.updatedAt = entry.created_at;
         }
         return stripCanvasLocalViewState(project as unknown as Record<string, unknown>) as unknown as CanvasProject;
+    }
+
+    getCanvasOperationReceipt(id: string, operationId: string): { committed: boolean; revision?: number } {
+        const row = this.db.prepare("SELECT b.revision FROM canvas_operation_batches b JOIN canvas_command_receipts r ON r.operation_id = b.operation_id WHERE b.project_id = ? AND b.operation_id = ?")
+            .get(id, operationId) as { revision: number } | undefined;
+        return row ? { committed: true, revision: Number(row.revision) } : { committed: false };
     }
 
     applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, inputOperations: CanvasOperation[], context?: CanvasCommandContext) {

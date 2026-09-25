@@ -12,9 +12,15 @@ description: Implemented changes that still need manual verification
 
 ## Editing H3 Clips with stale Picture references
 
+- Paste a Ref2VA prompt that defines `<Subject 1>` as a marriage booklet in `subject_definitions` while its Picture references are bound. The editor should show a neutral Subject chip rather than a missing-character error. Remove that definition while keeping another `<Subject 1>` mention: the unresolved chip should say "subject missing". Existing Picture chips should keep their bindings.
+- Select an H3 Clip and confirm its current Clip header shows both `Clip N` and the internal ID. Click the ID to copy its full value, and hover the timeline Clip card to see the same ID. Reorder Clips: the displayed number should follow the new order while each internal ID stays with its original Clip.
 - With `<Picture 4>` in a Clip prompt, remove its third character outfit image from the reference lane or the reference editor. The removal should save through Backend ops without a prompt reference warning or a legacy reference mismatch error, including when an old page sends the previous reference list. Refresh and confirm the removed image stays removed, the saved prompt remains editable, and character audio and other Clips stay unchanged. Check the remaining Picture numbers before generating.
+- In a Clip with its character outfit master switch off but a retained outfit catalog entry still marked enabled, generation preflight should not require an image binding for that disabled outfit; voice references remain valid. If the prompt still contains an invalid `<Picture N>`, the generation error should identify the visible Clip number and the missing tag, without showing the internal segment ID.
+- When an already committed canvas operation is retried with the same operation ID after its response is lost, the Backend should return its original receipt even if an older checkpoint contains H3 legacy references. No new revision should be created, and new reference edits should still reject unknown legacy media.
+- Reopen a canvas whose local draft marked that committed operation as rejected by the old Backend. The page should check the saved receipt, retry the unchanged operation ID, and clear the draft without creating another revision. A rejected operation with no saved receipt should remain available for explicit conflict resolution.
 - Open a Clip with three current image references while its saved storyboard summary still mentions `<Picture 4>`. The H3 node and page should remain usable. Opening the storyboard editor should show the missing reference error within the form and allow the summary to be edited.
 - Complete should keep the editor open with an error until the stale number is fixed. After correcting the summary, Complete should regenerate subject definitions and retention analysis from current references. Opening the page must not silently rewrite the prompt.
+- In a Clip with a storyboard frame, a prop image, a character outfit image, and an off-screen voice reference, leave the prop out of the Subject list. Complete should save successfully and define the prop image as an independent reference; the outfit image should remain the character's visual source, and the voice reference should remain attached to the off-screen speaker.
 
 ## H3 reference input lines for the selected Clip
 
@@ -48,9 +54,10 @@ description: Implemented changes that still need manual verification
 
 ## MCP canvas state pagination
 
-- A 449-node canvas should return all node summaries and connections in one default `canvas_get_state` call, with `truncated: false` and no `nextNodeOffset`.
+- A 449-node canvas should return all node IDs, types, titles, and available generation modes in one default `canvas_get_state` call, without positions, media keys, metadata, or a `connections` array. `view: "graph"` should return layout dimensions and connections.
 - When the summary would exceed the configured MCP output limit (512 KiB by default), the tool should return a page with `nextNodeOffset`; repeat the call with that offset until all IDs are read. Keep the same project revision across pages and deduplicate connections by ID when combining them.
 - `nodeLimit` should cap a caller-requested page for token control. A single node summary that cannot fit even without connections should still return `OUTPUT_TOO_LARGE` rather than a non-advancing page.
+- With an explicit `projectId`, `ifRevision` should return `unchanged: true` without nodes when the persisted revision matches; a changed revision should return the current directory. Combining it with graph, node IDs, or pagination should fail.
 
 ## H3 分镜提示词不再泄漏素材名
 
@@ -60,7 +67,7 @@ description: Implemented changes that still need manual verification
 
 ## MCP scoped canvas reads
 
-- `canvas_get_state({ nodeIds: ["<node id>"] })` should include only connections touching that node while retaining the project's `connectionCount`; omitting `nodeIds` should still include all connections.
+- `canvas_get_state({ nodeIds: ["<node id>"] })` should include only connections touching that node while retaining the project's `connectionCount`; `view: "graph"` should include all connections when unpaged.
 - `canvas_inspect` should keep full node summaries in `nodes` while `referenceCandidates` and `generationTargets` contain only their selection fields. Check that a reference candidate still exposes its `storageKey` and a generation target still exposes its model and status.
 
 ## MCP large-node reads and stale Clip IDs
@@ -105,7 +112,7 @@ description: Implemented changes that still need manual verification
 
 **MCP 返回体瘦身**
 
-- 调 `canvas_get_state`（不带参数）：尽量返回全部节点摘要（`totalNodes` 为真实节点总数，节点项不含 `metadata`）；超出输出上限时返回 `nextNodeOffset`，按同一 revision 继续翻页。
+- 调 `canvas_get_state`（不带参数）：尽量返回全部精简节点目录（`totalNodes` 为真实节点总数，节点项不含布局或 `metadata`）；超出输出上限时返回 `nextNodeOffset`，按同一 revision 继续翻页。`view: "graph"` 才返回布局与连线。
 - 调 `canvas_get_state({ nodeIds: ["<某节点 id>"] })`：小节点返回完整 metadata；超过现有输出上限时返回摘要并标记 `metadataTruncated`。
 - 调 `canvas_export_snapshot`：仍返回完整画布（契约未变）；在超大画布上会返回可自助恢复的 `OUTPUT_TOO_LARGE` 错误并给出缩小范围建议。
 - 调 `assets_list`：不再返回内联 base64（`coverUrl` 显示为 `[inline-media:image/png]`），`pageSize`/`page`/`keyword` 真正生效。
