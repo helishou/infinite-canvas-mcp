@@ -180,9 +180,11 @@ export function MediaPreviewModal({ item, onClose }: { item: MediaPreviewItem | 
         };
     }, [open, beforeUrl, updateSliderPos]);
 
-    const sizeText = resolution?.before && resolution?.after
-        ? `前 ${formatSize(resolution.before)} · 后 ${formatSize(resolution.after)}`
-        : formatSize(resolution?.after || resolution?.before);
+    // 视频预览不显示分辨率：视频有原生 controls，额外标注尺寸只是噪音。
+    const sizeText = type === "video" ? ""
+        : resolution?.before && resolution?.after
+            ? `前 ${formatSize(resolution.before)} · 后 ${formatSize(resolution.after)}`
+            : formatSize(resolution?.after || resolution?.before);
 
     return (
         <Modal
