@@ -53,6 +53,29 @@ test("重排和完整替换按 Clip ID 继承省略的任务字段，不丢结�
     assert.equal((replaced.project.nodes as typeof result.project.nodes & Array<{ metadata: { segments: Record<string, unknown>[] } }>)[0].metadata.segments[0].result, "two.mp4");
 });
 
+test("旧页面移除 H3 参考时携带旧字段副本，事务保留删除意图与幂等回执", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    const bindings = ["first", "second"].map((name) => ({ id: `binding-${name}`, assetId: `asset-${name}`, storageKey: `image:${name}`, mediaType: "image" }));
+    const legacy = bindings.map((binding) => ({ bindingId: binding.id, storageKey: binding.storageKey, type: "image" }));
+    db.createCanvasProject({ id: "legacy-retry", nodes: [{ id: "h3", type: "minimax-h3:video", metadata: { segments: [{ id: "ep01-v02", referenceBindings: bindings }] } }], connections: [] });
+    const op = { type: "update_h3_segment", nodeId: "h3", segmentId: "ep01-v02", patch: { referenceBindings: [bindings[0]], refItems: legacy } };
+    const before = db.getCanvasProject("legacy-retry")!;
+    const beforeRevision = Number(before.revision || 0);
+    const receipt = db.applyCanvasProjectOperations("legacy-retry", beforeRevision, [op], { operationId: "remove-stale-ref" });
+    const segment = ((receipt.project.nodes as Array<{ metadata: { segments: Record<string, unknown>[] } }>)[0]).metadata.segments[0];
+    assert.deepEqual(segment.referenceBindings, [bindings[0]]);
+    assert.equal("refItems" in segment, false);
+    assert.equal(receipt.revision, beforeRevision + 1);
+    const replay = db.applyCanvasProjectOperations("legacy-retry", beforeRevision, [op], { operationId: "remove-stale-ref" });
+    assert.equal(replay.duplicated, true);
+    assert.equal(db.getCanvasProject("legacy-retry")!.revision, receipt.revision);
+
+    const invalid = { ...op, patch: { referenceBindings: [], refItems: [...legacy, { bindingId: "unknown", storageKey: "image:unknown", type: "image" }] } };
+    assert.throws(() => db.applyCanvasProjectOperations("legacy-retry", receipt.revision, [invalid], { operationId: "reject-extra-ref" }), /绑定与旧参考不一致/);
+    assert.deepEqual(db.getCanvasProject("legacy-retry"), receipt.project);
+});
+
 test("进程内任务权限可更新状态，普通提示词/布局仍可编辑", (t) => {
     const db = fixture(t);
     db.applyCanvasProjectOperations("p", undefined, [
@@ -92,12 +115,19 @@ test("H3 个人视图字段在新建、导入节点和旧客户端更新边界�
     t.after(() => db.close());
     db.createCanvasProject({ id: "local-view", nodes: [{ id: "seed", type: "minimax-h3:video", metadata: { selectedSegmentId: "S02", playhead: 4, minimaxPreviewH: 900, prompt: "共享" } }], connections: [] });
     let nodes = db.getCanvasProject("local-view")!.nodes as Array<Record<string, any>>;
-    assert.deepEqual(nodes[0].metadata, { prompt: "共享" });
+    assert.equal(nodes[0].metadata.prompt, "共享");
+    assert.equal(Object.hasOwn(nodes[0].metadata, "selectedSegmentId"), false);
+    assert.equal(Object.hasOwn(nodes[0].metadata, "playhead"), false);
+    assert.equal(Object.hasOwn(nodes[0].metadata, "minimaxPreviewH"), false);
 
     db.applyCanvasProjectOperations("local-view", undefined, [{ type: "add_node", id: "added", nodeType: "minimax-h3:video", metadata: { timelineScrollLeft: 320, nanFengExpandedSections: { model: true }, segments: [{ id: "S01" }] } }]);
     db.applyCanvasProjectOperations("local-view", undefined, [{ type: "update_node", id: "added", metadata: { selectedSegmentId: "S01", minimaxPromptW: 700, notes: "保留" }, metadataDelete: ["playhead"] }]);
     nodes = db.getCanvasProject("local-view")!.nodes as Array<Record<string, any>>;
-    assert.deepEqual(nodes[1].metadata, { segments: [{ id: "S01" }], notes: "保留" });
+    assert.deepEqual(nodes[1].metadata.segments, [{ id: "S01" }]);
+    assert.equal(nodes[1].metadata.notes, "保留");
+    for (const field of ["timelineScrollLeft", "nanFengExpandedSections", "selectedSegmentId", "minimaxPromptW", "playhead"]) {
+        assert.equal(Object.hasOwn(nodes[1].metadata, field), false);
+    }
 
     const rawDb = (db as unknown as { db: { prepare: (sql: string) => { run: (...values: unknown[]) => void } } }).db;
     const legacy = structuredClone(db.getCanvasProject("local-view")!) as Record<string, any>;

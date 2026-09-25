@@ -1288,10 +1288,12 @@ export class BackendDatabase {
         const currentTaskId = index >= 0 ? String(segments[index].runtimeTaskId || "") : "";
         if (index < 0 || (currentTaskId && currentTaskId !== task.id)) return null;
         const terminalStatus = task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "error";
+        const active = segments.find((segment) => ["queued", "loading", "awaiting_confirmation"].includes(String(segment.status || "")) && String(segment.id || "") !== binding.segmentId);
         const segmentPatch: Record<string, unknown> = {
             status: terminalStatus,
             progress: task.progress,
             runtimeTaskId: "",
+            parentTaskId: "",
             ...(task.error ? { errorDetails: task.error } : {}),
         };
         if (output) {
@@ -1315,8 +1317,9 @@ export class BackendDatabase {
         // 注意：不再写 metadata.materials（迁移 v4 起停摆）。materials 历史由 generation_logs.outputs_json 承担，
         // 前端通过 MCP tool h3_get_node_materials / REST /canvas/nodes/:id/materials 按需取，metadata 体积随之下降。
         const nodeMetadataPatch: Record<string, unknown> = {
-            status: terminalStatus,
-            runProgress: task.progress,
+            status: active ? String(active.status || "loading") : terminalStatus,
+            runProgress: Math.max(Number(active?.progress || 0), task.progress),
+            runtimeTaskId: String(active?.parentTaskId || (active?.status === "awaiting_confirmation" ? active?.runtimeTaskId : "") || ""),
         };
         if (output) {
             nodeMetadataPatch.content = output.url;

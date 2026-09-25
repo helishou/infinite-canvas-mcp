@@ -9,6 +9,7 @@ import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { RunningHubBackend } from "../runtime/runninghub.js";
 import type { Stores } from "../stores/types.js";
 import { writeBackH3Task } from "./h3-task-writeback.js";
+import { createLogger } from "../logger.js";
 import { h3ClipCacheFingerprint, h3ClipCacheFingerprintV1, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, pickH3PostpassParams, stableH3Fingerprint } from "./h3-cache.js";
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCompositePrompt, storyboardCompositeDirective, storyboardCompositePlan } from "./storyboard-composite.js";
@@ -36,6 +37,8 @@ type H3Confirmation = { cursor: number; pending: PendingH3[]; inFlight?: { nodeI
 export type H3ConfirmationAction = { action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> };
 
 const H3_DEFAULTS_KEY = "plugin:minimax-h3:defaults:v1";
+const logger = createLogger("h3-runner");
+
 const H3_PARAM_KEYS = [
     "mode", "taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "steps", "denoise", "noiseSeedMode", "noiseSeed", "seed",
     "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sizeMultiple", "sampler", "scheduler",
@@ -84,7 +87,8 @@ export class CanvasH3Runner {
         if (normalized.params?.confirmSecondPass === true) throw new Error("请通过 H3 确认接口继续原任务，不能另建二采任务");
         const project = this.stores.projects.get(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
-        this.validatePlannedReferences(project, normalized);
+        // 单个 Clip 的参考素材不完整只跳过它自己；其余 Clip 必须照常入队，不能整批卡死。
+        const blockedPlans = this.validatePlannedReferences(project, normalized);
         const existing = clientTaskId ? this.stores.tasks.get(clientTaskId) : null;
         if (existing) return existing;
         const duplicate = this.findActiveDuplicate(normalized);
@@ -97,7 +101,8 @@ export class CanvasH3Runner {
             if (!sameInput || (duplicate.status === "awaiting_confirmation" && !sameClip)) throw new Error(`H3 Clip 正被任务 ${duplicate.id} 占用；请先完成或放弃该任务`);
             return duplicate;
         }
-        const runPlan = this.buildRunPlan(normalized);
+        const runPlan = this.buildRunPlan(normalized, blockedPlans);
+        if (blockedPlans.length) logger.warn("H3 批量运行跳过参考素材不完整的 Clip", { projectId: normalized.projectId, blocked: blockedPlans.map((item) => `${item.segmentId}: ${item.reason}`) });
         const frozenInput = { ...normalized, runPlan };
         const created = clientTaskId
             ? this.stores.tasks.create(clientTaskId, "canvas-h3-run", frozenInput, {})
@@ -112,16 +117,22 @@ export class CanvasH3Runner {
     private validatePlannedReferences(project: Record<string, unknown>, input: H3RunInput) {
         const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
         const wanted = input.nodeIds?.length ? new Set(input.nodeIds) : input.nodeId ? new Set([input.nodeId]) : null;
+        // 逐 Clip 收集：坏 Clip 只影响自己，不能因为一个 Clip 而否掉整批计划。
+        const blocked: Array<{ nodeId: string; segmentId: string; reason: string }> = [];
         for (const node of nodes.filter((item) => String(item.type || "").includes("minimax") && (!wanted || wanted.has(String(item.id || ""))))) {
             const segments = Array.isArray(recordOf(node.metadata).segments) ? recordOf(node.metadata).segments as H3Segment[] : [];
             for (const plan of this.planNode(node, input)) {
                 const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
-                if (segment) {
-                    const taskMode = normalizeTaskMode(input.params?.mode || input.params?.taskMode || segment.mode || segment.taskMode);
+                if (!segment) continue;
+                const taskMode = normalizeTaskMode(input.params?.mode || input.params?.taskMode || segment.mode || segment.taskMode);
+                try {
                     assertReferenceCompilation(compileH3Submission(project, segment, taskMode).compilation);
+                } catch (error) {
+                    blocked.push({ nodeId: String(node.id || ""), segmentId: String(plan.segmentId || ""), reason: (error as Error).message });
                 }
             }
         }
+        return blocked;
     }
 
     /**
@@ -235,9 +246,10 @@ export class CanvasH3Runner {
         return nodes.filter((node) => String(node.type || "").includes("minimax") && (!wanted || wanted.has(String(node.id || "")))).flatMap((node) => this.planNode(node, input));
     }
 
-    private buildRunPlan(input: H3RunInput): H3RunPlan {
-        const plans = this.plansFor(input);
-        if (!plans.length) throw new Error("没有符合条件的 H3 Clip");
+    private buildRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string }> = []): H3RunPlan {
+        const blockedKeys = new Set(blockedPlans.map((item) => `${item.nodeId}:${item.segmentId}`));
+        const plans = this.plansFor(input).filter((plan) => !blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`));
+        if (!plans.length) throw new Error(blockedPlans.length ? "没有可运行的 H3 Clip：所选 Clip 的参考素材绑定均不完整，请先修复素材绑定" : "没有符合条件的 H3 Clip");
         const before = this.stores.projects.get(input.projectId)!;
         const canonicalOps = plans.flatMap((plan) => {
             const patch = this.canonicalSegmentPatch(before, plan, input.params || {});
@@ -283,7 +295,7 @@ export class CanvasH3Runner {
         const previous = pending.previousOutput;
         this.patchSegment(projectId, pending.nodeId, pending.segmentId, {
             result: previous.result || "", resultStorageKey: previous.resultStorageKey || "", cacheFingerprint: previous.cacheFingerprint || "",
-            firstPassReady: false, firstPassResult: "", firstPassStorageKey: "", firstPassFingerprint: "", runtimeTaskId: "", status: discard ? "cancelled" : "awaiting_confirmation",
+            firstPassReady: false, firstPassResult: "", firstPassStorageKey: "", firstPassFingerprint: "", runtimeTaskId: "", parentTaskId: "", status: discard ? "cancelled" : "awaiting_confirmation",
         });
     }
 
@@ -371,7 +383,7 @@ export class CanvasH3Runner {
                 const secondPass = Boolean(pending && inFlight?.nodeId === plan.nodeId && inFlight?.segmentId === plan.segmentId);
                 if (pending && !secondPass) {
                     // keep_first_pass 决议已持久化，节点投影与 completed 事件可安全重放。
-                    this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { result: pending.firstPassResult, resultStorageKey: pending.firstPassStorageKey || "", cacheFingerprint: pending.firstPassFingerprint, firstPassReady: false, status: "success", runtimeTaskId: "" });
+                    this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { result: pending.firstPassResult, resultStorageKey: pending.firstPassStorageKey || "", cacheFingerprint: pending.firstPassFingerprint, firstPassReady: false, status: "success", runtimeTaskId: "", parentTaskId: "" });
                     const output = { url: pending.firstPassResult, storageKey: pending.firstPassStorageKey, mimeType: "video/mp4" };
                     task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), phase: "remaining", confirmation: { ...confirmation, cursor: planIndex + 1, pending: [], revision: confirmation.revision + 1 }, media: [...completedOutput(), output] } }, { type: "clip_completed", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: pending.firstPassChildTaskId, output, fingerprint: pending.firstPassFingerprint } })!;
                     if (!task) throw new Error("H3 保留一采决议冲突");
@@ -434,7 +446,7 @@ export class CanvasH3Runner {
                     this.publish(task, "task.updated");
                     return;
                 }
-                this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { cacheFingerprint: cache.fingerprint, firstPassReady: false, status: "success", runtimeTaskId: "" });
+                this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { cacheFingerprint: cache.fingerprint, firstPassReady: false, status: "success", runtimeTaskId: "", parentTaskId: "" });
                 task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), phase: "remaining", confirmation: { ...confirmation, pending: [], inFlight: undefined, cursor: planIndex + 1, revision: confirmation.revision + 1 }, media, ...output } }, { type: "clip_completed", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, output, fingerprint: cache.fingerprint } })!;
                 if (!task) throw new Error("H3 Clip 收口状态冲突");
                 completedByKey.set(key, { output, fingerprint: cache.fingerprint });
@@ -754,7 +766,7 @@ export class CanvasH3Runner {
         if (!node) throw new Error(`找不到 H3 节点: ${plan.nodeId}`);
         this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [
             { type: "update_node", id: plan.nodeId, metadata: { runtimeTaskId: parentId, status: "loading" } },
-            { type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch: { runtimeTaskId: childId, status: "loading", progress: 0 }, patchDelete: ["errorDetails"] },
+            { type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch: { parentTaskId: parentId, runtimeTaskId: childId, status: "loading", progress: 0 }, patchDelete: ["errorDetails"] },
         ], { runtimeWrite: true, source: { clientId: `task:${childId}`, kind: "task", label: "H3 任务" } });
         const log = this.stores.logs.update(generationLogId, { status: "running", runtimeTaskId: childId });
         this.events.publish({ type: "generation-log.updated", entityId: log.id, payload: log });

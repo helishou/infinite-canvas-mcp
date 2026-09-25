@@ -67,6 +67,17 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
     const nodes = nodesOf(project);
     const connections = connectionsOf(project);
     const results: CanvasOperationResult[] = [];
+    const previousH3Segments = new Map<string, Map<string, Record<string, unknown>>>();
+    for (const operation of operations) {
+        const touchesReferences = operation.type === "update_h3_segment" && Object.hasOwn(recordOf(operation.patch), "referenceBindings")
+            || ["add_h3_segment", "replace_h3_segments"].includes(operation.type);
+        const nodeId = operation.type === "update_node" && Object.hasOwn(recordOf(operation.metadata), "segments")
+            ? String(operation.id || "")
+            : touchesReferences ? String(operation.nodeId || "") : "";
+        if (!nodeId || previousH3Segments.has(nodeId)) continue;
+        const node = nodes.find((item) => String(item.id) === nodeId);
+        if (isH3CanvasNode(node)) previousH3Segments.set(nodeId, new Map(segmentsOf(node!).map((segment) => [String(segment.id || ""), segment])));
+    }
 
     for (const operation of operations) {
         const result: CanvasOperationResult = { type: operation.type, ok: true };
@@ -95,7 +106,11 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             });
             syncOrderedGroupMembership(nodes, id);
             const createdNode = nodes.find((node) => String(node.id) === id);
-            if (createdNode?.metadata && orderedGroupForMember(nodes, createdNode)) operation.position = createdNode.position;
+            if (createdNode?.metadata && orderedGroupForMember(nodes, createdNode)) {
+                operation.position = createdNode.position;
+                operation.width = Number(createdNode.width);
+                operation.height = Number(createdNode.height);
+            }
             result.createdNodeIds = [id];
         } else if (operation.type === "update_node") {
             const id = String(operation.id || "");
@@ -354,7 +369,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
     for (const nodeId of referenceNodes) {
         const node = nodes.find((item) => String(item.id) === nodeId);
         if (isH3CanvasNode(node)) {
-            canonicalizeH3References(node!);
+            canonicalizeH3References(node!, undefined, previousH3Segments.get(nodeId));
             registerH3ReferenceAssets(project, node!);
         }
     }
@@ -363,7 +378,24 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
     return results;
 }
 
-export function canonicalizeH3References(node: Record<string, unknown>, archiveLegacy?: (segment: Record<string, unknown>, index: number) => void) {
+function legacyMirrorsBindings(refs: Array<Record<string, unknown>>, bindings: Array<Record<string, unknown>>) {
+    if (refs.length !== bindings.length) return false;
+    const remaining = [...bindings];
+    for (const ref of refs) {
+        const refId = String(ref.bindingId || "");
+        const refMedia = [ref.storageKey, ref.url].filter(Boolean).map(String);
+        const match = remaining.findIndex((binding) => {
+            if (refId && refId !== String(binding.id || "")) return false;
+            const bindingMedia = [binding.storageKey, binding.url].filter(Boolean).map(String);
+            return refMedia.some((media) => bindingMedia.includes(media)) || Boolean(refId && !refMedia.length && !bindingMedia.length);
+        });
+        if (match < 0) return false;
+        remaining.splice(match, 1);
+    }
+    return true;
+}
+
+export function canonicalizeH3References(node: Record<string, unknown>, archiveLegacy?: (segment: Record<string, unknown>, index: number) => void, previousSegments?: Map<string, Record<string, unknown>>) {
     const metadata = recordOf(node.metadata);
     const segments = segmentsOf(node);
     for (const [index, segment] of segments.entries()) {
@@ -371,15 +403,29 @@ export function canonicalizeH3References(node: Record<string, unknown>, archiveL
         const legacyRefs = Array.isArray(segment.refItems) && segment.refItems.length
             ? segment.refItems.map(recordOf)
             : ["image", "video", "audio"].flatMap((type) => Array.isArray(buckets[type]) ? (buckets[type] as unknown[]).map(recordOf) : buckets[type] ? [recordOf(buckets[type])] : []);
-        const currentBindings = Array.isArray(segment.referenceBindings) ? segment.referenceBindings as Array<Record<string, unknown>> : [];
+        const hasBindings = Array.isArray(segment.referenceBindings);
+        const currentBindings = hasBindings ? segment.referenceBindings as Array<Record<string, unknown>> : [];
+        const previous = previousSegments?.get(String(segment.id || ""));
         if (legacyRefs.length) archiveLegacy?.(segment, index);
-        if (currentBindings.length && legacyRefs.length) {
-            const ids = new Set(currentBindings.map((binding) => String(binding.id || "")));
-            if (!archiveLegacy && (currentBindings.length !== legacyRefs.length || legacyRefs.some((ref) => ref.bindingId && !ids.has(String(ref.bindingId))))) {
+        if (hasBindings && legacyRefs.length && !archiveLegacy && (currentBindings.length || previous)) {
+            const previousBindings = Array.isArray(previous?.referenceBindings) ? previous.referenceBindings.map(recordOf) : [];
+            const previousBuckets = recordOf(previous?.refs);
+            const previousHadLegacy = Boolean((Array.isArray(previous?.refItems) && previous.refItems.length)
+                || ["image", "video", "audio"].some((type) => Array.isArray(previousBuckets[type]) ? previousBuckets[type].length : previousBuckets[type]));
+            const bucketRefs = ["image", "video", "audio"].flatMap((type) => Array.isArray(buckets[type]) ? (buckets[type] as unknown[]).map(recordOf) : buckets[type] ? [recordOf(buckets[type])] : []);
+            const mirrorsPrevious = previous && !previousHadLegacy && previousBindings.length > 0
+                && legacyMirrorsBindings(legacyRefs, previousBindings)
+                && (!bucketRefs.length || legacyMirrorsBindings(bucketRefs, previousBindings));
+            const mirrorsCurrent = currentBindings.length > 0 && legacyMirrorsBindings(legacyRefs, currentBindings)
+                && (!bucketRefs.length || legacyMirrorsBindings(bucketRefs, currentBindings));
+            const unchangedExisting = previousHadLegacy && JSON.stringify(previousBindings) === JSON.stringify(currentBindings)
+                && currentBindings.length === legacyRefs.length
+                && legacyRefs.every((ref) => !ref.bindingId || currentBindings.some((binding) => String(binding.id || "") === String(ref.bindingId)));
+            if (!mirrorsPrevious && !mirrorsCurrent && !unchangedExisting) {
                 throw new Error(`H3 Clip ${String(segment.id || "")} 的绑定与旧参考不一致，拒绝丢弃原数据`);
             }
         }
-        if (!Array.isArray(segment.referenceBindings) || !segment.referenceBindings.length) {
+        if (!hasBindings || !currentBindings.length && (archiveLegacy || !previous)) {
             const legacy = { ...segment };
             delete legacy.referenceBindings;
             const converted = referenceBindingsOf(legacy).bindings;
@@ -485,9 +531,11 @@ function syncOrderedGroupMembership(nodes: Array<Record<string, unknown>>, nodeI
         const rawSlots = Array.isArray(metadata.groupSlots) ? metadata.groupSlots.map(String) : [];
         const slots = rawSlots.length ? rawSlots.filter((id, index, all) => knownIds.has(id) && all.indexOf(id) === index) : legacyMemberIds;
         const nextSlots = nextGroupId === groupId ? (slots.includes(nodeId) ? slots : [...slots, nodeId]) : slots.filter((id) => id !== nodeId);
+        // 明确的槽位顺序已随本批操作提交时，成员归属更新不能再重排整组并覆盖显式布局。
+        if (rawSlots.length && nextSlots.length === rawSlots.length && nextSlots.every((id, index) => id === rawSlots[index])) return;
         metadata.groupSlots = nextSlots;
         group.metadata = metadata;
-        if (nextGroupId !== groupId || preservePosition) return;
+        if (!nextSlots.length) return;
 
         const columns = Math.max(1, Math.min(12, Math.round(Number(metadata.orderedGroupColumns)) || 4));
         const displayCount = nextSlots.length % columns === 0 ? nextSlots.length + columns : nextSlots.length + (columns - nextSlots.length % columns);
@@ -497,13 +545,28 @@ function syncOrderedGroupMembership(nodes: Array<Record<string, unknown>>, nodeI
         const gap = 14;
         const padding = { left: 24, right: 24, top: 52, bottom: 24 };
         const rows = Math.ceil(Math.max(displayCount, 1) / columns);
-        const cellWidth = Math.max(80, (groupWidth - padding.left - padding.right - gap * (columns - 1)) / columns);
-        const cellHeight = Math.max(80, (groupHeight - padding.top - padding.bottom - gap * (rows - 1)) / rows);
-        const slotIndex = nextSlots.indexOf(nodeId);
-        member.position = {
-            x: Number(groupPosition.x || 0) + padding.left + (slotIndex % columns) * (cellWidth + gap) + (cellWidth - Number(member.width || 0)) / 2,
-            y: Number(groupPosition.y || 0) + padding.top + Math.floor(slotIndex / columns) * (cellHeight + gap) + (cellHeight - Number(member.height || 0)) / 2,
-        };
+        const availableWidth = Math.max(0, groupWidth - padding.left - padding.right);
+        const availableHeight = Math.max(0, groupHeight - padding.top - padding.bottom);
+        const gapX = columns > 1 ? Math.min(gap, Math.max(0, (availableWidth - columns) / (columns - 1))) : 0;
+        const gapY = rows > 1 ? Math.min(gap, Math.max(0, (availableHeight - rows) / (rows - 1))) : 0;
+        const cellWidth = Math.max(0, (availableWidth - gapX * (columns - 1)) / columns);
+        const cellHeight = Math.max(0, (availableHeight - gapY * (rows - 1)) / rows);
+        nextSlots.forEach((memberId, slotIndex) => {
+            if (preservePosition && memberId === nodeId) return;
+            const slotMember = nodes.find((node) => String(node.id) === memberId);
+            if (!slotMember) return;
+            const originalWidth = Number(slotMember.width || 0);
+            const originalHeight = Number(slotMember.height || 0);
+            const scale = Math.min(1, cellWidth / Math.max(originalWidth, 1), cellHeight / Math.max(originalHeight, 1));
+            const width = originalWidth * scale;
+            const height = originalHeight * scale;
+            slotMember.position = {
+                x: Number(groupPosition.x || 0) + padding.left + (slotIndex % columns) * (cellWidth + gapX) + (cellWidth - width) / 2,
+                y: Number(groupPosition.y || 0) + padding.top + Math.floor(slotIndex / columns) * (cellHeight + gapY) + (cellHeight - height) / 2,
+            };
+            slotMember.width = width;
+            slotMember.height = height;
+        });
     });
 }
 
