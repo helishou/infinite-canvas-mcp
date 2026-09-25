@@ -1021,7 +1021,8 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
                 for (const key of operation.metadataDelete.map(String)) delete metadata[key];
                 node.metadata = metadata as CanvasNodeData["metadata"];
             }
-            nodes = syncOrderedGroupMembership(nodes, node.id, previousGroupId);
+            // 成员位置/尺寸的显式回放（含撤销、重做）必须保持原值；只有归属变化才自动整理槽位。
+            if (previousGroupId !== node.metadata?.groupId) nodes = syncOrderedGroupMembership(nodes, node.id, previousGroupId);
         } else if (type === "delete_node") {
             const ids = new Set((Array.isArray(operation.ids) ? operation.ids : [operation.id]).filter(Boolean).map(String));
             for (let index = nodes.length - 1; index >= 0; index--) if (ids.has(nodes[index].id)) nodes.splice(index, 1);

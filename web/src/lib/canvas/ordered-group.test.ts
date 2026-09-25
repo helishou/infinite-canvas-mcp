@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
-import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, insertOrderedGroupSlot, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupResizeLayout, orderedGroupSlots, replaceOrderedGroupSlot, swapOrderedGroupSlot, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
+import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, insertOrderedGroupSlot, moveOrderedGroupSlot, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupMemberPosition, orderedGroupMemberSize, orderedGroupResizeLayout, orderedGroupSlots, replaceOrderedGroupSlot, swapOrderedGroupSlot, syncOrderedGroupMembership, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
 
 const group = (slots: Array<string | null>): CanvasNodeData => ({
     id: "g",
@@ -75,6 +75,8 @@ test("ordered group arrange caps columns and stays stable on repeated arrange", 
 
 test("gap insertion and occupied-slot swap preserve ordered semantics", () => {
     assert.deepEqual(insertOrderedGroupSlot(["a", "b", null], "c", 1), ["a", "c", "b"]);
+    assert.deepEqual(moveOrderedGroupSlot(["a", "b", "c"], 0, 2), ["b", "a", "c"]);
+    assert.deepEqual(moveOrderedGroupSlot(["a", "b", "c"], 2, 1), ["a", "c", "b"]);
     assert.deepEqual(swapOrderedGroupSlot(["a", "b", "c"], 0, 2), ["c", "b", "a"]);
     assert.deepEqual(replaceOrderedGroupSlot(["a", "b", "c"], "outside", 1), { slots: ["a", "outside", "c"], displacedId: "b" });
 });
@@ -122,18 +124,109 @@ test("drop targeting follows the dragged node center instead of the grabbed curs
     assert.deepEqual(orderedGroupDraggedCenter({ x: 100, y: 80 }, { x: 200, y: 40 }, { width: 160, height: 100 }), { x: 380, y: 170 });
 });
 
+test("a picture grabbed near its edge still inserts at the slot under its center", () => {
+    const target = group(["a", "b", "c"]);
+    const occupied = [
+        { index: 0, x: 24, y: 52, width: 150, height: 120 },
+        { index: 1, x: 188, y: 52, width: 150, height: 120 },
+        { index: 2, x: 352, y: 52, width: 150, height: 120 },
+    ];
+    const center = orderedGroupDraggedCenter({ x: 352, y: 52 }, { x: -150, y: 0 }, { width: 150, height: 120 });
+    const grabbedPoint = { x: 368, y: 300 };
+    assert.deepEqual(orderedGroupDropTarget(target, 3, center, occupied), { kind: "slot", index: 1 });
+    assert.equal(orderedGroupDropTarget(target, 3, grabbedPoint, occupied)?.index, 2);
+});
+
 test("blank area after the final occupied slot resolves to the end gap", () => {
     const target = group(["a", "b", "c"]);
     const result = orderedGroupDropTarget(target, 3, { x: 700, y: 350 }, []);
     assert.deepEqual(result, { kind: "gap", index: 3 });
 });
 
-test("resizing an ordered group reflows slots without changing member sizes", () => {
+test("shrinking an ordered group scales members proportionally and keeps every member inside its slot", () => {
     const target = group(["a", "b", "c"]);
     const nodes = [target, member("a", "g"), member("b", "g"), member("c", "g")];
-    const layout = orderedGroupResizeLayout(target, { position: { x: 40, y: 30 }, width: 420, height: 760 }, nodes);
+    const bounds = { position: { x: 40, y: 30 }, width: 420, height: 760 };
+    const resizedGroup = { ...target, ...bounds };
+    const layout = orderedGroupResizeLayout(target, bounds, nodes);
+    const cells = orderedGroupLayout(resizedGroup, orderedGroupDisplaySlots(nodes.slice(1).map((node) => node.id), orderedGroupColumnCount(target)).length);
+
     assert.equal(layout.size, 3);
-    assert.equal(layout.get("a")?.width, nodes[1].width);
-    assert.equal(layout.get("a")?.height, nodes[1].height);
+    nodes.slice(1).forEach((node, index) => {
+        const memberBounds = layout.get(node.id);
+        assert.ok(memberBounds);
+        assert.equal(memberBounds.width / memberBounds.height, node.width / node.height);
+        const memberScales = nodes.slice(1).map((node) => {
+            const bounds = layout.get(node.id);
+            return bounds ? bounds.width / node.width : 0;
+        });
+        assert.ok(memberScales.every((scale) => Math.abs(scale - memberScales[0]) < 1e-9));
+        assert.ok(memberBounds.width <= cells[index].width);
+        assert.ok(memberBounds.height <= cells[index].height);
+        assert.ok(memberBounds.position.x >= resizedGroup.position.x + cells[index].x);
+        assert.ok(memberBounds.position.y >= resizedGroup.position.y + cells[index].y);
+        assert.ok(memberBounds.position.x + memberBounds.width <= resizedGroup.position.x + cells[index].x + cells[index].width);
+        assert.ok(memberBounds.position.y + memberBounds.height <= resizedGroup.position.y + cells[index].y + cells[index].height);
+    });
     assert.notDeepEqual(layout.get("a")?.position, layout.get("b")?.position);
+});
+
+test("small ordered groups keep their cells and members inside the frame", () => {
+    const target = { ...group(["a", "b", "c"]), width: 220, height: 160 };
+    const cells = orderedGroupLayout(target, orderedGroupDisplaySlots(["a", "b", "c"]).length);
+    for (const cell of cells) {
+        assert.ok(cell.x >= 0 && cell.y >= 0);
+        assert.ok(cell.x + cell.width <= target.width);
+        assert.ok(cell.y + cell.height <= target.height);
+    }
+    const oversized = member("a", "g");
+    const size = orderedGroupMemberSize(target, 0, oversized, cells.length);
+    const position = orderedGroupMemberPosition(target, 0, oversized, cells.length);
+    assert.ok(size.width <= cells[0].width && size.height <= cells[0].height);
+    assert.ok(position.x >= cells[0].x && position.x + size.width <= cells[0].x + cells[0].width);
+    const manyCells = orderedGroupLayout(target, orderedGroupDisplaySlots(Array.from({ length: 40 }, (_, index) => `n${index}`)).length);
+    assert.ok(manyCells.every((cell) => cell.y >= 0 && cell.y + cell.height <= target.height));
+});
+
+test("enlarging an ordered group grows its previously scaled members", () => {
+    const small = { ...group(["a"]), width: 420, height: 264 };
+    const image = { ...member("a", "g"), width: 80, height: 48 };
+    const enlarged = orderedGroupResizeLayout(small, { position: small.position, width: 760, height: 480 }, [small, image]).get("a");
+    assert.ok(enlarged);
+    assert.ok(enlarged.width > image.width && enlarged.height > image.height);
+    assert.ok(Math.abs(enlarged.width / enlarged.height - image.width / image.height) < 1e-9);
+});
+
+test("shrinking and enlarging a group restores fitting member dimensions", () => {
+    const original = group(["a"]);
+    const image = { ...member("a", "g"), width: 160, height: 120 };
+    const smallerBounds = { position: original.position, width: 420, height: original.height * 420 / original.width };
+    const smaller = orderedGroupResizeLayout(original, smallerBounds, [original, image]).get("a")!;
+    const smallerGroup = { ...original, ...smallerBounds };
+    const restored = orderedGroupResizeLayout(smallerGroup, { position: original.position, width: original.width, height: original.height }, [smallerGroup, { ...image, ...smaller }]).get("a")!;
+    assert.ok(Math.abs(restored.width - image.width) < 1e-9);
+    assert.ok(Math.abs(restored.height - image.height) < 1e-9);
+});
+
+test("an externally added member is resized to its ordered slot", () => {
+    const target = { ...group(["a"]), width: 220, height: 160 };
+    const incoming = { ...member("b", "g"), width: 400, height: 240 };
+    const updated = syncOrderedGroupMembership([target, member("a", "g"), incoming], "b");
+    const placed = updated.find((node) => node.id === "b")!;
+    const cell = orderedGroupLayout(target, 4)[1];
+    assert.ok(placed.width <= cell.width && placed.height <= cell.height);
+    assert.ok(placed.position.x >= cell.x && placed.position.x + placed.width <= cell.x + cell.width);
+});
+
+test("external membership reflows earlier members when a new row appears", () => {
+    const target = group(["a", "b", "c"]);
+    const previous = ["a", "b", "c"].map((id) => ({ ...member(id, "g"), width: 160, height: 300 }));
+    const updated = syncOrderedGroupMembership([target, ...previous, member("d", "g")], "d");
+    const cells = orderedGroupLayout(target, 8);
+    for (const [index, id] of ["a", "b", "c", "d"].entries()) {
+        const placed = updated.find((node) => node.id === id)!;
+        assert.ok(placed.height <= cells[index].height);
+        assert.ok(placed.position.y >= cells[index].y);
+        assert.ok(placed.position.y + placed.height <= cells[index].y + cells[index].height);
+    }
 });

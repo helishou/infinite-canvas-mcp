@@ -47,9 +47,14 @@ export default defineConfig({
     // 代理会截断 SSE（net::ERR_INCOMPLETE_CHUNKED_ENCODING）；改走 Vite 同源代理后由 Node 转发，
     // 浏览器不再直连 17370，长连接不再被代理掐断。/events、/agent 均非 SPA 路由，不会与前端冲突。
     server: {
-        // 测试/诊断输出不是源码；Windows 对这些临时文件的锁定不应让整个 Vite watcher 退出。
+        // H3 内置插件走源码 HMR；构建会覆盖 public 中的分发包，Windows 上监听该文件可能触发 EBUSY。
+        // 静态文件仍由 Vite 提供，插件清单仍按请求读取目录。
         watch: {
-            ignored: [resolve(webDir, "_test_report.txt"), resolve(webDir, "_diag.txt")],
+            ignored: [
+                resolve(webDir, "_test_report.txt"),
+                resolve(webDir, "_diag.txt"),
+                resolve(webDir, "public/plugins/minimax-h3.js"),
+            ],
         },
         proxy: {
             "/api": { target: "http://127.0.0.1:17370", changeOrigin: true },

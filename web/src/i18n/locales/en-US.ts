@@ -160,6 +160,7 @@ export default {
         noAudioSelected: "No audio selected",
         selectAudio: "Please select an audio file",
         characterRequireOneImage: "A character asset needs at least one reference image",
+        characterRequireReference: "A character asset needs at least one outfit or voice reference",
         selectSceneImage: "Select scene image",
         noSceneImageSelected: "No scene image selected",
         selectSceneColorCard: "Select scene color card",

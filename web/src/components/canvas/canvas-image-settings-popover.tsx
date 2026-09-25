@@ -7,13 +7,13 @@ import { useTranslation } from "react-i18next";
 import { ImageSettingsPanel, imageQualityLabel, imageSizeLabel } from "@/components/image-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, type AiConfig } from "@/stores/use-config-store";
+import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, type AiConfig } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField, workflowRequiresPrompt, type WorkflowDetail } from "@/services/api/workflows";
 import { migrateWorkflowParams, reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
 
 type CanvasImageSettingsPopoverProps = {
     config: AiConfig;
-    onConfigChange: (key: keyof AiConfig, value: string) => void;
+    onConfigChange: (key: "quality" | "size" | "count" | "background", value: string) => void;
     onMissingConfig?: () => void;
     onOpenChange?: (open: boolean) => void;
     buttonClassName?: string;
@@ -31,6 +31,7 @@ type CanvasImageSettingsPopoverProps = {
 
 export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, onPromptRequiredChange, referenceCount = 0 }: CanvasImageSettingsPopoverProps) {
     const { t } = useTranslation();
+    const updateConfig = useConfigStore((state) => state.updateConfig);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
@@ -147,7 +148,10 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                 placement={placement}
                 theme={theme}
                 config={config}
-                onConfigChange={onConfigChange}
+                onConfigChange={(key, value) => {
+                    onConfigChange(key, value);
+                    updateConfig(key, value);
+                }}
                 customFields={customFields}
                 customFieldValues={comfyParams}
                 onCustomFieldChange={onComfyParamsChange ? (id, value) => {
@@ -197,7 +201,7 @@ function ImageSettingsPortal({
     placement: CanvasImageSettingsPopoverProps["placement"];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
-    onConfigChange: (key: keyof AiConfig, value: string) => void;
+    onConfigChange: CanvasImageSettingsPopoverProps["onConfigChange"];
     customFields?: Parameters<typeof ImageSettingsPanel>[0]["customFields"];
     customFieldValues?: Parameters<typeof ImageSettingsPanel>[0]["customFieldValues"];
     onCustomFieldChange?: Parameters<typeof ImageSettingsPanel>[0]["onCustomFieldChange"];

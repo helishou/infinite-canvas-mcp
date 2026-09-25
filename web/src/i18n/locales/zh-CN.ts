@@ -160,6 +160,7 @@ export default {
         noAudioSelected: "未选择音频",
         selectAudio: "请先选择音频文件",
         characterRequireOneImage: "角色资产至少需要一张参考图",
+        characterRequireReference: "角色资产至少需要一套服装或一条声线",
         selectSceneImage: "选择场景图",
         noSceneImageSelected: "未选择场景图",
         selectSceneColorCard: "选择场景色卡",

@@ -57,12 +57,17 @@ export function orderedGroupDisplaySlots(slots: OrderedGroupSlot[], columns = CO
 export function orderedGroupLayout(group: CanvasNodeData, slotCount: number): OrderedGroupLayout[] {
     const columns = orderedGroupColumnCount(group);
     const rows = Math.ceil(Math.max(slotCount, 1) / columns);
-    const width = Math.max(80, (group.width - PADDING.left - PADDING.right - GAP * (columns - 1)) / columns);
-    const height = Math.max(80, (group.height - PADDING.top - PADDING.bottom - GAP * (rows - 1)) / rows);
+    // 槽位必须始终留在组框内；固定的 80px 下限会在缩小组框后把末列/末行画到框外。
+    const availableWidth = Math.max(0, group.width - PADDING.left - PADDING.right);
+    const availableHeight = Math.max(0, group.height - PADDING.top - PADDING.bottom);
+    const gapX = columns > 1 ? Math.min(GAP, Math.max(0, (availableWidth - columns) / (columns - 1))) : 0;
+    const gapY = rows > 1 ? Math.min(GAP, Math.max(0, (availableHeight - rows) / (rows - 1))) : 0;
+    const width = Math.max(0, (availableWidth - gapX * (columns - 1)) / columns);
+    const height = Math.max(0, (availableHeight - gapY * (rows - 1)) / rows);
     return Array.from({ length: slotCount }, (_, index) => ({
         index,
-        x: PADDING.left + (index % columns) * (width + GAP),
-        y: PADDING.top + Math.floor(index / columns) * (height + GAP),
+        x: PADDING.left + (index % columns) * (width + gapX),
+        y: PADDING.top + Math.floor(index / columns) * (height + gapY),
         width,
         height,
     }));
@@ -80,9 +85,10 @@ export function orderedGroupDropTarget(group: CanvasNodeData, slotCount: number,
     if (localX < PADDING.left || localX > group.width - PADDING.right || localY < PADDING.top || localY > group.height - PADDING.bottom) return null;
     const first = layouts[0];
     if (first && slotCount % columns !== 0) {
+        const gapX = columns > 1 ? Math.min(GAP, Math.max(0, (group.width - PADDING.left - PADDING.right - columns) / (columns - 1))) : 0;
         const endCell = {
-            x: PADDING.left + (slotCount % columns) * (first.width + GAP),
-            y: PADDING.top + Math.floor(slotCount / columns) * (first.height + GAP),
+            x: PADDING.left + (slotCount % columns) * (first.width + gapX),
+            y: layouts[layouts.length - 1].y,
             width: first.width,
             height: first.height,
         };
@@ -111,34 +117,45 @@ export function orderedGroupDropTarget(group: CanvasNodeData, slotCount: number,
 export function orderedGroupMemberPosition(group: CanvasNodeData, slotIndex: number, node: CanvasNodeData, slotCount: number) {
     const cell = orderedGroupLayout(group, slotCount)[slotIndex];
     if (!cell) return node.position;
+    const size = orderedGroupMemberSize(group, slotIndex, node, slotCount);
     return {
-        x: group.position.x + cell.x + (cell.width - node.width) / 2,
-        y: group.position.y + cell.y + (cell.height - node.height) / 2,
+        x: group.position.x + cell.x + (cell.width - size.width) / 2,
+        y: group.position.y + cell.y + (cell.height - size.height) / 2,
     };
 }
 
-export function orderedGroupMemberSize(_group: CanvasNodeData, _slotIndex: number, node: CanvasNodeData, _slotCount: number) {
-    return { width: node.width, height: node.height };
+export function orderedGroupMemberSize(group: CanvasNodeData, slotIndex: number, node: CanvasNodeData, slotCount: number) {
+    const cell = orderedGroupLayout(group, slotCount)[slotIndex];
+    if (!cell) return { width: node.width, height: node.height };
+    const scale = Math.min(1, cell.width / Math.max(node.width, 1), cell.height / Math.max(node.height, 1));
+    return { width: node.width * scale, height: node.height * scale };
 }
 
 export function orderedGroupResizeLayout(group: CanvasNodeData, bounds: OrderedGroupResizeBounds, nodes: CanvasNodeData[]) {
     const resizedGroup = { ...group, ...bounds };
     const slots = orderedGroupSlots(resizedGroup, nodes);
     const displaySlots = orderedGroupDisplaySlots(slots, orderedGroupColumnCount(group));
+    const previousCells = orderedGroupLayout(group, displaySlots.length);
+    const nextCells = orderedGroupLayout(resizedGroup, displaySlots.length);
     const result = new Map<string, OrderedGroupResizeBounds>();
     slots.forEach((nodeId, slotIndex) => {
         if (!nodeId) return;
         const node = nodes.find((item) => item.id === nodeId);
-        if (!node) return;
-        const cell = orderedGroupLayout(resizedGroup, displaySlots.length)[slotIndex];
-        if (!cell) return;
+        const previousCell = previousCells[slotIndex];
+        const cell = nextCells[slotIndex];
+        if (!node || !previousCell || !cell) return;
+        // 保持成员占据槽位的比例；缩小再放大会回到原尺寸，超出旧槽位的成员先收进槽内。
+        const occupancy = Math.min(1, Math.max(node.width / Math.max(previousCell.width, 1), node.height / Math.max(previousCell.height, 1)));
+        const scale = occupancy * Math.min(cell.width / Math.max(node.width, 1), cell.height / Math.max(node.height, 1));
+        const width = node.width * scale;
+        const height = node.height * scale;
         result.set(nodeId, {
             position: {
-                x: resizedGroup.position.x + cell.x + (cell.width - node.width) / 2,
-                y: resizedGroup.position.y + cell.y + (cell.height - node.height) / 2,
+                x: resizedGroup.position.x + cell.x + (cell.width - width) / 2,
+                y: resizedGroup.position.y + cell.y + (cell.height - height) / 2,
             },
-            width: node.width,
-            height: node.height,
+            width,
+            height,
         });
     });
     return result;
@@ -191,6 +208,11 @@ export function insertOrderedGroupSlot(slots: OrderedGroupSlot[], nodeId: string
     return next;
 }
 
+export function moveOrderedGroupSlot(slots: string[], sourceIndex: number, gapIndex: number) {
+    const nodeId = slots[sourceIndex];
+    return nodeId === undefined ? slots : insertOrderedGroupSlot(slots, nodeId, gapIndex - Number(sourceIndex < gapIndex));
+}
+
 /**
  * 把通过 MCP/协作增量写入 groupId 的节点同步进有序组的槽位记录，并立即落到对应单元格。
  * groupSlots 是有序组的顺序真值，不能只依赖普通组使用的 groupId。
@@ -207,15 +229,23 @@ export function syncOrderedGroupMembership(nodes: CanvasNodeData[], nodeId: stri
         if (!group?.metadata?.orderedGroup) return;
         const slots = orderedGroupSlots(group, nextNodes);
         const nextSlots = nextGroupId === groupId
-            ? insertOrderedGroupSlot(slots, nodeId, slots.length)
+            ? slots.includes(nodeId) ? slots : insertOrderedGroupSlot(slots, nodeId, slots.length)
             : slots.filter((id) => id !== nodeId);
+        // 同批次的撤销/重做已明确写入 groupSlots 和各成员位置；再次自动排布会覆盖恢复值。
+        const recordedSlots = group.metadata?.groupSlots;
+        if (Array.isArray(recordedSlots) && recordedSlots.length
+            && nextSlots.length === recordedSlots.length && nextSlots.every((id, index) => id === recordedSlots[index])) return;
         const groupWithSlots = { ...group, metadata: { ...group.metadata, groupSlots: nextSlots } };
         nextNodes = nextNodes.map((node) => node.id === group.id ? groupWithSlots : node);
-        if (nextGroupId !== groupId) return;
-        const slotIndex = nextSlots.indexOf(nodeId);
         const displayCount = orderedGroupDisplaySlots(nextSlots, orderedGroupColumnCount(groupWithSlots)).length;
-        const position = orderedGroupMemberPosition(groupWithSlots, slotIndex, member, displayCount);
-        nextNodes = nextNodes.map((node) => node.id === nodeId ? { ...node, position } : node);
+        const indices = new Map(nextSlots.map((id, index) => [id, index]));
+        nextNodes = nextNodes.map((node) => {
+            const slotIndex = indices.get(node.id);
+            if (slotIndex === undefined) return node;
+            const position = orderedGroupMemberPosition(groupWithSlots, slotIndex, node, displayCount);
+            const size = orderedGroupMemberSize(groupWithSlots, slotIndex, node, displayCount);
+            return { ...node, position, ...size };
+        });
     });
     return nextNodes;
 }

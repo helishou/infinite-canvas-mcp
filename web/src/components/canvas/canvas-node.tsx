@@ -20,6 +20,7 @@ import { useCanvasNodePreview } from "@/lib/canvas/canvas-drag-preview";
 import { ensureVideoPreview, getVideoPreviewRevision, subscribeVideoPreview, videoPreviewUrlFor } from "@/lib/canvas/canvas-video-frame";
 import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupLayout } from "@/lib/canvas/ordered-group";
+import { hasRenderableCanvasImage } from "@/lib/canvas/canvas-image-renderability";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
@@ -727,8 +728,8 @@ export const CanvasNode = React.memo(function CanvasNode({
             startTop: data.position.y,
             startWidth: data.width,
             startHeight: data.height,
-            keepRatio: isAspectLockedImage || data.type === CanvasNodeType.Video || Boolean(definition?.keepAspectRatio?.(data)),
-            ratio: imageAspectRatio(data),
+            keepRatio: isAspectLockedImage || data.type === CanvasNodeType.Video || (isGroup && data.metadata?.orderedGroup === true) || Boolean(definition?.keepAspectRatio?.(data)),
+            ratio: isGroup && data.metadata?.orderedGroup === true ? data.width / Math.max(data.height, 1) : imageAspectRatio(data),
         };
         window.addEventListener("mousemove", handleResizeMove);
         window.addEventListener("mouseup", handleResizeUp);
@@ -1320,7 +1321,7 @@ function TextSlotStatus({ text }: { text: CanvasNodeText }) {
 }
 
 function ImageNodeContent(props: NodeContentRendererProps) {
-    if (!props.node.metadata?.content && !props.isBatchRoot) {
+    if (!hasRenderableCanvasImage(props.node) && !props.isBatchRoot) {
         if (props.node.metadata?.status === "loading" || props.node.metadata?.images?.[0]?.status === "loading") return <LoadingContent theme={props.theme} />;
         if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
         return <EmptyImageContent {...props} />;
@@ -1794,6 +1795,7 @@ function ImageContent({
     const primaryImageId = node.metadata?.primaryImageId || images[0]?.id;
     const primaryImage = images.find((image) => image.id === primaryImageId);
     useImagePreviewRevision(primaryImage?.storageKey || node.metadata?.storageKey);
+    const primaryStorageKey = primaryImage?.storageKey || node.metadata?.storageKey;
     const primaryContent = primaryImage?.content || node.metadata?.content;
     const [primaryUrl, setPrimaryUrl] = useState("");
     const backendConnected = useBackendStore((state) => state.connected);
@@ -1801,21 +1803,21 @@ function ImageContent({
 
     useEffect(() => {
         let cancelled = false;
-        if (!primaryContent) {
+        if (!primaryContent && !primaryStorageKey) {
             setPrimaryUrl("");
             return;
         }
-        void ensureImagePreview(primaryImage?.storageKey || node.metadata?.storageKey);
-        resolveImageUrl(primaryImage?.storageKey || node.metadata?.storageKey, primaryContent).then((url) => {
+        void ensureImagePreview(primaryStorageKey);
+        resolveImageUrl(primaryStorageKey, primaryContent).then((url) => {
             if (!cancelled) setPrimaryUrl(url);
         });
         return () => {
             cancelled = true;
         };
-    }, [backendConnected, backendToken, node.metadata?.storageKey, primaryContent, primaryImage?.storageKey]);
+    }, [backendConnected, backendToken, primaryContent, primaryStorageKey]);
     const primarySource = primaryUrl
         ? pickImageSource({
-              previewUrl: previewUrlFor(primaryImage?.storageKey || node.metadata?.storageKey),
+              previewUrl: previewUrlFor(primaryStorageKey),
               originalUrl: primaryUrl,
               naturalWidth: primaryImage?.naturalWidth || node.metadata?.naturalWidth,
               naturalHeight: primaryImage?.naturalHeight || node.metadata?.naturalHeight,

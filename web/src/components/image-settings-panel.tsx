@@ -1,10 +1,10 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode } from "react";
 import { ConfigProvider, Switch } from "antd";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import type { AiConfig } from "@/stores/use-config-store";
+import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
 import type { WorkflowField } from "@/services/api/workflows";
 import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
 
@@ -51,7 +51,8 @@ type ImageSettingsPanelProps = {
 
 export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10, customFields, customFieldValues, onCustomFieldChange, hideStandardImageOptions = false }: ImageSettingsPanelProps) {
     const { t } = useTranslation();
-    const [snapDimensionToStep, setSnapDimensionToStep] = useState(true);
+    const updateConfig = useConfigStore((state) => state.updateConfig);
+    const snapDimensionToStep = config.imageAlign16 !== false;
     const quality = config.quality || "auto";
     const count = Math.max(1, Math.min(maxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
     const activeSize = config.size || "auto";
@@ -105,7 +106,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                                 {t("settingsPanels.image.align16")}
                             </span>
                             <span title={t("settingsPanels.image.align16Hint")} onMouseDown={(event) => event.stopPropagation()}>
-                                <Switch size="small" checked={snapDimensionToStep} onChange={setSnapDimensionToStep} />
+                                <Switch size="small" checked={snapDimensionToStep} onChange={(checked) => updateConfig("imageAlign16", checked)} />
                             </span>
                         </div>
                     </div>

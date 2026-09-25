@@ -42,6 +42,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     const { t } = useTranslation();
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
+    const updateConfig = useConfigStore((state) => state.updateConfig);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const isSmartGenerationNode = node.type === CanvasNodeType.Config && node.metadata?.smart === true;
     const mode = modeOverride ?? (isSmartGenerationNode ? node.metadata?.generationMode || "image" : defaultMode(node.type));
@@ -68,6 +69,10 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
         ? historyReferences.length
         : connectedNodes.filter((item) => item.type === CanvasNodeType.Image).length + mentionReferences.filter((item) => item.kind === "image").length;
     const clearHistoryReferences = () => onConfigChange(node.id, { activeImageHistoryId: null, activeImageHistoryExplicit: false });
+    const changeImageModel = (model: string) => {
+        onConfigChange(node.id, { model });
+        updateConfig("imageModel", model);
+    };
 
     const updatePrompt = (value: string) => editorRef.current?.replace(value);
 
@@ -126,7 +131,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                     <CanvasPromptLibrary onSelect={updatePrompt} />
                     {mode === "image" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
+                            <ModelPicker config={config} value={config.model} onChange={changeImageModel} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
                             <CanvasImageSettingsPopover
                                 config={config}
                                 placement="topLeft"

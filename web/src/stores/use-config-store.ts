@@ -73,6 +73,7 @@ export type AiConfig = {
     models: string[];
     quality: string;
     size: string;
+    imageAlign16: boolean;
     background: string;
     count: string;
     canvasImageCount: string;
@@ -136,6 +137,7 @@ export const defaultConfig: AiConfig = {
     models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
     quality: "auto",
     size: "1:1",
+    imageAlign16: true,
     background: "",
     count: "1",
     canvasImageCount: "3",
@@ -319,6 +321,7 @@ function normalizeConfig(input: Partial<AiConfig>): AiConfig {
         vquality: config.vquality || "720",
         videoGenerateAudio: config.videoGenerateAudio || "true",
         videoWatermark: config.videoWatermark || "false",
+        imageAlign16: config.imageAlign16 !== false,
         canvasImageCount: config.canvasImageCount || "3",
         proxyEnabled: Boolean(config.proxyEnabled),
         proxyUrl: normalizeLocalProxyUrl(config.proxyUrl || DEFAULT_LOCAL_PROXY_URL) || DEFAULT_LOCAL_PROXY_URL,

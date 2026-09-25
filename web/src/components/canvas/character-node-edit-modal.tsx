@@ -128,8 +128,8 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
     };
 
     const handleSave = () => {
-        if (!images.length) {
-            message.error(t("assets.characterRequireOneImage"));
+        if (!images.length && !hasCharacterVoiceSource({ url: voiceUrl, storageKey: voiceStorageKey, assetId: voiceAssetId })) {
+            message.error(t("assets.characterRequireReference"));
             return;
         }
         setSaving(true);
@@ -138,7 +138,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
             characterName: title.trim(),
             characterDescription: description.trim(),
             characterImages: images.map((image) => ({ ...image, role: image.role || "character_turnaround" })),
-            characterPrimaryIndex: Math.min(primaryIndex, images.length - 1),
+            characterPrimaryIndex: images.length ? Math.min(primaryIndex, images.length - 1) : 0,
             characterVoiceUrl: voiceUrl,
             characterVoiceName: resolveCharacterVoiceName(voiceName),
             characterVoiceDescription: voiceDescription.trim(),

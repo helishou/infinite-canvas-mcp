@@ -596,6 +596,14 @@ test("MCP 新节点写入有序组时立即追加槽位并落到组内", () => {
     assert.ok(added.position.x < group.position.x + group.width && added.position.y < group.position.y + group.height, "新节点应立即落在有序组框内");
 });
 
+test("显式更新有序组成员布局时不再按槽位覆盖位置尺寸", () => {
+    const group = { ...node("g", "group", 0, 0, 760, 480), metadata: { orderedGroup: true, groupSlots: ["a"] } } as CanvasNodeData;
+    const member = { ...node("a", "image", 24, 52, 180, 120), metadata: { groupId: "g" } } as CanvasNodeData;
+    const updated = applyOps([group, member], [{ type: "update_node", id: "a", patch: { position: { x: 80, y: 140 }, width: 160, height: 96 } }]).nodes.find((item) => item.id === "a")!;
+    assert.deepEqual(updated.position, { x: 80, y: 140 });
+    assert.deepEqual([updated.width, updated.height], [160, 96]);
+});
+
 test("生成组：成员离开旧组后，旧组按剩余成员收紧，成员被搬空则删除旧组", () => {
     const { group, members } = groupFixture();
     const nodes = [group, ...members, node("free", "text", 1800, 1080, 280, 160)];
@@ -782,4 +790,3 @@ test("组内整理：重复执行结果不变（幂等），非画面节点不�
         assert.equal(b.height, a.height, `${member.id} 第二次整理高度应不变`);
     });
 });
-

@@ -44,6 +44,42 @@ test("Backend 增量回放 MCP 有序组成员时同步槽位和位置", () => {
     assert.ok(added.position.x < 760 && added.position.y < 480, "远端新增节点应立即落在有序组框内");
 });
 
+test("有序组撤销和重做精确恢复槽位顺序及成员位置尺寸", () => {
+    const before = makeProject([
+        { id: "g", type: "group", title: "有序组", position: { x: 10, y: 20 }, width: 760, height: 480, metadata: { orderedGroup: true, groupSlots: ["a", "b"] } },
+        { id: "a", type: "image", title: "A", position: { x: 58, y: 100 }, width: 180, height: 120, metadata: { groupId: "g" } },
+        { id: "b", type: "image", title: "B", position: { x: 410, y: 100 }, width: 180, height: 120, metadata: { groupId: "g" } },
+    ]);
+    const after = makeProject([
+        { ...before.nodes[0], metadata: { ...before.nodes[0].metadata, groupSlots: ["b", "a"] } },
+        { ...before.nodes[1], position: { x: 410, y: 135 }, width: 160, height: 96 },
+        { ...before.nodes[2], position: { x: 58, y: 135 }, width: 160, height: 96 },
+    ]);
+    const undone = applyBackendCanvasDelta(after, diffCanvasProject(after, before), 2);
+    assert.deepEqual(undone.nodes, before.nodes);
+    const redone = applyBackendCanvasDelta(undone, diffCanvasProject(before, after), 3);
+    assert.deepEqual(redone.nodes, after.nodes);
+});
+
+test("拖出有序组后撤销和重做不覆盖同批次恢复的其他成员布局", () => {
+    const before = makeProject([
+        { id: "g", type: "group", title: "有序组", position: { x: 10, y: 20 }, width: 760, height: 480, metadata: { orderedGroup: true, groupSlots: ["a", "b", "c"] } },
+        { id: "a", type: "image", title: "A", position: { x: 58, y: 100 }, width: 180, height: 120, metadata: { groupId: "g" } },
+        { id: "b", type: "image", title: "B", position: { x: 220, y: 100 }, width: 180, height: 120, metadata: { groupId: "g" } },
+        { id: "c", type: "image", title: "C", position: { x: 410, y: 100 }, width: 180, height: 120, metadata: { groupId: "g" } },
+    ]);
+    const after = makeProject([
+        { ...before.nodes[0], metadata: { ...before.nodes[0].metadata, groupSlots: ["a", "c"] } },
+        { ...before.nodes[1], position: { x: 80, y: 145 }, width: 160, height: 96 },
+        { ...before.nodes[2], position: { x: 900, y: 80 }, metadata: {} },
+        { ...before.nodes[3], position: { x: 415, y: 145 }, width: 160, height: 96 },
+    ]);
+    const undone = applyBackendCanvasDelta(after, diffCanvasProject(after, before), 2);
+    assert.deepEqual(undone.nodes, before.nodes);
+    const redone = applyBackendCanvasDelta(undone, diffCanvasProject(before, after), 3);
+    assert.deepEqual(redone.nodes, after.nodes);
+});
+
 const VIEWPORT = { x: 0, y: 0, k: 1 };
 
 function makeH3Node(id: string, segments: Array<Record<string, unknown>>, extras: Record<string, unknown> = {}): Record<string, unknown> {

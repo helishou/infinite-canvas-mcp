@@ -806,7 +806,7 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
             if (!op.id) return;
             const previousGroupId = nodes.find((node) => node.id === op.id)?.metadata?.groupId;
             nodes = nodes.map((node) => (node.id === op.id ? { ...node, ...op.patch, metadata: { ...node.metadata, ...op.patch?.metadata, ...op.metadata } } : node));
-            nodes = syncOrderedGroupMembership(nodes, op.id, previousGroupId);
+            if (previousGroupId !== nodes.find((node) => node.id === op.id)?.metadata?.groupId) nodes = syncOrderedGroupMembership(nodes, op.id, previousGroupId);
         }
         if (op.type === "delete_node") {
             const ids = new Set(op.ids || (op.id ? [op.id] : op.nodeType ? nodes.filter((node) => node.type === op.nodeType).map((node) => node.id) : []));

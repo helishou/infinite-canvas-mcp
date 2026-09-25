@@ -362,8 +362,13 @@ export default function AssetsPage() {
             const asset = { ...base, kind: "video" as const, data: videoDraft };
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         } else if (values.kind === "character") {
-            if (!characterImages.length) { message.error(t("assets.characterRequireOneImage")); return; }
-            const primaryIndex = Math.min(Math.max(characterPrimaryIndex, 0), characterImages.length - 1);
+            const primaryIndex = characterImages.length
+                ? Math.min(Math.max(characterPrimaryIndex, 0), characterImages.length - 1)
+                : 0;
+            if (!characterImages.length && !characterVoice.url && !characterVoice.storageKey && !characterVoice.assetId) {
+                message.error(t("assets.characterRequireReference"));
+                return;
+            }
             const characterData: CharacterAsset["data"] = {
                 name: values.title.trim(),
                 englishName: "",
