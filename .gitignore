@@ -30,3 +30,4 @@ backend/venv
 artifacts
 tmp
 .codex
+.agent-artifacts

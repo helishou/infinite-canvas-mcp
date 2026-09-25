@@ -5,6 +5,34 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Remember the last image settings
+
+- In a canvas image node, change the image model, quality, size, image count, transparency, and 16-pixel alignment. Create another image node and confirm it starts with the latest model, quality, size, count, and transparency. Reopen the settings panel and confirm the alignment switch keeps its choice.
+- Refresh the page and create another image node. The same choices should remain. Reopen the original node and confirm its own saved settings still take priority when they differ from the latest defaults.
+
+## Editing H3 Clips with stale Picture references
+
+- With `<Picture 4>` in a Clip prompt, remove its third character outfit image from the reference lane or the reference editor. The removal should save through Backend ops without a prompt reference warning or a legacy reference mismatch error, including when an old page sends the previous reference list. Refresh and confirm the removed image stays removed, the saved prompt remains editable, and character audio and other Clips stay unchanged. Check the remaining Picture numbers before generating.
+- Open a Clip with three current image references while its saved storyboard summary still mentions `<Picture 4>`. The H3 node and page should remain usable. Opening the storyboard editor should show the missing reference error within the form and allow the summary to be edited.
+- Complete should keep the editor open with an error until the stale number is fixed. After correcting the summary, Complete should regenerate subject definitions and retention analysis from current references. Opening the page must not silently rewrite the prompt.
+
+## H3 reference input lines for the selected Clip
+
+- Select different Clips in an H3 canvas node. Only enabled references for the selected Clip should show dashed arrows from storyboard frames and other source media into H3. For a frame below H3, the line should enter the bottom of H3 from the top of the frame.
+- When multiple canvas nodes share a media file, the arrow should start at the binding's recorded source node. Existing solid image generation and crop provenance lines should keep their original meaning. Switching Clips should not add project connections or revisions.
+
+## Ordered group drag and resize
+
+- In a test canvas, swap members within an ordered group, drag one out, and drag it back in. Undo and redo each move immediately. Slot order, group membership, position, width, and height should match the respective before and after states without a second layout jump. Refresh and confirm the Backend receipt matches the page.
+- In a test canvas, drag a member to a gap on its right and then use Arrange. The saved order should match the visible order; dragging an image by its edge should target the slot under the image center. Dropping outside the slot area should leave the member movable.
+- Shrink an ordered group and enlarge it again. Slots and members should stay within the frame, preserve each member's aspect ratio, and restore the size of members that fitted their original slots. Add the fourth member to a three-member group and confirm that the new row reflows the existing members.
+- Add a member through MCP to a small ordered group, then refresh the canvas. The new member and existing members should remain inside their recorded slots. The Backend process must load the new build before this check.
+
+## H3 blocking-map prompt references
+
+- In a Ref2VA Clip with a blocking/axis image and character images, open the storyboard editor and click Complete. Confirm that `subject_definitions` contains a standalone `<Picture N>` line identifying the blocking map as a spatial plan, while `retention_analysis` contains a matching line for positions, movement paths, and the 180-degree axis. Character identity sources should not treat that image as an appearance reference. Repeat through `h3_write_storyboard_prompt` and confirm the same reference role.
+- Reopen a Clip whose saved entity definitions already include the blocking image. Confirm the generated Subject lines describe it as spatial guidance, and the standalone Picture definition and retention line still appear. Check any hand-edited prompt text before regenerating, since Complete rewrites the generated sections.
+
 ## MCP 分镜换槽与图片输入预检
 
 - 对有多张图的角色节点调用 `canvas_image_input_manifest`，确认返回实际参考顺序与 storageKey，并提示未明确选择的角色图；提供 `characterImageKeys` 后再提交图片生成，输入清单应与生成快照一致。
