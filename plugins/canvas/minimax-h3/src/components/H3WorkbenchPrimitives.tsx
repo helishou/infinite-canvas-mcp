@@ -1,13 +1,23 @@
 import { useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
-import type { H3Ref } from "../types";
 import { resultUrl } from "../services/h3-data";
+import { clipRuntimeState } from "../services/h3-clip-runtime";
+import type { H3Ref, H3Segment } from "../types";
 
-export function requestH3Run(ctx: CanvasNodeContext, all = false, forceRegenerate = false) {
+function selectedSegment(metadata: Record<string, unknown>) {
+    const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+    return segments.find((segment) => segment.id === String(metadata.selectedSegmentId || "")) || segments[0];
+}
+
+export function requestH3Run(ctx: CanvasNodeContext, all = false, forceRegenerate = false, segmentId?: string) {
     const node = ctx.getNode(ctx.node.id) || ctx.node;
     const metadata = node.metadata || {};
-    if (["queued", "loading", "awaiting_confirmation"].includes(String(metadata.status || ""))) return;
-    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, all, forceRegenerate });
+    const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+    const targetId = String(segmentId || metadata.selectedSegmentId || segments[0]?.id || "");
+    const target = segments.find((segment) => segment.id === targetId) || selectedSegment(metadata);
+    const state = clipRuntimeState(target);
+    if (["queued", "loading", "awaiting_confirmation"].includes(state.status)) return;
+    ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, all, forceRegenerate, segmentId: target?.id || targetId });
 }
 
 export function H3StatusBadge({ status, error, onRetry }: { status: string; error: string; onRetry: () => void }) {
@@ -402,15 +412,12 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
             const context = canvas.getContext("2d");
             if (!context) return;
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
-            canvas.toBlob((blob) => {
-                if (!blob) return;
-                const link = document.createElement("a");
-                const safeName = String(name || "video").replace(/[\\/:*?"<>|]+/g, "-");
-                link.href = URL.createObjectURL(blob);
-                link.download = `${safeName}-${position === "current" ? "当前帧" : position === "first" ? "首帧" : "尾帧"}.png`;
-                link.click();
-                window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-            }, "image/png");
+            const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+            if (!blob) return;
+            if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+                throw new Error("当前浏览器不支持将图片复制到剪贴板");
+            }
+            await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
         } finally {
             if (wasPlaying) void video.play().catch(() => undefined);
             setFrameMenuPosition(null);
@@ -576,7 +583,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     };
     if (!url) return <div className="minimax-player-content"><div className="minimax-player-empty">连接视频和角色参考图</div></div>;
     if (kind === "image") return <div className="minimax-player-content minimax-player-image" draggable onDragStart={handleDragStart}><img src={url} alt="H3 reference" draggable={false} onLoad={(event) => setMediaResolution({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />{mediaResolution ? <div className="minimax-player-resolution">{mediaResolution.width} × {mediaResolution.height}</div> : null}</div>;
-    if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio loop={Boolean(url) && !ctx.node.metadata?.h3PlaybackAll} ref={(node) => { videosRef.current[0] = node; }} src={url} controls preload="metadata" draggable={false} onPause={(event) => { const m = event.currentTarget; const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity))); ctx.updateMetadata({ playhead: timelineOffset + localTime }); }} /></div></div>;
+    if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio loop={false} ref={(node) => { videosRef.current[0] = node; }} src={url} controls preload="metadata" draggable={false} onPause={(event) => { const m = event.currentTarget; const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity))); ctx.updateMetadata({ playhead: timelineOffset + localTime }); }} /></div></div>;
     // 视频：双槽交叉淡入续播。两个 video 绝对叠放，active 槽可见且有 controls，另一槽透明且不接收事件；
     // 下一段已在 inactive 槽预载就绪，ended 时切换 active 即可即时续播，无 src 重载间隙。
     // muted 用 state 而不是 JSX 静态属性：rAF tick 触发 onPlayheadTick → 父组件重渲染，
@@ -613,10 +620,10 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                     ref={(node) => { videosRef.current[slot] = node; }}
                     src={slotSrc[slot] ? resultUrl(slotSrc[slot]) : undefined}
                     controls={active === slot}
-                    // 默认单段预览循环：交给浏览器原生 loop 处理，不再在 ended 事件里手动
-                    // 重置 currentTime + play()，避免任何 React state 副作用。连续播放
-                    // 模式下两个槽都不循环，让 ended 事件正常触发交叉淡入续播。
-                    loop={Boolean(slotSrc[slot]) && active === slot && !ctx.node.metadata?.h3PlaybackAll}
+                    // 单段预览不循环：播完停在末帧。
+                    // 之前这里用原生 loop，single clip 播放会反复从头循环；
+                    // 连续播放（h3PlaybackAll）仍靠 ended 事件触发双槽交叉淡入续播，两者互斥。
+                    loop={false}
                     muted={isMuted}
                     playsInline
                     preload="auto"

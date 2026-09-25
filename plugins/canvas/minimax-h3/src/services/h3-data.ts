@@ -157,7 +157,7 @@ export function replaceSegmentReference(segment: H3Segment, reference: H3Ref, ca
     if (oldIndex < 0) return segment;
     const old = current[oldIndex];
     const base = old.groupId
-        ? applyCharacterGroupEdits(segment, old.groupId, reference.type === "audio" ? { voiceEnabled: false } : { outfitEnabled: old.outfitId ? { [old.outfitId]: false } : undefined })
+        ? applyCharacterGroupEdits(segment, old.groupId, reference.type === "audio" ? { voiceEnabled: false } : { outfitEnabledById: old.outfitId ? { [old.outfitId]: false } : undefined })
         : segment;
     const baseRefs = refsForSegment(base).filter((ref) => !(old.bindingId ? ref.bindingId === old.bindingId : sameRef(ref, old)));
     const replacements = candidates
@@ -213,7 +213,9 @@ function characterGroupCapacity(segment: H3Segment, groupId?: string) {
     let otherAudios = 0;
     for (const [id, grp] of Object.entries(groups)) {
         if (groupId && id === groupId) continue;
-        otherImages += grp.outfits.filter((outfit) => outfit.enabled).length;
+        otherImages += normalizeCharacterGroup(grp).outfitEnabled
+            ? grp.outfits.filter((outfit) => outfit.enabled).length
+            : 0;
         if (grp.voiceEnabled) otherAudios += 1;
     }
     // 当前 group 之外的 standalone ref（用户手动拖入的非角色 ref）也参与计数
@@ -226,27 +228,34 @@ function characterGroupCapacity(segment: H3Segment, groupId?: string) {
     };
 }
 
+function normalizeCharacterGroup(group: H3CharacterGroup): H3CharacterGroup {
+    return { ...group, outfitEnabled: group.outfitEnabled ?? group.outfits.some((outfit) => outfit.enabled) };
+}
+
 function fitCharacterGroupToCapacity(segment: H3Segment, group: H3CharacterGroup): H3CharacterGroup {
-    const capacity = characterGroupCapacity(segment, group.id);
+    const normalized = normalizeCharacterGroup(group);
+    const capacity = characterGroupCapacity(segment, normalized.id);
     let imagesLeft = capacity.images;
     return {
-        ...group,
-        outfits: group.outfits.map((outfit) => {
-            if (!outfit.enabled) return outfit;
+        ...normalized,
+        outfitEnabled: normalized.outfitEnabled && normalized.outfits.length > 0 && capacity.images > 0,
+        outfits: normalized.outfits.map((outfit) => {
+            if (!normalized.outfitEnabled || !outfit.enabled) return outfit;
             if (imagesLeft <= 0) return { ...outfit, enabled: false };
             imagesLeft -= 1;
             return outfit;
         }),
-        voiceEnabled: Boolean(group.voice) && group.voiceEnabled && capacity.voice,
+        voiceEnabled: Boolean(normalized.voice) && normalized.voiceEnabled && capacity.voice,
     };
 }
 
 /** 从一个角色组派生当前应在 ref 槽里的 refs：每张 enabled outfit 拆为 image ref，voiceEnabled 时 voice 拆为 audio ref。 */
 export function refsFromCharacterGroup(group: H3CharacterGroup): H3Ref[] {
     const refs: H3Ref[] = [];
-    const subjectId = group.subjectId || group.characterNodeId;
-    for (const outfit of group.outfits) {
-        if (!outfit.enabled) continue;
+    const normalized = normalizeCharacterGroup(group);
+    const subjectId = normalized.subjectId || normalized.characterNodeId;
+    for (const outfit of normalized.outfits) {
+        if (!normalized.outfitEnabled || !outfit.enabled) continue;
         refs.push({
             url: outfit.url,
             type: "image",
@@ -260,16 +269,16 @@ export function refsFromCharacterGroup(group: H3CharacterGroup): H3Ref[] {
             outfitId: outfit.id,
         });
     }
-    if (group.voiceEnabled && group.voice?.url) {
+    if (normalized.voiceEnabled && normalized.voice?.url) {
         refs.push({
-            url: group.voice.url,
+            url: normalized.voice.url,
             type: "audio",
-            name: group.voice.name || `${group.characterName} · 声线`,
-            storageKey: group.voice.storageKey,
+            name: normalized.voice.name || `${normalized.characterName} · 声线`,
+            storageKey: normalized.voice.storageKey,
             role: "character_voice",
-            nodeId: group.characterNodeId,
+            nodeId: normalized.characterNodeId,
             subjectId,
-            groupId: group.id,
+            groupId: normalized.id,
         });
     }
     return refs;
@@ -282,12 +291,13 @@ function rewriteRefsWithGroups(segment: H3Segment, groups: Record<string, H3Char
     const standalone: H3Ref[] = [];
     for (const ref of previous) {
         if (ref.groupId && groups[ref.groupId]) {
-            // 仅当 ref 对应的 outfit 当前 enabled 时才保留 —— 否则当作 disabled，丢弃
+            // 服装总开关或逐套 enabled 任一关闭都移除图片 ref；声线只由 voiceEnabled 决定。
             const group = groups[ref.groupId];
-            const matchingOutfit = group?.outfits.find((outfit) => outfit.id === ref.outfitId);
-            // audio ref 没有 outfitId：用 group.voiceEnabled 决定是否保留
+            const matchingOutfit = group.outfits.find((outfit) => outfit.id === ref.outfitId);
             const isAudioRef = ref.type === "audio";
-            const stillEnabled = isAudioRef ? Boolean(group?.voiceEnabled) && Boolean(group?.voice?.url) : Boolean(matchingOutfit?.enabled);
+            const stillEnabled = isAudioRef
+                ? Boolean(group.voiceEnabled) && Boolean(group.voice?.url)
+                : Boolean(normalizeCharacterGroup(group).outfitEnabled) && Boolean(matchingOutfit?.enabled);
             const sourceRef = refsFromCharacterGroup(group).find((item) => isAudioRef
                 ? item.type === "audio"
                 : item.type === ref.type && item.outfitId === ref.outfitId);
@@ -365,7 +375,7 @@ function mergeOutfitCatalog(existing: H3CharacterOutfit[], incoming: CharacterOu
  * 否则保持原行为：所有 outfit 都 enabled（存量选过的都传 selectedOutfitKeys）。 */
 export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterGroupInput): H3Segment {
     if (!input.characterNodeId) throw new Error("角色组必须绑定已有 characterNodeId");
-    if (!input.outfits.length) throw new Error(`角色 ${input.characterName || input.characterNodeId} 缺少完整服装目录`);
+    if (!input.outfits.length && !input.voice) throw new Error(`角色 ${input.characterName || input.characterNodeId} 缺少服装目录和声线`);
     const existing = findCharacterGroupBySource(segment, input);
     const groups = { ...(segment.h3CharacterGroups || {}) };
     // 新建路径：未传 selectedOutfitKeys 时按主图默认只勾一套服装（characterPrimaryIndex）。
@@ -392,9 +402,9 @@ export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterG
             subjectId: input.subjectId || existing.subjectId || input.characterNodeId,
             voice: nextVoice,
             outfits: nextOutfits,
+            outfitEnabled: nextOutfits.length > 0 && (existing.outfitEnabled ?? nextOutfits.some((outfit) => outfit.enabled)),
             voiceEnabled: nextVoice ? (existing.voice ? existing.voiceEnabled : (input.defaultVoiceEnabled ?? true)) : false,
         });
-        if (!nextGroup.outfits.some((outfit) => outfit.enabled)) return segment;
         groups[existing.id] = nextGroup;
         return setSegmentCharacterGroups(segment, groups);
     }
@@ -407,9 +417,13 @@ export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterG
         subjectId: input.subjectId || input.characterNodeId,
         voice: input.voice,
         outfits: mergeOutfitCatalog([], input.outfits, nextSelectedOutfitKeys),
+        outfitEnabled: input.outfits.length > 0 && (nextSelectedOutfitKeys
+            ? nextSelectedOutfitKeys.some((key) => input.outfits.some((outfit) => outfitKey(outfit) === key))
+            : Number.isFinite(input.characterPrimaryIndex)
+                ? input.outfits.some((_, index) => index === Math.floor(input.characterPrimaryIndex!))
+                : true),
         voiceEnabled: input.voice ? (input.defaultVoiceEnabled ?? true) : false,
     });
-    if (!nextGroup.outfits.some((outfit) => outfit.enabled)) return segment;
     groups[id] = nextGroup;
     return setSegmentCharacterGroups(segment, groups);
 }
@@ -422,7 +436,7 @@ export function syncCharacterGroupFromSource(
 ): H3Segment {
     const existing = segment.h3CharacterGroups?.[groupId];
     if (!existing || existing.characterNodeId !== source.characterNodeId) return segment;
-    if (!source.outfits.length) return removeCharacterGroup(segment, groupId);
+    if (!source.outfits.length && !source.voice) return removeCharacterGroup(segment, groupId);
 
     const previousByKey = new Map(existing.outfits.map((outfit) => [outfitKey(outfit), outfit]));
     const outfits = source.outfits.map((outfit) => {
@@ -442,6 +456,7 @@ export function syncCharacterGroupFromSource(
         subjectId: existing.subjectId || source.characterNodeId,
         voice,
         outfits,
+        outfitEnabled: outfits.length > 0 && (existing.outfitEnabled ?? outfits.some((outfit) => outfit.enabled)),
         voiceEnabled: voice ? (existing.voice ? existing.voiceEnabled : true) : false,
     });
     const sameOutfits = existing.outfits.length === nextGroup.outfits.length && existing.outfits.every((outfit, index) => {
@@ -454,6 +469,7 @@ export function syncCharacterGroupFromSource(
         && existing.characterNodeId === nextGroup.characterNodeId
         && existing.subjectId === nextGroup.subjectId
         && JSON.stringify(existing.voice) === JSON.stringify(nextGroup.voice)
+        && existing.outfitEnabled === nextGroup.outfitEnabled
         && existing.voiceEnabled === nextGroup.voiceEnabled
         && sameOutfits) return segment;
 
@@ -471,16 +487,20 @@ export function removeCharacterGroup(segment: H3Segment, groupId: string): H3Seg
 export function applyCharacterGroupEdits(segment: H3Segment, groupId: string, patch: H3CharacterGroupEditPatch): H3Segment {
     const group = segment.h3CharacterGroups?.[groupId];
     if (!group) return segment;
+    const outfitEnabled = patch.outfitEnabled ?? (patch.outfitEnabledById
+        ? group.outfits.some((outfit) => patch.outfitEnabledById?.[outfit.id] ?? outfit.enabled)
+        : group.outfitEnabled);
     const nextGroup = fitCharacterGroupToCapacity(segment, {
         ...group,
-        outfits: patch.outfitEnabled ? group.outfits.map((outfit) => ({
+        outfits: patch.outfitEnabledById ? group.outfits.map((outfit) => ({
             ...outfit,
-            enabled: patch.outfitEnabled?.[outfit.id] ?? outfit.enabled,
+            enabled: patch.outfitEnabledById?.[outfit.id] ?? outfit.enabled,
         })) : group.outfits,
+        outfitEnabled: group.outfits.length > 0 && outfitEnabled,
         voiceEnabled: patch.voiceEnabled ?? group.voiceEnabled,
     });
-    // 全部 outfit 都关了 → 直接删组
-    if (!nextGroup.outfits.some((outfit) => outfit.enabled)) {
+    // 服装与声线是两个独立参考：全部关闭服装也不能删除角色组或声线。
+    if (!nextGroup.voiceEnabled && !nextGroup.outfitEnabled) {
         return removeCharacterGroup(segment, groupId);
     }
     return setSegmentCharacterGroups(segment, { ...(segment.h3CharacterGroups || {}), [groupId]: nextGroup });

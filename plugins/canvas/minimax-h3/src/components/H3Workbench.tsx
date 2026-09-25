@@ -8,6 +8,7 @@ import { applyCharacterGroupEdits, inferReferenceRole, refsForSegment, removeCha
 import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
+import { clipRuntimeState } from "../services/h3-clip-runtime";
 import { h3ThemeVars } from "../h3-theme";
 import { assignStoryboardShotRef, dropUnboundStoryboardReferences, rebindStoryboardShot, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, H3_TIMELINE_MIN, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
@@ -51,11 +52,13 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const fmt = (value: number) => `${Number(value || 0).toFixed(Number(value || 0) % 1 ? 1 : 0)}s`;
     const selectedVideo = selectedRefs.find((item) => item.type === "video");
     const selectedImage = selectedRefs.find((item) => item.type === "image");
+    const currentRuntime = clipRuntimeState(selected);
+    const currentTaskId = currentRuntime.taskId;
     const [livePreview, setLivePreview] = useState<{ parentTaskId: string; sourceTaskId: string; url: string; mime: string; step?: number; total?: number } | null>(null);
     useEffect(() => {
-        const taskId = String(metadata.runtimeTaskId || "");
+        const taskId = currentTaskId;
         setLivePreview(null);
-        if (String(metadata.status || "") !== "loading" || !taskId) return;
+        if (currentRuntime.status !== "loading" || !taskId) return;
         const onPreview = (event: Event) => {
             const detail = (event as CustomEvent<{ parentTaskId?: string; sourceTaskId?: string; url?: string; mime?: string; step?: number; total?: number }>).detail;
             if (!detail?.url || detail.parentTaskId !== taskId || !detail.sourceTaskId) return;
@@ -67,11 +70,10 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         };
         window.addEventListener("minimax-h3-preview", onPreview);
         return () => window.removeEventListener("minimax-h3-preview", onPreview);
-    }, [metadata.runtimeTaskId, metadata.status]);
-    const currentTaskId = String(metadata.runtimeTaskId || "");
+    }, [currentTaskId, currentRuntime.status]);
     const selectedOwnPreview = resultUrl(selected?.result) || selectedVideo?.url || selectedImage?.url || "";
     // 预览事件按父任务 ID 过滤；收到后必须独占主预览，不能再让原 Clip 视频留在同一层。
-    const showLivePreview = Boolean(livePreview && livePreview.parentTaskId === currentTaskId && String(metadata.status || "") === "loading");
+    const showLivePreview = Boolean(livePreview && livePreview.parentTaskId === currentTaskId && currentRuntime.status === "loading");
     const preview = showLivePreview ? livePreview!.url : (selectedOwnPreview || (selectedIndex === 0 ? String(metadata.content || upstream.find((item) => item.type === "video")?.url || "") : ""));
     const selectedResultRef = (selected?.results || []).find((item) => resultUrl(item.url) === preview || item.url === preview);
     const previewKind: H3Ref["type"] = showLivePreview ? (livePreview!.mime.startsWith("image/") ? "image" : "video") : (selectedResultRef?.type || (resultUrl(selected?.result) ? "video" : selectedVideo ? "video" : selectedImage ? "image" : "video"));
@@ -202,16 +204,17 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = segmentsFor(liveMetadata);
         const previous = current.find((item) => item.id === updated.id);
-        if (!previous) return;
+        if (!previous) return false;
         const previousItems = storyboardTrackItems(previous);
         const previousIds = new Set(previousItems.map((item) => item.id));
         const addedStoryboards = storyboardTrackItems(updated).filter((item) => !previousIds.has(item.id));
         if (previousItems.length && addedStoryboards.some((item) => item.duration < 0.5)) {
             message.warning("末张分镜时长不足 1 秒，无法再平分新增分镜。");
-            return;
+            return false;
         }
         ctx.updateMetadata({ ...(select ? { selectedSegmentId: updated.id } : {}), segments: current.map((item) => item.id === updated.id ? updated : item) });
         void syncStoryboardPrompt(ctx, updated);
+        return true;
     }, [ctx, metadata]);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => {
         if (!selected) return;
@@ -226,12 +229,11 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     }, [commitSegmentChange, ctx, metadata, selected]);
     const removeTimelineRef = (segmentId: string, ref: H3Ref) => {
         const segment = segments.find((item) => item.id === segmentId);
-        if (!segment) return;
+        if (!segment) return false;
         // 分镜图走专用入口（摘掉分镜卡上的图、保留分镜格），否则 storyboardShots 会留下指向已删
         // bindingId 的孤立引用 → 轨道上出现一张永远空着的分镜卡。
         if (ref.type === "image" && inferReferenceRole(ref) === "storyboard") {
-            commitSegmentChange(removeStoryboardImageReference(segment, ref));
-            return;
+            return commitSegmentChange(removeStoryboardImageReference(segment, ref));
         }
         // 属于角色组的 ref：把对应 outfit 设为 disabled / 关闭 voice，由 group → refs 派生逻辑重写
         if (ref.groupId) {
@@ -240,12 +242,11 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 const isVoice = ref.role === "character_voice" || (ref.type === "audio" && !ref.outfitId);
                 const nextSegment = isVoice
                     ? applyCharacterGroupEdits(segment, ref.groupId, { voiceEnabled: false })
-                    : applyCharacterGroupEdits(segment, ref.groupId, { outfitEnabled: ref.outfitId ? { [ref.outfitId]: false } : undefined });
-                commitSegmentChange(nextSegment);
-                return;
+                    : applyCharacterGroupEdits(segment, ref.groupId, { outfitEnabledById: ref.outfitId ? { [ref.outfitId]: false } : undefined });
+                return commitSegmentChange(nextSegment);
             }
         }
-        commitSegmentChange(withSegmentRefs(segment, refsForSegment(segment).filter((entry) => ref.bindingId ? entry.bindingId !== ref.bindingId : entry.url !== ref.url)));
+        return commitSegmentChange(withSegmentRefs(segment, refsForSegment(segment).filter((entry) => ref.bindingId ? entry.bindingId !== ref.bindingId : entry.url !== ref.url)));
     };
     // 空 ref 槽选定画布节点后写入：从被点的槽位起依次插入，已存在的素材不重复加入。
     const addNodeRefs = (segmentId: string, slotIndex: number, refs: H3Ref[]) => {
@@ -370,21 +371,18 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     };
     const deleteReferenceGroup = () => {
         if (!editingRef?.ref.groupId || !editingRefSegment) return;
-        commitSegmentChange(removeCharacterGroup(editingRefSegment, editingRef.ref.groupId));
-        setEditingRef(null);
+        if (commitSegmentChange(removeCharacterGroup(editingRefSegment, editingRef.ref.groupId))) setEditingRef(null);
     };
     const removeEditingReference = () => {
         if (!editingRef) return;
-        removeTimelineRef(editingRef.segmentId, editingRef.ref);
-        setEditingRef(null);
+        if (removeTimelineRef(editingRef.segmentId, editingRef.ref)) setEditingRef(null);
     };
     const removeEditingStoryboardImage = () => {
         if (!editingRef) return;
         const segment = segments.find((item) => item.id === editingRef.segmentId);
         if (!segment) return;
         const updated = removeStoryboardImageReference(segment, editingRef.ref);
-        if (updated !== segment) commitSegmentChange(updated);
-        setEditingRef(null);
+        if (updated !== segment && commitSegmentChange(updated)) setEditingRef(null);
     };
     const addDroppedReference = (event: React.DragEvent<HTMLElement>) => {
         if ((event.target as HTMLElement).closest(".minimax-ref-track")) return;
@@ -561,6 +559,6 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         </div>
-        <div key="status" className="minimax-wb-status"><H3StatusBadge status={String(metadata.status || selected?.status || "idle")} error={String(metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx, false, true)} />{String(metadata.smartStoryboardStatus || "") === "loading" ? <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 24 }}>智能分镜正在分析参考图并生成提示词，请稍候…</span> : null}{String(metadata.smartStoryboardStatus || "") === "success" ? <span style={{ marginLeft: 8, color: "#22c55e", fontSize: 24 }}>智能分镜已完成</span> : null}{String(metadata.smartStoryboardStatus || "") === "error" ? <span style={{ marginLeft: 8, color: "#ef4444", fontSize: 24 }}>智能分镜生成失败</span> : null}</div>
+        <div key="status" className="minimax-wb-status"><H3StatusBadge status={currentRuntime.status} error={String(selected?.errorDetails || metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx, false, true)} />{String(metadata.smartStoryboardStatus || "") === "loading" ? <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 24 }}>智能分镜正在分析参考图并生成提示词，请稍候…</span> : null}{String(metadata.smartStoryboardStatus || "") === "success" ? <span style={{ marginLeft: 8, color: "#22c55e", fontSize: 24 }}>智能分镜已完成</span> : null}{String(metadata.smartStoryboardStatus || "") === "error" ? <span style={{ marginLeft: 8, color: "#ef4444", fontSize: 24 }}>智能分镜生成失败</span> : null}</div>
     </div>;
 }

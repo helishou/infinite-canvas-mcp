@@ -6,8 +6,8 @@ import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
 import type { H3Segment } from "../types";
 
 type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; segment?: H3Segment; patch: (value: Partial<H3Segment>) => void };
-type SectionKey = "mode" | "model" | "sampling" | "lora" | "sla" | "runtime" | "latentUpscale" | "preview" | "rtx" | "faceRefine" | "audio";
-const sectionKeys: SectionKey[] = ["model", "sampling", "lora", "sla", "runtime", "latentUpscale", "preview", "rtx", "faceRefine", "audio"];
+type SectionKey = "mode" | "model" | "sampling" | "lora" | "sla" | "runtime" | "latentUpscale" | "preview" | "rtx" | "faceRefine" | "audio" | "continuation";
+const sectionKeys: SectionKey[] = ["model", "continuation", "sampling", "lora", "sla", "runtime", "latentUpscale", "preview", "rtx", "faceRefine", "audio"];
 const modeLabels = { t2v: "文生视频", i2v: "图生视频", fl2v: "首尾帧", ref2va: "多参考" } as const;
 const encoderTypes = ["minimax"];
 const encoderDevices = ["default", "cpu"];
@@ -148,6 +148,10 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     // 解析不出有效序列时回退到采样步数字段。
     const manualSigmaValues = segment.v81ManualSigma === true ? String(segment.h3FullSigma || "").match(/[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g)?.map(Number).filter(Number.isFinite) || [] : [];
     const samplingStepsSummary = manualSigmaValues.length >= 2 ? manualSigmaValues.length - 1 : (segment.steps || 20);
+    // 续段衔接折叠头摘要：两个开关任一开启都要能一眼看出状态。
+    const continuationSummary = segment.motionContextEnabled
+        ? <>{enabledSummary("潜空间续写")}{segment.tailFrameContinuation ? <span className="nfh3-enabled-summary"> · 尾帧接续</span> : null}</>
+        : segment.tailFrameContinuation ? enabledSummary("尾帧接续") : "均关闭";
     const setSeedMode = (value: string | number) => {
         const nextMode = String(value) as "random" | "fixed";
         const next: Partial<H3Segment> = { noiseSeedMode: nextMode };
@@ -182,6 +186,22 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
             {mode !== "t2v" ? choice("参考图最长边", refLongEdgeChoices, segment.referenceLongEdge || 1920, (value) => patch({ referenceLongEdge: Number(value) })) : null}
             {control("上一段完整视频作参考", <Switch checked={segment.previousVideoAsReference === true} onChange={(checked) => patch({ previousVideoAsReference: checked })} />)}
         </div>)}
+        {section("continuation", "续段衔接", continuationSummary, <div className="nfh3-control-grid">
+            {control("尾帧接续（把本段尾帧传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked })} />)}
+            {control("潜空间续写 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked })} />)}
+            <div className="nfh3-hint" style={{ gridColumn: "1 / -1" }}>尾帧接续：生成本段后自动抓本段尾帧，作为下一段的首帧参考并写进提示词。潜空间续写：使用 V15 的 AV latent 从本段起建立连续组，必须通过「运行当前及后续分镜」提交，单独运行某个 Clip 会报错。</div>
+            {segment.motionContextEnabled ? <>
+                {choice("Motion Context 帧数", ["22", "5", "39", "56"], segment.contextLength || "22", (value) => patch({ contextLength: String(value) }))}
+                {control("音频上下文帧数", <InputNumber style={field} min={0} max={240} value={segment.audioContextLength ?? 24} onChange={(value) => patch({ audioContextLength: value ?? undefined })} />)}
+                {control("续写音频精修", <Switch checked={segment.continuationAudioRefineEnabled === true} onChange={(checked) => patch({ continuationAudioRefineEnabled: checked })} />)}
+                {segment.continuationAudioRefineEnabled ? <>
+                    {control("音频精修降噪", <InputNumber style={field} min={0.01} max={1} step={0.01} value={segment.continuationAudioDenoise ?? 0.3} onChange={(value) => patch({ continuationAudioDenoise: value ?? undefined })} />)}
+                    {control("音频精修步数", <InputNumber style={field} min={1} max={100} value={segment.continuationAudioSteps ?? 4} onChange={(value) => patch({ continuationAudioSteps: value ?? undefined })} />)}
+                    {choice("音频精修采样器", samplerChoices, segment.continuationAudioSampler || "euler", (value) => patch({ continuationAudioSampler: String(value) }), undefined, true)}
+                    {choice("音频精修调度器", schedulerChoices, segment.continuationAudioScheduler || "simple", (value) => patch({ continuationAudioScheduler: String(value) }), undefined, true)}
+                </> : null}
+            </> : null}
+        </div>)}
         {section("sampling", "采样设置", `${samplingStepsSummary} 步 · ${segment.sampler || "res_multistep"}${segment.motionContextEnabled ? " · 潜空间续写" : ""}`, <div className="nfh3-control-grid">
             {choice("采样器", samplerChoices, segment.sampler || "res_multistep", (value) => patch({ sampler: value ? String(value) : undefined }), undefined, true, true, "选择采样器", true)}
             {choice("调度器", schedulerChoices, segment.scheduler || "simple", (value) => patch({ scheduler: value ? String(value) : undefined }), undefined, true, true, "选择调度器", true)}
@@ -197,18 +217,6 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
             {/* TE 加速：backend 在 params.teAccel===true 时往工作流注入 TESpeedMiniMaxH3 节点（standard 模式）。 */}
             {/* 改版时开关曾被丢失，导致只能靠旧 metadata 残留值生效；按 Clip 粒度恢复并可随参数导出/还原。 */}
             {control("TE 加速", <Switch checked={segment.teAccel === true} onChange={(checked) => patch({ teAccel: checked })} />)}
-            {segment.motionContextEnabled ? <>
-                {choice("Motion Context 帧数", ["22", "5", "39", "56"], segment.contextLength || "22", (value) => patch({ contextLength: String(value) }))}
-                {control("音频上下文帧数", <InputNumber style={field} min={0} max={240} value={segment.audioContextLength ?? 24} onChange={(value) => patch({ audioContextLength: value ?? undefined })} />)}
-                {control("续写音频精修", <Switch checked={segment.continuationAudioRefineEnabled === true} onChange={(checked) => patch({ continuationAudioRefineEnabled: checked })} />)}
-                {segment.continuationAudioRefineEnabled ? <>
-                    {control("音频精修降噪", <InputNumber style={field} min={0.01} max={1} step={0.01} value={segment.continuationAudioDenoise ?? 0.3} onChange={(value) => patch({ continuationAudioDenoise: value ?? undefined })} />)}
-                    {control("音频精修步数", <InputNumber style={field} min={1} max={100} value={segment.continuationAudioSteps ?? 4} onChange={(value) => patch({ continuationAudioSteps: value ?? undefined })} />)}
-                    {choice("音频精修采样器", samplerChoices, segment.continuationAudioSampler || "euler", (value) => patch({ continuationAudioSampler: String(value) }), undefined, true)}
-                    {choice("音频精修调度器", schedulerChoices, segment.continuationAudioScheduler || "simple", (value) => patch({ continuationAudioScheduler: String(value) }), undefined, true)}
-                </> : null}
-                <div className="nfh3-hint" style={{ gridColumn: "1 / -1" }}>Motion Context 开关仍在 Clip 卡片上；开启后即使用 V15 潜空间续写，请通过「运行当前及后续分镜」提交。</div>
-            </> : null}
         </div>)}
         {section("sla", "H3 SLA 稀疏注意力", segment.slaEnabled ? enabledSummary(`${segment.slaSparsity ?? 0.9} 稀疏率`) : "关闭", <div className="nfh3-control-grid">
             {control("启用 SLA", <Switch checked={segment.slaEnabled === true} onChange={(checked) => patch({ slaEnabled: checked })} />)}

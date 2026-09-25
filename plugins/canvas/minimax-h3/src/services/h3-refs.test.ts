@@ -27,6 +27,19 @@ test("角色 payload 保留完整服装目录和已有节点 ID", () => {
     assert.equal(group?.outfits.length, 3);
 });
 
+test("只有声线的角色 payload 仍能建立角色组", () => {
+    const group = readCharacterGroupFromDrop(transfer({
+        type: "character",
+        characterName: "沈昭宁",
+        characterNodeId: "character-voice-only",
+        characterImages: [],
+        characterVoiceUrl: "https://media.test/voice.mp3",
+        characterVoiceName: "沈昭宁声线",
+    }));
+    assert.equal(group?.outfits.length, 0);
+    assert.equal(group?.voice?.name, "沈昭宁声线");
+});
+
 test("角色节点不产生无 groupId 的普通图片候选", () => {
     const candidates = h3RefCandidates([
         { id: "character-1", type: "character", title: "沈昭宁", metadata: { characterImages: [{ url: "https://media.test/a.png" }] } } as never,

@@ -1,5 +1,5 @@
 import { promptDetails, validateDefinitionCoverage } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
-import type { H3SubjectDefinition } from "../types";
+import type { H3CharacterGroup, H3SubjectDefinition } from "../types";
 
 export type StoryboardPromptSubject = {
     id: string;
@@ -52,6 +52,76 @@ export function toSubjectDefinitions(subjects: StoryboardPromptSubject[]): H3Sub
         outfits: [...subject.outfits],
         role: subject.role,
     }));
+}
+
+/**
+ * 规则实体不仅来自媒体 ref：服装关闭但声线开启的角色组也必须保留人物身份。
+ * 角色组是人物语义权威，媒体槽只是可选的服装/声线投影。
+ */
+export function ensureCharacterGroupSubjects(
+    subjects: StoryboardPromptSubject[],
+    groups: Record<string, H3CharacterGroup> | undefined,
+): StoryboardPromptSubject[] {
+    const next = [...subjects];
+    const byId = new Map(next.map((subject) => [subject.id, subject]));
+    const byAlias = new Map<string, StoryboardPromptSubject>();
+    for (const subject of next) {
+        for (const alias of [subject.id, subject.name, subject.englishName || "", ...subject.aliases]) {
+            if (alias.trim()) byAlias.set(alias.trim().toLocaleLowerCase(), subject);
+        }
+    }
+    for (const group of Object.values(groups || {})) {
+        const outfitEnabled = group.outfitEnabled ?? group.outfits.some((outfit) => outfit.enabled);
+        if (!group.voiceEnabled && !outfitEnabled) continue;
+        const id = group.subjectId || group.characterNodeId || group.id;
+        if (!id) continue;
+        const existing = byId.get(id) || [group.id, group.characterName].map((alias) => byAlias.get(alias.toLocaleLowerCase())).find(Boolean);
+        if (existing) {
+            if (existing.role !== "storyboard" && existing.role !== "blocking") existing.role ||= "character_identity";
+            continue;
+        }
+        const subject: StoryboardPromptSubject = {
+            id,
+            name: group.characterName || id,
+            aliases: [group.id, group.characterNodeId || ""].filter((alias) => alias && alias !== id),
+            shotMarkers: [],
+            profile: group.voice?.description || "identity and voice follow the linked character definition",
+            outfits: group.outfits.filter((outfit) => outfit.enabled).map((outfit) => outfit.name).filter(Boolean),
+            pictures: [],
+            role: "character_identity",
+        };
+        next.push(subject);
+        byId.set(id, subject);
+        for (const alias of [subject.id, subject.name, ...subject.aliases]) byAlias.set(alias.toLocaleLowerCase(), subject);
+    }
+    return next;
+}
+
+/** 已保存的实体清单是用户删除语义的权威，但启用中的纯声线角色不能因旧清单未记录而消失。 */
+export function ensureCharacterGroupSubjectDefinitions(
+    definitions: H3SubjectDefinition[],
+    groups: Record<string, H3CharacterGroup> | undefined,
+): H3SubjectDefinition[] {
+    const next = [...definitions];
+    const byId = new Set(next.map((definition) => definition.id));
+    const byName = new Set(next.map((definition) => definition.name.trim().toLocaleLowerCase()).filter(Boolean));
+    for (const group of Object.values(groups || {})) {
+        const outfitEnabled = group.outfitEnabled ?? group.outfits.some((outfit) => outfit.enabled);
+        if (!group.voiceEnabled && !outfitEnabled) continue;
+        const id = group.subjectId || group.characterNodeId || group.id;
+        if (!id || byId.has(id) || byName.has(group.characterName.trim().toLocaleLowerCase())) continue;
+        next.push({
+            id,
+            name: group.characterName,
+            pictures: [],
+            profile: group.voice?.description || "identity and voice follow the linked character definition",
+            outfits: group.outfits.filter((outfit) => outfit.enabled).map((outfit) => outfit.name).filter(Boolean),
+            role: "character_identity",
+        });
+        byId.add(id);
+        byName.add(group.characterName.trim().toLocaleLowerCase());
+    }
+    return next;
 }
 
 export type StoryboardPromptReference = {
@@ -110,13 +180,13 @@ function shotText(reference: StoryboardPromptReference, shots: StoryboardPromptS
 function pictureFrameScope(reference: StoryboardPromptReference, shotsForReference: string[], shotCount: number) {
     if (reference.usage === "first_frame") return `${shotsForReference[0] || "[Shot 1]"} first frame`;
     if (reference.usage === "last_frame") return `${shotsForReference[shotsForReference.length - 1] || `[Shot ${Math.max(1, shotCount)}]`} last frame`;
-    return shotsForReference.join(", ") || (reference.role === "storyboard" ? "target shot sequence" : "");
+    return shotsForReference.join(", ") || (["storyboard", "blocking"].includes(reference.role) ? "target shot sequence" : "");
 }
 
 function isPictureAnchor(reference: StoryboardPromptReference) {
     if (reference.type !== "image") return false;
     return reference.usage === "first_frame" || reference.usage === "last_frame" ||
-        reference.role === "storyboard" || (reference.role === "keyframe" && reference.shotNumbers.length > 0);
+        reference.role === "storyboard" || reference.role === "blocking" || (reference.role === "keyframe" && reference.shotNumbers.length > 0);
 }
 
 function trackedReferences(references: StoryboardPromptReference[]) {
@@ -124,12 +194,22 @@ function trackedReferences(references: StoryboardPromptReference[]) {
 }
 
 export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[], references: StoryboardPromptReference[], shots: StoryboardPromptShot[]) {
+    const blockingTags = new Set(references.filter((reference) => reference.type === "image" && reference.role === "blocking").map((reference) => reference.tag));
+    // 实体清单里保存的「视觉来源」可能已经失效：关掉角色服装后，之前记下的 <Picture N>
+    // 不再是本 Clip 的参考素材。写进提示词前必须按当前 references 过滤，否则
+    // validateDefinitionCoverage 会判定「参考素材与主体来源不一致」让分镜编辑点完成失败。
+    const liveTags = new Set(references.map((reference) => reference.tag));
+    const subjectPictures = (subject: StoryboardPromptSubject) => subject.pictures.filter((tag) => liveTags.has(tag));
     const subjectOrdinalById = new Map(subjects.map((subject, index) => [subject.id, index + 1]));
     const subjectMarker = (subject: StoryboardPromptSubject) => `<Subject ${subjectOrdinalById.get(subject.id) || 1}>`;
     const subjectDefinitions = subjects.map((subject) => {
         const identity = [subject.name, subject.englishName && subject.englishName !== subject.name ? subject.englishName : ""].filter(Boolean).join(" / ");
         const details = promptDetails([subject.profile, ...subject.outfits]);
-        if (subject.pictures.length) details.unshift(`visual identity defined by reference(s) ${subject.pictures.join(", ")}`);
+        const livePictures = subjectPictures(subject);
+        const identityPictures = livePictures.filter((tag) => !blockingTags.has(tag));
+        const blockingPictures = livePictures.filter((tag) => blockingTags.has(tag));
+        if (identityPictures.length) details.unshift(`visual identity defined by reference(s) ${identityPictures.join(", ")}`);
+        if (blockingPictures.length) details.push(`spatial blocking guided by ${blockingPictures.join(", ")}`);
         if (!details.length) details.push("visual features follow the linked reference");
         return `${subjectMarker(subject)} is ${identity || subject.id}. ${details.join("; ")}.`;
     }).join("\n");
@@ -142,6 +222,10 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
         const subjectToken = subjectTokens.join(", ");
         const shotsForReference = shotText(reference, shots);
         if (reference.type === "image") {
+            if (reference.role === "blocking") {
+                const scope = shotsForReference.join(", ") || "the target shot sequence";
+                return `${referenceMarker} is the blocking and 180-degree action-axis map for ${scope}, defining relative subject positions, orientation, sightlines, entrances, and movement paths${reference.description ? `: ${reference.description}` : ""}. It is a spatial plan, not a rendered frame or character identity source.`;
+            }
             if (reference.role === "storyboard" && reference.compositePanels?.length) {
                 const panelMap = reference.compositePanels.map((panel) => `Panel ${panel.index} (row ${panel.row}, column ${panel.column}) corresponds to ${panel.shotNumbers.map((number) => `[Shot ${number}]`).join(", ") || "no assigned shot"}`).join("; ");
                 return `${referenceMarker} is one composite storyboard image arranged as a grid, not a single storyboard frame. Read each panel independently: ${panelMap}. The sheet defines viewpoint, subject placement, and shot order${reference.description ? `: ${reference.description}` : ""}.`;
@@ -175,7 +259,8 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
     }).join("\n");
 
     const retentionAnalysis = subjects.map((subject, subjectIndex) => {
-        const appearances = shots.flatMap((shot, index) => subjectAppearsInShot(subject, shot, subjectIndex + 1) ? [`[Shot ${index + 1}]`] : []);
+        const appearanceSubject = { ...subject, pictures: subjectPictures(subject).filter((tag) => !blockingTags.has(tag)) };
+        const appearances = shots.flatMap((shot, index) => subjectAppearsInShot(appearanceSubject, shot, subjectIndex + 1) ? [`[Shot ${index + 1}]`] : []);
         const scope = appearances.length ? `appears in ${appearances.join(", ")}` : "no shot appearance is explicitly assigned";
         const relationship = appearances.length ? "fully_preserved" : "weak_reference";
         const details = appearances.length
@@ -194,6 +279,17 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
             const scope = reference.role === "motion_reference" ? "camera movement and motion pacing" : "scene structure and pacing";
             const use = reference.role === "motion_reference" ? "use its motion characteristics as guidance" : "use its visual structure as guidance";
             return `${reference.tag} (${scope}): weak_reference - ${use} without reproducing the source video frame by frame.`;
+        }
+        if (reference.role === "blocking") {
+            const scope = pictureFrameScope(reference, shotsForReference, shots.length);
+            const level = reference.retentionLevel || "fully_preserved";
+            const details: Record<NonNullable<StoryboardPromptReference["retentionLevel"]>, string> = {
+                fully_preserved: "preserve the defined relative positions, movement paths, screen direction, and 180-degree action axis across shots without copying the overhead diagram into a rendered frame",
+                partially_preserved: "retain the selected spatial relationships and action axis while following shot-specific blocking changes",
+                attribute_transfer: "transfer the defined spatial relationships and action axis into the target shots without reproducing the diagram",
+                weak_reference: "use the spatial arrangement and action axis only as broad guidance",
+            };
+            return `${referenceMarker} (${scope}): ${level} - ${details[level]}.`;
         }
         const frame = reference.usage === "first_frame" ? "first-frame" : reference.usage === "last_frame" ? "last-frame" : reference.role === "storyboard" ? "storyboard composition" : "keyframe composition";
         const frameScope = pictureFrameScope(reference, shotsForReference, shots.length);
@@ -214,6 +310,9 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
     }).join("\n");
 
     const result = { subjectDefinitions: [subjectDefinitions, referenceDefinitions].filter(Boolean).join("\n"), retentionAnalysis: [retentionAnalysis, referenceRetention].filter(Boolean).join("\n") };
-    validateDefinitionCoverage(subjects, references, result.subjectDefinitions, result.retentionAnalysis);
+    // 校验也必须用过滤后的来源：失效的 <Picture N> 早已不在 references 里，
+    // 拿未过滤的清单去比对必然报「参考素材与主体来源不一致」。
+    const liveSubjects = subjects.map((subject) => ({ pictures: subjectPictures(subject) }));
+    validateDefinitionCoverage(liveSubjects, references, result.subjectDefinitions, result.retentionAnalysis);
     return result;
 }

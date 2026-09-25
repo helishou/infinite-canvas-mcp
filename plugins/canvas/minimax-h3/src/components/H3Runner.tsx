@@ -2,13 +2,17 @@ import { useEffect, useRef } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { useH3RunEvents } from "../hooks/useH3RunEvents";
 import { segmentsFor } from "../hooks/useH3Segments";
+import { clipRuntimeState } from "../services/h3-clip-runtime";
 import { message } from "antd";
 
 export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
-    const runInFlight = useRef(false);
+    const runInFlight = useRef<Set<string>>(new Set());
+    const segments = segmentsFor(ctx.node.metadata || {});
+    const selected = segments.find((segment) => segment.id === String(ctx.node.metadata?.selectedSegmentId || "")) || segments[0];
+    const selectedRuntime = clipRuntimeState(selected);
     useEffect(() => {
-        const taskId = String(ctx.node.metadata?.runtimeTaskId || "");
-        if (!taskId || String(ctx.node.metadata?.status || "") !== "loading") return;
+        const taskId = selectedRuntime.taskId;
+        if (!taskId || selectedRuntime.status !== "loading") return;
         let stopped = false;
         let timer: ReturnType<typeof setTimeout> | undefined;
         const poll = async () => {
@@ -30,24 +34,29 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
         };
         void poll();
         return () => { stopped = true; if (timer) clearTimeout(timer); };
-    }, [ctx.node.id, ctx.node.metadata?.runtimeTaskId, ctx.node.metadata?.status]);
+    }, [ctx.node.id, selected?.id, selectedRuntime.taskId, selectedRuntime.status]);
 
-    const run = async (runFromCurrent = false, forceRegenerate = false) => {
-        if (runInFlight.current) return;
-        runInFlight.current = true;
+    const run = async (runFromCurrent = false, forceRegenerate = false, requestedSegmentId?: string) => {
+        const initialMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        const initialSegments = segmentsFor(initialMetadata);
+        const segmentId = String(requestedSegmentId || initialMetadata.selectedSegmentId || initialSegments[0]?.id || "");
+        if (!segmentId || runInFlight.current.has(segmentId)) return;
+        runInFlight.current.add(segmentId);
         try {
-            const metadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
-            if (metadata.status === "awaiting_confirmation") return;
+            const metadata = initialMetadata;
             const segments = segmentsFor(metadata);
+            const selected = segments.find((segment) => segment.id === String(requestedSegmentId || metadata.selectedSegmentId || "")) || segments[0];
+            const state = clipRuntimeState(selected);
+            if (state.status === "awaiting_confirmation") return;
             if (!segments.length) throw new Error("当前节点没有可生成的 Clip");
-            const selectedId = String(metadata.selectedSegmentId || segments[0].id || "");
+            const selectedId = String(selected?.id || metadata.selectedSegmentId || "");
             if (!selectedId) throw new Error("当前节点没有可定位的 Clip");
             await ctx.flush();
             await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent, forceRegenerate });
         } catch (error) {
             message.error(error instanceof Error ? error.message : String(error));
         } finally {
-            runInFlight.current = false;
+            runInFlight.current.delete(segmentId);
         }
     };
 

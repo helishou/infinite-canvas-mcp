@@ -30,11 +30,16 @@ export type H3CharacterGroup = {
     subjectId?: string;
     voice?: H3CharacterVoice;
     outfits: H3CharacterOutfit[];
+    /** 是否启用当前 Clip 的服装参考；缺省兼容旧数据时按是否已有 enabled 服装推导。 */
+    outfitEnabled?: boolean;
     voiceEnabled: boolean;
 };
 
 export type H3CharacterGroupEditPatch = {
-    outfitEnabled?: Record<string, boolean>;
+    /** undefined 表示不改；true/false 统一控制整个角色组的服装参考。 */
+    outfitEnabled?: boolean;
+    /** 兼容旧的逐套 enabled 编辑入口。 */
+    outfitEnabledById?: Record<string, boolean>;
     voiceEnabled?: boolean;
 };
 
@@ -76,6 +81,8 @@ export type H3Segment = {
     status?: string;
     progress?: number;
     runtimeTaskId?: string;
+    /** H3 父运行任务 ID；runtimeTaskId 在生成阶段是当前 Clip 的子任务 ID。 */
+    parentTaskId?: string;
     // H3Runner catch 块写 segment.status: "error" 时把 errorDetails 也写到 segment 上，
     // H3ClipCard 用它显示 hover 提示，避免前端"卡片不更新"的视觉假象。
     errorDetails?: string;
@@ -148,7 +155,7 @@ export type H3Segment = {
     firstPassStorageKey?: string;
     firstPassFingerprint?: string;
     firstPassReady?: boolean;
-    storyboardPromptCache?: { version: 12; fingerprint: string; subjectDefinitions: string; retentionAnalysis: string };
+    storyboardPromptCache?: { version: 13; fingerprint: string; subjectDefinitions: string; retentionAnalysis: string };
     seamFaceFadeFrames?: number;
     seamColourMatch?: number;
     seamAudioCrossfadeMs?: number;

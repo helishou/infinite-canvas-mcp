@@ -48,7 +48,7 @@ test("编辑当前 Clip 的选择只改变 enabled，不删除目录项", () => 
     });
     const group = groupFrom(initial);
     const edited = applyCharacterGroupEdits(initial, group.id, {
-        outfitEnabled: {
+        outfitEnabledById: {
             [group.outfits[0].id]: true,
             [group.outfits[1].id]: false,
             [group.outfits[2].id]: false,
@@ -58,6 +58,37 @@ test("编辑当前 Clip 的选择只改变 enabled，不删除目录项", () => 
     const editedGroup = groupFrom(edited);
     assert.equal(editedGroup.outfits.length, 3);
     assert.deepEqual(refsForSegment(edited).filter((ref) => ref.type === "image").map((ref) => ref.storageKey), ["image:shen-zhao-1"]);
+});
+
+test("角色只有声线没有服装时仍保留角色组和声线引用", () => {
+    const initial = upsertCharacterGroup({ id: "clip-voice-only", taskMode: "ref2va", refItems: [] }, {
+        characterName: "沈昭宁",
+        characterNodeId: "character-shen-zhaoning",
+        outfits: [],
+        voice: { url: "https://media.test/voice.mp3", name: "沈昭宁声线", storageKey: "audio:voice" },
+    });
+
+    const group = groupFrom(initial);
+    assert.equal(group.outfits.length, 0);
+    assert.equal(group.outfitEnabled, false);
+    assert.equal(group.voiceEnabled, true);
+    assert.deepEqual(refsForSegment(initial).map((ref) => ref.type), ["audio"]);
+});
+
+test("关闭服装参考只移除图片引用并保留声线引用", () => {
+    const initial = upsertCharacterGroup({ id: "clip-outfit-off", taskMode: "ref2va", refItems: [] }, {
+        characterName: "沈昭宁",
+        characterNodeId: "character-shen-zhaoning",
+        outfits: sourceOutfits,
+        voice: { url: "https://media.test/voice.mp3", name: "沈昭宁声线", storageKey: "audio:voice" },
+    });
+    const group = groupFrom(initial);
+    const edited = applyCharacterGroupEdits(initial, group.id, { outfitEnabled: false });
+
+    assert.ok(Object.keys(edited.h3CharacterGroups || {}).length);
+    assert.equal(groupFrom(edited).voiceEnabled, true);
+    assert.deepEqual(refsForSegment(edited).filter((ref) => ref.type === "image"), []);
+    assert.deepEqual(refsForSegment(edited).filter((ref) => ref.type === "audio").map((ref) => ref.storageKey), ["audio:voice"]);
 });
 
 test("角色组派生 ref 保留真实源节点和角色四视图语义", () => {

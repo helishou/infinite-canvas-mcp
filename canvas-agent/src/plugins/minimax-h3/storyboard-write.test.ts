@@ -119,6 +119,134 @@ test("h3_write_storyboard_prompt 只写入服装描述而不写服装名称", ()
     assert.equal(browser.retentionAnalysis, generated.retentionAnalysis);
 });
 
+test("关闭服装后旧实体清单里的失效图片来源不会让编译报错", () => {
+    const voiceBinding = {
+        id: "voice-binding",
+        assetId: "asset-voice",
+        label: "沈侯·原声参考",
+        role: "character_voice",
+        tags: [],
+        enabled: true,
+        usage: "reference",
+        mediaType: "audio",
+        url: "https://example.test/voice.wav",
+        sourceNodeId: "character-shen",
+        subjectId: "shenhou",
+        groupId: "group-shen",
+    };
+    const segment = {
+        id: "segment-stale-source",
+        mode: "ref2va",
+        prompt: "detailed_description:\n旧内容\n\noverall_soundscape:\n\nnon_diegetic_music:\nN/A",
+        referenceBindings: [voiceBinding],
+        // 关掉服装前保存的实体清单：<Picture 2> 是沈侯的服装四视图，现在已不在素材里。
+        subjectDefinitions: [
+            { id: "shenhou", name: "沈侯", profile: "侯爵", pictures: ["<Picture 2>"], outfits: [], role: "character_identity" },
+        ],
+        h3CharacterGroups: {
+            "group-shen": {
+                id: "group-shen",
+                characterNodeId: "character-shen",
+                subjectId: "shenhou",
+                characterName: "沈侯",
+                outfits: [],
+                outfitEnabled: false,
+                voiceEnabled: true,
+            },
+        },
+    };
+    const generated = writeStoryboardPrompt({
+        nodes: [{ id: "character-shen", type: "character", metadata: { characterDescription: "年约四十九岁的侯爵。" } }],
+    }, segment, {
+        summary: "",
+        openingDescription: "",
+        shots: [{ description: "沈侯用 <Audio 1> 的音色开口说话。" }],
+        overallSoundscape: "",
+        nonDiegeticMusic: "N/A",
+    });
+
+    assert.match(generated.prompt, /<Subject 1> is 沈侯/);
+    assert.doesNotMatch(generated.prompt, /<Picture 2>/);
+});
+
+test("只有声线没有服装图的角色也进入主体定义与保留分析", () => {
+    const voiceBinding = {
+        id: "voice-binding",
+        assetId: "asset-voice",
+        label: "沈侯·原声参考",
+        role: "character_voice",
+        tags: [],
+        enabled: true,
+        usage: "reference",
+        mediaType: "audio",
+        url: "https://example.test/voice.wav",
+        sourceNodeId: "character-shen",
+        subjectId: "shenhou",
+        groupId: "group-shen",
+    };
+    const segment = {
+        id: "segment-voice-only",
+        mode: "ref2va",
+        prompt: "detailed_description:\n旧内容\n\noverall_soundscape:\n\nnon_diegetic_music:\nN/A",
+        referenceBindings: [voiceBinding],
+        h3CharacterGroups: {
+            "group-shen": {
+                id: "group-shen",
+                characterNodeId: "character-shen",
+                subjectId: "shenhou",
+                characterName: "沈侯",
+                outfits: [],
+                outfitEnabled: false,
+                voiceEnabled: true,
+            },
+        },
+    };
+    const generated = writeStoryboardPrompt({
+        nodes: [{ id: "character-shen", type: "character", metadata: { characterDescription: "年约四十九岁的侯爵。" } }],
+    }, segment, {
+        summary: "",
+        openingDescription: "",
+        shots: [{ description: "沈侯用 <Audio 1> 的音色开口说话。" }],
+        overallSoundscape: "",
+        nonDiegeticMusic: "N/A",
+    });
+
+    assert.match(generated.prompt, /<Subject 1> is 沈侯/);
+    assert.match(generated.prompt, /<Subject 1> \(appears in \[Shot 1\]\)/);
+});
+
+test("站位图独立定义和结算空间关系，不充当人物身份图", () => {
+    const identity = { id: "identity-1", assetId: "asset-identity", label: "人物身份图", role: "character_identity", enabled: true, usage: "reference", mediaType: "image", url: "https://example.test/identity.png", subjectId: "hero" };
+    const blocking = { id: "blocking-1", assetId: "asset-blocking", label: "雪院站位图", role: "blocking", enabled: true, usage: "reference", mediaType: "image", url: "https://example.test/blocking.png" };
+    const generated = writeStoryboardPrompt({}, {
+        id: "segment-1",
+        mode: "ref2va",
+        duration: 5,
+        referenceBindings: [identity, blocking],
+    }, {
+        summary: "",
+        openingDescription: "",
+        shots: [{ description: "人物沿雪院动作轴走向门口。" }],
+        overallSoundscape: "",
+        nonDiegeticMusic: "N/A",
+    });
+
+    assert.match(generated.subjectDefinitions, /^<Picture 2> is the blocking and 180-degree action-axis map for the target shot sequence/mu);
+    assert.match(generated.retentionAnalysis, /^<Picture 2> \(target shot sequence\): fully_preserved - preserve the defined relative positions/mu);
+    assert.doesNotMatch(generated.subjectDefinitions, /<Subject \d+> is Blocking/u);
+    assert.doesNotMatch(generated.subjectDefinitions, /visual identity defined by reference\(s\) <Picture 2>/u);
+    const browser = buildStoryboardPromptSections(generated.content.subjects, generated.content.references, generated.content.shots);
+    assert.equal(browser.subjectDefinitions, generated.subjectDefinitions);
+    assert.equal(browser.retentionAnalysis, generated.retentionAnalysis);
+
+    const savedSubjectPictures = generated.content.subjects.map((subject) => ({ ...subject, pictures: [...subject.pictures, "<Picture 2>"] }));
+    const withSavedDefinitions = buildStoryboardPromptSections(savedSubjectPictures, generated.content.references, generated.content.shots);
+    assert.match(withSavedDefinitions.subjectDefinitions, /spatial blocking guided by <Picture 2>/u);
+    assert.doesNotMatch(withSavedDefinitions.subjectDefinitions, /visual identity defined by reference\(s\) <Picture 2>/u);
+    const mapOnlyShot = buildStoryboardPromptSections(savedSubjectPictures, generated.content.references, [{ description: "镜头只引用 <Picture 2> 的站位规划。" }]);
+    assert.match(mapOnlyShot.retentionAnalysis, /<Subject 1> \(no shot appearance is explicitly assigned\)/u);
+});
+
 test("MCP 编译拒绝失效引用和非法时间，合法输入只生成一次切镜", () => {
     const segment = { mode: "ref2va", duration: 10 };
     const input = { openingDescription: "Winter daylight.", shots: [{ description: "Snow falls." }, { switchTime: "0:05", description: 'The shot hard-cuts to the folded document. <d>[Chinese] 不要。</d>' }], overallSoundscape: "Wind.", nonDiegeticMusic: "N/A" };

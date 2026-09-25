@@ -144,19 +144,23 @@ function subjectAppearsInShot(subject: PromptSubject, shot: PromptShot, subjectO
 }
 
 function buildPromptText(subjects: PromptSubject[], references: PromptReference[], shots: PromptShot[]) {
+    const blockingTags = new Set(references.filter((reference) => reference.type === "image" && reference.role === "blocking").map((reference) => reference.tag));
     const subjectOrdinalById = new Map(subjects.map((subject, index) => [subject.id, index + 1]));
     const subjectMarker = (subject: PromptSubject) => `<Subject ${subjectOrdinalById.get(subject.id) || 1}>`;
     const subjectDefinitions = subjects.map((subject) => {
         const identity = [subject.name, subject.englishName && subject.englishName !== subject.name ? subject.englishName : ""].filter(Boolean).join(" / ");
         const details = promptDetails([subject.profile, ...subject.outfits]);
-        if (subject.pictures.length) details.unshift(`visual identity defined by reference(s) ${subject.pictures.join(", ")}`);
+        const identityPictures = subject.pictures.filter((tag) => !blockingTags.has(tag));
+        const blockingPictures = subject.pictures.filter((tag) => blockingTags.has(tag));
+        if (identityPictures.length) details.unshift(`visual identity defined by reference(s) ${identityPictures.join(", ")}`);
+        if (blockingPictures.length) details.push(`spatial blocking guided by ${blockingPictures.join(", ")}`);
         if (!details.length) details.push("visual features follow the linked reference");
         return `${subjectMarker(subject)} is ${identity || subject.id}. ${details.join("; ")}.`;
     }).join("\n");
 
     const isPictureAnchor = (reference: PromptReference) => reference.type === "image" && (
         reference.usage === "first_frame" || reference.usage === "last_frame" ||
-        reference.role === "storyboard" || (reference.role === "keyframe" && reference.shotNumbers.length > 0)
+        reference.role === "storyboard" || reference.role === "blocking" || (reference.role === "keyframe" && reference.shotNumbers.length > 0)
     );
     const trackedReferences = references.filter((reference) => reference.type !== "image" || isPictureAnchor(reference));
     const referenceDefinitions = trackedReferences.map((reference) => {
@@ -170,6 +174,10 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
         ])].sort((a, b) => a - b).map((number) => `[Shot ${number}]`);
         if (reference.type === "image") {
             const picture = reference.tag;
+            if (reference.role === "blocking") {
+                const scope = shotsForReference.join(", ") || "the target shot sequence";
+                return `${picture} is the blocking and 180-degree action-axis map for ${scope}, defining relative subject positions, orientation, sightlines, entrances, and movement paths${reference.description ? `: ${reference.description}` : ""}. It is a spatial plan, not a rendered frame or character identity source.`;
+            }
             if (reference.role === "storyboard" && reference.compositePanels?.length) {
                 const panelMap = reference.compositePanels.map((panel) => `Panel ${panel.index} (row ${panel.row}, column ${panel.column}) corresponds to ${panel.shotNumbers.map((number) => `[Shot ${number}]`).join(", ") || "no assigned shot"}`).join("; ");
                 return `${picture} is one composite storyboard image arranged as a grid, not a single storyboard frame. Read each panel independently: ${panelMap}. The sheet defines viewpoint, subject placement, and shot order.`;
@@ -222,6 +230,17 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
         if (reference.type === "video") {
             const scope = reference.role === "motion_reference" ? "camera movement and motion pacing" : "scene structure and pacing";
             return `${reference.tag} (${scope}): weak_reference - use the video for the role defined above without reproducing it frame by frame.`;
+        }
+        if (reference.role === "blocking") {
+            const scope = shotsForReference.join(", ") || "target shot sequence";
+            const level = reference.retentionLevel || "fully_preserved";
+            const details: Record<NonNullable<PromptReference["retentionLevel"]>, string> = {
+                fully_preserved: "preserve the defined relative positions, movement paths, screen direction, and 180-degree action axis across shots without copying the overhead diagram into a rendered frame",
+                partially_preserved: "retain the selected spatial relationships and action axis while following shot-specific blocking changes",
+                attribute_transfer: "transfer the defined spatial relationships and action axis into the target shots without reproducing the diagram",
+                weak_reference: "use the spatial arrangement and action axis only as broad guidance",
+            };
+            return `${reference.tag} (${scope}): ${level} - ${details[level]}.`;
         }
         const frame = reference.usage === "first_frame" ? "first-frame" : reference.usage === "last_frame" ? "last-frame" : reference.role === "storyboard" ? "storyboard composition" : "keyframe composition";
         const frameScope = reference.usage === "first_frame"
@@ -314,7 +333,7 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
             : type === "image" ? ""
             : string(record(asset?.analysis).summary || record(ref.analysis).summary || record(sourceGroup?.voice).description || sourceMetadata.characterVoiceDescription);
         const mappedIds = type === "image" ? [...new Set([declaredSubjectId, string(ref.groupId), ...(Array.isArray(ref.storyboardSubjectIds) ? ref.storyboardSubjectIds.map(String) : [])].filter(Boolean))] : [];
-        const anchor = type === "image" && (string(ref.usage) === "first_frame" || string(ref.usage) === "last_frame" || role === "storyboard" || (role === "keyframe" && shotReferenceIds.has(string(ref.bindingId))));
+        const anchor = type === "image" && (string(ref.usage) === "first_frame" || string(ref.usage) === "last_frame" || role === "storyboard" || role === "blocking" || (role === "keyframe" && shotReferenceIds.has(string(ref.bindingId))));
         const ids = mappedIds.length ? mappedIds : type === "image" && sourceCharacterId ? [sourceCharacterId] : type === "image" && !anchor && string(ref.bindingId) ? [string(ref.bindingId)] : [];
         const subjectIds = new Set<string>();
         for (const id of ids) {
@@ -345,7 +364,7 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
             // Storyboard frames are concrete shot anchors, not reusable subject identity.
             // Keeping them out of <Subject> prevents a frame composition from leaking into
             // every later shot that mentions the same subject.
-            if (!entry.pictures.includes(pictureMarker) && type === "image" && role !== "storyboard") entry.pictures.push(pictureMarker);
+            if (!entry.pictures.includes(pictureMarker) && type === "image" && role !== "storyboard" && role !== "blocking") entry.pictures.push(pictureMarker);
             if (!entry.profile && profile) entry.profile = profile;
             if (entry.role === "storyboard" && role !== "storyboard") entry.role = role;
             if (entry.name === entry.id && name !== subjectId) entry.name = name;
@@ -371,6 +390,22 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
         };
     });
 
+    // 服装关闭但声线开启的角色仍必须进入主体定义与保留分析，否则人物在提示词里凭空消失。
+    for (const reference of referenceManifest) {
+        if (reference.type !== "audio" || reference.role !== "character_voice" || !reference.subjectId) continue;
+        if (subjects.has(reference.subjectId)) continue;
+        const group = groupFor(reference.subjectId) || Object.values(groups).map(record).find((item) => item.subjectId === reference.subjectId || item.characterNodeId === reference.subjectId);
+        const characterNode = group?.characterNodeId ? nodeById.get(string(group.characterNodeId)) : nodeById.get(reference.subjectId);
+        const metadata = record(characterNode?.metadata);
+        const name = string(group?.characterName || metadata.characterName || characterNode?.title || reference.subjectName) || reference.subjectId;
+        const profile = [string(metadata.characterDescription), string(record(group?.voice).description) || reference.description].filter((value, index, all) => value && all.indexOf(value) === index).join("; ");
+        const entry = subjects.get(reference.subjectId) || { id: reference.subjectId, name, aliases: new Set<string>(), shotMarkers: new Set<string>(), profile, outfits: new Set<string>(), pictures: [], role: "character_identity" };
+        [reference.subjectId, group?.id, group?.characterNodeId, group?.characterName, characterNode?.id, characterNode?.title, metadata.characterName]
+            .forEach((alias) => { if (typeof alias === "string" && alias.trim()) entry.aliases.add(alias.trim()); });
+        if (!entry.profile && profile) entry.profile = profile;
+        if (entry.name === entry.id && name !== reference.subjectId) entry.name = name;
+        subjects.set(reference.subjectId, entry);
+    }
     const voiceReferences = referenceManifest.filter((reference) => reference.type === "audio" && reference.role === "character_voice" && reference.subjectId);
     const speakerBySubject = new Map<string, string>();
     const explicitSpeakerId = (subjectId: string) => {
@@ -454,7 +489,7 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
     }) : string(input.summary);
     const storyboardDurations = deriveStoryboardDurations(normalizedShots, segment.duration);
     const content = {
-        version: 12,
+        version: 13,
         storyboardComposite: { enabled: segment.storyboardCompositeEnabled === true, ...(composite ? { rows: composite.rows, columns: composite.columns, panels: composite.panels, sourceIdentity: allRefs.filter((ref) => compositeSourceIds.has(string(ref.bindingId))).map((ref) => ({ bindingId: ref.bindingId, assetId: ref.assetId, storageKey: ref.storageKey || "", url: ref.storageKey ? "" : ref.url || "" })) } : {}) },
         summary,
         openingDescription: string(input.openingDescription),
@@ -506,11 +541,11 @@ export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue
     const generated = buildPromptSections(project, segment, input, bindings);
     const cache = record(segment.storyboardPromptCache);
     const promptMode = promptModeOf(segment);
-    if (promptMode === "ref2va" && cache.version === 12 && cache.fingerprint === generated.fingerprint && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
+    if (promptMode === "ref2va" && cache.version === 13 && cache.fingerprint === generated.fingerprint && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
     if (promptMode !== "ref2va" && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
     return {
         ...generated,
         unchanged: false as const,
-        ...(promptMode === "ref2va" ? { cache: { version: 12, fingerprint: generated.fingerprint, subjectDefinitions: generated.subjectDefinitions, retentionAnalysis: generated.retentionAnalysis } } : {}),
+        ...(promptMode === "ref2va" ? { cache: { version: 13, fingerprint: generated.fingerprint, subjectDefinitions: generated.subjectDefinitions, retentionAnalysis: generated.retentionAnalysis } } : {}),
     };
 }

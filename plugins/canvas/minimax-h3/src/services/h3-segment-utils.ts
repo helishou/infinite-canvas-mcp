@@ -31,7 +31,7 @@ export function patchSelectedSegment(ctx: CanvasNodeContext, metadata: Record<st
     ctx.updateMetadata({ selectedSegmentId: selectedId, segments: segments.map((segment) => segment.id === selectedId ? { ...segment, ...patch } : segment) });
 }
 
-export function buildRestoreParamsPatch(segments: H3Segment[], ref: H3Ref): Partial<H3Segment> {
+export function buildRestoreParamsPatch(segments: H3Segment[], ref: H3Ref, targetSegment?: H3Segment): Partial<H3Segment> {
     // 还原优先级：URL 反查源 Clip（参数始终最新）→ segmentId 反查（URL 变形/改写时兜底）
     // → 材料自带的生成时刻参数快照（源 Clip 已被删除/重建时兜底）。
     // 「设为当前 Clip」会一并还原 prompt（源段提示词带入当前 clip），
@@ -43,13 +43,37 @@ export function buildRestoreParamsPatch(segments: H3Segment[], ref: H3Ref): Part
         || (ref.segmentId ? segments.find((segment) => segment.id === ref.segmentId) : undefined);
     const snapshotRefs = Array.isArray(snapshot?.refs) ? snapshot.refs as H3Ref[] : Array.isArray(snapshot?.refItems) ? snapshot.refItems as H3Ref[] : undefined;
     const base = source ? restorableParams(source as Record<string, unknown>, RESTORABLE_PARAM_KEYS) : restorableParams(snapshot, RESTORABLE_PARAM_KEYS);
-    const refsPatch = source ? segmentRefsPatch(refsForSegment(source)) : snapshotRefs ? segmentRefsPatch(snapshotRefs) : {};
+    const rawRefsPatch = source ? segmentRefsPatch(refsForSegment(source)) : snapshotRefs ? segmentRefsPatch(snapshotRefs) : {};
+    const refsPatch = targetSegment ? restoreBindingsForTarget(rawRefsPatch, targetSegment) : rawRefsPatch;
+    const storyboardPatch = refsPatch.referenceBindings?.length
+        ? { storyboardShots: refsPatch.referenceBindings.filter((binding) => binding.role === "storyboard").map((binding) => ({ id: binding.id, referenceBindingId: binding.id })), storyboardDurations: {} }
+        : {};
     // 仅当源段确实带非空提示词时才还原 prompt：避免把当前 clip 的好提示词覆盖成空字符串
     // （源段 prompt 在实时 segments 里可能已丢失，但生成时刻快照 ref.params 里仍保留，故优先用快照兜底）。
     const basePrompt = String((base as Record<string, unknown>).prompt || "").trim();
     const snapshotPrompt = ref.params && typeof ref.params.prompt === "string" ? ref.params.prompt.trim() : "";
     const finalPrompt = basePrompt || snapshotPrompt;
-    if (finalPrompt) return { ...base, ...refsPatch, prompt: finalPrompt } as Partial<H3Segment>;
+    if (finalPrompt) return { ...base, ...refsPatch, ...storyboardPatch, prompt: finalPrompt } as Partial<H3Segment>;
     const { prompt: _drop, ...rest } = base as Record<string, unknown>;
-    return { ...rest, ...refsPatch } as Partial<H3Segment>;
+    return { ...rest, ...refsPatch, ...storyboardPatch } as Partial<H3Segment>;
+}
+
+function restoreBindingsForTarget(patch: Pick<H3Segment, "referenceBindings" | "refItems" | "refs">, target: H3Segment) {
+    if (!patch.referenceBindings?.length) return patch;
+    const groups = target.h3CharacterGroups || {};
+    const sourceByGroupAndOutfit = new Map<string, string>();
+    for (const group of Object.values(groups)) {
+        const groupId = String(group.id || "");
+        const sourceNodeId = String(group.characterNodeId || "");
+        if (!groupId || !sourceNodeId) continue;
+        for (const outfit of group.outfits || []) sourceByGroupAndOutfit.set(JSON.stringify([groupId, String(outfit.id || "")]), sourceNodeId);
+    }
+    return {
+        ...patch,
+        referenceBindings: patch.referenceBindings.map((binding) => {
+            if (!binding.groupId) return binding;
+            const sourceNodeId = sourceByGroupAndOutfit.get(JSON.stringify([binding.groupId, String(binding.outfitId || "")]));
+            return sourceNodeId ? { ...binding, sourceNodeId } : binding;
+        }),
+    };
 }

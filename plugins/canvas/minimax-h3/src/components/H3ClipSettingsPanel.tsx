@@ -3,6 +3,7 @@ import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Segment } from "../types";
 import { exportH3Settings, importH3Settings } from "../services/h3-segment-utils";
 import { writeDefaultParams } from "../services/h3-defaults";
+import { clipRuntimeState } from "../services/h3-clip-runtime";
 import type { H3DefaultLayout } from "../services/h3-defaults";
 import { ClipSettings } from "./ClipSettings";
 import { H3Icon } from "./H3Icon";
@@ -17,8 +18,9 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected }: 
     // 刷新恢复等路径），残留的 taskId 会让按钮卡在"取消生成"，用户点一下反而去
     // cancel 一个已终态(success)的任务而报错。加 status 守卫后，只要任务已结束
     // （success/error/cancelled/idle），按钮一律回归初始态"生成当前 Clip"。
-    const status = String(metadata.status || "idle");
-    const runtimeTaskId = String(metadata.runtimeTaskId || "");
+    const state = clipRuntimeState(selected);
+    const status = state.status;
+    const runtimeTaskId = state.taskId;
     // busy 只认生成状态位：status 处于 queued/loading 即视为忙碌。
     // 绝不能把 runtimeTaskId 作为 busy 的先决条件——否则「status 卡在 loading 但
     // runtimeTaskId 为空」(父任务创建前请求中断或历史状态残留) 时 busy 反为假，
@@ -90,6 +92,6 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected }: 
     return <div className="minimax-clip-parameters">
         <div key="settings-header" className="minimax-section-label"><H3Icon name="sliders" /> <span>Setting</span><span className="nfh3-settings-transfer"><button type="button" title="导入参数设置" onClick={() => fileRef.current?.click()}><H3Icon name="restore" /></button><button type="button" title="导出参数设置" onClick={downloadSettings}><H3Icon name="download" /></button><button type="button" title="设为默认参数（新建 H3 节点将自动携带当前参数）" onClick={saveAsDefault}><H3Icon name="database" /></button><input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void readSettings(file); event.currentTarget.value = ""; }} /></span><small className="nfh3-transfer-message">{transferMessage}</small><small className="nfh3-panel-status">{status === "awaiting_confirmation" ? "待确认" : busy ? "运行中" : "就绪"}</small></div>
         <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} patch={patchSelected} />
-        <div key="panel-actions" className="nfh3-panel-actions">{awaitingConfirmation ? <><button type="button" className="minimax-run" disabled={decisionBusy} onClick={() => void resolveConfirmation("confirm")}><H3Icon name="sparkles" /> 确认并精修</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("keep_first_pass")}>保留一采</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("discard")}>放弃任务</button></> : status === "awaiting_confirmation" ? <span>请选中待确认的 Clip</span> : <><button type="button" className={busy || stuck ? "minimax-reset" : "minimax-run"} onClick={() => { ctx.openPanel(); if (busy) { ctx.emit("minimax-h3:reset-and-run", { nodeId: ctx.node.id, all: false }); return; } requestH3Run(ctx, false, Boolean(selected?.result)); }}><H3Icon name={busy || stuck ? "restore" : "sparkles"} /> {busy || stuck ? "重置并重新生成" : selected?.result ? "重新生成当前 Clip" : "生成当前 Clip"}</button><button type="button" className={busy ? "minimax-reset" : "minimax-run-all"} onClick={() => { ctx.openPanel(); if (busy) { ctx.emit("minimax-h3:reset-and-run", { nodeId: ctx.node.id, all: true }); return; } requestH3Run(ctx, true); }}><H3Icon name={busy ? "restore" : "forward"} /> {busy ? "重置并重新运行" : "运行当前及后续"}</button></>}</div>
+        <div key="panel-actions" className="nfh3-panel-actions">{awaitingConfirmation ? <><button type="button" className="minimax-run" disabled={decisionBusy} onClick={() => void resolveConfirmation("confirm")}><H3Icon name="sparkles" /> 确认并精修</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("keep_first_pass")}>保留一采</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("discard")}>放弃任务</button></> : status === "awaiting_confirmation" ? <span>请选中待确认的 Clip</span> : <><button type="button" className={busy || stuck ? "minimax-reset" : "minimax-run"} onClick={() => { ctx.openPanel(); if (busy) { ctx.emit("minimax-h3:reset-and-run", { nodeId: ctx.node.id, all: false, segmentId: selected?.id || "" }); return; } requestH3Run(ctx, false, Boolean(selected?.result)); }}><H3Icon name={busy || stuck ? "restore" : "sparkles"} /> {busy || stuck ? "重置并重新生成" : selected?.result ? "重新生成当前 Clip" : "生成当前 Clip"}</button><button type="button" className={busy ? "minimax-reset" : "minimax-run-all"} onClick={() => { ctx.openPanel(); if (busy) { ctx.emit("minimax-h3:reset-and-run", { nodeId: ctx.node.id, all: true, segmentId: selected?.id || "" }); return; } requestH3Run(ctx, true); }}><H3Icon name={busy ? "restore" : "forward"} /> {busy ? "重置并重新运行" : "运行当前及后续"}</button></>}</div>
     </div>;
 }
