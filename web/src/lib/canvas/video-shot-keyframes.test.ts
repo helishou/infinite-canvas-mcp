@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CUT_BASE_RATIO, CUT_MERGE_SECONDS, MAX_SHOT_KEYFRAMES, MIN_CUT_SCORE, detectCuts } from "./video-shot-keyframes";
+import { CUT_BASE_RATIO, CUT_MERGE_SECONDS, MAX_SHOT_KEYFRAMES, MIN_CUT_SCORE, detectCuts, withOpeningShot } from "./video-shot-keyframes";
 import { REAL_H3_SAMPLE_SCORES } from "./__real_scores";
 
 /** 采样格：1/12 秒。取样点必须落在格上，否则 makeSamples 写不进峰值。 */
@@ -145,4 +145,39 @@ test("导出常量是合理正数", () => {
     assert.ok(CUT_BASE_RATIO > 1);
     assert.ok(CUT_MERGE_SECONDS > 0);
     assert.ok(MIN_CUT_SCORE > 0 && MIN_CUT_SCORE < 0.2);
+});
+
+test("补帧后第 0 秒的片头首帧一定在第 1 位", () => {
+    // 差分采样拿不到 samples[0]（没有前一帧可比），所以片头不在 detectCuts 的输出里。
+    // 修复前这里会漏掉片头，抽取结果直接从第 2 个分镜开始。
+    const cuts = withOpeningShot(detectCuts(realSamples()));
+    assert.equal(cuts[0].time, 0);
+    assert.equal(cuts[0].index, 1);
+    assert.equal(cuts[0].score, 0);
+});
+
+test("补帧不会篡改已有切点的时间，并顺延编号", () => {
+    const detected = detectCuts(realSamples());
+    const cuts = withOpeningShot(detected);
+    assert.equal(cuts.length, detected.length + 1);
+    for (const [position, cut] of cuts.slice(1).entries()) {
+        assert.equal(cut.time, detected[position].time);
+        assert.equal(cut.index, position + 2);
+    }
+});
+
+test("没有任何切点时也返回片头一帧", () => {
+    const cuts = withOpeningShot(detectCuts(makeSamples([])));
+    assert.deepEqual(cuts, [{ index: 1, time: 0, score: 0 }]);
+});
+
+test("片头补帧不影响 FFMPEG 真值命中数", () => {
+    // 补帧只在前置一个 t=0，不该让真实切点凭空多出来或消失。
+    // 时间对的是采样格（1/12 秒），所以和 ffmpeg 真值比要有容差。
+    const detected = withOpeningShot(detectCuts(realSamples())).slice(1);
+    assert.equal(detected.length, FFMPEG_CUTS.length);
+    for (const [position, cut] of detected.entries()) {
+        const error = Math.abs(cut.time - FFMPEG_CUTS[position]);
+        assert.ok(error <= 0.25, `第 ${position + 1} 镜偏差 ${(error * 1000).toFixed(0)}ms，超出 250ms 容差`);
+    }
 });

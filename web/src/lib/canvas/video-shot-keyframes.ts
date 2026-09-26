@@ -95,6 +95,20 @@ function nearestSnap(time: number, fps: number): number {
 }
 
 /**
+ * 补上第 0 秒的片头首帧，并把整组切点重新编号。
+ *
+ * 差分采样要拿前一帧做比较，所以 samples 里第一个可比样本在第 2 个采样点，
+ * t=0 永远不可能被 detectCuts 挑成切点 —— 不补这一帧，截取结果会从第 2 个
+ * 分镜开始，第 1 镜的首帧直接丢失。
+ *
+ * 片头那一帧的 score 填 0：它不是检测出来的切换点，只是「视频从这一帧开始」，
+ * 没有可比较的前一帧，score 无意义（detectCuts 也不会再读它）。
+ */
+export function withOpeningShot(cuts: ShotCut[]): ShotCut[] {
+    return [{ index: 1, time: 0, score: 0 }, ...cuts].map((cut, position) => ({ ...cut, index: position + 1 }));
+}
+
+/**
  * 扫描视频找分镜切换点，并抽取每个分镜的首帧。
  * onProgress 回报 0~1；返回的 blobs 与 cuts 顺序一一对应。
  */
@@ -203,7 +217,7 @@ export async function extractShotKeyframes(
             options.onProgress?.((time / Math.max(duration, 0.001)) * 0.6);
         }
 
-        let cuts = detectCuts(samples, options.baseRatio, options.minScore);
+        let cuts = withOpeningShot(detectCuts(samples, options.baseRatio, options.minScore));
         if (cuts.length > maxShots) cuts = cuts.slice(0, maxShots);
 
         const full = document.createElement("canvas");
@@ -221,18 +235,19 @@ export async function extractShotKeyframes(
         };
 
         const blobs: Blob[] = [];
+        const captured: ShotCut[] = [];
         for (const [index, cut] of cuts.entries()) {
             // 复用已经解码好的 video 出全分辨率帧：captureVideoFrame 每次都会新建
             // <video> 并重新 src 加载整个视频，N 个分镜就是 N 次全量下载，慢且易中途失败。
             const blob = await grabFullFrame(nearestSnap(cut.time, 1000)).catch(() => undefined);
             if (blob) {
                 blobs.push(blob);
-                cut.index = blobs.length;
+                captured.push({ ...cut, index: blobs.length });
             }
             options.onProgress?.(0.6 + ((index + 1) / Math.max(cuts.length, 1)) * 0.4);
         }
 
-        return { cuts: cuts.slice(0, blobs.length), blobs, duration, width, height };
+        return { cuts: captured, blobs, duration, width, height };
     } finally {
         video.removeAttribute("src");
         video.load();
