@@ -10,7 +10,7 @@ import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { clipRuntimeState } from "../services/h3-clip-runtime";
 import { h3ThemeVars } from "../h3-theme";
-import { assignStoryboardShotRef, dropUnboundStoryboardReferences, rebindStoryboardShot, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
+import { alignStoryboardReferenceOrder, assignStoryboardShotRef, dropUnboundStoryboardReferences, rebindStoryboardShot, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, H3_TIMELINE_MIN, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
@@ -201,6 +201,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         if (changed) ctx.updateMetadata({ segments: next });
     }, [segments, sharedContext.node.id]);
     const commitSegmentChange = useCallback((updated: H3Segment, select = false) => {
+        updated = alignStoryboardReferenceOrder(updated);
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = segmentsFor(liveMetadata);
         const previous = current.find((item) => item.id === updated.id);
@@ -213,7 +214,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             return false;
         }
         ctx.updateMetadata({ ...(select ? { selectedSegmentId: updated.id } : {}), segments: current.map((item) => item.id === updated.id ? updated : item) });
-        void syncStoryboardPrompt(ctx, updated);
+        void syncStoryboardPrompt(ctx, updated, previous);
         return true;
     }, [ctx, metadata]);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => {

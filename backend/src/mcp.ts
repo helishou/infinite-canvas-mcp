@@ -38,6 +38,11 @@ import type { CanvasTextGenerationInput } from "./canvas/text-dispatcher.js";
 import { splitImageBuffer } from "./canvas/image-split.js";
 import { cropImageBuffer, parseAspectRatio, type CropAnchor } from "./canvas/image-crop.js";
 import {
+  normalizeImportSources,
+  probeImageSize,
+  readImportableImage,
+} from "./canvas/import-local-image.js";
+import {
   effectiveCanvasNodeType,
   resolveCanvasImageReferences,
   resolveCanvasImageReferencesByIds,
@@ -1335,6 +1340,156 @@ function registerBackendCanvasTools(
         created,
         revision: applied.revision,
         originalNodesPreserved: true,
+      });
+    },
+  );
+  server.registerTool(
+    "canvas_import_local_images",
+    {
+      description:
+        "把本地磁盘上的图片文件导入画布，成为带 storageKey 的真实图片节点，可直接作为 canvas_create_generation_flow / canvas_run_generation 的参考图。与 assets_add 的区别：assets_add 用 dataURL 存素材库、不进 media_files、没有 storageKey，当不了生成参考；本工具走 Backend 媒体上传，落 media_files 并返回 storageKey/url/像素尺寸。items 接受字符串路径或 {filePath,title}，按顺序网格排列。",
+      inputSchema: z.object({
+        projectId: z.string().optional(),
+        items: z
+          .array(
+            z.union([
+              z.string(),
+              z.object({
+                filePath: z.string().describe("本地图片绝对路径"),
+                title: z.string().optional(),
+              }),
+            ]),
+          )
+          .min(1)
+          .describe("本地图片路径列表，按此顺序建节点"),
+        x: z.number().optional().describe("第一个节点的 X；不传用源节点右侧"),
+        y: z.number().optional().describe("第一个节点的 Y；不传用源节点同高"),
+        width: z.number().optional().describe("画布节点显示宽度，默认按图片原始比例自适应"),
+        gap: z.number().optional().describe("网格间距，默认 48"),
+        columns: z.number().optional().describe("网格列数，默认 4"),
+        titlePrefix: z.string().optional().describe("标题前缀；不传用文件名"),
+        docType: z.string().optional().describe("写入 metadata.docType，便于后续按类型筛选"),
+        annotation: z
+          .object({
+            x: z.number().optional(),
+            y: z.number().optional(),
+            width: z.number().optional(),
+            height: z.number().optional(),
+          })
+          .optional()
+          .describe("可选来源信息，写入 metadata.sourceAnnotation"),
+      }).shape,
+    },
+    async (rawInput: Record<string, unknown>) => {
+      const projectId = resolveMcpProjectId(state, rawInput.projectId, getBrowserActiveProjectId).projectId;
+      if (!projectId) throw new Error("缺少 projectId；请先选择活动画布");
+      const sources = normalizeImportSources(rawInput.items);
+
+      const project = await fetchCurrentCanvasProject(config, projectId);
+      const operations: Array<Record<string, unknown>> = [];
+      const created: Array<Record<string, unknown>> = [];
+      const failed: Array<Record<string, unknown>> = [];
+      const gap = Math.max(0, Number(rawInput.gap ?? 48));
+      const columns = Math.max(1, Number(rawInput.columns ?? 4));
+      const requestedWidth = Number(rawInput.width ?? 0) || 0;
+      const titlePrefix = String(rawInput.titlePrefix ?? "").trim();
+      const docType = String(rawInput.docType ?? "").trim();
+      const annotation = rawInput.annotation as Record<string, unknown> | undefined;
+
+      for (const [index, source] of sources.entries()) {
+        let prepared: Awaited<ReturnType<typeof readImportableImage>>;
+        try {
+          prepared = await readImportableImage(source);
+        } catch (error) {
+          failed.push({ filePath: source.filePath, error: String((error as Error).message || error) });
+          continue;
+        }
+        const probed = probeImageSize(prepared.data);
+        const media = await uploadMediaBinary(config, prepared.data, {
+          name: prepared.name,
+          mimeType: prepared.mimeType,
+          category: "library",
+          width: probed.width || null,
+          height: probed.height || null,
+        });
+
+        const canvasWidth = requestedWidth || (probed.width > 0 ? probed.width : 400);
+        const canvasHeight = Math.max(
+          1,
+          Math.round(canvasWidth * (probed.height > 0 ? probed.height / probed.width : 0.5625)),
+        );
+        const column = index % columns;
+        const row = Math.floor(index / columns);
+      const firstNodePosition = (nodesOf(project)[0]?.position || {}) as Record<string, number>;
+      const baseX = Number(rawInput.x ?? 0) || (nodesOf(project)[0] ? Number(firstNodePosition.x || 0) + 560 : 120);
+      const baseY = Number(rawInput.y ?? 0) || (nodesOf(project)[0] ? Number(firstNodePosition.y || 0) : 120);
+        const id = `image-${crypto.randomUUID()}`;
+        const title = source.title || (titlePrefix ? `${titlePrefix} · ${prepared.name}` : prepared.name);
+        const position = { x: baseX + column * (canvasWidth + gap), y: baseY + row * (canvasHeight + gap) };
+        const metadata: Record<string, unknown> = {
+          content: media.url,
+          storageKey: media.storageKey,
+          status: "success",
+          naturalWidth: probed.width || null,
+          naturalHeight: probed.height || null,
+          bytes: media.bytes,
+          mimeType: prepared.mimeType,
+          importSource: {
+            kind: "local-file",
+            filePath: prepared.filePath,
+            importedAt: new Date().toISOString(),
+          },
+          ...(docType ? { docType } : {}),
+          ...(annotation ? { sourceAnnotation: annotation } : {}),
+        };
+        operations.push({
+          type: "add_node",
+          nodeType: "image",
+          id,
+          title,
+          position,
+          width: canvasWidth,
+          height: canvasHeight,
+          metadata,
+        });
+        created.push({
+          id,
+          title,
+          storageKey: media.storageKey,
+          url: media.url,
+          bytes: media.bytes,
+          mimeType: prepared.mimeType,
+          sourcePath: prepared.filePath,
+          width: probed.width,
+          height: probed.height,
+          nodeWidth: canvasWidth,
+          nodeHeight: canvasHeight,
+          position,
+        });
+      }
+
+      if (!operations.length) {
+        throw new Error(
+          `没有可导入的图片：${failed.map((item) => `${item.filePath}（${item.error}）`).join("；")}`,
+        );
+      }
+
+      const applied = await applyBackendCanvasOperations(
+        config,
+        project.id,
+        Number(project.revision || 0),
+        operations,
+        state.clientId,
+      );
+      enforceToolOutputLimit("canvas_import_local_images", created);
+      return textResult({
+        ok: true,
+        projectId: project.id,
+        requested: sources.length,
+        count: created.length,
+        created,
+        ...(failed.length ? { failed } : {}),
+        revision: applied.revision,
       });
     },
   );

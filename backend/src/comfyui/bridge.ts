@@ -228,9 +228,9 @@ export class ComfyUiBackend {
             readNanFengChoices(),
         ]);
         const h3Models = models.filter(isH3ModelPath);
-        const minimaxLoras = [...loras, ...loraModelOnly, ...nanfengLoras].filter(isMinimaxLoraPath);
+        const availableLoras = [...loras, ...loraModelOnly, ...nanfengLoras];
         const minimaxTextEncoders = textEncoders.filter((value) => /minimax/i.test(value));
-        return { models: [...new Set(h3Models)].sort((a, b) => a.localeCompare(b)), loras: [...new Set(minimaxLoras)].sort((a, b) => a.localeCompare(b)), textEncoders: [...new Set(minimaxTextEncoders)].sort((a, b) => a.localeCompare(b)), videoVaes: [...new Set(videoVaes)].sort((a, b) => a.localeCompare(b)), audioVaes: [...new Set(audioVaes)].sort((a, b) => a.localeCompare(b)), latentUpscaleModels: [...new Set(latentUpscaleModels)].sort((a, b) => a.localeCompare(b)), nanfeng, refreshedAt: new Date().toISOString(), ...(errors.length ? { error: errors.join("; ") } : {}) };
+        return { models: [...new Set(h3Models)].sort((a, b) => a.localeCompare(b)), loras: [...new Set(availableLoras)].sort((a, b) => a.localeCompare(b)), textEncoders: [...new Set(minimaxTextEncoders)].sort((a, b) => a.localeCompare(b)), videoVaes: [...new Set(videoVaes)].sort((a, b) => a.localeCompare(b)), audioVaes: [...new Set(audioVaes)].sort((a, b) => a.localeCompare(b)), latentUpscaleModels: [...new Set(latentUpscaleModels)].sort((a, b) => a.localeCompare(b)), nanfeng, refreshedAt: new Date().toISOString(), ...(errors.length ? { error: errors.join("; ") } : {}) };
     }
 
     async status() {
@@ -1478,10 +1478,6 @@ function normalizeNanFengMode(raw: unknown): string {
     if (value === "fl2v") return "fl2v";
     // r2v / rv2v / v2v 全部归入参考生视频(ref2va)
     return "ref2va";
-}
-
-function isMinimaxLoraPath(value: string) {
-    return /(?:^|[\\/])minimax(?:[\\/]|$)/i.test(value);
 }
 
 function isH3ModelPath(value: string) {

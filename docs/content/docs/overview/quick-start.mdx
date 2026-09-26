@@ -5,29 +5,37 @@ description: Run Infinite Canvas in a few steps
 
 # Quick Start
 
-The complete application requires both the Backend and the `web/` frontend.
-
-## Deploy with Vercel
-
-The root `vercel.json` builds only `web/`, which is suitable for a frontend preview. Complete persistence for canvases, assets, and structured settings still requires a reachable Backend.
+The complete application requires three processes: the Backend, the Canvas Agent, and the `web/` frontend.
 
 ## Run locally
 
 ```bash
-git clone git@github.com:basketikun/infinite-canvas.git
-cd infinite-canvas
+git clone git@github.com:helishou/infinite-canvas-mcp.git
+cd infinite-canvas-mcp
 npm install
 npm run dev:local
 ```
 
 Open `http://localhost:3000`.
 
+`npm run dev:local` (`scripts\dev-local.bat` on Windows) first clears stale services on ports 17370, 17371, and 3001, then starts backend(17370), agent(17371), and web(3001). `npm run dev:services` skips the cleanup and starts all three concurrently. `dev` is not a watch command and not a liveness probe.
+
+To run the full short-film production stack on your own machine, use the three-process local mode above. The Docker image contains only the frontend.
+
 ## Run with Docker
+
+For a frontend preview built from the current source:
 
 ```bash
 docker build -t infinite-canvas .
 docker run --rm -p 3000:3000 infinite-canvas
 ```
+
+The repository Dockerfile builds only the static frontend and serves it with nginx; AI requests go directly from the browser to your own endpoints. The Backend, Canvas Agent, MCP, and the H3 short-film production stack live at the source level and are not included in the Docker frontend image. See [Docker Deployment](/docs/overview/docker).
+
+## Deploy with Vercel
+
+The root `vercel.json` builds only `web/`, which is suitable for a frontend preview. Complete persistence for canvases, assets, and structured settings still requires a reachable Backend.
 
 ## First-time setup
 

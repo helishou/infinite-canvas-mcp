@@ -10,8 +10,8 @@ description: 使用 Docker Compose 部署无限画布
 ## 使用发布镜像
 
 ```bash
-git clone git@github.com:basketikun/infinite-canvas.git
-cd infinite-canvas
+git clone git@github.com:helishou/infinite-canvas-mcp.git
+cd infinite-canvas-mcp
 docker compose up -d
 ```
 
@@ -49,7 +49,7 @@ docker compose -f docker-compose.local.yml up -d --build
 
 ## 数据说明
 
-当前主应用镜像只启动前端，不包含本地 Backend。该方式只适合界面预览；完整运行需要另行连接 Backend，并持久化其 SQLite 数据库与媒体目录。
+主应用镜像只构建静态前端并由 nginx 提供，不包含本地 Backend、Canvas Agent、MCP 与 H3 短片生产栈。该方式只适合界面预览；完整运行需要在本机启动 Backend 并持久化其 SQLite 数据库与媒体目录，可用[快速开始](/zh-CN/docs/overview/quick-start)里的三进程本地模式。
 
 ## 统计分析（可选）
 

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import { imageSlotStatus, imageSourceStatus } from "./image-result-slots.js";
 
 import type { ResolvedConfig } from "../config.js";
@@ -46,12 +47,14 @@ export type CanvasImageGenerationInput = {
   model: string;
   prompt: string;
   references?: CanvasImageReference[];
+  loopInputImages?: CanvasImageReference[];
   size?: string;
   width?: number;
   height?: number;
   quality?: string;
   count?: number;
   imageIds?: string[];
+  loopOutput?: CanvasGenerationCommand["loopOutput"];
   params?: Record<string, unknown>;
   clientTaskId?: string;
   resultPolicy?: "replace-active" | "append";
@@ -161,7 +164,7 @@ export class CanvasImageDispatcher {
         metadata: { runtimeTaskId: task.id, status: "loading", runProgress: 0,
           ...(prepared.createOperations.length ? {} : imageSlotStatus(project, normalized.nodeId!, normalized.imageIds, "loading")) },
         metadataDelete: ["errorDetails"],
-      }, ...imageSourceStatus(project, normalized.nodeId!, normalized.sourceNodeId, task.id, "loading", true)], { operationId: `image-task-bind:${task.id}`, runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
+      }, ...(normalized.loopOutput ? [] : imageSourceStatus(project, normalized.nodeId!, normalized.sourceNodeId, task.id, "loading", true))], { operationId: `image-task-bind:${task.id}`, runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
     } catch (error) {
       this.stores.tasks.update(task.id, { status: "failed", error: error instanceof Error ? error.message : String(error) });
       throw error;
@@ -175,7 +178,7 @@ export class CanvasImageDispatcher {
           platform: "canvas-image",
           workflow: plan.workflow || "",
           model: normalized.model,
-          taskMode: normalized.references?.length ? "i2i" : "t2i",
+          taskMode: executionImageInputs(normalized).length ? "i2i" : "t2i",
           prompt: normalized.prompt,
           references:
             normalized.references?.map((reference) => ({
@@ -185,6 +188,7 @@ export class CanvasImageDispatcher {
             })) || [],
           inputCounts: {
             references: normalized.references?.length || 0,
+            loopInputs: normalized.loopInputImages?.length || 0,
             count: Math.max(1, Math.min(4, Math.floor(normalized.count || 1))),
           },
           runtimeTaskId: task.id,
@@ -196,6 +200,7 @@ export class CanvasImageDispatcher {
               normalized.size ||
               `${normalized.width || 1024}x${normalized.height || 1024}`,
             quality: normalized.quality || "auto",
+            ...(normalized.loopInputImages?.length ? { loopInputImages: normalized.loopInputImages.map((image) => ({ name: image.name, mimeType: image.mimeType, storageKey: image.storageKey, url: image.url })) } : {}),
           },
         }).id
       : null;
@@ -244,8 +249,8 @@ export class CanvasImageDispatcher {
   private prepareReferences(
     input: CanvasImageGenerationInput,
   ): CanvasImageGenerationInput {
-    if (!input.references?.length) return input;
-    const references = input.references.map((reference) => {
+    if (!input.references?.length && !input.loopInputImages?.length) return input;
+    const prepare = (reference: CanvasImageReference) => {
       if (
         reference.storageKey &&
         this.stores.media.meta(reference.storageKey)
@@ -273,8 +278,12 @@ export class CanvasImageDispatcher {
         url: this.stores.media.url(stored),
         mimeType: reference.mimeType || stored.mimeType,
       });
-    });
-    return { ...input, references };
+    };
+    return {
+      ...input,
+      ...(input.references ? { references: input.references.map(prepare) } : {}),
+      ...(input.loopInputImages ? { loopInputImages: input.loopInputImages.map(prepare) } : {}),
+    };
   }
 
   private findActiveTask(input: CanvasImageGenerationInput) {
@@ -290,7 +299,9 @@ export class CanvasImageDispatcher {
       quality: input.quality,
       count: input.count,
       imageIds: input.imageIds,
+      loopOutput: input.loopOutput,
       references: input.references,
+      loopInputImages: input.loopInputImages,
       params: input.params,
       referenceNodeIds: input.referenceNodeIds,
       maskEdit: input.maskEdit,
@@ -310,7 +321,9 @@ export class CanvasImageDispatcher {
           quality: current.quality,
           count: current.count,
           imageIds: current.imageIds,
+          loopOutput: current.loopOutput,
           references: current.references,
+          loopInputImages: current.loopInputImages,
           params: current.params,
           referenceNodeIds: current.referenceNodeIds,
           maskEdit: current.maskEdit,
@@ -324,8 +337,10 @@ export class CanvasImageDispatcher {
   async retry(task: RuntimeTask) {
     if (task.kind !== "canvas-image")
       throw new Error(`任务类型 ${task.kind} 不是画布图片任务`);
+    const previous = task.input as CanvasImageGenerationInput;
     const input = {
-      ...(task.input as CanvasImageGenerationInput),
+      ...previous,
+      ...(previous.loopOutput ? { nodeId: previous.sourceNodeId, imageIds: undefined } : {}),
       clientTaskId: `canvas-retry-${crypto.randomUUID()}`,
     };
     const result = this.start(input);
@@ -464,7 +479,7 @@ export class CanvasImageDispatcher {
       const resolved = resolveWorkflowForModel(
         aiConfig,
         selectedModel,
-        (input.references || []).length,
+        executionImageInputs(input).length,
       );
       if (!resolved.ok)
         throw new Error(
@@ -485,7 +500,7 @@ export class CanvasImageDispatcher {
 
     const preset = builtinPreset(model);
     if (executor === "builtin-comfy" && preset) {
-      if (preset === "flux2-klein" && !input.references?.length)
+      if (preset === "flux2-klein" && !executionImageInputs(input).length)
         throw new Error("Flux2-Klein 至少需要一张参考图");
       return { executor, input: normalized, preset };
     }
@@ -527,7 +542,7 @@ export class CanvasImageDispatcher {
     taskId: string,
   ) {
     const references = await Promise.all(
-      (input.references || []).map((reference) =>
+      executionImageInputs(input).map((reference) =>
         this.readReference(reference),
       ),
     );
@@ -606,7 +621,7 @@ export class CanvasImageDispatcher {
     suffix = "",
   ) {
     const references = await Promise.all(
-      (input.references || []).map((reference) =>
+      executionImageInputs(input).map((reference) =>
         this.materializeReference(reference),
       ),
     );
@@ -667,7 +682,10 @@ export class CanvasImageDispatcher {
     const imageFields = fields.filter((field) =>
       isImageField(field, detail.workflow),
     );
-    const references = input.references || [];
+    const references = executionImageInputs(input);
+    if (references.length > imageFields.length) {
+      throw new Error(`工作流「${workflowName}」只有 ${imageFields.length} 个图片输入槽，本轮需要 ${references.length} 张（${input.loopInputImages?.length || 0} 张循环图 + ${input.references?.length || 0} 张固定参考图）；请配置支持三图的工作流或调整参考输入`);
+    }
     for (let index = 0; index < imageFields.length; index++) {
       const field = imageFields[index];
       const reference = references[index];
@@ -680,13 +698,14 @@ export class CanvasImageDispatcher {
       input.maskEdit && references.length >= 2
         ? maskReferenceWorkflow(detail.workflow, imageFields[1]?.node) || detail.workflow
         : detail.workflow;
+    const executableWorkflow = adaptFlux2KleinWorkflow(workflow, input.model);
 
     const childTaskId = `workflow-child-${taskId}${suffix}`;
     this.assertNotCancelled(taskId);
     this.trackChild(taskId, childTaskId);
     try {
       const result = await this.workflowExecutor.run(
-        workflow,
+        executableWorkflow,
         detail.config || emptyWorkflowConfig(workflowName),
         fieldValues,
         crypto.randomUUID(),
@@ -952,6 +971,32 @@ function stripReferencePayload(
 ): CanvasImageReference {
   const { dataUrl: _dataUrl, ...handle } = reference;
   return handle;
+}
+
+/** The provider sees one current loop input followed by the generator's fixed references. */
+export function executionImageInputs(input: Pick<CanvasImageGenerationInput, "loopInputImages" | "references">): CanvasImageReference[] {
+  return [...(input.loopInputImages || []), ...(input.references || [])];
+}
+
+/** This bundled Flux2 workflow used Inspire's shared loaders solely as ordinary single-model loaders. */
+export function adaptFlux2KleinWorkflow(workflow: Record<string, unknown>, model: string): Record<string, unknown> {
+  if (modelOptionName(model) !== "Flux2-Klein") return workflow;
+  const result = { ...workflow };
+  for (const [id, value] of Object.entries(workflow)) {
+    if (!value || typeof value !== "object") continue;
+    const node = value as { class_type?: string; inputs?: Record<string, unknown> };
+    const inputs = node.inputs || {};
+    if (node.class_type === "LoadTextEncoderShared //Inspire") {
+      const name = String(inputs.model_name1 || "");
+      if (!name || [inputs.model_name2, inputs.model_name3].some((item) => item && item !== "None")) throw new Error("Flux2-Klein 的文本编码器不是单模型配置，无法替换缺失的 Inspire 加载节点");
+      result[id] = { ...node, class_type: "CLIPLoader", inputs: { clip_name: name, type: "flux2" } };
+    } else if (node.class_type === "LoadDiffusionModelShared //Inspire") {
+      const name = String(inputs.model_name || "");
+      if (!name) throw new Error("Flux2-Klein 的扩散模型配置缺少模型文件名");
+      result[id] = { ...node, class_type: "UNETLoader", inputs: { unet_name: name, weight_dtype: String(inputs.weight_dtype || "default") } };
+    }
+  }
+  return result;
 }
 
 async function waitForTask(

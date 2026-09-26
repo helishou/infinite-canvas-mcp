@@ -5,6 +5,23 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Canvas video comparison
+
+- On a canvas with at least two video nodes, open one video's toolbar and choose Compare. The canvas should enter node selection, highlight other video nodes, and allow Escape or the top hint to cancel without opening a dialog. Click another video node to open the comparison with that video already selected; non-video nodes and the source video should not open it. Add or remove more videos inside the dialog without changing canvas nodes.
+- Play, pause, and drag the shared timeline. All visible videos should move to the same elapsed time. With videos of different lengths, the shorter one should hold its final frame while the longer one continues. Only the current video's audio should play. Close and reopen Compare to confirm it starts fresh.
+- Repeat play and seek while the pointer rests over the timeline and while the video picker is expanded. The comparison should remain usable without a React update-depth error.
+
+## H3 LoRA discovery
+
+- Add a LoRA outside the `Minimax` subfolder of the active ComfyUI model directory. Open the H3 Clip LoRA section and confirm it appears in the dropdown with its relative path; add another file while the section stays open, click "Refresh LoRA list", and confirm it appears without reloading the page. Select it and confirm the saved Clip keeps that path after a refresh.
+- While Backend still has an older model catalog, type `H3_speed_slider_1.1.safetensors` into a LoRA slot and press Enter. The slot should enable and retain that exact ComfyUI relative filename after reopening the Clip.
+- Search for `speed_slider` in the LoRA section. All LoRA slot dropdowns should show only matching filenames; clearing the search should restore the full list without changing a selected slot. Typing a complete relative filename directly in a slot should still work.
+
+## H3 storyboard image and Picture order
+
+- Bind three storyboard images to one Clip, then move the third storyboard card before the first, or bind a later card before an earlier empty card. Storyboard images in the reference list should follow the storyboard track, while each `<Picture N>` tag still points to its original image and other image references keep their slots.
+- For an existing Clip with mismatched order, complete the storyboard editor or write its shot bindings with `h3_write_storyboard_prompt`. Check that storyboard and Picture order agree. Refresh and compare the track, reference list, and actual reference submission before generation.
+
 ## Remember the last image settings
 
 - In a canvas image node, change the image model, quality, size, image count, transparency, and 16-pixel alignment. Create another image node and confirm it starts with the latest model, quality, size, count, and transparency. Reopen the settings panel and confirm the alignment switch keeps its choice.
@@ -737,7 +754,12 @@ description: Implemented changes that still need manual verification
 - 从顶部工具栏、空白画布创建菜单和连线创建菜单分别新建「循环」节点，确认节点标题、侧栏筛选、节点图标和连线手柄均正常显示。
 - 将文本或图片节点连接到循环节点，开启对应的提示词/图片输入，设置循环次数和起始序号；连接一个下游智能生成节点后运行，确认每一轮使用当前序号对应的输入，且每轮只提交一个结果。
 - 在循环提示词中使用 `《计数》`、`《总数》` 和 `《进度》`，确认下游提示词按当前轮次替换变量；刷新画布后确认循环参数仍保留。
-- 分别测试串行和并行模式，以及图片每轮数量/视频每轮数量设置，确认下游节点任务、结果槽和失败/停止行为不会互相覆盖；循环运行中点击停止，确认当前任务可取消且不会继续启动后续轮次。
+- 将 8 张图片放入有序图片组，组和 2 张固定图一起连到循环，再连到右侧图片生成节点。选中循环时，浮动生成面板应绑定右侧生成节点：参考栏只显示 2 张固定图，改模型后实际请求也使用新模型；组图不批量进入参考栏。循环自动显示 8 轮；点击「运行循环」或右侧生成按钮，均应按槽位顺序每轮输入 1 张图，保持同一提示词和 2 张固定图，最终有 8 张独立结果图。固定图直接连接生成节点时也保持相同行为；手动次数、起始序号与批量只在素材范围内执行，不回绕。
+- 新建循环节点默认 1 轮；开启提示词时可逐条增删编辑并插入 `《计数》`，有上游提示词时预览当前选中条目。连接「循环 → 生成 A → 生成 B」并运行，确认 B 接收本轮 A 的任务结果而非 A 上一轮的节点内容；上游与本地提示词合并，旧单文本字段仍可读取，纯提示词模式仍可设置起始序号。
+- 图片或视频生成链的每轮结果应由 Backend 创建独立输出节点，并标注循环来源、目标和轮次；重跑同一轮复用节点，图片旧结果槽应保留，视频节点可从历史选择旧媒体，不覆盖其他轮次。串行模式逐轮运行；并行模式同时运行多个轮次，每轮内部依次执行下游节点。API 最多同时运行 6 轮，ComfyUI 取配置实例数与 6 的较小值，读取实例失败时只运行 1 轮。
+- 图片任务日志分开展示「固定 refs」和「本轮组图」。当本轮需要 1 张组图 + 2 张固定图、选用的工作流却只有 2 个图片输入槽时，运行前提示槽位不足；Backend 也拒绝提交到模型，不能静默丢掉第三张。选择具有 3 个图片输入槽的工作流后逐轮运行。
+- Flux2-Klein 工作流若使用旧 Inspire 单模型加载节点，执行时转换为当前 ComfyUI 内置 CLIP/UNET 加载节点，不覆盖用户工作流文件；ComfyUI 服务恢复后用三图输入验证真实推理与结果归档。
+- 并行轮次反向完成时，结果仍回到各自输出节点；一个轮次失败或点击停止后，取消正在运行的轮次且不再启动待运行轮次。非媒体生成链选择并行时显示明确提示，不提交任务；视频结果不能被图片生成节点静默当成参考图。
 
 ## 画布资产自动归类
 
@@ -1203,6 +1225,7 @@ description: Implemented changes that still need manual verification
 - 在 ComfyUI 未启动时运行一个 H3 Clip，确认生成日志显示失败后，H3 节点与对应 Clip 都退出“生成中”、清空任务 ID，并显示同一失败原因。
 - 在任务终态事件到达前刷新或断开页面实时连接，确认前端任务轮询仍能把节点和 Clip 收敛到成功、失败或取消状态。
 - 构造一个任务已终态但日志仍为 `queued` / `running` 的历史记录并重启 Backend，确认日志自动修复为对应终态，不影响已被新任务接管的 Clip。
+- 让 H3 子任务失败后立即在 Clip 设置中点「重置并重新生成」：父任务已是 `failed` 时不得再调用取消；Clip 应退出 `loading`、清空旧父/子任务 ID并保留旧输出，然后可提交新任务。并发运行另一 Clip 时，失败收口不能清掉另一 Clip 的任务绑定；若查询后才转为终态，也应继续重生而不显示「任务状态 failed 不可取消」。
 
 - Vite Windows 文件监听：运行前端开发服务并执行测试/诊断输出，确认 `web/_test_report.txt`、`web/_diag.txt` 不会触发 `EBUSY`，Vite 进程保持运行，页面仍可访问。
 

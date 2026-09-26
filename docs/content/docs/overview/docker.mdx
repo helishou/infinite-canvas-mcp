@@ -8,8 +8,8 @@ description: Deploy Infinite Canvas with Docker Compose
 ## Use the published image
 
 ```bash
-git clone git@github.com:basketikun/infinite-canvas.git
-cd infinite-canvas
+git clone git@github.com:helishou/infinite-canvas-mcp.git
+cd infinite-canvas-mcp
 docker compose up -d
 ```
 
@@ -20,6 +20,12 @@ Open `http://localhost:3000`.
 ```bash
 docker compose -f docker-compose.local.yml up -d --build
 ```
+
+## What the image includes
+
+The main application image builds only the static frontend and serves it with nginx. AI requests are sent directly from the browser to your own OpenAI-compatible endpoints.
+
+The Backend, Canvas Agent, MCP layer, and the H3 short-film production stack live at the source level and are **not** included in the Docker image. This deployment is suitable for a frontend preview; running the complete application requires starting the Backend locally and persisting its SQLite database and media directory. Use the three-process local mode from [Quick Start](/docs/overview/quick-start) for the full stack.
 
 ## Documentation image
 
@@ -36,8 +42,6 @@ To build it from the current source:
 cd docs
 docker compose -f docker-compose.local.yml up -d --build
 ```
-
-The main application container only runs Next.js. Canvases, My Assets, generation history, and API keys are stored in the browser by default, while prompt repositories are fetched directly by the frontend. No persistent data volume is required for this data.
 
 ## Optional analytics
 

@@ -114,3 +114,31 @@ test("从 MCP 配置节点触发视频时先创建唯一结果节点再绑定任
     assert.equal(nodes.length, 3);
     assert.ok(stores.tasks.get("config-video"));
 });
+
+test("智能循环视频轮次各有独立节点，重跑保留旧媒体并复用节点", async (t) => {
+    const { db, stores, dispatcher, input, node } = fixture(t);
+    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), [
+        { type: "add_node", id: "loop", nodeType: "loop", title: "循环", position: { x: -480, y: 0 }, width: 380, height: 320, metadata: {} },
+        { type: "connect_nodes", id: "loop-video", fromNodeId: "loop", toNodeId: "video" },
+    ], { runtimeWrite: true });
+    const base = { ...input, sourceNodeId: "video", loopOutput: { loopNodeId: "loop", roundIndex: 1, slotIndex: 0 } };
+    dispatcher.start({ ...base, clientTaskId: "round-1" });
+    dispatcher.start({ ...base, clientTaskId: "round-2", loopOutput: { loopNodeId: "loop", roundIndex: 2, slotIndex: 1 } });
+    await Promise.all([settle(db, "round-1"), settle(db, "round-2")]);
+    const slots = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((item) => item.metadata?.loopOutputSlot);
+    assert.equal(slots.length, 2);
+    assert.equal(node("video").metadata.runtimeTaskId, undefined);
+    const first = slots.find((item) => item.metadata.loopRoundIndex === 1)!;
+    assert.equal(first.metadata.status, "success");
+    dispatcher.start({ ...base, clientTaskId: "round-1-again" });
+    await settle(db, "round-1-again");
+    const rerun = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((item) => item.metadata?.loopOutputSlot);
+    assert.equal(rerun.length, 2);
+    assert.equal(rerun.find((item) => item.metadata.loopRoundIndex === 1)?.id, first.id);
+    assert.equal(rerun.find((item) => item.metadata.loopRoundIndex === 1)?.metadata.loopOutputHistory?.length, 1);
+    const retried = dispatcher.retry(db.getTask("round-1")!);
+    await settle(db, retried.id);
+    const afterRetry = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((item) => item.metadata?.loopOutputSlot);
+    assert.equal(afterRetry.length, 2);
+    assert.equal(afterRetry.find((item) => item.metadata.loopRoundIndex === 1)?.metadata.loopOutputHistory?.length, 2);
+});

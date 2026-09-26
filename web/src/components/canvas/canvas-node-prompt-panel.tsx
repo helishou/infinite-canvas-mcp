@@ -32,13 +32,14 @@ type CanvasNodePromptPanelProps = {
     mentionReferences?: CanvasResourceReference[];
     nodes: CanvasNodeData[];
     connectedNodes?: CanvasNodeData[];
+    loopInputCount?: number;
     onDisconnectReference?: (fromNodeId: string, toNodeId: string) => void;
     onStartReferenceSelection?: (nodeId: string) => void;
     onImageSettingsOpenChange?: (open: boolean) => void;
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], onDisconnectReference, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], loopInputCount = 0, onDisconnectReference, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
@@ -64,10 +65,11 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
         ? node.metadata.images?.find((image) => image.id === node.metadata?.activeImageHistoryId)
         : undefined;
     const historyReferences = activeHistoryImage?.generationSnapshot?.references;
+    const visibleHistoryReferences = loopInputCount > 0 ? undefined : historyReferences;
     // 当前版本已恢复时按该版本的图片数路由工作流，否则按实时连接和 @ 引用计算。
-    const referenceCount = historyReferences !== undefined
-        ? historyReferences.length
-        : connectedNodes.filter((item) => item.type === CanvasNodeType.Image).length + mentionReferences.filter((item) => item.kind === "image").length;
+    const referenceCount = visibleHistoryReferences !== undefined
+        ? visibleHistoryReferences.length
+        : new Set([...connectedNodes.filter((item) => item.type === CanvasNodeType.Image).map((item) => item.id), ...mentionReferences.filter((item) => item.kind === "image").map((item) => item.nodeId)]).size + loopInputCount;
     const clearHistoryReferences = () => onConfigChange(node.id, { activeImageHistoryId: null, activeImageHistoryExplicit: false });
     const changeImageModel = (model: string) => {
         onConfigChange(node.id, { model });
@@ -96,7 +98,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
             onDoubleClick={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
         >
-            <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={historyReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={onStartReferenceSelection} />
+            <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={visibleHistoryReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={onStartReferenceSelection} />
             {isSmartGenerationNode ? (
                 <Segmented
                     className="mb-2 w-full"
@@ -185,7 +187,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
             </div>
             <Modal title={t("canvas.promptPanel.editorTitle")} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
-                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={historyReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
+                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={visibleHistoryReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
                     <CanvasCollaborativeText
                         projectId={projectId} target={target} chips dialogue
                         references={mentionReferences}

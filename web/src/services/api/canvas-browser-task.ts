@@ -69,8 +69,9 @@ async function execute(task: BackendRuntimeTask, signal: AbortSignal): Promise<R
     const config = taskConfig(useConfigStore.getState().config, model, script, input, params);
     const references = referenceImages(input.references);
     if (mode === "image") {
-        const images = references.length
-            ? await requestEdit(config, prompt, references, { signal })
+        const imageInputs = [...referenceImages(input.loopInputImages), ...references];
+        const images = imageInputs.length
+            ? await requestEdit(config, prompt, imageInputs, { signal })
             : await requestGeneration(config, prompt, { signal });
         const media = await Promise.all(images.map((image) => uploadMediaFile(image.dataUrl, "canvas-image", "output")));
         return { media: media.map(mediaHandle) };

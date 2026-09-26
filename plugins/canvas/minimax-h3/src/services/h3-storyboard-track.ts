@@ -3,6 +3,7 @@ import type { H3Ref, H3Segment, H3StoryboardShot } from "../types";
 import { readH3PromptSection, replaceH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import type { H3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import { stripDuplicateTransition } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
+import { orderStoryboardImageReferences, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 import { sameRef } from "./h3-compatibility";
 import { inferReferenceRole, refsForSegment, withSegmentRefs } from "./h3-data";
 
@@ -15,6 +16,14 @@ export function supportsStoryboardTrack(segment: H3Segment) {
 
 export function storyboardRefsForSegment(segment: H3Segment) {
     return refsForSegment(segment).filter((ref) => ref.type === "image" && inferReferenceRole(ref) === "storyboard");
+}
+
+export function alignStoryboardReferenceOrder(segment: H3Segment) {
+    const refs = refsForSegment(segment);
+    const ordered = orderStoryboardImageReferences(refs,
+        (segment.storyboardShots || []).flatMap((shot) => shot.referenceBindingId ? [shot.referenceBindingId] : []),
+        (ref) => ref.bindingId, (ref) => ref.type === "image" && inferReferenceRole(ref) === "storyboard");
+    return ordered.some((ref, index) => ref.bindingId !== refs[index]?.bindingId) ? withSegmentRefs(segment, ordered) : segment;
 }
 
 export function isStoryboardModeEnabled(segment: H3Segment) {
@@ -177,7 +186,7 @@ export function reorderStoryboardShots(segment: H3Segment, sourceId: string, tar
     if (from < 0 || to < 0 || from === to) return segment;
     const reordered = [...storyboard];
     [reordered[from], reordered[to]] = [reordered[to], reordered[from]];
-    return { ...segment, storyboardShots: shotsFromItems(reordered) };
+    return alignStoryboardReferenceOrder({ ...segment, storyboardShots: shotsFromItems(reordered) });
 }
 
 /** Move a storyboard card (and its bound image reference) between clips. */
@@ -194,10 +203,10 @@ export function moveStoryboardShotBetweenSegments(source: H3Segment, target: H3S
     const targetShot = { id: `storyboard-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, duration: sourceItem.duration, referenceBindingId: movedRef.bindingId };
     const targetShots: H3StoryboardShot[] = [...targetItems.map(({ id, duration, referenceBindingId }) => ({ id, duration, ...(referenceBindingId ? { referenceBindingId } : {}) }))];
     targetShots.splice(Math.min(insertionIndex, targetShots.length), 0, targetShot);
-    const nextTarget = withSegmentRefs({ ...target, storyboardModeEnabled: true, storyboardShots: targetShots }, nextTargetRefs);
+    const nextTarget = alignStoryboardReferenceOrder(withSegmentRefs({ ...target, storyboardModeEnabled: true, storyboardShots: targetShots }, nextTargetRefs));
     const nextSourceItems = sourceItems.filter((item) => item.id !== sourceId);
     const nextSourceRefs = refsForSegment(source).map((ref) => ref.bindingId === sourceRef.bindingId ? { ...ref, role: "other" as const } : ref);
-    const nextSource = withSegmentRefs({ ...source, storyboardModeEnabled: true, storyboardShots: shotsFromItems(nextSourceItems) }, nextSourceRefs);
+    const nextSource = alignStoryboardReferenceOrder(withSegmentRefs({ ...source, storyboardModeEnabled: true, storyboardShots: shotsFromItems(nextSourceItems) }, nextSourceRefs));
     return { source: nextSource, target: nextTarget };
 }
 
@@ -225,7 +234,7 @@ export function assignStoryboardShotRef(segment: H3Segment, shotId: string, ref:
     const storyboardShots = items.map((item) => item.id === shotId
         ? { id: item.id, duration: item.duration, referenceBindingId: bindingId }
         : { id: item.id, duration: item.duration, ...(item.ref?.bindingId ? { referenceBindingId: item.ref.bindingId } : {}) });
-    return { ...withSegmentRefs(segment, nextRefs), storyboardModeEnabled: true, storyboardShots };
+    return alignStoryboardReferenceOrder(withSegmentRefs({ ...segment, storyboardModeEnabled: true, storyboardShots }, nextRefs));
 }
 
 const PROMPT_SECTION_END = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description|storyboard_timeline):/mi;
@@ -422,7 +431,7 @@ function escapeRegExp(value: string) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Segment) {
+export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Segment, previous?: H3Segment) {
     if (!segment.id) return false;
     const target = { nodeId: ctx.node.id, segmentId: segment.id, field: "prompt" as const };
     const document = ctx.textDocument(target);
@@ -430,12 +439,15 @@ export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Se
         await document.flush();
         const snapshot = document.getSnapshot();
         if (!snapshot.ready || snapshot.blocked) return false;
-        const prompt = removeLegacyTimelineSection(snapshot.text);
+        const currentRefs = refsForSegment(segment);
+        const prompt = removeLegacyTimelineSection(previous
+            ? remapPictureTags(snapshot.text, refsForSegment(previous), currentRefs, (ref) => ref.bindingId, (ref) => ref.type === "image")
+            : snapshot.text);
         const enabled = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment) && storyboardTrackItems(segment).length > 0;
         const mode = String(segment.mode || segment.taskMode || "ref2va");
         const section = (mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description") as H3PromptSection;
         const sectionText = readH3PromptSection(prompt, section);
-        const refs = refsForSegment(segment);
+        const refs = currentRefs;
         const imageRefs = refs.filter((ref) => ref.type === "image");
         const normalizedSection = normalizeLegacyPictureTokens(sectionText, imageRefs);
         const activeItems = enabled ? storyboardTrackItems(segment) : [];

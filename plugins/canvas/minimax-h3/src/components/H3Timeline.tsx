@@ -22,7 +22,7 @@ const REFERENCE_ROLE_LABELS: Record<string, string> = {
 import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
 import { inferReferenceRole, refsForSegment, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
-import { addStoryboardShot, assignStoryboardShotRef, H3_STORYBOARD_MIN_DURATION, insertStoryboardShotAfter, isStoryboardModeEnabled, moveStoryboardShotBetweenSegments, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences } from "../services/h3-storyboard-track";
+import { addStoryboardShot, assignStoryboardShotRef, H3_STORYBOARD_MIN_DURATION, insertStoryboardShotAfter, isStoryboardModeEnabled, moveStoryboardShotBetweenSegments, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { sameRef } from "../services/h3-compatibility";
 import { H3_RUNTIME_REF_LIMITS, normalizeDroppedH3Ref, readCharacterGroupFromDrop } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
@@ -647,6 +647,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                                 if (sourceSegment) {
                                     const moved = moveStoryboardShotBetweenSegments(sourceSegment, segment, sourceId, item.id);
                                     ctx.updateMetadata({ segments: segments.map((candidate) => candidate.id === sourceSegmentId ? moved.source : candidate.id === segment.id ? moved.target : candidate), selectedSegmentId: segment.id });
+                                    void syncStoryboardPrompt(ctx, moved.source, sourceSegment);
+                                    void syncStoryboardPrompt(ctx, moved.target, segment);
                                     return;
                                 }
                             }

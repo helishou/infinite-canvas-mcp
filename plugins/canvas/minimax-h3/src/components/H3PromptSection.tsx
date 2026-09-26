@@ -6,7 +6,7 @@ import type { H3Ref, H3ReferenceRetention, H3Segment, H3SubjectDefinition } from
 import { H3Icon } from "./H3Icon";
 import { StoryboardDialogueStrip } from "./StoryboardDialogueStrip";
 import type { StoryboardSpeakerOption } from "./StoryboardDialogueStrip";
-import { inferReferenceRole, refsForSegment, segmentRefsPatch } from "../services/h3-data";
+import { inferReferenceRole, refsForSegment, segmentRefsPatch, withSegmentRefs } from "../services/h3-data";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { persistPromptCandidate, promptJobs, setPromptJob } from "../services/h3-prompt-jobs";
 import { buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, storyboardPromptFingerprint, stripGeneratedPromptSections, toSubjectDefinitions } from "../services/storyboard-prompt";
@@ -17,6 +17,7 @@ import { literalPromptSubjects } from "../services/prompt-subject-definitions";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
 import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import { formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, stripDuplicateTransition, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
+import { orderStoryboardImageReferences, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 import type { H3PromptSection, H3PromptSectionValues } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import baseReference from "../storyboard-assets/references/base-en.txt?raw";
 import refReference from "../storyboard-assets/references/ref-en.txt?raw";
@@ -1205,6 +1206,31 @@ export function H3PromptSection({
       if ((storyboardDirtyRef.current || readPromptSection(prompt, storyboardSection) !== expected) && !await saveStoryboard()) return;
       if (!persistStoryboardReferenceRetentions(storyboardShotsRef.current)) return;
       if (!await ensureStoryboardPromptSections()) return;
+      const latestMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+      const latestSegment = segmentsFor(latestMetadata).find((item) => item.id === selected?.id);
+      if (!latestSegment) throw new Error("当前 Clip 已不存在，无法对齐分镜图顺序。");
+      const previousRefs = refsForSegment(latestSegment);
+      const orderedRefs = orderStoryboardImageReferences(previousRefs,
+        storyboardShotsRef.current.flatMap((shot) => shot.pictureBindingId ? [shot.pictureBindingId] : []),
+        (ref) => ref.bindingId, isStoryboardPictureRef);
+      const orderChanged = orderedRefs.some((ref, index) => ref.bindingId !== previousRefs[index]?.bindingId);
+      const shotOrder = orderStoryboardImageReferences(latestSegment.storyboardShots || [],
+        storyboardShotsRef.current.flatMap((shot) => shot.pictureBindingId ? [shot.pictureBindingId] : []),
+        (shot) => shot.referenceBindingId,
+        (shot) => Boolean(shot.referenceBindingId && previousRefs.some((ref) => ref.bindingId === shot.referenceBindingId && isStoryboardPictureRef(ref))));
+      const trackChanged = shotOrder.some((shot, index) => shot.id !== latestSegment.storyboardShots?.[index]?.id);
+      if (orderChanged || trackChanged) {
+        await textDocument.flush();
+        const snapshot = textDocument.getSnapshot();
+        if (!snapshot.ready || snapshot.blocked) throw new Error(snapshot.error || "提示词尚未同步，无法对齐分镜图顺序。");
+        const nextPrompt = orderChanged ? remapPictureTags(snapshot.text, previousRefs, orderedRefs,
+          (ref) => ref.bindingId, (ref) => ref.type === "image") : snapshot.text;
+        if (nextPrompt !== snapshot.text && !await ctx.replaceText(textTarget, textDocument.getDocumentId(), snapshot.text, nextPrompt)) {
+          throw new Error("分镜图顺序更新时提示词发生并发修改，请重试。");
+        }
+        const updated = withSegmentRefs({ ...latestSegment, ...(trackChanged ? { storyboardShots: shotOrder } : {}) }, orderedRefs);
+        ctx.updateMetadata({ segments: segmentsFor(ctx.getNode(ctx.node.id)?.metadata || latestMetadata).map((item) => item.id === latestSegment.id ? updated : item) });
+      }
       storyboardDirtyRef.current = false;
       setStoryboardDirty(false);
       setStoryboardMode(false);

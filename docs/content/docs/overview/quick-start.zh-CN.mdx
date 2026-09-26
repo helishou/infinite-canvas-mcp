@@ -5,17 +5,13 @@ description: 用最少步骤把无限画布跑起来
 
 # 快速开始
 
-完整运行需要同时启动 Backend 和 `web/` 前端。
-
-## Vercel 部署
-
-根目录 `vercel.json` 只构建 `web/`。该方式适合预览前端；画布、素材和结构化配置的完整持久化仍需连接可访问的 Backend。
+完整运行需要同时启动 Backend、Canvas Agent 与 `web/` 前端三个进程。
 
 ## 本地启动
 
 ```bash
-git clone git@github.com:basketikun/infinite-canvas.git
-cd infinite-canvas
+git clone git@github.com:helishou/infinite-canvas-mcp.git
+cd infinite-canvas-mcp
 npm install
 npm run dev:local
 ```
@@ -26,14 +22,24 @@ npm run dev:local
 http://localhost:3000
 ```
 
+`npm run dev:local`（Windows 下为 `scripts\dev-local.bat`）会先清理 17370、17371、3001 三个端口上的旧服务，再拉起 backend(17370)、agent(17371) 与 web(3001)。`npm run dev:services` 不做清理，直接三进程并发启动。`dev` 不是 watch，也不是探活命令。
+
+如果要在自己的机器上完整跑短片生产栈，用上面的本地三进程模式；Docker 镜像只包含前端。
+
 ## Docker 启动
 
-如果你需要基于当前源码构建镜像：
+如果你只需要界面预览，可以基于当前源码构建前端镜像：
 
 ```bash
 docker build -t infinite-canvas .
 docker run --rm -p 3000:3000 infinite-canvas
 ```
+
+仓库 Dockerfile 只构建静态前端并由 nginx 提供，AI 请求由浏览器前台直连你自己的接口。Backend、Canvas Agent、MCP 与 H3 短片生产栈位于源码层面，Docker 前端镜像不包含它们。详见[Docker 部署](/zh-CN/docs/overview/docker)。
+
+## Vercel 部署
+
+根目录 `vercel.json` 只构建 `web/`。该方式适合预览前端；画布、素材和结构化配置的完整持久化仍需连接可访问的 Backend。
 
 ## 首次使用建议
 

@@ -153,6 +153,13 @@ export type CanvasNodeMetadata = {
     orderedGroup?: boolean;
     groupSlots?: string[];
     orderedGroupColumns?: number;
+    /** 视频批量抽出的分镜首帧：来源视频节点、组内镜数与各镜时间码。 */
+    sourceVideoNodeId?: string;
+    shotCount?: number;
+    docType?: string;
+    shotNumber?: number;
+    shotTime?: number;
+    shotScore?: number;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
     // 角色节点：characterAssetId 关联到资产库里的 CharacterAsset；characterImages 是节点自带的角色图谱快照（来自资产库或本地编辑）。
     characterAssetId?: string;
@@ -177,7 +184,9 @@ export type CanvasNodeMetadata = {
     sceneColorPalette?: string[];
     sceneColorCardPrompt?: string;
     loopCount?: number;
+    loopCountMode?: "auto" | "manual";
     loopMode?: "serial" | "parallel";
+    loopMediaMode?: "auto" | "image" | "video" | "off";
     loopPromptEnabled?: boolean;
     loopImageEnabled?: boolean;
     loopVideoEnabled?: boolean;
@@ -185,6 +194,14 @@ export type CanvasNodeMetadata = {
     loopImageBatchSize?: number;
     loopVideoBatchSize?: number;
     loopPrompt?: string;
+    loopPrompts?: string[];
+    /** Backend 建立的逐轮图片结果节点；不参与下一次循环的执行图遍历。 */
+    loopOutputSlot?: boolean;
+    loopSourceId?: string;
+    loopRootId?: string;
+    loopRoundIndex?: number;
+    loopSlotIndex?: number;
+    loopOutputHistory?: Array<CanvasNodeModeResult & { generationTaskId?: string }>;
 };
 
 export type CanvasNodeData = {

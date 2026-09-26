@@ -137,6 +137,8 @@ export class CanvasGenerationService {
         if (!command.projectId) return command;
         const project = this.stores.projects.get(command.projectId);
         if (!project) throw new Error(`画布不存在: ${command.projectId}`);
+        // 循环的引用已由网页按本轮结果快照解析；再次遍历源节点会混入其他轮次的输出。
+        if (command.loopOutput) return command;
         const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
         const sourceNodeId = command.sourceNodeId || command.nodeId;
         if (!sourceNodeId) return command;

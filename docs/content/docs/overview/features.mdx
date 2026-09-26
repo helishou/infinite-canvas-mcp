@@ -16,15 +16,19 @@ description: Major features available in the current project
 - Pan, zoom, reset the view, select multiple nodes, copy and paste, undo and redo.
 - Drag files onto the canvas and use lines, dots, or a blank background.
 - Export the entire canvas or selected elements with their resources.
+- Copy and paste nodes with their connections; nodes without media copy as canvas JSON and rebuild on paste.
+- Ordered groups collect the images actually in use into stable slots, and dragging a member keeps its original slot, position, and size.
 
 ## Nodes and workflows
 
-- Text, image, video, and generation-configuration nodes.
+- Built-in node types: text, image, video, audio, generation-configuration, and group. Everything else comes from canvas plugins.
 - Connect text prompts and reference media to generation nodes.
 - Generate or rewrite text, create images, edit images from references, and create videos.
 - Configure custom workflow text, number, slider, boolean, and dropdown fields consistently in canvas nodes and generation workbenches.
 - Preserve original image ratios by default and organize batch results as connected nodes.
 - Record prompts, models, dimensions, quality, and references on generated nodes for retries.
+- A node shrunk to its overview or compact shell still shows a static "generating" marker, so running tasks stay recognizable.
+- Right-click a text node to copy its body to the system clipboard.
 
 ## AI generation
 
@@ -32,13 +36,30 @@ description: Major features available in the current project
 - Configure multiple channels, fetch or enter model names, and choose default text, image, and video models.
 - Support image count, aspect ratio, quality, transparent backgrounds, reasoning effort, and custom invocation scripts.
 - Support OpenAI-style video endpoints.
+- Image generation settings remember the most recently used model, quality, size, count, transparent background, and 16-multiple alignment for new image nodes.
 
-## Canvas Agent
+## Short-film Clip production (MCP extension)
+
+This repository adds a short-film production layer on top of the canvas. The H3 video node organizes a film as a multi-Clip timeline; each Clip is configured independently and advances only after user confirmation.
+
+- H3 video node: a multi-Clip timeline. Each Clip can set prompt, model, sampling, size, LoRA, TRT video VAE, Motion Context continuation, and DLSS upscaling; advanced settings are grouped into model/basic, sampling, live preview, and RTX video upscale sections.
+- Storyboard track: bind multiple storyboard frames per Clip; binding order matches the `Picture N` numbering in the prompt, so reordering or inserting does not misalign references.
+- Reference binding: character nodes select period costumes through `imageKeys`; props, scenes, and staging/axis diagrams bind by their own responsibilities, and staging diagrams are kept as separate spatial references.
+- First/second pass confirmation: after the first pass the parent task persists into a pending-confirmation state where you can confirm a second pass, keep the first pass, or abandon it; serial multi-Clip pauses survive a restart.
+- Local ComfyUI: the Canvas Agent calls the built-in `minimax-h3` preset through `/comfy/tasks`. Motion Context requires a local `ffmpeg`, `ffprobe`, and Python Pillow (`PYTHON_PATH` selects the interpreter).
+- Drama and episodes: create episodes under a drama; each episode binds one canvas and stores its plot independently.
+- Production SOP: project-level constraints plus six production sub-skills (story design, asset preparation, staging and color, shot design, storyboard frames, Clip video), each verifying its own output. A fixed production directory `{dataDir}/productions/<canvasProjectId>/` stores the script, text storyboard, asset index, progress, and rework log.
+
+## Canvas Agent and MCP automation
 
 - Connect local Codex through Canvas Agent and MCP without giving a web server direct access to browser state.
 - Read the active canvas, selection, nodes, edges, generation status, and apply structured operations.
+- Canvas MCP: read and write the canvas, submit generations, wait for task terminal states, orchestrate generation flows, and replace references and storyboard slots.
+- H3 MCP: structured video plans for a node timeline, Clip reordering, reference and storyboard binding, runtime parameters, and model/LoRA listings.
 - Use Codex from the browser side panel with streaming responses, history, approvals, permissions, diagnostics, and local Skills.
 - Isolate active canvases and turns across multiple browser tabs.
+- MCP observability: redacted diagnostics with call success rate, latency, error distribution, recovery-suggestion adoption, and related task terminal states.
+- MCP tool output has a hard cap (`MCP_MAX_TOOL_OUTPUT_BYTES`, 0.5 MiB by default) and returns `OUTPUT_TOO_LARGE` instead of handing megabytes to the model.
 
 See [Codex App Plugin](/docs/overview/codex-app-plugin) for installation and usage.
 
@@ -66,4 +87,5 @@ See [Third-party Prompt Sources](/docs/overview/third-party-prompt-repositories)
 
 - The project is frontend-first and does not provide built-in cloud accounts or cloud storage.
 - API keys remain in local Backend storage; the browser loads them in memory and sends requests directly to configured providers.
+- Short-film H3 production depends on a local ComfyUI, ffmpeg/ffprobe, and Python; the Docker frontend image does not include them.
 - Production Docker static-resource paths still require broader deployment verification.

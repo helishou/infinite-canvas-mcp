@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { refsForSegment, replaceSegmentReference, withSegmentRefs } from "./h3-data";
-import { dropUnboundStoryboardReferences, rebindStoryboardShot, removeStoryboardShot, storyboardTrackItems } from "./h3-storyboard-track";
+import { assignStoryboardShotRef, dropUnboundStoryboardReferences, rebindStoryboardShot, reorderStoryboardShots, removeStoryboardShot, storyboardTrackItems } from "./h3-storyboard-track";
+import { remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 import type { H3Ref, H3Segment } from "../types";
 
 function storyboardSegment(): H3Segment {
@@ -37,6 +38,28 @@ function boardsOf(segment: H3Segment) {
         duration: Number(item.duration.toFixed(6)),
     }));
 }
+
+test("交换分镜卡时 Picture 图片顺序跟随分镜轨，原编号可映射到原素材", () => {
+    const segment = storyboardSegment();
+    const [first, second] = storyboardTrackItems(segment);
+    const reordered = reorderStoryboardShots(segment, first.id, second.id);
+    assert.deepEqual(boardsOf(reordered).map((item) => item.image), ["image:board-b", "image:board-a"]);
+    assert.deepEqual(refsForSegment(reordered).map((ref) => ref.storageKey), ["image:board-b", "image:scene", "image:board-a"]);
+    assert.equal(remapPictureTags("<Picture 1> <Picture 2> <Picture 3>", refsForSegment(segment), refsForSegment(reordered),
+        (ref) => ref.bindingId, (ref) => ref.type === "image"), "<Picture 3> <Picture 2> <Picture 1>");
+});
+
+test("给前面的空分镜绑图时，新增分镜图排在后续分镜图之前", () => {
+    const segment = storyboardSegment();
+    const first = storyboardTrackItems(segment)[0];
+    const withoutFirst = { ...segment, storyboardShots: [
+        { id: first.id, duration: first.duration },
+        { id: storyboardTrackItems(segment)[1].id, duration: storyboardTrackItems(segment)[1].duration, referenceBindingId: storyboardTrackItems(segment)[1].referenceBindingId },
+    ] };
+    const updated = assignStoryboardShotRef(withoutFirst, first.id, { url: "https://media.test/board-new.png", storageKey: "image:board-new", type: "image", name: "分镜 新" });
+    assert.deepEqual(boardsOf(updated).map((item) => item.image).slice(0, 2), ["image:board-new", "image:board-b"]);
+    assert.deepEqual(refsForSegment(updated).filter((ref) => ref.role === "storyboard").map((ref) => ref.storageKey), ["image:board-new", "image:board-b", "image:board-a"]);
+});
 
 test("从画布替换分镜图后，分镜卡停在原位置且图片换成新素材", () => {
     const segment = storyboardSegment();

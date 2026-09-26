@@ -23,6 +23,8 @@ export const canvasGenerationCommandSchema = z
     model: z.string().optional(),
     prompt: z.string().optional(),
     references: z.array(z.record(z.string(), z.unknown())).optional(),
+    /** Current loop round's image input; fixed reference images remain in references. */
+    loopInputImages: z.array(z.record(z.string(), z.unknown())).optional(),
     /** 标记画布蒙版局部编辑；工作流执行器需确保第二张输入图接入活动图像分支。 */
     maskEdit: z.boolean().optional(),
     videoReferences: z.array(z.record(z.string(), z.unknown())).optional(),
@@ -36,6 +38,12 @@ export const canvasGenerationCommandSchema = z
     count: z.number().optional(),
     /** 将图片结果按顺序回写到目标节点的现有图片槽；单槽重试只传该槽。 */
     imageIds: z.array(z.string().min(1)).optional(),
+    /** 智能画布循环：Backend 按目标节点和轮次建立独立媒体结果槽。 */
+    loopOutput: z.object({
+      loopNodeId: z.string().min(1),
+      roundIndex: z.number().int().min(1),
+      slotIndex: z.number().int().min(0).max(99),
+    }).optional(),
     params: z.record(z.string(), z.unknown()).optional(),
     input: z.record(z.string(), z.unknown()).optional(),
     preset: z.string().optional(),

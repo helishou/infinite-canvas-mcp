@@ -52,6 +52,47 @@ test("同一 H3 节点的两个 Clip 可同时运行，并各自保存父任务�
     assert.equal(segment("clip-b").parentTaskId, "");
 });
 
+test("父任务失败只清理自己仍在 loading 的 Clip，另一 Clip 可继续完成", async (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+        { id: "clip-a", prompt: "A", mode: "t2v", result: "old-a.mp4" },
+        { id: "clip-b", prompt: "B", mode: "t2v" },
+    ] } }], connections: [] });
+    const stores = createStores(db);
+    let releaseB!: () => void;
+    const waitB = new Promise<void>((resolve) => { releaseB = resolve; });
+    const comfy = {
+        async run(_preset: string, input: Record<string, unknown>, params: Record<string, unknown>, _url?: string, id?: string, onCreated?: (task: ReturnType<typeof stores.tasks.create>) => void) {
+            const task = stores.tasks.create(id || "child", "comfyui:minimax-h3", input, params);
+            onCreated?.(task);
+            if (String((params.canvasBinding as Record<string, unknown> | undefined)?.segmentId || "") === "clip-a") return stores.tasks.update(task.id, { status: "failed", error: "模拟失败" });
+            await waitB;
+            stores.media.store(Buffer.from("video-b"), { name: "b.mp4", storageKey: task.id, mimeType: "video/mp4", category: "output" });
+            return stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [{ url: `/media/${task.id}`, storageKey: task.id, mimeType: "video/mp4" }] } });
+        },
+        cancel() {},
+    };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-a", forceRegenerate: true }, "parent-a");
+    runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-b" }, "parent-b");
+    for (let i = 0; i < 100 && db.getTask("parent-a")?.status !== "failed"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(db.getTask("parent-a")?.status, "failed");
+    const read = () => (db.getCanvasProject("p")!.nodes as Array<{ metadata: { runtimeTaskId?: string; segments: Array<Record<string, unknown>> } }>)[0].metadata;
+    const clipA = read().segments.find((item) => item.id === "clip-a")!;
+    const clipB = read().segments.find((item) => item.id === "clip-b")!;
+    assert.equal(clipA.status, "error");
+    assert.equal(clipA.parentTaskId, "");
+    assert.equal(clipA.runtimeTaskId, "");
+    assert.equal(clipA.result, "old-a.mp4", "失败不能删除旧结果");
+    assert.equal(clipB.status, "loading");
+    assert.equal(clipB.parentTaskId, "parent-b");
+    assert.equal(read().runtimeTaskId, "parent-b");
+    releaseB();
+    for (let i = 0; i < 100 && db.getTask("parent-b")?.status !== "succeeded"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(db.getTask("parent-b")?.status, "succeeded");
+});
+
 test("一个 Clip 的参考素材绑定不完整时，只跳过它自己，其余 Clip 照常入队", async (t: TestContext) => {
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());

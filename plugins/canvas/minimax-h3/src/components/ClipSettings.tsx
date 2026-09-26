@@ -1,8 +1,10 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
-import { InputNumber, Switch, Select } from "antd";
+import { AutoComplete, Input, InputNumber, Switch, Select } from "antd";
+import { Search } from "lucide-react";
 import { h3LoraOptions, h3ModelOptions } from "../constants";
 import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
+import { useH3DropdownOpen } from "../hooks/useH3DropdownOpen";
 import type { H3Segment } from "../types";
 
 type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; segment?: H3Segment; patch: (value: Partial<H3Segment>) => void };
@@ -37,11 +39,28 @@ const renderH3SelectLabel = ({ label, value }: { label?: ReactNode; value?: stri
 function H3Dropdown({ values, value, onChange, placeholder, allowClear = false, format, searchable = false, listId = "nfh3-options" }: { values: Array<string | number>; value?: string | number; onChange: (value: string | number) => void; placeholder?: string; allowClear?: boolean; format?: (value: string | number) => string; searchable?: boolean; listId?: string }) {
     const selected = value === undefined || value === null ? undefined : String(value);
     const options = values.map((item) => ({ value: String(item), label: format ? format(item) : String(item) }));
-    return <Select className="nfh3-select" size="middle" showSearch={searchable} allowClear={allowClear} value={selected} placeholder={placeholder} optionFilterProp="label" options={options} labelRender={renderH3SelectLabel} styles={h3SelectStyles} onChange={(v) => { onChange(v as string); }} onMouseDown={(event) => event.stopPropagation()} style={{ width: "100%" }} popupMatchSelectWidth={false} />;
+    const dropdown = useH3DropdownOpen();
+    return <span ref={dropdown.rootRef} style={{ display: "block", minWidth: 0 }}><Select className="nfh3-select" size="middle" showSearch={searchable} allowClear={allowClear} value={selected} placeholder={placeholder} optionFilterProp="label" options={options} labelRender={renderH3SelectLabel} styles={h3SelectStyles} open={dropdown.open} onOpenChange={dropdown.onOpenChange} onChange={(v) => { onChange(v as string); }} onMouseDown={(event) => event.stopPropagation()} style={{ width: "100%" }} popupMatchSelectWidth={false} /></span>;
+}
+
+function H3LoraPicker({ values, value, onChange }: { values: string[]; value: string; onChange: (value: string) => void }) {
+    const [draft, setDraft] = useState(value);
+    const draftRef = useRef(value);
+    const committedRef = useRef(value);
+    useEffect(() => { draftRef.current = value; committedRef.current = value; setDraft(value); }, [value]);
+    const changeDraft = (next: string) => { draftRef.current = next; setDraft(next); };
+    const commit = () => {
+        const next = draftRef.current.trim();
+        if (next !== committedRef.current) { committedRef.current = next; onChange(next); }
+    };
+    const dropdown = useH3DropdownOpen();
+    return <span ref={dropdown.rootRef} style={{ display: "block", width: "100%", minWidth: 0 }}><AutoComplete className="nfh3-select" size="middle" value={draft} options={values.filter(Boolean).map((item) => ({ value: item, label: item }))} filterOption open={dropdown.open} onOpenChange={dropdown.onOpenChange} onChange={changeDraft} onSelect={(next) => { changeDraft(next); committedRef.current = next; onChange(next); }} onBlur={commit} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); event.currentTarget.blur(); } }} allowClear placeholder="选择或输入 LoRA 文件名" onMouseDown={(event) => event.stopPropagation()} style={{ width: "100%" }} /></span>;
 }
 
 export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const [catalog, setCatalog] = useState<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng: Record<string, unknown[]> }>({ models: [], loras: [], textEncoders: [], videoVaes: [], audioVaes: [], latentUpscaleModels: [], nanfeng: {} });
+    const [refreshingLoras, setRefreshingLoras] = useState(false);
+    const [loraSearch, setLoraSearch] = useState("");
     const [sigmaPresets, setSigmaPresets] = useState<Record<string, string>>({});
     useEffect(() => {
         let active = true;
@@ -51,6 +70,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         });
         return () => { active = false; };
     }, [ctx.ai, segment?.id]);
+    useEffect(() => { setLoraSearch(""); }, [segment?.id]);
     // 潜空间放大模型兜底：启用后若未选择且列表已加载，自动写入第一个可用模型。
     // 之前 discover 回调里写 segment 的时机不可靠（catalog 异步更新后组件已渲染），
     // 导致 UI 看着像是选了第一项，但 segment.latentUpscaleModel 实际为空，后端报无模型。
@@ -78,12 +98,17 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const expanded = (metadata.nanFengExpandedSections as Record<string, boolean> | undefined) || {};
     const setOpen = (key: SectionKey) => {
         const opening = expanded[key] !== true;
+        if (opening && key === "lora") void refreshLoraCatalog();
         ctx.updateMetadata({ nanFengExpandedSections: Object.fromEntries(sectionKeys.map((section) => [section, opening && section === key])) });
+    };
+    const refreshLoraCatalog = async () => {
+        setRefreshingLoras(true);
+        try { setCatalog(await discoverH3Models(ctx)); }
+        finally { setRefreshingLoras(false); }
     };
     const isH3Model = (value: string) => /(?:^|[\\/])h3(?:[\\/]|$)/i.test(value);
     const modelOptions = mergeH3Options(h3ModelOptions.filter((option) => isH3Model(option.value)), catalog.models.filter(isH3Model), (value) => value.replace(/^.*[\\/]/, ""));
-    const isMinimaxLora = (value?: string)=>true;
-    const loraOptions = mergeH3Options(h3LoraOptions.filter((option) => isMinimaxLora(option.value)), catalog.loras.filter(isMinimaxLora), (value) => value.replace(/^.*[\\/]/, ""));
+    const loraOptions = mergeH3Options(h3LoraOptions, catalog.loras, (value) => value.replace(/^.*[\\/]/, ""));
     const nfChoices = (key: string, fallback: Array<string | number>) => {
         const values = catalog.nanfeng[key];
         const backend = Array.isArray(values) ? values.filter((value): value is string | number => typeof value === "string" || typeof value === "number") : [];
@@ -135,9 +160,10 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         patch({ loraSlots: next, loraName: next[0]?.name || "", loraStrength: next[0]?.strength ?? 0.75 });
     };
     const addLoraSlot = () => { if (loraSlots.length < 8) patch({ loraSlots: [...loraSlots, { name: "", strength: 1, enabled: false }] }); };
-    // 已存槽位名必须始终出现在选项里：catalog 被 backend 过滤成只含 minimax/ 目录，
-    // 自定义路径（hmmotion、MysticXXX 等）不在其中，还原/导入后的值会无法回显（下拉显示占位符）。
+    // 已存槽位名必须始终出现在选项里，即使 ComfyUI 暂时离线也能回显。
     const loraValues = [...new Set([...loraOptions.map((item) => item.value), ...loraSlots.map((slot) => slot.name).filter(Boolean)])];
+    const loraQuery = loraSearch.trim().toLocaleLowerCase();
+    const filteredLoraValues = loraQuery ? loraValues.filter((value) => value.toLocaleLowerCase().includes(loraQuery)) : loraValues;
     const loraSummary = loraSlots.filter((slot) => slot.enabled && slot.name).length;
     const sigmaPresetNames = Object.keys(sigmaPresets);
     const selectedSigmaPreset = String(metadata.h3SigmaPresetName || sigmaPresetNames[0] || "");
@@ -261,7 +287,13 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
             {control("音频交叉淡化 ms", <InputNumber style={field} min={0} max={5000} step={10} value={segment.seamAudioCrossfadeMs != null ? Number(segment.seamAudioCrossfadeMs) : undefined} placeholder="0" onChange={(value) => patch({ seamAudioCrossfadeMs: value ?? undefined })} />)}
             <div className="nfh3-hint" style={{ gridColumn: "1 / -1" }}>确认模式先缓存不含二采、RTX 和人脸精修的一采视频；确认后从该视频解码执行全画面 H3 二采/放大（不复用潜变量），并可追加人脸精修。音频沿用一采结果。</div>
         </div>)}
-        {section("lora", "LoRA", loraSummary ? enabledSummary(`${loraSummary} 个已启用 `) : "未启用", <div className="nfh3-lora-stack">{loraSlots.map((slot, index) => <div className="nfh3-lora-row" key={index}><b>LoRA {index + 1}</b><Switch checked={slot.enabled} onChange={(checked) => patchLoraSlot(index, { enabled: checked })} /><H3Dropdown values={loraValues} value={slot.name || undefined} onChange={(value) => patchLoraSlot(index, { name: String(value), enabled: !!value })} placeholder="选择 LoRA" allowClear /><InputNumber min={-2} max={2} step={0.05} value={slot.strength != null ? Number(slot.strength) : undefined} placeholder="0.75" onChange={(value) => patchLoraSlot(index, { strength: value ?? undefined })} /></div>)}{loraSlots.length < 8 ? <button type="button" className="nfh3-lora-add" onClick={addLoraSlot}>＋ 添加 LoRA 槽位</button> : null}</div>)}
+        {section("lora", "LoRA", loraSummary ? enabledSummary(`${loraSummary} 个已启用 `) : "未启用", <div className="nfh3-lora-stack">
+            <Input className="nfh3-lora-search" size="middle" prefix={<Search size={20} aria-hidden="true" />} allowClear value={loraSearch} onChange={(event) => setLoraSearch(event.target.value)} placeholder="搜索 LoRA 文件名" aria-label="搜索 LoRA 文件名" onMouseDown={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} />
+            {loraSlots.map((slot, index) => <div className="nfh3-lora-row" key={index}><b>LoRA {index + 1}</b><Switch checked={slot.enabled} onChange={(checked) => patchLoraSlot(index, { enabled: checked })} /><H3LoraPicker key={`${segment.id}:${index}`} values={filteredLoraValues} value={slot.name || ""} onChange={(value) => patchLoraSlot(index, { name: value, enabled: !!value })} /><InputNumber min={0} max={10} step={0.05} value={slot.strength != null ? Number(slot.strength) : undefined} placeholder="0.75" onChange={(value) => patchLoraSlot(index, { strength: value ?? undefined })} /></div>)}
+            {loraSlots.length < 8 ? <button type="button" className="nfh3-lora-add" onClick={addLoraSlot}>＋ 添加 LoRA 槽位</button> : null}
+            <button type="button" className="nfh3-lora-add" onClick={() => void refreshLoraCatalog()} disabled={refreshingLoras}>{refreshingLoras ? "读取中…" : "刷新 LoRA 列表"}</button>
+            <div className="nfh3-hint">也可输入 ComfyUI `models/loras` 下的相对文件名，按回车应用。</div>
+        </div>)}
         {mode === "ref2va" ? section("audio", "数字人 · MV · 锁音频", segment.audioDrive ? enabledSummary("智能音频驱动") : segment.lockAudio ? enabledSummary("锁定音频") : "未启用", <div className="nfh3-audio-workspace">{control("开启锁音频", <Switch checked={segment.lockAudio === true} onChange={(checked) => patch({ lockAudio: checked })} />)}{control("开启音频驱动模式", <Switch checked={segment.audioDrive === true} onChange={(checked) => patch({ audioDrive: checked, lockAudio: checked ? true : segment.lockAudio })} />)}{segment.audioDrive ? <>{control("驱动文件", <input value={String(segment.audioDriveFile || "")} onChange={(event) => patch({ audioDriveFile: event.target.value })} placeholder="音频文件名或拖入" />, true)}{control("当前起点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveStart != null ? Number(segment.audioDriveStart) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveStart: value ?? undefined })} />)}{control("当前终点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveEnd != null ? Number(segment.audioDriveEnd) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveEnd: value ?? undefined })} />)}{control("打点数据", <textarea value={String(segment.audioDriveMarkers || "")} onChange={(event) => patch({ audioDriveMarkers: event.target.value })} placeholder="JSON" />, true)}{control("分段图片", <textarea value={String(segment.audioDriveSegmentImages || "")} onChange={(event) => patch({ audioDriveSegmentImages: event.target.value })} placeholder="JSON" />, true)}{control("分段分镜", <textarea value={String(segment.audioDriveSegmentStoryboards || "")} onChange={(event) => patch({ audioDriveSegmentStoryboards: event.target.value })} placeholder="JSON" />, true)}{control("创意描述", <textarea value={String(segment.audioDriveCreative || "")} onChange={(event) => patch({ audioDriveCreative: event.target.value })} />, true)}{control("排除范围", <textarea value={String(segment.audioDriveExclude || "")} onChange={(event) => patch({ audioDriveExclude: event.target.value })} />, true)}</> : null}</div>) : null}
     </div>;
 }

@@ -14,6 +14,7 @@ import { h3ClipCacheFingerprint, h3ClipCacheFingerprintV1, h3ConfirmationFingerp
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCompositePrompt, storyboardCompositeDirective, storyboardCompositePlan } from "./storyboard-composite.js";
 import { normalizeH3Params } from "./h3-params.js";
+import type { CanvasOperation } from "./project-ops.js";
 
 type H3RunInput = {
     projectId: string;
@@ -813,8 +814,31 @@ export class CanvasH3Runner {
         const ids = new Set(input.nodeIds?.length ? input.nodeIds : input.nodeId ? [input.nodeId] : []);
         for (const node of project.nodes as Array<Record<string, unknown>>) {
             if (ids.size && !ids.has(String(node.id || ""))) continue;
-            if (String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) continue;
-            this.updateNode(input.projectId, String(node.id), { runtimeTaskId: "", runtimeRunId: "", runRequestId: "", runRequestConsumedId: "", status, runProgress: task.progress, errorDetails: error, cancelRequested: false });
+            const metadata = recordOf(node.metadata);
+            const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+            const owned = status === "error" || status === "cancelled"
+                ? segments.filter((segment) => segment.id && String(segment.parentTaskId || "") === task.id && ["queued", "loading"].includes(String(segment.status || "")))
+                : [];
+            const otherActive = segments.find((segment) => String(segment.parentTaskId || "") !== task.id
+                && ["queued", "loading", "awaiting_confirmation"].includes(String(segment.status || ""))
+                && (segment.parentTaskId || segment.status === "awaiting_confirmation" && segment.runtimeTaskId));
+            const operations: CanvasOperation[] = owned.map((segment) => ({
+                type: "update_h3_segment", nodeId: String(node.id), segmentId: String(segment.id),
+                patch: { status, progress: task.progress, runtimeTaskId: "", parentTaskId: "", ...(status === "error" ? { errorDetails: error } : {}) },
+                ...(status === "cancelled" ? { patchDelete: ["errorDetails"] } : {}),
+                expectedFields: { parentTaskId: task.id },
+            }));
+            if (String(metadata.runtimeTaskId || "") === task.id) operations.push({
+                type: "update_node", id: String(node.id), metadata: {
+                    runtimeTaskId: String(otherActive?.parentTaskId || (otherActive?.status === "awaiting_confirmation" ? otherActive.runtimeTaskId : "") || ""),
+                    runtimeRunId: "", runRequestId: "", runRequestConsumedId: "",
+                    status: String(otherActive?.status || status), runProgress: Number(otherActive?.progress ?? task.progress),
+                    errorDetails: otherActive ? "" : error, cancelRequested: false,
+                },
+            });
+            if (!operations.length) continue;
+            const current = this.stores.projects.get(input.projectId)!;
+            this.stores.projects.applyOperations(input.projectId, Number(current.revision || 0), operations, { runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "H3 任务收口" } });
         }
     }
 

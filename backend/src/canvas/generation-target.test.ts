@@ -70,6 +70,49 @@ test("智能生成节点把图片结果槽直接绑定到自身", (t) => {
     assert.deepEqual((prepared.createOperations[1] as any).metadataDelete, ["generatedResultIds", "generatedTextResultIds", "primaryTextNodeId"]);
 });
 
+test("智能循环按轮次创建独立 Backend 输出节点，重跑复用节点并保留旧结果槽", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [
+        { id: "loop", type: "loop", position: { x: 0, y: 0 }, width: 380, height: 320, metadata: {} },
+        { id: "smart", type: "config", position: { x: 480, y: 0 }, width: 420, height: 540, metadata: { smart: true, generationMode: "image", prompt: "原提示词" } },
+    ], connections: [{ id: "loop-smart", fromNodeId: "loop", toNodeId: "smart" }] });
+    const stores = createStores(db);
+    const command = { mode: "image" as const, projectId: "p", nodeId: "smart", model: "gpt-image-2", prompt: "第一轮", count: 1,
+        loopOutput: { loopNodeId: "loop", roundIndex: 1, slotIndex: 0 } };
+    const first = prepareCanvasGenerationTarget(stores, command, "task-one");
+    assert.equal(first.command.nodeId, "loop-image-task-one");
+    assert.equal(first.command.sourceNodeId, "smart");
+    assert.deepEqual(first.createOperations.map((operation) => operation.type), ["add_node", "connect_nodes"]);
+    const firstSlot = (first.createOperations[0] as any).metadata.images[0].id;
+    assert.deepEqual((first.createOperations[0] as any).metadata.loopOutputSlot, true);
+    assert.deepEqual((first.createOperations[0] as any).metadata.loopRoundIndex, 1);
+    assert.deepEqual((first.createOperations[0] as any).position, { x: 996, y: 0 });
+    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), first.createOperations, { runtimeWrite: true });
+    const otherRound = prepareCanvasGenerationTarget(stores, { ...command, prompt: "第二轮", loopOutput: { loopNodeId: "loop", roundIndex: 2, slotIndex: 1 } }, "task-two");
+    assert.equal(otherRound.command.nodeId, "loop-image-task-two");
+    assert.notEqual((otherRound.createOperations[0] as any).position.y, 0);
+    const rerun = prepareCanvasGenerationTarget(stores, command, "task-three");
+    assert.equal(rerun.command.nodeId, first.command.nodeId);
+    assert.deepEqual(rerun.createOperations.map((operation) => operation.type), ["update_node"]);
+    assert.equal((rerun.createOperations[0] as any).metadata.images[0].id, firstSlot);
+    assert.equal((rerun.createOperations[0] as any).metadata.images.length, 2);
+    assert.notEqual(rerun.command.imageIds?.[0], firstSlot);
+});
+
+test("循环输出槽拒绝未连接的循环节点", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [
+        { id: "loop", type: "loop", metadata: {} },
+        { id: "smart", type: "config", metadata: { smart: true, generationMode: "image" } },
+    ], connections: [] });
+    assert.throws(() => prepareCanvasGenerationTarget(createStores(db), {
+        mode: "image", projectId: "p", nodeId: "smart", model: "gpt-image-2", prompt: "失败",
+        loopOutput: { loopNodeId: "loop", roundIndex: 1, slotIndex: 0 },
+    }, "task"), /未连接/);
+});
+
 test("智能节点重生成不写入位置或尺寸布局", (t) => {
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());

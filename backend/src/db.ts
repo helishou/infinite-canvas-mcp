@@ -4,7 +4,7 @@ import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
-import { completedImageSlots, imageSlotStatus, imageSourceStatus } from "./canvas/image-result-slots.js";
+import { completedImageSlots, dropImageSlots, imageSourceStatus } from "./canvas/image-result-slots.js";
 import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation } from "./canvas/project-ops.js";
 import { prepareClientCanvasOperation, stripCanvasLocalViewState } from "./canvas/operation-authority.js";
 import { collaborationError, commandFingerprint, concurrentCommandConflicts, type CanvasCommandContext, type CanvasCommit } from "./canvas/collaboration.js";
@@ -1492,8 +1492,9 @@ export class BackendDatabase {
             if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) return null;
             const status = task.status === "cancelled" ? "cancelled" : "error";
             const errorDetails = task.status === "cancelled" ? undefined : error;
-            const metadataPatch = { status, runtimeTaskId: undefined, errorDetails,
-                ...imageSlotStatus(project, input.nodeId, task.input.imageIds as string[] | undefined, status, errorDetails) };
+            const failedIds = Array.isArray(task.input.imageIds) ? task.input.imageIds.map(String).filter(Boolean) : [];
+            const dropPatch = dropImageSlots(project, input.nodeId, failedIds);
+            const metadataPatch = { status, runtimeTaskId: undefined, errorDetails, ...dropPatch };
             source.metadata = { ...recordOf(source.metadata), ...metadataPatch };
             const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata: metadataPatch, metadataDelete: task.status === "cancelled" ? ["runtimeTaskId", "errorDetails"] : ["runtimeTaskId"] }];
             operations.push(...imageSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, status));

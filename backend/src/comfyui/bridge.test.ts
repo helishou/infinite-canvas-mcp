@@ -2,12 +2,30 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 
-import { attachH3ActualSubmission, buildNativeNanFengV15Workflow, exactHistoryEntry, h3WatchdogState, localComfyInputName, summarizeH3Workflow } from "./bridge.js";
+import { ComfyUiBackend, attachH3ActualSubmission, buildNativeNanFengV15Workflow, exactHistoryEntry, h3WatchdogState, localComfyInputName, summarizeH3Workflow, type ComfyUiDeps } from "./bridge.js";
 import { MEDIA_DIR } from "../config.js";
 
 const promptA = "5ef69623-4030-4f1b-a00b-09e7355303e4";
 const promptB = "3d11bbd6-3b53-49c5-8514-d3fce9981704";
 const upload = async (file: string) => `uploaded-${file}`;
+
+test("H3 model catalog includes LoRAs outside the Minimax folder", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+        const node = String(input).split("/").at(-1)!;
+        const required = node === "LoraLoader" ? { lora_name: [["Minimax/turbo.safetensors", "custom/style.safetensors"]] }
+            : node === "LoraLoaderModelOnly" ? { lora_name: [["custom/style.safetensors", "motion.safetensors"]] }
+                : node === "NanFengH3MultiReferenceGeneratorV15" ? { LoRA1: [["custom/style.safetensors"]] } : {};
+        return new Response(JSON.stringify({ [node]: { input: { required } } }), { status: 200 });
+    };
+    try {
+        const bridge = new ComfyUiBackend({ settings: { get: () => "" } } as unknown as ComfyUiDeps, "http://comfy.test");
+        const catalog = await bridge.models();
+        assert.deepEqual(catalog.loras, ["custom/style.safetensors", "Minimax/turbo.safetensors", "motion.safetensors"]);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
 
 test("H3 watchdog identifies a stagnant low-progress task and can be disabled", () => {
     assert.deepEqual(h3WatchdogState(100_000, 0, 90_000, 0.05), { stalled: true, stagnantForMs: 100_000, progress: 0.05 });

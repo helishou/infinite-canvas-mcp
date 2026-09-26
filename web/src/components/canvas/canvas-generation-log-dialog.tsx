@@ -165,6 +165,8 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
     const copy = async (value: string) => { await navigator.clipboard?.writeText(value); message.success("已复制"); };
     const statusColor = log.status === "success" ? "green" : log.status === "failed" ? "red" : log.status === "running" ? "processing" : "default";
     const references = collectReferences(log);
+    const logParams = log.params && typeof log.params === "object" ? log.params as Record<string, unknown> : {};
+    const loopInputs = Array.isArray(logParams.loopInputImages) ? logParams.loopInputImages.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))) : [];
     const actualSubmission = actualSubmissionText(log.params);
     const kind = logKind(log);
     // 生文类日志（插件翻译/增强提示词等）把模型输出存进 outputs，这里渲染成可展开的文本段
@@ -178,6 +180,8 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
         <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={KIND_COLOR[kind]}>{typeLabel}</Tag><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
         <div className="mt-2 flex flex-wrap gap-3 text-xs text-stone-500"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span></div>
         {references.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">输入 refs：</span>{references.map((reference, index) => <ReferencePreview key={`${log.id}-ref-${index}`} reference={reference} index={index} onPreview={openPreview} />)}</div> : null}
+        {loopInputs.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">本轮组图：</span>{loopInputs.map((image, index) => <ReferencePreview key={`${log.id}-loop-${index}`} reference={image} index={index} onPreview={openPreview} />)}</div> : null}
+        {!loopInputs.length && Number(log.inputCounts?.loopInputs || 0) > 0 ? <div className="mt-2 text-xs text-stone-500">本轮组图：{log.inputCounts.loopInputs} 张（此历史日志未保存缩略图）</div> : null}
         {log.prompt ? <ExpandableText label="提示词" value={log.prompt} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.prompt || "")} /> : null}
         {textOutputs.map((output, index) => <ExpandableText key={`${log.id}-text-${index}`} label="输出文本" value={String(output.text || "")} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(String(output.text || ""))} />)}
         {actualSubmission ? <ExpandableText label="实际提交配置" value={actualSubmission} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(actualSubmission)} /> : null}

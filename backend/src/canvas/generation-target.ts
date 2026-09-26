@@ -21,6 +21,9 @@ export function prepareCanvasGenerationTarget(
     command: CanvasGenerationCommand,
     taskId: string,
 ): PreparedCanvasGenerationTarget {
+    if (command.loopOutput && (!["image", "video"].includes(command.mode) || !command.projectId || !command.nodeId)) {
+        throw new Error("循环输出槽需要画布图片或视频生成节点");
+    }
     if (!command.projectId || !command.nodeId || !["image", "video", "audio", "text"].includes(command.mode)) {
         return { command, project: null, createOperations: [] };
     }
@@ -28,7 +31,8 @@ export function prepareCanvasGenerationTarget(
     const source = project && records(project.nodes).find((node) => String(node.id || "") === command.nodeId);
     if (!project || !source) throw new Error(`画布${modeLabel(command.mode)}生成目标不存在，未启动模型`);
 
-    if (command.mode === "image") return prepareImage(project, source, command, taskId);
+    if (command.mode === "image") return prepareImage(stores, project, source, command, taskId);
+    if (command.mode === "video" && command.loopOutput) return prepareLoopVideoOutput(stores, project, source, command, taskId);
     if (source.type === "config" && record(source.metadata).smart === true) return prepareSmartMedia(project, source, command);
     if (source.type === command.mode) {
         return {
@@ -73,8 +77,9 @@ function prepareSmartMedia(project: CanvasProject, source: Record<string, any>, 
     };
 }
 
-function prepareImage(project: CanvasProject, source: Record<string, any>, command: CanvasGenerationCommand, taskId: string): PreparedCanvasGenerationTarget {
+function prepareImage(stores: Stores, project: CanvasProject, source: Record<string, any>, command: CanvasGenerationCommand, taskId: string): PreparedCanvasGenerationTarget {
     const metadata = record(source.metadata);
+    if (command.loopOutput) return prepareLoopImageOutput(stores, project, source, command, taskId);
     const writeBackToTarget = record(command.params).writeBackToTarget === true;
     const useSmartNode = source.type === "config" && metadata.smart === true;
     if (command.imageIds?.length) {
@@ -155,6 +160,89 @@ function prepareImage(project: CanvasProject, source: Record<string, any>, comma
     };
 }
 
+function prepareLoopImageOutput(stores: Stores, project: CanvasProject, source: Record<string, any>, command: CanvasGenerationCommand, taskId: string): PreparedCanvasGenerationTarget {
+    if (Number(command.count || 1) !== 1 || command.imageIds?.length) throw new Error("循环每轮只能生成一个独立图片结果");
+    if (source.type !== "image" && !(source.type === "config" && record(source.metadata).smart === true && (record(source.metadata).generationMode || "image") === "image")) {
+        throw new Error("循环输出槽只支持图片生成节点");
+    }
+    const { loop, existing } = resolveLoopOutputSlot(stores, project, source, command, "image");
+    const outputId = String(existing?.id || `loop-image-${taskId}`);
+    const imageId = `image-slot-${crypto.randomUUID()}`;
+    const image = { id: imageId, status: "loading", content: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "", generationSnapshot: imageGenerationSnapshot(record(source.metadata), command, 1) };
+    const tags = { loopOutputSlot: true, loopSourceId: loop.loopNodeId, loopRootId: String(source.id), loopRoundIndex: loop.roundIndex, loopSlotIndex: loop.slotIndex };
+    const metadata = { ...tags, images: [...records(record(existing?.metadata).images), image], primaryImageId: imageId, activeImageHistoryId: imageId, activeImageHistoryExplicit: false };
+    const size = existing ? { width: Number(existing.width || 340), height: Number(existing.height || 240) } : { width: 340, height: 240 };
+    const createOperations: CanvasOperation[] = existing
+        ? [{ type: "update_node", id: outputId, metadata, metadataDelete: ["content", "url", "storageKey", "mimeType", "bytes", "naturalWidth", "naturalHeight"] }]
+        : createResultOperations(project, source, command, taskId, outputId, size);
+    if (!existing) {
+        const add = createOperations[0] as Record<string, any>;
+        const sourceY = Number(record(source.position).y || 0);
+        add.position = findResultPosition(project, source, size, sourceY + loop.slotIndex * (size.height + 28));
+        add.title = `Image ${loop.roundIndex}`;
+        add.metadata = { ...record(add.metadata), ...metadata };
+    }
+    return { command: { ...command, nodeId: outputId, sourceNodeId: String(source.id), imageIds: [imageId] }, project, createOperations, targetSize: size };
+}
+
+function prepareLoopVideoOutput(stores: Stores, project: CanvasProject, source: Record<string, any>, command: CanvasGenerationCommand, taskId: string): PreparedCanvasGenerationTarget {
+    if (source.type !== "video" && !(source.type === "config" && record(source.metadata).smart === true && record(source.metadata).generationMode === "video")) {
+        throw new Error("循环视频输出槽只支持视频生成节点");
+    }
+    const { loop, existing } = resolveLoopOutputSlot(stores, project, source, command, "video");
+    const outputId = String(existing?.id || `loop-video-${taskId}`);
+    const previous = record(existing?.metadata);
+    const history = [...records(previous.loopOutputHistory)];
+    if (previous.content || previous.storageKey) history.push({ content: previous.content, storageKey: previous.storageKey, mimeType: previous.mimeType, bytes: previous.bytes, naturalWidth: previous.naturalWidth, naturalHeight: previous.naturalHeight, durationMs: previous.durationMs, generationTaskId: previous.generationTaskId });
+    const tags = { loopOutputSlot: true, loopSourceId: loop.loopNodeId, loopRootId: String(source.id), loopRoundIndex: loop.roundIndex, loopSlotIndex: loop.slotIndex };
+    const size = existing ? { width: Number(existing.width || 340), height: Number(existing.height || 190) } : { width: 340, height: 190 };
+    const metadataDelete = ["content", "url", "storageKey", "mimeType", "bytes", "naturalWidth", "naturalHeight", "durationMs"];
+    const createOperations: CanvasOperation[] = existing
+        ? [{ type: "update_node", id: outputId, metadata: { ...tags, loopOutputHistory: history }, metadataDelete }]
+        : createResultOperations(project, source, command, taskId, outputId, size);
+    if (!existing) {
+        const add = createOperations[0] as Record<string, any>;
+        const sourceY = Number(record(source.position).y || 0);
+        add.position = findResultPosition(project, source, size, sourceY + loop.slotIndex * (size.height + 28));
+        add.title = `Video ${loop.roundIndex}`;
+        add.metadata = { ...record(add.metadata), ...tags };
+    }
+    return { command: { ...command, nodeId: outputId, sourceNodeId: String(source.id) }, project, createOperations, targetSize: size };
+}
+
+function resolveLoopOutputSlot(stores: Stores, project: CanvasProject, source: Record<string, any>, command: CanvasGenerationCommand, mode: "image" | "video") {
+    const loop = command.loopOutput!;
+    const nodes = records(project.nodes);
+    const loopNode = nodes.find((node) => String(node.id || "") === loop.loopNodeId && node.type === "loop");
+    if (!loopNode || !isDownstreamOf(project, loop.loopNodeId, String(source.id))) throw new Error("循环节点未连接到本次生成节点");
+    const candidates = nodes.filter((node) => {
+        const value = record(node.metadata);
+        return node.type === mode && value.loopOutputSlot === true
+            && value.loopSourceId === loop.loopNodeId && value.loopRootId === source.id;
+    });
+    const existing = candidates.find((node) => Number(record(node.metadata).loopRoundIndex) === loop.roundIndex)
+        || candidates.find((node) => Number(record(node.metadata).loopSlotIndex) === loop.slotIndex);
+    const activeTaskId = String(record(existing?.metadata).runtimeTaskId || "");
+    if (activeTaskId && ["queued", "running"].includes(String(stores.tasks.get(activeTaskId)?.status || ""))) throw new Error("该循环轮次的输出槽正在生成");
+    return { loop, existing };
+}
+
+function isDownstreamOf(project: CanvasProject, fromId: string, targetId: string) {
+    const connections = records(project.connections);
+    const seen = new Set([fromId]);
+    const pending = [fromId];
+    while (pending.length) {
+        const current = pending.pop()!;
+        for (const connection of connections) {
+            if (String(connection.fromNodeId || "") !== current) continue;
+            const next = String(connection.toNodeId || "");
+            if (next === targetId) return true;
+            if (next && !seen.has(next)) { seen.add(next); pending.push(next); }
+        }
+    }
+    return false;
+}
+
 function createResultOperations(
     project: CanvasProject,
     source: Record<string, any>,
@@ -180,11 +268,11 @@ function createResultOperations(
 }
 
 /** Keep the flow expanding to the right while avoiding an occupied result slot. */
-function findResultPosition(project: CanvasProject, source: Record<string, any>, size: { width: number; height: number }) {
+function findResultPosition(project: CanvasProject, source: Record<string, any>, size: { width: number; height: number }, preferredY?: number) {
     const gap = 96;
     const sourcePosition = record(source.position);
     const x = Number(sourcePosition.x || 0) + Number(source.width || size.width) + gap;
-    const startY = Number(sourcePosition.y || 0);
+    const startY = preferredY ?? Number(sourcePosition.y || 0);
     const nodes = records(project.nodes);
     const rows = [startY];
     for (let ring = 1; ring <= 60; ring++) {

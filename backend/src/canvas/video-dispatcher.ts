@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
 import type { CanvasProject, RuntimeTask, WorkflowConfig, WorkflowField } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
@@ -32,6 +33,7 @@ export type CanvasVideoGenerationInput = {
     preset?: string;
     comfyUrl?: string;
     clientTaskId?: string;
+    loopOutput?: CanvasGenerationCommand["loopOutput"];
 };
 
 type Plan = { input: CanvasVideoGenerationInput; kind: "concat" | "workflow" | "preset" | "direct"; workflow?: string; preset?: string };
@@ -76,7 +78,8 @@ export class CanvasVideoDispatcher {
 
     retry(task: RuntimeTask) {
         if (task.kind !== "canvas-video") throw new Error(`任务类型 ${task.kind} 不是画布视频任务`);
-        const result = this.start({ ...(task.input as CanvasVideoGenerationInput), clientTaskId: `canvas-video-retry-${crypto.randomUUID()}` });
+        const previous = task.input as CanvasVideoGenerationInput;
+        const result = this.start({ ...previous, ...(previous.loopOutput ? { nodeId: previous.sourceNodeId } : {}), clientTaskId: `canvas-video-retry-${crypto.randomUUID()}` });
         const retried = this.stores.tasks.get(result.taskId)!;
         this.stores.tasks.addEvent(retried.id, "retry", { parentTaskId: task.id });
         return retried;
@@ -203,7 +206,15 @@ export class CanvasVideoDispatcher {
         if (!input.projectId) return null;
         const source = input.sourceNodeId || input.nodeId;
         return this.stores.tasks.list({ kind: "canvas-video", projectId: input.projectId, limit: 500 })
-            .find((task) => ["queued", "running"].includes(task.status) && ((task.input as CanvasVideoGenerationInput).sourceNodeId || task.nodeId) === source) || null;
+            .find((task) => {
+                if (!["queued", "running"].includes(task.status)) return false;
+                const previous = task.input as CanvasVideoGenerationInput;
+                if ((previous.sourceNodeId || task.nodeId) !== source) return false;
+                if (!input.loopOutput) return !previous.loopOutput;
+                return previous.loopOutput?.loopNodeId === input.loopOutput.loopNodeId
+                    && previous.loopOutput?.roundIndex === input.loopOutput.roundIndex
+                    && previous.loopOutput?.slotIndex === input.loopOutput.slotIndex;
+            }) || null;
     }
 
     private prepare(input: CanvasVideoGenerationInput): CanvasVideoGenerationInput {
@@ -242,6 +253,7 @@ export class CanvasVideoDispatcher {
 }
 
 function bindSource(project: CanvasProject, input: CanvasVideoGenerationInput, taskId: string) {
+    if (input.loopOutput) return [];
     if (!input.sourceNodeId || input.sourceNodeId === input.nodeId) return [];
     const source = (project.nodes as Array<Record<string, any>>).find((node) => node.id === input.sourceNodeId);
     return source?.type === "config" ? [{ type: "update_node", id: input.sourceNodeId, metadata: { status: "loading", runtimeTaskId: taskId }, metadataDelete: ["errorDetails"] }] : [];

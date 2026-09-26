@@ -7,6 +7,7 @@ import { imageToDataUrl } from "@/services/image-storage";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasNodeResource } from "@/types/canvas-plugin";
 import { buildCanvasSpatialIndex, type CanvasSpatialIndex } from "@/lib/canvas/canvas-spatial-index";
+import { orderedGroupSlots } from "@/lib/canvas/ordered-group";
 
 export type CanvasResourceKind = "image" | "video" | "audio" | "text";
 
@@ -132,7 +133,8 @@ export function getMentionResourceNodes(nodeId: string, nodes: CanvasNodeData[],
     const resolvedIndex = graphIndex(nodes, connections, index);
     const configInputs = expandGroupResourceNodes(getConnectedConfigInputNodes(nodeId, nodes, connections, resolvedIndex), nodes, resolvedIndex);
     if (configInputs.length) return configInputs;
-    const ownInputs = expandGroupResourceNodes(getContextInputNodes(nodeId, nodes, connections, resolvedIndex), nodes, resolvedIndex);
+    const fixedInputs = getFixedReferenceNodes(nodeId, nodes, resolvedIndex);
+    const ownInputs = expandGroupResourceNodes(fixedInputs.length ? fixedInputs : getContextInputNodes(nodeId, nodes, connections, resolvedIndex), nodes, resolvedIndex);
     if (ownInputs.length) return ownInputs;
     const node = resolvedIndex.nodeById.get(nodeId);
     return node && isResourceNode(node) ? [node] : [];
@@ -164,7 +166,41 @@ export function getGenerationResourceNodes(nodeId: string, nodes: CanvasNodeData
 
 function getContextInputNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex) {
     const resolvedIndex = graphIndex(nodes, connections, index);
-    return (resolvedIndex.incomingByNodeId.get(nodeId) || []).filter((node) => isCanvasReferenceNode(node, nodes, resolvedIndex));
+    const variableIds = loopVariableSourceIds(nodeId, nodes, resolvedIndex);
+    return (resolvedIndex.incomingByNodeId.get(nodeId) || []).filter((node) => !variableIds.has(node.id) && isCanvasReferenceNode(node, nodes, resolvedIndex));
+}
+
+/** A loop's sources remain iteration inputs even if old canvases also link them to the generator. */
+function loopVariableSourceIds(nodeId: string, nodes: CanvasNodeData[], index: CanvasGraphIndex) {
+    const ids = new Set<string>();
+    for (const loop of index.incomingByNodeId.get(nodeId) || []) {
+        if (loop.type !== CanvasNodeType.Loop) continue;
+        for (const source of loopSourceRoles(loop, nodes, index).variable) {
+            ids.add(source.id);
+            if (source.type === CanvasNodeType.Group) {
+                for (const child of getGroupResourceNodes(source.id, nodes, index)) ids.add(child.id);
+            }
+        }
+    }
+    return ids;
+}
+
+function loopSourceRoles(loop: CanvasNodeData, nodes: CanvasNodeData[], index: CanvasGraphIndex) {
+    const sources = index.incomingByNodeId.get(loop.id) || [];
+    const hasMedia = (node: CanvasNodeData) => node.type === CanvasNodeType.Character || nodeResourceItems(node).some((item) => item.kind === "image" || item.kind === "video");
+    const groups = sources.filter((source) => source.type === CanvasNodeType.Group && getGroupResourceNodes(source.id, nodes, index).some(hasMedia));
+    return {
+        variable: groups.length ? groups : sources.filter(hasMedia),
+        fixed: groups.length ? sources.filter((source) => source.type !== CanvasNodeType.Group && hasMedia(source)) : [],
+    };
+}
+
+export function getFixedReferenceNodes(nodeId: string, nodes: CanvasNodeData[], index: CanvasGraphIndex) {
+    const variableIds = loopVariableSourceIds(nodeId, nodes, index);
+    const incoming = index.incomingByNodeId.get(nodeId) || [];
+    const direct = incoming.filter((node) => node.type !== CanvasNodeType.Loop && !variableIds.has(node.id));
+    const throughLoops = incoming.filter((node) => node.type === CanvasNodeType.Loop).flatMap((loop) => loopSourceRoles(loop, nodes, index).fixed);
+    return [...new Map([...direct, ...throughLoops].map((node) => [node.id, node])).values()];
 }
 
 function getConnectedConfigInputNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex) {
@@ -188,6 +224,11 @@ function expandGroupResourceNodes(inputNodes: CanvasNodeData[], nodes: CanvasNod
 }
 
 export function getGroupResourceNodes(groupId: string, nodes: CanvasNodeData[], index?: CanvasGraphIndex) {
+    const group = index?.nodeById.get(groupId) || nodes.find((node) => node.id === groupId);
+    if (group?.metadata?.orderedGroup) {
+        const byId = index?.nodeById || new Map(nodes.map((node) => [node.id, node]));
+        return orderedGroupSlots(group, nodes).map((id) => byId.get(id)).filter((node): node is CanvasNodeData => Boolean(node && isResourceNode(node)));
+    }
     return (index?.groupChildrenById.get(groupId) || nodes.filter((node) => node.metadata?.groupId === groupId)).filter(isResourceNode);
 }
 
@@ -246,7 +287,12 @@ export function isTextGenerationNode(node?: CanvasNodeData | null): boolean {
 }
 
 export function nodeResourceItems(node: CanvasNodeData): CanvasNodeResource[] {
-    if (node.type === CanvasNodeType.Loop && node.metadata?.loopPromptEnabled && node.metadata.loopPrompt?.trim()) return [{ kind: "text", text: node.metadata.loopPrompt.trim() }];
+    if (node.type === CanvasNodeType.Loop && node.metadata?.loopPromptEnabled) {
+        const prompt = node.metadata.loopPrompts !== undefined
+            ? node.metadata.loopPrompts.map((value) => value.trim()).filter(Boolean).join("\n")
+            : node.metadata.loopPrompt?.trim();
+        if (prompt) return [{ kind: "text", text: prompt }];
+    }
     const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart === true ? node.metadata?.generationMode || "image" : undefined;
     if (smartMode === "image") {
         const images = node.metadata?.images || [];
@@ -285,12 +331,13 @@ function isResourceNode(node: CanvasNodeData) {
 function hasLoopResources(node: CanvasNodeData, nodes: CanvasNodeData[], index?: CanvasGraphIndex): boolean {
     if (node.type !== CanvasNodeType.Loop) return false;
     const metadata = node.metadata;
-    if (metadata?.loopPromptEnabled && metadata.loopPrompt?.trim()) return true;
-    if (!metadata?.loopImageEnabled && !metadata?.loopVideoEnabled && !metadata?.loopPromptEnabled) return false;
+    if (metadata?.loopPromptEnabled && (metadata.loopPrompts !== undefined ? metadata.loopPrompts.some((value) => value.trim()) : metadata.loopPrompt?.trim())) return true;
+    if (metadata?.loopMediaMode === "off" && !metadata.loopPromptEnabled) return false;
     const resolvedIndex = graphIndex(nodes, [], index);
     return (resolvedIndex.incomingByNodeId.get(node.id) || []).some((source) => source.type === CanvasNodeType.Loop
         ? hasLoopResources(source, nodes, resolvedIndex)
-        : isResourceNode(source) || hasGroupResources(source, nodes, resolvedIndex));
+        : (source.type === CanvasNodeType.Group ? getGroupResourceNodes(source.id, nodes, resolvedIndex) : [source])
+            .some((item) => nodeResourceItems(item).some((resource) => resource.kind === "image" || resource.kind === "video" || metadata?.loopPromptEnabled && resource.kind === "text")));
 }
 
 function resourceText(node: CanvasNodeData): string | undefined {

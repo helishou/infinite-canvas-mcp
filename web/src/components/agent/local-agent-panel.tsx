@@ -75,16 +75,26 @@ const MESSAGE_PREVIEW_LONG_EDGE = 192;
 const MESSAGE_PREVIEW_MAX_LENGTH = 500_000;
 const AGENT_PROTOCOL_VERSION = 6;
 const HISTORY_RETRY_DELAYS_MS = [0, 150, 350, 700, 1200];
-const AGENT_REASONING_EFFORTS = new Set<AgentReasoningEffort>(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const rt = (key: string, options?: Record<string, unknown>) => i18n.t(`agent.runtime.${key}`, options);
+
+function fixedAgentModel(id: string, displayName: string, defaultReasoningEffort: AgentReasoningEffort, isDefault = false): AgentModel {
+    const supportedReasoningEfforts: AgentModel["supportedReasoningEfforts"] = ["low", "medium", "high", "xhigh", "max"].map((reasoningEffort) => ({ reasoningEffort: reasoningEffort as AgentReasoningEffort }));
+    return { id, model: id, displayName, defaultReasoningEffort, supportedReasoningEfforts, ...(isDefault ? { isDefault: true } : {}) };
+}
 
 type AgentWorkspace = { workspacePath: string; activeThreadId?: string };
 type AgentThreadsResponse = { ok?: boolean; workspace?: AgentWorkspace; conversation?: AgentConversationState; data?: AgentThreadSummary[] };
 type AgentThreadResponse = { ok?: boolean; workspace?: AgentWorkspace; conversation?: AgentConversationState; thread?: AgentThreadSummary; messages?: AgentChatItem[]; settledTurnIds?: string[]; historyReady?: boolean };
 type AgentWorkspaceResponse = { ok?: boolean; workspace?: AgentWorkspace; conversation?: AgentConversationState };
 type AgentTurnResponse = { ok?: boolean; threadId?: string };
-type AgentModelsResponse = { ok?: boolean; data?: AgentModel[] };
 type AgentCodexState = { busy?: boolean; threadId?: string; turnId?: string };
+
+// Keep the Canvas Agent model picker pinned to the GPT-6 family.
+const GPT6_AGENT_MODELS: AgentModel[] = [
+    fixedAgentModel("gpt-6-astra", "GPT-6 Astra", "high"),
+    fixedAgentModel("gpt-6-sol", "GPT-6 Sol", "high"),
+    fixedAgentModel("gpt-6-luna", "GPT-6 Luna", "medium", true),
+];
 type AgentHelloEvent = { ok?: boolean; protocolVersion?: number; clientId?: string; workspace?: { activeThreadId?: string }; conversation?: AgentConversationState; codex?: AgentCodexState; pendingApprovals?: AgentPendingApproval[] };
 type AgentWorkspaceEvent = { activeThreadId?: string; threadId?: string; sourceClientId?: string; emptyThread?: boolean; draftThread?: boolean; conversation?: AgentConversationState };
 type AgentChatEvent = { threadId?: string; turnId?: string; sourceClientId?: string; replayed?: boolean; message?: AgentChatItem };
@@ -600,25 +610,15 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
 
     useEffect(() => {
         if (!connected) return;
-        void fetchAgentJson<AgentModelsResponse>(endpoint, token, "/codex/models").then(({ data = [] }) => {
-            const names = new Set<string>();
-            const models = data.flatMap((item) => {
-                const name = item.displayName || item.model;
-                const efforts = item.supportedReasoningEfforts.filter(({ reasoningEffort }) => AGENT_REASONING_EFFORTS.has(reasoningEffort));
-                if (item.model === "codex-auto-review" || names.has(name) || !efforts.length) return [];
-                names.add(name);
-                const defaultReasoningEffort = efforts.some((effort) => effort.reasoningEffort === item.defaultReasoningEffort) ? item.defaultReasoningEffort : efforts[0].reasoningEffort;
-                return [{ ...item, supportedReasoningEfforts: efforts, defaultReasoningEffort }];
-            });
-            if (!models.length) return;
-            const savedModel = useAgentStore.getState().model;
-            const current = models.find((item) => item.model === savedModel) || models.find((item) => item.isDefault) || models[0];
-            const savedEffort = useAgentStore.getState().reasoningEffort;
-            const efforts = current.supportedReasoningEfforts.map((item) => item.reasoningEffort);
-            const nextEffort = efforts.includes(savedEffort as AgentReasoningEffort) ? savedEffort as AgentReasoningEffort : current.defaultReasoningEffort || efforts[0];
-            setAgentState({ models, model: current.model, reasoningEffort: nextEffort });
-        }).catch((error) => addEventLog(rt("modelListFailed"), error));
-    }, [connected, endpoint, setAgentState, token]);
+        const models = GPT6_AGENT_MODELS;
+        const savedModel = useAgentStore.getState().model;
+        const current = models.find((item) => item.model === savedModel) || models.find((item) => item.isDefault) || models[0];
+        if (!current) return;
+        const savedEffort = useAgentStore.getState().reasoningEffort;
+        const efforts = current.supportedReasoningEfforts.map((item) => item.reasoningEffort);
+        const nextEffort = efforts.includes(savedEffort as AgentReasoningEffort) ? savedEffort as AgentReasoningEffort : current.defaultReasoningEffort || efforts[0];
+        setAgentState({ models, model: current.model, reasoningEffort: nextEffort });
+    }, [connected, setAgentState]);
 
     useEffect(() => {
         if (!connected) return;

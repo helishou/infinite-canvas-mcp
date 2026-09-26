@@ -48,6 +48,7 @@ export function MediaPreviewModal({ item, onClose }: { item: MediaPreviewItem | 
     const containerRef = useRef<HTMLDivElement>(null);
     const draggingRef = useRef(false);
     const videoRef = useRef<HTMLVideoElement>(null);
+    const audioRef = useRef<HTMLAudioElement>(null);
     const [videoMenu, setVideoMenu] = useState<{ x: number; y: number } | null>(null);
     const [copying, setCopying] = useState<string | null>(null);
 
@@ -98,6 +99,19 @@ export function MediaPreviewModal({ item, onClose }: { item: MediaPreviewItem | 
         setCompareSize(null);
         setSliderPos(0);
     }, [url, beforeUrl, type]);
+
+    // 弹窗里 `<audio autoPlay>` / `<video autoPlay>` 在节点被关闭、url 切空、
+    // 模态层销毁时会从 DOM 移除——多数浏览器会自己暂停，但部分情况下音频会
+    // 留在后台继续播放。这里捕获当前 ref 在 setup 时拿到的节点，cleanup
+    // 主动 pause()，把「关掉预览弹窗后还在偷偷响」的概率压到最小。
+    useEffect(() => {
+        const video = videoRef.current;
+        const audio = audioRef.current;
+        return () => {
+            video?.pause();
+            audio?.pause();
+        };
+    }, [url]);
 
     // 对比模式：量出同高显示尺寸，顺带记录前后图分辨率
     useEffect(() => {
@@ -205,7 +219,7 @@ export function MediaPreviewModal({ item, onClose }: { item: MediaPreviewItem | 
             styles={{ body: { padding: 0, display: "flex", justifyContent: "center", alignItems: "center", maxHeight: "80vh" } }}
         >
             {type === "audio" ? (
-                <audio src={url} controls autoPlay style={{ width: "min(640px, 92vw)", margin: 24 }} />
+                <audio ref={audioRef} src={url} controls autoPlay style={{ width: "min(640px, 92vw)", margin: 24 }} />
             ) : type === "video" ? (
                 <video
                     ref={videoRef}

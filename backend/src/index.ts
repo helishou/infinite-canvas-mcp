@@ -4,7 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 import { DATA_DIR, loadConfig, saveConfig, ensureDataDirs } from "./config.js";
-import { BackendDatabase } from "./db.js";
+import { BackendDatabase, type RuntimeTaskStatus } from "./db.js";
 import { registerBackendErrorHandler, startServer } from "./server.js";
 import { createLogger } from "./logger.js";
 import { createStores } from "./stores/index.js";
@@ -256,7 +256,7 @@ async function startBackendHttpServer() {
     () => canvasRealtime.focusedProjectId(),
   );
   // 先完整取出每种活动状态，再启动恢复循环；处理期间状态会变化，不能边处理边 OFFSET 分页。
-  const tasksWithStatus = (status: "running" | "queued" | "awaiting_confirmation") => {
+  const tasksWithStatus = (status: RuntimeTaskStatus) => {
     const found: ReturnType<typeof stores.tasks.list> = [];
     for (let offset = 0; ; offset += 500) {
       const page = stores.tasks.list({ status, limit: 500, offset });
@@ -308,39 +308,6 @@ async function startBackendHttpServer() {
     )
       canvasH3Runner.resume(task);
     if (
-      ["succeeded", "failed", "cancelled", "awaiting_confirmation"].includes(task.status) &&
-      task.kind === "canvas-h3-run"
-    ) {
-      void canvasH3Runner
-        .reconcileTerminal(task)
-        .catch((error) =>
-          logger.warn("H3 终态节点回写修复失败", {
-            taskId: task.id,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-    }
-    if (
-      ["succeeded", "failed", "cancelled"].includes(task.status) &&
-      (task.kind === "comfyui:minimax-h3" ||
-        task.kind === "runninghub:minimax-h3")
-    ) {
-      const binding = task.params?.canvasBinding as
-        | { generationLogId?: string }
-        | undefined;
-      const log = binding?.generationLogId
-        ? stores.logs.get(binding.generationLogId)
-        : null;
-      if (log && (log.status === "queued" || log.status === "running")) {
-        void writeBackH3Task(stores, runtime.events, task).catch((error) =>
-          logger.warn("H3 子任务终态日志修复失败", {
-            taskId: task.id,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-      }
-    }
-    if (
       ["queued", "running"].includes(task.status) &&
       task.kind.startsWith("comfyui:")
     )
@@ -350,6 +317,45 @@ async function startBackendHttpServer() {
         task.kind === "runninghub:minimax-h3"
       )
         runningHub.resume(task.id);
+  }
+  // 终态回写修复必须独立于上面的活动状态循环：succeeded/failed/cancelled 的任务
+  // 不在 tasksWithStatus("running"|"queued"|"awaiting_confirmation") 范围内，
+  // 放在循环体内永远不会被遍历到，节点/Clip 会长期停在 loading。
+  for (const status of ["succeeded", "failed", "cancelled"] as const) {
+    for (const task of tasksWithStatus(status)) {
+      if (
+        task.kind === "canvas-h3-run" &&
+        ["succeeded", "failed", "cancelled", "awaiting_confirmation"].includes(task.status)
+      ) {
+        void canvasH3Runner
+          .reconcileTerminal(task)
+          .catch((error) =>
+            logger.warn("H3 终态节点回写修复失败", {
+              taskId: task.id,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
+      }
+      if (
+        task.kind === "comfyui:minimax-h3" ||
+        task.kind === "runninghub:minimax-h3"
+      ) {
+        const binding = task.params?.canvasBinding as
+          | { generationLogId?: string }
+          | undefined;
+        const log = binding?.generationLogId
+          ? stores.logs.get(binding.generationLogId)
+          : null;
+        if (log && (log.status === "queued" || log.status === "running")) {
+          void writeBackH3Task(stores, runtime.events, task).catch((error) =>
+            logger.warn("H3 子任务终态日志修复失败", {
+              taskId: task.id,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        }
+      }
+    }
   }
   // ── 孤儿任务回收（防僵尸堆积）───────────────────────────────────
   // backend 重启（tsx --watch 源码热更、崩溃等）会杀掉内存中的执行循环，遗留

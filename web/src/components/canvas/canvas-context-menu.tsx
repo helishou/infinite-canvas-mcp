@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
-import { BetweenHorizontalStart, ClipboardCopy, GalleryHorizontalEnd, GalleryHorizontal, Group, Plus, Trash2 } from "lucide-react";
+import { BetweenHorizontalStart, ClipboardCopy, GalleryHorizontalEnd, GalleryHorizontal, Group, Images, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -13,8 +13,10 @@ export function CanvasNodeContextMenu({
     canCaptureVideoFrame,
     canGroup,
     canCopyContent,
+    isExtractingKeyframes,
     onClose,
     onCaptureVideoFrame,
+    onExtractVideoKeyframes,
     onGroup,
     onCopyContent,
 
@@ -25,9 +27,11 @@ export function CanvasNodeContextMenu({
     canCaptureVideoFrame: boolean;
     canGroup: boolean;
     canCopyContent: boolean;
+    isExtractingKeyframes?: boolean;
 
     onClose: () => void;
     onCaptureVideoFrame: (position: VideoFramePosition) => void;
+    onExtractVideoKeyframes?: () => void;
     onGroup: () => void;
     onCopyContent: () => void;
 
@@ -58,6 +62,12 @@ export function CanvasNodeContextMenu({
                     <MenuButton icon={<BetweenHorizontalStart className="size-4" />} label={t("canvas.videoFrames.first")} onClick={() => onCaptureVideoFrame("first")} />
                     <MenuButton icon={<GalleryHorizontalEnd className="size-4" />} label={t("canvas.videoFrames.last")} onClick={() => onCaptureVideoFrame("last")} />
                     <MenuButton icon={<GalleryHorizontal className="size-4" />} label={t("canvas.videoFrames.current")} onClick={() => onCaptureVideoFrame("current")} />
+                    <MenuButton
+                        icon={<Images className="size-4" />}
+                        label={isExtractingKeyframes ? t("canvas.videoFrames.extracting") : t("canvas.videoFrames.allShots")}
+                        onClick={onExtractVideoKeyframes}
+                        disabled={isExtractingKeyframes}
+                    />
                     <div className="my-1 border-t" style={{ borderColor: theme.toolbar.border }} />
                 </>
             ) : null}
@@ -81,11 +91,17 @@ export function CanvasNodeContextMenu({
     );
 }
 
-function MenuButton({ icon, label, onClick, danger = false }: { icon: ReactNode; label: string; onClick?: () => void; danger?: boolean }) {
+function MenuButton({ icon, label, onClick, danger = false, disabled = false }: { icon: ReactNode; label: string; onClick?: () => void; danger?: boolean; disabled?: boolean }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
 
     return (
-        <button type="button" className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:opacity-80" style={{ color: danger ? "#f87171" : theme.node.text }} onClick={onClick}>
+        <button
+            type="button"
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors enabled:hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40"
+            style={{ color: danger ? "#f87171" : theme.node.text }}
+            onClick={onClick}
+            disabled={disabled}
+        >
             {icon}
             <span>{label}</span>
         </button>

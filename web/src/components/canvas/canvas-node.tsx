@@ -45,6 +45,7 @@ export type CanvasNodeProps = {
     isConnecting: boolean;
     isConnectionSource?: boolean;
     referenceSelectionState?: "target" | "disabled" | "available";
+    selectionPurpose?: "reference" | "video-compare";
     showPanel: boolean;
     showImageInfo: boolean;
     mentionReferences?: CanvasResourceReference[];
@@ -499,6 +500,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     isConnectionTarget,
     isConnecting,
     referenceSelectionState,
+    selectionPurpose = "reference",
     showPanel,
     showImageInfo,
     mentionReferences = [],
@@ -547,6 +549,11 @@ export const CanvasNode = React.memo(function CanvasNode({
     const hasTextContent = (data.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text")) && Boolean(data.metadata?.content?.trim());
     const hasImageContent = (data.type === CanvasNodeType.Image || (isSmartGenerationNode && smartMode === "image")) && Boolean(data.metadata?.content || data.metadata?.images?.length);
     const hasVideoContent = (data.type === CanvasNodeType.Video || (isSmartGenerationNode && smartMode === "video")) && Boolean(data.metadata?.content);
+    const selectionLabel = referenceSelectionState
+        ? selectionPurpose === "video-compare"
+            ? t(referenceSelectionState === "target" ? "canvas.videoCompare.selectingSource" : "canvas.videoCompare.chooseNode")
+            : t(referenceSelectionState === "target" ? "canvas.references.selecting" : "canvas.references.choose")
+        : "";
     const hasAudioContent = (data.type === CanvasNodeType.Audio || (isSmartGenerationNode && smartMode === "audio")) && Boolean(data.metadata?.content);
     const isCharacter = data.type === CanvasNodeType.Character;
     const hasCharacterContent = isCharacter && (data.metadata?.characterImages?.length || 0) > 0;
@@ -883,7 +890,10 @@ export const CanvasNode = React.memo(function CanvasNode({
                     }
                     if ((data.type === CanvasNodeType.Image || isSmartGenerationNode) && hasImageContent) {
                         event.stopPropagation();
-                        onViewImage?.(data);
+                        const activeImageId = isSmartGenerationNode && data.metadata?.activeImageHistoryExplicit === true
+                            ? data.metadata.activeImageHistoryId
+                            : data.metadata?.primaryImageId || data.metadata?.images?.[0]?.id;
+                        onViewImage?.(data, activeImageId || undefined);
                         return;
                     }
                     if (data.type === CanvasNodeType.Character) {
@@ -981,7 +991,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     >
                         {referenceSelectionState !== "disabled" ? (
                             <span className="rounded-lg px-3 py-2 text-sm font-medium shadow-sm" style={{ background: theme.toolbar.panel, color: theme.node.text }}>
-                                {t(referenceSelectionState === "target" ? "canvas.references.selecting" : "canvas.references.choose")}
+                                {selectionLabel}
                             </span>
                         ) : null}
                     </div>
@@ -1115,6 +1125,19 @@ function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererP
     const occupiedSlots = ordered ? (node.metadata?.groupSlots || []).filter((slot): slot is string => typeof slot === "string") : [];
     const slots = ordered ? orderedGroupDisplaySlots(occupiedSlots, orderedGroupColumnCount(node)) : [];
     const cells = orderedGroupLayout(node, slots.length);
+    // 抽首帧时组先落地成壳，边抽边显示进度，避免长任务期间画布毫无反馈。
+    // 复用既有的 runProgress 契约，角标逻辑不用另起一套。
+    const extracting = node.metadata?.status === "loading";
+    const progress = nodeRunProgress(node);
+    if (extracting) {
+        return (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2" style={{ color: theme.node.activeStroke }}>
+                <div className="size-8 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
+                <span className="text-[10px] tracking-[0.2em]">{t("canvas.videoFrames.extracting")}</span>
+                {progress === undefined ? null : <span className="text-[10px] tabular-nums opacity-70">{progress}%</span>}
+            </div>
+        );
+    }
     return (
         <div className="relative h-full w-full p-3">
             {ordered
@@ -1726,7 +1749,10 @@ function ExpandedCharacterImageCard({
 
 function VideoNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     const { t } = useTranslation();
-    if (!node.metadata?.content)
+    const [historyIndex, setHistoryIndex] = useState(-1);
+    const history = node.metadata?.loopOutputHistory || [];
+    useEffect(() => setHistoryIndex(-1), [node.metadata?.generationTaskId]);
+    if (!node.metadata?.content && !history.length)
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
                 <Video className="size-7 opacity-35" />
@@ -1741,7 +1767,27 @@ function VideoNodeContent({ node, theme, scale }: NodeContentRendererProps) {
             </div>
         );
     }
-    return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />;
+    const selectedIndex = !node.metadata?.content && historyIndex < 0 ? history.length - 1 : historyIndex;
+    const source = selectedIndex >= 0 ? history[selectedIndex]?.content || node.metadata?.content : node.metadata?.content;
+    return (
+        <div className="relative h-full w-full">
+            <video src={source} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />
+            {history.length ? (
+                <select
+                    value={selectedIndex}
+                    onChange={(event) => setHistoryIndex(Number(event.target.value))}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    className="absolute right-2 top-2 max-w-[65%] rounded-md border px-1.5 py-1 text-xs"
+                    style={{ background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text }}
+                    data-canvas-no-zoom
+                    aria-label={t("canvas.loopNode.videoHistory")}
+                >
+                    <option value={-1} disabled={!node.metadata?.content}>{t("canvas.loopNode.currentResult")}</option>
+                    {history.map((item, index) => <option key={`${item.storageKey || index}-${index}`} value={index}>{t("canvas.loopNode.historyResult", { count: index + 1 })}</option>)}
+                </select>
+            ) : null}
+        </div>
+    );
 }
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {

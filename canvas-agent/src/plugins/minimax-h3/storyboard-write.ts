@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf } from "../../canvas/reference-contract.js";
+import { orderStoryboardImageReferences, remapPictureTags } from "../../canvas/storyboard-reference-order.js";
 import { assembleH3Prompt } from "./prompt-sections.js";
 import { deriveStoryboardDurations, formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, promptDetails, stripDuplicateTransition, stripStoryboardCues, validateDefinitionCoverage, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "./prompt-rules.js";
 
@@ -533,19 +534,44 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
 }
 
 export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue, rawInput: RecordValue) {
-    const input = rawInput as StoryboardInput;
-    if (!Array.isArray(input.shots) || !input.shots.length) throw new Error("分镜至少需要一镜");
+    const originalInput = rawInput as StoryboardInput;
+    if (!Array.isArray(originalInput.shots) || !originalInput.shots.length) throw new Error("分镜至少需要一镜");
+    const originalBindings = referenceBindingsOf(segment).bindings;
+    const bindings = orderStoryboardImageReferences(originalBindings,
+        originalInput.shots.flatMap((shot) => string(shot.pictureBindingId) ? [string(shot.pictureBindingId)] : []),
+        (binding) => binding.id,
+        (binding) => binding.enabled && Boolean(binding.url || binding.storageKey) && binding.role === "storyboard" && (binding.mediaType || inferReferenceMediaType(binding)) === "image");
+    const orderChanged = bindings.some((binding, index) => binding.id !== originalBindings[index]?.id);
+    const storyboardIds = new Set(bindings.filter((binding) => binding.enabled && (binding.url || binding.storageKey) && binding.role === "storyboard").map((binding) => binding.id));
+    const existingShots = Array.isArray(segment.storyboardShots) ? segment.storyboardShots.map(record) : undefined;
+    const orderedShots = existingShots && orderStoryboardImageReferences(existingShots,
+        originalInput.shots.flatMap((shot) => string(shot.pictureBindingId) ? [string(shot.pictureBindingId)] : []),
+        (shot) => string(shot.referenceBindingId), (shot) => storyboardIds.has(string(shot.referenceBindingId)));
+    const shotOrderChanged = Boolean(orderedShots?.some((shot, index) => shot.id !== existingShots?.[index]?.id));
+    const remap = (value: string) => orderChanged
+        ? remapPictureTags(value, originalBindings.filter((binding) => binding.enabled && (binding.url || binding.storageKey)), bindings.filter((binding) => binding.enabled && (binding.url || binding.storageKey)),
+            (binding) => binding.id, (binding) => (binding.mediaType || inferReferenceMediaType(binding)) === "image")
+        : value;
+    const input: StoryboardInput = {
+        ...originalInput,
+        summary: remap(originalInput.summary || ""),
+        openingDescription: remap(originalInput.openingDescription),
+        shots: originalInput.shots.map((shot) => ({ ...shot, description: remap(shot.description) })),
+        overallSoundscape: remap(originalInput.overallSoundscape),
+        nonDiegeticMusic: remap(originalInput.nonDiegeticMusic),
+    };
     validateStoryboardShotDescriptions(input.shots);
     validateShotTimeline(input.shots, segment.duration === undefined ? undefined : Number(segment.duration));
-    const bindings = referenceBindingsOf(segment).bindings;
     const generated = buildPromptSections(project, segment, input, bindings);
     const cache = record(segment.storyboardPromptCache);
     const promptMode = promptModeOf(segment);
-    if (promptMode === "ref2va" && cache.version === 13 && cache.fingerprint === generated.fingerprint && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
-    if (promptMode !== "ref2va" && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
+    if (!orderChanged && !shotOrderChanged && promptMode === "ref2va" && cache.version === 13 && cache.fingerprint === generated.fingerprint && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
+    if (!orderChanged && !shotOrderChanged && promptMode !== "ref2va" && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
     return {
         ...generated,
         unchanged: false as const,
+        ...(orderChanged ? { referenceBindings: bindings } : {}),
+        ...(shotOrderChanged ? { storyboardShots: orderedShots } : {}),
         ...(promptMode === "ref2va" ? { cache: { version: 13, fingerprint: generated.fingerprint, subjectDefinitions: generated.subjectDefinitions, retentionAnalysis: generated.retentionAnalysis } } : {}),
     };
 }
