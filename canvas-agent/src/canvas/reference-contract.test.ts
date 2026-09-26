@@ -75,3 +75,76 @@ test("同一媒体在不同 Clip 保留各自名称与主体，来源节点的�
     assert.deepEqual([first.references[0].subjectId, second.references[0].subjectId], ["a", "b"]);
     assert.deepEqual([first.references[0].storageKey, second.references[0].storageKey], ["image:new", "image:new"]);
 });
+
+// 角色组参考绑定是 h3CharacterGroups 的派生视图：写工具整组替换 bindings 时不必重建它们。
+// 这是 h3_set_reference_bindings 26/64 失败（character_group_binding_count /
+// character_group_binding_source_mismatch）的根因修复。
+const characterNode = {
+    id: "character-1",
+    type: "character",
+    metadata: {
+        characterAssetId: "asset-char-1",
+        characterName: "沈侯",
+        characterImages: [
+            { url: "http://media.test/a.png", storageKey: "image:a", outfit: "常服", role: "character_turnaround" },
+            { url: "http://media.test/b.png", storageKey: "image:b", outfit: "夜行", role: "character_turnaround" },
+        ],
+    },
+};
+const groupProject = { nodes: [characterNode] };
+const groupSegment = (bindings: unknown[]) => ({
+    taskMode: "ref2va",
+    prompt: "<Subject 1> 走出画面\n<d>[Chinese] 既然如此，我谢家与你们再无干系。</d>",
+    h3CharacterGroups: {
+        "group-1": {
+            id: "group-1",
+            characterName: "沈侯",
+            characterAssetId: "asset-char-1",
+            characterNodeId: "character-1",
+            subjectId: "shen-hou",
+            outfitEnabled: true,
+            outfits: [
+                { id: "outfit-1", url: "http://media.test/a.png", storageKey: "image:a", name: "常服", role: "character_turnaround", enabled: true },
+                { id: "outfit-2", url: "http://media.test/b.png", storageKey: "image:b", name: "夜行", role: "character_turnaround", enabled: true },
+            ],
+            voiceEnabled: false,
+        },
+    },
+    referenceBindings: bindings,
+});
+
+test("整组替换 bindings 不含角色组派生行时，编译器仍提交角色组服装并零报错", () => {
+    const result = compileReferenceSubmission(groupProject, groupSegment([
+        { id: "bind-scene", assetId: "asset-scene", label: "雪庭院", role: "scene", tags: [], enabled: true, usage: "reference", storageKey: "image:scene" },
+    ]));
+    const errors = result.issues.filter((issue) => issue.severity === "error");
+    assert.deepEqual(errors, [], errors.map((issue) => issue.message).join("；"));
+    const groupRefs = result.references.filter((ref) => ref.groupId === "group-1");
+    assert.equal(groupRefs.length, 2);
+    assert.deepEqual(groupRefs.map((ref) => ref.outfitId), ["outfit-1", "outfit-2"]);
+    assert.deepEqual([...new Set(groupRefs.map((ref) => ref.sourceNodeId))], ["character-1"]);
+    assert.deepEqual([...new Set(groupRefs.map((ref) => ref.subjectId))], ["shen-hou"]);
+    assert.ok(result.references.some((ref) => ref.label === "雪庭院"));
+});
+
+test("角色组派生 binding 的存量快照被逐条覆盖，id 与顺序保持稳定", () => {
+    const stale = [{
+        id: "stale-binding-id", assetId: "asset-x", label: "旧快照", role: "character_turnaround", tags: [],
+        enabled: true, usage: "reference", groupId: "group-1", outfitId: "outfit-1", sourceNodeId: "wrong-node", subjectId: "wrong-subject",
+    }];
+    const first = compileReferenceSubmission(groupProject, groupSegment(stale));
+    const second = compileReferenceSubmission(groupProject, groupSegment([]));
+    assert.deepEqual(first.references.map((ref) => ref.id), second.references.map((ref) => ref.id));
+    assert.ok(!first.references.some((ref) => ref.id === "stale-binding-id"));
+    const outfit1 = first.references.find((ref) => ref.outfitId === "outfit-1");
+    assert.equal(outfit1?.sourceNodeId, "character-1");
+    assert.equal(outfit1?.subjectId, "shen-hou");
+});
+
+test("角色组没有任何启用服装时只提交手工参考，不产生空派生行", () => {
+    const segment = groupSegment([]);
+    segment.h3CharacterGroups["group-1"].outfits.forEach((outfit) => { outfit.enabled = false; });
+    const result = compileReferenceSubmission(groupProject, segment);
+    assert.equal(result.references.filter((ref) => ref.groupId === "group-1").length, 0);
+    assert.equal(result.issues.filter((issue) => issue.severity === "error").length, 0);
+});

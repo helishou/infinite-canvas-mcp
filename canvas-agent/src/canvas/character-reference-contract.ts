@@ -47,8 +47,6 @@ export function validateH3CharacterGroups(project: Record<string, unknown>, segm
     const groups = recordOf(segment.h3CharacterGroups);
     const nodes = arrayOf(project.nodes);
     const nodeById = new Map(nodes.map((node) => [String(node.id || ""), node]));
-    const catalog = new Map(arrayOf(project.referenceCatalog).map((asset) => [String(asset.id || ""), asset]));
-    const bindings = arrayOf(segment.referenceBindings);
     const issues: CharacterGroupValidationIssue[] = [];
 
     for (const [groupKey, rawGroup] of Object.entries(groups)) {
@@ -110,30 +108,19 @@ export function validateH3CharacterGroups(project: Record<string, unknown>, segm
 
         const expectedSubjectId = String(group.subjectId || "").trim() || characterNodeId;
         // 总开关关闭时保留完整服装目录，但当前 Clip 不再要求这些图片的派生 binding。
+        // referenceBindings 里的角色组行是 h3CharacterGroups 的派生视图（由编译器现场生成），
+        // 缺行、多行、sourceNodeId 不符都属于快照漂移，不是真数据错误；真正被校验的是
+        // 角色组本体：源节点、完整服装目录、职责与 subjectId 与源节点一致。
         const enabledOutfits = group.outfitEnabled === false ? [] : outfitItems.filter((outfit) => outfit.enabled !== false);
         for (const outfit of enabledOutfits) {
             const key = mediaKey(outfit);
             if (!key) continue;
-            const matching = bindings.filter((binding) => String(binding.groupId || "") === groupId && String(binding.outfitId || "") === String(outfit.id || ""));
-            if (matching.length !== 1) {
-                issues.push(issue("character_group_binding_count", `角色组“${String(group.characterName || groupId)}”的启用服装“${key}”应有一个派生 binding，实际 ${matching.length} 个`, { groupId, characterNodeId, outfitKey: key }));
-                continue;
+            const expectedRole = characterImageRole(sourceImagesByKey.get(key));
+            if (String(outfit.role || "character_turnaround") !== expectedRole) {
+                issues.push(issue("character_group_outfit_role_mismatch", `角色组“${String(group.characterName || groupId)}”的图片职责与源角色节点不一致`, { groupId, characterNodeId, outfitKey: key }));
             }
-            const binding = matching[0];
-            const bindingUrl = String(binding.url || catalog.get(String(binding.assetId || ""))?.url || "").trim();
-            if (!bindingUrl) {
-                issues.push(issue("character_group_preview_url_missing", `角色组“${String(group.characterName || groupId)}”的 binding 缺少预览 URL：${key}`, { groupId, characterNodeId, outfitKey: key, bindingId: String(binding.id || "") }));
-            }
-            if (String(binding.sourceNodeId || "") !== characterNodeId) {
-                issues.push(issue("character_group_binding_source_mismatch", `角色组“${String(group.characterName || groupId)}”的 binding 没有绑定源角色节点`, { groupId, characterNodeId, outfitKey: key, bindingId: String(binding.id || "") }));
-            }
-            const sourceImage = sourceImagesByKey.get(key);
-            const expectedRole = characterImageRole(sourceImage);
-            if (String(outfit.role || "character_turnaround") !== expectedRole || String(binding.role || "") !== expectedRole) {
-                issues.push(issue("character_group_binding_role_mismatch", `角色组“${String(group.characterName || groupId)}”的图片职责与源角色节点不一致`, { groupId, characterNodeId, outfitKey: key, bindingId: String(binding.id || "") }));
-            }
-            if (String(binding.subjectId || "") !== expectedSubjectId) {
-                issues.push(issue("character_group_binding_subject_mismatch", `角色组“${String(group.characterName || groupId)}”的 binding subjectId 不一致`, { groupId, characterNodeId, outfitKey: key, bindingId: String(binding.id || "") }));
+            if (String(group.subjectId || "").trim() && String(group.subjectId).trim() !== expectedSubjectId) {
+                issues.push(issue("character_group_subject_mismatch", `角色组“${String(group.characterName || groupId)}”的 subjectId 无效`, { groupId, characterNodeId, outfitKey: key }));
             }
         }
     }

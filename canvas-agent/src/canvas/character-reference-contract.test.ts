@@ -82,14 +82,18 @@ test("角色组 sourceNodeId 指向 image 节点时预检报错", () => {
     assert.ok(issues.some((issue) => issue.code === "character_group_source_not_character"));
 });
 
-test("角色 binding 只有 storageKey 时预检报缺少预览 URL", () => {
-    const issues = validateH3CharacterGroups(project(), completeSegment({ url: undefined }));
-    assert.ok(issues.some((issue) => issue.code === "character_group_preview_url_missing"));
-});
-
-test("完整角色组和角色 binding 通过预检", () => {
-    const issues = validateH3CharacterGroups(project(), completeSegment());
-    assert.deepEqual(issues.filter((issue) => issue.severity === "error"), []);
+// referenceBindings 里的角色组行是 h3CharacterGroups 的派生视图，由编译器现场生成。
+// 这里故意把它们全部清空：缺行属于快照漂移，不是真数据错误，预检不应因此失败。
+test("角色组派生 binding 缺失或漂移时预检仍以角色组本体为准", () => {
+    for (const patch of [{}, { url: undefined }, { sourceNodeId: "wrong-node" }, { subjectId: "wrong-subject" }]) {
+        const segment = completeSegment();
+        segment.referenceBindings = [{ ...completeSegment().referenceBindings[0], ...patch }];
+        const issues = validateH3CharacterGroups(project(), segment);
+        assert.equal(issues.filter((issue) => issue.severity === "error").length, 0, `patch=${JSON.stringify(patch)}`);
+    }
+    const empty = completeSegment();
+    empty.referenceBindings = [];
+    assert.equal(validateH3CharacterGroups(project(), empty).filter((issue) => issue.severity === "error").length, 0);
 });
 
 test("服装总开关关闭时不要求旧目录中单件仍启用的图片 binding", () => {
@@ -97,5 +101,5 @@ test("服装总开关关闭时不要求旧目录中单件仍启用的图片 bind
     segment.h3CharacterGroups["group-1"].outfitEnabled = false;
     segment.referenceBindings = [];
     const issues = validateH3CharacterGroups(project(), segment);
-    assert.equal(issues.some((issue) => issue.code === "character_group_binding_count"), false);
+    assert.equal(issues.some((issue) => issue.code === "character_group_outfit_role_mismatch"), false);
 });

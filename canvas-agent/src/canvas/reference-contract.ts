@@ -132,29 +132,79 @@ export function referenceBindingsOf(segment: Record<string, unknown>): { binding
     return { bindings, migratedLegacyRefs: bindings.length > 0 };
 }
 
-function normalizeCharacterGroupBindingSubjects(bindings: ReferenceBinding[], segment: Record<string, unknown>) {
-    const groups = recordOf(segment.h3CharacterGroups);
-    const subjectByBinding = new Map<string, string>();
-    for (const [groupKey, rawGroup] of Object.entries(groups)) {
-        const group = recordOf(rawGroup);
-        const groupId = String(group.id || groupKey);
-        const subjectId = String(group.subjectId || "").trim() || String(group.characterNodeId || "").trim();
-        if (!subjectId) continue;
-        for (const rawOutfit of Array.isArray(group.outfits) ? group.outfits : []) {
-            const outfitId = String(recordOf(rawOutfit).id || "");
-            if (outfitId) subjectByBinding.set(JSON.stringify([groupId, outfitId]), subjectId);
-        }
+/**
+ * 角色组的参考绑定是 `h3CharacterGroups` 的派生视图，不是独立数据。
+ *
+ * 历史实现把派生副本写进 segment.referenceBindings，任何整组替换 bindings 的工具都必须
+ * 手工重建它们，否则预检报 character_group_binding_count / character_group_binding_source_mismatch。
+ * 现在改成：编译器每次从角色组本体现场派生，写入端只负责把 h3CharacterGroups 改对。
+ * 存量 segment 里已有的派生行保留作为 UI 可读快照，但不再参与正确性判断。
+ */
+export function characterGroupBindings(group: Record<string, unknown>): ReferenceBinding[] {
+    const groupId = String(group.id || "");
+    const characterNodeId = String(group.characterNodeId || "").trim();
+    const characterName = String(group.characterName || "角色");
+    const subjectId = String(group.subjectId || "").trim() || characterNodeId;
+    if (!groupId || !characterNodeId || !subjectId) return [];
+    const outfitRows = Array.isArray(group.outfits) ? group.outfits : [];
+    const refs: ReferenceBinding[] = outfitRows.filter((row) => recordOf(row).enabled !== false).map((row, index) => {
+        const outfit = recordOf(row);
+        const outfitKey = String(outfit.id || "");
+        const url = String(outfit.url || "");
+        const key = String(outfit.storageKey || url);
+        if (!outfitKey || !key) return null;
+        return {
+            id: stableReferenceId("binding", `${groupId}:${outfitKey}`, index),
+            assetId: stableReferenceId("asset", `${characterNodeId}:${key}`),
+            label: `${characterName} · ${String(outfit.name || "outfit")}`,
+            role: inferReferenceRole(outfit),
+            tags: ["character-group", String(outfit.role || "character_turnaround")],
+            enabled: true,
+            usage: "reference",
+            subjectId,
+            mediaType: "image",
+            url,
+            storageKey: String(outfit.storageKey || "") || undefined,
+            mimeType: String(outfit.mimeType || "") || undefined,
+            sourceNodeId: characterNodeId,
+            groupId,
+            outfitId: outfitKey,
+        } as ReferenceBinding;
+    }).filter(Boolean) as ReferenceBinding[];
+    const voice = recordOf(group.voice);
+    if (group.voiceEnabled === true && String(voice.url || "")) {
+        refs.push({
+            id: stableReferenceId("binding", `${groupId}:voice`),
+            assetId: String(voice.assetId || "") || stableReferenceId("asset", `${characterNodeId}:voice`),
+            label: `${characterName} · ${String(voice.name || "声线")}`,
+            role: "character_voice",
+            tags: ["character-group"],
+            enabled: true,
+            usage: "reference",
+            subjectId,
+            mediaType: "audio",
+            url: String(voice.url),
+            storageKey: String(voice.storageKey || "") || undefined,
+            sourceNodeId: characterNodeId,
+            groupId,
+        });
     }
-    return bindings.map((binding) => {
-        const subjectId = subjectByBinding.get(JSON.stringify([binding.groupId || "", binding.outfitId || ""]));
-        return subjectId && binding.subjectId !== subjectId ? { ...binding, subjectId } : binding;
-    });
+    return refs;
+}
+
+/** 合并手工参考与角色组派生参考；同 id 时以派生结果为准。 */
+function withDerivedCharacterGroupBindings(bindings: ReferenceBinding[], segment: Record<string, unknown>) {
+    const groups = recordOf(segment.h3CharacterGroups);
+    const derived = Object.values(groups).flatMap((raw) => characterGroupBindings(recordOf(raw)));
+    if (!derived.length) return bindings.filter((binding) => !binding.groupId);
+    const derivedIds = new Set(derived.map((binding) => binding.id));
+    return [...bindings.filter((binding) => !binding.groupId && !derivedIds.has(binding.id)), ...derived];
 }
 
 export function compileReferenceSubmission(project: Record<string, unknown>, segment: Record<string, unknown>): ReferenceCompilation {
     const catalog = new Map(referenceCatalogOf(project).map((asset) => [asset.id, asset]));
     const { bindings: rawBindings, migratedLegacyRefs } = referenceBindingsOf(segment);
-    const bindings = normalizeCharacterGroupBindingSubjects(rawBindings, segment);
+    const bindings = withDerivedCharacterGroupBindings(rawBindings, segment);
     const issues: ReferenceIssue[] = [...validateH3CharacterGroups(project, { ...segment, referenceBindings: bindings })];
     const counters: Record<ReferenceMediaType, number> = { image: 0, video: 0, audio: 0 };
     const references = bindings.filter((binding) => binding.enabled).flatMap((binding): CompiledReference[] => {
