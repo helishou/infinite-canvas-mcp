@@ -3130,8 +3130,17 @@ function installMcpToolObservability(
         const valueRecord = recordOf(value);
         if (resultRecord.isError === true || valueRecord.ok === false) {
           const errorRecord = recordOf(valueRecord.error);
+          // 业务失败体也带 error.message；取值顺序要覆盖 error 对象、error 字符串和顶层 message，
+          // 否则 "ok:false 但没有 error 字段" 的工具只会记下 "MCP 工具执行失败"，真实原因丢失。
           const error = Object.assign(
-            new Error(String(errorRecord.message || valueRecord.error || "MCP 工具执行失败")),
+            new Error(
+              String(
+                errorRecord.message ||
+                  valueRecord.message ||
+                  (typeof valueRecord.error === "string" ? valueRecord.error : "") ||
+                  "MCP 工具执行失败",
+              ),
+            ),
             {
               code: typeof errorRecord.code === "string" ? errorRecord.code : undefined,
               status: typeof errorRecord.httpStatus === "number" ? errorRecord.httpStatus : undefined,

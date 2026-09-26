@@ -963,3 +963,51 @@ test("canvas_get_state 指定节点只返回相关连线", async (t) => {
   const all = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "h3-project", view: "graph" } }));
   assert.deepEqual(all.connections.map((edge: { id: string }) => edge.id), ["edge-1", "edge-2"]);
 });
+
+
+// 模拟一个"业务失败但协议层成功"的 Backend 响应：ok:false + 顶层 message，没有 error 字段。
+// canvas_validate_generation 之前就返回这种体，于是真实预检原因在观测里被替换成
+// "MCP 工具执行失败"。
+async function mockBusinessFailureBackend(t: import("node:test").TestContext, onMcpEvent?: (event: Record<string, unknown>) => void) {
+  const app = express();
+  app.use(express.json());
+  app.post("/mcp/observability/events", (req, res) => {
+    onMcpEvent?.(req.body as Record<string, unknown>);
+    res.status(201).json({ ok: true });
+  });
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  const reason = "预检阻断：提示词引用了不存在的 Picture 3";
+  // 协同工具走通用观测包装；让它读一个 ok:false + 顶层 message 的画布响应。
+  app.get("/canvas/projects/:id/collaboration", (_req, res) => res.json({ ok: false, message: reason }));
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => {
+    server.close();
+    await once(server, "close");
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("missing port");
+  return `http://127.0.0.1:${address.port}`;
+}
+
+// 回归：`ok:false` 但没有 `error` 字段的业务失败体，此前只会被记成
+// "MCP 工具执行失败"，真实原因（这里是预检阻断原因）彻底丢失。
+test("业务失败体只有 ok:false 和 message 时，观测事件保留真实原因", async (t) => {
+  const events: Array<Record<string, unknown>> = [];
+  const backendUrl = await mockBusinessFailureBackend(t, (event) => events.push(event));
+  const client = await mcpClient(t, await fixture(t, backendUrl));
+  const result = await client.callTool({
+    name: "canvas_get_collaboration_state",
+    arguments: { projectId: "canvas-1" },
+  });
+  const payload = textPayload(result);
+
+  const failed = events.filter((event) => event.event === "tool.failed");
+  assert.equal(failed.length, 1, "应记为一次工具失败");
+  assert.equal(
+    (failed[0].outputSummary as Record<string, unknown>).message,
+    "预检阻断：提示词引用了不存在的 Picture 3",
+    "观测事件必须保留真实失败原因，而不是 MCP 工具执行失败",
+  );
+  assert.notEqual(payload.error?.message, "MCP 工具执行失败", "返回给调用方的错误也必须带真实原因");
+});
