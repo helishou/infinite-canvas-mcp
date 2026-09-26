@@ -11,7 +11,7 @@ import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workfl
 import { resolveComfyImageSize } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, request, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, prepareCanvasLoop, request, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
 import { runCanvasAudioTask } from "@/services/api/canvas-audio";
@@ -47,9 +47,9 @@ import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/can
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
-import { buildLoopSourceInputs, buildNodeGenerationContext, buildNodeGenerationInputs, hydrateNodeGenerationContext, recordLoopGenerationOutput, splitLoopPromptItems, type CanvasLoopRuntimeContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
+import { buildLoopRunInputPlan, buildLoopSourceInputs, buildNodeGenerationContext, buildNodeGenerationInputs, hydrateNodeGenerationContext, recordLoopGenerationOutput, splitLoopPromptItems, type CanvasLoopRuntimeContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasLoopNode } from "@/components/canvas/canvas-loop-node";
-import { buildLoopGenerationStages, createLoopFallbackOutput, resolveLoopInputPlan, runLoopGenerationRounds, runLoopGenerationStages, singleLoopPanelTarget, upstreamLoopForGeneration } from "@/lib/canvas/canvas-loop-execution";
+import { resolveLoopInputPlan, runLoopGenerationRounds, upstreamLoopForGeneration } from "@/lib/canvas/canvas-loop-execution";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { CharacterNodeEditModal } from "@/components/canvas/character-node-edit-modal";
 import { SceneNodeEditModal } from "@/components/canvas/scene-node-edit-modal";
@@ -238,6 +238,8 @@ function linkLoopAbort(signal: AbortSignal | undefined, controller: AbortControl
 
 function generationModeForLoopTarget(node: CanvasNodeData): CanvasNodeGenerationMode {
     if (node.type === CanvasNodeType.Config && node.metadata?.smart) return node.metadata.generationMode || "image";
+    // 循环节点自己就是智能生成节点，生成模式直接读自己的 metadata。
+    if (node.type === CanvasNodeType.Loop) return node.metadata?.generationMode || "image";
     if (node.type === CanvasNodeType.Text) return "text";
     if (node.type === CanvasNodeType.Video) return "video";
     if (node.type === CanvasNodeType.Audio) return "audio";
@@ -248,19 +250,13 @@ function isImageConversionSource(node: CanvasNodeData) {
     return node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image");
 }
 
-function isLoopGenerationTarget(node: CanvasNodeData) {
-    return (
-        node.metadata?.loopOutputSlot !== true && (
-            node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Text || node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio || node.type === CanvasNodeType.Config || Boolean(getNodeDefinition(node.type)?.useBuiltinPanel)
-        )
-    );
-}
-
 function loopImageInputCount(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], graph: CanvasGraphIndex) {
-    const loop = graph.incomingByNodeId.get(nodeId)?.find((source) => source.type === CanvasNodeType.Loop);
+    const target = graph.nodeById.get(nodeId);
+    const loop = target?.type === CanvasNodeType.Loop ? target : graph.incomingByNodeId.get(nodeId)?.find((source) => source.type === CanvasNodeType.Loop);
     if (!loop) return 0;
     const inputs = buildLoopSourceInputs(loop.id, nodes, connections, graph);
-    const plan = resolveLoopInputPlan(loop.metadata || {}, inputs.filter((input) => input.type === "image").length, inputs.filter((input) => input.type === "video").length);
+    const countSlots = (type: NodeGenerationInput["type"]) => new Set(inputs.filter((input) => input.type === type).map((input) => input.nodeId)).size;
+    const plan = resolveLoopInputPlan(loop.metadata || {}, countSlots("image"), countSlots("video"), countSlots("audio"), countSlots("text"));
     return plan.mediaKind === "image" ? Math.min(plan.batchSize, Math.max(0, plan.sourceCount - plan.start + 1)) : 0;
 }
 
@@ -609,6 +605,7 @@ function InfiniteCanvasPage() {
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     const generationRequestsRef = useRef(new Map<string, ActiveGenerationRequest>());
     const loopAbortRef = useRef<AbortController | null>(null);
+    const loopPreparingRef = useRef(false);
     const dragPreviewPositionsRef = useRef<Map<string, Position>>(EMPTY_DRAG_PREVIEW);
     const resizePreviewBoundsRef = useRef<Map<string, CanvasResizePreviewBounds>>(EMPTY_RESIZE_PREVIEW);
     const updateDropTargetGroupId = useCallback((next: string | null) => {
@@ -1135,13 +1132,14 @@ function InfiniteCanvasPage() {
     const renderedConnections = useMemo(() => {
         if (!groupConnectionOverview) return visibleConnections;
         return visibleConnections.filter((connection) =>
-            connection.id === selectedConnectionId || focusedConnectionIds.has(connection.id) || (!groupIdByNodeId.has(connection.fromNodeId) && !groupIdByNodeId.has(connection.toNodeId)),
+            connection.role === "loop-input-reference" || connection.id === selectedConnectionId || focusedConnectionIds.has(connection.id) || (!groupIdByNodeId.has(connection.fromNodeId) && !groupIdByNodeId.has(connection.toNodeId)),
         );
     }, [focusedConnectionIds, groupConnectionOverview, groupIdByNodeId, selectedConnectionId, visibleConnections]);
     const connectionOverviewBundles = useMemo(() => {
         if (!groupConnectionOverview) return [];
         const bundles = new Map<string, { fromX: number; fromY: number; toX: number; toY: number; count: number }>();
         for (const connection of connections) {
+            if (connection.role === "loop-input-reference") continue;
             if (focusedConnectionIds.has(connection.id)) continue;
             const sourceGroupId = groupIdByNodeId.get(connection.fromNodeId);
             const targetGroupId = groupIdByNodeId.get(connection.toNodeId);
@@ -4403,10 +4401,27 @@ function InfiniteCanvasPage() {
                 if (loopContext) throw new Error("下游节点已有生成任务，循环无法继续");
                 return;
             }
-            const sourceNode = nodesRef.current.find((node) => node.id === nodeId);
+            const loopOwner = loopContext?.nodeId ? loopContext.initialNodes?.get(loopContext.nodeId) || nodesRef.current.find((node) => node.id === loopContext.nodeId) : undefined;
+            const storedSourceNode = nodesRef.current.find((node) => node.id === nodeId);
+            const sourceNode = storedSourceNode || (loopContext?.loopOutput && loopOwner ? {
+                ...loopOwner,
+                id: nodeId,
+                type: CanvasNodeType.Config,
+                title: `第 ${loopContext.loopOutput.slotIndex + 1} 轮`,
+                metadata: { ...loopOwner.metadata, smart: true, generationMode: mode, loopOutputSlot: true, loopSourceId: loopContext.nodeId,
+                    loopOutputGroupId: loopContext.loopOutput.outputGroupId, loopSlotIndex: loopContext.loopOutput.slotIndex },
+            } : undefined);
+            const generationNodes = loopContext?.initialNodes && sourceNode
+                ? [...loopContext.initialNodes.values()].filter((node) => node.id !== nodeId).concat({
+                    ...sourceNode, type: CanvasNodeType.Config,
+                    metadata: { ...sourceNode.metadata, smart: true, generationMode: mode },
+                })
+                : storedSourceNode || !sourceNode ? nodesRef.current : [...nodesRef.current, sourceNode];
             if (loopContext && !sourceNode) throw new Error("循环下游节点已不存在");
             const initialNode = loopContext?.initialNodes?.get(nodeId) || sourceNode;
-            const generationConfig = { ...buildGenerationConfig(effectiveConfig, sourceNode, mode), ...(loopContext ? { count: "1" } : {}) };
+            const loopNode = loopOwner;
+            const configSource = loopContext?.loopOutput ? loopNode || sourceNode : sourceNode;
+            const generationConfig = { ...buildGenerationConfig(effectiveConfig, configSource, mode), ...(loopContext ? { count: "1" } : {}) };
             if (generationConfig.model !== VIDEO_CONCAT_MODEL && !isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
                 if (loopContext) throw new Error("下游节点的模型配置不可用");
@@ -4475,7 +4490,8 @@ function InfiniteCanvasPage() {
             try {
                 const sourceTextContent = initialNode?.type === CanvasNodeType.Text ? initialNode.metadata?.content?.trim() || "" : "";
                 const editingTextNode = !loopContext && mode === "text" && Boolean(sourceTextContent);
-                const rawGenerationContext = buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, editingTextNode ? t("canvas.projectPage.editTextPrompt", { source: sourceTextContent, prompt }) : prompt, undefined, loopContext);
+                const rawGenerationContext = buildNodeGenerationContext(nodeId, generationNodes, loopContext?.initialConnections || connectionsRef.current,
+                    editingTextNode ? t("canvas.projectPage.editTextPrompt", { source: sourceTextContent, prompt }) : prompt, undefined, loopContext);
                 const activeImageHistory = !loopContext && mode === "image" && sourceNode?.type === CanvasNodeType.Config && sourceNode.metadata?.smart && sourceNode.metadata.activeImageHistoryExplicit === true && sourceNode.metadata.activeImageHistoryId
                     ? sourceNode.metadata.images?.find((image) => image.id === sourceNode.metadata?.activeImageHistoryId)?.generationSnapshot
                     : undefined;
@@ -4500,7 +4516,7 @@ function InfiniteCanvasPage() {
                         ? resolveImageGenerationReferences(activeImageHistory.references)
                         : [...new Map([...sourceReference, ...generationContext.referenceImages].map((image) => [image.id, image])).values()];
                     // 工作流路由、场景默认参数和渠道凭据由 Backend 统一解析；前端只提交节点手填参数。
-                    const comfyParams = sourceNode?.metadata?.comfyParams;
+                    const comfyParams = configSource?.metadata?.comfyParams;
                     // 稳定请求 ID 同时决定 Backend 创建的结果节点 ID；网页不再自行创建占位节点。
                     const clientTaskId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
                     await flushCanvasProjectBeforeGeneration(projectId);
@@ -4513,7 +4529,7 @@ function InfiniteCanvasPage() {
                     const task = await runCanvasImageTask(
                         {
                             mode: "image",
-                            ...(sourceNode?.metadata?.maskEdit ? { maskEdit: true } : {}),
+                            ...(configSource?.metadata?.maskEdit ? { maskEdit: true } : {}),
                             model: generationConfig.model,
                             prompt: effectivePrompt,
                             references: referenceImages,
@@ -4525,7 +4541,7 @@ function InfiniteCanvasPage() {
                             ...(loopContext?.loopOutput ? { loopOutput: loopContext.loopOutput } : {}),
                             params: comfyParams,
                             ...(sourceNode?.type === CanvasNodeType.Config && sourceNode.metadata?.smart ? {
-                                historySnapshot: { prompt, size: generationConfig.size, background: generationConfig.background, maskEdit: sourceNode.metadata.maskEdit },
+                                historySnapshot: { prompt, size: generationConfig.size, background: generationConfig.background, maskEdit: configSource?.metadata?.maskEdit },
                             } : {}),
                             clientTaskId,
                             projectId,
@@ -4556,7 +4572,7 @@ function InfiniteCanvasPage() {
                             size: generationConfig.size,
                             seconds: generationConfig.videoSeconds,
                             resolution: generationConfig.vquality,
-                            params: sourceNode?.metadata?.comfyParams,
+                            params: configSource?.metadata?.comfyParams,
                             clientTaskId,
                             projectId,
                             nodeId,
@@ -4577,6 +4593,7 @@ function InfiniteCanvasPage() {
                             model: generationConfig.model,
                             prompt: effectivePrompt,
                             audioReferences: generationContext.referenceAudios.map((item) => ({ id: item.id, name: item.name, url: item.url, storageKey: item.storageKey, mimeType: item.type })),
+                            ...(loopContext?.loopOutput ? { loopOutput: loopContext.loopOutput } : {}),
                             params: { voice: generationConfig.audioVoice, format: generationConfig.audioFormat, speed: generationConfig.audioSpeed, instructions: generationConfig.audioInstructions },
                             clientTaskId,
                             projectId,
@@ -4598,6 +4615,7 @@ function InfiniteCanvasPage() {
                             prompt: effectivePrompt,
                             count: loopContext ? 1 : getGenerationCount(String(sourceNode?.metadata?.textCount || 1)),
                             references: generationContext.referenceImages,
+                            ...(loopContext?.loopOutput ? { loopOutput: loopContext.loopOutput } : {}),
                             params: { systemPrompt: generationConfig.systemPrompt, reasoningEffort: generationConfig.reasoningEffort, ...(sourceNode?.type === CanvasNodeType.Config && sourceNode.metadata?.smart ? { targetTextNodeId: nodeId } : {}) },
                             projectId,
                             nodeId,
@@ -4625,116 +4643,123 @@ function InfiniteCanvasPage() {
     );
     const runLoop = useCallback(
         async (loopNodeId: string) => {
-            if (loopAbortRef.current) return;
-            const loopNode = nodesRef.current.find((node) => node.id === loopNodeId);
-            if (!loopNode || loopNode.type !== CanvasNodeType.Loop) return;
-            const metadata = loopNode.metadata || {};
-            let stages: CanvasNodeData[][];
+            if (loopAbortRef.current || loopPreparingRef.current) return;
+            loopPreparingRef.current = true;
             try {
-                stages = buildLoopGenerationStages(loopNodeId, nodesRef.current, connectionsRef.current, isLoopGenerationTarget);
+                await flushCanvasProjectBeforeGeneration(projectId);
             } catch (error) {
+                loopPreparingRef.current = false;
                 message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
                 return;
             }
-            if (!stages.length) {
-                // 不再强制要求先手动连下游：运行时自动补一个输出节点并连线。
-                const created = createLoopFallbackOutput(loopNodeId, loopNode, (type, position) => createCanvasNode(type, position), {
-                    x: Number(loopNode.position?.x || 0) + Number(loopNode.width || 340) + 120,
-                    y: Number(loopNode.position?.y || 0),
-                });
-                setNodes((prev) => [...prev, created.node]);
-                setConnections((prev) => [...prev, created.connection]);
-                nodesRef.current = [...nodesRef.current, created.node];
-                connectionsRef.current = [...connectionsRef.current, created.connection];
-                stages = buildLoopGenerationStages(loopNodeId, nodesRef.current, connectionsRef.current, isLoopGenerationTarget);
-                if (!stages.length) {
-                    message.warning(t("canvas.loopNode.noInput"));
-                    return;
-                }
-            }
-            const mediaChain = stages.every((stage) => stage.every((target) => {
-                const mode = generationModeForLoopTarget(target);
-                return (mode === "image" && (target.type === CanvasNodeType.Image || target.type === CanvasNodeType.Config && target.metadata?.smart === true) && !target.metadata?.maskEdit)
-                    || (mode === "video" && (target.type === CanvasNodeType.Video || target.type === CanvasNodeType.Config && target.metadata?.smart === true));
-            }));
-            if (metadata.loopMode === "parallel" && !mediaChain) {
-                message.warning(t("canvas.loopNode.parallelMediaOnly"));
-                return;
-            }
+            const savedProject = useCanvasStore.getState().projects.find((project) => project.id === projectId);
+            if (!savedProject) { loopPreparingRef.current = false; return; }
+            nodesRef.current = savedProject.nodes;
+            connectionsRef.current = savedProject.connections;
+            const loopNode = nodesRef.current.find((node) => node.id === loopNodeId);
+            if (!loopNode || loopNode.type !== CanvasNodeType.Loop) { loopPreparingRef.current = false; return; }
+            const metadata = loopNode.metadata || {};
+            const mode = generationModeForLoopTarget(loopNode);
             const inputs = buildLoopSourceInputs(loopNodeId, nodesRef.current, connectionsRef.current)
                 .flatMap((input) => input.type === "group" ? input.children : [input]);
-            const imageCount = inputs.filter((input) => input.type === "image").length;
-            const videoCount = inputs.filter((input) => input.type === "video").length;
-            const plan = resolveLoopInputPlan(metadata, imageCount, videoCount);
-            const mediaKinds = new Set(inputs.filter((input) => input.type === "image" || input.type === "video").map((input) => input.type));
-            if (mediaKinds.has("image") && mediaKinds.has("video")) {
+            const countSlots = (type: NodeGenerationInput["type"]) => new Set(inputs.filter((input) => input.type === type).map((input) => input.nodeId)).size;
+            const promptCount = countSlots("text");
+            const plan = buildLoopRunInputPlan(loopNodeId, nodesRef.current, connectionsRef.current);
+            const mediaKinds = new Set(inputs.filter((input) => input.type === "image" || input.type === "video" || input.type === "audio").map((input) => input.type));
+            if (mediaKinds.size > 1) {
+                loopPreparingRef.current = false;
                 message.warning(t("canvas.loopNode.mixedMedia"));
                 return;
             }
-            if ((plan.mediaKind === "image" && mediaKinds.has("video")) || (plan.mediaKind === "video" && mediaKinds.has("image"))) {
+            const inputKind = mediaKinds.values().next().value as "image" | "video" | "audio" | undefined;
+            const supportsInput = !inputKind
+                || mode === "image" && inputKind === "image"
+                || mode === "video" && (inputKind === "image" || inputKind === "video")
+                || mode === "audio" && inputKind === "audio"
+                || mode === "text" && inputKind === "image";
+            if (!supportsInput) {
+                loopPreparingRef.current = false;
                 message.warning(t("canvas.loopNode.mediaMismatch"));
                 return;
             }
-            if (plan.mediaKind && plan.rounds === 0) {
+            if (plan.mediaKind && mediaKinds.size && !mediaKinds.has(plan.mediaKind)) {
+                loopPreparingRef.current = false;
+                message.warning(t("canvas.loopNode.mediaMismatch"));
+                return;
+            }
+            if (plan.mediaKind && plan.availableRounds === 0) {
+                loopPreparingRef.current = false;
                 message.warning(t("canvas.loopNode.noMediaAtStart"));
                 return;
             }
-            const hasInput = Boolean(metadata.loopPromptEnabled && ((metadata.loopPrompts !== undefined ? metadata.loopPrompts.some((value) => value.trim()) : metadata.loopPrompt?.trim()) || inputs.some((input) => input.type === "text")))
-                || Boolean(plan.mediaKind && plan.sourceCount)
-                || stages.some((stage) => stage.some((target) => Boolean(target.metadata?.prompt?.trim() || target.metadata?.composerContent?.trim() || buildNodeGenerationInputs(target.id, nodesRef.current, connectionsRef.current).length)));
+            const loopOwnInput = Boolean(metadata.composerContent?.trim() || metadata.prompt?.trim() || metadata.model);
+            const hasInput = loopOwnInput
+                || Boolean(metadata.loopPromptEnabled && ((metadata.loopPrompts !== undefined ? metadata.loopPrompts.some((value) => value.trim()) : metadata.loopPrompt?.trim()) || inputs.some((input) => input.type === "text")))
+                || Boolean(plan.sourceCount || promptCount);
             if (!hasInput) {
+                loopPreparingRef.current = false;
                 message.warning(t("canvas.loopNode.noInput"));
                 return;
             }
             const total = plan.rounds;
-            const start = plan.start;
-            const batchSize = plan.batchSize;
-            const end = start + (total - 1) * batchSize;
+            const runId = crypto.randomUUID();
+            const baseContext: CanvasLoopRuntimeContext = { index: 0, total, nodeId: loopNodeId };
+            if (mode === "image") {
+                const prompt = metadata.composerContent ?? metadata.prompt ?? "";
+                const context = buildNodeGenerationContext(loopNodeId, nodesRef.current, connectionsRef.current, prompt, undefined, baseContext);
+                const model = buildGenerationConfig(effectiveConfig, loopNode, mode).model;
+                if (resolveModelChannel(effectiveConfig, model).kind === "comfyui") {
+                    const requiredImages = context.referenceImages.length + context.loopInputImages.length;
+                    const workflowName = resolveModelWorkflow(effectiveConfig, model, requiredImages);
+                    if (workflowName) {
+                        let detail: Awaited<ReturnType<typeof fetchWorkflowDetail>>;
+                        try { detail = await fetchWorkflowDetail(workflowName); }
+                        catch (error) {
+                            loopPreparingRef.current = false;
+                            message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+                            return;
+                        }
+                        const availableImages = (detail.config?.fields || []).filter((field) => isWorkflowImageField(field, detail.workflow)).length;
+                        if (requiredImages > availableImages) {
+                            loopPreparingRef.current = false;
+                            message.error(`工作流「${workflowName}」只有 ${availableImages} 个图片输入槽，本轮需要 ${requiredImages} 张；请配置支持当前参考数量的工作流`);
+                            return;
+                        }
+                    }
+                }
+            }
             const controller = new AbortController();
+            loopPreparingRef.current = false;
             const initialNodes = new Map(nodesRef.current.map((node) => [node.id, node]));
+            const initialConnections = [...connectionsRef.current];
             loopAbortRef.current = controller;
             setRunningLoopId(loopNodeId);
             setLoopProgress({ current: 0, total });
             try {
-                for (const target of stages[0] || []) {
-                    if (generationModeForLoopTarget(target) !== "image") continue;
-                    const model = buildGenerationConfig(effectiveConfig, target, "image").model;
-                    if (resolveModelChannel(effectiveConfig, model).kind !== "comfyui") continue;
-                    const prompt = target.metadata?.composerContent ?? target.metadata?.prompt ?? "";
-                    const context = buildNodeGenerationContext(target.id, nodesRef.current, connectionsRef.current, prompt, undefined, { index: 0, total, nodeId: loopNodeId });
-                    const requiredImages = context.loopInputImages.length + context.referenceImages.length;
-                    const workflowName = resolveModelWorkflow(effectiveConfig, model, requiredImages);
-                    if (!workflowName) continue;
-                    const detail = await fetchWorkflowDetail(workflowName);
-                    const availableImages = (detail.config?.fields || []).filter((field) => isWorkflowImageField(field, detail.workflow)).length;
-                    if (requiredImages > availableImages) throw new Error(`工作流「${workflowName}」只有 ${availableImages} 个图片输入槽，本轮需要 ${requiredImages} 张（${context.loopInputImages.length} 张循环图 + ${context.referenceImages.length} 张固定参考图）；请配置支持三图的工作流或调整参考输入`);
-                }
-                await flushCanvasProjectBeforeGeneration(projectId);
-                const hasComfy = mediaChain && stages.some((stage) => stage.some((target) => {
-                    const model = buildGenerationConfig(effectiveConfig, target, generationModeForLoopTarget(target)).model;
-                    return resolveModelChannel(effectiveConfig, model).kind === "comfyui";
-                }));
+                const prepared = await prepareCanvasLoop({ projectId, loopNodeId, runId, mode, totalRounds: total, roundInputNodeIds: plan.roundInputNodeIds });
                 const parallelRounds = metadata.loopMode === "parallel" && total > 1;
+                const model = buildGenerationConfig(effectiveConfig, loopNode, mode).model;
+                const hasComfy = resolveModelChannel(effectiveConfig, model).kind === "comfyui";
                 const configuredInstances = parallelRounds && hasComfy
                     ? await request<{ instances: string[] }>("GET", "/api/comfyui/instances", undefined, { signal: controller.signal }).then((response) => response.instances.filter((value) => value.trim()).length).catch(() => 1)
                     : 6;
                 const parallelLimit = parallelRounds ? Math.min(6, Math.max(1, configuredInstances)) : 1;
                 let completed = 0;
-                await runLoopGenerationRounds(total, parallelLimit, controller, async (index) => {
+                const runRound = async (index: number) => {
                     controller.signal.throwIfAborted();
-                    const roundIndex = start + index * batchSize;
+                    const roundIndex = plan.start + index * plan.batchSize;
+                    const slotNodeId = prepared.slotNodeIds[index];
+                    if (!slotNodeId) throw new Error(`循环结果槽缺失：第 ${index + 1} 轮`);
                     const loopContext: CanvasLoopRuntimeContext = {
-                        index, total: end, nodeId: loopNodeId, signal: controller.signal, roundOutputs: new Map(), initialNodes,
-                        ...(mediaChain ? { loopOutput: { loopNodeId, roundIndex, slotIndex: index } } : {}),
+                        index, total, nodeId: loopNodeId, signal: controller.signal, initialNodes, initialConnections,
+                        loopOutput: { loopNodeId, roundIndex, slotIndex: index, totalRounds: total, slotNodeId, outputGroupId: prepared.outputGroupId },
                     };
-                    const runTarget = (target: CanvasNodeData) => {
-                        const prompt = target.metadata?.composerContent ?? target.metadata?.prompt ?? (target.type === CanvasNodeType.Text ? target.metadata?.content || "" : "");
-                        return handleGenerateNode(target.id, generationModeForLoopTarget(target), prompt, loopContext);
-                    };
-                    await runLoopGenerationStages(stages, controller, runTarget);
+                    const prompt = metadata.composerContent ?? metadata.prompt ?? "";
+                    await handleGenerateNode(slotNodeId, mode, prompt, loopContext);
                     completed += 1;
                     setLoopProgress({ current: completed, total });
-                });
+                };
+                await runLoopGenerationRounds(total, parallelLimit, controller, runRound);
             } catch (error) {
                 if (!isGenerationCanceled(error)) message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
             } finally {
@@ -4743,7 +4768,7 @@ function InfiniteCanvasPage() {
                 setLoopProgress(undefined);
             }
         },
-        [effectiveConfig, handleGenerateNode, message, projectId, t],
+        [effectiveConfig, flushCanvasProjectBeforeGeneration, handleGenerateNode, message, projectId, t],
     );
 
     const stopLoop = useCallback(() => {
@@ -5291,12 +5316,59 @@ function InfiniteCanvasPage() {
         setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId });
     }, []);
 
+    const renderLoopPanel = useCallback(
+        (loopNode: CanvasNodeData) => {
+            const upstreamInputs = buildLoopSourceInputs(loopNode.id, nodesRef.current, connectionsRef.current)
+                .flatMap((input) => input.type === "group" ? input.children : [input]);
+            const upstreamPromptItems = upstreamInputs.flatMap((input) => input.type === "text" ? splitLoopPromptItems(input.text || "") : []);
+            const plan = buildLoopRunInputPlan(loopNode.id, nodesRef.current, connectionsRef.current);
+            const activeLoop = runningLoopId === loopNode.id;
+            return (
+                <div className="flex flex-col gap-2">
+                    {/* 循环参数：次数、串并行、提示词列表、起始序号、批量。 */}
+                    <CanvasLoopNode
+                node={loopNode}
+                        theme={theme}
+                        isRunning={activeLoop}
+                        progress={activeLoop ? loopProgress : undefined}
+                        upstreamPromptItems={upstreamPromptItems}
+                        plan={plan}
+                        onChange={(patch) => handleConfigNodeChange(loopNode.id, patch)}
+                        onRun={() => void runLoop(loopNode.id)}
+                        onStop={stopLoop}
+                    />
+                    {/* 智能生成配置：模型、提示词、参考图。循环节点自己就是生成节点，所以直接用同一套面板。 */}
+                    <CanvasNodePromptPanel
+                        node={loopNode}
+                        nodes={nodes}
+                        isRunning={activeLoop}
+                        mentionReferences={mentionReferencesByNodeId.get(loopNode.id) || EMPTY_REFERENCES}
+                        connectedNodes={getFixedReferenceNodes(loopNode.id, nodes, graphIndex)}
+                        loopInputCount={loopImageInputCount(loopNode.id, nodes, connections, graphIndex)}
+                        onConfigChange={handleConfigNodeChange}
+                        onGenerate={runNodeOrLoop}
+                        onStop={stopLoop}
+                        onDisconnectReference={(fromNodeId, toNodeId) => disconnectNodeReference(fromNodeId, toNodeId)}
+                        onStartReferenceSelection={startNodeReferenceSelection}
+                        onImageSettingsOpenChange={(open) => {
+                            setNodeImageSettingsOpen(open);
+                            if (open) setToolbarNodeId(null);
+                        }}
+                    />
+                </div>
+            );
+        },
+        [connections, disconnectNodeReference, graphIndex, handleConfigNodeChange, mentionReferencesByNodeId, nodes, runLoop, runNodeOrLoop, startNodeReferenceSelection, stopLoop, theme],
+    );
+
     const renderNodePanel = useCallback(
         (panelNode: CanvasNodeData) => {
-            const target = panelNode.type === CanvasNodeType.Loop
-                ? singleLoopPanelTarget(panelNode.id, nodes, connections, isLoopGenerationTarget)
-                : panelNode;
+            // 循环节点的面板是它自己的配置表单，和智能生成节点一样挂在节点下方。
+            // 不要再把循环的浮层转发给下游生成节点——那会让循环自己的参数无处可改。
+            if (panelNode.type === CanvasNodeType.Loop) return renderLoopPanel(panelNode);
+            const target = panelNode;
             if (!target) return null;
+            if (target.metadata?.loopOutputSlot === true) return null;
             const activeLoop = upstreamLoopForGeneration(target.id, nodes, connections);
             const isRunning = runningNodeId === target.id || Boolean(activeLoop && runningLoopId === activeLoop.id);
             const stop = (nodeId: string) => activeLoop && runningLoopId === activeLoop.id ? stopLoop() : confirmStopGeneration(nodeId);
@@ -5380,23 +5452,21 @@ function InfiniteCanvasPage() {
 
     const renderNodeContentPanel = useCallback(
         (contentNode: CanvasNodeData) => {
+            // 循环节点本体不再内联表单：配置全部在节点下方的浮层里（renderLoopPanel）。
+            // 本体只留一个紧凑摘要，提示当前轮次和运行进度。
             if (contentNode.type === CanvasNodeType.Loop) {
+                const activeLoop = runningLoopId === contentNode.id;
                 const upstreamInputs = buildLoopSourceInputs(contentNode.id, nodesRef.current, connectionsRef.current)
                     .flatMap((input) => input.type === "group" ? input.children : [input]);
-                const upstreamPromptItems = upstreamInputs.flatMap((input) => input.type === "text" ? splitLoopPromptItems(input.text || "") : []);
+                const countSlots = (type: NodeGenerationInput["type"]) => new Set(upstreamInputs.filter((input) => input.type === type).map((input) => input.nodeId)).size;
+                const plan = resolveLoopInputPlan(contentNode.metadata || {}, countSlots("image"), countSlots("video"), countSlots("audio"), countSlots("text"));
                 return (
-                    <CanvasLoopNode
-                        node={contentNode}
-                        theme={theme}
-                        isRunning={runningLoopId === contentNode.id}
-                        progress={runningLoopId === contentNode.id ? loopProgress : undefined}
-                        upstreamPromptItems={upstreamPromptItems}
-                        imageCount={upstreamInputs.filter((input) => input.type === "image").length}
-                        videoCount={upstreamInputs.filter((input) => input.type === "video").length}
-                        onChange={(patch) => handleConfigNodeChange(contentNode.id, patch)}
-                        onRun={() => void runLoop(contentNode.id)}
-                        onStop={stopLoop}
-                    />
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 p-4" style={{ color: theme.node.text }}>
+                        <span className="text-2xl font-semibold tabular-nums">{plan.rounds} ×</span>
+                        <span className="text-[11px] opacity-60">
+                            {activeLoop && loopProgress ? t("canvas.loopNode.running", loopProgress) : t("canvas.loopNode.title")}
+                        </span>
+                    </div>
                 );
             }
             if (contentNode.metadata?.smart) return null;

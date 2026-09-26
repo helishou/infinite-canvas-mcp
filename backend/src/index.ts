@@ -55,7 +55,7 @@ async function startBackendHttpServer() {
   const config = loadConfig(true);
   saveConfig(config);
   ensureDataDirs();
-  const releaseInstanceLock = acquireBackendInstanceLock(DATA_DIR);
+  const releaseInstanceLock = await acquireBackendInstanceLock(DATA_DIR);
 
   const db = new BackendDatabase();
   const stores = createStores(db);

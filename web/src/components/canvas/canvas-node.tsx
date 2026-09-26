@@ -159,7 +159,7 @@ function overviewSummary(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Audio || metadata?.generationMode === "audio") return `${node.title || "音频"}${metadata?.durationMs ? ` · ${Math.round(metadata.durationMs / 1000)} 秒` : ""}`;
     if (node.type === CanvasNodeType.Video || metadata?.generationMode === "video") return `${node.title || "视频"}${metadata?.status ? ` · ${metadata.status}` : ""}`;
     if (node.type === CanvasNodeType.Group) return `${node.title || "分组"} · ${metadata?.groupLocked ? "已锁定" : "分组"}`;
-    if (node.type === CanvasNodeType.Loop) return `${node.title || "循环"} · ${metadata?.loopCount || 1} 次`;
+    if (node.type === CanvasNodeType.Loop) return node.title || "循环";
     return metadata?.prompt || metadata?.content || node.title || node.type;
 }
 
@@ -1113,7 +1113,6 @@ function EmptyLoopContent({ node, theme }: NodeContentRendererProps) {
             <ListRestart className="size-5 shrink-0 opacity-70" />
             <div className="min-w-0">
                 <div className="truncate text-sm font-semibold">{node.title}</div>
-                <div className="mt-1 text-xs opacity-60">{node.metadata?.loopCount || 1} ×</div>
             </div>
         </div>
     );

@@ -3,8 +3,8 @@
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { backendConnection } from "@/lib/backend-connection";
 import { nanoid } from "nanoid";
-import type { CanvasGenerationCommand, CanvasGenerationStartResult } from "@basketikun/canvas-agent/generation-contract";
-import { CANVAS_GENERATION_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
+import type { CanvasGenerationCommand, CanvasGenerationStartResult, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
+import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
 import { ensureCanvasDraftLease } from "@/lib/canvas/canvas-draft-session";
 
 export type BackendMediaResult = {
@@ -39,7 +39,7 @@ export class BackendApiError extends Error {
 }
 
 export async function request<T = unknown>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
-    if (method !== "GET" && /^\/canvas\/projects(?:\/|$)/.test(path)) await ensureCanvasDraftLease();
+    if (method !== "GET" && (/^\/canvas\/projects(?:\/|$)/.test(path) || path === CANVAS_LOOP_PREPARE_PATH)) await ensureCanvasDraftLease();
     const token = getBackendTokenShared();
     const backendUrl = getBackendUrl().replace(/\/$/, "");
     const url = `${backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
@@ -89,6 +89,11 @@ export type BackendRuntimeTask = {
 /** 所有画布生成来源共用的任务提交客户端。 */
 export function startCanvasGeneration(input: CanvasGenerationCommand, signal?: AbortSignal) {
     return request<{ ok: boolean } & CanvasGenerationStartResult>("POST", CANVAS_GENERATION_PATH, input, { signal });
+}
+
+export type CanvasLoopPrepareResult = { runId: string; outputGroupId: string; slotNodeIds: string[]; totalRounds: number };
+export function prepareCanvasLoop(input: CanvasLoopPrepare) {
+    return request<{ ok: boolean } & CanvasLoopPrepareResult>("POST", CANVAS_LOOP_PREPARE_PATH, input);
 }
 
 export function syncBackendAiConfig(config: unknown) {

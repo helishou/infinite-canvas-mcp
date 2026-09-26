@@ -14,7 +14,8 @@ export type CanvasLoopRuntimeContext = {
     signal?: AbortSignal;
     roundOutputs?: Map<string, NodeGenerationInput[]>;
     initialNodes?: Map<string, CanvasNodeData>;
-    loopOutput?: { loopNodeId: string; roundIndex: number; slotIndex: number };
+    initialConnections?: CanvasConnection[];
+    loopOutput?: { loopNodeId: string; roundIndex: number; slotIndex: number; totalRounds?: number; slotNodeId?: string; outputGroupId?: string };
 };
 
 export type NodeGenerationContext = {
@@ -52,7 +53,11 @@ export type NodeGenerationInput = NodeGenerationResourceInput | NodeGenerationGr
 export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], prompt: string, index?: CanvasGraphIndex, loopContext?: CanvasLoopRuntimeContext): NodeGenerationContext {
     const inputs = buildNodeGenerationInputs(nodeId, nodes, connections, index, loopContext);
     const sourceNode = nodes.find((node) => node.id === nodeId);
-    const separateLoopImages = Boolean(loopContext?.nodeId && (sourceNode?.type === CanvasNodeType.Image || sourceNode?.type === CanvasNodeType.Config && sourceNode.metadata?.smart === true && (sourceNode.metadata.generationMode || "image") === "image"));
+    const separateLoopImages = Boolean(loopContext?.nodeId && (
+        sourceNode?.type === CanvasNodeType.Loop && (sourceNode.metadata?.generationMode || "image") === "image"
+        || sourceNode?.type === CanvasNodeType.Image
+        || sourceNode?.type === CanvasNodeType.Config && sourceNode.metadata?.smart === true && (sourceNode.metadata.generationMode || "image") === "image"
+    ));
     const loopResources = loopContext ? flattenGenerationInputs(inputs.filter((input) => input.nodeId === loopContext.nodeId)) : [];
     const loopImages = loopResources.flatMap((resource) => resource.image ? [resource.image] : []);
     if (sourceNode?.type === CanvasNodeType.Config && Boolean(sourceNode.metadata?.composerContent?.trim()) && (sourceNode.metadata?.smart !== true || /@\[node:[^\]]+\]/.test(prompt))) {
@@ -174,6 +179,13 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
 }
 
 export function buildNodeGenerationInputs(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex, loopContext?: CanvasLoopRuntimeContext): NodeGenerationInput[] {
+    const resolvedIndex = index || buildCanvasGraphIndex(nodes, connections);
+    if (loopContext?.nodeId && (loopContext.loopOutput || loopContext.nodeId === nodeId)) {
+        const loopNode = resolvedIndex.nodeById.get(loopContext.nodeId);
+        if (loopNode?.type === CanvasNodeType.Loop) {
+            return readLoopGenerationResources(loopNode, nodes, connections, resolvedIndex, loopContext, new Set());
+        }
+    }
     const targetNode = nodes.find((node) => node.id === nodeId);
     const characterSelections = targetNode?.metadata?.characterReferences || {};
     const resourceNodes = getGenerationResourceNodes(nodeId, nodes, connections, index);
@@ -196,6 +208,28 @@ export function buildLoopSourceInputs(loopNodeId: string, nodes: CanvasNodeData[
     return [...buckets.prompts, ...buckets.variableMedia];
 }
 
+function loopResourcePlan(metadata: CanvasNodeData["metadata"], buckets: ReturnType<typeof readLoopInputBuckets>) {
+    const count = (items: NodeGenerationResourceInput[]) => new Set(items.map((item) => item.nodeId)).size;
+    return resolveLoopInputPlan(metadata || {}, count(buckets.variableMedia.filter((item) => item.type === "image")),
+        count(buckets.variableMedia.filter((item) => item.type === "video")),
+        count(buckets.variableMedia.filter((item) => item.type === "audio")), count(buckets.variablePrompts));
+}
+
+function roundInputNodeIds(buckets: ReturnType<typeof readLoopInputBuckets>, plan: ReturnType<typeof resolveLoopInputPlan>, iteration: number) {
+    const items = plan.mediaKind ? buckets.variableMedia.filter((item) => item.type === plan.mediaKind) : buckets.variablePrompts;
+    const ids = [...new Set(items.map((item) => item.nodeId))];
+    const position = plan.start - 1 + iteration * plan.batchSize;
+    return ids.slice(position, position + plan.batchSize);
+}
+
+/** Freeze the same ordered input slots used when each round builds its model request. */
+export function buildLoopRunInputPlan(loopNodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex) {
+    const loop = nodes.find((node) => node.id === loopNodeId);
+    const buckets = readLoopInputBuckets(loopNodeId, nodes, connections, index);
+    const plan = loopResourcePlan(loop?.metadata, buckets);
+    return { ...plan, roundInputNodeIds: Array.from({ length: plan.rounds }, (_, iteration) => roundInputNodeIds(buckets, plan, iteration)) };
+}
+
 function readLoopInputBuckets(loopNodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex, loopContext?: CanvasLoopRuntimeContext, visited = new Set<string>()) {
     const resolvedIndex = index || buildCanvasGraphIndex(nodes, connections);
     const nextVisited = new Set(visited).add(loopNodeId);
@@ -204,10 +238,14 @@ function readLoopInputBuckets(loopNodeId: string, nodes: CanvasNodeData[], conne
         .map((source) => ({ source, inputs: source.type === CanvasNodeType.Group
             ? getGroupResourceNodes(source.id, nodes, resolvedIndex).flatMap((child) => readNodeGenerationResource(child, undefined, nodes, connections, resolvedIndex, loopContext, nextVisited))
             : readNodeGenerationResource(source, undefined, nodes, connections, resolvedIndex, loopContext, nextVisited) }));
-    const media = (input: NodeGenerationResourceInput) => input.type === "image" || input.type === "video";
+    const media = (input: NodeGenerationResourceInput) => input.type === "image" || input.type === "video" || input.type === "audio";
     const groupMedia = sources.filter(({ source }) => source.type === CanvasNodeType.Group).flatMap(({ inputs }) => inputs.filter(media));
+    const groupPrompts = sources.filter(({ source }) => source.type === CanvasNodeType.Group).flatMap(({ inputs }) => inputs.filter((input) => input.type === "text"));
+    const directPrompts = sources.filter(({ source }) => source.type !== CanvasNodeType.Group).flatMap(({ inputs }) => inputs.filter((input) => input.type === "text"));
     return {
-        prompts: sources.flatMap(({ inputs }) => inputs.filter((input) => input.type === "text")),
+        prompts: [...groupPrompts, ...directPrompts],
+        variablePrompts: groupPrompts.length ? groupPrompts : groupMedia.length || sources.some(({ inputs }) => inputs.some(media)) ? [] : directPrompts,
+        fixedPrompts: groupPrompts.length ? directPrompts : groupMedia.length || sources.some(({ inputs }) => inputs.some(media)) ? directPrompts : [],
         variableMedia: groupMedia.length ? groupMedia : sources.flatMap(({ inputs }) => inputs.filter(media)),
         fixedMedia: groupMedia.length ? sources.filter(({ source }) => source.type !== CanvasNodeType.Group).flatMap(({ inputs }) => inputs.filter(media)) : [],
     };
@@ -286,28 +324,29 @@ function readLoopGenerationResources(node: CanvasNodeData, nodes: CanvasNodeData
     if (visited.has(node.id)) return [];
     const resolvedIndex = index || buildCanvasGraphIndex(nodes, connections);
     const metadata = node.metadata || {};
-    const { prompts, variableMedia, fixedMedia } = readLoopInputBuckets(node.id, nodes, connections, resolvedIndex, loopContext, visited);
+    const { variablePrompts, fixedPrompts, variableMedia, fixedMedia } = readLoopInputBuckets(node.id, nodes, connections, resolvedIndex, loopContext, visited);
     const iteration = Math.max(0, loopContext?.index || 0);
-    const promptItems = prompts.flatMap((input) => splitLoopPromptItems(input.text || ""));
-    const imageItems = variableMedia.filter((input) => input.type === "image");
-    const videoItems = variableMedia.filter((input) => input.type === "video");
-    const plan = resolveLoopInputPlan(metadata, imageItems.length, videoItems.length);
+    const buckets = { variablePrompts, fixedPrompts, variableMedia, fixedMedia, prompts: [...variablePrompts, ...fixedPrompts] };
+    const plan = loopResourcePlan(metadata, buckets);
     const position = plan.start - 1 + iteration * plan.batchSize;
+    const selectedIds = new Set(roundInputNodeIds(buckets, plan, iteration));
+    const selectedPromptIds = new Set([...new Set(variablePrompts.map((input) => input.nodeId))].slice(position, position + plan.batchSize));
     const result: NodeGenerationResourceInput[] = [];
 
-    if (metadata.loopPromptEnabled) {
-        const localPrompts = metadata.loopPrompts !== undefined
+    const selectedUpstream = variablePrompts.filter((input) => selectedPromptIds.has(input.nodeId)).map((input) => input.text || "").filter(Boolean);
+    const fixedUpstream = fixedPrompts.map((input) => input.text || "").filter(Boolean);
+    if (metadata.loopPromptEnabled || selectedUpstream.length || fixedUpstream.length) {
+        const localPrompts = metadata.loopPromptEnabled ? metadata.loopPrompts !== undefined
             ? metadata.loopPrompts.map((value) => value.trim()).filter(Boolean)
-            : splitLoopPromptItems(metadata.loopPrompt || "");
+            : splitLoopPromptItems(metadata.loopPrompt || "") : [];
         const prompt = localPrompts.length ? localPrompts[position % localPrompts.length] : "";
-        const selected = promptItems.length ? promptItems[position % promptItems.length] : "";
+        const selected = [...selectedUpstream, ...fixedUpstream].join("\n\n");
         const effectivePrompt = selected && ["现在生成第《计数》张卖点图片", "Generate selling-point image 《计数》"].includes(prompt) ? "" : prompt;
         const combined = [selected, effectivePrompt].filter(Boolean).join("\n\n");
         if (combined) result.push({ nodeId: node.id, type: "text", title: node.title, text: renderLoopPrompt(combined, position, loopContext?.total || Math.max(1, metadata.loopCount || 1)) });
     }
     result.push(...fixedMedia);
-    if (plan.mediaKind === "image") result.push(...selectLoopBatch(imageItems, position, plan.batchSize).map((item) => ({ ...item, nodeId: node.id })));
-    if (plan.mediaKind === "video") result.push(...selectLoopBatch(videoItems, position, plan.batchSize).map((item) => ({ ...item, nodeId: node.id })));
+    result.push(...variableMedia.filter((item) => item.type === plan.mediaKind && selectedIds.has(item.nodeId)).map((item) => ({ ...item, nodeId: node.id })));
     return result;
 }
 

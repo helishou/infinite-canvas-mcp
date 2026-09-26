@@ -332,7 +332,6 @@ function hasLoopResources(node: CanvasNodeData, nodes: CanvasNodeData[], index?:
     if (node.type !== CanvasNodeType.Loop) return false;
     const metadata = node.metadata;
     if (metadata?.loopPromptEnabled && (metadata.loopPrompts !== undefined ? metadata.loopPrompts.some((value) => value.trim()) : metadata.loopPrompt?.trim())) return true;
-    if (metadata?.loopMediaMode === "off" && !metadata.loopPromptEnabled) return false;
     const resolvedIndex = graphIndex(nodes, [], index);
     return (resolvedIndex.incomingByNodeId.get(node.id) || []).some((source) => source.type === CanvasNodeType.Loop
         ? hasLoopResources(source, nodes, resolvedIndex)

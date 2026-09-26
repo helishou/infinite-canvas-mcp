@@ -45,7 +45,7 @@ export const NODE_SPECS = {
     },
     [CanvasNodeType.Loop]: {
         width: 380, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Loop].title; },
-        metadata: { status: "idle", loopCount: 1, loopCountMode: "auto", loopMode: "serial", loopMediaMode: "auto", loopPromptEnabled: false, loopImageEnabled: false, loopVideoEnabled: false, loopStart: 1, loopImageBatchSize: 1, loopVideoBatchSize: 1, loopPrompt: "" },
+        metadata: { status: "idle", generationMode: "image", loopMode: "serial", loopMediaMode: "auto", loopPromptEnabled: false, loopImageEnabled: false, loopVideoEnabled: false, loopStart: 1, loopImageBatchSize: 1, loopVideoBatchSize: 1, loopAudioBatchSize: 1, loopPrompt: "" },
     },
     [CanvasNodeType.Group]: {
         width: 760, height: 480, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Group].title; },

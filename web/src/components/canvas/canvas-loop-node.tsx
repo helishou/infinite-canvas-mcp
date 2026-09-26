@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { splitLoopPromptItems } from "@/components/canvas/canvas-node-generation";
-import { resolveLoopInputPlan } from "@/lib/canvas/canvas-loop-execution";
+import type { resolveLoopInputPlan } from "@/lib/canvas/canvas-loop-execution";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
 
 type CanvasLoopNodeProps = {
@@ -13,8 +13,7 @@ type CanvasLoopNodeProps = {
     isRunning: boolean;
     progress?: { current: number; total: number };
     upstreamPromptItems: string[];
-    imageCount: number;
-    videoCount: number;
+    plan: ReturnType<typeof resolveLoopInputPlan>;
     onChange: (patch: Partial<CanvasNodeMetadata>) => void;
     onRun: () => void;
     onStop: () => void;
@@ -25,10 +24,9 @@ function integer(value: string, fallback: number, min: number, max: number) {
     return Math.min(max, Math.max(min, Math.floor(Number.isFinite(parsed) ? parsed : fallback)));
 }
 
-export function CanvasLoopNode({ node, theme, isRunning, progress, upstreamPromptItems, imageCount, videoCount, onChange, onRun, onStop }: CanvasLoopNodeProps) {
+export function CanvasLoopNode({ node, theme, isRunning, progress, upstreamPromptItems, plan, onChange, onRun, onStop }: CanvasLoopNodeProps) {
     const { t } = useTranslation();
     const metadata = node.metadata || {};
-    const plan = resolveLoopInputPlan(metadata, imageCount, videoCount);
     const count = plan.rounds;
     const mode = metadata.loopMode === "parallel" ? "parallel" : "serial";
     const promptEnabled = Boolean(metadata.loopPromptEnabled);
@@ -41,7 +39,18 @@ export function CanvasLoopNode({ node, theme, isRunning, progress, upstreamPromp
     const upstreamPrompt = upstreamPromptItems.length ? upstreamPromptItems[(Math.max(1, metadata.loopStart || 1) - 1) % upstreamPromptItems.length] : "";
 
     return (
-        <div className="flex h-full w-full flex-col gap-2 overflow-y-auto rounded-[inherit] p-4" style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+        // 外壳与智能生成节点的配置面板（CanvasNodePromptPanel）保持同一套：
+        // 圆角卡片 + 阴影 + 毛玻璃 + 禁止缩放/拖拽。节点本体和节点下方浮层共用这一份样式，
+        // 所以循环节点看起来就是"内嵌了一个智能生成"。
+        <div
+            data-canvas-no-zoom
+            className="flex h-full w-full flex-col gap-2 overflow-y-auto rounded-2xl border p-3 shadow-2xl backdrop-blur"
+            style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+            onWheel={(event) => event.stopPropagation()}
+        >
             <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2">
                     <ListRestart className="size-5 shrink-0" style={{ color: theme.node.activeStroke }} />
@@ -50,21 +59,7 @@ export function CanvasLoopNode({ node, theme, isRunning, progress, upstreamPromp
                 <span className="shrink-0 text-xs opacity-60">{isRunning && progress ? t("canvas.loopNode.running", progress) : `${count} ×`}</span>
             </div>
 
-            <div className="flex items-center gap-2">
-                <label className="flex min-w-0 flex-1 items-center justify-between gap-2 text-xs opacity-75">
-                    <span>{t("canvas.loopNode.count")}</span>
-                    <NumberInput
-                        min={plan.mediaKind ? 0 : 1}
-                        max={100}
-                        value={count}
-                        disabled={isRunning}
-                        className="h-8 w-20 rounded-lg border bg-transparent px-2 text-center text-sm outline-none"
-                        borderColor={theme.node.stroke}
-                        color={theme.node.text}
-                        onChange={(value) => onChange({ loopCount: value, loopCountMode: "manual" })}
-                    />
-                </label>
-                {plan.countMode === "manual" && (imageCount > 0 || videoCount > 0) ? <button type="button" disabled={isRunning} className="text-[11px] opacity-75" onClick={() => onChange({ loopCountMode: "auto" })}>{t("canvas.loopNode.auto")}</button> : null}
+            <div className="flex items-center justify-end gap-2">
                 <div className="flex rounded-lg border p-0.5" style={{ borderColor: theme.node.stroke }}>
                     {(["serial", "parallel"] as const).map((value) => (
                         <button
@@ -87,8 +82,8 @@ export function CanvasLoopNode({ node, theme, isRunning, progress, upstreamPromp
                     const useDefault = !promptEnabled && !promptFields.some((value) => value.trim()) && !upstreamPromptItems.length;
                     onChange({ loopPromptEnabled: !promptEnabled, ...(useDefault ? { loopPrompt: t("canvas.loopNode.defaultPrompt"), loopPrompts: [t("canvas.loopNode.defaultPrompt")] } : {}) });
                 }} />
-                <Toggle label={t("canvas.loopNode.image")} checked={imageEnabled} disabled={isRunning} theme={theme} onClick={() => onChange({ loopMediaMode: imageEnabled ? "off" : "image", loopImageEnabled: !imageEnabled, loopVideoEnabled: false })} />
-                <Toggle label={t("canvas.loopNode.video")} checked={videoEnabled} disabled={isRunning} theme={theme} onClick={() => onChange({ loopMediaMode: videoEnabled ? "off" : "video", loopVideoEnabled: !videoEnabled, loopImageEnabled: false })} />
+                <Toggle label={t("canvas.loopNode.image")} checked={imageEnabled} disabled={isRunning} theme={theme} onClick={() => onChange({ loopMediaMode: imageEnabled ? "auto" : "image", loopImageEnabled: !imageEnabled, loopVideoEnabled: false })} />
+                <Toggle label={t("canvas.loopNode.video")} checked={videoEnabled} disabled={isRunning} theme={theme} onClick={() => onChange({ loopMediaMode: videoEnabled ? "auto" : "video", loopVideoEnabled: !videoEnabled, loopImageEnabled: false })} />
             </div>
 
             {promptEnabled ? (
@@ -140,6 +135,7 @@ export function CanvasLoopNode({ node, theme, isRunning, progress, upstreamPromp
                 </label>
                 {imageEnabled ? <BatchInput label={t("canvas.loopNode.image")} value={metadata.loopImageBatchSize || 1} disabled={isRunning} theme={theme} onChange={(value) => onChange({ loopImageBatchSize: value })} /> : null}
                 {videoEnabled ? <BatchInput label={t("canvas.loopNode.video")} value={metadata.loopVideoBatchSize || 1} disabled={isRunning} theme={theme} onChange={(value) => onChange({ loopVideoBatchSize: value })} /> : null}
+                {plan.mediaKind === "audio" ? <BatchInput label={t("canvas.loopNode.audioInput")} value={metadata.loopAudioBatchSize || 1} disabled={isRunning} theme={theme} onChange={(value) => onChange({ loopAudioBatchSize: value })} /> : null}
             </div>
 
             <div className="mt-auto flex items-center justify-between gap-2">

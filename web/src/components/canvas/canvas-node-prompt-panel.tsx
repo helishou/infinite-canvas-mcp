@@ -45,7 +45,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const isSmartGenerationNode = node.type === CanvasNodeType.Config && node.metadata?.smart === true;
+    const isSmartGenerationNode = node.type === CanvasNodeType.Loop || node.type === CanvasNodeType.Config && node.metadata?.smart === true;
     const mode = modeOverride ?? (isSmartGenerationNode ? node.metadata?.generationMode || "image" : defaultMode(node.type));
     const config = buildNodeConfig(globalConfig, node, mode);
     const hasTextContent = (node.type === CanvasNodeType.Text || (isSmartGenerationNode && mode === "text")) && Boolean(node.metadata?.content?.trim());

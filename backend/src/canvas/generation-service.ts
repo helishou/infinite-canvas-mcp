@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
+import type { CanvasGenerationCommand, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
@@ -14,6 +14,7 @@ import {
     resolveCanvasImageReferencesByIds,
     resolveCanvasSceneNodes,
 } from "./image-references.js";
+import { prepareCanvasLoopRun } from "./generation-target.js";
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { CanvasTextDispatcher, type CanvasTextGenerationInput } from "./text-dispatcher.js";
 import { CanvasVideoDispatcher } from "./video-dispatcher.js";
@@ -44,6 +45,7 @@ export class CanvasGenerationService {
     ) {}
 
     async start(command: CanvasGenerationCommand) {
+        validateLoopGenerationCommand(command, command.projectId ? this.stores.projects.get(command.projectId) : null);
         const operation = command.operation || "generate";
         if (operation === "h3-run") return this.startH3(command);
         const script = command.model ? resolveModelScript(this.stores.settings?.get?.("ai.config"), command.model) : "";
@@ -64,6 +66,10 @@ export class CanvasGenerationService {
         if (command.mode === "video") return this.startVideo(command);
         if (command.mode === "audio") return this.startAudio(command);
         throw new Error(`画布生成模式暂不支持：${command.mode}`);
+    }
+
+    prepareLoopRun(input: CanvasLoopPrepare) {
+        return prepareCanvasLoopRun(this.stores, input);
     }
 
     private startH3(command: CanvasGenerationCommand) {
@@ -249,6 +255,40 @@ export class CanvasGenerationService {
         });
         return { ...result, task: this.stores.tasks.get(result.taskId) || undefined };
     }
+}
+
+/** Prevent an old page from silently submitting a whole input group as ordinary refs. */
+export function validateLoopGenerationCommand(command: CanvasGenerationCommand, project: CanvasProject | null) {
+    const binding = command.loopOutput;
+    if (binding && (!binding.slotNodeId || !binding.outputGroupId || binding.totalRounds === undefined)) {
+        throw new Error("循环协议已更新；请刷新画布页面后从循环节点重新运行，避免整组图片作为普通参考图提交");
+    }
+    if (!project || !command.nodeId || binding) return;
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+    const connections = Array.isArray(project.connections) ? project.connections as Array<Record<string, any>> : [];
+    const byId = new Map(nodes.map((node) => [String(node.id || ""), node]));
+    const source = byId.get(command.nodeId);
+    if (!source) return;
+    const incoming = new Map<string, string[]>();
+    for (const connection of connections) {
+        const to = String(connection.toNodeId || "");
+        const from = String(connection.fromNodeId || "");
+        if (to && from) incoming.set(to, [...(incoming.get(to) || []), from]);
+    }
+    const seen = new Set<string>();
+    const pending = [String(source.id || "")];
+    let belongsToLoop = source.type === "loop" || source.metadata?.loopOutputSlot === true;
+    while (!belongsToLoop && pending.length) {
+        const current = pending.pop()!;
+        if (seen.has(current)) continue;
+        seen.add(current);
+        for (const parentId of incoming.get(current) || []) {
+            const parent = byId.get(parentId);
+            if (parent?.type === "loop") { belongsToLoop = true; break; }
+            if (parentId) pending.push(parentId);
+        }
+    }
+    if (belongsToLoop) throw new Error("循环生成缺少 Backend 准备的输出槽；请刷新画布页面后从循环节点重新运行");
 }
 
 function bindCanvasTask(stores: Stores, binding: Record<string, unknown>, taskId: string) {

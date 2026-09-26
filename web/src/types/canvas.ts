@@ -186,13 +186,14 @@ export type CanvasNodeMetadata = {
     loopCount?: number;
     loopCountMode?: "auto" | "manual";
     loopMode?: "serial" | "parallel";
-    loopMediaMode?: "auto" | "image" | "video" | "off";
+    loopMediaMode?: "auto" | "image" | "video" | "audio" | "off";
     loopPromptEnabled?: boolean;
     loopImageEnabled?: boolean;
     loopVideoEnabled?: boolean;
     loopStart?: number;
     loopImageBatchSize?: number;
     loopVideoBatchSize?: number;
+    loopAudioBatchSize?: number;
     loopPrompt?: string;
     loopPrompts?: string[];
     /** Backend 建立的逐轮图片结果节点；不参与下一次循环的执行图遍历。 */
@@ -201,7 +202,19 @@ export type CanvasNodeMetadata = {
     loopRootId?: string;
     loopRoundIndex?: number;
     loopSlotIndex?: number;
-    loopOutputHistory?: Array<CanvasNodeModeResult & { generationTaskId?: string }>;
+    loopOutputGroup?: boolean;
+    loopOutputGroupId?: string;
+    loopOutputMode?: "image" | "video" | "audio" | "text";
+    loopPreparedRuns?: Array<{ runId: string; mode: "image" | "video" | "audio" | "text"; totalRounds: number; slotNodeIds: string[]; roundInputNodeIds: string[][] }>;
+    loopOutputHistory?: Array<CanvasNodeModeResult & { mode?: string; prompt?: string; model?: string; generationTaskId?: string }>;
+    /**
+     * 循环节点自身就是智能生成节点：提示词、模型和生成参数直接存在循环的 metadata 上，
+     * 运行时不再自动补一个下游 Config 节点。
+     * 下列字段复用上面已有的通用生成字段（generationMode / prompt / composerContent /
+     * model / size / quality / count / comfyParams），不再单独定义 loop* 别名，
+     * 这样 `buildGenerationConfig` 读循环参数与读智能生成节点走的是同一条路径。
+     * 未显式设置时由 `buildGenerationConfig` 的全局兜底决定（generationMode 缺省按图片处理）。
+     */
 };
 
 export type CanvasNodeData = {

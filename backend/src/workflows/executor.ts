@@ -512,6 +512,7 @@ export class WorkflowExecutor {
         nodeId: string | undefined;
         name: string | undefined;
         configTitle: string;
+        parentTaskId: string | undefined;
     }> {
         const controller = new AbortController();
         const url = comfyUrl ?? this.bridge.getUrl();
@@ -612,7 +613,7 @@ export class WorkflowExecutor {
             : this.tasks.create("workflow", { workflow: "custom", fields: persistedFieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) });
         this.controllers.set(task.id, controller);
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
-        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title };
+        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title, parentTaskId };
     }
 
     /**
@@ -632,14 +633,21 @@ export class WorkflowExecutor {
         nodeId: string | undefined;
         name: string | undefined;
         configTitle: string;
+        /** 画布父任务已自行写过生成日志时，内层不再重复写。 */
+        parentTaskId: string | undefined;
     }): Promise<RunResult> {
-        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle } = ctx;
+        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle, parentTaskId } = ctx;
+        // 画布任务（image/video/audio）已经写过一条更完整的生成日志时，这里不再重复写。
+        // 否则同一次生图会在日志面板出现「生图」+「工作流」两条几乎一致的记录：
+        // 同一 nodeId、同一 prompt、同一产物 storageKey，只有耗时和任务 ID 不同。
+        // 父日志（platform:"canvas-image"）字段更全：模型、参考图、loopInputImages、t2i/i2i。
+        const skipLog = Boolean(parentTaskId);
         try {
             this.tasks.update(task.id, { status: "running", progress: 0.05 });
             const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId);
             this.tasks.update(task.id, { status: "succeeded", progress: 1, result: finalResult });
             this.events?.publish({ type: "task.completed", entityId: task.id, payload: finalResult });
-            this.db?.createGenerationLog({
+            if (!skipLog) this.db?.createGenerationLog({
                 projectId: projectId || "workflow",
                 nodeId,
                 status: "success",
@@ -665,7 +673,7 @@ export class WorkflowExecutor {
                 this.tasks.update(task.id, { status: "failed", error: message });
                 this.events?.publish({ type: "task.failed", entityId: task.id, payload: { error: message } });
             }
-            this.db?.createGenerationLog({
+            if (!skipLog) this.db?.createGenerationLog({
                 projectId: projectId || "workflow",
                 nodeId,
                 status: "failed",
@@ -687,6 +695,12 @@ export class WorkflowExecutor {
         }
     }
 
+    /**
+     * @param parentTaskId 画布任务已自行写过生成日志时传入（如图片生成走 comfy-workflow）。
+     *   内层不再重复写 platform:"workflow" 日志——同一次生图会在日志面板出现两条几乎
+     *   一致的记录（同一 nodeId、同一 prompt、同一产物 storageKey），只有耗时和任务 ID 不同。
+     *   父日志（platform:"canvas-image"）字段更全：模型、参考图、loopInputImages、t2i/i2i。
+     */
     async run(
         workflowJson: Record<string, unknown>,
         config: WorkflowConfig,

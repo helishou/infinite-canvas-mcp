@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildCanvasGraphIndex, createMentionReferenceSelector, getFixedReferenceNodes, getMentionResourceNodes, nodeResourceItems } from "./canvas-resource-references";
-import { buildLoopSourceInputs, buildNodeGenerationContext, buildNodeGenerationInputs, recordLoopGenerationOutput, type CanvasLoopRuntimeContext } from "@/components/canvas/canvas-node-generation";
+import { buildLoopRunInputPlan, buildLoopSourceInputs, buildNodeGenerationContext, buildNodeGenerationInputs, recordLoopGenerationOutput, type CanvasLoopRuntimeContext } from "@/components/canvas/canvas-node-generation";
 import { resolveLoopInputPlan } from "@/lib/canvas/canvas-loop-execution";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { sourceNodeReferenceImages } from "@/lib/canvas/canvas-generation-helpers";
@@ -179,6 +179,84 @@ test("现场连线：两张固定图和八镜组都接循环，八轮各取一�
     assert.deepEqual(rounds.map((round) => round.loopInputImages.map((image) => image.storageKey)), frames.map((frame) => [frame.metadata?.storageKey]));
 });
 
+test("循环节点自身生成时，每轮只读取输入有序组对应槽位", () => {
+    const images: CanvasNodeData[] = Array.from({ length: 3 }, (_, index) => ({
+        id: `input-${index + 1}`, type: CanvasNodeType.Image, title: `输入 ${index + 1}`, position: { x: 0, y: 0 }, width: 100, height: 100,
+        metadata: { groupId: "input-group", content: `input-${index + 1}.png`, storageKey: `media/input-${index + 1}.png` },
+    }));
+    const group: CanvasNodeData = { id: "input-group", type: CanvasNodeType.Group, title: "输入", position: { x: 0, y: 0 }, width: 800, height: 600,
+        metadata: { orderedGroup: true, groupSlots: images.map((image) => image.id) } };
+    const fixed: CanvasNodeData = { id: "fixed", type: CanvasNodeType.Image, title: "固定参考", position: { x: 0, y: 0 }, width: 100, height: 100,
+        metadata: { content: "fixed.png", storageKey: "media/fixed.png" } };
+    const loop: CanvasNodeData = { id: "loop", type: CanvasNodeType.Loop, title: "循环", position: { x: 900, y: 0 }, width: 380, height: 320,
+        metadata: { generationMode: "image", loopMediaMode: "auto", loopPromptEnabled: true, loopPrompt: "第《计数》轮，共《总数》轮" } };
+    const nodes = [group, ...images, fixed, loop];
+    const connections = [
+        { id: "group-loop", fromNodeId: group.id, toNodeId: loop.id },
+        { id: "fixed-loop", fromNodeId: fixed.id, toNodeId: loop.id },
+    ];
+    const rounds = images.map((_, index) => buildNodeGenerationContext(loop.id, nodes, connections, "基础提示词", undefined,
+        { index, total: images.length, nodeId: loop.id }));
+    assert.deepEqual(rounds.map((round) => round.referenceImages.map((image) => image.storageKey)), images.map(() => ["media/fixed.png"]));
+    assert.deepEqual(rounds.map((round) => round.loopInputImages.map((image) => image.storageKey)), images.map((image) => [image.metadata?.storageKey]));
+    assert.deepEqual(rounds.map((round) => round.prompt.includes(`第${rounds.indexOf(round) + 1}轮，共3轮`)), [true, true, true]);
+});
+
+test("关闭的旧图片开关仍按有序组两图生成两轮，准备连线与实际参考一致", () => {
+    const images = [1, 2].map((index): CanvasNodeData => ({
+        id: `image-${index}`, type: CanvasNodeType.Image, title: `图 ${index}`,
+        position: { x: 0, y: 0 }, width: 100, height: 100,
+        metadata: { groupId: "group", content: `image-${index}.png`, storageKey: `media/image-${index}.png` },
+    }));
+    const group: CanvasNodeData = { id: "group", type: CanvasNodeType.Group, title: "有序输入", position: { x: 0, y: 0 }, width: 400, height: 300,
+        metadata: { orderedGroup: true, groupSlots: images.map((item) => item.id) } };
+    const loop: CanvasNodeData = { id: "loop", type: CanvasNodeType.Loop, title: "循环", position: { x: 500, y: 0 }, width: 380, height: 320,
+        metadata: { loopMediaMode: "off", loopImageBatchSize: 1, loopStart: 1, generationMode: "image" } };
+    const nodes = [images[1], group, loop, images[0]];
+    const connections = [{ id: "group-loop", fromNodeId: group.id, toNodeId: loop.id }];
+    const plan = buildLoopRunInputPlan(loop.id, nodes, connections);
+    assert.equal(plan.rounds, 2);
+    assert.deepEqual(plan.roundInputNodeIds, [[images[0].id], [images[1].id]]);
+    const contexts = [0, 1].map((index) => buildNodeGenerationContext(loop.id, nodes, connections, "逐张处理", undefined,
+        { index, total: 2, nodeId: loop.id }));
+    assert.deepEqual(contexts.map((context) => context.loopInputImages.map((item) => item.storageKey)),
+        [["media/image-1.png"], ["media/image-2.png"]]);
+});
+
+test("两个右侧结果槽的图片任务各自只携带本轮的一张组图", () => {
+    const images: CanvasNodeData[] = Array.from({ length: 8 }, (_, index) => ({ id: `shot-${index + 1}`, type: CanvasNodeType.Image,
+        title: `镜头 ${index + 1}`, position: { x: 0, y: index * 100 }, width: 100, height: 100,
+        metadata: { groupId: "input-group", content: `shot-${index + 1}.png`, storageKey: `media/shot-${index + 1}.png` } }));
+    const inputGroup: CanvasNodeData = { id: "input-group", type: CanvasNodeType.Group, title: "输入组", position: { x: 0, y: 0 }, width: 500, height: 900,
+        metadata: { orderedGroup: true, groupSlots: images.map((image) => image.id) } };
+    const fixed: CanvasNodeData = { id: "fixed", type: CanvasNodeType.Image, title: "固定参考", position: { x: 0, y: 0 }, width: 100, height: 100,
+        metadata: { content: "fixed.png", storageKey: "media/fixed.png" } };
+    const loop: CanvasNodeData = { id: "loop", type: CanvasNodeType.Loop, title: "循环", position: { x: 600, y: 0 }, width: 380, height: 320,
+        metadata: { generationMode: "image", loopMediaMode: "auto", loopStart: 1, loopImageBatchSize: 1, prompt: "重绘" } };
+    const slots: CanvasNodeData[] = ["result-a", "result-b"].map((id, index) => ({ id, type: CanvasNodeType.Config,
+        title: `结果 ${index + 1}`, position: { x: 1100, y: index * 300 }, width: 340, height: 240,
+        metadata: { smart: true, generationMode: "image", loopOutputSlot: true, loopSourceId: loop.id } }));
+    const outputGroup: CanvasNodeData = { id: "output-group", type: CanvasNodeType.Group, title: "循环输出", position: { x: 1050, y: 0 }, width: 760, height: 600,
+        metadata: { orderedGroup: true, groupSlots: slots.map((slot) => slot.id), loopOutputGroup: true, loopSourceId: loop.id } };
+    const nodes = [inputGroup, ...images, fixed, loop, outputGroup, ...slots];
+    const connections = [
+        { id: "input-loop", fromNodeId: inputGroup.id, toNodeId: loop.id },
+        { id: "fixed-loop", fromNodeId: fixed.id, toNodeId: loop.id },
+        { id: "loop-output", fromNodeId: loop.id, toNodeId: outputGroup.id },
+    ];
+    const graph = buildCanvasGraphIndex(nodes, connections);
+    for (let index = 0; index < images.length; index += 1) {
+        const slot = slots[index % slots.length];
+        const context = buildNodeGenerationContext(slot.id, nodes, connections, "重绘", graph, {
+            index, total: images.length, nodeId: loop.id,
+            loopOutput: { loopNodeId: loop.id, roundIndex: index + 1, slotIndex: index, totalRounds: images.length,
+                slotNodeId: `output-slot-${index + 1}`, outputGroupId: outputGroup.id },
+        });
+        assert.deepEqual(context.loopInputImages.map((image) => image.storageKey), [`media/shot-${index + 1}.png`]);
+        assert.deepEqual(context.referenceImages.map((image) => image.storageKey), ["media/fixed.png"]);
+    }
+});
+
 test("循环素材从指定序号按批量前进，耗尽后不会从头重复", () => {
     const images: CanvasNodeData[] = ["a", "b", "c", "d"].map((name, index) => ({
         id: name, type: CanvasNodeType.Image, title: name, position: { x: 0, y: index * 100 }, width: 100, height: 100,
@@ -229,15 +307,18 @@ test("并行视频轮次传递本轮视频结果", () => {
 });
 
 test("循环提示词逐条轮换，并合并上游与本地内容", () => {
-    const prompt: CanvasNodeData = { id: "prompt", type: CanvasNodeType.Text, title: "上游", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "上游 A\n上游 B" } };
-    const loop: CanvasNodeData = { id: "loop", type: CanvasNodeType.Loop, title: "循环", position: { x: 200, y: 0 }, width: 380, height: 320, metadata: { loopStart: 2, loopCount: 2, loopPromptEnabled: true, loopPrompt: "本地 X\n本地 Y" } };
+    const prompts: CanvasNodeData[] = ["上游 A", "上游 B"].map((content, index) => ({ id: `prompt-${index + 1}`, type: CanvasNodeType.Text, title: `上游 ${index + 1}`, position: { x: 0, y: index * 120 }, width: 100, height: 100,
+        metadata: { groupId: "prompt-group", content } }));
+    const group: CanvasNodeData = { id: "prompt-group", type: CanvasNodeType.Group, title: "提示词组", position: { x: 0, y: 0 }, width: 240, height: 320,
+        metadata: { orderedGroup: true, groupSlots: prompts.map((prompt) => prompt.id) } };
+    const loop: CanvasNodeData = { id: "loop", type: CanvasNodeType.Loop, title: "循环", position: { x: 300, y: 0 }, width: 380, height: 320, metadata: { loopStart: 1, loopPromptEnabled: true, loopPrompt: "本地 X\n本地 Y" } };
     const target: CanvasNodeData = { id: "target", type: CanvasNodeType.Config, title: "目标", position: { x: 650, y: 0 }, width: 420, height: 540, metadata: { smart: true, generationMode: "image" } };
-    const nodes = [prompt, loop, target];
-    const connections = [{ id: "prompt-loop", fromNodeId: prompt.id, toNodeId: loop.id }, { id: "loop-target", fromNodeId: loop.id, toNodeId: target.id }];
-    const first = buildNodeGenerationInputs(target.id, nodes, connections, undefined, { index: 0, total: 3 });
-    const second = buildNodeGenerationInputs(target.id, nodes, connections, undefined, { index: 1, total: 3 });
-    assert.equal(first[0].type === "text" ? first[0].text : "", "上游 B\n\n本地 Y");
-    assert.equal(second[0].type === "text" ? second[0].text : "", "上游 A\n\n本地 X");
+    const nodes = [group, ...prompts, loop, target];
+    const connections = [{ id: "prompt-loop", fromNodeId: group.id, toNodeId: loop.id }, { id: "loop-target", fromNodeId: loop.id, toNodeId: target.id }];
+    const first = buildNodeGenerationInputs(target.id, nodes, connections, undefined, { index: 0, total: 2 });
+    const second = buildNodeGenerationInputs(target.id, nodes, connections, undefined, { index: 1, total: 2 });
+    assert.equal(first[0].type === "text" ? first[0].text : "", "上游 A\n\n本地 X");
+    assert.equal(second[0].type === "text" ? second[0].text : "", "上游 B\n\n本地 Y");
 });
 
 test("智能循环默认提示词在有上游提示词时不重复追加", () => {
