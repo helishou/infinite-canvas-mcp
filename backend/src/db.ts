@@ -1303,7 +1303,8 @@ export class BackendDatabase {
         // 先收口日志，再用 runtimeTaskId CAS 尝试更新画布投影；否则 CAS 失败会留下永久 running 日志。
         const currentLog = binding.generationLogId ? this.getGenerationLog(binding.generationLogId) : null;
         const actualSubmission = task.result?.actualSubmission && typeof task.result.actualSubmission === "object" ? task.result.actualSubmission as Record<string, unknown> : null;
-        const log = binding.generationLogId
+        // 生成日志可能已按保留策略清理；任务与画布绑定仍可独立完成回写。
+        const log = binding.generationLogId && currentLog
             ? this.updateGenerationLog(binding.generationLogId, {
                 status: task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "failed",
                 finishedAt: new Date().toISOString(),

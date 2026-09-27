@@ -184,7 +184,7 @@ test("拒绝输出修改时，同批合法文本增量与条件替换也完整�
 test("真实任务回写仍可落库并记录增量，旧任务不能覆盖已被接管的 Clip", (t) => {
     const db = fixture(t);
     const task = { id: "child1", status: "succeeded", progress: 100 } as RuntimeTask;
-    const binding = { projectId: "p", nodeId: "h3", segmentId: "s1" };
+    const binding = { projectId: "p", nodeId: "h3", segmentId: "s1", generationLogId: "pruned-log" };
     const output = { url: "new.mp4", storageKey: "new.mp4", type: "video" };
     const saved = db.writeBackH3Task(task, binding, output);
     assert.ok(saved);

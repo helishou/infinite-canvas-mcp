@@ -25,7 +25,7 @@ import { DirectImageBackend } from "./runtime/chatgpt-image.js";
 import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
 import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
-import { CanvasH3Runner } from "./canvas/h3-runner.js";
+import { boundH3ParentTaskIds, CanvasH3Runner } from "./canvas/h3-runner.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
 import { CanvasTextDispatcher } from "./canvas/text-dispatcher.js";
 import { CanvasVideoDispatcher } from "./canvas/video-dispatcher.js";
@@ -256,10 +256,10 @@ async function startBackendHttpServer() {
     () => canvasRealtime.focusedProjectId(),
   );
   // 先完整取出每种活动状态，再启动恢复循环；处理期间状态会变化，不能边处理边 OFFSET 分页。
-  const tasksWithStatus = (status: RuntimeTaskStatus) => {
+  const tasksWithStatus = (status: RuntimeTaskStatus, kind?: string) => {
     const found: ReturnType<typeof stores.tasks.list> = [];
     for (let offset = 0; ; offset += 500) {
-      const page = stores.tasks.list({ status, limit: 500, offset });
+      const page = stores.tasks.list({ status, kind, limit: 500, offset });
       found.push(...page);
       if (page.length < 500) return found;
     }
@@ -318,28 +318,22 @@ async function startBackendHttpServer() {
       )
         runningHub.resume(task.id);
   }
-  // 终态回写修复必须独立于上面的活动状态循环：succeeded/failed/cancelled 的任务
-  // 不在 tasksWithStatus("running"|"queued"|"awaiting_confirmation") 范围内，
-  // 放在循环体内永远不会被遍历到，节点/Clip 会长期停在 loading。
+  // 终态父任务只需修复仍绑定在画布上的节点/Clip。遍历全部历史父任务会在每次
+  // 启动时重复读取项目与事件，并重试早已收口（甚至日志已按保留策略清理）的任务。
+  for (const taskId of boundH3ParentTaskIds(stores.projects.list())) {
+    const task = stores.tasks.get(taskId);
+    if (task?.kind !== "canvas-h3-run" || !["succeeded", "failed", "cancelled"].includes(task.status)) continue;
+    void canvasH3Runner.reconcileTerminal(task).catch((error) =>
+      logger.warn("H3 终态节点回写修复失败", {
+        taskId: task.id,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+  // 子任务终态日志修复独立于活动状态恢复：日志可能在任务落终态后仍停在 running。
   for (const status of ["succeeded", "failed", "cancelled"] as const) {
-    for (const task of tasksWithStatus(status)) {
-      if (
-        task.kind === "canvas-h3-run" &&
-        ["succeeded", "failed", "cancelled", "awaiting_confirmation"].includes(task.status)
-      ) {
-        void canvasH3Runner
-          .reconcileTerminal(task)
-          .catch((error) =>
-            logger.warn("H3 终态节点回写修复失败", {
-              taskId: task.id,
-              error: error instanceof Error ? error.message : String(error),
-            }),
-          );
-      }
-      if (
-        task.kind === "comfyui:minimax-h3" ||
-        task.kind === "runninghub:minimax-h3"
-      ) {
+    for (const kind of ["comfyui:minimax-h3", "runninghub:minimax-h3"]) {
+      for (const task of tasksWithStatus(status, kind)) {
         const binding = task.params?.canvasBinding as
           | { generationLogId?: string }
           | undefined;

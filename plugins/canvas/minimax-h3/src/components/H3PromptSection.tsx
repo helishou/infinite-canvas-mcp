@@ -7,6 +7,9 @@ import { H3Icon } from "./H3Icon";
 import { StoryboardDialogueStrip } from "./StoryboardDialogueStrip";
 import type { StoryboardSpeakerOption } from "./StoryboardDialogueStrip";
 import { inferReferenceRole, refsForSegment, segmentRefsPatch, withSegmentRefs } from "../services/h3-data";
+import { sameRef } from "../services/h3-compatibility";
+import { orderedGroupStoryboardRefs } from "../services/h3-refs";
+import { storyboardShotMarkers } from "../services/h3-storyboard-markers";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { persistPromptCandidate, promptJobs, setPromptJob } from "../services/h3-prompt-jobs";
 import { buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, storyboardPromptFingerprint, stripGeneratedPromptSections, toSubjectDefinitions } from "../services/storyboard-prompt";
@@ -460,7 +463,7 @@ const STORYBOARD_CUE_PATTERN = /^Use the approved .+? from <Picture\s+(\d+)> as 
 
 function parseStoryboardDescription(description: string, imageRefs: H3Ref[], allRefs = imageRefs) {
   const normalizedDescription = normalizeLegacyReferenceTokens(description, allRefs);
-  const markers = [...normalizedDescription.matchAll(/\[Shot\s+(\d+)\](?:\s+At\s+(\d{1,2}:\d{2}(?:\.\d{1,3})?)[,，]?)?/giu)];
+  const markers = storyboardShotMarkers(normalizedDescription);
   if (!markers.length) return {
     openingDescription: normalizedDescription.trim(),
     shots: [{ id: crypto.randomUUID(), description: "", switchTime: "", transitionType: "cut" as const }],
@@ -911,6 +914,35 @@ export function H3PromptSection({
     setStoryboardError(null);
     return nextShots;
   };
+  const bindOrderedStoryboardGroup = (shotId: string, groupId: string) => {
+    if (!selected) return;
+    if (!storyboardShotsRef.current.some((shot) => shot.id === shotId)) return;
+    const nodes = ctx.getNodes();
+    const group = nodes.find((node) => node.id === groupId && node.type === "group" && node.metadata?.orderedGroup);
+    if (!group) { setStoryboardError("所选有序组已不存在，请重新选择。"); return; }
+    const images = orderedGroupStoryboardRefs(group, nodes, ctx.node.id, ctx.getConnections());
+    if (!images.length) { setStoryboardError("有序组内没有可用分镜图。"); return; }
+    const latestMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+    const segment = segmentsFor(latestMetadata).find((item) => item.id === selected.id);
+    if (!segment) { setStoryboardError("当前 Clip 已不存在，无法导入分镜图。"); return; }
+    const nextRefs = refsForSegment(segment);
+    for (const image of images) {
+      const index = nextRefs.findIndex((ref) => ref.type === "image" && sameRef(ref, image));
+      if (index < 0) nextRefs.push(image);
+      else nextRefs[index] = { ...nextRefs[index], role: "storyboard" };
+    }
+    const normalized = refsForSegment(withSegmentRefs(segment, nextRefs));
+    const bindingIds = images.map((image) => normalized.find((ref) => ref.type === "image" && sameRef(ref, image))?.bindingId).filter((id): id is string => Boolean(id));
+    if (bindingIds.length !== images.length) { setStoryboardError("分镜图引用未能完整登记，请重试。"); return; }
+    patchSelected(segmentRefsPatch(normalized));
+    updateStoryboardShots((shots) => {
+      const index = shots.findIndex((shot) => shot.id === shotId);
+      if (index < 0) return shots;
+      const first = { ...shots[index], pictureBindingId: bindingIds[0] };
+      const added = bindingIds.slice(1).map((pictureBindingId) => ({ id: crypto.randomUUID(), description: "", switchTime: "", preciseCut: false, transitionType: "cut" as const, pictureBindingId }));
+      return [...shots.slice(0, index), first, ...added, ...shots.slice(index + 1)];
+    });
+  };
   const updateStoryboardRetention = (bindingId: string, retentionLevel: H3ReferenceRetention) => {
     const next = { ...storyboardRetentionLevelsRef.current, [bindingId]: retentionLevel };
     storyboardRetentionLevelsRef.current = next;
@@ -1016,6 +1048,9 @@ export function H3PromptSection({
       </span>,
     }]
     : []);
+  const canvasNodes = storyboardMode ? ctx.getNodes() : [];
+  const orderedStoryboardGroups = canvasNodes.filter((node) => node.type === "group" && node.metadata?.orderedGroup)
+    .map((group) => ({ value: `ordered-group:${group.id}`, label: `导入有序组 · ${group.title || "未命名组"}` }));
 
   // 实体定义的视觉来源池：当前 Clip 的非分镜图片引用（道具/场景/角色等）。
   // 分镜图只用于逐镜「绑定分镜图」，不再作为实体视觉身份候选，避免污染 Subject 定义。
@@ -1753,7 +1788,7 @@ export function H3PromptSection({
       <div key="prompt-textarea-wrap" className={`minimax-prompt-translate-wrap${!isTranslated && selected ? " has-line-map" : ""}`}>
         {isTranslated && translation && translation.segmentId === selected?.id && translation.prompt === prompt
           ? <textarea readOnly value={translation.text} aria-label="中文翻译（只读）" />
-          : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
+          : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips clipReferenceTags speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
         <button
           key="prompt-translate"
           type="button"
@@ -1900,6 +1935,7 @@ export function H3PromptSection({
                       speakers={speakerRoster}
                       dialogue
                       chips
+                      clipReferenceTags
                       placeholder="填写全段统一的风格、时代、环境、画面和连续性要求，不写具体镜头动作"
                       className="minimax-collaborative-prompt nfh3-shot-editor nfh3-opening-editor"
                       style={{ minHeight: 80, height: "auto", fontSize: 15 }}
@@ -1924,14 +1960,19 @@ export function H3PromptSection({
                     size="small"
                     value={shot.pictureBindingId}
                     allowClear
-                    placeholder={storyboardPictureOptions.length ? "选择当前 Clip 引用的分镜图" : "请先在 Refs 中添加分镜图"}
+                    placeholder={storyboardPictureOptions.length || orderedStoryboardGroups.length ? "选择分镜图或有序组" : "请先在 Refs 中添加分镜图"}
                     options={[
                       ...storyboardPictureOptions.map(({ value, label }) => ({ value, label })),
+                      ...orderedStoryboardGroups,
                       ...(shot.pictureBindingId && !storyboardPictureOptions.some((option) => option.value === shot.pictureBindingId)
                         ? [{ value: shot.pictureBindingId, label: "已移除的分镜图（待重新绑定）" }]
                         : []),
                     ]}
                     onChange={(value) => {
+                      if (typeof value === "string" && value.startsWith("ordered-group:")) {
+                        bindOrderedStoryboardGroup(shot.id, value.slice("ordered-group:".length));
+                        return;
+                      }
                       updateStoryboardShots((shots) => shots.map((item) => item.id === shot.id ? { ...item, pictureBindingId: typeof value === "string" ? value : undefined } : item));
                     }}
                     aria-label={`为分镜 ${index + 1} 绑定分镜图`}
@@ -1966,6 +2007,7 @@ export function H3PromptSection({
                   onChange={(description) => updateStoryboardShots((shots) => shots.map((item) => item.id === shot.id ? { ...item, description } : item))}
                   references={storyboardEditorReferences}
                   chips
+                  clipReferenceTags
                   speakers={speakerRoster}
                   dialogue
                   placeholder="描述这个分镜，输入 @ 选择当前 Clip 引用的分镜图或人物"

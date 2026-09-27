@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { CharacterGroupParseError, h3RefCandidates, readCharacterGroupFromDrop } from "./h3-refs.ts";
+import { CharacterGroupParseError, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop } from "./h3-refs.ts";
 
 function transfer(payload: Record<string, unknown>) {
     const encoded = JSON.stringify(payload);
@@ -89,4 +89,23 @@ test("旧图片节点没有快照时沿生成输入连线回溯角色", () => {
         { id: "connection-2", fromNodeId: "config-1", toNodeId: "image-1" },
     ] as never);
     assert.deepEqual(candidates[0]?.ref.storyboardSubjectIds, ["character-1"]);
+});
+
+test("有序组按 groupSlots 导入全部可用分镜图，跳过非图片与失效槽位", () => {
+    const group = { id: "group-1", type: "group", metadata: { orderedGroup: true, groupSlots: ["board-b", "video", "missing", "board-a"] } } as never;
+    const boardA = { id: "board-a", type: "image", title: "分镜 A", metadata: { content: "https://media.test/a.png", storageKey: "image:a", groupId: "group-1" } } as never;
+    const boardB = { id: "board-b", type: "image", title: "分镜 B", metadata: { content: "https://media.test/b.png", storageKey: "image:b", groupId: "group-1" } } as never;
+    const video = { id: "video", type: "video", title: "视频", metadata: { content: "https://media.test/video.mp4", groupId: "group-1" } } as never;
+    const refs = orderedGroupStoryboardRefs(group, [boardA, group, video, boardB], "h3-1");
+    assert.deepEqual(refs.map((ref) => [ref.nodeId, ref.storageKey, ref.role]), [
+        ["board-b", "image:b", "storyboard"],
+        ["board-a", "image:a", "storyboard"],
+    ]);
+});
+
+test("旧有序组无 groupSlots 时按成员顺序导入", () => {
+    const group = { id: "group-1", type: "group", metadata: { orderedGroup: true, groupSlots: [] } } as never;
+    const boardA = { id: "board-a", type: "image", metadata: { content: "https://media.test/a.png", groupId: "group-1" } } as never;
+    const boardB = { id: "board-b", type: "image", metadata: { content: "https://media.test/b.png", groupId: "group-1" } } as never;
+    assert.deepEqual(orderedGroupStoryboardRefs(group, [boardB, group, boardA], "h3-1").map((ref) => ref.nodeId), ["board-b", "board-a"]);
 });

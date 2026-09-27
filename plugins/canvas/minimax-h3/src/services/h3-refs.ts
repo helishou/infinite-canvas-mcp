@@ -176,6 +176,26 @@ export function h3RefCandidates(nodes: CanvasNodeData[], selfId: string, allNode
     return out.filter((item, index, all) => all.findIndex((other) => sameRef(other.ref, item.ref)) === index);
 }
 
+/** Expand an ordered storyboard group by its persisted slot order, not canvas position. */
+export function orderedGroupStoryboardRefs(group: CanvasNodeData, allNodes: CanvasNodeData[], selfId: string, connections: CanvasConnection[] = []): H3Ref[] {
+    if (group.type !== "group" || group.metadata?.orderedGroup !== true) return [];
+    const byId = new Map(allNodes.map((node) => [node.id, node]));
+    const slots = group.metadata.groupSlots;
+    const ids = Array.isArray(slots) && slots.length
+        ? slots.filter((id): id is string => typeof id === "string")
+        : allNodes.filter((node) => node.metadata?.groupId === group.id && node.type !== "group").map((node) => node.id);
+    const seen = new Set<string>();
+    const members = ids.flatMap((id) => {
+        if (seen.has(id)) return [];
+        seen.add(id);
+        const node = byId.get(id);
+        return node && node.type !== "group" ? [node] : [];
+    });
+    return h3RefCandidates(members, selfId, allNodes, connections)
+        .filter((candidate) => candidate.ref.type === "image")
+        .map((candidate) => ({ ...candidate.ref, role: "storyboard" as const }));
+}
+
 export class CharacterGroupParseError extends Error {
     readonly code = "character_group_source_missing";
     constructor(message: string) {

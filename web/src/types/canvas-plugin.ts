@@ -118,6 +118,8 @@ export type CanvasSpeakerOption = { id: string; name?: string; previewUrl?: stri
 export type CanvasTextEditorProps = {
     projectId: string; target: CanvasTextTarget; placeholder?: string;
     references?: CanvasTextReference[]; chips?: boolean;
+    /** H3 Clip only: mark unresolved <Picture N> and related tags for rebinding. */
+    clipReferenceTags?: boolean;
     /** 台词说话人名册：菜单/徽标按此显示角色名与头像；省略时回退 S1–S6。 */
     speakers?: CanvasSpeakerOption[];
     /** Local rich text editor for transient fields that are persisted through their owning document. */

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
 
-import type { RuntimeTask } from "../db.js";
+import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { RunningHubBackend } from "../runtime/runninghub.js";
@@ -39,6 +39,27 @@ export type H3ConfirmationAction = { action: "confirm" | "keep_first_pass" | "di
 
 const H3_DEFAULTS_KEY = "plugin:minimax-h3:defaults:v1";
 const logger = createLogger("h3-runner");
+
+/** 只重放仍被画布节点或 Clip 绑定的父任务；已收口的历史任务不会再改变画布。 */
+export function boundH3ParentTaskIds(projects: CanvasProject[]): Set<string> {
+    const ids = new Set<string>();
+    for (const project of projects) {
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+        for (const node of nodes) {
+            const metadata = recordOf(node.metadata);
+            const nodeTaskId = String(metadata.runtimeTaskId || "");
+            if (nodeTaskId) ids.add(nodeTaskId);
+            const segments = Array.isArray(metadata.segments) ? metadata.segments : [];
+            for (const segment of segments) {
+                const clip = recordOf(segment);
+                const parentTaskId = String(clip.parentTaskId || "");
+                const status = String(clip.status || "");
+                if (parentTaskId && (clip.runtimeTaskId || ["queued", "loading", "awaiting_confirmation"].includes(status))) ids.add(parentTaskId);
+            }
+        }
+    }
+    return ids;
+}
 
 const H3_PARAM_KEYS = [
     "mode", "taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "steps", "denoise", "noiseSeedMode", "noiseSeed", "seed",

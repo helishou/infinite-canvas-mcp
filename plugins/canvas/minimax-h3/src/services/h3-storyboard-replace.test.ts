@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { refsForSegment, replaceSegmentReference, withSegmentRefs } from "./h3-data";
-import { assignStoryboardShotRef, dropUnboundStoryboardReferences, rebindStoryboardShot, reorderStoryboardShots, removeStoryboardShot, storyboardTrackItems } from "./h3-storyboard-track";
+import { assignStoryboardShotRef, assignStoryboardShotRefs, dropUnboundStoryboardReferences, rebindStoryboardShot, reorderStoryboardShots, removeStoryboardShot, storyboardTrackItems } from "./h3-storyboard-track";
 import { remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 import type { H3Ref, H3Segment } from "../types";
 
@@ -59,6 +59,33 @@ test("给前面的空分镜绑图时，新增分镜图排在后续分镜图之�
     const updated = assignStoryboardShotRef(withoutFirst, first.id, { url: "https://media.test/board-new.png", storageKey: "image:board-new", type: "image", name: "分镜 新" });
     assert.deepEqual(boardsOf(updated).map((item) => item.image).slice(0, 2), ["image:board-new", "image:board-b"]);
     assert.deepEqual(refsForSegment(updated).filter((ref) => ref.role === "storyboard").map((ref) => ref.storageKey), ["image:board-new", "image:board-b", "image:board-a"]);
+});
+
+test("有序组绑定空分镜时依次插入全部图片并保留后续分镜", () => {
+    const segment = storyboardSegment();
+    const [first, second] = storyboardTrackItems(segment);
+    const withBlank = { ...segment, storyboardShots: [
+        { id: first.id, duration: first.duration },
+        { id: second.id, duration: second.duration, referenceBindingId: second.referenceBindingId },
+    ] };
+    const updated = assignStoryboardShotRefs(withBlank, first.id, [
+        { url: "https://media.test/new-b.png", storageKey: "image:new-b", type: "image", name: "B" },
+        { url: "https://media.test/new-a.png", storageKey: "image:new-a", type: "image", name: "A" },
+    ]);
+    assert.deepEqual(boardsOf(updated).slice(0, 3).map((item) => item.image), ["image:new-b", "image:new-a", "image:board-b"]);
+    assert.equal(boardsOf(updated)[0].id, first.id);
+    assert.equal(boardsOf(updated)[2].id, second.id);
+    assert.equal(boardsOf(updated)[0].duration, boardsOf(updated)[1].duration);
+    assert.ok(boardsOf(updated).every((item) => item.duration >= 0.5));
+    assert.equal(Number(boardsOf(updated).reduce((sum, item) => sum + item.duration, 0).toFixed(4)), 8);
+    assert.deepEqual(refsForSegment(updated).filter((ref) => ref.role === "storyboard").slice(0, 3).map((ref) => ref.storageKey), ["image:new-b", "image:new-a", "image:board-b"]);
+});
+
+test("有序组图片数超过 Clip 可容纳的最短分镜时不写入部分结果", () => {
+    const segment = { ...storyboardSegment(), duration: 1 };
+    const first = storyboardTrackItems(segment)[0];
+    const refs = Array.from({ length: 3 }, (_, index) => ({ url: `https://media.test/${index}.png`, type: "image" as const, name: String(index) }));
+    assert.equal(assignStoryboardShotRefs(segment, first.id, refs), segment);
 });
 
 test("从画布替换分镜图后，分镜卡停在原位置且图片换成新素材", () => {

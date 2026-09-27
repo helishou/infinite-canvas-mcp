@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { appendPreviousReference, buildH3ContinuationTask, collectH3Refs, resolveClipContinuation } from "./h3-runner.js";
+import { appendPreviousReference, boundH3ParentTaskIds, buildH3ContinuationTask, collectH3Refs, resolveClipContinuation } from "./h3-runner.js";
+
+test("启动恢复只选仍绑定在节点或 Clip 上的 H3 父任务", () => {
+    const projects = [{ id: "p", nodes: [
+        { id: "h3", metadata: { runtimeTaskId: "active-parent", segments: [
+            { id: "done", status: "success", runtimeTaskId: "", parentTaskId: "" },
+            { id: "settled-stale-id", status: "success", runtimeTaskId: "", parentTaskId: "settled-parent" },
+            { id: "loading", status: "loading", runtimeTaskId: "child", parentTaskId: "clip-parent" },
+        ] } },
+        { id: "image", metadata: { runtimeTaskId: "other-task" } },
+    ] }];
+    assert.deepEqual([...boundH3ParentTaskIds(projects)], ["active-parent", "clip-parent", "other-task"]);
+    assert.deepEqual([...boundH3ParentTaskIds([{ id: "settled", nodes: [{ id: "h3", metadata: { segments: [{ status: "success" }] } }] }])], []);
+});
 
 // 回归防线：链式续跑曾把上一段成品静默塞进下一段的「视频1（参考视频）」——
 // 旧实现曾把 motionContextEnabled 误解为上一段成品视频注入开关。

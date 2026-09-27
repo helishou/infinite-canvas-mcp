@@ -115,6 +115,25 @@ test("H3 random seed and legacy LoRA aliases become the values submitted to V15"
     assert.deepEqual(summary.loras, [{ name: "Minimax\\minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors", strength: 0.75 }]);
 });
 
+test("H3 LoRA 强度超出 V15 节点范围时在编译期夹紧，而不是提交给 ComfyUI 后被 400 拒绝", async () => {
+    // 真实故障：clip 里 LoRA3 强度存成 7.0，V15 节点上限 4.0，
+    // ComfyUI /prompt 直接返回 HTTP 400 prompt_outputs_failed_validation。
+    const graph = await buildNativeNanFengV15Workflow(
+        { prompt: "@图片1", references: ["reference.png"] },
+        {
+            mode: "ref2va", seed: 123, realtimePreviewEnabled: false,
+            loraSlots: [
+                { name: "Minimax\\minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors", strength: 0.75, enabled: true },
+                { name: "H3_speed_slider_1.1.safetensors", strength: 7, enabled: true },
+                { name: "Minimax\\Bunny_weapon_combatV1.safetensors", strength: -9, enabled: true },
+            ],
+        }, upload, "http://comfy.local", new AbortController().signal,
+    );
+    assert.equal(graph.nf_v15.inputs["LoRA1强度"], 0.75);
+    assert.equal(graph.nf_v15.inputs["LoRA2强度"], 4);
+    assert.equal(graph.nf_v15.inputs["LoRA3强度"], -4);
+});
+
 test("H3 TE acceleration uses a graph that contains the visible TE patcher", async () => {
     const graph = await buildNativeNanFengV15Workflow(
         { prompt: "@图片1", references: ["reference.png"] },

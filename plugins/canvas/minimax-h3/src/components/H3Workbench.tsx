@@ -5,12 +5,12 @@ import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
 import { applyCharacterGroupEdits, inferReferenceRole, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
-import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
+import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { clipRuntimeState } from "../services/h3-clip-runtime";
 import { h3ThemeVars } from "../h3-theme";
-import { alignStoryboardReferenceOrder, assignStoryboardShotRef, dropUnboundStoryboardReferences, rebindStoryboardShot, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
+import { alignStoryboardReferenceOrder, assignStoryboardShotRef, assignStoryboardShotRefs, dropUnboundStoryboardReferences, rebindStoryboardShot, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, H3_TIMELINE_MIN, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
@@ -300,16 +300,29 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         if (!node || node.id === ctx.node.id) return;
         const segment = segments.find((item) => item.id === pick.segmentId);
         if (!segment) return;
-        // 空分镜绑图：取选中节点的第一张图片（角色节点取主服装图），以 storyboard 职责绑到该分镜
+        const groupImages = node.type === "group" ? orderedGroupStoryboardRefs(node, ctx.getNodes(), ctx.node.id, ctx.getConnections()) : [];
+        if (node.type === "group" && !node.metadata?.orderedGroup) {
+            message.warning("请选择有序组以按槽位顺序导入分镜图");
+            return;
+        }
+        // 空分镜绑图：有序组按槽位批量导入，单节点仍取首张图片（角色节点取主服装图）。
         if (pick.shotId) {
+            if (node.type === "group") {
+                if (!groupImages.length) { message.warning("有序组内没有可用分镜图"); return; }
+                const updated = assignStoryboardShotRefs(segment, pick.shotId, groupImages);
+                if (updated === segment) { message.warning("当前 Clip 时长不足以容纳组内所有分镜图，每张至少需要 0.5 秒"); return; }
+                commitSegmentChange(updated, true);
+                return;
+            }
             const shotImage = node.type === "character"
                 ? (() => { const group = readCharacterGroupFromNode(node); return group?.outfits[0]; })()
                 : h3RefCandidates([node], ctx.node.id, ctx.getNodes(), ctx.getConnections()).map((item) => item.ref).find((ref) => ref.type === "image");
-            if (!shotImage?.url) { message.warning("所选节点没有可用图片，未绑定分镜"); return; }
+            if (!shotImage?.url && !shotImage?.storageKey) { message.warning("所选节点没有可用图片，未绑定分镜"); return; }
             commitSegmentChange(assignStoryboardShotRef(segment, pick.shotId, { ...shotImage, type: "image" }), true);
             return;
         }
         if (pick.replaceRef) {
+            if (node.type === "group") { message.warning("替换单张参考时请选择一张图片节点"); return; }
             const current = refsForSegment(segment);
             const oldIndex = current.findIndex((ref) => pick.replaceRef?.bindingId ? ref.bindingId === pick.replaceRef.bindingId : sameRef(ref, pick.replaceRef!));
             if (oldIndex < 0) return;
@@ -359,6 +372,11 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 commitSegmentChange(updated, true);
                 return;
             }
+        }
+        if (node.type === "group") {
+            if (!groupImages.length) { message.warning("有序组内没有可用分镜图"); return; }
+            addNodeRefs(pick.segmentId, pick.slotIndex, groupImages);
+            return;
         }
         addNodeRefs(pick.segmentId, pick.slotIndex, h3RefCandidates([node], ctx.node.id, ctx.getNodes(), ctx.getConnections()).map((item) => item.ref).filter((ref) => pick.types.includes(ref.type)));
     };

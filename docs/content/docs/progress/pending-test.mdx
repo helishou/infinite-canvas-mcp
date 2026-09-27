@@ -5,6 +5,10 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Local Backend startup
+
+- Start `npm run dev:backend` with a canvas that has accumulated H3 history. The Backend health check should become available promptly, and opening the canvas should connect without waiting for all historical H3 tasks to replay. A terminal H3 task still bound to a node or Clip should finish its saved writeback after restart, even if its older generation log has been pruned.
+
 ## Canvas video comparison
 
 - On a canvas with at least two video nodes, open one video's toolbar and choose Compare. The canvas should enter node selection, highlight other video nodes, and allow Escape or the top hint to cancel without opening a dialog. Click another video node to open the comparison with that video already selected; non-video nodes and the source video should not open it. Add or remove more videos inside the dialog without changing canvas nodes.
@@ -17,8 +21,14 @@ description: Implemented changes that still need manual verification
 - While Backend still has an older model catalog, type `H3_speed_slider_1.1.safetensors` into a LoRA slot and press Enter. The slot should enable and retain that exact ComfyUI relative filename after reopening the Clip.
 - Search for `speed_slider` in the LoRA section. All LoRA slot dropdowns should show only matching filenames; clearing the search should restore the full list without changing a selected slot. Typing a complete relative filename directly in a slot should still work.
 
+## Smart generation and H3 Clip reference display
+
+- Type or paste `<Picture 1>` in a regular smart generation prompt in image, video, audio, or text mode. It should remain plain text without a red "missing Clip reference" chip; `@` resource suggestions should still work. In an H3 Clip prompt or storyboard editor, unresolved `<Picture N>` and `<Subject N>` tags should still show clickable repair chips.
+
 ## H3 storyboard image and Picture order
 
+- Paste a prompt with 12 line-opening `[Shot X]` labels, inline `shared by [Shot X]` composite storyboard references, and shot references in other sections into an H3 Clip. The storyboard editor should show only the 12 line-opening shots from `detailed_description`. Save and reopen it to confirm the shot count, descriptions, and inline composite references remain intact.
+- Create an ordered canvas group with several storyboard images and rearrange its slots. Pick that group from an empty H3 storyboard card: every usable image should enter consecutive cards in slot order, ahead of existing later cards. Also choose the group in the storyboard prompt editor's "Bind storyboard image" selector: the images should join the current Clip and bind to consecutive shots. Refresh and compare the track, references, and Picture order. Non-image members and stale slots should be skipped. If the Clip cannot give every storyboard card at least 0.5 seconds, track import should report the limit without a partial write.
 - Bind three storyboard images to one Clip, then move the third storyboard card before the first, or bind a later card before an earlier empty card. Storyboard images in the reference list should follow the storyboard track, while each `<Picture N>` tag still points to its original image and other image references keep their slots.
 - For an existing Clip with mismatched order, complete the storyboard editor or write its shot bindings with `h3_write_storyboard_prompt`. Check that storyboard and Picture order agree. Refresh and compare the track, reference list, and actual reference submission before generation.
 

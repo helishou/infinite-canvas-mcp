@@ -5,6 +5,7 @@ import type { H3PromptSection } from "../../../../../canvas-agent/src/plugins/mi
 import { stripDuplicateTransition } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
 import { orderStoryboardImageReferences, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 import { sameRef } from "./h3-compatibility";
+import { storyboardShotLabelMarkers } from "./h3-storyboard-markers";
 import { inferReferenceRole, refsForSegment, withSegmentRefs } from "./h3-data";
 
 export const H3_STORYBOARD_MIN_DURATION = 0.5;
@@ -237,6 +238,43 @@ export function assignStoryboardShotRef(segment: H3Segment, shotId: string, ref:
     return alignStoryboardReferenceOrder(withSegmentRefs({ ...segment, storyboardModeEnabled: true, storyboardShots }, nextRefs));
 }
 
+/** Bind a group at one storyboard card and insert its remaining frames immediately after it. */
+export function assignStoryboardShotRefs(segment: H3Segment, shotId: string, refs: H3Ref[]): H3Segment {
+    const images = refs.filter((ref, index) => ref.type === "image" && (ref.url || ref.storageKey)
+        && refs.findIndex((other) => other.type === "image" && sameRef(other, ref)) === index);
+    if (!images.length) return segment;
+    if (images.length === 1) return assignStoryboardShotRef(segment, shotId, images[0]);
+    const items = storyboardTrackItems(segment);
+    const targetIndex = items.findIndex((item) => item.id === shotId);
+    if (targetIndex < 0 || items.length + images.length - 1 > Math.max(0.5, Number(segment.duration || 1)) / H3_STORYBOARD_MIN_DURATION + 1e-6) return segment;
+    const target = items[targetIndex];
+    const newIds = images.slice(1).map(() => `storyboard-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`);
+    const expanded = items.flatMap((item, index) => index === targetIndex
+        ? [item, ...newIds.map((id) => ({ id, duration: 0, ref: undefined, referenceBindingId: undefined }))]
+        : [item]);
+    const splitDuration = target.duration / images.length;
+    const durationById = new Map<string, number>();
+    if (splitDuration >= H3_STORYBOARD_MIN_DURATION) {
+        items.forEach((item) => durationById.set(item.id, item.id === shotId ? splitDuration : item.duration));
+        newIds.forEach((id) => durationById.set(id, splitDuration));
+    } else {
+        const total = items.reduce((sum, item) => sum + item.duration, 0);
+        const extra = total - expanded.length * H3_STORYBOARD_MIN_DURATION;
+        expanded.forEach((item) => durationById.set(item.id, H3_STORYBOARD_MIN_DURATION + extra * (item.id === shotId || newIds.includes(item.id) ? splitDuration : item.duration) / total));
+    }
+    let updated: H3Segment = {
+        ...segment,
+        storyboardModeEnabled: true,
+        storyboardShots: expanded.map((item) => ({
+            id: item.id,
+            duration: durationById.get(item.id)!,
+            ...(item.ref?.bindingId ? { referenceBindingId: item.ref.bindingId } : {}),
+        })),
+    };
+    for (const [index, ref] of images.entries()) updated = assignStoryboardShotRef(updated, index ? newIds[index - 1] : shotId, ref);
+    return updated;
+}
+
 const PROMPT_SECTION_END = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description|storyboard_timeline):/mi;
 
 function removeLegacyTimelineSection(prompt: string) {
@@ -261,7 +299,7 @@ function normalizeLegacyPictureTokens(content: string, imageRefs: H3Ref[]) {
 }
 
 function promptShotsOf(content: string, storyboardIds: Set<string>, imageRefs: H3Ref[]): { opening: string; shots: PromptShot[] } {
-    const markers = [...content.matchAll(/\[Shot\s+\d+\]/giu)];
+    const markers = storyboardShotLabelMarkers(content);
     if (!markers.length) return { opening: content.trim(), shots: [] };
     const shots = markers.map((marker, index) => {
         const start = marker.index! + marker[0].length;
