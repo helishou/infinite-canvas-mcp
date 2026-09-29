@@ -27,6 +27,8 @@ description: >
 | 分镜关键帧 | 文字分镜表判定某镜需要新图，或需要检查、重做静态分镜图 | [分镜关键帧](subskills/canvas-video-storyboard-frames/SKILL.md) | 需要的关键帧已验收，跳过镜头有明确依据 |
 | Clip 视频 | 需要编写 H3 提示词，或生成、检查、返修分段视频 | [Clip 视频](subskills/canvas-video-clip-production/SKILL.md) | 默认完成任务终态、媒体落库/可访问性及 `taskId`/`storageKey` 记录；只有用户要求质量验收时才以验收及承接作为完成条件 |
 
+**题材叠加层**（不是阶段）：用户点名打斗 / 动作戏 / 元素对轰 / 召唤 / 长镜头 / 赛车追车时，在当前阶段之上叠加读取 [动作片题材](subskills/canvas-video-action-camera/SKILL.md)。它的触发关键词、加载顺序与冲突裁决都在那份文件里；跨阶段通用规则的真值在 `references/action-camera-principles.md`，题材玩法在 `references/action-camera-playbook.md`，**按小节名引用、不通读**。叠加层不新增阶段、不改变阶段顺序、不改变 Clip 默认只做技术性收口的口径。题材密度与 `references/prevention-by-construction.md` §四 的 H3 段内镜数预算冲突时，预算为默认路径，越界需用户显式授权并在 `storyboard.md` 记风险。
+
 用户明确指定阶段时直接进入该阶段；不要因为总流程存在就重做已获批上游。若当前阶段的硬输入缺失，停在最早的缺失项并说明缺什么。用户只要求规划、检查、连线、写提示词或试跑一张时，不得自动跨到生成、批量运行或下一阶段。
 
 验收不是独立阶段。每个子 Skill 必须完成本阶段所需的证据回读和状态记录；Clip 视频生成后默认只做技术性收口，不主动检查或验收媒体质量、不评分、不返修、不要求用户确认。只有用户明确要求时才执行 Clip 质量检查、返修或逐项确认。其他阶段仍按各自子 Skill 的验收要求执行；若用户要求逐项确认，自检通过后仍停在当前阶段等待用户，不能把自检自动升级为用户确认。

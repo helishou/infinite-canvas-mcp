@@ -76,6 +76,8 @@ Soft optical diffusion with a natural focus hierarchy. Broad [light source / dir
 7. 色卡 HEX、曝光、材质、按景别安排的景深与默认柔光质感；胶片颗粒仅按项目要求添加。
 8. 针对本镜的排除项。
 
+9. 本镜的风力档位与布料 / 发丝状态，以及克制的面部读法——英文定稿见 [通用原则 § 四 · 表情克制](../../references/action-camera-principles.md) 与 [§ 五 · 布料与发丝物理](../../references/action-camera-principles.md)。对话戏同样适用，不需要用户点名。静帧只写**当前档位**的状态，不写变化过程，也不让风吹出「动作已完成」的姿态。
+
 ## 提交前闸门
 
 - 从画布实时回读目标 smart config 的 `metadata.prompt` 与 `metadata.composerContent`，阻断 `DIALOGUE / DELIVERY`、`Dialogue:`、`Delivery:`、`AUDIO INTENT`、`声音/音效/BGM`、`DYNAMIC EXECUTION`、`planned duration` 等视频/声音字段。
@@ -90,6 +92,16 @@ Soft optical diffusion with a natural focus hierarchy. Broad [light source / dir
 - 为每张图使用独立、稳定、带版本的幂等键，保存真实 `directTasks[].taskId`。用有界 `canvas_wait_tasks` 收口，终态按精确任务 ID 核对。
 - 成功必须同时具备：`status=succeeded`、真实 storage key、像素尺寸、目标节点、prompt 版本、generation log 中真实参考输入，以及生成前后布局完全一致。
 - 失败时先判断参考选择、职责冲突、构图、色彩或过渡描述的主要问题，一次只修一个主要问题。
+
+## 禁漫画式效果线
+
+线路类图形特效整条禁止——不是降配额，是不许出现：集中线 / 速度线 / 效果线 / 辐射线 / 放射线；贴在人物或笔画边缘的冲击线 / 擦布线 / 爆炸线。英文自查：`radial speed lines` / `speed lines` / `action lines` / `impact lines` / `motion lines` / `converging lines`。
+
+理由：它们是贴在图上的图形，不是画面里真实存在的东西，一出现就把 3D CG 物理质感拉回漫画分格，还天生抢眼。
+
+速度感改由四条承担（都不贴图）：高速的身体或技能拉成一道 motion blur（`a single blurred streak`）；元素自己拖出的形体；同一肢体相邻帧的 2–3 个半透明影子（受配额：单镜 ≤2 道、全片 ≤3 镜）；镜头语言（横移跟拍 · 被甩开再追上 · 贴地低角 · 镜头受击后仰）。
+
+自查：中英词表各扫一遍，命中即报错（否定句放行——规则段自己写「不许效果线」不算违规）。
 
 ## 关键帧验收与返修
 
