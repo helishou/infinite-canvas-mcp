@@ -82,11 +82,11 @@ description: 把已确认剧情、资产、站位与色彩基准转成可执行�
 
 ### Temporal storyboard continuity：时序分镜连续性
 
-（简要指向）相邻镜头需要保留前一张已接受的分镜作为连续参考时，详见 [references/prevention-by-construction.md](../references/prevention-by-construction.md) 的对应小节（含「事前防范」与「分镜装配」）。
+每格写三态：`开场状态 / 动作与过程 / 收尾状态`；开场状态必须显式复述上一格的收尾，第 1 格写「本段开场」。逐格跟踪的可变状态：每个人物的位置、姿态、重心与朝向、头部朝向与视线落点，以及关键道具的物理状态（对折 / 摊平 / 在谁手里）。任何姿态或道具状态的变化必须在它发生的那一格里有明确动作描写，不能两格之间无声跳变。相邻镜头需要保留前一张已接受的分镜作为连续参考时，只在它已视觉验收且确实继承同一人物、道具或空间状态时才引用。完整写法见 [storyboard-design § 三 · 每格写三态，后格开场 = 前格收尾](../../references/storyboard-design.md)。
 
 ### Verification and repair：核对与返修
 
-（简要指向）按源 CSV → manifest → 画布节点 → 任务/日志 → 真实媒体五层顺序逐级核对；图像与源冲突时按"源错→修复源/manifest / manifest 漏→补 prompt / 参考或工作流错→修绑定 / 模型错→换幂等键"分类处置。完整流程见 [references/prevention-by-construction.md](../references/prevention-by-construction.md)。
+按源 CSV → manifest → 画布节点 → 任务/日志 → 真实媒体五层顺序逐级核对；图像与源冲突时按"源错→修复源/manifest / manifest 漏→补 prompt / 参考或工作流错→修绑定 / 模型错→换幂等键"分类处置。发现问题时只回修镜头设计或明确退回哪个上游，**不生成图片来掩盖设计缺口**；一次只修一个主要原因。关键帧层的具体验收与返修见 [分镜关键帧 § 关键帧验收与返修](../canvas-video-storyboard-frames/SKILL.md)。
 
 ## 对话镜头
 
