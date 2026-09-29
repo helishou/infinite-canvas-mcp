@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { stripGeneratedPromptSections } from "./storyboard-prompt";
+import { buildPromptEnhancementInput, stripGeneratedPromptSections } from "./storyboard-prompt";
 
-test("增强提示词前剥离上一轮生成的结构化段落，避免幻觉主体被当作用户事实回喂", () => {
+test("提取自由文本时不把旧结构化段落标成用户明确事实", () => {
     // 取自真实 Clip10（segment-05a682da…）：没有人物图，增强后 prompt 里却多了一个主体。
     const stored = `subject_definitions:
 <Subject 1> is the slender woman in the snow courtyard, visible through her pale hands and her ice-blue-gray thick winter cloak with white fur trim and pale-blue patterned cuff, wearing a warm ivory-white crossed-collar inner skirt, a gray-blue narrow woven belt, and a plain silver hairpin. Her identity is anchored across the snow and study phases; she does not need to be visible in the study phase, only her hand and sleeve.
@@ -26,7 +26,7 @@ None.`;
 
     const stripped = stripGeneratedPromptSections(stored);
 
-    // 生成产物里的段落名和主体都不该再作为「用户原文」回喂给模型。
+    // 旧稿会作为待改写原文传入，但不能混进“用户明确自由文本”字段。
     assert.doesNotMatch(stripped, /subject_definitions:/);
     assert.doesNotMatch(stripped, /retention_analysis:/);
     assert.doesNotMatch(stripped, /overall_soundscape:/);
@@ -75,4 +75,19 @@ test("纯自由文本（无任何生成段落）原样保留", () => {
 
 test("只有生成段落时剥离后为空串", () => {
     assert.equal(stripGeneratedPromptSections("summary:\nonly summary."), "");
+});
+
+test("增强请求包含编辑器中的完整原提示词，即使它只有 H3 六段结构", () => {
+    const original = "subject_definitions:\n<Subject 1> is Phoebe.\n\nsummary:\nMeet at the harbor.\n\ndetailed_description:\n[Shot 1] She says: <d>[Chinese] 好吗？</d>";
+    const input = buildPromptEnhancementInput({ currentPrompt: original, manifest: "Picture 1: Phoebe character card" });
+    assert.ok(input.includes(`Original prompt from the editor (rewrite this complete draft):\n${original}`));
+    assert.match(input, /<d>\[Chinese\] 好吗？<\/d>/);
+    assert.match(input, /Reference manifest \(fixed numbering; do not reorder\):\nPicture 1:/);
+});
+
+test("自由文本与结构化旧稿同时存在时明确优先级，并保留完整旧稿供改写", () => {
+    const currentPrompt = "菲比先认出漂泊者。\n\nsummary:\nAn older generated description.";
+    const input = buildPromptEnhancementInput({ currentPrompt, manifest: "None" });
+    assert.match(input, /User-authored free text \(higher priority than the existing draft\):\n菲比先认出漂泊者。/);
+    assert.ok(input.includes(`Original prompt from the editor (rewrite this complete draft):\n${currentPrompt}`));
 });

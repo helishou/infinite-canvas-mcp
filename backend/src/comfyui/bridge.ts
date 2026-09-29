@@ -12,6 +12,7 @@ import { splitVideo } from "./video-segment.js";
 import { buildMotionContextClip } from "./motion-context.js";
 import { assertIndependentMediaRoot, comfyInputName, copyComfyInput, resolveComfyRoot } from "./local-root.js";
 import { normalizeH3Params, resolveH3Seed, clampH3LoraStrength } from "../canvas/h3-params.js";
+import { assertH3LatentUpscalerReady } from "./h3-latent-upscaler-preflight.js";
 
 /** ComfyUI Bridge 的总后台侧依赖：任务走 task store，URL 走 setting store。 */
 export type ComfyUiDeps = {
@@ -99,8 +100,13 @@ export function summarizeH3Workflow(workflow: Record<string, any>, promptId: str
     if (native) {
         const requestedRatio = String(native["画面比例"] || "16:9");
         const ratio = normalizeH3AspectRatio(requestedRatio);
-        const megapixels = Number(native["百万像素"] || 0.4), multiple = Number(native["尺寸倍数"] || 32);
-        const width = Math.max(32, Math.round(Math.sqrt(megapixels * 1024 * 1024 * ratioWidth(ratio) / ratioHeight(ratio)) / multiple) * multiple);
+        const megapixels = Number(native["百万像素"] || 0.4);
+        // V15 inherits V8.1's decimal-MP, 16-pixel latent grid and H3 alignment rule.
+        // The older 1024²/sizeMultiple estimate can report 672×1184 for an actual 672×1216 latent.
+        const latentAlign = Math.max(1, Number(native["H3潜空间对齐"] || 2));
+        const scale = Math.sqrt(megapixels * 1_000_000 / (ratioWidth(ratio) * ratioHeight(ratio)));
+        const width = Math.ceil(Math.ceil(ratioWidth(ratio) * scale / 16) / latentAlign) * latentAlign * 16;
+        const height = Math.ceil(Math.ceil(ratioHeight(ratio) * scale / 16) / latentAlign) * latentAlign * 16;
         const loras = Array.from({ length: 8 }, (_, index) => ({ name: String(native[`LoRA${index + 1}`] || ""), strength: Number(native[`LoRA${index + 1}强度`] ?? 1), enabled: native[`LoRA${index + 1}启用`] === true })).filter((item) => item.enabled && item.name && item.name !== "未选择").map(({ name, strength }) => ({ name, strength }));
         const manual = native["V81一采使用手动Sigma"] === true ? native["H3完整Sigma序列"] : native["西格玛模式"] === "手动序列" ? native["手动西格玛"] : "";
         const mediaInputs = { images: pickNativeSlots(native, "图片", 9), videos: pickNativeSlots(native, "视频", 3), audios: pickNativeSlots(native, "音频", 3) };
@@ -112,7 +118,7 @@ export function summarizeH3Workflow(workflow: Record<string, any>, promptId: str
                 : String(native.SageAttention || dedicatedAttention || "disabled");
         const sigmaValues = manual ? String(manual).match(/[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g) : null;
         const steps = sigmaValues && sigmaValues.length >= 2 ? sigmaValues.length - 1 : Number(native["采样步数"] || 0);
-        return { promptId, seed: Number(native["随机种子"]), seedMode: native["固定随机种子"] === true ? "fixed" : "random", frames: durationToFrames(Number(native["时长秒"] || 5)), ...(requestedRatio === "原图比例" ? {} : { width, height: Math.max(32, Math.round(width * ratioHeight(ratio) / ratioWidth(ratio) / multiple) * multiple) }), steps, sampler: String(native["采样器"] || ""), scheduler: String(native["调度器"] || ""), ...(loras.length ? { loras } : {}), attention, sigma: manual ? `手动：${String(manual)}` : `调度器：${String(native["调度器"] || "")} / ${Number(native["采样步数"] || 0)} 步`, mediaInputs };
+        return { promptId, seed: Number(native["随机种子"]), seedMode: native["固定随机种子"] === true ? "fixed" : "random", frames: durationToFrames(Number(native["时长秒"] || 5)), ...(requestedRatio === "原图比例" ? {} : { width, height }), steps, sampler: String(native["采样器"] || ""), scheduler: String(native["调度器"] || ""), ...(loras.length ? { loras } : {}), attention, sigma: manual ? `手动：${String(manual)}` : `调度器：${String(native["调度器"] || "")} / ${Number(native["采样步数"] || 0)} 步`, mediaInputs };
     }
     const inputsOf = (type: string) => nodes.find((node) => node.class_type === type)?.inputs || {};
     const condition = nodes.find((node) => node.class_type === "MiniMaxH3ReferenceToVideo" || node.class_type === "MiniMaxH3ImageToVideo")?.inputs || {};
@@ -1073,6 +1079,10 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
         return buildDecodedH3SecondPassWorkflow(input, params, upload, signal);
     }
     params = normalizeH3Params(await resolveNanFengWorkflowParams(_comfyUrl, params, signal), true);
+    if (params.latentUpscaleEnabled === true) {
+        if (params.motionContextEnabled === true) throw new Error("V15 潜空间续写与潜空间放大二采不能同时开启；请先关闭其中一项。未提交一采任务。");
+        await assertH3LatentUpscalerReady(_comfyUrl, String(params.latentUpscaleModel || ""), signal);
+    }
     // The native V15 node has no TE-speed input. Keep the visible switch
     // effective by using the expanded graph when it is enabled, where the
     // TESpeedMiniMaxH3 patcher is an actual model node.

@@ -3,15 +3,15 @@ export type H3LoraSlot = { name: string; strength: number; enabled: boolean };
 const MAX_H3_SEED = Number.MAX_SAFE_INTEGER;
 
 /**
- * NanFengH3MultiReferenceGeneratorV15 的「LoRA{N}强度」范围，实测自
- * GET /object_info/NanFengH3MultiReferenceGeneratorV15 → ["FLOAT", {"min": -4.0, "max": 4.0, "step": 0.05}]。
+ * 与本机 NanFengH3MultiReferenceGeneratorV15 的「LoRA{N}强度」声明对齐：
+ * FLOAT min -4.0、max 10.0、step 0.05；ComfyUI 进程重载节点后 object_info 才会更新。
  * 超出范围时 ComfyUI 会在 /prompt 阶段整体拒绝（HTTP 400
  * prompt_outputs_failed_validation / value_bigger_than_max），任务连队列都进不去，
- * 所以必须在编译期夹紧，而不是等 ComfyUI 报错。
+ * 只对超出 V15 声明范围的值在编译期夹紧，而不是等 ComfyUI 报错。
  * 注意：走 LoraLoader/LoraLoaderModelOnly 的老路径范围是 ±100，这里只约束 V15 原生节点。
  */
 export const H3_LORA_STRENGTH_MIN = -4;
-export const H3_LORA_STRENGTH_MAX = 4;
+export const H3_LORA_STRENGTH_MAX = 10;
 
 export function clampH3LoraStrength(value: unknown, fallback = 1) {
     const strength = Number(value);

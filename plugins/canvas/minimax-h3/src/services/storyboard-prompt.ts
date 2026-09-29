@@ -3,7 +3,7 @@ import type { H3CharacterGroup, H3SubjectDefinition } from "../types";
 
 /**
  * 官方 H3 提示词的六段（ref2va）/ 三段（其他模式）固定字段名。
- * 这些段落是**上一轮模型的生成产物**，不是用户输入。
+ * 这些段落可能是上一轮模型的生成产物，也可能由用户修改。
  */
 const GENERATED_PROMPT_SECTIONS = [
     "subject_definitions",
@@ -22,12 +22,8 @@ const GENERATED_SECTION_HEAD = new RegExp(
 );
 
 /**
- * 剥离 prompt 里上一轮生成的结构化段落，只留用户自己写的自由文本。
- *
- * 「增强提示词」会把用户输入当 system 里的 "user intent" 喂回模型；如果原封不动
- * 喂入上一轮输出，模型会把上一轮**臆造**的 `<Subject N>`（例如没有人物引用时编出的
- * "the slender woman in the snow courtyard"）当成用户既定事实保留下来，幻觉就此固化，
- * 并且用户后来删掉人物图也清不掉。
+ * 从结构化稿前提取自由文本，作为增强时更高优先级的明确意图。
+ * 增强请求仍包含编辑器的完整原文；旧稿中的主体与参考关系要按当前 manifest 核对。
  */
 export function stripGeneratedPromptSections(prompt: string | null | undefined): string {
     const text = String(prompt || "");
@@ -36,6 +32,19 @@ export function stripGeneratedPromptSections(prompt: string | null | undefined):
     // 第一个生成段落之前的内容就是用户的自由文本。
     if (!first) return text.trim();
     return text.slice(0, first.index).replace(/(?:\r?\n)+$/, "").trim();
+}
+
+/** 增强提示词必须收到编辑器中的完整原文；自由文本用于区分用户明确意图与旧生成稿。 */
+export function buildPromptEnhancementInput(input: { currentPrompt: string; globalPrompt?: string; manifest: string; transitionPlan?: string }): string {
+    const original = input.currentPrompt.trim();
+    const userText = stripGeneratedPromptSections(original);
+    return [
+        userText && userText !== original ? `User-authored free text (higher priority than the existing draft):\n${userText}` : "",
+        `Original prompt from the editor (rewrite this complete draft):\n${original}`,
+        input.globalPrompt?.trim() ? `Global project instructions:\n${input.globalPrompt.trim()}` : "",
+        `Reference manifest (fixed numbering; do not reorder):\n${input.manifest}`,
+        input.transitionPlan ? `Transition plan (fixed image order; do not reorder):\n${input.transitionPlan}` : "",
+    ].filter(Boolean).join("\n\n");
 }
 
 export type StoryboardPromptSubject = {

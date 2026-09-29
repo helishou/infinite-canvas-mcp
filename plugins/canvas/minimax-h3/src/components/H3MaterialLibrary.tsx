@@ -6,10 +6,21 @@ import { segmentsFor } from "../hooks/useH3Segments";
 import { H3Icon } from "./H3Icon";
 import { H3MaterialCard } from "./H3MaterialCard";
 import { message } from "antd";
+import { h3Label, useH3Locale } from "../h3-locale";
 
 type Props = { ctx: CanvasNodeContext; outputs: H3Ref[]; segments: H3Segment[]; selected?: H3Segment; patchSelected: (patch: Partial<H3Segment>) => void };
 
+/** 历史输出卡片的时间后缀：MM-DD HH:mm:ss，跨天也能区分；解析失败返回空串。 */
+function formatOutputTime(value?: string): string {
+    if (!value) return "";
+    const at = new Date(value);
+    if (Number.isNaN(at.getTime())) return "";
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`;
+}
+
 export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
+    const locale = useH3Locale();
     const [outputFilter, setOutputFilter] = useState<"all" | "current">(String(ctx.node.metadata?.minimaxOutputFilter || "") === "current" ? "current" : "all");
     const [historyOutputs, setHistoryOutputs] = useState<H3Ref[]>([]);
     // Output 固定单行横向滚动：卡片高度实测面板可用高度自适应（78–380px），宽度=高度×2 保持 2:1。
@@ -34,6 +45,9 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
         void ctx.generationLogs.list({ projectId: ctx.projectId, nodeId: ctx.node.id, limit: 200 }).then((logs) => {
             if (!active) return;
         const refs: H3Ref[] = [];
+        // 同一个 Clip 会跑出多条历史输出；用「Clip 内序号」区分，不能用 log.outputs 的下标
+        // （H3 每次运行只落 1 个输出，index 恒为 0 → 所有卡片都叫“历史输出 1”）。
+        const perSegmentCount = new Map<string, number>();
         for (const log of logs) {
             for (const [index, item] of (log.outputs || []).entries()) {
                 const value = item && typeof item === "object" ? item as Record<string, unknown> : {};
@@ -41,10 +55,16 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
                 if (!url) continue;
                 const mimeType = String(value.mimeType || "video/mp4");
                 const type: H3Ref["type"] = mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : "video";
+                const clipKey = String(log.segmentId || "");
+                const seq = (perSegmentCount.get(clipKey) || 0) + 1;
+                perSegmentCount.set(clipKey, seq);
+                const clipNo = clipKey ? segments.findIndex((item) => item.id === clipKey) : -1;
+                const clipLabel = clipNo >= 0 ? `Clip ${clipNo + 1}` : clipKey ? "已删除 Clip" : "未知 Clip";
+                const stamp = formatOutputTime(log.finishedAt || log.createdAt);
                 refs.push({
                     url,
                     type,
-                    name: String(value.name || `历史输出 ${index + 1}`),
+                    name: String(value.name || `${clipLabel} · #${seq}${stamp ? ` · ${stamp}` : ""}`),
                     storageKey: typeof value.storageKey === "string" ? value.storageKey : undefined,
                     mimeType,
                     segmentId: log.segmentId,
@@ -56,7 +76,7 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
             setHistoryOutputs(refs);
         }).catch(() => { if (active) setHistoryOutputs([]); });
         return () => { active = false; };
-    }, [ctx.generationLogs, ctx.node.id, ctx.projectId, outputRevision]);
+    }, [ctx.generationLogs, ctx.node.id, ctx.projectId, outputRevision, segments.map((item) => item.id).join("|")]);
     useEffect(() => {
         // 测量父容器（.minimax-library）的可用高度，而非 listRef 自身：
         // listRef 是 grid 容器，其高度由 --h3-out-card-h 决定，若测量自身会形成
@@ -101,7 +121,7 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
         }
     };
     return <aside className="minimax-library">
-        <div key="library-head" className="minimax-library-head"><H3Icon name="output" /> <span>Output</span><span className="minimax-output-actions"><button type="button" aria-label="切换输出筛选" aria-pressed={outputFilter === "current"} title={outputFilter === "all" ? "当前显示全部输出，点击只显示当前 Clip" : "当前只显示当前 Clip，点击显示全部输出"} onClick={() => changeOutputFilter(outputFilter === "all" ? "current" : "all")} className={`minimax-output-filter${outputFilter === "current" ? " active" : ""}`}><H3Icon name={outputFilter === "all" ? "filter-all" : "filter-current"} /></button></span></div>
-        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.generationLogId || ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} compact removable onRestore={() => void restoreOutput(ref)} onOpenPreview={() => ctx.openMediaPreview({ url: ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url, name: ref.name, type: ref.type })} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>Output</span></div> : null}</div>
+        <div key="library-head" className="minimax-library-head"><H3Icon name="output" /> <span>{h3Label(locale, "output")}</span><span className="minimax-output-actions"><button type="button" aria-label="切换输出筛选" aria-pressed={outputFilter === "current"} title={outputFilter === "all" ? "当前显示全部输出，点击只显示当前 Clip" : "当前只显示当前 Clip，点击显示全部输出"} onClick={() => changeOutputFilter(outputFilter === "all" ? "current" : "all")} className={`minimax-output-filter${outputFilter === "current" ? " active" : ""}`}><H3Icon name={outputFilter === "all" ? "filter-all" : "filter-current"} /></button></span></div>
+        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.generationLogId || ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} locale={locale} compact removable onRestore={() => void restoreOutput(ref)} onOpenPreview={() => ctx.openMediaPreview({ url: ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url, name: ref.name, type: ref.type })} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>{h3Label(locale, "output")}</span></div> : null}</div>
     </aside>;
 }

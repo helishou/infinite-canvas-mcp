@@ -43,11 +43,36 @@ test("智能生成节点只把主图作为下游参考输入", () => {
     const target: CanvasNodeData = { ...source, id: "target", title: "目标智能节点", metadata: { smart: true, generationMode: "image" } };
     const resources = nodeResourceItems(source);
     assert.deepEqual(resources.map((resource) => resource.storageKey), ["media/second.png"]);
+    assert.deepEqual(nodeResourceItems({ ...source, metadata: { ...source.metadata, content: "", images: source.metadata!.images!.map((image) => ({ ...image, content: "" })) } }).map((resource) => resource.storageKey), ["media/second.png"]);
 
     const inputs = buildNodeGenerationInputs("target", [source, target], [{ id: "connection", fromNodeId: "source", toNodeId: "target" }], buildCanvasGraphIndex([source, target], [{ id: "connection", fromNodeId: "source", toNodeId: "target" }]));
     assert.deepEqual(inputs.map((input) => input.type), ["image"]);
     assert.deepEqual(inputs.map((input) => input.type === "image" && input.image ? input.image.storageKey : undefined), ["media/second.png"]);
     assert.deepEqual(sourceNodeReferenceImages(source).map((image) => image.storageKey), ["media/second.png"]);
+});
+
+test("智能生图节点二次生成只读取自身文本入边，不借用下游配置节点的图片", () => {
+    const textSource: CanvasNodeData = { id: "text", type: CanvasNodeType.Config, title: "文本生成", position: { x: 0, y: 0 }, width: 100, height: 100,
+        metadata: { smart: true, generationMode: "text", content: "人物设定" } };
+    const target: CanvasNodeData = { id: "target", type: CanvasNodeType.Config, title: "智能生图", position: { x: 200, y: 0 }, width: 100, height: 100,
+        metadata: { smart: true, generationMode: "image", content: "first.png", storageKey: "image:first", images: [
+            { id: "first", status: "success", content: "first.png", storageKey: "image:first", naturalWidth: 1, naturalHeight: 1, bytes: 1, mimeType: "image/png" },
+        ], primaryImageId: "first" } };
+    const downstream: CanvasNodeData = { id: "downstream", type: CanvasNodeType.Config, title: "下游生图", position: { x: 400, y: 0 }, width: 100, height: 100,
+        metadata: { smart: true, generationMode: "image" } };
+    const otherImage: CanvasNodeData = { id: "other", type: CanvasNodeType.Image, title: "下游专用参考图", position: { x: 200, y: 200 }, width: 100, height: 100,
+        metadata: { content: "other.png", storageKey: "image:other" } };
+    const nodes = [textSource, target, downstream, otherImage];
+    const connections = [
+        { id: "text-target", fromNodeId: textSource.id, toNodeId: target.id },
+        { id: "target-downstream", fromNodeId: target.id, toNodeId: downstream.id },
+        { id: "other-downstream", fromNodeId: otherImage.id, toNodeId: downstream.id },
+    ];
+    const ownContext = buildNodeGenerationContext(target.id, nodes, connections, "");
+    assert.deepEqual(ownContext.referenceImages, []);
+    assert.match(ownContext.prompt, /人物设定/);
+    assert.deepEqual(getMentionResourceNodes(target.id, nodes, connections).map((node) => node.id), [textSource.id]);
+    assert.deepEqual(buildNodeGenerationContext(downstream.id, nodes, connections, "").referenceImages.map((image) => image.storageKey), ["image:first", "image:other"]);
 });
 
 test("角色参考默认只用主图，存量服装选择保持原样", () => {

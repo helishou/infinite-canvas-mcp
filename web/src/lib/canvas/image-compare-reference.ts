@@ -1,4 +1,5 @@
 import { CanvasNodeType, type CanvasConnection, type CanvasImageReferenceSnapshot, type CanvasNodeData } from "@/types/canvas";
+import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
 
 export type CanvasCompareReference = {
     storageKey?: string;
@@ -19,6 +20,16 @@ export function findCanvasCompareReference(
     connections: CanvasConnection[],
     snapshotReferences?: CanvasImageReferenceSnapshot[],
 ): CanvasCompareReference | null {
+    if (node.metadata?.loopOutputSlot) {
+        const inputConnections = connections.filter((connection) => connection.toNodeId === node.id && connection.role === "loop-input-reference");
+        const nodeById = new Map(nodes.map((item) => [item.id, item]));
+        const inputImage = inputConnections.map((connection) => nodeById.get(connection.fromNodeId))
+            .map((inputNode) => inputNode ? canvasNodeImage(inputNode) : null)
+            .find((image) => image?.storageKey || image?.content);
+        // The per-round reference edge identifies the matching input slot. Never
+        // replace a missing input with an unrelated fixed reference from the snapshot.
+        return inputImage ? { storageKey: inputImage.storageKey, content: inputImage.content } : null;
+    }
     const snapshotReference = snapshotReferences?.find((reference) => reference.storageKey || reference.url);
     if (snapshotReference) {
         return { storageKey: snapshotReference.storageKey, content: snapshotReference.url || "" };

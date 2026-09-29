@@ -142,3 +142,96 @@ test("单独生成坏 Clip 时错误使用前端 Clip 序号并给出具体原�
         return true;
     });
 });
+
+test("潜空间续写从组首继承画幅尺寸，并在新链中重新生成潜变量", async (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+        { id: "clip-a", prompt: "A", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, sizeMultiple: 32, latentUpscaleAlign: 2, motionContextEnabled: true, contextLength: "39", audioContextLength: 48, continuationAudioRefineEnabled: true },
+        { id: "clip-b", prompt: "B", mode: "t2v", aspectRatio: "16:9 (Widescreen)", megapixels: 0.5, sizeMultiple: 64, latentUpscaleAlign: 4, motionContextEnabled: false, contextLength: "5", audioContextLength: 0, continuationAudioRefineEnabled: false },
+    ] } }], connections: [] });
+    const stores = createStores(db);
+    const submitted: Array<{ segmentId: string; aspectRatio: unknown; megapixels: unknown; sizeMultiple: unknown; latentUpscaleAlign: unknown; contextLength: unknown; audioContextLength: unknown; continuationAudioRefineEnabled: unknown; continuationTask: unknown }> = [];
+    const comfy = {
+        async run(_preset: string, input: Record<string, unknown>, params: Record<string, unknown>, _url?: string, id?: string, onCreated?: (task: ReturnType<typeof stores.tasks.create>) => void) {
+            const task = stores.tasks.create(id || `child-${submitted.length + 1}`, "comfyui:minimax-h3", input, params);
+            onCreated?.(task);
+            submitted.push({
+                segmentId: String((params.canvasBinding as Record<string, unknown>).segmentId),
+                aspectRatio: params.aspectRatio, megapixels: params.megapixels, sizeMultiple: params.sizeMultiple, latentUpscaleAlign: params.latentUpscaleAlign,
+                contextLength: params.contextLength, audioContextLength: params.audioContextLength, continuationAudioRefineEnabled: params.continuationAudioRefineEnabled,
+                continuationTask: params.continuationTask,
+            });
+            stores.media.store(Buffer.from("fake-video"), { name: `${task.id}.mp4`, storageKey: task.id, mimeType: "video/mp4", category: "output" });
+            return stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [{ url: `/media/${task.id}`, storageKey: task.id, mimeType: "video/mp4" }] } });
+        },
+        cancel() {},
+    };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const runChain = async (id: string) => {
+        runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-a", runFromCurrent: true, skipCompleted: false }, id);
+        for (let i = 0; i < 200 && !["succeeded", "failed"].includes(db.getTask(id)?.status || ""); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+        assert.equal(db.getTask(id)?.status, "succeeded", db.getTask(id)?.error || "潜空间续写任务未成功");
+    };
+    await runChain("chain-1");
+    assert.deepEqual(submitted.map(({ segmentId, aspectRatio, megapixels, sizeMultiple, latentUpscaleAlign }) => ({ segmentId, aspectRatio, megapixels, sizeMultiple, latentUpscaleAlign })), [
+        { segmentId: "clip-a", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, sizeMultiple: 32, latentUpscaleAlign: 2 },
+        { segmentId: "clip-b", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, sizeMultiple: 32, latentUpscaleAlign: 2 },
+    ]);
+    assert.deepEqual(submitted.map((item) => JSON.parse(String(item.continuationTask)).index), [1, 2]);
+    assert.deepEqual(submitted.map(({ contextLength, audioContextLength, continuationAudioRefineEnabled }) => [contextLength, audioContextLength, continuationAudioRefineEnabled]), [["39", 48, false], ["39", 48, true]], "S01 的音频精修应作用于 S02，不应作用于自身");
+    const segments = ((db.getCanvasProject("p")!.nodes as Array<{ metadata: { segments: Array<Record<string, unknown>> } }>)[0].metadata.segments);
+    assert.equal(segments[1].megapixels, 0.8, "继承后的尺寸应同步写回画布 Clip");
+    assert.equal(segments[1].aspectRatio, "9:16 (Portrait)");
+    assert.equal(segments[1].sizeMultiple, 32);
+    assert.equal(segments[1].latentUpscaleAlign, 2);
+    await runChain("chain-2");
+    assert.equal(submitted.length, 4, "新链必须重新生成潜变量，不能复用旧 MP4 缓存");
+    assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-a", runFromCurrent: true, skipCompleted: true }), /不能跳过已完成 Clip/);
+    assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-b", runFromCurrent: true, skipCompleted: false }), /组首 Clip/);
+});
+
+test("本段开关只控制通往下一段的边界，独立连续组不互相继承尺寸", async (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+        { id: "a", prompt: "A", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, motionContextEnabled: false },
+        { id: "b", prompt: "B", mode: "t2v", aspectRatio: "16:9 (Widescreen)", megapixels: 0.5, motionContextEnabled: true },
+        { id: "c", prompt: "C", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.3, motionContextEnabled: false },
+        { id: "d", prompt: "D", mode: "t2v", aspectRatio: "4:3 (Standard)", megapixels: 0.6, motionContextEnabled: true },
+        { id: "e", prompt: "E", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.2, motionContextEnabled: false },
+    ] } }], connections: [] });
+    const stores = createStores(db);
+    const submitted: Array<{ id: string; megapixels: unknown; continuationTask: unknown }> = [];
+    const comfy = {
+        async run(_preset: string, input: Record<string, unknown>, params: Record<string, unknown>, _url?: string, id?: string, onCreated?: (task: ReturnType<typeof stores.tasks.create>) => void) {
+            const task = stores.tasks.create(id || `child-${submitted.length + 1}`, "comfyui:minimax-h3", input, params);
+            onCreated?.(task);
+            submitted.push({ id: String((params.canvasBinding as Record<string, unknown>).segmentId), megapixels: params.megapixels, continuationTask: params.continuationTask });
+            stores.media.store(Buffer.from("fake-video"), { name: `${task.id}.mp4`, storageKey: task.id, mimeType: "video/mp4", category: "output" });
+            return stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [{ url: `/media/${task.id}`, storageKey: task.id, mimeType: "video/mp4" }] } });
+        },
+        cancel() {},
+    };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const task = runner.start({ projectId: "p", nodeId: "n", segmentId: "a", runFromCurrent: true, skipCompleted: false }, "edge-chain");
+    const plans = (task.result?.plans || []) as Array<{ segmentId: string; continuation?: { group: string; index: number } }>;
+    assert.deepEqual(plans.map((plan) => [plan.segmentId, plan.continuation?.index ?? null]), [["a", null], ["b", 1], ["c", 2], ["d", 1], ["e", 2]]);
+    assert.notEqual(plans[1].continuation?.group, plans[3].continuation?.group);
+    for (let i = 0; i < 200 && !["succeeded", "failed"].includes(db.getTask(task.id)?.status || ""); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(db.getTask(task.id)?.status, "succeeded", db.getTask(task.id)?.error || "续写分组未成功");
+    assert.deepEqual(submitted.map(({ id, megapixels }) => [id, megapixels]), [["a", 0.8], ["b", 0.5], ["c", 0.5], ["d", 0.6], ["e", 0.6]]);
+    assert.equal(submitted[0].continuationTask, undefined, "S01 关闭时不应被下一段的开关拉进潜变量组");
+});
+
+test("潜空间续写不能绕过参考不完整的中间 Clip", (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+        { id: "head", prompt: "A", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, motionContextEnabled: true },
+        { id: "missing-image", prompt: "B", mode: "i2v" },
+        { id: "tail", prompt: "C", mode: "t2v" },
+    ] } }], connections: [] });
+    const runner = new CanvasH3Runner(createStores(db), new BackendEventBus(), {} as never, {} as never);
+    assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "head", runFromCurrent: true }), /不能跳过连续组中的 Clip/);
+});

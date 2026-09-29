@@ -21,6 +21,7 @@ const REFERENCE_ROLE_LABELS: Record<string, string> = {
 };
 import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
+import { applyH3GlobalSettings } from "../services/h3-global-settings";
 import { inferReferenceRole, refsForSegment, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { addStoryboardShot, assignStoryboardShotRef, H3_STORYBOARD_MIN_DURATION, insertStoryboardShotAfter, isStoryboardModeEnabled, moveStoryboardShotBetweenSegments, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { sameRef } from "../services/h3-compatibility";
@@ -28,6 +29,7 @@ import { H3_RUNTIME_REF_LIMITS, normalizeDroppedH3Ref, readCharacterGroupFromDro
 import { H3Icon } from "./H3Icon";
 import { H3ClipCard } from "./H3ClipCard";
 import { h3ThemeVars } from "../h3-theme";
+import { h3Label, useH3Locale } from "../h3-locale";
 
 function newClipId() {
     const randomUUID = typeof globalThis.crypto?.randomUUID === "function" ? globalThis.crypto.randomUUID.bind(globalThis.crypto) : undefined;
@@ -55,6 +57,7 @@ type H3TimelineProps = {
 };
 
 export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEditRef, onRequestReplaceRef, onRequestPickRef, onRequestPickStoryboardShot, pickingShotKey, onSegmentChange, pickingKey, onPlayAll, fmt }: H3TimelineProps) {
+    const locale = useH3Locale();
     const compactMedia = ctx.scale < 0.2;
     const trackScrollRef = useRef<HTMLDivElement | null>(null);
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
@@ -510,7 +513,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     // 新建 Clip：继承基准 Clip 的设置（模式/提示词外的一切运行配置），内容清空。
     const buildClipAfter = (basis?: H3Segment) => {
         const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, referenceBindings, storyboardModeEnabled, storyboardDurations, storyboardShots, ...settings } = basis || ({} as H3Segment);
-        return {
+        return applyH3GlobalSettings({
             ...settings,
             id: newClipId(),
             prompt: defaultPrompt,
@@ -521,7 +524,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             results: [],
             referenceBindings: [],
             runtimeTaskId: "",
-        } as H3Segment;
+        } as H3Segment, ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {});
     };
     // 在 index 处插入新 Clip 并选中：compactSegmentStarts 会重排各 Clip 的 start；
     // pendingScrollIdRef 让 DOM 提交后把时间轴滚到新 Clip 最右侧。
@@ -806,8 +809,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         <div className="minimax-edit-timeline">
         <div className="minimax-timeline-controls"><button type="button" title="连续播放全部 Clip" onClick={onPlayAll}><H3Icon name="play" /></button></div>
         <div className="minimax-left-labels">
-            <div className="minimax-video-label">Video</div>
-            <div className="minimax-ref-label">Refs</div>
+            <div className="minimax-video-label">{h3Label(locale, "video")}</div>
+            <div className="minimax-ref-label">{h3Label(locale, "references")}</div>
         </div>
         <div className="minimax-ruler-row" style={{ width: trackWidth }}>
             <div ref={rulerInnerRef} style={{ width: trackWidth }}>

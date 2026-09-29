@@ -3,12 +3,18 @@ import { nanoid } from "nanoid";
 import { BackendApiError, getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId, request } from "@/services/backend-api";
 import { canvasTextKey, CollaborativeTextSession, type CanvasTextTarget, type TextDraft } from "@/lib/canvas/collaborative-text-session";
 import { canvasDraftPersistence } from "@/lib/canvas/canvas-draft-persistence";
+import { evictDeletedCanvasTextSessions, flushCurrentCanvasTextSessions } from "./canvas-text-lifecycle";
 
 type StoredDraft = TextDraft & { ownerId: string; backend: string; projectId: string; target: CanvasTextTarget; source: ReturnType<typeof getCanvasCollaborationClient> };
 const outbox = localforage.createInstance({ name: "infinite-canvas-text-outbox" });
 const sessions = new Map<string, { backend: string; projectId: string; target: CanvasTextTarget; session: CollaborativeTextSession }>();
 const commitListeners = new Set<(event: unknown) => void>();
 const eventListeners = new Set<(event: unknown) => void>();
+
+/** Deleted targets receive a new document identity when restored, including through Undo. */
+export function invalidateDeletedCanvasTextSessions(projectId: string, operations: Array<Record<string, unknown>>) {
+    evictDeletedCanvasTextSessions(sessions, getBackendUrl(), projectId, operations);
+}
 
 export const onCanvasTextEvent = (listener: (event: unknown) => void) => { eventListeners.add(listener); return () => eventListeners.delete(listener); };
 export function publishCanvasTextCommit(projectId: string, response: { revision: number; operations: unknown[]; project: Record<string, unknown> }) {
@@ -24,7 +30,8 @@ export function getCanvasTextSession(projectId: string, target: CanvasTextTarget
     const ownerId = getCanvasDraftSessionId();
     const key = JSON.stringify([backend, projectId, canvasTextKey(target)]);
     const existing = sessions.get(key);
-    if (existing) return existing.session;
+    if (existing && !existing.session.hasReplacedDocument()) return existing.session;
+    if (existing) sessions.delete(key);
     const records = new Map<string, StoredDraft>();
     const source = getCanvasCollaborationClient();
     const path = `/canvas/projects/${encodeURIComponent(projectId)}`;
@@ -71,22 +78,24 @@ export function receiveCanvasTextEvent(event: unknown) {
     if (value?.type !== "canvas.updated" || !value.entityId) return;
     if (!value.payload || !Array.isArray(value.payload.operations)) {
         const project = value.payload as Record<string, any> | undefined;
-        if (project?.id === value.entityId) for (const entry of sessions.values()) {
+        if (project?.id === value.entityId) for (const [key, entry] of sessions) {
             if (entry.backend !== getBackendUrl() || entry.projectId !== value.entityId) continue;
             const { target, session } = entry;
             const node = project.nodes?.find((item: Record<string, any>) => item.id === target.nodeId);
             const record = target.textItemId ? node?.metadata?.texts?.find((item: Record<string, any>) => item.id === target.textItemId) : target.segmentId ? node?.metadata?.segments?.find((item: Record<string, any>) => item.id === target.segmentId) : target.nodeId ? node?.metadata : project;
-            if (!record || String(record[target.field] || "") !== session.text.toString()) void session.reconnect();
+            if (!record) sessions.delete(key);
+            else if (String(record[target.field] || "") !== session.text.toString()) void session.reconnect();
         }
         return;
     }
+    invalidateDeletedCanvasTextSessions(value.entityId, value.payload.operations);
     for (const operation of value.payload.operations) for (const update of [...(operation.textUpdates || []), ...(operation.textUpdate ? [operation.textUpdate] : [])]) {
         const target = update.target as CanvasTextTarget | undefined;
         if (!target) continue;
         const key = JSON.stringify([getBackendUrl(), value.entityId, canvasTextKey(target)]);
         try { sessions.get(key)?.session.receive({ state: update.update, documentId: update.documentId }); } catch { /* session records the blocking state */ }
     }
-    if (value.payload.operations.some((operation) => ["delete_node", "delete_h3_segment", "replace_h3_segments"].includes(String(operation.type)) || !operation.textUpdate && operation.type === "update_node" && ["texts", "segments"].some((key) => Object.hasOwn(operation.metadata || {}, key) || (operation.metadataDelete || []).includes(key)))) for (const entry of sessions.values()) if (entry.backend === getBackendUrl() && entry.projectId === value.entityId) void entry.session.reconnect();
+    if (value.payload.operations.some((operation) => !operation.textUpdate && operation.type === "update_node" && ["texts", "segments"].some((key) => Object.hasOwn(operation.metadata || {}, key) || (operation.metadataDelete || []).includes(key)))) for (const entry of sessions.values()) if (entry.backend === getBackendUrl() && entry.projectId === value.entityId) void entry.session.reconnect();
 }
 
 export async function reconnectCanvasTexts(projectId: string) {
@@ -109,7 +118,7 @@ export async function flushCanvasTexts(projectId: string) {
     const targets = new Map<string, CanvasTextTarget>();
     await outbox.iterate<StoredDraft, void>((draft) => { if (draft.ownerId === getCanvasDraftSessionId() && draft.backend === getBackendUrl() && draft.projectId === projectId) targets.set(canvasTextKey(draft.target), draft.target); });
     targets.forEach((target) => getCanvasTextSession(projectId, target));
-    await Promise.all([...sessions.values()].filter((entry) => entry.backend === getBackendUrl() && entry.projectId === projectId).map(async ({ session }) => { await session.initialize(); if (session.getSnapshot().pending) await session.flush(); }));
+    await flushCurrentCanvasTextSessions([...sessions.values()].filter((entry) => entry.backend === getBackendUrl() && entry.projectId === projectId).map((entry) => entry.session));
 }
 
 if (typeof window !== "undefined") window.addEventListener("canvas-storage-recovered", () => { for (const entry of sessions.values()) if (entry.backend === getBackendUrl() && entry.session.getSnapshot().pending) void entry.session.flush().catch(() => {}); });

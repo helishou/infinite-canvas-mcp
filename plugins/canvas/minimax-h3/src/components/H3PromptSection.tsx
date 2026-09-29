@@ -1,6 +1,5 @@
 import { getReact, useEffect, useMemo, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext, CanvasReferenceAsset, CanvasTextEditorHandle, CanvasTextReference } from "@infinite-canvas/plugin-sdk";
-import type { ChangeEvent } from "react";
 import { Button, Modal, Select, Switch } from "antd";
 import type { H3Ref, H3ReferenceRetention, H3Segment, H3SubjectDefinition } from "../types";
 import { H3Icon } from "./H3Icon";
@@ -10,17 +9,20 @@ import { inferReferenceRole, refsForSegment, segmentRefsPatch, withSegmentRefs }
 import { sameRef } from "../services/h3-compatibility";
 import { orderedGroupStoryboardRefs } from "../services/h3-refs";
 import { storyboardShotMarkers } from "../services/h3-storyboard-markers";
+import { alignStoryboardShotsToReferences } from "../services/storyboard-shot-alignment";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { persistPromptCandidate, promptJobs, setPromptJob } from "../services/h3-prompt-jobs";
-import { buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, storyboardPromptFingerprint, stripGeneratedPromptSections, toSubjectDefinitions } from "../services/storyboard-prompt";
+import { buildPromptEnhancementInput, buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, storyboardPromptFingerprint, toSubjectDefinitions } from "../services/storyboard-prompt";
+import { matchStyleTemplatePrefix } from "../../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
 import { extractDialogues, stripDialogueSpeakers, injectDialogueSpeakers, parseSubjectSpeakerMap, collectSpeakerIds } from "../services/storyboard-dialogue";
 import { h3ThemeVars } from "../h3-theme";
+import { h3Label, useH3Locale } from "../h3-locale";
 import { promptEnhanceImagePayload } from "../services/prompt-enhance-references";
 import { literalPromptSubjects } from "../services/prompt-subject-definitions";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
 import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import { formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, stripDuplicateTransition, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
-import { orderStoryboardImageReferences, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
+import { orderStoryboardImageReferences, orderStoryboardReferencesFirst, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 import type { H3PromptSection, H3PromptSectionValues } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import baseReference from "../storyboard-assets/references/base-en.txt?raw";
 import refReference from "../storyboard-assets/references/ref-en.txt?raw";
@@ -34,31 +36,6 @@ type Props = {
   patchSelected: (patch: Partial<H3Segment>) => void;
   onOpenStoryboard: () => void;
 };
-
-type AutoGrowTextareaProps = {
-  value: string;
-  onChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
-  placeholder?: string;
-  ariaLabel: string;
-};
-
-function AutoGrowTextarea({ value, onChange, placeholder, ariaLabel }: AutoGrowTextareaProps) {
-  const ref = useRef<HTMLTextAreaElement | null>(null);
-  useEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-    element.style.height = "auto";
-    element.style.height = `${element.scrollHeight}px`;
-  }, [value]);
-  return <textarea
-    ref={ref}
-    className="nfh3-structured-textarea"
-    value={value}
-    onChange={onChange}
-    placeholder={placeholder}
-    aria-label={ariaLabel}
-  />;
-}
 
 // 南风 H3 官方提示词骨架（nanfeng_prompt_nodes[_v10] web/h3_multiref.js insertPromptBlock 逐字核对）
 const H3_OFFICIAL_BLOCK = [
@@ -577,45 +554,6 @@ function parseStoryboardDescription(description: string, imageRefs: H3Ref[], all
   };
 }
 
-export function alignStoryboardShotsToReferences(shots: StoryboardShot[], imageRefs: H3Ref[]) {
-  const pictures = imageRefs.filter((ref) => isStoryboardPictureRef(ref) && ref.bindingId);
-  if (!pictures.length) return { shots, changed: false };
-
-  const pictureIds = new Set(pictures.map((ref) => ref.bindingId!));
-  const bound = new Map<string, StoryboardShot>();
-  const ordered: StoryboardShot[] = [];
-  const unbound: StoryboardShot[] = [];
-  let changed = false;
-  for (const shot of shots) {
-    const id = shot.pictureBindingId;
-    if (id && pictureIds.has(id) && !bound.has(id)) {
-      // 分镜轨是镜头顺序的权威来源。不要因为参考图槽位仍保持旧顺序，
-      // 把轨道交换后的已绑定镜头重新排回去。
-      bound.set(id, shot);
-      ordered.push(shot);
-    } else {
-      if (id) changed = true;
-      unbound.push(id ? { ...shot, pictureBindingId: undefined } : shot);
-    }
-  }
-
-  let unboundIndex = 0;
-  for (const ref of pictures) {
-    const id = ref.bindingId!;
-    if (bound.has(id)) continue;
-    const shot = unbound[unboundIndex++];
-    changed = true;
-    const next = shot || { id: crypto.randomUUID(), description: "", switchTime: "", transitionType: "cut" as const };
-    const nextBound = { ...next, pictureBindingId: id };
-    bound.set(id, nextBound);
-    ordered.push(nextBound);
-  }
-
-  const aligned = [...ordered, ...unbound.slice(unboundIndex)];
-  if (aligned.some((shot, index) => shots[index]?.id !== shot.id)) changed = true;
-  return { shots: aligned, changed };
-}
-
 // 官方 H3 切镜写法：用自然句而非 [Transition:] 方括号标签。
 const SHOT_TRANSITION_LEADIN: Record<StoryboardTransition, string> = {
   continuous: "the shot continues",
@@ -706,10 +644,15 @@ export function H3PromptSection({
   patchSelected,
   onOpenStoryboard,
 }: Props) {
+  const locale = useH3Locale();
   const editorRef = useRef<CanvasTextEditorHandle | null>(null);
   const textTarget = useMemo(() => ({ nodeId: ctx.node.id, segmentId: selected?.id, field: "prompt" as const }), [ctx.node.id, selected?.id]);
-  const textDocument = useMemo(() => ctx.textDocument(textTarget), [ctx.projectId, ctx.node.id, selected?.id]);
+  const [textDocument, setTextDocument] = useState(() => ctx.textDocument(textTarget));
   const textStatus = getReact().useSyncExternalStore(textDocument.subscribe, textDocument.getSnapshot);
+  useEffect(() => {
+    const current = ctx.textDocument(textTarget);
+    if (current !== textDocument) setTextDocument(current);
+  });
   const suggestions = useMemo(() => ctx.textSuggestions(textTarget), [ctx.projectId, ctx.node.id, selected?.id]);
   const suggestionState = getReact().useSyncExternalStore(suggestions.subscribe, suggestions.getSnapshot);
   const prompt = textStatus.ready ? textStatus.text : String(selected?.prompt || "");
@@ -785,19 +728,21 @@ export function H3PromptSection({
   const loadStoryboardPrompt = (sourcePrompt: string) => {
     const summary = promptMode === "ref2va" ? readPromptSection(sourcePrompt, "summary") : "";
     const { openingDescription, shots: parsedShots } = parseStoryboardDescription(readPromptSection(sourcePrompt, storyboardSection), imageRefs, [...imageRefs, ...videoRefs, ...audioRefs]);
-    const aligned = alignStoryboardShotsToReferences(parsedShots, imageRefs);
+    // 旧版已保存的模板前缀只在打开表单时剥离；新保存的正文不再包含模板词。
+    const styleMatch = matchStyleTemplatePrefix(openingDescription);
+    const aligned = alignStoryboardShotsToReferences<StoryboardShot>(parsedShots, imageRefs);
     const shots = aligned.shots;
     const soundscape = readPromptSection(sourcePrompt, "overall_soundscape");
     const music = readPromptSection(sourcePrompt, "non_diegetic_music") || "N/A";
     const retentionLevels = Object.fromEntries(imageRefs.filter((ref) => isStoryboardPictureRef(ref) && ref.bindingId).map((ref) => [ref.bindingId!, isStoryboardRetention(ref.retentionLevel) ? ref.retentionLevel : "fully_preserved"]));
     storyboardShotsRef.current = shots;
-    storyboardOpeningDescriptionRef.current = openingDescription;
+    storyboardOpeningDescriptionRef.current = styleMatch?.rest ?? openingDescription;
     storyboardSummaryRef.current = summary;
     storyboardRetentionLevelsRef.current = retentionLevels;
     storyboardSoundscapeRef.current = soundscape;
     storyboardMusicRef.current = music;
     setStoryboardShots(shots);
-    setStoryboardOpeningDescription(openingDescription);
+    setStoryboardOpeningDescription(styleMatch?.rest ?? openingDescription);
     setStoryboardSummary(summary);
     setStoryboardRetentionLevels(retentionLevels);
     setStoryboardSoundscape(soundscape);
@@ -831,15 +776,14 @@ export function H3PromptSection({
     version: number,
     compositeEnabled: boolean,
   ) => {
-    if (!selected || !textStatus.ready || textStatus.blocked) {
-      setStoryboardError("提示词尚未同步，分镜修改暂时无法保存。");
-      return false;
-    }
+    if (!selected) return false;
     setStoryboardSaving(true);
     setStoryboardError(null);
     try {
-      await textDocument.flush();
-      const snapshot = textDocument.getSnapshot();
+      const activeDocument = ctx.textDocument(textTarget);
+      if (activeDocument !== textDocument) setTextDocument(activeDocument);
+      await activeDocument.flush();
+      const snapshot = activeDocument.getSnapshot();
       if (!snapshot.ready || snapshot.blocked) {
         setStoryboardError(snapshot.error || "提示词尚未同步，分镜修改暂时无法保存。");
         return false;
@@ -878,7 +822,7 @@ export function H3PromptSection({
         }
         return true;
       }
-      const replaced = await ctx.replaceText(textTarget, textDocument.getDocumentId(), latestPrompt, nextPrompt);
+      const replaced = await ctx.replaceText(textTarget, activeDocument.getDocumentId(), latestPrompt, nextPrompt);
       if (!replaced) {
         setStoryboardError("提示词保存时发生并发修改，请重新载入最新提示词后再编辑。");
         return false;
@@ -1245,7 +1189,7 @@ export function H3PromptSection({
       const latestSegment = segmentsFor(latestMetadata).find((item) => item.id === selected?.id);
       if (!latestSegment) throw new Error("当前 Clip 已不存在，无法对齐分镜图顺序。");
       const previousRefs = refsForSegment(latestSegment);
-      const orderedRefs = orderStoryboardImageReferences(previousRefs,
+      const orderedRefs = orderStoryboardReferencesFirst(previousRefs,
         storyboardShotsRef.current.flatMap((shot) => shot.pictureBindingId ? [shot.pictureBindingId] : []),
         (ref) => ref.bindingId, isStoryboardPictureRef);
       const orderChanged = orderedRefs.some((ref, index) => ref.bindingId !== previousRefs[index]?.bindingId);
@@ -1255,12 +1199,14 @@ export function H3PromptSection({
         (shot) => Boolean(shot.referenceBindingId && previousRefs.some((ref) => ref.bindingId === shot.referenceBindingId && isStoryboardPictureRef(ref))));
       const trackChanged = shotOrder.some((shot, index) => shot.id !== latestSegment.storyboardShots?.[index]?.id);
       if (orderChanged || trackChanged) {
-        await textDocument.flush();
-        const snapshot = textDocument.getSnapshot();
+        const activeDocument = ctx.textDocument(textTarget);
+        if (activeDocument !== textDocument) setTextDocument(activeDocument);
+        await activeDocument.flush();
+        const snapshot = activeDocument.getSnapshot();
         if (!snapshot.ready || snapshot.blocked) throw new Error(snapshot.error || "提示词尚未同步，无法对齐分镜图顺序。");
         const nextPrompt = orderChanged ? remapPictureTags(snapshot.text, previousRefs, orderedRefs,
           (ref) => ref.bindingId, (ref) => ref.type === "image") : snapshot.text;
-        if (nextPrompt !== snapshot.text && !await ctx.replaceText(textTarget, textDocument.getDocumentId(), snapshot.text, nextPrompt)) {
+        if (nextPrompt !== snapshot.text && !await ctx.replaceText(textTarget, activeDocument.getDocumentId(), snapshot.text, nextPrompt)) {
           throw new Error("分镜图顺序更新时提示词发生并发修改，请重试。");
         }
         const updated = withSegmentRefs({ ...latestSegment, ...(trackChanged ? { storyboardShots: shotOrder } : {}) }, orderedRefs);
@@ -1278,22 +1224,12 @@ export function H3PromptSection({
   useEffect(() => { setIsTranslated(false); }, [selected?.id, prompt]);
 
   const enhancePrompt = async () => {
-    console.log("zengqiangtishici ")
     if (!textStatus.ready || textStatus.blocked || !prompt.trim() || enhancing) return;
     const targetSegmentId = selected?.id;
     const promptAtCall = prompt;
     if (!targetSegmentId || promptJobs(ctx)[targetSegmentId]?.status === "running") return;
-    // 增强时只把**用户自己写的自由文本**喂回模型。上一轮生成的六段产物（含模型臆造的
-    // <Subject N>）不是用户输入；原样回喂会让幻觉被当成既定事实固化，用户之后删掉
-    // 人物引用也清不掉。用 candidate base 记录原文，供 diff 展示与采用。
-    const userIntent = stripGeneratedPromptSections(promptAtCall);
     const requestId = crypto.randomUUID();
-    const job = { requestId, base: promptAtCall, userIntent, documentId: textDocument.getDocumentId() };
-    // prompt 里只剩上一轮的生成段落 = 用户没写任何意图：此时增强只会让模型自由发挥。
-    if (!userIntent) {
-      setPromptJob(ctx, targetSegmentId, { ...job, status: "error", error: "提示词里只有上一轮生成的段落，没有你自己的描述，无法增强" });
-      return;
-    }
+    const job = { requestId, base: promptAtCall, documentId: textDocument.getDocumentId() };
     setPromptJob(ctx, targetSegmentId, { ...job, status: "running" });
     try {
       const model = String(
@@ -1338,7 +1274,7 @@ export function H3PromptSection({
       const storyboardImageRefs = references
         .filter((ref) => ref.type === "image" && isStoryboardPictureRef(ref))
         .sort((left, right) => (storyboardOrder.get(left.bindingId || "") ?? Number.MAX_SAFE_INTEGER) - (storyboardOrder.get(right.bindingId || "") ?? Number.MAX_SAFE_INTEGER));
-      const hasExplicitHardCut = /(?:\b(?:hard[- ]cut|the\s+(?:shot|camera)\s+cuts?\s+to)\b|\[Transition:\s*cut\]|硬切)/iu.test(userIntent);
+      const hasExplicitHardCut = /(?:\b(?:hard[- ]cut|the\s+(?:shot|camera)\s+cuts?\s+to)\b|\[Transition:\s*cut\]|硬切)/iu.test(promptAtCall);
       let transitionPlan = "";
       let transitionInstruction = "";
       if (storyboardMode && storyboardImageRefs.length >= 2) {
@@ -1372,7 +1308,7 @@ export function H3PromptSection({
         `The selected mode is ${normalizedMode.toUpperCase()} and the selected clip duration is ${Number(selected?.duration || 5).toFixed(2)} seconds.`,
         structure,
         alignment,
-        "Rewrite the user intent into one production-ready prompt. Preserve characters, actions, dialogue, visible text, reference numbering, and hard constraints; never invent facts.",
+        "Rewrite the complete current editor prompt into one production-ready prompt. Preserve its characters, actions, dialogue, visible text, and hard constraints. User-authored free text and the actual reference manifest take priority over unsupported claims in an older generated draft; do not invent facts.",
         "Make every requested visual detail explicit: composition, subject appearance, pose, gaze, action phases, camera type/amplitude/speed, lighting, materials, continuity, environment, and sound.",
         "Use the exact official field names, section order, reference tags, timestamp conventions, dialogue tags, and language rules. Preserve each <Subject N>, <Picture N>, <Video N>, and <Audio N> tag exactly; do not renumber them.",
         "Assign a stable speaker id (S1, S2, …) to every subject who speaks or delivers dialogue in detailed_description, in order of first appearance; write it immediately after the subject reference, e.g. '<Subject 1> (S1) says:'. Every spoken line must carry its speaker id — never drop it.",
@@ -1381,13 +1317,12 @@ export function H3PromptSection({
       ];
       if (transitionInstruction) systemParts.push(`Storyboard image reference transition instruction:\n${transitionInstruction}`);
       const system = systemParts.join("\n\n");
-      const userPromptParts = [
-        userIntent,
-        String(ctx.node.metadata?.globalPrompt || "").trim(),
-        `Reference manifest (fixed numbering; do not reorder):\n${manifest}`,
-      ];
-      if (transitionPlan) userPromptParts.push(`Transition plan (fixed image order; do not reorder):\n${transitionPlan}`);
-      const userPrompt = userPromptParts.filter(Boolean).join("\n\n");
+      const userPrompt = buildPromptEnhancementInput({
+        currentPrompt: promptAtCall,
+        globalPrompt: String(ctx.node.metadata?.globalPrompt || ""),
+        manifest,
+        transitionPlan,
+      });
       const refPayload = promptEnhanceImagePayload(references);
       const result = await ctx.ai.generateText(userPrompt, {
         model,
@@ -1631,14 +1566,14 @@ export function H3PromptSection({
     <section className="minimax-prompt-field minimax-prompt-field--mention">
       <span key="prompt-header" className="nfh3-prompt-header">
         <span className="nfh3-prompt-header-main">
-          <H3Icon key="prompt-icon" name="prompt" /> <span key="prompt-label">Prompt</span>{" "}
+          <H3Icon key="prompt-icon" name="prompt" /> <span key="prompt-label">{h3Label(locale, "prompt")}</span>{" "}
           {!storyboardMode ? <>
             <button
               key="enhance"
               type="button"
-              disabled={enhancing || !prompt.trim()}
+              disabled={enhancing || !textStatus.ready || textStatus.blocked || !prompt.trim()}
               onClick={() => void enhancePrompt()}
-              title={!prompt.trim() ? "请先输入提示词" : "调用当前文本模型增强提示词"}
+              title={!textStatus.ready ? "等待提示词同步" : textStatus.blocked ? "提示词编辑尚未同步" : !prompt.trim() ? "请先输入提示词" : "调用当前文本模型增强提示词"}
             >
               {enhancing ? "增强中…" : "增强提示词"}
             </button>
@@ -1907,18 +1842,29 @@ export function H3PromptSection({
               </div>
             </details> : null}
             {promptMode === "ref2va" ? <details className="nfh3-storyboard-detail" open>
-              <summary>summary</summary>
+              <summary title="summary">{h3Label(locale, "summary")}</summary>
               <div className="nfh3-storyboard-detail-body">
-                <AutoGrowTextarea
+                <TextEditor
+                  key={`${selected?.id}:storyboard-summary`}
+                  projectId={ctx.projectId}
+                  target={textTarget}
+                  standalone
+                  autoHeight
                   value={storyboardSummary}
-                  onChange={(event) => updateStoryboardTextField("summary", event.target.value)}
+                  onChange={(summary) => updateStoryboardTextField("summary", summary)}
+                  references={storyboardEditorReferences}
+                  chips
+                  clipReferenceTags
+                  speakers={speakerRoster}
+                  dialogue
                   placeholder="填写本段剧情摘要"
-                  ariaLabel="summary"
+                  className="minimax-collaborative-prompt nfh3-shot-editor"
+                  style={{ minHeight: 92, height: "auto", fontSize: 15 }}
                 />
               </div>
             </details> : null}
             <details className="nfh3-storyboard-detail" open>
-              <summary>{storyboardSection}</summary>
+              <summary title={storyboardSection}>{h3Label(locale, storyboardSection === "detailed_description" ? "detailedDescription" : "integratedDescription")}</summary>
               <div className="nfh3-storyboard-detail-body">
                 <div className="nfh3-storyboard-opening nfh3-storyboard-detail">
                   <div className="nfh3-storyboard-static-summary">开头总体描述（非分镜）</div>
@@ -1960,7 +1906,7 @@ export function H3PromptSection({
                     size="small"
                     value={shot.pictureBindingId}
                     allowClear
-                    placeholder={storyboardPictureOptions.length || orderedStoryboardGroups.length ? "选择分镜图或有序组" : "请先在 Refs 中添加分镜图"}
+                    placeholder={storyboardPictureOptions.length || orderedStoryboardGroups.length ? "选择分镜图或有序组" : h3Label(locale, "addStoryboardReference")}
                     options={[
                       ...storyboardPictureOptions.map(({ value, label }) => ({ value, label })),
                       ...orderedStoryboardGroups,
@@ -2064,24 +2010,42 @@ export function H3PromptSection({
               </div>
             </details>
             <details className="nfh3-storyboard-detail" open>
-              <summary>overall_soundscape</summary>
+              <summary title="overall_soundscape">{h3Label(locale, "soundscape")}</summary>
               <div className="nfh3-storyboard-detail-body">
-                <AutoGrowTextarea
+                <TextEditor
+                  key={`${selected?.id}:storyboard-soundscape`}
+                  projectId={ctx.projectId}
+                  target={textTarget}
+                  standalone
+                  autoHeight
                   value={storyboardSoundscape}
-                  onChange={(event) => updateStoryboardTextField("soundscape", event.target.value)}
+                  onChange={(soundscape) => updateStoryboardTextField("soundscape", soundscape)}
+                  references={storyboardEditorReferences}
+                  chips
+                  clipReferenceTags
                   placeholder="填写环境声与音效"
-                  ariaLabel="overall_soundscape"
+                  className="minimax-collaborative-prompt nfh3-shot-editor"
+                  style={{ minHeight: 92, height: "auto", fontSize: 15 }}
                 />
               </div>
             </details>
             <details className="nfh3-storyboard-detail" open>
-              <summary>non_diegetic_music</summary>
+              <summary title="non_diegetic_music">{h3Label(locale, "music")}</summary>
               <div className="nfh3-storyboard-detail-body">
-                <AutoGrowTextarea
+                <TextEditor
+                  key={`${selected?.id}:storyboard-music`}
+                  projectId={ctx.projectId}
+                  target={textTarget}
+                  standalone
+                  autoHeight
                   value={storyboardMusic}
-                  onChange={(event) => updateStoryboardTextField("music", event.target.value)}
-                  placeholder="N/A"
-                  ariaLabel="non_diegetic_music"
+                  onChange={(music) => updateStoryboardTextField("music", music)}
+                  references={storyboardEditorReferences}
+                  chips
+                  clipReferenceTags
+                  placeholder={h3Label(locale, "optional")}
+                  className="minimax-collaborative-prompt nfh3-shot-editor"
+                  style={{ minHeight: 92, height: "auto", fontSize: 15 }}
                 />
               </div>
             </details>

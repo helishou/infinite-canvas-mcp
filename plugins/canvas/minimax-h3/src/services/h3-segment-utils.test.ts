@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildRestoreParamsPatch } from "./h3-segment-utils";
+import { buildRestoreParamsPatch, exportH3Settings, importH3Settings } from "./h3-segment-utils";
 import type { H3Ref, H3Segment } from "../types";
 
 const targetSegment: H3Segment = {
@@ -52,4 +52,11 @@ test("还原引用时丢弃旧 storyboardShots，按历史分镜引用重建，�
     assert.deepEqual(patch.storyboardShots, [{ id: boardBinding.id, referenceBindingId: boardBinding.id }]);
     assert.equal(patch.storyboardShots?.some((shot) => shot.id === "stale-shot"), false);
     assert.equal(patch.storyboardShots?.some((shot) => shot.id === "stale-empty-shot"), false);
+});
+
+test("视觉风格模板随设置导出和导入，提示词不在设置文件中", () => {
+    const exported = exportH3Settings({ id: "clip", prompt: "用户正文", styleTemplateId: "modern-korean" });
+    assert.equal(exported.settings.styleTemplateId, "modern-korean");
+    assert.equal(Object.hasOwn(exported.settings, "prompt"), false);
+    assert.equal(importH3Settings(exported)?.styleTemplateId, "modern-korean");
 });

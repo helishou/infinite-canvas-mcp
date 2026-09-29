@@ -37,10 +37,13 @@ export function h3ClipCacheFingerprint(input: {
     const dependency = h3ClipDependsOnPrevious(segment, params) ? String(previousFingerprint || "missing") : "independent";
     const segmentInputs = Object.fromEntries([
         "confirmationMode", "motionContextEnabled", "previousVideoAsReference", "tailFrameContinuation",
-        "previousTailFrameContinuation", "storyboardCompositeEnabled", "storyboardDurations", "storyboardShots",
+        "previousTailFrameContinuation", "storyboardCompositeEnabled", "storyboardDurations", "storyboardShots", "styleTemplateId",
     ].filter((key) => segment[key] !== undefined).map((key) => [key, segment[key]]));
     const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly"].includes(key)));
-    return stableH3Fingerprint({ version: 2, segment: segmentInputs, params: fingerprintParams, references, compiledPrompt, dependency });
+    // Older tail-frame runs in fixed-frame modes captured a PNG but omitted it from
+    // the submitted image slots. Never reuse those outputs after the routing fix.
+    const fixedFrameTail = segment.previousTailFrameContinuation === true && ["t2v", "i2v", "fl2v"].includes(String(params.taskMode || params.mode || ""));
+    return stableH3Fingerprint({ version: fixedFrameTail ? 3 : 2, segment: segmentInputs, params: fingerprintParams, references, compiledPrompt, dependency });
 }
 
 /** 仅用于恢复升级前已暂停的一采任务；新任务一律使用 v2 实际输入指纹。 */

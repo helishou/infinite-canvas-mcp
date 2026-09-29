@@ -202,6 +202,43 @@ test("任务查询先在 SQLite 过滤和分页，超过 500 个活动任务仍�
     assert.ok(plan.some((row) => row.detail.includes("tasks_project_kind_status_created")));
 });
 
+test("启动恢复只读取最近 10 条生成候选，保留超出范围的任务", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [], connections: [] });
+    const createdAt = (day: number) => `2026-01-${String(day).padStart(2, "0")}T00:00:00.000Z`;
+    for (let day = 1; day <= 12; day++) {
+        const id = `active-${day}`;
+        db.createTask(id, "canvas-h3-run", { projectId: "p" }, {});
+        db.updateTask(id, { status: day % 2 ? "running" : "queued" });
+        db.db.prepare("UPDATE tasks SET created_at = ? WHERE id = ?").run(createdAt(day), id);
+    }
+    db.createTask("bound-parent", "canvas-h3-run", { projectId: "p" }, {});
+    db.updateTask("bound-parent", { status: "succeeded" });
+    db.db.prepare("UPDATE tasks SET created_at = ? WHERE id = ?").run(createdAt(19), "bound-parent");
+    const log = db.createGenerationLog({
+        projectId: "p", nodeId: "h3", segmentId: "clip", status: "running", platform: "comfyui",
+        workflow: "MiniMax H3", model: "h3", taskMode: "t2v", prompt: "", references: [], inputCounts: {},
+        startedAt: createdAt(20), durationMs: 0, outputs: [], params: {},
+    });
+    db.createTask("pending-child", "comfyui:minimax-h3", { projectId: "p" }, { canvasBinding: { generationLogId: log.id } });
+    db.updateTask("pending-child", { status: "succeeded" });
+    db.updateGenerationLog(log.id, { runtimeTaskId: "pending-child" });
+    db.db.prepare("UPDATE tasks SET created_at = ? WHERE id = ?").run(createdAt(20), "pending-child");
+    db.createTask("unbound-history", "canvas-h3-run", { projectId: "p" }, {});
+    db.updateTask("unbound-history", { status: "succeeded" });
+    db.db.prepare("UPDATE tasks SET created_at = ? WHERE id = ?").run(createdAt(21), "unbound-history");
+    db.createTask("unbound-child", "comfyui:minimax-h3", { projectId: "p" }, { canvasBinding: { generationLogId: "missing" } });
+    db.updateTask("unbound-child", { status: "succeeded" });
+    db.db.prepare("UPDATE tasks SET created_at = ? WHERE id = ?").run(createdAt(22), "unbound-child");
+
+    const selected = db.listStartupRecoveryTasks(["bound-parent"]);
+    assert.deepEqual(selected.map((task) => task.id), ["pending-child", "bound-parent", ...Array.from({ length: 8 }, (_, i) => `active-${12 - i}`)]);
+    assert.equal(db.getTask("active-1")?.status, "running");
+    assert.equal(db.getTask("unbound-history")?.status, "succeeded");
+    assert.equal(db.getTask("unbound-child")?.status, "succeeded");
+});
+
 test("历史输出只由 Backend 核对日志与媒体后还原", (t) => {
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());

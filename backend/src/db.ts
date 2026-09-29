@@ -2020,9 +2020,24 @@ export class BackendDatabase {
         const limit = Math.max(1, Math.min(500, Number(options.limit || 500)));
         const offset = Math.max(0, Number(options.offset || 0));
         const rows = this.db.prepare(
-            `SELECT * FROM generation_logs ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+            `SELECT * FROM generation_logs ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
         ).all(...values, limit, offset) as Array<Record<string, unknown>>;
-        return rows.map(generationLogFromRow);
+        return rows.map((row) => this.withLegacyTailFrameMedia(generationLogFromRow(row)));
+    }
+
+    /** Older H3 logs saved a captured tail's file path without its media key. Resolve it for display without rewriting the historical log. */
+    private withLegacyTailFrameMedia(log: GenerationLog): GenerationLog {
+        if (!log.references.some((reference) => reference.runtime === true && String(reference.id || "").startsWith("runtime-tail-") && !reference.storageKey && !reference.url && typeof reference.resolved === "string")) return log;
+        const findMedia = this.db.prepare("SELECT storage_key, mime_type FROM media_files WHERE file_path = ? LIMIT 1");
+        let changed = false;
+        const references = log.references.map((reference) => {
+            if (reference.runtime !== true || !String(reference.id || "").startsWith("runtime-tail-") || reference.storageKey || reference.url || typeof reference.resolved !== "string") return reference;
+            const media = findMedia.get(reference.resolved) as { storage_key?: string; mime_type?: string } | undefined;
+            if (!media?.storage_key || !String(media.mime_type || "").startsWith("image/")) return reference;
+            changed = true;
+            return { ...reference, storageKey: media.storage_key, mimeType: media.mime_type };
+        });
+        return changed ? { ...log, references } : log;
     }
 
     deleteGenerationLogs(options: { id?: string; projectId?: string; nodeId?: string }): number {
@@ -2519,6 +2534,28 @@ export class BackendDatabase {
     getTask(id: string): RuntimeTask | null {
         const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Record<string, unknown> | undefined;
         return row ? this.taskFromRow(row) : null;
+    }
+
+    /** 启动恢复只读取最新候选；已结束任务仅限仍被 H3 画布绑定或日志未收口。 */
+    listStartupRecoveryTasks(boundH3ParentIds: string[], limit = 10): RuntimeTask[] {
+        const rows = this.db.prepare(`
+            SELECT t.* FROM tasks t
+            WHERE t.status IN ('running', 'queued', 'awaiting_confirmation')
+               OR (t.kind = 'canvas-h3-run'
+                   AND t.status IN ('succeeded', 'failed', 'cancelled')
+                   AND t.id IN (SELECT value FROM json_each(?)))
+               OR (t.kind IN ('comfyui:minimax-h3', 'runninghub:minimax-h3')
+                   AND t.status IN ('succeeded', 'failed', 'cancelled')
+                   AND EXISTS (
+                       SELECT 1 FROM generation_logs l
+                       WHERE l.id = json_extract(t.params_json, '$.canvasBinding.generationLogId')
+                         AND l.runtime_task_id = t.id
+                         AND l.status IN ('queued', 'running')
+                   ))
+            ORDER BY t.created_at DESC, t.id DESC
+            LIMIT ?
+        `).all(JSON.stringify(boundH3ParentIds), limit) as Array<Record<string, unknown>>;
+        return rows.map((row) => this.taskFromRow(row));
     }
 
     listTasks(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {

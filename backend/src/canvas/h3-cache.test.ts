@@ -14,6 +14,11 @@ test("fingerprints are canonical and exclude runtime/result fields", () => {
     assert.notEqual(fingerprint(base), fingerprint({ ...base, prompt: "changed" }));
 });
 
+test("changing the visual style template invalidates a cached Clip", () => {
+    assert.notEqual(fingerprint({ ...base, styleTemplateId: "modern-korean" }), fingerprint({ ...base, styleTemplateId: "soft-light" }));
+    assert.notEqual(fingerprint({ ...base, styleTemplateId: "modern-korean" }), fingerprint({ ...base, styleTemplateId: null }));
+});
+
 test("only explicit continuation modes depend on the previous clip", () => {
     assert.equal(h3ClipDependsOnPrevious({}), false);
     assert.equal(h3ClipDependsOnPrevious({ motionContextEnabled: true }), true);
@@ -26,6 +31,17 @@ test("upstream changes invalidate only dependent downstream clips", () => {
     const dependent = { ...base, id: "c3", motionContextEnabled: true };
     assert.equal(fingerprint(independent, "upstream-a"), fingerprint(independent, "upstream-b"));
     assert.notEqual(fingerprint(dependent, "upstream-a"), fingerprint(dependent, "upstream-b"));
+});
+
+test("fixed-frame tail continuation invalidates outputs produced before tail routing was fixed", () => {
+    const segment = { ...base, previousTailFrameContinuation: true };
+    const params = { mode: "fl2v", taskMode: "fl2v" };
+    const oldFingerprint = stableH3Fingerprint({
+        version: 2, segment: { previousTailFrameContinuation: true }, params,
+        references: [], compiledPrompt: "shot", dependency: "previous",
+    });
+    const newFingerprint = h3ClipCacheFingerprint({ segment, params, references: [], compiledPrompt: "shot", previousFingerprint: "previous" });
+    assert.notEqual(newFingerprint, oldFingerprint);
 });
 
 test("reuse requires both exact fingerprint and an output", () => {

@@ -310,7 +310,7 @@ export function H3PaneHandles({ ctx }: { ctx: CanvasNodeContext }) {
     return <div ref={hostRef} style={{ display: "contents" }}>{bars.map((bar) => <span key={bar.key} className={`minimax-pane-handle minimax-pane-handle-${bar.dir}`} style={bar.dir === "ns" ? { left: bar.x, top: bar.y - 3, width: bar.w, height: 7 } : { left: bar.x - 3, top: bar.y, width: 7, height: bar.h }} onPointerDown={onPointerDown(bar.key)} onPointerMove={onPointerMove} onPointerUp={release} onPointerCancel={release} />)}</div>;
 }
 
-export function H3RulerScrubber({ ctx, total, previewH }: { ctx: CanvasNodeContext; total: number; previewH: number }) {
+export function H3RulerScrubber({ ctx, segments, total, previewH }: { ctx: CanvasNodeContext; segments: H3Segment[]; total: number; previewH: number }) {
     const scrubRef = useRef<HTMLDivElement | null>(null);
     const [origin, setOrigin] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
     // 轨道几何直接取 ruler 的 offset*（本地 CSS px，与绝对定位同坐标系、不受画布 zoom 缩放），
@@ -354,8 +354,12 @@ export function H3RulerScrubber({ ctx, total, previewH }: { ctx: CanvasNodeConte
         const scroll = transformMatch ? Math.abs(parseFloat(transformMatch[1])) : 0;
         const scale = el.offsetWidth > 0 ? rect.width / el.offsetWidth : 1;
         const px = Math.max(0, (event.clientX - rect.left) / scale + scroll);
-        // 拖拽/点击 seek：置 h3Scrubbing 让 rAF 暂停驱动，避免拖动与播放进度抢指针位置（指针改由本次 updateMetadata 的 playhead 实时驱动）
-        ctx.updateMetadata({ playhead: Math.max(0, Math.min(total, px / 100)), h3PlaybackAll: false, h3Scrubbing: true });
+        const playhead = Math.max(0, Math.min(total, px / 100));
+        const segment = segments.find((item) => playhead >= Number(item.start || 0)
+            && playhead < Number(item.start || 0) + Math.max(0.5, Number(item.duration || 1))) || segments[segments.length - 1];
+        // 拖拽/点击 seek 同时切换当前 Clip；末端时间归最后一段。
+        // h3Scrubbing 让 rAF 暂停驱动，避免拖动与播放进度抢指针位置。
+        ctx.updateMetadata({ playhead, ...(segment ? { selectedSegmentId: segment.id } : {}), h3PlaybackAll: false, h3Scrubbing: true });
     };
     return <div ref={scrubRef} className="minimax-ruler-scrubber" style={{ top: origin?.top ?? `calc(58px + ${previewH}px + 10px)`, left: origin?.left ?? 62, width: origin?.width ?? "calc(100% - 126px)", height: origin?.height ?? 28 }} title="点击跳转播放指针" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* synthetic/无指针ID 的测试事件无活动指针，忽略 */ } event.currentTarget.setAttribute("data-scrubbing", "1"); apply(event); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) apply(event); }} onPointerUp={(event) => { try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* 同上 */ } event.currentTarget.removeAttribute("data-scrubbing"); ctx.updateMetadata({ h3Scrubbing: false }); }} onPointerCancel={(event) => { event.currentTarget.removeAttribute("data-scrubbing"); ctx.updateMetadata({ h3Scrubbing: false }); }} />;
 }

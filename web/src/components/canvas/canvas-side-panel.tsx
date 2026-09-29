@@ -120,7 +120,7 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab projectId={projectId} onInsert={onInsertAsset} theme={theme} />
                     ) : (
-                        <CanvasPromptsTab onInsert={onInsertAsset} theme={theme} />
+                        <CanvasPromptsTab onInsert={onInsertAsset} nodes={nodes} theme={theme} />
                     )}
                 </div>
                 <button type="button" className="absolute inset-y-0 right-0 z-40 w-4 translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label={t("canvas.sidePanel.resize")} />
@@ -730,7 +730,7 @@ function ImageAssetCover({ asset }: { asset: ImageAsset }) {
 // Prompt library tab: collapsible source groups, lazy loading, and copy or text-node insertion actions.
 // ---------------------------------------------------------------------------
 
-const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { onInsert: (payload: InsertAssetPayload) => void; theme: CanvasTheme }) {
+const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, nodes, theme }: { onInsert: (payload: InsertAssetPayload) => void; nodes: CanvasNodeData[]; theme: CanvasTheme }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const sources = usePromptSourceStore((state) => state.sources);
@@ -797,7 +797,7 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
                 </div>
             </div>
             <PromptDetailDialog prompt={detail} onClose={() => setDetail(null)} onCopy={(prompt) => void copyPrompt(prompt)} />
-            <CustomPromptDialog open={addDialogOpen} mode="add" onClose={() => setAddDialogOpen(false)} />
+            <CustomPromptDialog open={addDialogOpen} mode="add" canvasNodes={nodes} onClose={() => setAddDialogOpen(false)} />
         </div>
     );
 });

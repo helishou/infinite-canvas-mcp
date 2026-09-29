@@ -11,30 +11,32 @@ function fixture() {
     let nextId = 0;
     let offline = false;
     let loseReply = false;
+    let documentId = "doc-1";
     let gate: Promise<void> | undefined;
     const create = () => {
         const session = new CollaborativeTextSession({
             nextId: () => `op-${++nextId}`,
-            read: async () => { if (offline) throw new Error("offline"); return { state: encodeTextUpdate(Y.encodeStateAsUpdate(server)), documentId: "doc-1" }; },
+            read: async () => { if (offline) throw new Error("offline"); return { state: encodeTextUpdate(Y.encodeStateAsUpdate(server)), documentId }; },
             load: async () => [...disk.values()].map((item) => ({ ...item })),
             save: async (draft) => { disk.set(draft.operationId, { ...draft }); },
             remove: async (draft) => { disk.delete(draft.operationId); },
             send: async (draft) => {
                 if (gate) await gate;
                 if (offline) throw new Error("offline");
+                assert.equal(draft.documentId, documentId);
                 if (receipts.has(draft.operationId)) assert.equal(receipts.get(draft.operationId), draft.update);
                 else {
                     receipts.set(draft.operationId, draft.update);
                     Y.applyUpdate(server, decodeTextUpdate(draft.update));
                 }
                 if (loseReply) { loseReply = false; throw new Error("lost receipt"); }
-                session.receive({ state: encodeTextUpdate(Y.encodeStateAsUpdate(server)), documentId: "doc-1" });
+                session.receive({ state: encodeTextUpdate(Y.encodeStateAsUpdate(server)), documentId });
             },
             isPermanentError: () => false,
         });
         return session;
     };
-    return { create, disk, receipts, server, offline: (value: boolean) => { offline = value; }, loseReply: () => { loseReply = true; }, gate: (value?: Promise<void>) => { gate = value; } };
+    return { create, disk, receipts, server, offline: (value: boolean) => { offline = value; }, documentId: (value: string) => { documentId = value; }, loseReply: () => { loseReply = true; }, gate: (value?: Promise<void>) => { gate = value; } };
 }
 
 test("两个中文编辑增量合并，本地撤销不会撤销远端插入", async () => {
@@ -144,4 +146,30 @@ test("同 ID 对象重建后拒绝合并新身份，旧草稿和正文保持可�
     assert.equal(session.getSnapshot().blocked, true);
     assert.equal(f.disk.size, 1);
     assert.equal([...f.disk.values()][0].documentId, "doc-1");
+    assert.equal(session.hasReplacedDocument(), true);
+});
+
+test("刷新后旧身份草稿留在磁盘，新身份文本可继续编辑", async () => {
+    const f = fixture();
+    const old = f.create();
+    await old.initialize();
+    f.offline(true);
+    old.text.insert(2, "旧草稿");
+    await assert.rejects(old.flush(), /offline/);
+    const oldDraft = [...f.disk.values()][0];
+    f.documentId("doc-2");
+    f.offline(false);
+
+    const restored = f.create();
+    await restored.initialize();
+    assert.equal(restored.getSnapshot().ready, true);
+    assert.equal(restored.getSnapshot().blocked, false);
+    assert.equal(restored.getSnapshot().pending, 0);
+    assert.equal(restored.text.toString(), "甲乙");
+    assert.deepEqual([...f.disk.values()], [oldDraft]);
+
+    restored.text.insert(2, "新编辑");
+    await restored.flush();
+    assert.equal(f.server.getText("text").toString(), "甲乙新编辑");
+    assert.deepEqual([...f.disk.values()], [oldDraft]);
 });

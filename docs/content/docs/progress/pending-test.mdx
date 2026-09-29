@@ -5,9 +5,89 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## H3 visual style template setting
+
+- Select a visual style template under Settings → Model and basic parameters. Check both Current Clip and Global settings scopes: the global selection should update existing Clips and be inherited by new Clips. Clearing the selection should stop template injection.
+- After saving a Ref2VA storyboard, `detailed_description` in the editor should contain no template text. The generation log and submitted prompt should include the selected template once at the start of that section. For I2V, FL2V, and T2V, it should appear in `integrated_multimodal_description`. A legacy saved template prefix should not be duplicated; changing or clearing the setting should take effect without rewriting the saved prompt on refresh.
+- Exporting, importing, or saving default settings should include the template choice without including the prompt body in the settings file.
+
+## H3 playhead selects its Clip
+
+- In a multi-Clip H3 timeline, click the ruler inside another Clip, then drag the playhead across a Clip boundary and back. The selected Clip highlight, current Clip panel, and preview should follow the playhead. Seeking to the timeline end should select the final Clip.
+
+## H3 node settings scope
+
+- In an H3 node with several Clips, switch to Global settings and check the prominent notice. Change a model, sampling parameter, and duration. Every existing Clip should show the new values, timeline starts should follow the changed durations, and each Clip should retain its own prompt and references.
+- Add and insert Clips on the timeline. They should inherit fields edited in Global settings. Switch back to Current Clip and change one field; only that Clip should change. After reloading the canvas, new Clips should still receive the global fields. Check the scope controls and notice in both languages.
+
+## H3 node interface language
+
+- Open an H3 node in Chinese and check the Prompt, Settings, Output, Video/References timeline labels, media types, and storyboard field headings are displayed in Chinese. Switch to English and back; the labels should update immediately while the serialized prompt section names and generation input remain unchanged.
+
+## H3 Ref2VA captured tail in generation-log inputs
+
+- Open a successful Ref2VA generation log created with tail-frame continuation. Its input refs should show the captured tail image alongside the Clip's other references, and the image preview should open from the existing media record. A historical tail whose media file is unavailable should still appear by name. Check that the displayed image count matches the actual V15 submission without regenerating the Clip.
+- When the next Ref2VA Clip already has storyboard Picture 1, run that Clip alone. The new log should show the previous Clip's tail as input Picture 1, and the submitted prompt should cite `<Picture 1>` immediately after `[Shot 1]` without retaining the old frame's composition cue. After refreshing the canvas, the Clip's saved storyboard image and editor prompt should remain unchanged. With no storyboard image, existing Picture numbers should shift only in the submitted input.
+
+## H3 FL2VA tail-frame continuation
+
+- Enable tail-frame continuation on a completed Clip, then run the next FL2VA Clip alone. In the new generation log and ComfyUI V15 input, Picture 1 must be a newly captured frame from the previous Clip, while Picture 2 remains the next Clip's saved last-frame image. The submitted prompt must keep Picture 1 and Picture 2 numbering, and an old output generated without that first-frame input must not be reused.
+
+## Restore an H3 Clip prompt after Undo
+
+- Delete a Clip with an existing prompt, then immediately press Ctrl+Z. Confirm that the Clip and prompt return without a persistent "Clip not found" error. Edit and save the prompt, refresh the canvas, and check that the text remains.
+- Other Clips on the node should remain editable. Any unconfirmed text draft from before deletion must remain recoverable instead of being silently applied to the restored document identity.
+- Immediately open and save the storyboard editor after restoring the Clip. Saving should wait for the new prompt session to load. Old-identity drafts should remain in the draft box and must not be merged into the new document. If Backend has not restored the Clip yet, the editor should show the specific read error and keep form edits.
+- Keep an old draft blocked by a replaced Clip document, then edit and generate from a different smart image node in the same canvas. The current image prompt should sync and submit while the old Clip draft stays recoverable. A sync failure in the image prompt itself must still stop generation.
+
+## References on a second smart image generation
+
+- Connect a text node to a smart image node, then connect that image node to another generator that also has its own image reference. After the first result, generate again from the first node: it should still route as text to image, while the downstream generator retains its own image reference.
+
+## Loop image output preview comparison
+
+- Connect an ordered image input group and a fixed reference image to an image loop. After generation, open each round's output preview: the before side of the comparison slider should show the matching image from the input group. Selecting an older result in the same slot should still compare with that slot's current input. An old loop slot whose source input was deleted should not show an unrelated fixed reference as its before image. Ordinary image results should continue to use their generation snapshot for comparison.
+
+## H3 latent-upscale compatibility preflight
+
+- On a ComfyUI instance without `H3LatentUpscalerNodeMegapixels`, enable H3 latent-upscale second pass and submit a Clip. The Backend should reject it before a first-pass Comfy task starts, with a clear missing-node message. With the compatibility node installed, check that the selected upscaler model appears in `NanFengH3LowPeakLatentUpscalerV15` and that submission proceeds. Verify first-pass speed separately; preflight only prevents the known late failure.
+- If H3 Motion Context continuation and latent-upscale second pass are both enabled, submission should reject the incompatible combination before sampling.
+
+## H3 prompt enhancement receives the original prompt
+
+- Enter a complete six-section Ref2VA prompt, including dialogue, in a Clip and click Enhance Prompt. The text-generation request should include the entire current editor prompt and the current reference manifest; a structured prompt alone should no longer be rejected as having no free-form user text. Check the returned candidate before accepting it, especially subject references and dialogue.
+- When free-form user text precedes an older structured draft, the request should include both and identify the free-form text as higher priority. While collaborative text is still syncing, Enhance Prompt should remain disabled instead of doing nothing on click.
+
+## Character voice upload compression
+
+- After restarting Backend, upload a voice file larger than 0.5 MB in either the canvas character editor or the character asset editor. The active voice should become a 24 kHz mono, 64 kbps MP3; the UI should show the original and compressed sizes, and the original media should remain stored. Voice files at or below 0.5 MB and ordinary audio asset uploads should retain their source format. The existing Phoebe character and speaking H3 Clips should reference the approved compressed MP3.
+- Before Backend is restarted, a character voice upload should report that compression is unavailable instead of silently storing a large file as the active voice.
+
+## Smart text result editing
+
+- After restarting Backend, double-click a successful smart text node's result. Editing the text should save the active result and keep the node's input prompt unchanged. A normal image smart node should not expose its media content as editable text.
+
+## H3 storyboard editor follows the prompt shot count
+
+- Write two line-start `[Shot N]` entries in a Clip prompt and add four storyboard images. Opening the storyboard editor should show only two shots. Shots without an explicit image cue should stay unbound so each image can be chosen manually. After completing the edit, reopen it to check that the shot count and manual bindings remain.
+- When image and shot counts match, empty shots may still initialize from image order. Explicit prompt bindings should keep their shot order; duplicate or missing bindings should clear without adding shots.
+
+## H3 V15 LoRA strength range
+
+- After ComfyUI reloads the updated V15 custom node, check `/object_info/NanFengH3MultiReferenceGeneratorV15`: all eight `LoRA N strength` inputs should accept -4 through 10. Set a Clip LoRA strength to 7, verify the canvas retains it, and inspect a newly submitted task's V15 input and generation log; both should show 7. Values above 10 or below -4 should be clamped before submission. Do not use an existing log to verify the new node schema.
+
+## Smart image node tools
+
+- On an image-mode smart node with multiple generated images, choose a primary image and use Reverse Prompt, Crop, Split, Mask Edit, Upscale, Auto Levels, Angle, View, Download, and Add to Assets. Each tool should use the selected primary image, including when it is stored only by media key. Reverse Prompt should create its connected text and configuration nodes. Replace Image should keep the smart node's model and prompt settings.
+
+## H3 storyboard images first in Picture order
+
+- In a Clip with character images followed by storyboard images, reorder storyboard cards and complete the storyboard editor. The storyboard images should occupy the first Picture slots in shot order, followed by other image references. Existing `<Picture N>` mentions should still point to their original images after renumbering. Check the new generation log's input refs and actual submitted image slots in the same order; older logs remain historical snapshots.
+
 ## Local Backend startup
 
-- Start `npm run dev:backend` with a canvas that has accumulated H3 history. The Backend health check should become available promptly, and opening the canvas should connect without waiting for all historical H3 tasks to replay. A terminal H3 task still bound to a node or Clip should finish its saved writeback after restart, even if its older generation log has been pruned.
+- From a VS Code terminal, run `npm run dev:local`. Backend should report that it has started and `/health` should respond before opening the canvas; Web and Agent should remain available. The default `dev:backend` command should run without a watch child. Use `npm run dev:watch --workspace backend` only when source watching is needed.
+- Start `npm run dev:backend` with a canvas that has accumulated H3 history. The Backend health check should become available promptly, and opening the canvas should connect without waiting for all historical H3 tasks to replay. Startup should process at most the 10 newest recovery candidates, including unfinished tasks and terminal H3 tasks still bound to a node or Clip. Older candidates should remain unchanged if excluded. A selected terminal H3 task should finish its saved writeback even if its older generation log has been pruned.
 
 ## Canvas video comparison
 
@@ -1721,7 +1801,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ### H3 尾帧接续
 
-- 开启 S03 的尾帧接续后，只点击“生成当前 Clip”运行 S04，确认实际提交图片数量比 S04 自有参考图多 1 张，且生成日志提示词包含上一段尾帧首帧锚定说明。
+- 在 Ref2VA 模式开启 S03 的尾帧接续后，只点击“生成当前 Clip”运行 S04，确认实际提交图片数量比 S04 自有参考图多 1 张，且生成日志提示词包含上一段尾帧首帧锚定说明。FL2VA 模式按上方专项核对首帧替换，图片总数仍为 2 张。
 - 开启尾帧接续但清除上一段成品后运行下一段，确认任务直接报告缺少上一段成品，不创建一个未接续的伪成功任务。
 
 - 分别点击前端「生成当前 Clip」和调用 `h3_run_clip`，确认两者都只创建一个 `canvas-h3-run` 父任务，并由 Backend 创建相同的 H3 子任务、生成日志和 Clip 绑定。

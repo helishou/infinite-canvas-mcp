@@ -130,8 +130,9 @@ function collectReferences(log: GenerationLog): Array<Record<string, unknown>> {
     const params = typeof log.params === "object" && log.params ? (log.params as Record<string, unknown>) : {};
     if (params.refs) pushRefs(params.refs);
     if (params.refItems) pushRefs(params.refItems);
-    // 如果顶层 references 已经全都有 url，保持原样；否则用 params 中补充到的完整 ref 替换
-    return refs.length && refs.every(hasUrl) ? refs : refs.filter(hasUrl).length ? refs.filter(hasUrl) : refs;
+    // 旧 H3 日志中的运行时尾帧只有本地 resolved 路径；媒体索引失效时也保留名称，不把已提交的输入隐藏。
+    const visible = refs.filter(hasUrl);
+    return visible.length ? refs.filter((ref) => hasUrl(ref) || (ref.runtime === true && String(ref.id || "").startsWith("runtime-tail-"))) : refs;
 }
 
 function actualSubmissionText(params: unknown) {
@@ -196,6 +197,7 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
 }
 
 function ReferencePreview({ reference, index, onPreview }: { reference: Record<string, unknown>; index: number; onPreview?: (url: string, video: boolean, name?: string) => void }) {
+    const isRuntimeTail = reference.runtime === true && String(reference.id || "").startsWith("runtime-tail-");
     const storageKey = typeof reference.storageKey === "string" && reference.storageKey ? reference.storageKey : "";
     const url = storageKey ? backendMediaUrl(storageKey) : String(reference.url || "");
     const rawType = String(reference.type || "").toLowerCase();
@@ -221,7 +223,7 @@ function ReferencePreview({ reference, index, onPreview }: { reference: Record<s
     ) : null;
     if (!url) return <Tag title={fallbackName || label}>{fallbackName || label}</Tag>;
     // 固定预览框尺寸，预留布局空间，避免缩略图陆续加载时反复触发重排/重绘
-    if (inferred.kind === "image") return <div className="group relative" style={{ width: 96, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "rgba(120,120,120,0.10)" }}><img src={url} alt={fallbackName || label} title={fallbackName || label} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />{previewButton}</div>;
+    if (inferred.kind === "image") return <div className="group relative" style={{ width: 96, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "rgba(120,120,120,0.10)" }}><img src={url} alt={fallbackName || label} title={fallbackName || label} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />{isRuntimeTail ? <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1 text-[10px] leading-4 text-white">接续尾帧</span> : null}{previewButton}</div>;
     if (inferred.kind === "video") return <div className="group relative" style={{ width: 112, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "#000" }}><video src={url} title={fallbackName || label} controls muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} />{previewButton}</div>;
     if (inferred.kind === "audio") return <audio src={url} title={fallbackName || label} controls preload="metadata" className="h-8 w-52" />;
     return <Tag title={fallbackName || label}>{fallbackName || label}</Tag>;

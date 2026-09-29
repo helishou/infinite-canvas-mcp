@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Modal, Select } from "antd";
-import { Pause, Play } from "lucide-react";
+import { App, Button, Modal, Select, Tooltip } from "antd";
+import { Columns2, Loader2, Pause, Play } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { saveAs } from "file-saver";
+import { resolveBackendAgentEndpoint, runVideoConcatTask, type LocalReference } from "@/services/api/comfyui";
 
-export type CanvasVideoCompareItem = { id: string; title: string; url: string; durationMs?: number };
+export type CanvasVideoCompareItem = { id: string; title: string; url: string; durationMs?: number; storageKey?: string };
 export type CanvasVideoComparison = { source: CanvasVideoCompareItem; candidates: CanvasVideoCompareItem[]; initialSelectedIds?: string[] };
+
+/** 横向拼接时每格的目标高度（像素）。720 = 两路 16:9 拼成 2560x720，够看清又不至于太大。 */
+const HSTACK_CELL_HEIGHT = 720;
+const HSTACK_MESSAGE_KEY = "video-compare-hstack";
 
 function formatTime(seconds: number) {
     const value = Math.max(0, Math.floor(seconds));
@@ -17,6 +23,7 @@ function videoDuration(video: HTMLVideoElement, fallback?: number) {
 
 export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: CanvasVideoComparison; onClose: () => void }) {
     const { t } = useTranslation();
+    const { message } = App.useApp();
     const [selectedIds, setSelectedIds] = useState<string[]>(comparison.initialSelectedIds || []);
     const [durations, setDurations] = useState<Record<string, number>>({});
     const [errors, setErrors] = useState<Record<string, boolean>>({});
@@ -111,6 +118,29 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
         setPlaying(true);
     };
 
+    // 横向拼接下载：把当前选中的所有视频交给后端 ffmpeg 排成一行，音轨取第一路（源视频）。
+    const [exporting, setExporting] = useState(false);
+    const downloadHstack = useCallback(async () => {
+        if (exporting) return;
+        if (items.length < 2) { message.warning(t("canvas.videoCompare.hstackNeedTwo")); return; }
+        const controller = new AbortController();
+        setExporting(true);
+        message.open({ key: HSTACK_MESSAGE_KEY, type: "loading", content: t("canvas.videoCompare.hstackRunning", { count: items.length }), duration: 0 });
+        try {
+            const { endpoint, token } = resolveBackendAgentEndpoint();
+            const references: LocalReference[] = items.map((item, index) => ({ name: `${index + 1}-${item.title || "video"}`, storageKey: item.storageKey, url: item.storageKey ? undefined : item.url }));
+            const result = await runVideoConcatTask(endpoint, token, references, controller.signal, { layout: "hstack", longEdge: HSTACK_CELL_HEIGHT });
+            const fileName = `video-compare-hstack-${items.length}-${Date.now()}.mp4`;
+            saveAs(result.url, fileName);
+            message.success({ key: HSTACK_MESSAGE_KEY, content: t("canvas.videoCompare.hstackDone", { name: fileName }), duration: 4 });
+        } catch (error) {
+            if ((error as Error)?.name === "AbortError") return;
+            message.error({ key: HSTACK_MESSAGE_KEY, content: t("canvas.videoCompare.hstackFailed", { error: error instanceof Error ? error.message : String(error) }), duration: 6 });
+        } finally {
+            setExporting(false);
+        }
+    }, [exporting, items, message, t]);
+
     return <Modal
         title={t("canvas.videoCompare.title")}
         open
@@ -168,6 +198,11 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
                 <Button type="primary" icon={playing ? <Pause className="size-4" /> : <Play className="size-4" />} onClick={togglePlayback} disabled={!totalDuration} aria-label={t(playing ? "canvas.videoCompare.pause" : "canvas.videoCompare.play")} />
                 <input type="range" className="min-w-0 flex-1 cursor-pointer accent-blue-500 disabled:cursor-not-allowed" min={0} max={totalDuration || 1} step={0.01} value={time} onChange={(event) => seek(Number(event.target.value))} disabled={!totalDuration} aria-label={t("canvas.videoCompare.seek")} />
                 <span className="shrink-0 text-xs tabular-nums">{formatTime(time)} / {formatTime(totalDuration)}</span>
+                <Tooltip title={items.length < 2 ? t("canvas.videoCompare.hstackNeedTwo") : t("canvas.videoCompare.hstackHint")}>
+                    <Button icon={exporting ? <Loader2 className="size-4 animate-spin" /> : <Columns2 className="size-4" />} onClick={() => void downloadHstack()} loading={exporting} disabled={items.length < 2} data-testid="video-compare-hstack-download" aria-label={t("canvas.videoCompare.hstackDownload")}>
+                        {t("canvas.videoCompare.hstackDownload")}
+                    </Button>
+                </Tooltip>
             </div>
             <p className="text-xs opacity-60">{t("canvas.videoCompare.hint")}</p>
         </div>

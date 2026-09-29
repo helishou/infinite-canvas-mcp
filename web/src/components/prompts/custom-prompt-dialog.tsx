@@ -1,11 +1,23 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { App, Button, Form, Input, Modal } from "antd";
-import { Plus, Upload, X } from "lucide-react";
+import { App, Button, Form, Input, Modal, Space } from "antd";
+import { Image as ImageIcon, Plus, Upload, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { readFileAsDataUrl } from "@/lib/image-utils";
+import { getDataUrlByteSize, readFileAsDataUrl } from "@/lib/image-utils";
 import type { Prompt } from "@/services/api/prompts";
 import { useCustomPromptsStore, type NewCustomPrompt } from "@/stores/use-custom-prompts-store";
+import type { CanvasNodeData } from "@/types/canvas";
+
+import { CanvasCoverPicker, type CanvasCoverCandidate } from "./canvas-cover-picker";
+
+function blobToDataUrl(blob: Blob) {
+    return new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("image read failed"));
+        reader.readAsDataURL(blob);
+    });
+}
 
 type Mode = "add" | "edit";
 
@@ -13,6 +25,8 @@ type Props = {
     open: boolean;
     mode: Mode;
     initial?: Prompt | null;
+    /** 传入当前画布节点时，封面图多一个「从画布选择」入口；不传（提示词库页面）则只保留本地上传。 */
+    canvasNodes?: CanvasNodeData[];
     onClose: () => void;
     onSaved?: () => void;
 };
@@ -23,7 +37,7 @@ type CustomPromptFormValues = Omit<NewCustomPrompt, "tags" | "coverUrl" | "refer
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
 
-export function CustomPromptDialog({ open, mode, initial, onClose, onSaved }: Props) {
+export function CustomPromptDialog({ open, mode, initial, canvasNodes, onClose, onSaved }: Props) {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const addPrompt = useCustomPromptsStore((state) => state.addPrompt);
@@ -32,6 +46,7 @@ export function CustomPromptDialog({ open, mode, initial, onClose, onSaved }: Pr
     const [submitting, setSubmitting] = useState(false);
     const [coverUrl, setCoverUrl] = useState("");
     const [referenceUrls, setReferenceUrls] = useState<string[]>([]);
+    const [coverPickerOpen, setCoverPickerOpen] = useState(false);
     const coverInputRef = useRef<HTMLInputElement>(null);
     const referencesInputRef = useRef<HTMLInputElement>(null);
 
@@ -93,6 +108,27 @@ export function CustomPromptDialog({ open, mode, initial, onClose, onSaved }: Pr
 
     const removeReference = (index: number) => {
         setReferenceUrls((prev) => prev.filter((_, i) => i !== index));
+    };
+
+    // 画布选中的封面要转成 data URL 再存：提示词存在总后台设置里，而
+    // backendMediaUrl 带的是会过期的连接 token，直接存 URL 过一阵就裂图。
+    const applyCanvasCover = async (candidate: CanvasCoverCandidate) => {
+        setCoverPickerOpen(false);
+        try {
+            const dataUrl = candidate.url.startsWith("data:") ? candidate.url : await fetch(candidate.url)
+                .then((response) => {
+                    if (!response.ok) throw new Error(String(response.status));
+                    return response.blob();
+                })
+                .then(blobToDataUrl);
+            if (getDataUrlByteSize(dataUrl) > MAX_FILE_SIZE) {
+                message.error(t("prompts.custom.fileTooLarge", { size: "5MB" }));
+                return;
+            }
+            setCoverUrl(dataUrl);
+        } catch {
+            message.error(t("prompts.custom.imageReadFailed"));
+        }
     };
 
     const handleOk = async () => {
@@ -163,9 +199,15 @@ export function CustomPromptDialog({ open, mode, initial, onClose, onSaved }: Pr
                             />
                         </div>
                     ) : (
-                        <Button icon={<Upload className="size-4" />} onClick={() => coverInputRef.current?.click()}>
-                            {t("prompts.custom.form.coverUpload")}
-                        </Button>
+                        // 提示词库页面没有画布上下文，只给本地上传。
+                        <Space wrap>
+                            <Button icon={<Upload className="size-4" />} onClick={() => coverInputRef.current?.click()}>
+                                {t("prompts.custom.form.coverUpload")}
+                            </Button>
+                            {canvasNodes ? <Button icon={<ImageIcon className="size-4" />} onClick={() => setCoverPickerOpen(true)}>
+                                {t("prompts.custom.form.coverFromCanvas")}
+                            </Button> : null}
+                        </Space>
                     )}
                 </Form.Item>
                 <Form.Item label={t("prompts.custom.form.references")}>
@@ -190,6 +232,7 @@ export function CustomPromptDialog({ open, mode, initial, onClose, onSaved }: Pr
                     </div>
                 </Form.Item>
             </Form>
+            {canvasNodes ? <CanvasCoverPicker open={coverPickerOpen} nodes={canvasNodes} onSelect={(candidate) => void applyCanvasCover(candidate)} onClose={() => setCoverPickerOpen(false)} /> : null}
         </Modal>
     );
 }

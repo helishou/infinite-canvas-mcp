@@ -9,6 +9,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
@@ -49,7 +50,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     const mode = modeOverride ?? (isSmartGenerationNode ? node.metadata?.generationMode || "image" : defaultMode(node.type));
     const config = buildNodeConfig(globalConfig, node, mode);
     const hasTextContent = (node.type === CanvasNodeType.Text || (isSmartGenerationNode && mode === "text")) && Boolean(node.metadata?.content?.trim());
-    const hasImageContent = (node.type === CanvasNodeType.Image || (isSmartGenerationNode && mode === "image")) && Boolean(node.metadata?.content);
+    const hasImageContent = mode === "image" && Boolean(canvasNodeImage(node) || (node.type === CanvasNodeType.Loop && node.metadata?.content));
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const { id: projectId = "" } = useParams();
     const field = node.type === CanvasNodeType.Config || isEditingExistingContent ? "composerContent" : "prompt";

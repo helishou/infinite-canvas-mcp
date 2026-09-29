@@ -44,9 +44,9 @@ test("交换分镜卡时 Picture 图片顺序跟随分镜轨，原编号可映�
     const [first, second] = storyboardTrackItems(segment);
     const reordered = reorderStoryboardShots(segment, first.id, second.id);
     assert.deepEqual(boardsOf(reordered).map((item) => item.image), ["image:board-b", "image:board-a"]);
-    assert.deepEqual(refsForSegment(reordered).map((ref) => ref.storageKey), ["image:board-b", "image:scene", "image:board-a"]);
+    assert.deepEqual(refsForSegment(reordered).map((ref) => ref.storageKey), ["image:board-b", "image:board-a", "image:scene"]);
     assert.equal(remapPictureTags("<Picture 1> <Picture 2> <Picture 3>", refsForSegment(segment), refsForSegment(reordered),
-        (ref) => ref.bindingId, (ref) => ref.type === "image"), "<Picture 3> <Picture 2> <Picture 1>");
+        (ref) => ref.bindingId, (ref) => ref.type === "image"), "<Picture 2> <Picture 3> <Picture 1>");
 });
 
 test("给前面的空分镜绑图时，新增分镜图排在后续分镜图之前", () => {

@@ -3,6 +3,33 @@ import assert from "node:assert/strict";
 
 import { compileReferenceSubmission } from "./reference-contract.js";
 
+test("分镜图片固定占用最前 Picture 槽，旧提示词按绑定身份改写", () => {
+    const binding = (id: string, role: "storyboard" | "character_identity") => ({
+        id, assetId: id, label: id, role, tags: [], enabled: true, usage: "reference", mediaType: "image", url: `https://example.test/${id}.png`,
+    });
+    const result = compileReferenceSubmission({}, {
+        taskMode: "ref2va",
+        prompt: "<Picture 1> <Picture 2> <Picture 3> <Picture 4>",
+        referenceBindings: [binding("person-a", "character_identity"), binding("board-a", "storyboard"), binding("person-b", "character_identity"), binding("board-b", "storyboard")],
+        storyboardShots: [{ referenceBindingId: "board-b" }, { referenceBindingId: "board-a" }],
+    });
+    assert.deepEqual(result.references.map((ref) => [ref.token, ref.id]), [
+        ["<Picture 1>", "board-b"], ["<Picture 2>", "board-a"], ["<Picture 3>", "person-a"], ["<Picture 4>", "person-b"],
+    ]);
+    assert.equal(result.semanticPrompt, "<Picture 1> <Picture 2> <Picture 3> <Picture 4>");
+    assert.equal(result.compiledPrompt, "<Picture 3> <Picture 2> <Picture 4> <Picture 1>");
+});
+
+test("单张分镜图也排在人物图之前", () => {
+    const refs = ["person-a", "person-b", "board"].map((id) => ({
+        id, assetId: id, label: id, role: id === "board" ? "storyboard" : "other",
+        tags: [], enabled: true, usage: "reference", mediaType: "image", url: `https://example.test/${id}.png`,
+    }));
+    const result = compileReferenceSubmission({}, { taskMode: "ref2va", prompt: "<Picture 1> <Picture 2> <Picture 3>", referenceBindings: refs });
+    assert.deepEqual(result.references.map((ref) => ref.id), ["board", "person-a", "person-b"]);
+    assert.equal(result.compiledPrompt, "<Picture 2> <Picture 3> <Picture 1>");
+});
+
 test("提示词使用公开编号标签，主体定义补入对应图片引用", () => {
     const project = { referenceCatalog: [
         { id: "a", label: "人物", mediaType: "image", role: "character_identity", tags: [], storageKey: "image:a" },

@@ -62,7 +62,7 @@ function fixture() {
         getCanvasNodes: async () => project.nodes,
     };
     const handlers = pluginMcp.createHandler(context);
-    return { project, calls, handlers, handler: handlers.h3_prepare_clip! };
+    return { project, calls, backend, handlers, handler: handlers.h3_prepare_clip! };
 }
 
 test("h3_prepare_clip 一次原子写入继承参数、角色组和已有节点连接", async () => {
@@ -143,4 +143,20 @@ test("h3_get_node 只返回当前 Clip 索引，不泄漏整段 metadata", async
     assert.equal("metadata" in node, false);
     assert.ok(JSON.stringify(node).length < 1_000);
     await assert.rejects(() => handlers.h3_get_clip!({ projectId: "project-1", nodeId: "h3-1", segmentId: "stale" }), /当前 Clip ID：s1、s2.*h3_get_node/);
+});
+
+test("h3_run_all_clips 可从指定组首不跳过已完成段地提交潜空间续写", async () => {
+    const { backend, handlers } = fixture();
+    const requests: any[] = [];
+    (backend as any).canvasRunGeneration = async (request: any) => {
+        requests.push(request);
+        return { task: { id: "chain-task", kind: "canvas-h3-run", status: "queued", projectId: "project-1", progress: 0, outputs: [] } };
+    };
+    await handlers.h3_run_all_clips!({ projectId: "project-1", nodeIds: ["h3-1"], startSegmentId: "s1", skipCompleted: false });
+    assert.deepEqual(requests[0], {
+        mode: "video", operation: "h3-run", projectId: "project-1", nodeIds: ["h3-1"], segmentId: "s1",
+        runFromCurrent: true, skipCompleted: false, params: {},
+    });
+    await assert.rejects(() => handlers.h3_run_all_clips!({ projectId: "project-1", nodeIds: ["h3-1"], startSegmentId: "missing", skipCompleted: false }), /精确选择一个/);
+    assert.equal(requests.length, 1);
 });

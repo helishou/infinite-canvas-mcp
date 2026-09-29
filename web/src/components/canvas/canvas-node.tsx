@@ -884,6 +884,11 @@ export const CanvasNode = React.memo(function CanvasNode({
                     // 节点内的按钮/输入控件自己消费双击：click 上的 stopPropagation 拦不住独立的 dblclick 事件，
                     // 不判断落点会让「下载 / 创建副本 / 张数」这类工具条按钮的双击冒泡到节点，误触发预览或编辑。
                     if (event.target instanceof Element && event.target.closest("button, [role='button'], input, textarea, select")) return;
+                    if (data.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text")) {
+                        event.stopPropagation();
+                        setIsEditingContent(true);
+                        return;
+                    }
                     if (definition?.onDoubleClick && pluginContext) {
                         if (definition.onDoubleClick(pluginContext)) event.stopPropagation();
                         return;
@@ -906,9 +911,6 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onEditScene?.(data);
                         return;
                     }
-                    if (data.type !== CanvasNodeType.Text) return;
-                    event.stopPropagation();
-                    setIsEditingContent(true);
                 }}
                 onDragOver={(event) => {
                     if (data.type !== CanvasNodeType.Character && data.type !== CanvasNodeType.Scene) return;

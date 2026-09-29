@@ -17,6 +17,7 @@ export const H3_LOCAL_VIEW_DEFAULTS = {
     minimaxRefLaneH: 150,
     nanFengExpandedSections: {},
     h3SigmaPresetName: "",
+    h3SettingsScope: "clip",
 };
 
 const localKeys = new Set(Object.keys(H3_LOCAL_VIEW_DEFAULTS));

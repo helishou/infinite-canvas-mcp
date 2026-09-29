@@ -5,6 +5,7 @@ import { Search } from "lucide-react";
 import { h3LoraOptions, h3ModelOptions, H3_LORA_STRENGTH_MIN, H3_LORA_STRENGTH_MAX } from "../constants";
 import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
 import { useH3DropdownOpen } from "../hooks/useH3DropdownOpen";
+import { H3_STYLE_TEMPLATES, styleTemplateFromPrompt } from "../../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
 import type { H3Segment } from "../types";
 
 type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; segment?: H3Segment; patch: (value: Partial<H3Segment>) => void };
@@ -95,6 +96,9 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     }, [ctx.storage, segment?.id]);
     if (!segment) return null;
     const mode = (segment.mode || segment.taskMode || "ref2va") as keyof typeof modeLabels;
+    const styleTemplateId = segment.styleTemplateId === undefined
+        ? styleTemplateFromPrompt(String(segment.prompt || ""), mode)
+        : segment.styleTemplateId;
     const expanded = (metadata.nanFengExpandedSections as Record<string, boolean> | undefined) || {};
     const setOpen = (key: SectionKey) => {
         const opening = expanded[key] !== true;
@@ -176,7 +180,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const samplingStepsSummary = manualSigmaValues.length >= 2 ? manualSigmaValues.length - 1 : (segment.steps || 20);
     // 续段衔接折叠头摘要：两个开关任一开启都要能一眼看出状态。
     const continuationSummary = segment.motionContextEnabled
-        ? <>{enabledSummary("潜空间续写")}{segment.tailFrameContinuation ? <span className="nfh3-enabled-summary"> · 尾帧接续</span> : null}</>
+        ? <>{enabledSummary("潜空间续写至下一段")}{segment.tailFrameContinuation ? <span className="nfh3-enabled-summary"> · 尾帧接续</span> : null}</>
         : segment.tailFrameContinuation ? enabledSummary("尾帧接续") : "均关闭";
     const setSeedMode = (value: string | number) => {
         const nextMode = String(value) as "random" | "fixed";
@@ -192,6 +196,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" data-mode={key} className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b></button>)}</div>
         {section("model", "模型与基础参数", String(segment.modelName || "未选择模型").replace(/^.*[\\/]/, ""), <div className="nfh3-control-grid">
             {control("模型", <H3Dropdown values={modelOptions.map((item) => item.value)} value={segment.modelName || modelOptions[0]?.value} onChange={(value) => patch({ modelName: String(value) })} placeholder="选择模型" />, true)}
+            {choice("视觉风格模板", H3_STYLE_TEMPLATES.map((template) => template.id), styleTemplateId, (value) => patch({ styleTemplateId: value ? String(value) : null }), (value) => H3_STYLE_TEMPLATES.find((template) => template.id === value)?.label || String(value), true, true, "不加模板", true)}
             {control("文本编码器", <H3Dropdown values={catalog.textEncoders.filter((value) => /minimax/i.test(value))} value={segment.textEncoder || catalog.textEncoders.find((value) => /minimax/i.test(value))} onChange={(value) => patch({ textEncoder: String(value) })} placeholder="选择文本编码器" />, true)}
             {control("视频 VAE", <H3Dropdown values={catalog.videoVaes} value={segment.videoVae || catalog.videoVaes[0]} onChange={(value) => patch({ videoVae: String(value) })} placeholder="选择视频 VAE" />, true)}
             {control("音频 VAE", <H3Dropdown values={catalog.audioVaes} value={segment.audioVae || catalog.audioVaes[0]} onChange={(value) => patch({ audioVae: String(value) })} placeholder="选择音频 VAE" />, true)}
@@ -210,16 +215,15 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
             {choice("尺寸倍数", [32], segment.sizeMultiple || 32, (value) => patch({ sizeMultiple: Number(value) }))}
             {mode === "ref2va" ? choice("参考图尺寸", refImageSizeChoices, segment.refImageSize || "match", (value) => patch({ refImageSize: String(value) })) : null}
             {mode !== "t2v" ? choice("参考图最长边", refLongEdgeChoices, segment.referenceLongEdge || 1920, (value) => patch({ referenceLongEdge: Number(value) })) : null}
-            {control("上一段完整视频作参考", <Switch checked={segment.previousVideoAsReference === true} onChange={(checked) => patch({ previousVideoAsReference: checked })} />)}
         </div>)}
         {section("continuation", "续段衔接", continuationSummary, <div className="nfh3-control-grid">
             {control("尾帧接续（把本段尾帧传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked })} />)}
-            {control("潜空间续写 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked })} />)}
-            <div className="nfh3-hint" style={{ gridColumn: "1 / -1" }}>尾帧接续：生成本段后自动抓本段尾帧，作为下一段的首帧参考并写进提示词。潜空间续写：使用 V15 的 AV latent 从本段起建立连续组，必须通过「运行当前及后续分镜」提交，单独运行某个 Clip 会报错。</div>
+            {control("潜空间续写到下一段 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked })} />)}
+            <div className="nfh3-hint" style={{ gridColumn: "1 / -1" }}>尾帧接续：本段尾帧成为下一段的首帧参考。潜空间续写：开启本段开关后，本段的 AV latent 与所设上下文参数传给紧邻的下一段；关闭处断链。请从连续组首段使用「运行当前及后续分镜」，不能跳过组内已完成片段。单独运行本段不会建立跨任务续写。</div>
             {segment.motionContextEnabled ? <>
-                {choice("Motion Context 帧数", ["22", "5", "39", "56"], segment.contextLength || "22", (value) => patch({ contextLength: String(value) }))}
-                {control("音频上下文帧数", <InputNumber style={field} min={0} max={240} value={segment.audioContextLength ?? 24} onChange={(value) => patch({ audioContextLength: value ?? undefined })} />)}
-                {control("续写音频精修", <Switch checked={segment.continuationAudioRefineEnabled === true} onChange={(checked) => patch({ continuationAudioRefineEnabled: checked })} />)}
+                {choice("传给下一段的视频上下文帧数", ["22", "5", "39", "56"], segment.contextLength || "22", (value) => patch({ contextLength: String(value) }))}
+                {control("传给下一段的音频上下文帧数", <InputNumber style={field} min={0} max={240} value={segment.audioContextLength ?? 24} onChange={(value) => patch({ audioContextLength: value ?? undefined })} />)}
+                {control("下一段续写音频精修", <Switch checked={segment.continuationAudioRefineEnabled === true} onChange={(checked) => patch({ continuationAudioRefineEnabled: checked })} />)}
                 {segment.continuationAudioRefineEnabled ? <>
                     {control("音频精修降噪", <InputNumber style={field} min={0.01} max={1} step={0.01} value={segment.continuationAudioDenoise ?? 0.3} onChange={(value) => patch({ continuationAudioDenoise: value ?? undefined })} />)}
                     {control("音频精修步数", <InputNumber style={field} min={1} max={100} value={segment.continuationAudioSteps ?? 4} onChange={(value) => patch({ continuationAudioSteps: value ?? undefined })} />)}
@@ -228,7 +232,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
                 </> : null}
             </> : null}
         </div>)}
-        {section("sampling", "采样设置", `${samplingStepsSummary} 步 · ${segment.sampler || "res_multistep"}${segment.motionContextEnabled ? " · 潜空间续写" : ""}`, <div className="nfh3-control-grid">
+        {section("sampling", "采样设置", `${samplingStepsSummary} 步 · ${segment.sampler || "res_multistep"}${segment.motionContextEnabled ? " · 续写到下一段" : ""}`, <div className="nfh3-control-grid">
             {choice("采样器", samplerChoices, segment.sampler || "res_multistep", (value) => patch({ sampler: value ? String(value) : undefined }), undefined, true, true, "选择采样器", true)}
             {choice("调度器", schedulerChoices, segment.scheduler || "simple", (value) => patch({ scheduler: value ? String(value) : undefined }), undefined, true, true, "选择调度器", true)}
             {segment.sampler === "南风采样器" ? <>{choice("ER 求解方式", erSolverTypes, segment.erSolverType || "ER-SDE", (value) => patch({ erSolverType: String(value) }))}{control("ER 修正阶数", <InputNumber style={field} min={1} max={3} value={segment.erMaxStage ?? 3} onChange={(value) => patch({ erMaxStage: value ?? undefined })} />)}{control("ER eta", <InputNumber style={field} min={0} max={10} step={0.01} value={segment.erEta ?? 1} onChange={(value) => patch({ erEta: value ?? undefined })} />)}{control("ER 噪声幅度", <InputNumber style={field} min={0} max={100} step={0.01} value={segment.erSNoise ?? 1} onChange={(value) => patch({ erSNoise: value ?? undefined })} />)}</> : null}

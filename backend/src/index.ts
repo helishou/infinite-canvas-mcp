@@ -4,7 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 import { DATA_DIR, loadConfig, saveConfig, ensureDataDirs } from "./config.js";
-import { BackendDatabase, type RuntimeTaskStatus } from "./db.js";
+import { BackendDatabase } from "./db.js";
 import { registerBackendErrorHandler, startServer } from "./server.js";
 import { createLogger } from "./logger.js";
 import { createStores } from "./stores/index.js";
@@ -255,21 +255,32 @@ async function startBackendHttpServer() {
     stores.mcpObservability,
     () => canvasRealtime.focusedProjectId(),
   );
-  // 先完整取出每种活动状态，再启动恢复循环；处理期间状态会变化，不能边处理边 OFFSET 分页。
-  const tasksWithStatus = (status: RuntimeTaskStatus, kind?: string) => {
-    const found: ReturnType<typeof stores.tasks.list> = [];
-    for (let offset = 0; ; offset += 500) {
-      const page = stores.tasks.list({ status, kind, limit: 500, offset });
-      found.push(...page);
-      if (page.length < 500) return found;
+  // 启动时只读取最新 10 条需要恢复的生成任务；超出范围的记录保持原状，
+  // 不因未入选而标记失败。终态只考虑仍绑定的 H3 父任务和未收口的生成日志。
+  const recoveryTasks = db.listStartupRecoveryTasks([...boundH3ParentTaskIds(stores.projects.list())], 10);
+  for (const task of recoveryTasks) {
+    if (task.kind === "canvas-h3-run" && ["succeeded", "failed", "cancelled"].includes(task.status)) {
+      void canvasH3Runner.reconcileTerminal(task).catch((error) =>
+        logger.warn("H3 终态节点回写修复失败", {
+          taskId: task.id,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      continue;
     }
-  };
-  // Backend 重启后继续观察已提交但尚未结束的任务；绑定信息在 SQLite 中。
-  for (const task of [
-    ...tasksWithStatus("running"),
-    ...tasksWithStatus("queued"),
-    ...tasksWithStatus("awaiting_confirmation").filter((task) => task.kind === "canvas-h3-run"),
-  ]) {
+    const binding = task.params?.canvasBinding as { generationLogId?: string } | undefined;
+    const pendingLog = binding?.generationLogId ? stores.logs.get(binding.generationLogId) : null;
+    if (["comfyui:minimax-h3", "runninghub:minimax-h3"].includes(task.kind)
+      && ["succeeded", "failed", "cancelled"].includes(task.status)
+      && pendingLog && ["queued", "running"].includes(pendingLog.status)) {
+      void writeBackH3Task(stores, runtime.events, task).catch((error) =>
+        logger.warn("H3 子任务终态日志修复失败", {
+          taskId: task.id,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      continue;
+    }
     if (
       ["queued", "running"].includes(task.status) &&
       task.kind === "canvas-image"
@@ -302,65 +313,26 @@ async function startBackendHttpServer() {
       task.kind === "direct-audio"
     )
       directAudio.resume(task.id);
-    if (
-      ["queued", "running"].includes(task.status) &&
-      task.kind === "canvas-h3-run"
-    )
+    if (task.kind === "canvas-h3-run")
       canvasH3Runner.resume(task);
     if (
       ["queued", "running"].includes(task.status) &&
       task.kind.startsWith("comfyui:")
     )
       runtime.comfy.resume(task.id);
-      if (
-        ["queued", "running"].includes(task.status) &&
-        task.kind === "runninghub:minimax-h3"
-      )
-        runningHub.resume(task.id);
-  }
-  // 终态父任务只需修复仍绑定在画布上的节点/Clip。遍历全部历史父任务会在每次
-  // 启动时重复读取项目与事件，并重试早已收口（甚至日志已按保留策略清理）的任务。
-  for (const taskId of boundH3ParentTaskIds(stores.projects.list())) {
-    const task = stores.tasks.get(taskId);
-    if (task?.kind !== "canvas-h3-run" || !["succeeded", "failed", "cancelled"].includes(task.status)) continue;
-    void canvasH3Runner.reconcileTerminal(task).catch((error) =>
-      logger.warn("H3 终态节点回写修复失败", {
-        taskId: task.id,
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    );
-  }
-  // 子任务终态日志修复独立于活动状态恢复：日志可能在任务落终态后仍停在 running。
-  for (const status of ["succeeded", "failed", "cancelled"] as const) {
-    for (const kind of ["comfyui:minimax-h3", "runninghub:minimax-h3"]) {
-      for (const task of tasksWithStatus(status, kind)) {
-        const binding = task.params?.canvasBinding as
-          | { generationLogId?: string }
-          | undefined;
-        const log = binding?.generationLogId
-          ? stores.logs.get(binding.generationLogId)
-          : null;
-        if (log && (log.status === "queued" || log.status === "running")) {
-          void writeBackH3Task(stores, runtime.events, task).catch((error) =>
-            logger.warn("H3 子任务终态日志修复失败", {
-              taskId: task.id,
-              error: error instanceof Error ? error.message : String(error),
-            }),
-          );
-        }
-      }
-    }
+    if (["queued", "running"].includes(task.status) && task.kind === "runninghub:minimax-h3")
+      runningHub.resume(task.id);
   }
   // ── 孤儿任务回收（防僵尸堆积）───────────────────────────────────
   // backend 重启（tsx --watch 源码热更、崩溃等）会杀掉内存中的执行循环，遗留
   // status=running/queued 的任务永远无人跟踪。上面的 resume 循环只恢复了
   // 特定类型、且确实提交到 ComfyUI（有 promptId）的任务；其余（如 workflow 类型、
   // 有处理器但从未提交的 comfyui 任务、无恢复处理器的画布任务）是僵尸任务，
-  // 会在列表里无限堆积。此处（尚未监听端口、不会有新任务）统一置为 failed。
-  for (const task of [
-    ...tasksWithStatus("running"),
-    ...tasksWithStatus("queued"),
-  ]) {
+  // 会在列表里无限堆积。此处仅检查本次入选任务（尚未监听端口、不会有新任务），
+  // 确认无法恢复时置为 failed；未入选的旧任务保持原状。
+  for (const selected of recoveryTasks) {
+    const task = stores.tasks.get(selected.id);
+    if (!task) continue;
     if (task.status !== "queued" && task.status !== "running") continue;
     const hasHandler =
       task.kind === "canvas-image" ||

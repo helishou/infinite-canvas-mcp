@@ -20,6 +20,17 @@ export function orderStoryboardImageReferences<T extends object>(
     return references.map((reference) => isStoryboardImage(reference) ? ordered[index++] : reference);
 }
 
+/** Put storyboard images first, in shot order, while preserving all other refs' relative order. */
+export function orderStoryboardReferencesFirst<T extends object>(
+    references: T[],
+    shotBindingIds: string[],
+    bindingIdOf: (reference: T) => string | undefined,
+    isStoryboardImage: (reference: T) => boolean,
+): T[] {
+    const storyboards = orderStoryboardImageReferences(references.filter(isStoryboardImage), shotBindingIds, bindingIdOf, isStoryboardImage);
+    return [...storyboards, ...references.filter((reference) => !isStoryboardImage(reference))];
+}
+
 /** Rebase numeric Picture tags when image bindings move to different slots. */
 export function remapPictureTags<T>(
     text: string,

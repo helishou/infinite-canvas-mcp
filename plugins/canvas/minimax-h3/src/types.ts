@@ -88,6 +88,8 @@ export type H3Segment = {
     errorDetails?: string;
     taskMode?: string;
     storyboardCompositeEnabled?: boolean;
+    /** 设置中选择的视觉风格模板 id；仅运行时注入提示词，null = 不加模板。 */
+    styleTemplateId?: string | null;
     seed?: number | string;
     noiseSeedMode?: "random" | "fixed";
     noiseSeed?: number | string;
@@ -281,7 +283,7 @@ export type H3Segment = {
     denoise?: number;
     trimIn?: number;
     trimOut?: number;
-    // Motion Context 是南风 V15 的 AV latent 潜空间续写开关；后端负责生成连续组任务描述符。
+    // 本段的 outgoing 开关：将本段的 AV latent 传给紧邻下一段；后端负责连续组任务描述符。
     motionContextEnabled?: boolean;
     // 上一段成品视频作为「参考视频」喂进本段：必须显式开启，默认关闭。
     // 只有链式续跑（runFromCurrent）时生效；标在本段上（index > 0 才有意义）。

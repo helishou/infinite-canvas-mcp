@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf } from "../../canvas/reference-contract.js";
-import { orderStoryboardImageReferences, remapPictureTags } from "../../canvas/storyboard-reference-order.js";
+import { orderStoryboardImageReferences, orderStoryboardReferencesFirst, remapPictureTags } from "../../canvas/storyboard-reference-order.js";
 import { assembleH3Prompt } from "./prompt-sections.js";
 import { deriveStoryboardDurations, formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, promptDetails, stripDuplicateTransition, stripStoryboardCues, validateDefinitionCoverage, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "./prompt-rules.js";
 
@@ -537,7 +537,7 @@ export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue
     const originalInput = rawInput as StoryboardInput;
     if (!Array.isArray(originalInput.shots) || !originalInput.shots.length) throw new Error("分镜至少需要一镜");
     const originalBindings = referenceBindingsOf(segment).bindings;
-    const bindings = orderStoryboardImageReferences(originalBindings,
+    const bindings = orderStoryboardReferencesFirst(originalBindings,
         originalInput.shots.flatMap((shot) => string(shot.pictureBindingId) ? [string(shot.pictureBindingId)] : []),
         (binding) => binding.id,
         (binding) => binding.enabled && Boolean(binding.url || binding.storageKey) && binding.role === "storyboard" && (binding.mediaType || inferReferenceMediaType(binding)) === "image");

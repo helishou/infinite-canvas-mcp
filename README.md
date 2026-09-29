@@ -78,9 +78,9 @@ npm install
 npm run dev:local        # Windows 下的 dev:local.bat → dev-local.ps1；或 npm run dev:services
 ```
 
-启动后访问 `http://localhost:3000`。
+启动后访问 `http://localhost:3001`。
 
-`npm run dev:local` 会先清理 17370、17371、3001 三个端口上的旧服务，再拉起 backend(17370)、agent(17371) 与 web(3001)。`npm run dev:services` 不做清理，直接三进程并发启动。`dev` 不是 watch，也不是探活命令。
+`npm run dev:local` 会先清理 17370、17371、3001 三个端口上的旧服务，再拉起 backend(17370)、agent(17371) 与 web(3001)。`npm run dev:services` 不做清理，直接三进程并发启动。Backend 的 `dev:backend` 默认直接运行源码，不自动重启；需要监听源码变更时运行 `npm run dev:watch --workspace backend`。开发命令不是探活命令。
 
 ### Docker 运行
 

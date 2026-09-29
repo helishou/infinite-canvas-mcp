@@ -16,6 +16,7 @@ export type BackendMediaResult = {
     width: number | null;
     height: number | null;
     durationMs: number | null;
+    compression?: { originalBytes: number; originalStorageKey: string; thresholdBytes: number };
 };
 
 export type BackendTokenResponse = { ok: boolean; token: string };
@@ -112,6 +113,27 @@ export async function backendHealth(): Promise<{ ok: boolean; protocolVersion?: 
         return await res.json();
     } catch {
         return { ok: false };
+    }
+}
+
+/**
+ * 业务接口探活：`/health` + `/config` 通过不代表这个地址就是总后台。
+ * 旧版 canvas-agent 兼容代理（17371）两者都返回 200，却对 /canvas/* 全部 404，
+ * 页面会因此显示「素材库是空的」。用一条最便宜的业务接口（kind=text，约 0.6KB）
+ * 验证地址真能提供数据；404 一律视为「连错后台」。
+ */
+export async function probeBackendBusinessApi(): Promise<{ ok: boolean; detail: string }> {
+    const base = getBackendUrl().replace(/\/$/, "");
+    const token = getBackendTokenShared();
+    try {
+        const res = await fetch(`${base}/canvas/assets?kind=text&token=${encodeURIComponent(token)}`, { signal: AbortSignal.timeout(5000) });
+        if (res.status === 404) return { ok: false, detail: `${base} 不是总后台：该地址对 /canvas/assets 返回 404（可能是旧版 canvas-agent 兼容代理，或反代路径不对）` };
+        if (res.status === 401) return { ok: false, detail: `${base} 拒绝了当前连接密钥（HTTP 401），请在连接设置里重新获取 Token` };
+        if (!res.ok) return { ok: false, detail: `${base} 业务接口异常：HTTP ${res.status}` };
+        return { ok: true, detail: "" };
+    } catch (error) {
+        const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        return { ok: false, detail: `${base} 业务接口不可达（${reason}）` };
     }
 }
 
@@ -354,7 +376,7 @@ export function saveBackendPromptCache(sourceId: string, cache: unknown) {
 
 // ── Media ────────────────────────────────────────────────────────────────
 
-export async function uploadBackendMedia(options: {
+type BackendMediaUploadOptions = {
     name: string;
     blob: Blob;
     storageKey?: string;
@@ -363,7 +385,17 @@ export async function uploadBackendMedia(options: {
     height?: number;
     durationMs?: number;
     category?: "input" | "output" | "library";
-}): Promise<BackendMediaResult> {
+};
+
+export function uploadBackendMedia(options: BackendMediaUploadOptions): Promise<BackendMediaResult> {
+    return postBackendMedia("/media/upload-binary", options);
+}
+
+export function uploadBackendCharacterVoice(options: BackendMediaUploadOptions): Promise<BackendMediaResult> {
+    return postBackendMedia("/media/character-voice", options);
+}
+
+async function postBackendMedia(endpoint: string, options: BackendMediaUploadOptions): Promise<BackendMediaResult> {
     const { useBackendStore } = await import("@/stores/use-backend-store");
     const token = useBackendStore.getState().token || "";
     const headers: Record<string, string> = {
@@ -375,10 +407,13 @@ export async function uploadBackendMedia(options: {
     if (options.durationMs !== undefined) headers["x-media-duration-ms"] = String(options.durationMs);
     if (options.category) headers["x-media-category"] = options.category;
     if (options.storageKey) headers["x-media-storage-key"] = options.storageKey;
-    const url = `${getBackendUrl().replace(/\/$/, "")}/media/upload-binary?token=${encodeURIComponent(token)}`;
+    const url = `${getBackendUrl().replace(/\/$/, "")}${endpoint}?token=${encodeURIComponent(token)}`;
     const res = await fetch(url, { method: "POST", headers, body: options.blob });
     const data = (await res.json().catch(() => ({}))) as { media?: BackendMediaResult; error?: string };
-    if (!res.ok || !data.media) throw new Error(`Backend POST /media/upload-binary failed: HTTP ${res.status} ${data.error || ""}`);
+    if (!res.ok || !data.media) {
+        if (endpoint === "/media/character-voice" && res.status === 404) throw new Error("CHARACTER_VOICE_COMPRESSION_UNAVAILABLE");
+        throw new Error(`Backend POST ${endpoint} failed: HTTP ${res.status} ${data.error || ""}`);
+    }
     return data.media;
 }
 

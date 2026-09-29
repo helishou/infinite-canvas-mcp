@@ -6,7 +6,8 @@
 
 | 修改/消费者 | 生效路径 | 必要动作 |
 |---|---|---|
-| Backend dev | 当前 package 的 `tsx watch src/index.ts` | 核对 watch 是否完成重启并加载新源码 |
+| Backend dev | 当前 package 的 `tsx src/index.ts`，不自动重启 | 核对实际进程是否加载新源码，再处理必要重载 |
+| Backend watch | 显式 `npm run dev:watch --workspace backend` | 核对 watch 是否完成重启并加载新源码 |
 | Backend start 或明确的 dist 消费方 | `backend/dist` | 根目录 `npm run build --workspace backend` |
 | Backend 导入 canvas-agent | 包 exports 指向 `canvas-agent/dist` | 根目录 `npm run build --workspace canvas-agent`，确认消费进程加载 |
 | 普通画布插件 | 插件 bundle | 插件目录 `node build.mjs`，核对实际加载 URL |

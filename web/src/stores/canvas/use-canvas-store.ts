@@ -14,7 +14,7 @@ import { buildCanvasConflictBaseline, isCanvasConflictBaseline, type CanvasConfl
 import { canvasDraftPersistence } from "@/lib/canvas/canvas-draft-persistence";
 import { syncOrderedGroupMembership } from "@/lib/canvas/ordered-group";
 import { CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS, H3_LOCAL_VIEW_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
-import { flushCanvasTexts, onCanvasTextCommit, prepareCanvasTextWith, receiveCanvasTextEvent } from "@/services/api/canvas-text";
+import { flushCanvasTexts, invalidateDeletedCanvasTextSessions, onCanvasTextCommit, prepareCanvasTextWith, receiveCanvasTextEvent } from "@/services/api/canvas-text";
 
 export type CanvasProject = {
     id: string;
@@ -131,6 +131,7 @@ function captureCanvasAction(before: CanvasProject, after: CanvasProject) {
     if (!operations.length) return;
     if (getBackendUrl() !== commandBackend) throw new Error("后台地址已改变，请刷新后继续编辑；原后台草稿仍保留");
     pendingCommands.enqueue({ operationId: nanoid(), projectId: before.id, ownerId: draftSessionId, backend: commandBackend, source: getCanvasCollaborationClient(), order: ++commandOrder, base: buildCanvasConflictBaseline(before, operations), operations });
+    invalidateDeletedCanvasTextSessions(before.id, operations);
 }
 function projectCanvasCommands(remote: CanvasProject) {
     let projection = remote;

@@ -4,6 +4,7 @@ import test from "node:test";
 import { writeStoryboardPrompt } from "./storyboard-write.js";
 import { compileReferenceSubmission } from "../../canvas/reference-contract.js";
 import { buildStoryboardPromptSections } from "../../../../plugins/canvas/minimax-h3/src/services/storyboard-prompt.js";
+import { styleTemplateText } from "./style-templates.js";
 
 test("h3_write_storyboard_prompt 将旧版分镜引用占位符归一化为 Picture 标签", () => {
     const binding = {
@@ -20,6 +21,7 @@ test("h3_write_storyboard_prompt 将旧版分镜引用占位符归一化为 Pict
     const segment = {
         id: "segment-1",
         mode: "ref2va",
+        styleTemplateId: "modern-korean",
         prompt: [
             "旧版自由文本，不应继续保留。",
             "主体定义：旧版中文主体定义。",
@@ -62,6 +64,7 @@ test("h3_write_storyboard_prompt 将旧版分镜引用占位符归一化为 Pict
     assert.equal(generated.prompt.includes("主体定义："), false);
     assert.match(generated.prompt, /detailed_description:[\s\S]*\[Shot 1\].*<Picture 1>/s);
     assert.doesNotMatch(generated.prompt, /character-group|character_turnaround/);
+    assert.equal(generated.prompt.includes(styleTemplateText("modern-korean")), false, "模板设置不写入分镜编辑保存的提示词");
 });
 
 test("MCP 按逐镜绑定顺序排列分镜图，并让 Picture 标签仍指向原图", () => {
@@ -84,15 +87,15 @@ test("MCP 按逐镜绑定顺序排列分镜图，并让 Picture 标签仍指向�
         ],
         overallSoundscape: "", nonDiegeticMusic: "N/A",
     });
-    assert.deepEqual(generated.referenceBindings?.map((binding) => binding.id), ["frame-1", "identity", "frame-2", "frame-3"]);
+    assert.deepEqual(generated.referenceBindings?.map((binding) => binding.id), ["frame-1", "frame-2", "frame-3", "identity"]);
     assert.deepEqual(generated.storyboardShots?.map((shot) => shot.id), ["shot-1", "shot-2", "shot-3"]);
-    assert.match(generated.prompt, /Opening uses <Picture 4>/u);
+    assert.match(generated.prompt, /Opening uses <Picture 3>/u);
     assert.match(generated.prompt, /\[Shot 1\][^\n]*<Picture 1>/u);
-    assert.match(generated.prompt, /\[Shot 2\][^\n]*<Picture 3>/u);
-    assert.match(generated.prompt, /\[Shot 3\][^\n]*<Picture 4>/u);
+    assert.match(generated.prompt, /\[Shot 2\][^\n]*<Picture 2>/u);
+    assert.match(generated.prompt, /\[Shot 3\][^\n]*<Picture 3>/u);
     const submitted = compileReferenceSubmission({}, { taskMode: "ref2va", prompt: generated.prompt, referenceBindings: generated.referenceBindings });
     assert.deepEqual(submitted.references.filter((reference) => reference.mediaType === "image").map((reference) => [reference.token, reference.id]), [
-        ["<Picture 1>", "frame-1"], ["<Picture 2>", "identity"], ["<Picture 3>", "frame-2"], ["<Picture 4>", "frame-3"],
+        ["<Picture 1>", "frame-1"], ["<Picture 2>", "frame-2"], ["<Picture 3>", "frame-3"], ["<Picture 4>", "identity"],
     ]);
 });
 

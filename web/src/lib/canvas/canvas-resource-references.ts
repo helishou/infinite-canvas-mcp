@@ -2,6 +2,7 @@ import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { shallow } from "zustand/vanilla/shallow";
 import i18n from "@/i18n";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageToDataUrl } from "@/services/image-storage";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
@@ -205,6 +206,10 @@ export function getFixedReferenceNodes(nodeId: string, nodes: CanvasNodeData[], 
 
 function getConnectedConfigInputNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex) {
     const resolvedIndex = graphIndex(nodes, connections, index);
+    // A config node is itself the generator: only its incoming edges are inputs.
+    // Looking through an outgoing config borrows that downstream node's other
+    // references and can turn a text-only rerun into an accidental image edit.
+    if (resolvedIndex.nodeById.get(nodeId)?.type === CanvasNodeType.Config) return [];
     const configNode = (resolvedIndex.outgoingByNodeId.get(nodeId) || []).find((node) => node.type === CanvasNodeType.Config);
     if (!configNode) return [];
     return getContextInputNodes(configNode.id, nodes, connections, resolvedIndex).filter((node) => node.id !== nodeId);
@@ -294,17 +299,11 @@ export function nodeResourceItems(node: CanvasNodeData): CanvasNodeResource[] {
         if (prompt) return [{ kind: "text", text: prompt }];
     }
     const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart === true ? node.metadata?.generationMode || "image" : undefined;
-    if (smartMode === "image") {
-        const images = node.metadata?.images || [];
-        const primaryImageId = node.metadata?.primaryImageId || images[0]?.id;
-        const primaryImage = images.find((image) => image.id === primaryImageId && Boolean(image.content || image.storageKey));
-        if (primaryImage) return [{ kind: "image" as const, url: primaryImage.content || undefined, storageKey: primaryImage.storageKey }];
-        if (node.metadata?.content) return [{ kind: "image", url: node.metadata.content, storageKey: node.metadata.storageKey }];
-    }
+    const image = canvasNodeImage(node);
+    if (image) return [{ kind: "image", url: image.content || undefined, storageKey: image.storageKey }];
     if (smartMode === "video" && node.metadata?.content) return [{ kind: "video", url: node.metadata.content, storageKey: node.metadata.storageKey }];
     if (smartMode === "audio" && node.metadata?.content) return [{ kind: "audio", url: node.metadata.content, storageKey: node.metadata.storageKey }];
     if (smartMode === "text" && (node.metadata?.content || node.metadata?.prompt)) return [{ kind: "text", text: node.metadata.content || node.metadata.prompt }];
-    if (node.type === CanvasNodeType.Image && node.metadata?.content) return [{ kind: "image", url: node.metadata.content, storageKey: node.metadata.storageKey }];
     if (node.type === CanvasNodeType.Video && node.metadata?.content) return [{ kind: "video", url: node.metadata.content, storageKey: node.metadata.storageKey }];
     if (node.type === CanvasNodeType.Audio && node.metadata?.content) return [{ kind: "audio", url: node.metadata.content, storageKey: node.metadata.storageKey }];
     if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) return [{ kind: "text", text: node.metadata.content || node.metadata.prompt }];

@@ -54,6 +54,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
     const [voiceStorageKey, setVoiceStorageKey] = useState("");
     const [voiceAssetId, setVoiceAssetId] = useState("");
     const [saving, setSaving] = useState(false);
+    const [uploadingVoice, setUploadingVoice] = useState(false);
     const [replaceImageIndex, setReplaceImageIndex] = useState<number | null>(null);
     const voiceInputRef = useRef<HTMLInputElement>(null);
     const lastCanvasImagePickRef = useRef("");
@@ -100,12 +101,23 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
         const file = e.target.files?.[0];
         e.target.value = "";
         if (!file) return;
-        const result = await uploadMediaFile(file, "audio", "library");
-        setVoiceUrl(result.url);
-        setVoiceName(file.name);
-        setVoiceStorageKey(result.storageKey || "");
-        setVoiceAssetId("");
-    }, []);
+        setUploadingVoice(true);
+        try {
+            const result = await uploadMediaFile(file, "audio", "library", { characterVoiceCompression: true });
+            setVoiceUrl(result.url);
+            setVoiceName(result.compression ? `${file.name.replace(/\.[^.]+$/, "")}-24k-64kbps.mp3` : file.name);
+            setVoiceStorageKey(result.storageKey || "");
+            setVoiceAssetId("");
+            if (result.compression) message.success(t("canvas.character.voiceCompressed", { before: Math.round(file.size / 1024), after: Math.round(result.bytes / 1024) }));
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            message.error(reason === "CHARACTER_VOICE_COMPRESSION_UNAVAILABLE"
+                ? t("canvas.character.voiceBackendRestartRequired")
+                : t("canvas.character.voiceUploadFailed", { reason }));
+        } finally {
+            setUploadingVoice(false);
+        }
+    }, [t]);
 
     const updateImage = (idx: number, patch: Partial<CharacterImage>) => {
         setImages((current) => current.map((image, i) => (i === idx ? { ...image, ...patch } : image)));
@@ -128,6 +140,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
     };
 
     const handleSave = () => {
+        if (uploadingVoice) return;
         if (!images.length && !hasCharacterVoiceSource({ url: voiceUrl, storageKey: voiceStorageKey, assetId: voiceAssetId })) {
             message.error(t("assets.characterRequireReference"));
             return;
@@ -250,7 +263,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
             </div>
             <div className="mt-6 flex justify-end gap-2">
                 <Button onClick={onClose}>{t("common.cancel")}</Button>
-                <Button type="primary" icon={<Save className="size-3.5" />} loading={saving} onClick={handleSave}>
+                <Button type="primary" icon={<Save className="size-3.5" />} loading={saving || uploadingVoice} onClick={handleSave}>
                     {t("common.save")}
                 </Button>
             </div>

@@ -236,6 +236,7 @@
 .nfh3-storyboard-picture-binding > .ant-select { width:100%; min-width:0; }
 .nfh3-storyboard-picture-binding > .ant-select:nth-of-type(2) { grid-column:2; }
 .nfh3-storyboard-field-label { display:block; margin-top:2px; }
+.nfh3-storyboard-hint-inline { color:var(--h3-muted); font-size:12px; }
 .nfh3-storyboard-field-label,.nfh3-storyboard-transition label { color:var(--h3-muted); font-size:14px; font-weight:700; }
 .nfh3-speaker-option { display:inline-flex; align-items:center; gap:7px; }
 .nfh3-speaker-option img { width:26px; height:26px; object-fit:cover; border-radius:50%; }
@@ -283,6 +284,9 @@
 .minimax-output-list > div > span[style*="display: flex"] svg,
 .minimax-output-list > div > span[style*="display:flex"] svg { width:14px; height:14px; stroke-width:2.2; }
 .minimax-output-list > div { height:var(--h3-out-card-h, 78px) !important; }
+/* Output 卡片名字条：同一 Clip 有 N 个历史版本，类型标签无法区分，必须显示名字。 */
+.minimax-output-name { position:absolute; left:0; right:0; bottom:0; z-index:3; padding:2px 6px; background:linear-gradient(to top, rgba(2,6,23,.92), rgba(2,6,23,0)); color:#e2e8f0; font-size:11px; line-height:1.5; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
+.minimax-output-item:hover .minimax-output-name { color:#f8fafc; }
 /* Output 固定单行横向滚动：卡片高度随面板高度（--h3-out-card-h），宽度=高度×2，超出横向滚动。禁止竖向滚动。 */
 .minimax-output-list > div > video,.minimax-output-list > div > img { width:100%; height:100%; object-fit:cover; }
 .minimax-library-list:not(.minimax-output-list) > div > span[style*="bottom"] { top:3px !important; bottom:auto !important; left:3px !important; }
@@ -561,6 +565,15 @@
 .nfh3-settings-transfer button:hover { border-color:var(--h3-active); color:var(--h3-active); background:var(--h3-hover); }
 .nfh3-settings-transfer svg { width:26px; height:26px; }
 .nfh3-transfer-message { color:var(--h3-muted); font-size:22px; white-space:nowrap; }
+.nfh3-settings-scope { margin:10px 0 14px; padding:14px 18px; border:2px solid var(--h3-border); border-radius:10px; background:var(--h3-panel); color:var(--h3-text); }
+.nfh3-settings-scope.is-global { border-color:#f5a623; background:color-mix(in srgb,#f5a623 18%,var(--h3-panel)); box-shadow:inset 5px 0 0 #f5a623; }
+.nfh3-settings-scope-control { display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:21px; }
+.nfh3-settings-scope-control strong { margin-right:8px; }
+.nfh3-settings-scope-control button { padding:8px 18px; border:1px solid var(--h3-border); border-radius:7px; background:var(--h3-fill); color:var(--h3-text); font-size:20px; font-weight:700; cursor:pointer; }
+.nfh3-settings-scope-control button.active { border-color:var(--h3-active); background:var(--h3-active-bg); color:var(--h3-active-text); }
+.nfh3-settings-scope.is-global .nfh3-settings-scope-control button.active { border-color:#f5a623; background:#b75b00; color:#fff; }
+.nfh3-settings-scope p { margin:10px 0 0; font-size:19px; line-height:1.4; }
+.nfh3-settings-scope.is-global p { font-weight:750; }
 .nfh3-panel-actions { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding-top:9px; }
 .nfh3-panel-actions button { min-width:0; height:68px; display:flex; align-items:center; justify-content:center; gap:12px; border-radius:8px; font-size:22px; font-weight:800; letter-spacing:.01em; cursor:pointer; transition:background .16s ease,border-color .16s ease,color .16s ease,box-shadow .16s ease,transform .16s ease; }
 .nfh3-panel-actions button:hover:not(:disabled) { transform:translateY(-1px); }

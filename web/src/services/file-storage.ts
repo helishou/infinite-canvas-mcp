@@ -1,11 +1,11 @@
 import { nanoid } from "nanoid";
-import { uploadBackendMedia, deleteBackendMedia, backendMediaUrl } from "@/services/backend-api";
+import { uploadBackendMedia, uploadBackendCharacterVoice, deleteBackendMedia, backendMediaUrl } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { withLocalProxy } from "@/stores/use-config-store";
 
-export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
+export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number; compression?: { originalBytes: number; originalStorageKey: string; thresholdBytes: number } };
 
-export async function uploadMediaFile(input: string | Blob, prefix = "file", category: "input" | "output" | "library" = "input"): Promise<UploadedFile> {
+export async function uploadMediaFile(input: string | Blob, prefix = "file", category: "input" | "output" | "library" = "input", options?: { characterVoiceCompression?: boolean }): Promise<UploadedFile> {
     const blob = typeof input === "string" ? await (await fetch(withLocalProxy(input))).blob() : input;
     if (!useBackendStore.getState().connected) throw new Error("总后台未连接，无法上传媒体");
     const url = URL.createObjectURL(blob);
@@ -13,8 +13,10 @@ export async function uploadMediaFile(input: string | Blob, prefix = "file", cat
     const videoMeta = meta as { width?: number; height?: number; durationMs?: number };
 
     URL.revokeObjectURL(url);
-    const result = await uploadBackendMedia({ name: `${prefix}-${nanoid()}`, blob, mimeType: blob.type || "application/octet-stream", width: videoMeta.width, height: videoMeta.height, durationMs: videoMeta.durationMs, category });
-    return { url: result.url, storageKey: result.storageKey, bytes: blob.size, mimeType: result.mimeType, ...videoMeta };
+    const name = options?.characterVoiceCompression && "name" in blob && typeof blob.name === "string" ? blob.name : `${prefix}-${nanoid()}`;
+    const upload = options?.characterVoiceCompression ? uploadBackendCharacterVoice : uploadBackendMedia;
+    const result = await upload({ name, blob, mimeType: blob.type || "application/octet-stream", width: videoMeta.width, height: videoMeta.height, durationMs: videoMeta.durationMs, category });
+    return { url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, ...videoMeta, ...(result.compression ? { compression: result.compression } : {}) };
 }
 
 export async function resolveMediaUrl(storageKey?: string, fallback = "") {

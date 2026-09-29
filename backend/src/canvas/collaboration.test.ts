@@ -217,3 +217,23 @@ test("批量文本按文本项 ID 编辑，另一人切换主项不改变编辑�
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { texts: [{ id: "a", content: "重新添加" }, { id: "b", content: "乙" }] } }]);
     assert.notEqual(db.getCanvasText("canvas", target).documentId, initial.documentId);
 });
+
+test("智能文字配置节点可编辑生成结果，且不改输入提示词", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "smart-text", nodeType: "config", metadata: {
+        smart: true, generationMode: "text", prompt: "输入提示词", composerContent: "输入提示词",
+        content: "原生成结果", texts: [{ id: "result-1", content: "原生成结果", status: "success" }], primaryTextId: "result-1",
+    } }]);
+    const target = { nodeId: "smart-text", textItemId: "result-1", field: "content" as const };
+    const initial = db.getCanvasText("canvas", target);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "text_replace", target, documentId: initial.documentId, expectedText: initial.text, text: "人工改过的结果" }]);
+    const node = (db.getCanvasProject("canvas")!.nodes as Array<{ id: string; metadata: Record<string, unknown> }>).find((item) => item.id === "smart-text")!;
+    assert.equal(node.metadata.content, "人工改过的结果");
+    assert.equal((node.metadata.texts as Array<{ content: string }>)[0].content, "人工改过的结果");
+    assert.equal(node.metadata.prompt, "输入提示词");
+    assert.equal(node.metadata.composerContent, "输入提示词");
+    assert.equal(db.getCanvasText("canvas", target).text, "人工改过的结果");
+
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "image-config", nodeType: "config", metadata: { smart: true, generationMode: "image", content: "非文字结果" } }]);
+    assert.throws(() => db.getCanvasText("canvas", { nodeId: "image-config", field: "content" }), /不是可协作文本/);
+});

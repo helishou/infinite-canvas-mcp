@@ -10,6 +10,7 @@ import { useCopyText } from "@/hooks/use-copy-text";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useImageQuickToolsStore } from "@/stores/use-image-quick-tools-store";
 import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
+import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
 import type { CanvasNodeToolbarItem } from "@/types/canvas-plugin";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
 import { buildImageToolbarTools, defaultImageQuickToolIds, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
@@ -121,7 +122,7 @@ export function CanvasNodeHoverToolbar({
     const isAudio = node.type === CanvasNodeType.Audio || (isSmartGenerationNode && smartMode === "audio");
     const isCharacter = node.type === CanvasNodeType.Character;
     const isScene = node.type === CanvasNodeType.Scene;
-    const hasImage = isImage && Boolean(node.metadata?.content);
+    const hasImage = isImage && Boolean(canvasNodeImage(node));
     const hasVideo = isVideo && Boolean(node.metadata?.content);
     const hasAudio = isAudio && Boolean(node.metadata?.content);
     const isText = node.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text");
@@ -131,7 +132,8 @@ export function CanvasNodeHoverToolbar({
     const canRetry = node.metadata?.status === "error";
     const quickImageToolIdSet = new Set(quickImageToolIds);
     const copyImagePrompt = (target: CanvasNodeData) => {
-        const prompt = target.metadata?.prompt?.trim();
+        const selectedImage = target.metadata?.images?.find((image) => image.id === (target.metadata?.primaryImageId || target.metadata?.images?.[0]?.id));
+        const prompt = (selectedImage?.generationSnapshot?.effectivePrompt || target.metadata?.prompt)?.trim();
         if (!prompt) {
             message.warning(t("canvas.nodeToolbar.noPrompt"));
             return;

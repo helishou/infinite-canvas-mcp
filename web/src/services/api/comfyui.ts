@@ -155,10 +155,17 @@ export async function getLocalH3Task(endpoint: string, token: string, taskId: st
     return { ...response.task, preview, result: { url: output?.url || "", storageKey: output?.storageKey, mimeType: output?.mimeType || "video/mp4", taskId: response.task.id, actualSubmission: response.task.result.actualSubmission, segments: (response.task.result.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })) } };
 }
 
-export async function runVideoConcatTask(endpoint: string, token: string, videos: LocalReference[], signal?: AbortSignal) {
+export type VideoConcatLayout = "sequence" | "hstack";
+
+export async function runVideoConcatTask(endpoint: string, token: string, videos: LocalReference[], signal?: AbortSignal, options: { layout?: VideoConcatLayout; longEdge?: number | "auto" } = {}) {
     const inputs = videos.map((video) => video.storageKey || video.url || "").filter(Boolean);
     if (!inputs.length) throw new Error("视频拼接至少需要两个视频输入");
-    const created = await fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, "/video-concat/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ videos: inputs }) });
+    if (options.layout === "hstack" && inputs.length < 2) throw new Error("横向拼接至少需要两个视频");
+    const body: Record<string, unknown> = { videos: inputs };
+    if (options.layout) body.layout = options.layout;
+    // sequence 用 longEdge 限制单片长边；hstack 下后端把它当每格高度，所以直接给目标像素高。
+    if (options.longEdge !== undefined) body.longEdge = options.longEdge;
+    const created = await fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, "/video-concat/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const cancel = () => { void fetchAgentJson(endpoint, token, `/video-concat/tasks/${created.task.id}/cancel`, { method: "POST" }).catch(() => undefined); };
     signal?.addEventListener("abort", cancel, { once: true });
     for (;;) {

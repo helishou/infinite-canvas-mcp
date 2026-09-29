@@ -1,5 +1,7 @@
 import { validateH3CharacterGroups } from "./character-reference-contract.js";
 
+import { orderStoryboardReferencesFirst, remapPictureTags } from "./storyboard-reference-order.js";
+
 export const REFERENCE_ROLES = [
     "character_identity", "character_turnaround", "scene", "blocking", "storyboard",
     "keyframe", "motion_reference", "audio_reference", "character_voice", "style",
@@ -204,7 +206,12 @@ function withDerivedCharacterGroupBindings(bindings: ReferenceBinding[], segment
 export function compileReferenceSubmission(project: Record<string, unknown>, segment: Record<string, unknown>): ReferenceCompilation {
     const catalog = new Map(referenceCatalogOf(project).map((asset) => [asset.id, asset]));
     const { bindings: rawBindings, migratedLegacyRefs } = referenceBindingsOf(segment);
-    const bindings = withDerivedCharacterGroupBindings(rawBindings, segment);
+    const originalBindings = withDerivedCharacterGroupBindings(rawBindings, segment);
+    const shotIds = (Array.isArray(segment.storyboardShots) ? segment.storyboardShots : [])
+        .map((shot) => String(recordOf(shot).referenceBindingId || "")).filter(Boolean);
+    const bindings = orderStoryboardReferencesFirst(originalBindings, shotIds,
+        (binding) => binding.id,
+        (binding) => binding.enabled && binding.role === "storyboard" && (binding.mediaType || inferReferenceMediaType(binding)) === "image");
     const issues: ReferenceIssue[] = [...validateH3CharacterGroups(project, { ...segment, referenceBindings: bindings })];
     const counters: Record<ReferenceMediaType, number> = { image: 0, video: 0, audio: 0 };
     const references = bindings.filter((binding) => binding.enabled).flatMap((binding): CompiledReference[] => {
@@ -235,6 +242,12 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         return [{ ...merged, mediaType, ordinal, token }];
     });
     const semanticPrompt = String(segment.prompt || "");
+    // Existing Clips keep their saved prompt until an explicit edit. Preserve each Picture's
+    // source image when compiling the storyboard-first execution order.
+    const orderedPrompt = bindings.some((binding, index) => binding.id !== originalBindings[index]?.id)
+        ? remapPictureTags(semanticPrompt, originalBindings.filter((binding) => binding.enabled), bindings.filter((binding) => binding.enabled),
+            (binding) => binding.id, (binding) => (binding.mediaType || inferReferenceMediaType(binding)) === "image")
+        : semanticPrompt;
     const bySubjectId = new Map<string, { reference: CompiledReference; ordinal: number }>();
     let nextSubjectOrdinal = 1;
     const registerSubject = (reference: CompiledReference, ids: Array<string | undefined>) => {
@@ -258,7 +271,7 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
     // describe a character, prop, scene, object, or an entity defined elsewhere;
     // never validate it against character bindings or enabled media count.
     validatePromptReferences(semanticPrompt, references, undefined, issues);
-    const compiledPrompt = semanticPrompt
+    const compiledPrompt = orderedPrompt
         .replace(/<(subject|picture|video|audio)\s+(\d+)>/giu, (_marker, kind: string, ordinal: string) => `<${kind[0].toUpperCase()}${kind.slice(1).toLowerCase()} ${ordinal}>`)
         .replace(/(<Subject\s+\d+>)(?=[\p{L}\p{N}(])/gu, "$1 ");
     const promptWithBoundSubjects = bindLiteralSubjectsToPictures(compiledPrompt, references, bySubjectId);

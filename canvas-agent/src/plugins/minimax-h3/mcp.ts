@@ -249,14 +249,16 @@ const TOOLS: PluginMcpToolWire[] = [
     },
     {
         id: "h3_run_all_clips",
-        version: "1.3.0",
+        version: "1.4.0",
         name: "H3 运行全部片段",
-        description: "通过 Backend H3 执行器运行所有(或指定的)节点，复用画布任务、媒体落库和终态回写，不依赖打开画布页面。",
+        description: "通过 Backend H3 执行器运行所有(或指定的)节点。潜空间续写时指定单个 nodeId、连续组首段 startSegmentId 和 skipCompleted=false，从组首重新生成潜变量；普通批跑默认跳过已完成片段。",
         inputJsonSchema: {
             type: "object",
             properties: {
                 projectId: { type: "string", description: "画布项目 id" },
                 nodeIds: { type: "array", items: { type: "string" }, description: "限定运行的节点 id;省略则运行全部 H3 节点" },
+                startSegmentId: { type: "string", description: "从该稳定 Clip id 起运行当前及后续片段；潜空间续写时指定连续组首段" },
+                skipCompleted: { type: "boolean", description: "是否跳过已有结果；默认 true，潜空间续写必须为 false" },
                 params: { type: "object", description: "覆盖片段自带参数的生成参数" },
             },
             required: ["projectId"],
@@ -975,10 +977,15 @@ export const pluginMcp: PluginMcpModule = {
                 const projectId = String(input.projectId || "");
                 const override = (input.params as Record<string, unknown>) || {};
                 const onlyIds = Array.isArray(input.nodeIds) ? (input.nodeIds as string[]).map(String) : null;
+                const startSegmentId = String(input.startSegmentId || "");
+                const skipCompleted = input.skipCompleted === undefined ? true : input.skipCompleted === true;
                 const project = await context.getCanvasProject(projectId);
                 if (!project) throw new Error(`画布不存在:${projectId}`);
                 const nodes = (Array.isArray(project.nodes) ? project.nodes as AgentCanvasNode[] : []).filter((node) => isH3Node(node) && (!onlyIds || onlyIds.includes(node.id)));
-                const result = await context.backend.canvasRunGeneration({ mode: "video", operation: "h3-run", projectId, nodeIds: nodes.map((node) => node.id), runFromCurrent: true, skipCompleted: true, params: override });
+                if (startSegmentId && (nodes.length !== 1 || !segmentsOf(nodes[0]).some((segment) => segment.id === startSegmentId))) {
+                    throw new Error("指定 startSegmentId 时必须精确选择一个包含该 Clip 的 H3 节点");
+                }
+                const result = await context.backend.canvasRunGeneration({ mode: "video", operation: "h3-run", projectId, nodeIds: nodes.map((node) => node.id), ...(startSegmentId ? { segmentId: startSegmentId } : {}), runFromCurrent: true, skipCompleted, params: override });
                 if (!result.task) throw new Error("Backend H3 批量运行未返回任务");
                 return summarizeRuntimeTask(result.task);
             },

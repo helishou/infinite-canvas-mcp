@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
+import { applyH3StyleTemplate, isH3StyleTemplateId, styleTemplateFromPrompt } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 
 import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
@@ -78,6 +79,7 @@ const H3_PARAM_KEYS = [
     "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "teAccel", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
     "referenceVideoPolicy", "trimIn", "trimOut", "motionContextEnabled", "tailFrameContinuation", "previousVideoAsReference", "motionContextNoiseEnabled", "motionContextNoiseAlpha", "motionContextNoiseAlphaEnd", "motionContextNoiseRampFrames", "combatLoraWeight", "cinematicLoraWeight",
 ] as const;
+const H3_OUTGOING_CONTEXT_KEYS = ["contextLength", "audioContextLength", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler"] as const;
 
 function compileH3Submission(project: Record<string, unknown>, segment: H3Segment, taskMode: string) {
     const original = compileReferenceSubmission(project, { ...segment, taskMode });
@@ -270,16 +272,58 @@ export class CanvasH3Runner {
 
     private buildRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }> = []): H3RunPlan {
         const blockedKeys = new Set(blockedPlans.map((item) => `${item.nodeId}:${item.segmentId}`));
-        const plans = this.plansFor(input).filter((plan) => !blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`));
+        const allPlans = this.plansFor(input);
+        if (allPlans.some((plan) => plan.continuation && blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`))) {
+            throw new Error("潜空间续写不能跳过连续组中的 Clip；请修复参考素材后从组首重新运行");
+        }
+        const plans = allPlans.filter((plan) => !blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`));
         if (!plans.length) throw new Error(blockedPlans.length
             ? `没有可运行的 H3 Clip：${blockedPlans.slice(0, 3).map((item) => `Clip ${item.clipNumber}：${item.reason}`).join("；")}`
             : "没有符合条件的 H3 Clip");
         const before = this.stores.projects.get(input.projectId)!;
+        const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const sizeOps = (before.nodes as Array<Record<string, unknown>>).flatMap((node) => {
+            const groups = new Map<string, H3Plan[]>();
+            for (const plan of plans.filter((item) => item.nodeId === node.id && item.continuation)) {
+                const group = plan.continuation!.group;
+                groups.set(group, [...(groups.get(group) || []), plan]);
+            }
+            if (!groups.size) return [];
+            // A latent chain cannot skip its head or any middle clip, even if that clip's references are invalid.
+            const metadata = recordOf(node.metadata);
+            const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+            return [...groups.values()].flatMap((nodePlans) => {
+                if (nodePlans[0].continuation?.index !== 1 || nodePlans.some((plan, index) => plan.continuation?.index !== index + 1)) {
+                    throw new Error("潜空间续写不能跳过连续组中的 Clip；请修复参考素材后从组首重新运行");
+                }
+                const head = segments.find((segment) => segment.id === nodePlans[0].segmentId);
+                if (!head) throw new Error("潜空间续写组首 Clip 已不存在");
+                const headParams = extractParams(head, input.params || {}, metadata, defaults);
+                const aspectRatio = String(headParams.aspectRatio || "");
+                const megapixels = Number(headParams.megapixels);
+                const sizeMultiple = Number(headParams.sizeMultiple || 32);
+                const latentUpscaleAlign = Number(headParams.latentUpscaleAlign || 2);
+                if (!aspectRatio || aspectRatio === "原图比例" || !Number.isFinite(megapixels) || megapixels <= 0 || !Number.isFinite(sizeMultiple) || sizeMultiple <= 0 || !Number.isFinite(latentUpscaleAlign) || latentUpscaleAlign <= 0) {
+                    throw new Error("潜空间续写需要组首 Clip 使用固定画幅和有效分辨率，才能让后续 Clip 继承同一潜变量尺寸");
+                }
+                if (nodePlans.some((plan) => {
+                    const segment = segments.find((item) => item.id === plan.segmentId);
+                    return segment && extractParams(segment, input.params || {}, metadata, defaults).latentUpscaleEnabled === true;
+                })) throw new Error("潜空间续写当前不能与 H3 潜空间放大二采混用；二采会改变保存的潜变量尺寸");
+                const inherited = { aspectRatio, megapixels, sizeMultiple, latentUpscaleAlign };
+                return nodePlans.slice(1).flatMap((plan) => {
+                    const segment = segments.find((item) => item.id === plan.segmentId);
+                    if (!segment) throw new Error(`潜空间续写 Clip ${plan.segmentId} 已不存在`);
+                    const patch = Object.fromEntries(Object.entries(inherited).filter(([key, value]) => segment[key] !== value));
+                    return Object.keys(patch).length ? [{ type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch }] : [];
+                });
+            });
+        });
         const canonicalOps = plans.flatMap((plan) => {
             const patch = this.canonicalSegmentPatch(before, plan, input.params || {});
             return Object.keys(patch).length ? [{ type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch }] : [];
         });
-        if (canonicalOps.length) this.stores.projects.applyOperations(input.projectId, Number(before.revision || 0), canonicalOps, { runtimeWrite: true, source: { clientId: "task:h3", kind: "task", label: "H3 参数规范化" } });
+        if (canonicalOps.length || sizeOps.length) this.stores.projects.applyOperations(input.projectId, Number(before.revision || 0), [...canonicalOps, ...sizeOps], { runtimeWrite: true, source: { clientId: "task:h3", kind: "task", label: "H3 参数规范化" } });
         const project = this.stores.projects.get(input.projectId)!;
         const nodes = project.nodes as Array<Record<string, unknown>>;
         const selectedNodeIds = new Set(plans.map((plan) => plan.nodeId));
@@ -307,7 +351,7 @@ export class CanvasH3Runner {
                 nodes: nodes.filter((node) => selectedNodeIds.has(String(node.id)) || sourceNodeIds.has(String(node.id))),
                 referenceCatalog: catalog.filter((asset) => assetIds.has(String(asset.id))),
             },
-            defaults: recordOf(this.stores.settings.get(H3_DEFAULTS_KEY)),
+            defaults,
         });
     }
 
@@ -415,11 +459,12 @@ export class CanvasH3Runner {
                     this.publish(task, "task.updated");
                     continue;
                 }
-                const override = secondPass ? inFlight!.postpassParams : input.params || {};
+                const override = secondPass ? inFlight!.postpassParams : this.continuationOverride(input, plan, input.params || {});
                 if (!secondPass && !input.runPlan) this.ensureCanonicalSegmentSubmission(input.projectId, plan, override);
                 const cache = this.clipCacheState(input, plan, override, effectiveFingerprints);
                 effectiveFingerprints.set(key, cache.fingerprint);
-                if (!input.forceRegenerate && !secondPass && !confirmation.prepared && !confirmation.pending.length && cache.output) {
+                // Cached MP4 files do not carry the latent context saved under this new run id.
+                if (!plan.continuation && !input.forceRegenerate && !secondPass && !confirmation.prepared && !confirmation.pending.length && cache.output) {
                     const output = cache.output;
                     task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), confirmation: { ...confirmation, cursor: planIndex + 1, revision: confirmation.revision + 1 }, media: [...completedOutput(), output] } }, { type: "clip_reused", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, output, fingerprint: cache.fingerprint } })!;
                     if (!task) throw new Error("H3 缓存复用冲突");
@@ -532,6 +577,20 @@ export class CanvasH3Runner {
         return { fingerprint, legacyFingerprint, loggedLegacyFingerprint, output, segment };
     }
 
+    /** The switch and its context controls live on the source clip; the next clip consumes them. */
+    private continuationOverride(input: H3RunInput, plan: H3Plan, override: Record<string, unknown>): Record<string, unknown> {
+        if (!plan.continuation || plan.continuation.index === 1) return override;
+        const project = this.projectFor(input);
+        const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId);
+        const metadata = recordOf(node?.metadata);
+        const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+        const source = segments[plan.segmentIndex - 1];
+        if (!source || source.motionContextEnabled !== true) throw new Error(`Clip ${plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
+        const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const sourceParams = extractParams(source, override, metadata, defaults);
+        return { ...override, ...Object.fromEntries(H3_OUTGOING_CONTEXT_KEYS.filter((key) => sourceParams[key] !== undefined).map((key) => [key, sourceParams[key]])) };
+    }
+
     private patchSegment(projectId: string, nodeId: string, segmentId: string, patch: Record<string, unknown>) {
         const project = this.stores.projects.get(projectId)!;
         this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [
@@ -547,17 +606,33 @@ export class CanvasH3Runner {
             ? segments.findIndex((segment) => String(segment.id || "") === input.segmentId)
             : input.segmentIndex ?? Math.max(0, segments.findIndex((segment) => !segment.result));
         if (selected < 0) throw new Error("找不到所选 Clip，请刷新画布后重试");
-        const selectedSegment = segments[selected];
-        const continuationMode = selectedSegment.motionContextEnabled === true && input.runFromCurrent === true;
-        if (selectedSegment.motionContextEnabled === true && !input.runFromCurrent && selected > 0) throw new Error("V15 潜空间续写必须使用「运行当前及后续分镜」，不能单独运行一个 Clip。");
-        if (continuationMode && input.skipCompleted) throw new Error("V15 潜空间续写不能跳过已完成 Clip，请从连续组首段重新运行。");
+        if (selected > 0 && segments[selected - 1].motionContextEnabled === true) {
+            throw new Error(`Clip ${selected + 1} 需要接入上一段潜变量；请从上一段所在连续组的组首 Clip 重新运行`);
+        }
         const indices = input.runFromCurrent ? segments.map((_, index) => index).filter((index) => index >= selected) : [selected];
+        if (input.runFromCurrent && input.skipCompleted && indices.some((index) => index + 1 < segments.length && segments[index].motionContextEnabled === true)) {
+            throw new Error("V15 潜空间续写不能跳过已完成 Clip，请从连续组首段重新运行。");
+        }
+        let groupHead = -1;
         let continuationIndex = 0;
-        const continuationGroup = String(selectedSegment.continuationGroupId || selectedSegment.id || `segment-${selected}`);
         return indices.filter((index) => segments[index]).filter((index) => !input.skipCompleted || !segments[index].result).map((segmentIndex) => {
             const segment = segments[segmentIndex];
             if (!segment.id) throw new Error(`H3 Clip ${segmentIndex + 1} 缺少身份标识`);
-            return { nodeId: String(node.id || ""), segmentId: String(segment.id), segmentIndex, ...(continuationMode ? { continuation: { group: continuationGroup, index: ++continuationIndex } } : {}) };
+            const incoming = input.runFromCurrent === true && segmentIndex > selected && segments[segmentIndex - 1].motionContextEnabled === true;
+            const outgoing = input.runFromCurrent === true && segmentIndex + 1 < segments.length && segment.motionContextEnabled === true;
+            if (!incoming && !outgoing) {
+                groupHead = -1;
+                continuationIndex = 0;
+                return { nodeId: String(node.id || ""), segmentId: String(segment.id), segmentIndex };
+            }
+            if (!incoming) {
+                groupHead = segmentIndex;
+                continuationIndex = 0;
+            }
+            if (groupHead < 0) throw new Error("潜空间续写缺少连续组首段，请从组首重新运行");
+            const head = segments[groupHead];
+            const group = `${String(head.continuationGroupId || "h3-chain")}:${String(head.id)}`;
+            return { nodeId: String(node.id || ""), segmentId: String(segment.id), segmentIndex, continuation: { group, index: ++continuationIndex } };
         });
     }
 
@@ -619,11 +694,14 @@ export class CanvasH3Runner {
         const { compilation, composite } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
         const scenePrompt = appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
+        const styleTemplateId = segment.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode) : segment.styleTemplateId;
+        if (styleTemplateId && !isH3StyleTemplateId(styleTemplateId)) throw new Error(`无效的 H3 视觉风格模板：${styleTemplateId}`);
+        params.styleTemplateId = styleTemplateId || null;
         const refs = compilation.references.map((reference) => ({ ...reference, type: reference.mediaType, name: reference.label } as H3Ref));
-        if (params.motionContextEnabled === true && !plan.continuation) {
-            if (plan.segmentIndex > 0) throw new Error("Motion Context（V15 潜空间续写）必须使用「运行当前及后续分镜」，不能单独运行一个 Clip。");
-            params.motionContextEnabled = false;
-        }
+        // The segment switch controls its outgoing edge. A group head saves latent at index 1;
+        // only index > 1 consumes the previous clip's latent. Standalone runs have no cross-task context.
+        params.motionContextEnabled = Boolean(plan.continuation);
+        if (plan.continuation?.index === 1) params.continuationAudioRefineEnabled = false;
         if (plan.continuation) {
             params.motionContextEnabled = true;
             params.continuationTask = buildH3ContinuationTask(String(parent.input.projectId), plan.continuation.group, parent.id, plan.continuation.index);
@@ -681,20 +759,24 @@ export class CanvasH3Runner {
         const submittedImageReferences = imageRefs.map((ref) => isCompositeRef(ref) && compositeMedia
             ? { ...ref, url: this.stores.media.url(compositeMedia), storageKey: compositeMedia.storageKey }
             : ref);
-        const actualReferences: Array<Record<string, unknown>> = [
+        let actualReferences: Array<Record<string, unknown>> = [
             ...submittedImageReferences,
             ...videoRefs,
             ...audioRefs,
         ];
+        let runtimeTaskMode = taskMode;
         if (previousPath && useTailFrame) {
             const tail = await this.captureTailFrame(previousPath, `h3-tail-${parent.id}-${plan.segmentIndex}.png`);
-            if (!isT2v && !isI2v && !isFl2v) {
-                images.unshift(tail);
-                actualReferences.unshift({ id: `runtime-tail-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 尾帧`, type: "image", role: "keyframe", usage: "first_frame", runtime: true, sourceSegmentId: previous?.id, resolved: tail });
-            }
-            if (images.length > 9) throw new Error("尾帧续接后参考图片超过 MiniMax H3 的 9 张上限");
-            prompt = appendTailFramePrompt(prompt, `Clip ${plan.segmentIndex}`);
+            const routed = routeTailFrameInput(taskMode, images, actualReferences, {
+                id: `runtime-tail-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 尾帧`, type: "image", role: taskMode === "ref2va" ? "storyboard" : "keyframe", usage: "first_frame",
+                runtime: true, sourceSegmentId: previous?.id, resolved: tail.filePath, url: this.stores.media.url(tail), storageKey: tail.storageKey,
+            }, Boolean(composite));
+            images.splice(0, images.length, ...routed.images);
+            actualReferences = routed.actualReferences;
+            runtimeTaskMode = routed.taskMode;
+            prompt = appendTailFramePrompt(prompt, `Clip ${plan.segmentIndex}`, routed.replacedFirstFrame, taskMode === "ref2va", Boolean(composite));
         }
+        prompt = applyH3StyleTemplate(prompt, taskMode, styleTemplateId as string | null);
         // 组装最终送入工作流的参考视频列表：本段自有参考视频（最多 3 段）+ 显式开启时才追加的上一段成品。
         const referenceVideos = appendPreviousReference(videos, usePreviousAsReference && !isT2v && !isI2v && !isFl2v ? previousPath : "");
         if (usePreviousAsReference && previousPath && !isT2v && !isI2v && !isFl2v) {
@@ -702,7 +784,8 @@ export class CanvasH3Runner {
         }
         const engine = String(params.minimaxEngine || params.engine || metadata.minimaxEngine || "").toLowerCase();
         Object.assign(params, {
-            taskMode,
+            taskMode: runtimeTaskMode,
+            mode: runtimeTaskMode,
             // V15 Motion Context 由 motionContextEnabled + continuationTask 驱动；这里关闭的
             // 是旧版预处理图标记，避免再把上一段视频走旧 motion/context 图。
             motionContext: false,
@@ -723,7 +806,7 @@ export class CanvasH3Runner {
             actualReferences,
             ...(composite ? { storyboardComposite: { rows: composite.rows, columns: composite.columns, sourceBindingIds: composite.sourceBindingIds, panels: composite.panels } } : {}),
             warnings: compilation.issues.filter((issue) => issue.severity === "warning"),
-            continuation: { tailFrame: useTailFrame, previousVideo: usePreviousAsReference, motionContext: Boolean(plan.continuation) },
+            continuation: { tailFrame: useTailFrame, previousVideo: usePreviousAsReference, motionContext: Boolean(plan.continuation), requestedMode: taskMode, runtimeMode: runtimeTaskMode },
         };
         const log = this.stores.logs.create({
             projectId: String(parent.input.projectId), nodeId: plan.nodeId, segmentId: plan.segmentId,
@@ -924,7 +1007,7 @@ export class CanvasH3Runner {
     }
 
     private captureTailFrame(videoPath: string, name: string) {
-        return new Promise<string>((resolve, reject) => {
+        return new Promise<ReturnType<Stores["media"]["store"]>>((resolve, reject) => {
             const chunks: Buffer[] = [];
             const errors: Buffer[] = [];
             const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-sseof", "-0.05", "-i", videoPath, "-frames:v", "1", "-vf", "scale='if(gt(iw,ih),min(768,iw),-2)':'if(gt(iw,ih),-2,min(768,ih))'", "-f", "image2pipe", "-vcodec", "png", "pipe:1"], { stdio: ["ignore", "pipe", "pipe"] });
@@ -933,10 +1016,40 @@ export class CanvasH3Runner {
             child.once("error", reject);
             child.once("exit", (code) => {
                 if (code !== 0 || !chunks.length) return reject(new Error(`截取上一段尾帧失败: ${Buffer.concat(errors).toString("utf8").trim()}`));
-                resolve(this.stores.media.store(Buffer.concat(chunks), { name, mimeType: "image/png", category: "input" }).filePath);
+                resolve(this.stores.media.store(Buffer.concat(chunks), { name, mimeType: "image/png", category: "input" }));
             });
         });
     }
+}
+
+/** Fixed-frame modes replace Picture 1; Ref2VA replaces its first storyboard image unless it is a composite sheet. */
+export function routeTailFrameInput(
+    taskMode: string,
+    images: readonly string[],
+    actualReferences: readonly Record<string, unknown>[],
+    tailReference: Record<string, unknown>,
+    preserveStoryboardComposite = false,
+) {
+    const tailPath = String(tailReference.resolved || "");
+    if (!tailPath) throw new Error("尾帧接续缺少截取后的图片路径");
+    const fixedFirstFrame = taskMode === "i2v" || taskMode === "fl2v";
+    const firstStoryboard = taskMode === "ref2va" && !preserveStoryboardComposite && actualReferences[0]?.role === "storyboard";
+    const replacedFirstFrame = fixedFirstFrame || firstStoryboard;
+    if (replacedFirstFrame && !images.length) throw new Error("首帧槽位不存在，无法用上一段尾帧接续");
+    const routedImages = replacedFirstFrame ? [tailPath, ...images.slice(1)] : [tailPath, ...images];
+    if (routedImages.length > 9) throw new Error("尾帧续接后参考图片超过 MiniMax H3 的 9 张上限");
+    const firstReference = actualReferences[0];
+    const routedTail: Record<string, unknown> = {
+        ...tailReference,
+        ...(taskMode === "ref2va" ? { role: "storyboard" } : {}),
+        ...(replacedFirstFrame && firstReference ? { id: firstReference.id, replacesBindingId: firstReference.id } : {}),
+    };
+    return {
+        images: routedImages,
+        actualReferences: replacedFirstFrame ? [routedTail, ...actualReferences.slice(1)] : [routedTail, ...actualReferences],
+        taskMode: taskMode === "t2v" ? "i2v" : taskMode,
+        replacedFirstFrame,
+    };
 }
 
 /**
@@ -1070,15 +1183,59 @@ function firstPassReferencesFromLog(logs: ReturnType<Stores["logs"]["list"]>, se
     return references.every(Boolean) ? references as Array<Record<string, unknown>> : null;
 }
 
-function appendTailFramePrompt(prompt: string, fromClip: string) {
+export function appendTailFramePrompt(prompt: string, fromClip: string, replacedFirstFrame = false, storyboardMode = false, preserveStoryboardComposite = false) {
     let shifted = prompt;
-    let max = 0;
-    for (const match of shifted.matchAll(/<Picture\s+(\d+)>/gi)) max = Math.max(max, Number(match[1]));
-    for (let index = max; index >= 1; index--) shifted = shifted.replace(new RegExp(`<Picture\\s+${index}>`, "gi"), `<Picture ${index + 1}>`);
-    const definition = `<Picture 1> is the opening frame of this segment, hard-cut from the ending frame of ${fromClip} to anchor character and scene continuity.`;
+    if (!replacedFirstFrame) {
+        let max = 0;
+        for (const match of shifted.matchAll(/<Picture\s+(\d+)>/gi)) max = Math.max(max, Number(match[1]));
+        for (let index = max; index >= 1; index--) shifted = shifted.replace(new RegExp(`<Picture\\s+${index}>`, "gi"), `<Picture ${index + 1}>`);
+    }
+    if (storyboardMode && replacedFirstFrame) {
+        shifted = stripPictureOneSectionLine(stripPictureOneSectionLine(shifted, "subject_definitions"), "retention_analysis");
+    }
+    if (preserveStoryboardComposite) {
+        shifted = shifted.replace("A single submitted image is a composite storyboard sheet", "In addition to the opening frame, <Picture 2> is a composite storyboard sheet");
+    }
+    const definition = `<Picture 1> is the opening frame of this segment, hard-cut from the ending frame of ${fromClip} to anchor character and scene continuity.${replacedFirstFrame ? " This runtime frame replaces the saved first-frame image; use the runtime frame wherever the prompt describes <Picture 1>." : ""}`;
     const retention = `<Picture 1> ([Shot 1] first frame): partially_preserved - the ending frame of ${fromClip} is hard-cut into this segment as the opening frame; preserve the character's identity, pose, and ongoing action across the cut, but treat it as a new shot/scene (not a seamless match-cut continuation).`;
     const withDefinition = /^subject_definitions\s*[:：]/m.test(shifted) ? appendToSection(shifted, "subject_definitions", definition) : shifted;
-    return appendToSection(withDefinition, "retention_analysis", retention);
+    const withRetention = appendToSection(withDefinition, "retention_analysis", retention);
+    return storyboardMode ? insertTailStoryboardCue(withRetention, fromClip) : withRetention;
+}
+
+function stripPictureOneSectionLine(prompt: string, section: string) {
+    const header = new RegExp(`^${section}\\s*[:：][ \\t]*(?:\\r?\\n)?`, "mi").exec(prompt);
+    if (!header) return prompt;
+    const start = header.index + header[0].length;
+    const rest = prompt.slice(start);
+    const next = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music)\s*[:：]/mi.exec(rest);
+    const end = start + (next?.index ?? rest.length);
+    const body = prompt.slice(start, end).replace(/^[ \t]*<Picture\s+1>[^\r\n]*(?:\r?\n)?/gmi, "");
+    return `${prompt.slice(0, start)}${body}${prompt.slice(end)}`;
+}
+
+function insertTailStoryboardCue(prompt: string, fromClip: string) {
+    const cue = `Use the approved ending frame of ${fromClip} from <Picture 1> as the shot-entry keyframe and composition anchor for this shot. After the keyframe, keep the camera setup and spatial relationship stable while allowing natural performance.`;
+    const section = /^detailed_description\s*[:：][ \t]*(?:\r?\n)?/mi.exec(prompt);
+    const sectionStart = section ? section.index + section[0].length : -1;
+    const remainder = sectionStart >= 0 ? prompt.slice(sectionStart) : "";
+    const nextSection = /^(?:subject_definitions|summary|retention_analysis|overall_soundscape|non_diegetic_music)\s*[:：]/mi.exec(remainder);
+    const sectionEnd = sectionStart < 0 ? prompt.length : sectionStart + (nextSection?.index ?? remainder.length);
+    const body = sectionStart < 0 ? "" : prompt.slice(sectionStart, sectionEnd);
+    const shot = /^[ \t]*\[Shot[ \t]+1\]/mi.exec(body);
+    if (!shot) {
+        const description = `[Shot 1] ${cue}${body.trim() ? ` ${body.trim()}` : ""}`;
+        return sectionStart < 0 ? appendToSection(prompt, "detailed_description", description) : `${prompt.slice(0, sectionStart)}${description}\n${prompt.slice(sectionEnd)}`;
+    }
+    const afterMarker = shot.index + shot[0].length;
+    let rest = body.slice(afterMarker);
+    // The storyboard editor emits this cue from the saved frame. Once the tail frame
+    // anchors Shot 1, that generated cue must not describe a competing frame.
+    rest = rest.replace(/^[ \t]*Use the approved .+? from <Picture\s+\d+> as (?:the visual anchor|the target composition reference|the shot-entry keyframe and composition anchor) for this shot\.(?:[ \t]*After the keyframe, keep the camera setup and spatial relationship stable while allowing natural performance\.)?[ \t]*/iu, "");
+    rest = rest.replace(/^In the composite storyboard image, this is Panel \d+ \(row \d+, column \d+\), shared by (?:\[Shot \d+\](?:, )?)+\.[ \t]*/iu, "");
+    const suffix = /^[\r\n]/u.test(rest) ? rest : rest.trimStart() ? ` ${rest.trimStart()}` : "";
+    const rewritten = `${body.slice(0, afterMarker)} ${cue}${suffix}`;
+    return `${prompt.slice(0, sectionStart)}${rewritten}${prompt.slice(sectionEnd)}`;
 }
 
 function appendToSection(prompt: string, section: string, line: string) {

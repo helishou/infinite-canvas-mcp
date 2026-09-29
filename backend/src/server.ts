@@ -55,6 +55,7 @@ import {
 } from "./server/connection-routes.js";
 import { CanvasDraftSessionLeases } from "./canvas/draft-session-leases.js";
 import { registerMcpObservabilityRoutes } from "./server/mcp-observability-routes.js";
+import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
 
 const logger = createLogger("backend");
 
@@ -1260,6 +1261,40 @@ export function startServer(
             ok: false,
             error: error instanceof Error ? error.message : String(error),
           });
+      }
+    },
+  );
+
+  /** 角色声线上传独立入口：超过 0.5 MB 才压缩，原文件保留在媒体库。 */
+  app.post(
+    "/media/character-voice",
+    express.raw({ type: "*/*", limit: "100mb" }),
+    async (req, res) => {
+      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const name = decodeURIComponent(String(req.headers["x-media-name"] || "voice.wav"));
+      const mimeType = String(req.headers["content-type"] || "application/octet-stream").split(";", 1)[0];
+      const durationMs = Number(req.headers["x-media-duration-ms"]) || null;
+      if (!body.length) return void res.status(400).json({ ok: false, error: "声线文件为空" });
+      try {
+        const voice = await prepareCharacterVoiceUpload(body, name, mimeType);
+        const original = voice.compressed ? stores.media.store(body, { name, mimeType, category: "library", durationMs }) : null;
+        const media = stores.media.store(voice.body, { name: voice.name, mimeType: voice.mimeType, category: "library", durationMs });
+        res.status(201).json({ ok: true, media: {
+          storageKey: media.storageKey,
+          url: stores.media.url(media),
+          mimeType: media.mimeType,
+          bytes: media.bytes,
+          width: media.width,
+          height: media.height,
+          durationMs: media.durationMs,
+          ...(original ? { compression: {
+            originalBytes: voice.originalBytes,
+            originalStorageKey: original.storageKey,
+            thresholdBytes: CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES,
+          } } : {}),
+        } });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
       }
     },
   );

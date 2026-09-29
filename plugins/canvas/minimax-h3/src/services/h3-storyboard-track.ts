@@ -3,7 +3,7 @@ import type { H3Ref, H3Segment, H3StoryboardShot } from "../types";
 import { readH3PromptSection, replaceH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import type { H3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import { stripDuplicateTransition } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
-import { orderStoryboardImageReferences, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
+import { orderStoryboardReferencesFirst, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 import { sameRef } from "./h3-compatibility";
 import { storyboardShotLabelMarkers } from "./h3-storyboard-markers";
 import { inferReferenceRole, refsForSegment, withSegmentRefs } from "./h3-data";
@@ -21,7 +21,7 @@ export function storyboardRefsForSegment(segment: H3Segment) {
 
 export function alignStoryboardReferenceOrder(segment: H3Segment) {
     const refs = refsForSegment(segment);
-    const ordered = orderStoryboardImageReferences(refs,
+    const ordered = orderStoryboardReferencesFirst(refs,
         (segment.storyboardShots || []).flatMap((shot) => shot.referenceBindingId ? [shot.referenceBindingId] : []),
         (ref) => ref.bindingId, (ref) => ref.type === "image" && inferReferenceRole(ref) === "storyboard");
     return ordered.some((ref, index) => ref.bindingId !== refs[index]?.bindingId) ? withSegmentRefs(segment, ordered) : segment;
