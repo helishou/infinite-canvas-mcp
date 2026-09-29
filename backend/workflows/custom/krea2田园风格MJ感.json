@@ -177,7 +177,7 @@
   "111": {
     "class_type": "llama_cpp_model_loader",
     "inputs": {
-      "model": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+      "model": "Qwen3-VL-8B-Instruct-abliterated-v2.0.Q4_K_M.gguf",
       "mmproj_model": "Qwen3-VL-8B-Instruct-abliterated-v2.0.mmproj-Q8_0.gguf",
       "chat_handler": "Qwen3-VL",
       "think_mode": false,

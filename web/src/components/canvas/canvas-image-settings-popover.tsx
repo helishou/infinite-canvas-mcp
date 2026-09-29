@@ -122,6 +122,12 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     }, [onPromptRequiredChange, workflowDetail, workflowName]);
 
     const customFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, workflowDetail?.workflow) && !field.isPrompt);
+    // 隐藏标准项的唯一依据是「本次真的要渲染工作流参数」。之前只判断渠道是不是 comfyui，
+    // 于是取不到工作流字段时标准项也被一起藏掉，面板只剩透明背景和张数。
+    const showsWorkflowParams = customFields.length > 0;
+    const hideStandardImageOptions = showsWorkflowParams;
+    // ComfyUI 模型但没解析出参数：明确说明原因，不再给一个看不出所以然的空面板。
+    const workflowParamsMissing = isLocalCustomWorkflow && !showsWorkflowParams;
 
     useEffect(() => {
         if (!workflowDetail || workflowDetail.name !== workflowName || !onComfyParamsChange) return;
@@ -159,7 +165,8 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                     comfyParamsRef.current = next;
                     onComfyParamsChange(next);
                 } : undefined}
-                hideStandardImageOptions={isLocalCustomWorkflow}
+                hideStandardImageOptions={hideStandardImageOptions}
+                workflowParamsMissing={workflowParamsMissing}
             />
         ) : null;
 
@@ -195,6 +202,7 @@ function ImageSettingsPortal({
     customFieldValues,
     onCustomFieldChange,
     hideStandardImageOptions,
+    workflowParamsMissing,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -206,6 +214,7 @@ function ImageSettingsPortal({
     customFieldValues?: Parameters<typeof ImageSettingsPanel>[0]["customFieldValues"];
     onCustomFieldChange?: Parameters<typeof ImageSettingsPanel>[0]["onCustomFieldChange"];
     hideStandardImageOptions: boolean;
+    workflowParamsMissing: boolean;
 }) {
     const width = 356;
     const gap = 8;
@@ -239,6 +248,7 @@ function ImageSettingsPortal({
                 customFieldValues={customFieldValues}
                 onCustomFieldChange={onCustomFieldChange}
                 hideStandardImageOptions={hideStandardImageOptions}
+                workflowParamsMissing={workflowParamsMissing}
             />
         </div>,
         document.body,

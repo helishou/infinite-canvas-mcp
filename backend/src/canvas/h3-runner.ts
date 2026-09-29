@@ -781,6 +781,9 @@ export class CanvasH3Runner {
         const styleTemplateId = segment.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode) : segment.styleTemplateId;
         if (styleTemplateId && !isH3StyleTemplateId(styleTemplateId)) throw new Error(`无效的 H3 视觉风格模板：${styleTemplateId}`);
         params.styleTemplateId = styleTemplateId || null;
+        // 实时预览节点靠 target_node_id 把帧推回画布上的 H3 节点；不传就是空串，
+        // 帧无处可去，预览功能等于没开。节点 id 在这里才确定，必须在提交前注入。
+        params.targetNodeId = plan.nodeId;
         const refs = compilation.references.map((reference) => ({ ...reference, type: reference.mediaType, name: reference.label } as H3Ref));
         // The segment switch controls its outgoing edge. A group head saves latent at index 1;
         // only index > 1 consumes the previous clip's latent. Standalone runs have no cross-task context.

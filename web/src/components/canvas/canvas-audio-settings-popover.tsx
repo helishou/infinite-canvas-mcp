@@ -42,6 +42,7 @@ export function CanvasAudioSettingsPopover({
     const [open, setOpen] = useState(false);
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
     const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
+    const workflowDetailRef = useRef<WorkflowDetail | null>(null);
     const comfyParamsRef = useRef(comfyParams);
     const onComfyParamsChangeRef = useRef(onComfyParamsChange);
     comfyParamsRef.current = comfyParams;
@@ -82,19 +83,23 @@ export function CanvasAudioSettingsPopover({
 
     useEffect(() => {
         if (!workflowName) {
+            workflowDetailRef.current = null;
             setWorkflowDetail(null);
             return;
         }
         // 面板每次打开时重新取字段，避免使用已过期的字段 ID。
-        if (!open && workflowDetail?.name === workflowName) return;
+        // 必须读 ref 而不是 state：state 不在本 effect 的依赖里，闭包只会拿到首次渲染的 null。
+        if (!open && workflowDetailRef.current?.name === workflowName) return;
         let cancelled = false;
         fetchWorkflowDetail(workflowName)
             .then((detail) => {
                 if (cancelled) return;
+                workflowDetailRef.current = detail;
                 setWorkflowDetail(detail);
             })
             .catch(() => {
                 if (cancelled) return;
+                workflowDetailRef.current = null;
                 setWorkflowDetail(null);
             });
         return () => {

@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
 import { CustomPromptDialog } from "@/components/prompts/custom-prompt-dialog";
 import { fetchBackendCanvasDrama } from "@/services/backend-api";
-import { fetchSourcePrompts, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
+import { fetchSourcePrompts, isCustomPrompt, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
@@ -744,6 +744,7 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, nodes, theme
     const [customOpen, setCustomOpen] = useState(true);
     const [detail, setDetail] = useState<Prompt | null>(null);
     const [addDialogOpen, setAddDialogOpen] = useState(false);
+    const [editPrompt, setEditPrompt] = useState<Prompt | null>(null);
     const addPromptAction = (
         <button
             type="button"
@@ -796,8 +797,17 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, nodes, theme
                     {!enabledSources.length && customPrompts.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("canvas.sidePanel.noPrompts")} className="pt-12" /> : null}
                 </div>
             </div>
-            <PromptDetailDialog prompt={detail} onClose={() => setDetail(null)} onCopy={(prompt) => void copyPrompt(prompt)} />
+            <PromptDetailDialog
+                prompt={detail}
+                onClose={() => setDetail(null)}
+                onCopy={(prompt) => void copyPrompt(prompt)}
+                onEdit={detail && isCustomPrompt(detail) ? (prompt) => {
+                    setDetail(null);
+                    setEditPrompt(prompt);
+                } : undefined}
+            />
             <CustomPromptDialog open={addDialogOpen} mode="add" canvasNodes={nodes} onClose={() => setAddDialogOpen(false)} />
+            <CustomPromptDialog open={Boolean(editPrompt)} mode="edit" initial={editPrompt} canvasNodes={nodes} onClose={() => setEditPrompt(null)} />
         </div>
     );
 });

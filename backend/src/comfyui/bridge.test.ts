@@ -190,6 +190,28 @@ test("H3 TE acceleration uses a graph that contains the visible TE patcher", asy
     assert.equal(Object.values(graph).some((node: any) => node.class_type === "TESpeedMiniMaxH3"), true);
 });
 
+test("H3 realtime preview bridge receives the canvas target node and TAEH3 flag", async () => {
+    const graph = await buildNativeNanFengV15Workflow(
+        { prompt: "@图片1", references: ["reference.png"] },
+        { mode: "ref2va", seed: 123, targetNodeId: "h3-node-42", taeh3Enabled: true },
+        upload, "http://comfy.local", new AbortController().signal,
+    );
+    const preview = Object.values(graph).find((node: any) => node.class_type === "NanFengH3KJPreviewBridgeV15") as any;
+    assert.ok(preview, "实时预览开启时应插入预览桥接节点");
+    // 帧靠 target_node_id 推回画布节点；漏传会让预览开着却永远收不到帧。
+    assert.equal(preview.inputs.target_node_id, "h3-node-42");
+    assert.equal(preview.inputs.taeh3_enabled, true);
+});
+
+test("H3 realtime preview is skipped only when explicitly disabled", async () => {
+    const graph = await buildNativeNanFengV15Workflow(
+        { prompt: "@图片1", references: ["reference.png"] },
+        { mode: "ref2va", seed: 123, realtimePreviewEnabled: false },
+        upload, "http://comfy.local", new AbortController().signal,
+    );
+    assert.equal(Object.values(graph).some((node: any) => node.class_type === "NanFengH3KJPreviewBridgeV15"), false);
+});
+
 test("H3 V15 native workflow does not submit removed model-cache input", async () => {
     const graph = await buildNativeNanFengV15Workflow(
         { prompt: "@图片1", references: ["reference.png"] },

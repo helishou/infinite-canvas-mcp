@@ -1,11 +1,11 @@
-import { Copy, FileText, FolderPlus } from "lucide-react";
+import { Copy, FileText, FolderPlus, Pencil } from "lucide-react";
 import { Button, Image, Modal, Space, Tag } from "antd";
 import { cloneElement, type CSSProperties, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 
 import { formatPromptDate, type Prompt } from "@/services/api/prompts";
 
-export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset }: { prompt: Prompt | null; onClose: () => void; onCopy: (prompt: string) => void; onSaveAsset?: (prompt: Prompt) => void }) {
+export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset, onEdit }: { prompt: Prompt | null; onClose: () => void; onCopy: (prompt: string) => void; onSaveAsset?: (prompt: Prompt) => void; onEdit?: (prompt: Prompt) => void }) {
     const { i18n, t } = useTranslation();
 
     return (
@@ -34,6 +34,11 @@ export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset }: { p
                             <Button type="primary" icon={<Copy className="size-4" />} onClick={() => onCopy(prompt.prompt)}>
                                 {t("common.copyPrompt")}
                             </Button>
+                            {onEdit ? (
+                                <Button icon={<Pencil className="size-4" />} onClick={() => onEdit(prompt)}>
+                                    {t("common.edit")}
+                                </Button>
+                            ) : null}
                             {onSaveAsset ? (
                                 <Button icon={<FolderPlus className="size-4" />} onClick={() => onSaveAsset(prompt)}>
                                     {t("common.addToAssets")}

@@ -2,34 +2,29 @@
   <img src="web/public/logo.svg" width="96" alt="infinite-canvas logo">
 </p>
 
-<h1 align="center">无限画布 (infinite-canvas)</h1>
+<h1 align="center">无限画布 MCP (Infinite Canvas MCP)</h1>
 
 <p align="center">
-  <a href="https://linux.do/"><img src="https://img.shields.io/badge/Linux.do-Community-2b6de8?style=flat-square" alt="Linux.do"></a>
-  <a href="https://render.com/deploy?repo=https://github.com/basketikun/infinite-canvas" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Render-Deploy-46e3b7?style=flat-square&logo=render&logoColor=111111" alt="Deploy to Render"></a>
-  <a href="https://github.com/basketikun/infinite-canvas"><img src="https://img.shields.io/github/stars/basketikun/infinite-canvas?style=flat-square&logo=github" alt="GitHub stars"></a>
-  <a href="https://github.com/basketikun/infinite-canvas/tags"><img src="https://img.shields.io/github/v/tag/basketikun/infinite-canvas?style=flat-square&label=version" alt="Version"></a>
+  <a href="https://github.com/helishou/infinite-canvas-mcp"><img src="https://img.shields.io/github/stars/helishou/infinite-canvas-mcp?style=flat-square&logo=github" alt="GitHub stars"></a>
+  <a href="https://github.com/helishou/infinite-canvas-mcp/tags"><img src="https://img.shields.io/github/v/tag/helishou/infinite-canvas-mcp?style=flat-square&label=version" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f97316?style=flat-square" alt="License"></a>
   <a href="https://vite.dev/"><img src="https://img.shields.io/badge/Vite-7-646cff?style=flat-square&logo=vite&logoColor=white" alt="Vite"></a>
   <a href="https://reactrouter.com/"><img src="https://img.shields.io/badge/React_Router-7-ca4245?style=flat-square&logo=reactrouter&logoColor=white" alt="React Router"></a>
 </p>
 
 <p align="center">
-<a href="https://trendshift.io/repositories/50077?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-50077" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/50077" alt="basketikun%2Finfinite-canvas | Trendshift" width="250" height="55"/></a>
 </p>
 
 <p align="center">
-  <a href="docs/content/docs/overview/quick-start.zh-CN.mdx">快速开始</a> · <a href="docs/content/docs/overview/features.zh-CN.mdx">功能介绍</a> · <a href="docs/content/docs/overview/docker.zh-CN.mdx">Docker 部署</a> · <a href="docs/content/docs/canvas/canvas-node-manual.mdx">画布节点操作手册</a> · <a href="docs/content/docs/canvas/canvas-shortcuts.mdx">画布快捷键</a> · <a href="SECURITY.md">漏洞提交</a> · <a href="docs/content/docs/progress/todo.mdx">待办事项</a> · <a href="canvas-agent/README.md">本地 Canvas Agent</a> · <a href="plugins/canvas/README.md">画布插件 SDK</a> · <a href="plugins/infinite-canvas/README.md">Codex app 插件</a>
+<a href="docs/content/docs/overview/quick-start.zh-CN.mdx">快速开始</a> · <a href="docs/content/docs/overview/features.zh-CN.mdx">功能介绍</a> · <a href="docs/content/docs/overview/docker.zh-CN.mdx">Docker 部署</a> · <a href="docs/content/docs/canvas/canvas-node-manual.mdx">画布节点操作手册</a> · <a href="docs/content/docs/canvas/canvas-shortcuts.mdx">画布快捷键</a> · <a href="SECURITY.md">漏洞提交</a> · <a href="docs/content/docs/progress/todo.mdx">项目计划</a> · <a href="canvas-agent/README.md">本地 Canvas Agent</a> · <a href="plugins/canvas/README.md">画布插件 SDK</a> · <a href="plugins/infinite-canvas/README.md">Codex app 插件</a>
 </p>
 
 无限画布（Infinite Canvas）是一款面向 AI 影像与短片生产的开源工作台。它把无限画布编排、多模型生成、参考图编辑、**MiniMax H3 短片 Clip 生产**、本地 Agent 与 MCP 自动化，以及一整套短片生产 SOP 收进同一个界面和同一套后端，适合从视觉方案探索一路迭代到可交付的成片。
 
-本仓库是 `basketikun/infinite-canvas` 的衍生分支，在原画布能力之上增加了面向短片生产的扩展层：H3 视频节点与 Clip 时间线、剧目与分集数据模型、参考与分镜绑定、覆盖画布与 H3 的 MCP 工具面，以及把剧本 → 分镜 → 关键帧 → Clip 视频串成一条可验收流水线的生产 SOP。
+这是一个独立维护的无限画布与 AI 影像生产工作台。本项目从 [basketikun/infinite-canvas](https://github.com/basketikun/infinite-canvas) 发展而来，并在其画布基础上持续建设短片生产能力，包括 H3 视频节点与 Clip 时间线、剧目与分集数据模型、参考与分镜绑定、画布与 H3 MCP 工具，以及贯穿剧本、分镜、关键帧和 Clip 视频的生产 SOP。感谢上游项目及其贡献者提供的基础工作。
 
 > [!CAUTION]
-> 项目目前处于开发阶段，不保证历史数据兼容。各种本地存储格式都可能直接调整，欢迎关注后续更新。
->
-> 如果你需要稳定维护自己的分支，建议自行 fork 后独立开发。二次开发与 PR 请保留原作者信息和前端页面标识。
+> 项目仍在持续开发中，数据结构和本地存储格式可能调整。使用前请备份重要项目数据。
 
 ## 核心能力
 
@@ -95,7 +90,7 @@ docker compose up -d
 
 首次打开后进入右上角配置，填入自己的 OpenAI 兼容 `Base URL` 与 `API Key`，设置默认文/图/视频模型。如果默认的 OpenAI 接口调用方式与你的 API 不同，可自定义生图与视频的脚本调用。
 
-如果你在为没有合适的生图 API 发愁，可以看看那个免费生图项目：[chatgpt2api](https://github.com/basketikun/chatgpt2api)。
+问题反馈与功能建议请通过本仓库的 [Issues](https://github.com/helishou/infinite-canvas-mcp/issues) 提交。
 
 ## 效果展示
 
@@ -118,34 +113,20 @@ docker compose up -d
   </tr>
 </table>
 
-## 联系方式
+## 参与项目
 
-项目定制二次开发需求与生图 API 需求可联系。
-
-邮箱：1844025705@qq.com · QQ：1844025705
-
-## 赞助支持
-
-本项目长期开放广告赞助合作，欢迎品牌 / 产品投放，你的支持是持续更新的动力！
-
-有广告赞助意向请通过上方联系方式沟通。
-
-## 社区支持
-
-学 AI，上 L 站：[LinuxDO](https://linux.do/)
-
-点击链接加入群聊【开源无限画布(2群)】：https://qm.qq.com/q/HRt2kUnYiG
+欢迎通过本仓库提交问题反馈、改进建议和代码贡献。提交前请查看现有 [Issues](https://github.com/helishou/infinite-canvas-mcp/issues) 与 [Pull Requests](https://github.com/helishou/infinite-canvas-mcp/pulls)，避免重复工作。
 
 ## 开源协议
 
-本项目使用 [MIT License](LICENSE)。任何人都可以免费使用、复制、修改、分发、再授权和商业使用本项目，也可以用于闭源产品。
+本仓库按 [MIT License](LICENSE) 发布。该许可文件保留了上游版权声明；基于上游代码及其衍生部分的使用、分发和修改，请遵守许可条款并保留所需版权与许可声明。
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=basketikun%2Finfinite-canvas&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=helishou%2Finfinite-canvas-mcp&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=basketikun/infinite-canvas&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=basketikun/infinite-canvas&type=date&theme=light&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=basketikun/infinite-canvas&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=helishou/infinite-canvas-mcp&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=helishou/infinite-canvas-mcp&type=date&theme=light&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=helishou/infinite-canvas-mcp&type=date&legend=top-left" />
  </picture>
 </a>

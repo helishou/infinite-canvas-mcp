@@ -6,17 +6,13 @@ import { ArrowUp, Image as ImageIcon, LoaderCircle, Maximize2, MessageSquare, Mu
 import { Button, Modal, Segmented, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
-import { ModelPicker } from "@/components/model-picker";
-import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, resolveModelForCapability, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
+import { CanvasGenerationControls } from "./canvas-generation-controls";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
-import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasCollaborativeText } from "./canvas-collaborative-text";
-import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
-import { CanvasTextSettingsPopover } from "./canvas-text-settings-popover";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
@@ -45,8 +41,6 @@ type CanvasNodePromptPanelProps = {
 export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], loopInputCount = 0, onDisconnectReference, onReorderReference, reorderableSourceNodeIds, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const globalConfig = useEffectiveConfig();
-    const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
-    const updateConfig = useConfigStore((state) => state.updateConfig);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const isSmartGenerationNode = node.type === CanvasNodeType.Loop || node.type === CanvasNodeType.Config && node.metadata?.smart === true;
     const mode = modeOverride ?? (isSmartGenerationNode ? node.metadata?.generationMode || "image" : defaultMode(node.type));
@@ -73,11 +67,13 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     const referenceCount = visibleHistoryReferences !== undefined
         ? visibleHistoryReferences.length
         : new Set([...connectedNodes.filter((item) => item.type === CanvasNodeType.Image).map((item) => item.id), ...mentionReferences.filter((item) => item.kind === "image").map((item) => item.nodeId)]).size + loopInputCount;
+    // 音频场景要按「带了几段参考音频」路由工作流（0 = 纯文本，≥1 = 参考音色克隆），
+    // 与图片引用数是两套计数，不能复用 referenceCount。
+    const audioReferenceCount = new Set([
+        ...connectedNodes.filter((item) => item.type === CanvasNodeType.Audio).map((item) => item.id),
+        ...mentionReferences.filter((item) => item.kind === "audio").map((item) => item.nodeId),
+    ]).size;
     const clearHistoryReferences = () => onConfigChange(node.id, { activeImageHistoryId: null, activeImageHistoryExplicit: false });
-    const changeImageModel = (model: string) => {
-        onConfigChange(node.id, { model });
-        updateConfig("imageModel", model);
-    };
 
     const updatePrompt = (value: string) => editorRef.current?.replace(value);
 
@@ -134,38 +130,18 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                         <Button type="text" className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0" style={{ color: theme.node.text }} icon={<Maximize2 className="size-3.5" />} onClick={openExpandedEditor} aria-label={t("canvas.promptPanel.expandEditor")} />
                     </Tooltip>
                     <CanvasPromptLibrary onSelect={updatePrompt} />
-                    {mode === "image" ? (
-                        <>
-                            <ModelPicker config={config} value={config.model} onChange={changeImageModel} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasImageSettingsPopover
-                                config={config}
-                                placement="topLeft"
-                                buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3"
-                                onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
-                                onMissingConfig={() => openConfigDialog(true)}
-                                onOpenChange={onImageSettingsOpenChange}
-                                comfyParams={node.metadata?.comfyParams}
-                                onComfyParamsChange={(value) => onConfigChange(node.id, { comfyParams: value })}
-                                onPromptRequiredChange={setImagePromptRequired}
-                                referenceCount={referenceCount}
-                            />
-                        </>
-                    ) : mode === "video" ? (
-                        <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
-                        </>
-                    ) : mode === "audio" ? (
-                        <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="audio" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
-                        </>
-                    ) : (
-                        <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="text" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasTextSettingsPopover config={config} count={node.metadata?.textCount || 1} onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })} onCountChange={(textCount) => onConfigChange(node.id, { textCount })} />
-                        </>
-                    )}
+                    <CanvasGenerationControls
+                        node={node}
+                        mode={mode}
+                        config={config}
+                        onConfigChange={onConfigChange}
+                        referenceCounts={{ image: referenceCount, audio: audioReferenceCount }}
+                        imageReferenceCount={referenceCount}
+                        textCount={node.metadata?.textCount || 1}
+                        onTextCountChange={(next: number) => onConfigChange(node.id, { textCount: next })}
+                        onImageSettingsOpenChange={onImageSettingsOpenChange}
+                        onImagePromptRequiredChange={setImagePromptRequired}
+                    />
                 </div>
                 <Button
                     type="primary"
@@ -228,16 +204,3 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
     };
 }
 
-function videoConfigPatch(key: keyof AiConfig, value: string) {
-    if (key === "videoSeconds") return { seconds: value };
-    if (key === "videoGenerateAudio") return { generateAudio: value };
-    if (key === "videoWatermark") return { watermark: value };
-    return { [key]: value };
-}
-
-function audioConfigPatch(key: CanvasAudioSettingKey, value: string) {
-    if (key === "audioVoice") return { audioVoice: value };
-    if (key === "audioFormat") return { audioFormat: value };
-    if (key === "audioSpeed") return { audioSpeed: value };
-    return { audioInstructions: value };
-}

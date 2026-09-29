@@ -47,9 +47,11 @@ type ImageSettingsPanelProps = {
     customFieldValues?: Record<string, unknown>;
     onCustomFieldChange?: (id: string, value: unknown) => void;
     hideStandardImageOptions?: boolean;
+    /** ComfyUI 模型但没解析出工作流字段：提示原因，同时保持标准项可见。 */
+    workflowParamsMissing?: boolean;
 };
 
-export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10, customFields, customFieldValues, onCustomFieldChange, hideStandardImageOptions = false }: ImageSettingsPanelProps) {
+export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10, customFields, customFieldValues, onCustomFieldChange, hideStandardImageOptions = false, workflowParamsMissing = false }: ImageSettingsPanelProps) {
     const { t } = useTranslation();
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const snapDimensionToStep = config.imageAlign16 !== false;
@@ -86,6 +88,14 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     <div className="space-y-2.5">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
                         <WorkflowCustomFields fields={customFields} values={customFieldValues || {}} onChange={onCustomFieldChange} />
+                    </div>
+                ) : null}
+                {workflowParamsMissing ? (
+                    <div className="space-y-1">
+                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
+                        <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.75 }}>
+                            {t("settingsPanels.image.workflowFieldsMissing")}
+                        </div>
                     </div>
                 ) : null}
                 {!hideStandardImageOptions && <div className="space-y-2.5">

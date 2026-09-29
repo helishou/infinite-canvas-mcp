@@ -3110,7 +3110,16 @@ function InfiniteCanvasPage() {
                 const image = node.metadata?.images?.find((item) => item.id === itemId);
                 if (!image?.content && !image?.storageKey) return node;
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-                const size = node.metadata?.freeResize ? { width: node.width, height: node.height } : fitNodeSize(image.naturalWidth, image.naturalHeight, imageConfig.width, imageConfig.height);
+                // A smart generation node is a persistent workspace node, not a disposable
+                // image result node. Keep its geometry when changing which result it shows.
+                // Older result slots may also omit dimensions; preserve the current node size
+                // rather than passing undefined through fitNodeSize (which collapses it to 1x1).
+                const preserveNodeSize = node.metadata?.freeResize || (node.type === CanvasNodeType.Config && node.metadata?.smart);
+                const naturalWidth = image.naturalWidth || node.metadata?.naturalWidth || node.width;
+                const naturalHeight = image.naturalHeight || node.metadata?.naturalHeight || node.height;
+                const size = preserveNodeSize
+                    ? { width: node.width, height: node.height }
+                    : fitNodeSize(naturalWidth, naturalHeight, imageConfig.width, imageConfig.height);
                 const generation = image.generationSnapshot;
                 const historyReferences = generation?.references.map((reference) => reference.storageKey || reference.url || "").filter(Boolean);
                 return {
@@ -3149,12 +3158,16 @@ function InfiniteCanvasPage() {
         );
     }, [message, projectId]);
 
+    // 图槽可能没有 naturalWidth/naturalHeight（导入图、老数据），先回落节点自身的自然尺寸，
+    // 再由 fitNodeSize 兜底到默认包围盒，避免算式产出 NaN 坐标。
+    const imageSizeOf = (node: CanvasNodeData, image: { naturalWidth?: number; naturalHeight?: number }) =>
+        fitNodeSize(image.naturalWidth || node.metadata?.naturalWidth || 0, image.naturalHeight || node.metadata?.naturalHeight || 0, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height);
+
     const duplicateBatchImage = useCallback((node: CanvasNodeData, imageId: string) => {
         const image = node.metadata?.images?.find((item) => item.id === imageId);
         if (!image?.content && !image?.storageKey) return;
         const id = nanoid();
-        const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-        const size = fitNodeSize(image.naturalWidth, image.naturalHeight, imageConfig.width, imageConfig.height);
+        const size = imageSizeOf(node, image);
         const copy: CanvasNodeData = {
             id,
             type: CanvasNodeType.Image,
