@@ -98,7 +98,7 @@ const TOOLS: PluginMcpToolWire[] = [
         id: "h3_run_clip",
         version: "1.4.0",
         name: "H3 运行单段",
-        description: "通过 Backend H3 执行器运行指定片段，复用画布任务、媒体落库和终态回写，不依赖打开画布页面。",
+        description: "通过 Backend H3 执行器运行指定片段；若上一段当前成片有匹配的完整 AV 潜变量，可直接从连续组中段续跑。",
         inputJsonSchema: {
             type: "object",
             properties: {
@@ -251,13 +251,13 @@ const TOOLS: PluginMcpToolWire[] = [
         id: "h3_run_all_clips",
         version: "1.4.0",
         name: "H3 运行全部片段",
-        description: "通过 Backend H3 执行器运行所有(或指定的)节点。潜空间续写时指定单个 nodeId、连续组首段 startSegmentId 和 skipCompleted=false，从组首重新生成潜变量；普通批跑默认跳过已完成片段。",
+        description: "通过 Backend H3 执行器运行所有(或指定的)节点。潜空间续写可从已有完整潜变量的组中段继续；指定单个 nodeId、startSegmentId 与 skipCompleted=false。普通批跑默认跳过已完成片段。",
         inputJsonSchema: {
             type: "object",
             properties: {
                 projectId: { type: "string", description: "画布项目 id" },
                 nodeIds: { type: "array", items: { type: "string" }, description: "限定运行的节点 id;省略则运行全部 H3 节点" },
-                startSegmentId: { type: "string", description: "从该稳定 Clip id 起运行当前及后续片段；潜空间续写时指定连续组首段" },
+                startSegmentId: { type: "string", description: "从该稳定 Clip id 起运行当前及后续片段；组中段须有匹配的上一段 AV 潜变量" },
                 skipCompleted: { type: "boolean", description: "是否跳过已有结果；默认 true，潜空间续写必须为 false" },
                 params: { type: "object", description: "覆盖片段自带参数的生成参数" },
             },

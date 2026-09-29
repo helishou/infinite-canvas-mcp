@@ -17,11 +17,26 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { applyBackendCanvasDelta, diffCanvasProject, detectCanvasConflicts, isLocalProjectNewer, type CanvasProject } from "./use-canvas-store";
+import { reorderCanvasReferenceConnections } from "@/lib/canvas/canvas-resource-references";
 
 test("列表摘要只提交列表字段，不把未加载的空节点解释成删除", () => {
     const base = makeProject([makeH3Node("h", [])]);
     const summary = { ...base, summary: { nodeCount: 1, connectionCount: 0 }, nodes: [], title: "新名称" };
     assert.deepEqual(diffCanvasProject(base, summary), [{ type: "update_project", patch: { title: "新名称" } }]);
+});
+
+test("参考连线改序通过细粒度 ops 回放，保留连线 ID 与其它目标", () => {
+    const base = makeProject([], { connections: [
+        { id: "a", fromNodeId: "image-a", toNodeId: "target" },
+        { id: "b", fromNodeId: "image-b", toNodeId: "target" },
+        { id: "other", fromNodeId: "image-a", toNodeId: "other", order: 9 },
+    ] });
+    const next = { ...base, connections: reorderCanvasReferenceConnections(base.connections, "target", "image-a", "image-b") };
+    const operations = diffCanvasProject(base, next);
+    assert.deepEqual(operations.map((operation) => operation.type), ["delete_connections", "connect_nodes", "delete_connections", "connect_nodes"]);
+    const replayed = applyBackendCanvasDelta(base, operations, 2);
+    assert.deepEqual(replayed.connections.filter((connection) => connection.toNodeId === "target").map((connection) => [connection.id, connection.order]).sort(), [["a", 1], ["b", 0]]);
+    assert.deepEqual(replayed.connections.find((connection) => connection.id === "other"), base.connections[2]);
 });
 
 test("增量回放保留无关节点对象，不修改原始基线", () => {

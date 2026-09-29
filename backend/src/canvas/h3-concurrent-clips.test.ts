@@ -152,7 +152,11 @@ test("潜空间续写从组首继承画幅尺寸，并在新链中重新生成�
     ] } }], connections: [] });
     const stores = createStores(db);
     const submitted: Array<{ segmentId: string; aspectRatio: unknown; megapixels: unknown; sizeMultiple: unknown; latentUpscaleAlign: unknown; contextLength: unknown; audioContextLength: unknown; continuationAudioRefineEnabled: unknown; continuationTask: unknown }> = [];
+    const staged: Array<{ sourceRun: string; targetRun: string; previousIndex: number }> = [];
     const comfy = {
+        async prepareH3ContinuationSeed(source: { run: string }, target: { run: string }, previousIndex: number) {
+            staged.push({ sourceRun: source.run, targetRun: target.run, previousIndex });
+        },
         async run(_preset: string, input: Record<string, unknown>, params: Record<string, unknown>, _url?: string, id?: string, onCreated?: (task: ReturnType<typeof stores.tasks.create>) => void) {
             const task = stores.tasks.create(id || `child-${submitted.length + 1}`, "comfyui:minimax-h3", input, params);
             onCreated?.(task);
@@ -188,7 +192,20 @@ test("潜空间续写从组首继承画幅尺寸，并在新链中重新生成�
     await runChain("chain-2");
     assert.equal(submitted.length, 4, "新链必须重新生成潜变量，不能复用旧 MP4 缓存");
     assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-a", runFromCurrent: true, skipCompleted: true }), /不能跳过已完成 Clip/);
-    assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-b", runFromCurrent: true, skipCompleted: false }), /组首 Clip/);
+    runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-b", runFromCurrent: true, skipCompleted: false }, "resume-tail");
+    for (let i = 0; i < 200 && !["succeeded", "failed"].includes(db.getTask("resume-tail")?.status || ""); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(db.getTask("resume-tail")?.status, "succeeded", db.getTask("resume-tail")?.error || "组中续跑未成功");
+    assert.deepEqual(staged, [{ sourceRun: "chain-2", targetRun: "resume-tail", previousIndex: 1 }]);
+    assert.deepEqual(JSON.parse(String(submitted.at(-1)?.continuationTask)), {
+        workflow: "p", node: "nf_v15", group: "h3-chain:clip-a", run: "resume-tail", index: 2,
+    });
+    assert.equal(submitted.length, 5, "组中续跑只重新生成目标 Clip，不重跑组首");
+
+    const changed = stores.projects.get("p")!;
+    stores.projects.applyOperations("p", Number(changed.revision), [
+        { type: "update_h3_segment", nodeId: "n", segmentId: "clip-a", patch: { resultStorageKey: "different-output" } },
+    ], { runtimeWrite: true, source: { clientId: "test", kind: "task", label: "stale source" } });
+    assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-b", runFromCurrent: true, skipCompleted: false }), /找不到与上一段当前成片匹配/);
 });
 
 test("本段开关只控制通往下一段的边界，独立连续组不互相继承尺寸", async (t: TestContext) => {
@@ -222,6 +239,64 @@ test("本段开关只控制通往下一段的边界，独立连续组不互相�
     assert.equal(db.getTask(task.id)?.status, "succeeded", db.getTask(task.id)?.error || "续写分组未成功");
     assert.deepEqual(submitted.map(({ id, megapixels }) => [id, megapixels]), [["a", 0.8], ["b", 0.5], ["c", 0.5], ["d", 0.6], ["e", 0.6]]);
     assert.equal(submitted[0].continuationTask, undefined, "S01 关闭时不应被下一段的开关拉进潜变量组");
+});
+
+test("Clip3 从当前 Clip2 的 AV 潜变量继续，拒绝尺寸不匹配", async (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+        { id: "s1", prompt: "A", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.4, motionContextEnabled: true },
+        { id: "s2", prompt: "B", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.4, motionContextEnabled: true },
+        { id: "s3", prompt: "C", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.4, motionContextEnabled: false },
+    ] } }], connections: [] });
+    const stores = createStores(db);
+    const submitted: Array<{ segmentId: string; continuationTask: Record<string, unknown> }> = [];
+    const staged: Array<{ sourceRun: string; targetRun: string; previousIndex: number }> = [];
+    const comfy = {
+        async prepareH3ContinuationSeed(source: { run: string }, target: { run: string }, previousIndex: number) {
+            staged.push({ sourceRun: source.run, targetRun: target.run, previousIndex });
+        },
+        async run(_preset: string, input: Record<string, unknown>, params: Record<string, unknown>, _url?: string, id?: string, onCreated?: (task: ReturnType<typeof stores.tasks.create>) => void) {
+            const task = stores.tasks.create(id || `child-${submitted.length + 1}`, "comfyui:minimax-h3", input, params);
+            onCreated?.(task);
+            submitted.push({ segmentId: String((params.canvasBinding as Record<string, unknown>).segmentId), continuationTask: JSON.parse(String(params.continuationTask)) });
+            stores.media.store(Buffer.from("fake-video"), { name: `${task.id}.mp4`, storageKey: task.id, mimeType: "video/mp4", category: "output" });
+            return stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [{ url: `/media/${task.id}`, storageKey: task.id, mimeType: "video/mp4" }] } });
+        },
+        cancel() {},
+    };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const wait = async (id: string) => {
+        for (let i = 0; i < 200 && !["succeeded", "failed"].includes(db.getTask(id)?.status || ""); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+        assert.equal(db.getTask(id)?.status, "succeeded", db.getTask(id)?.error || "H3 未成功");
+    };
+    runner.start({ projectId: "p", nodeId: "n", segmentId: "s1", runFromCurrent: true, skipCompleted: false }, "source-run");
+    await wait("source-run");
+    const patch = (megapixels: number) => {
+        const current = stores.projects.get("p")!;
+        stores.projects.applyOperations("p", Number(current.revision), [
+            { type: "update_h3_segment", nodeId: "n", segmentId: "s3", patch: { megapixels } },
+        ], { runtimeWrite: true, source: { clientId: "test", kind: "task", label: "size" } });
+    };
+    patch(0.5);
+    assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "s3", runFromCurrent: true, skipCompleted: false }), /megapixels/);
+    patch(0.4);
+    runner.start({ projectId: "p", nodeId: "n", segmentId: "s3", runFromCurrent: true, skipCompleted: false }, "resume-from-s3");
+    await wait("resume-from-s3");
+    assert.deepEqual(submitted.map((item) => item.segmentId), ["s1", "s2", "s3", "s3"]);
+    assert.deepEqual(staged, [{ sourceRun: "source-run", targetRun: "resume-from-s3", previousIndex: 2 }]);
+    assert.equal(submitted[3].continuationTask.index, 3);
+    assert.equal(submitted[3].continuationTask.run, "resume-from-s3");
+
+    const project = stores.projects.get("p")!;
+    const sourceNode = (project.nodes as Array<Record<string, unknown>>).find((node) => node.id === "n")!;
+    stores.projects.applyOperations("p", Number(project.revision), [
+        { type: "add_node", id: "n-copy", nodeType: "minimax-h3", metadata: structuredClone(sourceNode.metadata) },
+    ], { source: { clientId: "test", kind: "task", label: "copy" } });
+    runner.start({ projectId: "p", nodeId: "n-copy", segmentId: "s3", runFromCurrent: true, skipCompleted: false }, "resume-copy");
+    await wait("resume-copy");
+    assert.deepEqual(staged.at(-1), { sourceRun: "source-run", targetRun: "resume-copy", previousIndex: 2 }, "副本只能复用同项目同媒体 key 的来源");
+    assert.equal(submitted.at(-1)?.continuationTask.index, 3);
 });
 
 test("潜空间续写不能绕过参考不完整的中间 Clip", (t: TestContext) => {

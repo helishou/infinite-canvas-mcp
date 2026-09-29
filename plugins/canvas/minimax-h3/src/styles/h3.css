@@ -487,6 +487,8 @@
 .nfh3-control-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
 .nfh3-control { min-width:0; min-height:54px; display:grid; grid-template-columns:minmax(58px,92px) minmax(0,1fr); align-items:center; gap:8px; padding:6px 9px; border:1px solid #34404c; border-radius:6px; background:#252c33; color:#9eafc1; font-size:18px; font-weight:800; }
 .nfh3-control > span { min-width:0; line-height:1.2; overflow-wrap:anywhere; }
+.nfh3-control[data-control="视觉风格模板"] { grid-template-columns:128px minmax(0,1fr); }
+.nfh3-control[data-control="视觉风格模板"] > span:first-child { white-space:nowrap; overflow-wrap:normal; }
 .nfh3-control.wide { grid-column:1/-1; }
 .nfh3-control input { min-width:0; width:100%; height:44px; border:0; outline:0; background:transparent; color:#f3f7fb; font-size:22px; }
 .nfh3-control select { min-width:0; width:100%; height:56px; border:0; outline:0; background:transparent; color:#f3f7fb; font-size:33px; line-height:1.2; }
@@ -535,6 +537,9 @@
 .nfh3-choice-grid button.selected { border-color:#39c8ef; background:#164357; color:#e5faff; box-shadow:inset 0 0 0 1px rgba(64,201,243,.18); }
 .nfh3-choice-grid button.selected i { position:static; display:inline-block; width:auto; height:auto; margin-right:3px; }
 .nfh3-hint,.nfh3-ref-summary,.nfh3-audio-note { color:#718496; font-size:22px; line-height:1.45; }
+/* 说明文字改为悬停显示：标签后的 ? 标记，不占常驻版面。 */
+.nfh3-hint-mark { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; margin-left:6px; border:1px solid #4a5a68; border-radius:50%; color:#8fa2b3; font-size:11px; font-weight:700; line-height:1; cursor:help; vertical-align:middle; user-select:none; }
+.nfh3-hint-mark:hover { border-color:#55d5fa; color:#e7faff; }
 .nfh3-ref-summary { padding:14px; border:1px dashed #40505e; border-radius:6px; background:#20272e; }
 .nfh3-audio-workspace { display:flex; flex-direction:column; gap:12px; padding:12px; border:1px solid #3d5964; border-radius:7px; background:linear-gradient(135deg,#17282e,#1d272d); }
 .nfh3-lora-stack { display:flex; flex-direction:column; gap:10px; }

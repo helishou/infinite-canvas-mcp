@@ -448,7 +448,10 @@ export function syncCharacterGroupFromSource(
         };
     });
     const voice = source.voice;
-    const nextGroup = fitCharacterGroupToCapacity(segment, {
+    // Source refresh updates the catalog only. The current mode may temporarily hide
+    // references (for example t2v); applying its capacity here would erase the
+    // user's saved outfit/voice selection when the node mounts or the source changes.
+    const nextGroup: H3CharacterGroup = {
         ...existing,
         characterName: source.characterName || existing.characterName,
         characterAssetId: source.characterAssetId || existing.characterAssetId,
@@ -458,7 +461,7 @@ export function syncCharacterGroupFromSource(
         outfits,
         outfitEnabled: outfits.length > 0 && (existing.outfitEnabled ?? outfits.some((outfit) => outfit.enabled)),
         voiceEnabled: voice ? (existing.voice ? existing.voiceEnabled : true) : false,
-    });
+    };
     const sameOutfits = existing.outfits.length === nextGroup.outfits.length && existing.outfits.every((outfit, index) => {
         const next = nextGroup.outfits[index];
         return outfit.id === next.id && outfit.url === next.url && outfit.name === next.name

@@ -5,6 +5,33 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## H3 visual style template row
+
+- In Settings → Model and basic parameters, the visual style template label and its empty or selected value should stay on one line at the same row height as nearby model fields. Long options should still open, search, select, and clear. Check common panel widths and both themes.
+
+## Character labels at small canvas scales
+
+- Zoom out a character node with a cover image. Its character icon and name should remain readable without obscuring the main image. Continue into overview and compact modes and check that the label stays within the node. Verify selection, hover, and both themes.
+
+## Drag ordering for canvas references
+
+- Connect at least two image references to a smart image node and drag their cards into a new order. The order should survive a canvas reload, and the next generation log and submitted inputs should follow it. Check a mix of character and image cards as well.
+- Dragging should not move canvas nodes or remove connections. Remove, add, and hover preview actions should still work. Historical references from an older output remain read only, and indirect loop references should not be reordered as direct connections.
+
+## Template append node in the workflow graph
+
+- Open the imported "2.1 text to image" workflow. Node #25 should show the template append label, reveal its full `PromptTemplateSuffix` class on hover, and retain its editable `template` field. The #4 → #25 → #10 connection and the node structure after export and reimport should remain intact. Check the label in both languages.
+
+## Qwen Image 2.1 two-image editing
+
+- Run the Qwen Image 2.1 editing workflow through the canvas model with two reference images. The prepared graph should retain only those two image inputs, keep the prompt enhancer and media output, and return an image for that run. One-image, all-image, and missing required-input cases should continue to follow their field settings.
+
+## H3 node copy and mode switching
+
+- Copy an H3 node with character outfit and voice references and previous outputs. Switch either node between text to video and multi reference modes, then reload the canvas. Each node should retain its own reference selection; returning to multi reference mode should show the saved references. Editing one node must not change the other node's Clip data.
+- The original node's outputs and generation logs should remain accessible. Text to video mode may hide reference slots that do not apply, but switching modes must not delete saved references.
+- Duplicate a node with both incoming and outgoing connections using the context menu and Ctrl+C/V. The copy should keep usable incoming references without connecting to an unselected downstream node. Copying two connected selected nodes together should preserve their internal connection.
+
 ## H3 visual style template setting
 
 - Select a visual style template under Settings → Model and basic parameters. Check both Current Clip and Global settings scopes: the global selection should update existing Clips and be inherited by new Clips. Clearing the selection should stop template injection.
@@ -52,6 +79,11 @@ description: Implemented changes that still need manual verification
 
 - On a ComfyUI instance without `H3LatentUpscalerNodeMegapixels`, enable H3 latent-upscale second pass and submit a Clip. The Backend should reject it before a first-pass Comfy task starts, with a clear missing-node message. With the compatibility node installed, check that the selected upscaler model appears in `NanFengH3LowPeakLatentUpscalerV15` and that submission proceeds. Verify first-pass speed separately; preflight only prevents the known late failure.
 - If H3 Motion Context continuation and latent-upscale second pass are both enabled, submission should reject the incompatible combination before sampling.
+
+## H3 Motion Context resume from a middle Clip
+
+- After a completed Motion Context chain, edit Clip 3 and run the current Clip and later Clips. The Backend should reuse the AV latent from the currently bound Clip 2 result, render from Clip 3, and leave the earlier run's latent files and Clip 1–2 outputs intact. Check the new task's continuation index and archived output.
+- Change Clip 3's model or dimensions, replace Clip 2's active result, or remove its latent file: resume should fail before a ComfyUI sampling task starts. A remote ComfyUI without a configured local root should receive a clear unsupported message.
 
 ## H3 prompt enhancement receives the original prompt
 

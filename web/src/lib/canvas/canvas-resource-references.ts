@@ -43,6 +43,29 @@ export type CanvasGraphIndex = {
     connectionSpatialIndex: CanvasSpatialIndex<CanvasConnection>;
 };
 
+function connectionOrder(connection: CanvasConnection) {
+    return typeof connection.order === "number" && Number.isFinite(connection.order) ? connection.order : Number.MAX_SAFE_INTEGER;
+}
+
+/** Move a source to the target source's position without changing its endpoints or other nodes' references. */
+export function reorderCanvasReferenceConnections(connections: CanvasConnection[], targetNodeId: string, sourceNodeId: string, overNodeId: string) {
+    if (sourceNodeId === overNodeId) return connections;
+    const ordered = connections
+        .map((connection, index) => ({ connection, index }))
+        .filter(({ connection }) => connection.toNodeId === targetNodeId)
+        .sort((left, right) => connectionOrder(left.connection) - connectionOrder(right.connection) || left.index - right.index);
+    const sourceIds = [...new Set(ordered.map(({ connection }) => connection.fromNodeId))];
+    const fromIndex = sourceIds.indexOf(sourceNodeId);
+    const toIndex = sourceIds.indexOf(overNodeId);
+    if (fromIndex < 0 || toIndex < 0) return connections;
+    sourceIds.splice(fromIndex, 1);
+    sourceIds.splice(toIndex, 0, sourceNodeId);
+    const orderBySource = new Map(sourceIds.map((id, index) => [id, index]));
+    return connections.map((connection) => connection.toNodeId === targetNodeId
+        ? { ...connection, order: orderBySource.get(connection.fromNodeId) }
+        : connection);
+}
+
 function connectionBounds(connection: CanvasConnection, nodeById: Map<string, CanvasNodeData>) {
     const from = nodeById.get(connection.fromNodeId);
     const to = nodeById.get(connection.toNodeId);
@@ -63,9 +86,10 @@ function connectionBounds(connection: CanvasConnection, nodeById: Map<string, Ca
 export function buildCanvasGraphIndex(nodes: CanvasNodeData[], connections: CanvasConnection[]): CanvasGraphIndex {
     const nodeById = new Map(nodes.map((node) => [node.id, node]));
     const incomingByNodeId = new Map<string, CanvasNodeData[]>();
+    const incomingLinksByNodeId = new Map<string, Array<{ source: CanvasNodeData; connection: CanvasConnection; index: number }>>();
     const outgoingByNodeId = new Map<string, CanvasNodeData[]>();
     const connectionsByNodeId = new Map<string, CanvasConnection[]>();
-    connections.forEach((connection) => {
+    connections.forEach((connection, index) => {
         const source = nodeById.get(connection.fromNodeId);
         const target = nodeById.get(connection.toNodeId);
         if (!source || !target) return;
@@ -74,13 +98,16 @@ export function buildCanvasGraphIndex(nodes: CanvasNodeData[], connections: Canv
             related.push(connection);
             connectionsByNodeId.set(nodeId, related);
         }
-        const incoming = incomingByNodeId.get(target.id) || [];
-        incoming.push(source);
-        incomingByNodeId.set(target.id, incoming);
+        const incoming = incomingLinksByNodeId.get(target.id) || [];
+        incoming.push({ source, connection, index });
+        incomingLinksByNodeId.set(target.id, incoming);
         const outgoing = outgoingByNodeId.get(source.id) || [];
         outgoing.push(target);
         outgoingByNodeId.set(source.id, outgoing);
     });
+    for (const [nodeId, links] of incomingLinksByNodeId) {
+        incomingByNodeId.set(nodeId, links.sort((left, right) => connectionOrder(left.connection) - connectionOrder(right.connection) || left.index - right.index).map(({ source }) => source));
+    }
     const groupChildrenById = new Map<string, CanvasNodeData[]>();
     nodes.forEach((node) => {
         const groupId = node.metadata?.groupId;

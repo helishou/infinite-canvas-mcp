@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
-import { AutoComplete, Input, InputNumber, Switch, Select } from "antd";
+import { AutoComplete, Input, InputNumber, Switch, Select, Tooltip } from "antd";
 import { Search } from "lucide-react";
 import { h3LoraOptions, h3ModelOptions, H3_LORA_STRENGTH_MIN, H3_LORA_STRENGTH_MAX } from "../constants";
 import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
@@ -29,11 +29,10 @@ const dlssEngines = ["Auto", "Native DLSSG", "Cascade"];
 const dlssCodecs = ["H.264", "H.264 (NVIDIA NVENC)", "H.265", "H.265 (NVIDIA NVENC)", "AV1", "AV1 (NVIDIA NVENC)", "ProRes Proxy"];
 const h3SelectValueStyle: CSSProperties = { display: "block", minWidth: 0, overflow: "hidden", color: "#f3f7fb", fontSize: 28, fontWeight: 700, lineHeight: "46px", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const h3SelectStyles = {
-    content: h3SelectValueStyle,
     item: h3SelectValueStyle,
     itemContent: h3SelectValueStyle,
     input: { fontSize: 28, lineHeight: "46px" },
-    placeholder: { fontSize: 28, lineHeight: "46px" },
+    placeholder: { color: "var(--h3-muted)", fontSize: 28, lineHeight: "46px" },
 };
 const renderH3SelectLabel = ({ label, value }: { label?: ReactNode; value?: string | number }) => <span style={h3SelectValueStyle}>{label ?? value}</span>;
 
@@ -155,7 +154,9 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const field = { width: "100%" } as const;
     const section = (key: SectionKey, title: string, summary: ReactNode, content: ReactNode, className = "") => <section key={`nfh3-sec-${key}`} className={`nfh3-section ${className}`} data-section={key}><button type="button" className="nfh3-section-head" onClick={() => setOpen(key)}><span className={`nfh3-chevron${expanded[key] === true ? " is-open" : ""}`} aria-hidden="true" /><b>{title}</b><small>{summary}</small></button>{expanded[key] === true ? <div className="nfh3-section-body">{content}</div> : null}</section>;
     const enabledSummary = (text: string) => <span className="nfh3-enabled-summary">{text}</span>;
-    const control = (label: string, value: ReactNode, wide = false) => <label key={`nfh3-ctl-${label}`} className={`nfh3-control${wide ? " wide" : ""}`}><span>{label}</span>{value}</label>;
+    // hint 走 Tooltip：说明文字只在悬停时出现，不常驻占版面。需要 import { Tooltip } from "antd"。
+    const hintMark = (hint: string) => <Tooltip title={hint}><span className="nfh3-hint-mark" aria-label={hint} role="img">?</span></Tooltip>;
+    const control = (label: string, value: ReactNode, wide = false, hint?: string) => <label key={`nfh3-ctl-${label}`} className={`nfh3-control${wide ? " wide" : ""}`} data-control={label}><span>{label}{hint ? hintMark(hint) : null}</span>{value}</label>;
     const choice = (label: string, values: Array<string | number>, value: unknown, onChange: (value: string | number) => void, format?: (value: string | number) => string, wide = false, searchable = false, placeholder?: string, allowClear = false) => control(label, <H3Dropdown values={values} value={value as string | number} onChange={onChange} format={format} searchable={searchable} placeholder={placeholder} allowClear={allowClear} listId={`nfh3-${label}-options`} />, wide);
     const loraSlots = (segment.loraSlots?.length ? segment.loraSlots : [{ name: segment.loraName || "", strength: Number(segment.loraStrength ?? 1), enabled: !!segment.loraName }]).slice(0, 8);
     while (loraSlots.length < 3) loraSlots.push({ name: "", strength: 1, enabled: false });
@@ -179,8 +180,13 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const manualSigmaValues = segment.v81ManualSigma === true ? String(segment.h3FullSigma || "").match(/[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g)?.map(Number).filter(Number.isFinite) || [] : [];
     const samplingStepsSummary = manualSigmaValues.length >= 2 ? manualSigmaValues.length - 1 : (segment.steps || 20);
     // 续段衔接折叠头摘要：两个开关任一开启都要能一眼看出状态。
+    // 接缝加噪/denoise 属于「接缝软硬」而非开关状态，但数值偏离默认时必须能被看见，
+    // 否则用户只看到「潜空间续写至下一段」却不知道缝是硬接还是加了噪。
+    const seamOn = segment.continuationSeamNoiseEnabled === true;
+    const seamNote = seamOn ? ` · 接缝加噪${segment.continuationSeamNoiseMode === "gaussian" ? "(高斯)" : ""}` : "";
+    const denoiseNote = segment.denoise != null && Number(segment.denoise) < 1 ? ` · 降噪 ${segment.denoise}` : "";
     const continuationSummary = segment.motionContextEnabled
-        ? <>{enabledSummary("潜空间续写至下一段")}{segment.tailFrameContinuation ? <span className="nfh3-enabled-summary"> · 尾帧接续</span> : null}</>
+        ? <>{enabledSummary("潜空间续写至下一段")}{segment.tailFrameContinuation ? <span className="nfh3-enabled-summary"> · 尾帧接续</span> : null}{denoiseNote || seamNote ? <span className="nfh3-enabled-summary">{seamNote}{denoiseNote}</span> : null}</>
         : segment.tailFrameContinuation ? enabledSummary("尾帧接续") : "均关闭";
     const setSeedMode = (value: string | number) => {
         const nextMode = String(value) as "random" | "fixed";
@@ -218,11 +224,11 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         </div>)}
         {section("continuation", "续段衔接", continuationSummary, <div className="nfh3-control-grid">
             {control("尾帧接续（把本段尾帧传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked })} />)}
-            {control("潜空间续写到下一段 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked })} />)}
-            <div className="nfh3-hint" style={{ gridColumn: "1 / -1" }}>尾帧接续：本段尾帧成为下一段的首帧参考。潜空间续写：开启本段开关后，本段的 AV latent 与所设上下文参数传给紧邻的下一段；关闭处断链。请从连续组首段使用「运行当前及后续分镜」，不能跳过组内已完成片段。单独运行本段不会建立跨任务续写。</div>
+            {control("潜空间续写到下一段 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked })} />, false, "尾帧接续：本段尾帧成为下一段的首帧参考。潜空间续写：开启本段开关后，本段的 AV latent 与所设上下文参数传给紧邻的下一段；关闭处断链。请从连续组首段使用「运行当前及后续分镜」，不能跳过组内已完成片段。单独运行本段不会建立跨任务续写。")}
             {segment.motionContextEnabled ? <>
                 {choice("传给下一段的视频上下文帧数", ["22", "5", "39", "56"], segment.contextLength || "22", (value) => patch({ contextLength: String(value) }))}
                 {control("传给下一段的音频上下文帧数", <InputNumber style={field} min={0} max={240} value={segment.audioContextLength ?? 24} onChange={(value) => patch({ audioContextLength: value ?? undefined })} />)}
+                {control("接缝加噪（复刻旧版动噪，让下一段重画接缝）", <Switch checked={segment.continuationSeamNoiseEnabled === true} onChange={(checked) => patch(checked ? { continuationSeamNoiseEnabled: true, continuationSeamNoiseMode: "block", continuationSeamNoise: 0.053, continuationSeamNoiseRamp: 3, continuationSeamNoiseSeed: 0 } : { continuationSeamNoiseEnabled: false, continuationSeamNoise: 0 })} />, false, "给钉住的视频潜变量叠加旧版动噪：36×64 六色调色板、MT19937 定序、nearest 放大，末尾 3 块递减到 0.10/0.45，接缝本身仍然干净、过渡发生在它前面几块。强度已按实测潜变量尺度校准为旧版 alpha=0.45 的等效值，无需调参。关掉是硬接缝（运动最连贯但容易粘滞），打开是软接缝（动作会重画，人物一致性略降）。音频永不加噪。")}
                 {control("下一段续写音频精修", <Switch checked={segment.continuationAudioRefineEnabled === true} onChange={(checked) => patch({ continuationAudioRefineEnabled: checked })} />)}
                 {segment.continuationAudioRefineEnabled ? <>
                     {control("音频精修降噪", <InputNumber style={field} min={0.01} max={1} step={0.01} value={segment.continuationAudioDenoise ?? 0.3} onChange={(value) => patch({ continuationAudioDenoise: value ?? undefined })} />)}
@@ -241,7 +247,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
             {control("完整 Sigma 序列", <textarea value={String(segment.h3FullSigma || "")} onChange={(event) => patch({ h3FullSigma: event.target.value })} placeholder="留空自动；需总步数+1个值并以0结尾" />, true)}
             {choice("Sigma 预设", sigmaPresetNames, selectedSigmaPreset, (value) => { const name = String(value); patch({ h3FullSigma: sigmaPresets[name], v81ManualSigma: true }); ctx.updateMetadata({ h3SigmaPresetName: name }); }, undefined, true)}
             <div className="nfh3-preset-actions"><button type="button" onClick={() => saveSigmaPreset(selectedSigmaPreset)}>保存</button><button type="button" onClick={createSigmaPreset}>新建</button><button type="button" onClick={deleteSigmaPreset} disabled={!selectedSigmaPreset}>删除</button></div>
-            {control("降噪强度", <InputNumber style={field} min={0} max={1} step={0.01} value={segment.denoise != null ? Number(segment.denoise) : undefined} placeholder="1" onChange={(value) => patch({ denoise: value ?? undefined })} />)}
+            {control("降噪强度", <InputNumber style={field} min={0} max={1} step={0.01} value={segment.denoise != null ? Number(segment.denoise) : undefined} placeholder="1" onChange={(value) => patch({ denoise: value ?? undefined })} />, false, segment.motionContextEnabled && segment.denoise != null && Number(segment.denoise) < 1 ? "降噪会缩短整段采样轨迹，不只影响接缝：调低后本段整体重绘更多、细节更活，但也更容易偏离本段提示词与参考图。只想软化接缝时，优先用「续段衔接」里的接缝加噪，它只影响钉住的潜变量。" : undefined)}
             {choice("SageAttention", sageChoices, segment.sageAttention || "H3专用Sage加速", (value) => patch({ sageAttention: String(value) }), (value) => String(value).replace(/^sageattn_/, "sage "))}
             {control("允许编译", <Switch checked={segment.allowCompile === true} onChange={(checked) => patch({ allowCompile: checked })} />)}
             {/* TE 加速：backend 在 params.teAccel===true 时往工作流注入 TESpeedMiniMaxH3 节点（standard 模式）。 */}

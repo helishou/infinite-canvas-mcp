@@ -5,6 +5,7 @@ import {
     applyCharacterGroupEdits,
     refsForSegment,
     refsFromCharacterGroup,
+    syncCharacterGroupFromSource,
     upsertCharacterGroup,
 } from "./h3-data";
 import type { H3CharacterGroup, H3Segment } from "../types";
@@ -108,4 +109,28 @@ test("角色组派生 ref 保留真实源节点和角色四视图语义", () => 
     assert.equal(ref?.groupId, "group-1");
     assert.equal(ref?.outfitId, "outfit-1");
     assert.equal(ref?.url, sourceOutfits[0].url);
+});
+
+test("源角色刷新不因临时切换到文生视频而清空已选参考", () => {
+    const initial = upsertCharacterGroup({ id: "clip-mode", taskMode: "ref2va", refItems: [] }, {
+        characterName: "沈昭宁",
+        characterNodeId: "character-shen-zhaoning",
+        outfits: sourceOutfits,
+        selectedOutfitKeys: [sourceOutfits[0].storageKey!],
+        voice: { url: "https://media.test/voice.mp3", name: "声线", storageKey: "audio:voice" },
+    });
+    const before = refsForSegment(initial).map((ref) => ref.storageKey);
+    const group = groupFrom(initial);
+    const textMode = { ...initial, mode: "t2v" as const, taskMode: "t2v" as const };
+    const refreshed = syncCharacterGroupFromSource(textMode, group.id, {
+        characterName: "沈昭宁",
+        characterNodeId: "character-shen-zhaoning",
+        outfits: sourceOutfits,
+        voice: { url: "https://media.test/voice.mp3", name: "声线", storageKey: "audio:voice" },
+    });
+
+    assert.deepEqual(refsForSegment(refreshed).map((ref) => ref.storageKey), before);
+    assert.equal(groupFrom(refreshed).outfitEnabled, true);
+    assert.equal(groupFrom(refreshed).voiceEnabled, true);
+    assert.deepEqual(refsForSegment({ ...refreshed, mode: "ref2va", taskMode: "ref2va" }).map((ref) => ref.storageKey), before);
 });

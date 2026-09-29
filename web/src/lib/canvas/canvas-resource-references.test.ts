@@ -1,11 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildCanvasGraphIndex, createMentionReferenceSelector, getFixedReferenceNodes, getMentionResourceNodes, nodeResourceItems } from "./canvas-resource-references";
+import { buildCanvasGraphIndex, createMentionReferenceSelector, getFixedReferenceNodes, getMentionResourceNodes, nodeResourceItems, reorderCanvasReferenceConnections } from "./canvas-resource-references";
 import { buildLoopRunInputPlan, buildLoopSourceInputs, buildNodeGenerationContext, buildNodeGenerationInputs, recordLoopGenerationOutput, type CanvasLoopRuntimeContext } from "@/components/canvas/canvas-node-generation";
 import { resolveLoopInputPlan } from "@/lib/canvas/canvas-loop-execution";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { sourceNodeReferenceImages } from "@/lib/canvas/canvas-generation-helpers";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
+
+test("参考卡片排序写入连线 order，刷新后展示与生成输入保持一致", () => {
+    const nodes: CanvasNodeData[] = [
+        { id: "a", type: CanvasNodeType.Image, title: "A", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "a.png" } },
+        { id: "b", type: CanvasNodeType.Image, title: "B", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "b.png" } },
+        { id: "target", type: CanvasNodeType.Config, title: "生成", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { smart: true, generationMode: "image" } },
+        { id: "other", type: CanvasNodeType.Config, title: "其他", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: {} },
+    ];
+    const connections = [
+        { id: "a-target", fromNodeId: "a", toNodeId: "target" },
+        { id: "b-target", fromNodeId: "b", toNodeId: "target" },
+        { id: "a-other", fromNodeId: "a", toNodeId: "other", order: 7 },
+    ];
+
+    const reordered = reorderCanvasReferenceConnections(connections, "target", "a", "b");
+    assert.deepEqual(reordered.map((connection) => connection.order), [1, 0, 7]);
+    assert.equal(connections[0].order, undefined);
+    assert.equal(reorderCanvasReferenceConnections(reordered, "target", "missing", "b"), reordered);
+    const restored = JSON.parse(JSON.stringify(reordered));
+    const index = buildCanvasGraphIndex(nodes, restored);
+    assert.deepEqual(getFixedReferenceNodes("target", nodes, index).map((node) => node.id), ["b", "a"]);
+    assert.deepEqual(buildNodeGenerationInputs("target", nodes, restored, index).map((input) => input.nodeId), ["b", "a"]);
+});
 
 test("无关节点更新和裁剪变化保留引用数组，关联资源变化才失效", () => {
     const a: CanvasNodeData = { id: "a", type: CanvasNodeType.Text, title: "A", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "a" } };

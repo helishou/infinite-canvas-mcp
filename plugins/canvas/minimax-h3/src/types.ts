@@ -205,6 +205,16 @@ export type H3Segment = {
     audioContextLength?: number;
     continuationTask?: string;
     continuationGroupId?: string;
+    /** 接缝加噪开关：复刻旧版动噪（36×64 六色块噪），让下一段重画接缝。强度等参数由前端按校准值写入。 */
+    continuationSeamNoiseEnabled?: boolean;
+    /** 接缝加噪：叠加在钉住的视频潜变量上的噪声强度，0=硬接缝，音频永不加噪。 */
+    continuationSeamNoise?: number;
+    /** 接缝加噪模式：block=复刻旧版 36×64 调色板块噪（默认）；gaussian=普通高斯。 */
+    continuationSeamNoiseMode?: "block" | "gaussian";
+    /** 接缝加噪种子；0=自动取本 Clip 随机种子，同段重跑可复现。 */
+    continuationSeamNoiseSeed?: number;
+    /** 接缝加噪斜坡：末尾若干块递减到旧版 alphaEnd 比例（0.10/0.45），默认 3。 */
+    continuationSeamNoiseRamp?: number;
     continuationAudioRefineEnabled?: boolean;
     continuationAudioDenoise?: number;
     continuationAudioSteps?: number;

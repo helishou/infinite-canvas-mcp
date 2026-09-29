@@ -73,7 +73,7 @@ import { setBackendCanvasPresence } from "@/stores/use-backend-store";
 import { useCanvasDocument } from "@/pages/canvas/hooks/use-canvas-document";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
-import { buildCanvasGraphIndex, createMentionReferenceSelector, getFixedReferenceNodes, getGroupResourceNodes, isCanvasReferenceNode, nodeResourceItems, type CanvasGraphIndex, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { buildCanvasGraphIndex, createMentionReferenceSelector, getFixedReferenceNodes, getGroupResourceNodes, isCanvasReferenceNode, nodeResourceItems, reorderCanvasReferenceConnections, type CanvasGraphIndex, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
@@ -1499,6 +1499,11 @@ function InfiniteCanvasPage() {
         setConnections((prev) => prev.filter((connection) => connection.fromNodeId !== fromNodeId || connection.toNodeId !== toNodeId));
     }, [clearActiveImageHistory]);
 
+    const reorderNodeReferences = useCallback((toNodeId: string, fromNodeId: string, overNodeId: string) => {
+        setConnections((prev) => reorderCanvasReferenceConnections(prev, toNodeId, fromNodeId, overNodeId));
+    }, []);
+    const directReferenceSourceIds = useCallback((toNodeId: string) => new Set(connections.filter((connection) => connection.toNodeId === toNodeId).map((connection) => connection.fromNodeId)), [connections]);
+
     const startNodeReferenceSelection = useCallback((nodeId: string) => {
         setReferencePickerNodeId(nodeId);
         setSelectedNodeIds(new Set([nodeId]));
@@ -1605,14 +1610,12 @@ function InfiniteCanvasPage() {
             id,
             title: `${source.title} Copy`,
             position: { x: source.position.x + 36, y: source.position.y + 36 },
+            metadata: source.metadata ? structuredClone(source.metadata) : undefined,
         };
         const nextConnections = connectionsRef.current.flatMap((connection) => {
             if (connection.toNodeId === nodeId) {
                 const input = currentNodes.find((node) => node.id === connection.fromNodeId);
                 if (input && isCanvasReferenceNode(input, currentNodes)) return [{ ...connection, id: nanoid(), toNodeId: id }];
-            }
-            if (connection.fromNodeId === nodeId && currentNodes.find((node) => node.id === connection.toNodeId)?.type === CanvasNodeType.Config) {
-                return [{ ...connection, id: nanoid(), fromNodeId: id }];
             }
             return [];
         });
@@ -1633,7 +1636,7 @@ function InfiniteCanvasPage() {
             .map((node) => ({
                 ...node,
                 position: { ...node.position },
-                metadata: node.metadata ? { ...node.metadata } : undefined,
+                metadata: node.metadata ? structuredClone(node.metadata) : undefined,
             }));
 
         if (!copiedNodes.length) return;
@@ -1649,7 +1652,6 @@ function InfiniteCanvasPage() {
                     const input = currentNodes.find((node) => node.id === connection.fromNodeId);
                     return Boolean(input && isCanvasReferenceNode(input, currentNodes, graphIndex));
                 }
-                if (fromSelected) return currentNodes.find((node) => node.id === connection.toNodeId)?.type === CanvasNodeType.Config;
                 return false;
             }).map((connection) => ({ ...connection })),
         };
@@ -1747,7 +1749,7 @@ function InfiniteCanvasPage() {
                     x: node.position.x + dx,
                     y: node.position.y + dy,
                 },
-                metadata: node.metadata ? { ...node.metadata } : undefined,
+                metadata: node.metadata ? structuredClone(node.metadata) : undefined,
             };
         });
 
@@ -1763,9 +1765,10 @@ function InfiniteCanvasPage() {
             const toIsCopied = idMap.has(connection.toNodeId);
             if (!fromIsCopied && !toIsCopied) return [];
             const input = fromIsCopied ? null : currentNodes.find((node) => node.id === connection.fromNodeId);
-            const config = toIsCopied ? null : currentNodes.find((node) => node.id === connection.toNodeId);
             if (!fromIsCopied && (!input || !isCanvasReferenceNode(input, currentNodes))) return [];
-            if (!toIsCopied && config?.type !== CanvasNodeType.Config) return [];
+            // A copied node must not reconnect to an unselected downstream node,
+            // including a Config node from an older clipboard payload.
+            if (!toIsCopied) return [];
             const fromNodeId = idMap.get(connection.fromNodeId) || connection.fromNodeId;
             const toNodeId = idMap.get(connection.toNodeId) || connection.toNodeId;
             return [
@@ -5501,6 +5504,8 @@ function InfiniteCanvasPage() {
                         onGenerate={runNodeOrLoop}
                         onStop={stopLoop}
                         onDisconnectReference={(fromNodeId, toNodeId) => disconnectNodeReference(fromNodeId, toNodeId)}
+                        onReorderReference={(fromNodeId, overNodeId) => reorderNodeReferences(loopNode.id, fromNodeId, overNodeId)}
+                        reorderableSourceNodeIds={directReferenceSourceIds(loopNode.id)}
                         onStartReferenceSelection={startNodeReferenceSelection}
                         onImageSettingsOpenChange={(open) => {
                             setNodeImageSettingsOpen(open);
@@ -5510,7 +5515,7 @@ function InfiniteCanvasPage() {
                 </div>
             );
         },
-        [connections, disconnectNodeReference, graphIndex, handleConfigNodeChange, mentionReferencesByNodeId, nodes, runLoop, runNodeOrLoop, startNodeReferenceSelection, stopLoop, theme],
+        [connections, directReferenceSourceIds, disconnectNodeReference, graphIndex, handleConfigNodeChange, mentionReferencesByNodeId, nodes, reorderNodeReferences, runLoop, runNodeOrLoop, startNodeReferenceSelection, stopLoop, theme],
     );
 
     const renderNodePanel = useCallback(
@@ -5544,6 +5549,8 @@ function InfiniteCanvasPage() {
                         onGenerate={runNodeOrLoop}
                         onStop={stop}
                         onDisconnectReference={disconnectReference}
+                        onReorderReference={(fromNodeId, overNodeId) => reorderNodeReferences(target.id, fromNodeId, overNodeId)}
+                        reorderableSourceNodeIds={directReferenceSourceIds(target.id)}
                         onStartReferenceSelection={startNodeReferenceSelection}
                         onImageSettingsOpenChange={(open) => {
                             setNodeImageSettingsOpen(open);
@@ -5560,6 +5567,8 @@ function InfiniteCanvasPage() {
                         onChange={(composerContent) => handleConfigNodeChange(target.id, { composerContent })}
                         onClose={() => setDialogNodeId(null)}
                         onDisconnectReference={disconnectReference}
+                        onReorderReference={(fromNodeId, overNodeId) => reorderNodeReferences(target.id, fromNodeId, overNodeId)}
+                        reorderableSourceNodeIds={directReferenceSourceIds(target.id)}
                         onStartReferenceSelection={startNodeReferenceSelection}
                     />
                 )
@@ -5575,6 +5584,8 @@ function InfiniteCanvasPage() {
                     onGenerate={runNodeOrLoop}
                     onStop={stop}
                     onDisconnectReference={disconnectReference}
+                    onReorderReference={(fromNodeId, overNodeId) => reorderNodeReferences(target.id, fromNodeId, overNodeId)}
+                    reorderableSourceNodeIds={directReferenceSourceIds(target.id)}
                     onStartReferenceSelection={startNodeReferenceSelection}
                     modeOverride={getNodeDefinition(target.type)?.useBuiltinPanel?.mode}
                     onImageSettingsOpenChange={(open) => {
@@ -5588,6 +5599,7 @@ function InfiniteCanvasPage() {
             configInputsById,
             confirmStopGeneration,
             connections,
+            directReferenceSourceIds,
             disconnectNodeReference,
             graphIndex,
             handleConfigNodeChange,
@@ -5595,6 +5607,7 @@ function InfiniteCanvasPage() {
             mentionReferencesByNodeId,
             nodes,
             renderPluginPanel,
+            reorderNodeReferences,
             runningLoopId,
             runningNodeId,
             startNodeReferenceSelection,

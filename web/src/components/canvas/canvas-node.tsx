@@ -294,6 +294,10 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     // 字号在低倍率时维持约 14px 屏幕高度，但必须同时受节点宽高和两行标题容量约束，不能用 transform 放大后溢出。
     const textOverviewFontSize = Math.max(12, Math.min(14 / Math.max(scale, 0.01), (width * 0.8) / Math.max(1, Math.ceil(Array.from(textOverviewTitle).length / 2)), height * 0.28));
     const overviewIconSize = Math.min(44 / Math.max(scale, 0.01), Math.min(width, height) * 0.42);
+    const characterBadgeFontSize = Math.min(15 / Math.max(scale, 0.01), width * 0.22, height * 0.3);
+    const characterBadgeIconSize = Math.min(17 / Math.max(scale, 0.01), Math.min(width, height) * 0.38);
+    const characterBadgePaddingX = Math.min(8 / Math.max(scale, 0.01), width * 0.05);
+    const characterBadgePaddingY = Math.min(4 / Math.max(scale, 0.01), height * 0.04);
     const hasMediaPreview = Boolean(image || videoSource || isH3);
     const generating = isNodeGenerating(data);
     const generatingPercent = generating ? nodeRunProgress(data) : undefined;
@@ -373,9 +377,12 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
             {/* 缩略图/文本会盖住底色，生成中再叠一层活动色，保证缩小后整块仍然泛橙。 */}
             {generating && (hasMediaPreview || isTextOverview) ? <div className="pointer-events-none absolute inset-0" style={{ background: generatingTint }} /> : null}
             {image || videoSource || isH3 ? (
-                <div className="pointer-events-none absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1 bg-black/45 px-2 py-1 text-[10px] text-white">
-                    <Icon className="size-3 shrink-0" />
-                    <span className="truncate">{data.title || summary}</span>
+                <div
+                    className={`pointer-events-none absolute bottom-0 flex min-w-0 items-center text-white ${isCharacter ? "left-0 max-w-full rounded-tr-lg bg-black/70 font-semibold" : "inset-x-0 gap-1 bg-black/45 px-2 py-1 text-[10px]"}`}
+                    style={isCharacter ? { gap: Math.min(5 / Math.max(scale, 0.01), width * 0.03), padding: `${characterBadgePaddingY}px ${characterBadgePaddingX}px`, fontSize: characterBadgeFontSize, lineHeight: 1.15 } : undefined}
+                >
+                    <Icon className={isCharacter ? "shrink-0" : "size-3 shrink-0"} style={isCharacter ? { width: characterBadgeIconSize, height: characterBadgeIconSize } : undefined} />
+                    <span className="min-w-0 truncate">{isCharacter ? data.metadata?.characterName || data.title || summary : data.title || summary}</span>
                 </div>
             ) : null}
             {generating ? (
@@ -1074,9 +1081,10 @@ function NodeContent(props: NodeContentRendererProps) {
 function CompactNodeContent({ node, theme, scale }: Pick<NodeContentRendererProps, "node" | "theme" | "scale">) {
     const Icon = nodeTypeIcon(node);
     const isGroup = node.type === CanvasNodeType.Group;
+    const isCharacter = node.type === CanvasNodeType.Character;
     // 紧凑壳是 scale 低于 0.24 时的内容降级，同样要能让远处看出「这个节点在跑任务」。
     const generating = isNodeGenerating(node);
-    const iconSize = Math.min(44 / Math.max(scale, 0.01), Math.min(node.width, node.height) * 0.42);
+    const iconSize = Math.min((isCharacter ? 50 : 44) / Math.max(scale, 0.01), Math.min(node.width, node.height) * (isCharacter ? 0.48 : 0.42));
     return (
         <div
             className="relative flex h-full w-full items-center justify-center overflow-hidden"
@@ -1085,13 +1093,15 @@ function CompactNodeContent({ node, theme, scale }: Pick<NodeContentRendererProp
         >
             {/* 缩略壳存在的意义就是省开销：生成中只靠活动色铺底 + 活动色图标区分，不做旋转动画。 */}
             {!isGroup ? (
-                <Icon aria-hidden="true" style={{ width: iconSize, height: iconSize, color: generating ? theme.node.generating : nodeAccentColor(node, theme) }} />
+                <Icon aria-hidden="true" style={{ width: iconSize, height: iconSize, color: generating ? theme.node.generating : nodeAccentColor(node, theme), transform: isCharacter ? `translateY(${-6 / Math.max(scale, 0.01)}px)` : undefined }} />
             ) : null}
             <span
                 className={`absolute inset-x-1 truncate text-center opacity-75 ${isGroup ? "inset-y-0 flex items-center justify-center" : "bottom-1"}`}
-                style={isGroup ? { fontSize: Math.min(12 / Math.max(scale, 0.01), Math.min(node.width, node.height) * 0.35) } : undefined}
+                style={isGroup ? { fontSize: Math.min(12 / Math.max(scale, 0.01), Math.min(node.width, node.height) * 0.35) }
+                    : isCharacter ? { fontSize: Math.min(14 / Math.max(scale, 0.01), node.width * 0.22, node.height * 0.38), fontWeight: 600, bottom: Math.min(5 / Math.max(scale, 0.01), node.height * 0.04) }
+                    : undefined}
             >
-                {node.title || node.type}
+                {isCharacter ? node.metadata?.characterName || node.title || node.type : node.title || node.type}
             </span>
         </div>
     );
