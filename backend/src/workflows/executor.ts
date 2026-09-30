@@ -148,7 +148,7 @@ function buildPrompt(fields: WorkflowField[], values: FieldValues): string | und
  * 注入参数到 workflow JSON 副本
  * 对应 Python generate() L15098-15108
  */
-function injectParams(
+export function injectParams(
     workflow: Record<string, unknown>,
     params: RunParams,
 ): Record<string, unknown> {
@@ -160,7 +160,10 @@ function injectParams(
         if (!node.inputs) node.inputs = {};
         for (const [inputName, value] of Object.entries(nodeInputs as Record<string, unknown>)) {
             if (value === null) {
-                delete (node.inputs as Record<string, unknown>)[inputName];
+                // 原生 H3 把空媒体槽定义为必选 COMBO；保持其合法空值，不能删掉必需的 input。
+                if (node.class_type === "NanFengH3MultiReferenceGeneratorV15" && /^(图片[1-9]|视频[1-3]|音频[1-3])$/.test(inputName)) {
+                    (node.inputs as Record<string, unknown>)[inputName] = "未选择";
+                } else delete (node.inputs as Record<string, unknown>)[inputName];
             } else {
                 (node.inputs as Record<string, unknown>)[inputName] = value;
             }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { resolveCharacterImageKeys } from "@basketikun/canvas-agent/reference-contract";
 import { FileText, Image as ImageIcon, Music2, Plus, Puzzle, Video, X } from "lucide-react";
 import { Popover } from "antd";
 import { useTranslation } from "react-i18next";
@@ -122,24 +123,22 @@ function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sour
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
     const images = node.metadata?.characterImages || [];
-    const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
-    const primaryImage = images[primaryIndex];
-    const keys = selection?.imageKeys
-        ? new Set(selection.imageKeys)
-        : new Set(primaryImage ? [characterReferenceKey(primaryImage, primaryIndex)] : []);
+    const keys = new Set(resolveCharacterImageKeys(node.metadata, selection));
     const selectedImages = images.filter((image, index) => keys.has(characterReferenceKey(image, index))).slice(0, 2);
-    const selectedImageCount = selection?.imageKeys ? selection.imageKeys.length : selectedImages.length;
+    const selectedImageCount = keys.size;
+    const imageSources = JSON.stringify(selectedImages.map((image) => [image.storageKey, image.url]));
     const voiceIncluded = !sourceIsImageGeneration && !sourceIsAudioGeneration && !sourceIsTextGeneration && selection?.voiceEnabled !== false && Boolean(node.metadata?.characterVoiceUrl || node.metadata?.characterVoiceStorageKey);
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
-    const [urls, setUrls] = useState<string[]>([]);
+    const [resolvedImages, setResolvedImages] = useState({ sources: "", urls: [] as string[] });
+    const urls = resolvedImages.sources === imageSources ? resolvedImages.urls : [];
     useEffect(() => {
         let cancelled = false;
         void Promise.all(selectedImages.map((image) => {
             void ensureImagePreview(image.storageKey);
             return resolveImageUrl(image.storageKey, image.url || "").catch(() => image.url || "");
-        })).then((resolved) => { if (!cancelled) setUrls(resolved); });
+        })).then((resolved) => { if (!cancelled) setResolvedImages({ sources: imageSources, urls: resolved }); });
         return () => { cancelled = true; };
-    }, [backendConnected, backendToken, node.id, selection?.imageKeys?.join(","), images.length]);
+    }, [backendConnected, backendToken, node.id, imageSources]);
     // 音频生成节点：角色引用以「声线音频」作为输入，渲染音频格。
     // 文本生成节点：角色引用以「角色文本设定」作为输入，渲染文本格。
     // 两个早返回都放在 hooks 之后，避免切换生成模式时 hook 数量变化导致 React 报错。

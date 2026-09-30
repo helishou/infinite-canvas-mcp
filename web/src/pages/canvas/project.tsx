@@ -2,6 +2,7 @@ import { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useR
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Group, Video } from "lucide-react";
+import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import copyToClipboard from "copy-to-clipboard";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
@@ -2942,12 +2943,21 @@ function InfiniteCanvasPage() {
                 return;
             }
 
-            // 已移除「按 Delete/Backspace 删除选中节点」的键盘快捷方式：选中节点后误按删除键会直接删掉整个节点且难以恢复（用户明确要求）。
-            // 删除节点仍可通过右键菜单 / 节点悬浮工具栏 / 顶部删除按钮等有意操作完成。连线删除保留（风险低、易重连）。
             if (event.key === "Delete" || event.key === "Backspace") {
+                if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || isModifierShortcut || event.altKey) return;
                 if (selectedConnectionId) {
+                    event.preventDefault();
                     deleteConnection(selectedConnectionId);
+                } else if (event.key === "Delete" && selectedNodeIdsRef.current.size) {
+                    event.preventDefault();
+                    const selected = selectedNodeIdsRef.current;
+                    const deletableIds = new Set(nodesRef.current.filter((node) => selected.has(node.id) && !isH3NodeType(node.type)).map((node) => node.id));
+                    if (deletableIds.size) {
+                        deleteNodes(deletableIds);
+                        setSelectedNodeIds(new Set([...selected].filter((id) => !deletableIds.has(id))));
+                    }
                 }
+                return;
             }
 
             if (event.key === "Escape") {

@@ -99,13 +99,15 @@ async function createBackendMcpInstance(
     backendUrl: config.url,
     listCanvasProjects: () => backendApi.listCanvasProjects(),
     getCanvasProject: (projectId) => backendApi.getCanvasProject(projectId),
-    applyCanvasOperations: (projectId, operations, expectedRevision) =>
+    applyCanvasOperations: (projectId, operations, expectedRevision, operationId, strictRevision) =>
       applyBackendCanvasOperations(
         config,
         projectId,
         expectedRevision,
         operations,
         state.clientId,
+        operationId,
+        strictRevision,
       ),
     replacePluginDeclarations: (declarations) =>
       backendApi.replacePluginDeclarations(declarations),
@@ -3590,7 +3592,8 @@ async function applyBackendCanvasOperations(
   expectedRevision: number | undefined,
   operations: Array<Record<string, unknown>>,
   clientId = `mcp:${process.pid}`,
-  operationId = crypto.randomUUID(),
+  operationId: string = crypto.randomUUID(),
+  strictRevision = false,
 ) {
   const response = await fetch(
     `${config.url.replace(/\/$/, "")}/canvas/projects/${encodeURIComponent(projectId)}/ops?token=${encodeURIComponent(config.token)}`,
@@ -3598,7 +3601,7 @@ async function applyBackendCanvasOperations(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        baseRevision: expectedRevision,
+        ...(strictRevision ? { expectedRevision } : { baseRevision: expectedRevision }),
         operations,
         operationId,
         source: { clientId, kind: "mcp", label: "MCP" },

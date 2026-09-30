@@ -2,7 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { redactInlineMedia } from "../runtime/redact-inline-media.js";
-import { removeEmptyImageNodes, validatePromptGraph } from "./executor.js";
+import { injectParams, removeEmptyImageNodes, validatePromptGraph } from "./executor.js";
+
+test("原生 H3 未提供的可选媒体保留合法 COMBO 空值，不让必填槽位消失", () => {
+    const source = { h3: { class_type: "NanFengH3MultiReferenceGeneratorV15", inputs: { 图片1: "first.png", 图片2: "未选择", 视频1: "未选择", 音频1: "未选择", 提示词: "test" } }, image: { class_type: "LoadImage", inputs: { image: "stale.png" } } };
+    const prepared = injectParams(source, { h3: { 图片2: null, 视频1: null, 音频1: null }, image: { image: null } }) as typeof source;
+    assert.equal(prepared.h3.inputs.图片1, "first.png");
+    assert.equal(prepared.h3.inputs.图片2, "未选择");
+    assert.equal(prepared.h3.inputs.视频1, "未选择");
+    assert.equal(prepared.h3.inputs.音频1, "未选择");
+    assert.equal(Object.hasOwn(prepared.image.inputs, "image"), false);
+    assert.equal(source.image.inputs.image, "stale.png");
+});
 
 test("工作流持久化数据会移除嵌套 data URL，但保留普通句柄和文本", () => {
     const value = redactInlineMedia({

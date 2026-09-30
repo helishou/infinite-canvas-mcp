@@ -61,6 +61,7 @@ description: >
 
 ### 画布真值与可追溯性
 
+- **画布操作统一使用 Hermes 注册的原生 Canvas MCP 入口。** 先 `tool_describe` 再 `tool_call`，查询、写入、引用绑定、生成、等待和取消均如此；终端脚本即使内部调用 `/mcp`，也不是默认允许的入口。本地脚本可做离线 payload/媒体处理和制作文档，不代替画布服务调用。备用通道必须同时具备本轮失败证据（已核对原生 schema、参数与目标）和用户本轮明确授权，仍受阻且未获授权就报告，不自动切换；批量、长提示词、少调用、旧脚本、旧授权与压缩摘要都不构成许可。获批范围结束后恢复原生入口，恢复会话时不继承备用资格。
 - 任何写入前先读取当前 MCP schema 或项目封装；不沿用旧脚本字段猜测。
 - 节点、任务、媒体与 revision 以实际返回的 `nodeId`、`taskId`、`storageKey`、`revision` 为准；标题、预计 ID、请求成功或节点状态回显不能替代真实结果。
 - **不要凭记忆填 ID。** `nodeId` / `segmentId` / `taskId` / `Picture N` / `binding.id` / `assetId` 一律先从本轮真实返回里取；过期会话记下的 ID 几乎必然 `NODE_NOT_FOUND` / `SEGMENT_NOT_FOUND` / `TASK_NOT_FOUND`。本轮已经回读过就复用结果，不必重复读。
@@ -68,7 +69,7 @@ description: >
 - **`status` 等后台维护字段不写进 patch。** `h3_update_clip` / `h3_apply_video_plan` / `h3_prepare_clip` 传 `status` 会直接被拒（"字段 status 由后台任务维护"）；`metadata` 必须在 patch 里用独立增量字段，不能整体覆盖。配置节点须在 metadata 顶层写 `model`，否则静默跳过不建任务。
 - **只读探查优先用小返回工具。** 按成本从低到高：`h3_get_node`（约 0.5 KB）→ `canvas_get_state` / `canvas_inspect`（节点目录，量级几 KB）→ `h3_get_clip_references` / `h3_get_clip_prompt`（按需单项）。已被服务端的 `TOOL_PAYLOAD_HOTSPOT` 点名的 `canvas_export_snapshot`、`assets_list` 无过滤裸调禁止使用；`canvas_get_state` 在大画布（大画布曾实测 2,231,095 字符）过期时先尝试目录模式。
 - **不要在不在线的界面前调用需要网页的工具。** `site_navigate`、`workbench_image_get_config` / `workbench_image_generate`、`workbench_video_*`、`canvas_get_selection` 依赖已连接的网页会话；无头/未开页面时必然返回 `当前没有已连接网页`。改用等价的 Backend 工具（`canvas_inspect`、`canvas_list_projects`、`models_list`）。
-- **工具集改版后不要沿用旧工具名。** 已从 schema 移除的工具（如 `h3_prepare_clip`）调用必然 `CANVAS_TOOL_FAILED`。调不通的工具先确认它还在当前 MCP schema 里。
+- **工具集改版后不要沿用旧工具名。** 当前实时 schema 未提供的工具不能调用；`h3_prepare_clip` 等历史入口必须先经本轮 `tool_describe` 确认，不能因源码有 handler 或旧 Skill 有示例就假定可用。调不通先核对契约，不恢复脚本路线。
 - 同名节点必须按精确 ID 操作。所有提交都保存实际任务 ID，并按该 ID 有界等待或查询；等待异常时查询原任务，不重复提交。
 - `referenceNodeIds`、连线和提示词中的 `Image N` 只是声明。生成后必须从 generation log 的 `references_json`、`input_counts_json` 与实际 provider/workflow 输入确认参考真的传入。`referenceNodeIds` 常失效，参考要接上就用 `canvas_connect_nodes` 补；多图 character 节点先生成 `canvas_image_input_manifest` 选图，否则多参考会互相稀释权重。
 - **生图前确认所选模型支持当前输入形态。** 服务端会直接拒"模型「X」不支持单图输入"这类 400；看到这个就换模型或增减参考数，不要重试同一组合。
@@ -115,6 +116,7 @@ productions/<canvasProjectId>/
 
 ## 通用执行节奏
 
+- 原生 MCP 操作的轮次、读取范围和集中核验，按 [原生 MCP 操作预算](references/native-mcp-operation-budget.md) §二–四 执行；这不改变生成或质量检查授权。
 - 画布任务可拆成互不依赖的只读调查、资料准备或独立审查时，可并行委派子代理；委派说明要给出画布项目 ID、精确节点/任务范围、只读或可写权限、交付格式和停止条件。模型可按子任务难度选择较轻量的可用模型（例如 gpt-6-luna），但需由主代理统一核对结果。
 - 同一画布项目内的写操作通常共享 revision，且节点、连线、视口和任务状态会互相影响；所有写操作由主代理串行安排。修改前读取目标的最新状态，提交后核对写入结果，再执行依赖它的下一步；工具本身已返回更新后的目标字段时，不重复拉取完整节点。不得让子代理并行写同一项目，也不得仅凭代理各自的成功回执假定合并安全。
 - 已知 H3 `nodeId`/`segmentId` 时优先用 `h3_get_clip` 的 `include` 一次取齐本次需要的提示词、参考与运行参数；只需片段目录时用 `h3_get_node`。避免为每段反复调用 `canvas_get_state(nodeIds=[H3节点])`，也避免把同一片段的提示词、参考、运行参数拆成多次读取。互不依赖的只读查询可并行；同一画布写入仍串行。多段简单配置改动可先从一次快照准备，逐段提交成功后在末尾集中回读字段核对；若用户同时编辑目标字段，逐段重新定向读取并在冲突后重算补丁。

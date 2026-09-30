@@ -15,6 +15,31 @@ function fixture(t: TestContext) {
     return db;
 }
 
+test("角色主图变更原子更新下游引用，回执/广播/历史重放一致，失败不留下半次更新", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [
+        { type: "add_node", id: "char", nodeType: "character", metadata: { characterPrimaryIndex: 0, characterImages: [{ storageKey: "image:a" }, { storageKey: "image:b" }] } },
+        { type: "add_node", id: "target", nodeType: "config", metadata: { characterReferences: { char: { imageKeys: ["image:a"], voiceEnabled: false } }, images: [{ id: "old", generationSnapshot: { references: [{ storageKey: "image:a" }] } }] } },
+        { type: "connect_nodes", fromNodeId: "char", toNodeId: "target" },
+    ]);
+    const before = db.getCanvasProject("canvas")!;
+    const operations = [{ type: "update_node", id: "char", metadata: { characterPrimaryIndex: 1 } }];
+    assert.throws(() => db.applyCanvasProjectOperations("canvas", undefined, [...operations, { type: "update_node", id: "missing" }]));
+    assert.deepEqual(db.getCanvasProject("canvas"), before);
+    let broadcast: CanvasCommit | undefined;
+    db.onCanvasCommit((commit) => { broadcast = commit; });
+    const changed = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "primary-change" });
+    assert.deepEqual(changed.operations.map((op: { type: string; id?: unknown }) => [op.type, op.id]), [["update_node", "char"], ["update_node", "target"]]);
+    const target = (changed.project.nodes as Array<Record<string, any>>).find((node) => node.id === "target")!;
+    assert.deepEqual(target.metadata.characterReferences.char, { imageKeys: ["image:b"], voiceEnabled: false });
+    assert.equal(target.metadata.images[0].generationSnapshot.references[0].storageKey, "image:a");
+    assert.deepEqual(broadcast?.operations, changed.operations);
+    const repeated = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "primary-change" });
+    assert.equal(repeated.duplicated, true);
+    assert.deepEqual(repeated.project, changed.project);
+    assert.deepEqual(repeated.operations, changed.operations);
+});
+
 test("持久候选不改原文，重复保存不重复；采用与状态确认是同一事务", (t) => {
     const db = fixture(t);
     const target = { nodeId: "text", field: "content" as const };

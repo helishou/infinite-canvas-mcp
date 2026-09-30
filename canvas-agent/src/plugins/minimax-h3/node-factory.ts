@@ -1,4 +1,5 @@
 const defaultPrompt = "保持原视频的动作、镜头和环境，替换主体角色，动作连贯，人物外观稳定。";
+export { H3_VIDEO_MEGAPIXELS, H3_VIDEO_RATIOS, h3VideoDimensions, h3OriginalVideoDimensions } from "./video-settings.js";
 const defaultH3Model = "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors";
 
 /** H3 节点的单一基础默认值来源；前端节点定义与 MCP 创建节点共用。 */

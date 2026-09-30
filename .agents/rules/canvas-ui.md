@@ -42,6 +42,10 @@ H3 Select 用 antd `size="middle"`；调整收起后的值用 styles.content/ite
 - ruler 如用 transform 平移，按实际实现取偏移；不能盲读恒为 0 的 scrollLeft。滚动、恢复位置、定位 Clip 要保持刻度、轨道和指针一致。
 - ResizeObserver 不测量由自身回写尺寸直接决定的容器，防止反馈循环。CSS 修改检查媒体/容器查询下最终生效声明。
 
+## 键盘删除
+
+画布 Delete 快捷键只删除选中的普通节点；H3 节点（含历史类型别名）在单选和混选时均不得通过 Delete 删除，混选删除后保留 H3 选择。输入框、富文本和忽略快捷键的控件区域继续按编辑语义处理按键。验证 H3 单选、混选及普通节点撤销恢复。
+
 ## 播放与副作用
 
 用户主动播放、运行、seek 使用事件或本地 trigger，metadata 只记状态。StrictMode 的 effect 重跑不能让“首次跳过”ref 失效后自动触发。播放 timeupdate 与用户 seek 要有明确所有权，不能互相回写形成循环；持久运行状态的所有权见[数据契约](canvas-contracts.md)。

@@ -38,6 +38,8 @@
 
 ## H3 字段与引用
 
+- 普通生成节点引用角色时，主图引用随角色主图或图片变更自动更新；失效选图恢复当前主图，仍有效的独立服装选择和显式关闭图片保持原意。更新与角色编辑在同一 ops 事务中持久化和广播，参考卡、计数及实际输入使用共享解析；历史生成快照不改写、不自动重跑。验证换主图、等数量替换、删除、跨窗口回放及重复提交。
+
 - H3 runtimeTaskId、status、进度、结果、结果历史由 Backend 独占。`diffCanvasProject` 只提交提示词、参考、布局等允许的用户编辑字段；旧页面快照不能覆盖 Backend 运行数据。
 - Clip 编辑真值为 referenceBindings；Backend 在 ops 中通过 canonicalizeH3References/registerH3ReferenceAssets 规范化并登记目录，前端不另启 reference-sync/write-coordinator。
 - 绑定使用 nodeId + segmentId + bindingId 定位；label、role、tags、subjectId 属于绑定上下文。同 assetId 可被不同 Clip 赋予不同语义，复制 Clip 后相同 bindingId 也须区分。

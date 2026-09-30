@@ -1,4 +1,5 @@
 import type { AiTextMessage } from "@/services/api/image";
+import { resolveCharacterImageKeys } from "@basketikun/canvas-agent/reference-contract";
 import i18n from "@/i18n";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import type { ReferenceImage } from "@/types/image";
@@ -378,9 +379,7 @@ function renderLoopPrompt(prompt: string, index: number, total: number) {
 
 function readCharacterGenerationResources(node: CanvasNodeData, selection?: CanvasCharacterReferenceSelection): NodeGenerationResourceInput[] {
     const images = node.metadata?.characterImages || [];
-    const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
-    const primaryImage = images[primaryIndex];
-    const selectedKeys = new Set(selection?.imageKeys || (primaryImage ? [characterReferenceKey(primaryImage, primaryIndex)] : []));
+    const selectedKeys = new Set(resolveCharacterImageKeys(node.metadata, selection));
     const imageInputs = images.flatMap((image, index): NodeGenerationResourceInput[] => {
         if (!image.url || !selectedKeys.has(characterReferenceKey(image, index))) return [];
         return [{

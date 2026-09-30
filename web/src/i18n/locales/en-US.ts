@@ -1,4 +1,5 @@
 export default {
+    h3Video: { durationError: "H3 duration must be an integer between 1 and 15 seconds", missingField: "Missing H3 workflow parameter mapping: {{field}}", preview: "H3 input: {{size}} · {{seconds}} s · {{megapixels}} MP. Dimensions follow native aspect ratios and grid alignment.", autoPreview: "Automatic size: image-to-video and first/last frames follow the first frame aspect ratio; text-to-video and multi-reference use the workflow aspect ratio. Resolution controls pixel count; duration is 1–15 seconds." },
     meta: {
         title: "Infinite Canvas",
         description: "An infinite canvas creation tool",
@@ -576,6 +577,18 @@ stopTitle: "Stop generation?", stopDescription: "The current request will be int
         darkTheme: "Switch to dark theme",
     },
     home: {
+        workbench: {
+            title: "Workspace", subtitle: "Pick up your ideas and keep creating.", tasks: "Tasks", recentTasks: "Recent tasks", task: "Generation task",
+            continue: "Continue editing", lastEdited: "Recently updated", firstProject: "Start with your first canvas", firstProjectHint: "Connect text, references, and generated results in one creative space.",
+            imageStudio: "Image studio", imageHint: "Start with a prompt or reference", videoStudio: "Video studio", videoHint: "Bring your images to life",
+            recentProjects: "Recent projects", all: "All", canvas: "Canvases", drama: "Drama canvases", pinned: "Saved", search: "Search projects…", grid: "Grid view", list: "List view",
+            pin: "Save project", unpin: "Unsave project", canvasOverview: "Canvas overview", previewNamed: "Preview {{name}}", manageProjects: "Manage all projects", moreProjects: "Show more projects",
+            noMatches: "No matching projects. Try a different search or filter.", noProjects: "No canvases yet. Create one to get started.",
+            recentOutputs: "Recent generations", result: "Generated result", viewResults: "View results", moreResults: "Load earlier results", noOutputs: "No completed media outputs in the recent records.", offlineOutputs: "Connect to Backend to view generated results.",
+            image: "Image", video: "Video", audio: "Audio", sourceProject: "Open source canvas", openSource: "Open source", projectName: "Project name", createOpen: "Create and open",
+            offline: "Backend is disconnected. Projects shown may be local snapshots.", settings: "Connection settings", retry: "Retry", refresh: "Refresh", loadFailed: "Could not load {{sections}}. Previous content has been kept.", saveFailed: "Could not save bookmark", section_logs: "results", section_tasks: "tasks", section_settings: "bookmarks",
+            noTasks: "No tasks yet", status_queued: "Queued", status_running: "Running", status_awaiting_confirmation: "Needs confirmation", status_succeeded: "Completed", status_failed: "Failed", status_cancelled: "Cancelled",
+        },
         promptError: "Failed to load prompts",
         description: "Generate, connect, and reshape <content>images, text, and graphics</content> in <canvas>Infinite Canvas</canvas>, turning one-off generations into a continuous creative process.",
         start: "Get started",

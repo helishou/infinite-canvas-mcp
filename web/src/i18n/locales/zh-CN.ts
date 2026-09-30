@@ -1,4 +1,5 @@
 export default {
+    h3Video: { durationError: "H3 时长必须是 1–15 秒之间的整数", missingField: "H3 工作流缺少参数映射：{{field}}", preview: "H3 实际输入：{{size}} · {{seconds}} 秒 · {{megapixels}} MP。尺寸按原生比例和网格对齐。", autoPreview: "自动尺寸：图生和首尾帧沿用首帧比例；文生和多参使用工作流比例。清晰度决定像素量，时长为 1–15 秒。" },
     meta: {
         title: "无限画布",
         description: "一个无限画布创作工具",
@@ -33,7 +34,7 @@ export default {
     },
     settingsPanels: {
         common: { auto: "自动", low: "低", medium: "中", high: "高", xhigh: "极高" },
-        image: { title: "图像设置", quality: "质量", size: "尺寸", align16: "16 倍数对齐", align16Hint: "输入完成后自动向上补成 16 的倍数", aspectRatio: "宽高比", transparent: "透明背景", transparentHint: "开启后生成无背景的透明图像（仅部分模型可用）", count: "生成张数", images: "{{count}} 张", workflowFields: "工作流参数", workflowFieldsMissing: "该模型的工作流参数暂时读取不到，可在工作流管理里检查字段配置" },
+        image: { title: "图像设置", quality: "质量", size: "尺寸", align16: "16 倍数对齐", align16Hint: "输入完成后自动向上补成 16 的倍数", aspectRatio: "宽高比", transparent: "透明背景", transparentHint: "开启后生成无背景的透明图像（仅部分模型可用）", count: "生成张数", images: "{{count}} 张", workflowFields: "工作流参数", workflowFieldsMissing: "该模型的工作流参数暂时读取不到，可在工作流管理里检查字段配置", workflowFieldsScenarioUnsupported: "该模型不支持当前参考图数量，改用其它模型或到模型设置里调整输入场景路由" },
         video: { title: "视频设置", quality: "清晰度", size: "尺寸", seconds: "秒数", resolution: "分辨率", ratio: "比例", duration: "时长", smart: "智能", output: "输出", generateAudio: "生成声音", watermark: "添加水印", adaptive: "自适应", sizes: { landscape: "横屏", portrait: "竖屏", square: "方形", widescreen: "宽屏", tall: "长图", auto: "自动" }, ratios: { landscape: "横屏", portrait: "竖屏", square: "方形", standardLandscape: "标准横屏", standardPortrait: "标准竖屏", cinematic: "宽银幕", adaptive: "自适应" } },
         audio: { title: "音频设置", voice: "声音", format: "格式", speed: "语速", instructions: "声音指令", instructionsPlaceholder: "例如：自然、温暖、适合旁白。", workflowFields: "工作流参数" },
         text: { title: "文本设置", reasoning: "推理强度", count: "生成次数" },
@@ -576,6 +577,18 @@ stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断�
         darkTheme: "切换到深色主题",
     },
     home: {
+        workbench: {
+            title: "工作台", subtitle: "接着上次的灵感，继续创作。", tasks: "任务", recentTasks: "最近任务", task: "生成任务",
+            continue: "继续编辑", lastEdited: "最近更新", firstProject: "从第一张画布开始", firstProjectHint: "连接文字、参考图与生成结果，在同一个空间里创作。",
+            imageStudio: "图片创作", imageHint: "从提示词或参考图开始", videoStudio: "视频创作", videoHint: "让画面动起来",
+            recentProjects: "最近项目", all: "全部", canvas: "画布", drama: "短剧画布", pinned: "收藏", search: "搜索项目…", grid: "网格视图", list: "列表视图",
+            pin: "收藏项目", unpin: "取消收藏", canvasOverview: "画布概览", previewNamed: "预览 {{name}}", manageProjects: "管理全部项目", moreProjects: "显示更多项目",
+            noMatches: "没有匹配的项目，试试其他关键词或筛选。", noProjects: "还没有画布，点击新建开始创作。",
+            recentOutputs: "最近生成", result: "生成结果", viewResults: "查看结果", moreResults: "加载更早的结果", noOutputs: "最近记录中暂无已完成的媒体结果。", offlineOutputs: "连接 Backend 后查看生成结果。",
+            image: "图片", video: "视频", audio: "音频", sourceProject: "打开来源画布", openSource: "打开来源", projectName: "项目名称", createOpen: "创建并打开",
+            offline: "Backend 未连接，当前显示的项目可能来自本地快照。", settings: "连接设置", retry: "重试", refresh: "刷新", loadFailed: "{{sections}}加载失败，已保留上次内容。", saveFailed: "收藏保存失败", section_logs: "生成结果", section_tasks: "任务", section_settings: "收藏",
+            noTasks: "暂无任务", status_queued: "排队中", status_running: "运行中", status_awaiting_confirmation: "待确认", status_succeeded: "已完成", status_failed: "失败", status_cancelled: "已取消",
+        },
         promptError: "获取提示词失败",
         description: "在 <canvas>无限画布</canvas> 中生成、连接和重组 <content>图片、文字与图形</content>，让创作从单次生成变成连续推演。",
         start: "开始使用",

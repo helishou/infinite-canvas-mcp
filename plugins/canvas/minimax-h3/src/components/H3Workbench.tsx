@@ -4,7 +4,7 @@ import { message } from "antd";
 import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
-import { applyCharacterGroupEdits, inferReferenceRole, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
+import { applyCharacterGroupEdits, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
@@ -153,7 +153,14 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             let changed = false;
             const nextSegments = currentSegments.map((segment) => {
                 let nextSegment = segment;
-                for (const [groupId, group] of Object.entries(segment.h3CharacterGroups || {})) {
+                const sourceIds = new Set(refsForSegment(segment).filter((ref) => !ref.groupId && ref.nodeId && (!changedNodeIds || changedNodeIds.has(ref.nodeId))).map((ref) => ref.nodeId!));
+                for (const sourceId of sourceIds) {
+                    const sourceNode = ctx.getNode(sourceId);
+                    if (sourceNode?.type !== "character") continue;
+                    const source = readCharacterGroupFromNode(sourceNode);
+                    if (source) nextSegment = promoteCharacterSourceReferences(nextSegment, source);
+                }
+                for (const [groupId, group] of Object.entries(nextSegment.h3CharacterGroups || {})) {
                     if (!group.characterNodeId || (changedNodeIds && !changedNodeIds.has(group.characterNodeId))) continue;
                     const sourceNode = ctx.getNode(group.characterNodeId);
                     if (sourceNode?.type !== "character") continue;
@@ -587,7 +594,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
         {editingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={editingRef.ref} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
-            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={previewStorageKey ? ctx.mediaUrl(previewStorageKey) : preview} kind={previewKind} storageKey={previewStorageKey} name={previewName} playhead={playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
+            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={previewStorageKey ? ctx.mediaUrl(previewStorageKey) : preview} kind={previewKind} aspectRatio={String(selected?.aspectRatio || metadata.aspectRatio || "16:9 (Widescreen)")} storageKey={previewStorageKey} name={previewName} livePreview={showLivePreview} playhead={playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} patchAllSettings={patchAllSettings} /></div>
         <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestReplaceRef={beginCanvasRefReplace} onRequestPickRef={requestCanvasRefPick} onRequestPickStoryboardShot={requestStoryboardShotPick} pickingShotKey={pickingRef?.shotId ? `${pickingRef.segmentId}:${pickingRef.shotId}` : undefined} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />

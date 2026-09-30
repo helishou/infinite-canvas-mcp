@@ -6,6 +6,9 @@ import { validateH3CharacterGroups } from "../../canvas/character-reference-cont
 import { buildCharacterGroupFromExistingNode } from "./character-groups.js";
 import { writeStoryboardPrompt } from "./storyboard-write.js";
 import { isReferenceNameEcho } from "./prompt-rules.js";
+import { createHash } from "node:crypto";
+import { H3_RUNTIME_SEGMENT_FIELDS } from "../../canvas/runtime-fields.js";
+import { H3_UPDATE_CLIPS_TOOL } from "./batch-update-tool.js";
 
 // H3 片段(节点 metadata.segments 中的元素)
 type H3Segment = Record<string, unknown>;
@@ -50,8 +53,63 @@ function nodeProjection(patch: H3Segment): H3Segment {
     return projection;
 }
 
+function assertH3ClipPatch(project: Record<string, unknown>, target: H3Segment, patch: H3Segment, compileAll = false) {
+    if (Object.hasOwn(patch, "h3CharacterGroups") || Object.hasOwn(patch, "characterGroups")) throw new Error("角色组必须通过 h3_bind_existing_character_groups 写入");
+    if (compileAll || Object.hasOwn(patch, "referenceBindings")) assertReferenceCompilation(compileReferenceSubmission(project, { ...target, ...patch }));
+}
+
+/** Prepare every target first; the caller persists the operation array exactly once. */
+export function buildH3BatchUpdates(project: Record<string, unknown>, node: AgentCanvasNode, rawUpdates: unknown) {
+    if (!isH3Node(node)) throw new Error(`节点 ${node.id} 不是 MiniMax H3 节点`);
+    if (!Array.isArray(rawUpdates) || !rawUpdates.length || rawUpdates.length > 100) throw new Error("updates 必须包含 1–100 个 Clip 更新");
+    const segments = segmentsOf(node);
+    const seen = new Set<string>();
+    const operations: Array<Record<string, unknown>> = [];
+    const entries: Array<{ segmentId: string; segmentIndex: number; updatedFields: string[] }> = [];
+    const projection: H3Segment = {};
+    const protectedFields = new Set<string>([...H3_RUNTIME_SEGMENT_FIELDS, "id", "h3CharacterGroups", "characterGroups", "metadata", "segments", "__proto__", "constructor", "prototype"]);
+    for (const raw of rawUpdates) {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("updates 每项必须为对象");
+        const item = raw as Record<string, unknown>;
+        const segmentId = item.segmentId;
+        if (typeof segmentId !== "string" || !segmentId || seen.has(segmentId)) throw new Error(`segmentId 缺失或重复:${String(segmentId)}`);
+        seen.add(segmentId);
+        const segmentIndex = segments.findIndex((segment) => segment.id === segmentId);
+        if (segmentIndex < 0) throw new Error(`找不到片段:${segmentId}`);
+        const target = segments[segmentIndex];
+        if (["loading", "queued", "running", "awaiting_confirmation"].includes(String(target.status || "")) || target.runtimeTaskId) throw new Error(`Clip 有活动任务或任务绑定，先核对任务终态:${segmentId}`);
+        if (!item.patch || typeof item.patch !== "object" || Array.isArray(item.patch) || !Object.keys(item.patch).length) throw new Error(`Clip ${segmentId} 的 patch 必须为非空对象`);
+        const patch = structuredClone(item.patch) as H3Segment;
+        for (const key of Object.keys(patch)) if (protectedFields.has(key)) throw new Error(`批量更新禁止修改 ${key}；运行态由后台维护，角色组使用专用工具`);
+        if (Object.hasOwn(patch, "duration") && (typeof patch.duration !== "number" || !Number.isFinite(patch.duration) || patch.duration <= 0)) throw new Error(`Clip ${segmentId} 的 duration 必须为正数`);
+        for (const key of ["title", "prompt"]) if (Object.hasOwn(patch, key) && typeof patch[key] !== "string") throw new Error(`Clip ${segmentId} 的 ${key} 必须为字符串`);
+        for (const key of ["referenceBindings", "subjects", "timeline"]) if (Object.hasOwn(patch, key) && !Array.isArray(patch[key])) throw new Error(`Clip ${segmentId} 的 ${key} 必须为数组`);
+        assertH3ClipPatch(project, target, patch, true);
+        operations.push({ type: "update_h3_segment", nodeId: node.id, segmentId, patch });
+        entries.push({ segmentId, segmentIndex, updatedFields: Object.keys(patch) });
+        Object.assign(projection, nodeProjection(patch));
+    }
+    if (Object.keys(projection).length) operations.push({ type: "update_node", id: node.id, metadata: projection });
+    return { operations, entries };
+}
+
+function committedH3Fields(segment: H3Segment, fields: string[]) {
+    const values: Record<string, unknown> = {};
+    const fieldSummaries: Record<string, { bytes: number; sha256: string }> = {};
+    for (const key of fields) {
+        const value = segment[key];
+        if (value === null || typeof value === "boolean" || typeof value === "number" || (typeof value === "string" && value.length <= 256)) values[key] = value;
+        else {
+            const serialized = JSON.stringify(value) ?? "undefined";
+            fieldSummaries[key] = { bytes: Buffer.byteLength(serialized), sha256: createHash("sha256").update(serialized).digest("hex") };
+        }
+    }
+    return { values, fieldSummaries };
+}
+
 // 工具元信息(声明,供 Agent 动态注册)
 const TOOLS: PluginMcpToolWire[] = [
+    H3_UPDATE_CLIPS_TOOL,
     {
         id: "h3_list_models",
         version: "1.2.0",
@@ -913,6 +971,25 @@ export const pluginMcp: PluginMcpModule = {
                 const taskId = String(input.taskId || "");
                 return summarizeRuntimeTask(await context.backend.cancelTask(taskId));
             },
+            h3_update_clips: async (input) => {
+                const projectId = String(input.projectId || "");
+                const nodeId = String(input.nodeId || "");
+                const { project, node } = await getProjectNode(context, projectId, nodeId);
+                const revision = Number(project.revision || 0);
+                if (input.expectedRevision !== undefined && (!Number.isInteger(input.expectedRevision) || Number(input.expectedRevision) < 0 || input.expectedRevision !== revision)) throw new Error(`画布版本冲突：expectedRevision=${String(input.expectedRevision)}，当前 revision=${revision}`);
+                const { operations, entries } = buildH3BatchUpdates(project, node, input.updates);
+                // Validation depends on references/assets too; do not rebase the validated batch.
+                const result = await context.backend.applyCanvasOperations(projectId, operations, revision, undefined, true);
+                const refreshedNode = (Array.isArray(result.project.nodes) ? result.project.nodes : []).find((value) => (value as Record<string, unknown>).id === nodeId) as AgentCanvasNode | undefined;
+                if (!refreshedNode) throw new Error(`批量更新后读取失败:${nodeId}`);
+                const refreshed = segmentsOf(refreshedNode);
+                const items = entries.map((entry) => {
+                    const segment = refreshed.find((value) => value.id === entry.segmentId);
+                    if (!segment) throw new Error(`批量更新后读取片段失败:${entry.segmentId}`);
+                    return { ...entry, ...committedH3Fields(segment, entry.updatedFields) };
+                });
+                return { ok: true, atomic: true, projectId, nodeId, revision: result.revision, count: items.length, items };
+            },
             h3_update_clip: async (input) => {
                 const nodeId = String(input.nodeId || "");
                 const projectId = String(input.projectId || "");
@@ -926,8 +1003,7 @@ export const pluginMcp: PluginMcpModule = {
                 const target = segments[index];
                 if (!target.id) throw new Error(`片段 ${index} 缺少 id，无法使用细粒度 update_h3_segment`);
                 const patch = (input.patch as Record<string, unknown>) || {};
-                if (Object.prototype.hasOwnProperty.call(patch, "h3CharacterGroups")) throw new Error("角色组必须通过 h3_bind_existing_character_groups 写入");
-                if (Object.prototype.hasOwnProperty.call(patch, "referenceBindings")) assertReferenceCompilation(compileReferenceSubmission(project, { ...target, ...patch }));
+                assertH3ClipPatch(project, target, patch);
                 const operations: Record<string, unknown>[] = [{ type: "update_h3_segment", nodeId, segmentId: String(target.id), patch }];
                 const projection = nodeProjection(patch);
                 if (Object.keys(projection).length) operations.push({ type: "update_node", id: nodeId, metadata: projection });

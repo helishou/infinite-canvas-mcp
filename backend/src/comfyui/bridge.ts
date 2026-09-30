@@ -14,6 +14,7 @@ import { assertIndependentMediaRoot, comfyInputName, copyComfyInput, resolveComf
 import { normalizeH3Params, resolveH3Seed, clampH3LoraStrength } from "../canvas/h3-params.js";
 import { assertH3LatentUpscalerReady } from "./h3-latent-upscaler-preflight.js";
 import { stageH3ContinuationSeed, type H3ContinuationIdentity } from "./continuation-seed.js";
+import { listLocalLoras } from "./local-lora-catalog.js";
 
 /** ComfyUI Bridge 的总后台侧依赖：任务走 task store，URL 走 setting store。 */
 export type ComfyUiDeps = {
@@ -204,6 +205,10 @@ export class ComfyUiBackend {
      */
     async models(signal?: AbortSignal): Promise<ComfyModelCatalog> {
         const errors: string[] = [];
+        const localLoras = await listLocalLoras(String(this.deps.settings.get("comfyui.localRootDir") || "")).catch((error) => {
+            errors.push(`Local LoRAs: ${error instanceof Error ? error.message : String(error)}`);
+            return [] as string[];
+        });
         const readChoices = async (node: string, input: string) => {
             try {
                 const response = await fetch(`${this.url}/object_info/${node}`, { signal });
@@ -240,7 +245,7 @@ export class ComfyUiBackend {
             readNanFengChoices(),
         ]);
         const h3Models = models.filter(isH3ModelPath);
-        const availableLoras = [...loras, ...loraModelOnly, ...nanfengLoras];
+        const availableLoras = [...loras, ...loraModelOnly, ...nanfengLoras, ...localLoras];
         const minimaxTextEncoders = textEncoders.filter((value) => /minimax/i.test(value));
         return { models: [...new Set(h3Models)].sort((a, b) => a.localeCompare(b)), loras: [...new Set(availableLoras)].sort((a, b) => a.localeCompare(b)), textEncoders: [...new Set(minimaxTextEncoders)].sort((a, b) => a.localeCompare(b)), videoVaes: [...new Set(videoVaes)].sort((a, b) => a.localeCompare(b)), audioVaes: [...new Set(audioVaes)].sort((a, b) => a.localeCompare(b)), latentUpscaleModels: [...new Set(latentUpscaleModels)].sort((a, b) => a.localeCompare(b)), nanfeng, refreshedAt: new Date().toISOString(), ...(errors.length ? { error: errors.join("; ") } : {}) };
     }
@@ -377,32 +382,35 @@ export class ComfyUiBackend {
         const controller = new AbortController(); this.controllers.set(task.id, controller);
         this.comfyExecutions.set(task.id, { url: comfyUrl });
         let executionCacheCleared = false;
+        let executionCompleted = false;
+        const keepModelCache = task.params.keepModelCache !== false;
         try {
             this.updateTask(task.id, { status: "running", progress: 0.05 });
             this.deps.tasks.addEvent(task.id, "status", { status: "running" });
             const result = preset.id === "minimax-h3" && task.params.autoSplit === true && typeof task.input.video === "string"
                 ? await this.executeH3Segments(task, preset.id, task.input, task.params, comfyUrl, controller)
                 : await this.executeWorkflow(task, preset.id, task.input, task.params, comfyUrl, controller);
-            if (preset.id === "minimax-h3") {
+            if (preset.id === "minimax-h3" && !keepModelCache) {
                 await this.clearComfyExecutionCache(comfyUrl);
                 executionCacheCleared = true;
             }
             this.updateTask(task.id, { status: "succeeded", progress: 1, result });
             this.deps.tasks.addEvent(task.id, "result", result);
+            executionCompleted = true;
         } finally {
-            if (preset.id === "minimax-h3" && !executionCacheCleared) {
+            if (preset.id === "minimax-h3" && !executionCacheCleared && (!keepModelCache || !executionCompleted)) {
                 try { await this.clearComfyExecutionCache(comfyUrl); } catch (error) { console.warn("[comfyui] H3 执行缓存清理失败:", error instanceof Error ? error.message : String(error)); }
             }
             this.controllers.delete(task.id); this.comfyExecutions.delete(task.id);
         }
     }
 
-    /** 清掉 ComfyUI 的执行上下文和 CUDA allocator 缓存，但保留 H3 模型，避免下一 Clip 重新加载模型。 */
+    /** 完整释放执行缓存和模型；成功连续生成且保留缓存时不得调用 /free。 */
     private async clearComfyExecutionCache(comfyUrl: string) {
         const response = await fetch(`${comfyUrl}/free`, {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ unload_models: false, free_memory: true }),
+            body: JSON.stringify({ unload_models: true, free_memory: true }),
         });
         if (!response.ok) throw new Error(`ComfyUI /free failed: HTTP ${response.status}`);
     }
@@ -1152,6 +1160,7 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     for (const [target, source, fallback] of [
         ["DLSS_video_upscale_mode", "dlssVideoUpscaleMode", "1.5× (Quality)"], ["DLSS_video_require_neural_upscaling", "dlssVideoRequireNeuralUpscaling", false], ["DLSS_video_nr_preset", "dlssVideoNrPreset", "Default"], ["DLSS_video_nr_style", "dlssVideoNrStyle", "Default"], ["DLSS_video_nr_intensity", "dlssVideoNrIntensity", 1], ["DLSS_video_local_tone_strength", "dlssVideoLocalToneStrength", 1], ["DLSS_video_local_structure_strength", "dlssVideoLocalStructureStrength", 1], ["DLSS_video_skin_structure_strength", "dlssVideoSkinStructureStrength", -1], ["DLSS_video_automatic_mask", "dlssVideoAutomaticMask", false], ["DLSS_video_dlss_model_preset", "dlssVideoModelPreset", "Default"], ["DLSS_video_encoding_quality", "dlssVideoEncodingQuality", "Max"], ["DLSS_video_video_codec", "dlssVideoCodec", "H.264"], ["DLSS_video_container", "dlssVideoContainer", "MP4"], ["DLSS_video_rename", "dlssVideoRename", "Auto"], ["DLSS_video_custom_suffix", "dlssVideoCustomSuffix", "_DLSS5"], ["DLSS_video_hdr_mode", "dlssVideoHdrMode", false], ["DLSS_video_output_detail_strength", "dlssVideoOutputDetailStrength", 1], ["DLSS_fg_output_fps", "dlssFgOutputFps", "60"], ["DLSS_fg_dlss_engine", "dlssFgEngine", "Auto"], ["DLSS_fg_encoding_quality", "dlssFgEncodingQuality", "Max"], ["DLSS_fg_video_codec", "dlssFgVideoCodec", "H.264"], ["DLSS_fg_container", "dlssFgContainer", "MP4"], ["DLSS_fg_rename", "dlssFgRename", "Auto"], ["DLSS_fg_custom_suffix", "dlssFgCustomSuffix", "_DLSSFG"], ["DLSS_fg_hdr_mode", "dlssFgHdrMode", false]] as Array<[string, string, unknown]>) inputs[target] = value(source, fallback);
     for (const [target, source, fallback] of [["南风ER_solver_type", "erSolverType", "ER-SDE"], ["南风ER_max_stage", "erMaxStage", 3], ["南风ER_eta", "erEta", 1], ["南风ER_s_noise", "erSNoise", 1]] as Array<[string, string, unknown]>) inputs[target] = value(source, fallback);
+    if (params.nativeLoaderCacheSupported === true) inputs["复用加载器缓存"] = params.keepModelCache !== false;
     const graph: Record<string, any> = { nf_v15: { class_type: NANFENG_H3_CLASS, inputs } };
     let outputImages: [string, number] = ["nf_v15", 0];
     let outputAudio: [string, number] = ["nf_v15", 1];
@@ -1642,7 +1651,7 @@ async function resolveNanFengWorkflowParams(comfyUrl: string, params: Record<str
             ["modelName", "模型"], ["textEncoder", "文本编码器"], ["videoVae", "视频VAE"],
             ["audioVae", "音频VAE"], ["latentUpscaleModel", "H3潜空间放大模型"],
         ];
-        const next = { ...resolved };
+        const next: Record<string, unknown> = { ...resolved, nativeLoaderCacheSupported: Object.hasOwn(required, "复用加载器缓存") || Object.hasOwn(body[NANFENG_H3_CLASS]?.input?.optional || {}, "复用加载器缓存") };
         for (const [paramName, inputName] of pathFields) {
             const available = choices(inputName);
             if (!available.length) continue;

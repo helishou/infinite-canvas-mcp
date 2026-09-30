@@ -9,6 +9,7 @@ import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/a
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSizeLabel } from "@/components/video-settings-panel";
+import { isLocalH3VideoModel } from "@/lib/h3-video-settings";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { deleteStoredMedia } from "@/services/file-storage";
@@ -524,7 +525,7 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
-                <VideoSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
+                <VideoSettingsPanel config={{ ...config, model }} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
             </div>
         </>
     );
@@ -705,9 +706,10 @@ function buildLog({ prompt, model, config, references, durationMs, status, task,
         config: logConfig,
         references,
         durationMs,
-        size: logConfig.size,
-        resolution: logConfig.vquality,
-        seconds: logConfig.videoSeconds,
+        // 展示实际输入；配置保留请求意图，重试时不能把 auto 偷换成固定尺寸。
+        size: task?.parameters?.size || logConfig.size,
+        resolution: task?.parameters?.resolution || logConfig.vquality,
+        seconds: task?.parameters?.seconds || logConfig.videoSeconds,
         status,
         task,
         video,
@@ -721,7 +723,7 @@ function buildVideoConfig(config: AiConfig, model: string): AiConfig {
         model,
         videoModel: model,
         size: normalizeVideoSize(config.size),
-        videoSeconds: normalizeVideoSeconds(config.videoSeconds),
+        videoSeconds: isLocalH3VideoModel(config, model) ? config.videoSeconds : normalizeVideoSeconds(config.videoSeconds),
         vquality: normalizeResolution(config.vquality),
         videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),

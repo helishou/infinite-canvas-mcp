@@ -59,7 +59,7 @@ export type PluginMcpBackend = {
     backendUrl?: string;
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
     getCanvasProject(projectId: string): Promise<Record<string, unknown>>;
-    applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[] }>;
+    applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number, operationId?: string, strictRevision?: boolean): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[] }>;
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
     canvasRunGeneration(input: CanvasGenerationCommand): Promise<{ ok?: boolean } & CanvasGenerationStartResult>;
     getTask(id: string): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;

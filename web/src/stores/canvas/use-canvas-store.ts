@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { characterReferenceUpdates } from "@basketikun/canvas-agent/reference-contract";
 import localforage from "localforage";
 
 import { nanoid } from "nanoid";
@@ -686,9 +687,21 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         scheduleCanvasSync();
     },
     updateProject: (id, patch) => {
-        const normalizedPatch = patch.viewport ? { ...patch, viewport: normalizeViewportTransform(patch.viewport) } : patch;
+        let normalizedPatch = patch.viewport ? { ...patch, viewport: normalizeViewportTransform(patch.viewport) } : patch;
         const before = get().projects.find((project) => project.id === id);
         if (!before) return;
+        if (normalizedPatch.nodes) {
+            let nodes = normalizedPatch.nodes;
+            const previousById = new Map(before.nodes.map((node) => [node.id, node]));
+            for (const node of normalizedPatch.nodes) {
+                const previous = previousById.get(node.id);
+                if (!previous || previous === node) continue;
+                for (const update of characterReferenceUpdates(previous, node, nodes)) {
+                    nodes = nodes.map((target) => target.id === update.id ? { ...target, metadata: { ...target.metadata, ...update.metadata } } : target);
+                }
+            }
+            normalizedPatch = { ...normalizedPatch, nodes };
+        }
         // patch 实际未改变 project 时跳过 setState：节点 / 连线 / 会话字段
         // 是 map/filter/concat 之类函数式 action，每次都生成新数组引用，Object.is
         // 浅比较挡不住；React 18 StrictMode dev 模式或 zustand 通知顺序中反复
@@ -1025,6 +1038,7 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
         } else if (type === "update_node") {
             const node = nodes.find((item) => item.id === String(operation.id || ""));
             if (!node) continue;
+            const previousNode = { ...node, metadata: node.metadata };
             const previousGroupId = node.metadata?.groupId;
             Object.assign(node, operation.patch || {});
             if (operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)) node.metadata = { ...((node.metadata || {}) as Record<string, unknown>), ...(operation.metadata as Record<string, unknown>) } as CanvasNodeData["metadata"];
@@ -1032,6 +1046,9 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
                 const metadata = { ...((node.metadata || {}) as Record<string, unknown>) };
                 for (const key of operation.metadataDelete.map(String)) delete metadata[key];
                 node.metadata = metadata as CanvasNodeData["metadata"];
+            }
+            for (const update of characterReferenceUpdates(previousNode, node, nodes)) {
+                nodes = nodes.map((target) => target.id === update.id ? { ...target, metadata: { ...target.metadata, ...update.metadata } } : target);
             }
             // 成员位置/尺寸的显式回放（含撤销、重做）必须保持原值；只有归属变化才自动整理槽位。
             if (previousGroupId !== node.metadata?.groupId) nodes = syncOrderedGroupMembership(nodes, node.id, previousGroupId);

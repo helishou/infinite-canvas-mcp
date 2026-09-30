@@ -364,7 +364,7 @@ export function H3RulerScrubber({ ctx, segments, total, previewH }: { ctx: Canva
     return <div ref={scrubRef} className="minimax-ruler-scrubber" style={{ top: origin?.top ?? `calc(58px + ${previewH}px + 10px)`, left: origin?.left ?? 62, width: origin?.width ?? "calc(100% - 126px)", height: origin?.height ?? 28 }} title="点击跳转播放指针" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* synthetic/无指针ID 的测试事件无活动指针，忽略 */ } event.currentTarget.setAttribute("data-scrubbing", "1"); apply(event); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) apply(event); }} onPointerUp={(event) => { try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* 同上 */ } event.currentTarget.removeAttribute("data-scrubbing"); ctx.updateMetadata({ h3Scrubbing: false }); }} onPointerCancel={(event) => { event.currentTarget.removeAttribute("data-scrubbing"); ctx.updateMetadata({ h3Scrubbing: false }); }} />;
 }
 
-export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, timelineOffset = 0, clipDuration, playToken, playRequest, nextUrl, onEnded, onPlayheadTick }: { ctx: CanvasNodeContext; url: string; kind: H3Ref["type"]; storageKey?: string; name?: string; playhead: number; timelineOffset?: number; clipDuration?: number; playToken: number; playRequest: number; nextUrl?: string; onEnded?: (continuedFromSlot?: boolean) => void; onPlayheadTick?: (absoluteTime: number) => void }) {
+export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageKey, name, livePreview = false, playhead, timelineOffset = 0, clipDuration, playToken, playRequest, nextUrl, onEnded, onPlayheadTick }: { ctx: CanvasNodeContext; url: string; kind: H3Ref["type"]; aspectRatio?: string; storageKey?: string; name?: string; livePreview?: boolean; playhead: number; timelineOffset?: number; clipDuration?: number; playToken: number; playRequest: number; nextUrl?: string; onEnded?: (continuedFromSlot?: boolean) => void; onPlayheadTick?: (absoluteTime: number) => void }) {
     // 双槽交叉淡入续播：当前段在 active 槽播放，下一段提前预载进另一槽；
     // 当前段 ended 时直接切换到已就绪的 buffer 槽播放，消除「换 src 重载」造成的卡顿。
     const videosRef = useRef<[HTMLMediaElement | null, HTMLMediaElement | null]>([null, null]);
@@ -372,6 +372,32 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     const activeRef = useRef(0);
     const [active, setActive] = useState(0);
     const [slotSrc, setSlotSrc] = useState<[string, string]>([url || "", ""]);
+    const playerContentRef = useRef<HTMLDivElement | null>(null);
+    const [aspectFrame, setAspectFrame] = useState<{ width: number; height: number } | null>(null);
+    const ratioMatch = aspectRatio.match(/(\d+(?:\.\d+)?)\s*[:/x]\s*(\d+(?:\.\d+)?)/i);
+    const parsedRatio = ratioMatch ? Number(ratioMatch[1]) / Number(ratioMatch[2]) : 16 / 9;
+    const frameRatio = Number.isFinite(parsedRatio) && parsedRatio > 0 ? parsedRatio : 16 / 9;
+    useEffect(() => {
+        const content = playerContentRef.current;
+        if (!content) return;
+        const updateFrame = () => {
+            const width = content.clientWidth;
+            const height = content.clientHeight;
+            if (!width || !height) return;
+            const frameWidth = Math.min(width, height * frameRatio);
+            const frameHeight = frameWidth / frameRatio;
+            setAspectFrame((current) => current && Math.abs(current.width - frameWidth) < 0.5 && Math.abs(current.height - frameHeight) < 0.5
+                ? current
+                : { width: frameWidth, height: frameHeight });
+        };
+        updateFrame();
+        const observer = new ResizeObserver(updateFrame);
+        observer.observe(content);
+        return () => observer.disconnect();
+    }, [frameRatio]);
+    const aspectGuide = aspectFrame
+        ? <div className="minimax-player-aspect-guide" style={{ width: aspectFrame.width, height: aspectFrame.height }} aria-hidden="true" />
+        : null;
     // 预览分辨率：图片/视频加载后把真实尺寸写进来，叠加在预览左下角（见 minimax-player-resolution）。
     const [mediaResolution, setMediaResolution] = useState<{ width: number; height: number } | null>(null);
     useEffect(() => { setMediaResolution(null); }, [url, kind]);
@@ -442,6 +468,8 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     const endedRetrySrcRef = useRef<string | null>(null);
     // 当前 active 视频播完：连续播放模式下，若 buffer 槽已预载好下一段，交叉淡入直接续播；否则走 advancePlayback 重载
     useEffect(() => {
+        // 采样中的预览由 video.loop 自行循环，不进入成片换段或结束回写。
+        if (livePreview) return;
         const media = videosRef.current[activeRef.current];
         if (!media) return;
         const handler = () => {
@@ -482,7 +510,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         };
         media.addEventListener("ended", handler);
         return () => media.removeEventListener("ended", handler);
-    }, [active]);
+    }, [active, livePreview]);
     // Tab / 窗口切到后台时强制 pause 双槽视频：浏览器在隐藏标签里仍会继续跑 video，
     // 切回来时已经播过一段，看上去像"自动播放"。在不可见时主动 pause 一次，切回来由用户/下一次 playRequest 决定是否续播。
     useEffect(() => {
@@ -504,6 +532,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     // 起播（旧槽不可见地在后台重播，可见的新槽停在首帧）——这正是「暂停/换段后画面跳到首帧」的根因之一。
     // 播放期间由 requestAnimationFrame 平滑驱动时间刻度指针（直接改 DOM，不写 metadata）
     useEffect(() => {
+        if (livePreview) return;
         let raf = 0;
         const tick = () => {
             // 拖动刻度期间，scrubber 会设 data-scrubbing，rAF 立即让位给拖动 seek，避免指针抖动
@@ -520,7 +549,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         };
         raf = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(raf);
-    }, [playToken, timelineOffset, clipDuration, onPlayheadTick]);
+    }, [playToken, timelineOffset, clipDuration, onPlayheadTick, livePreview]);
     // 当前选中 clip：加载进 active 槽（手动选中/拖动/初始）；已在 active 或 buffer 槽则跳过，避免重复重载
     useEffect(() => {
         if (!url) return;
@@ -537,13 +566,14 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     }, [url]);
     // 预载下一段进 inactive 槽：播放当前段时后台暖缓存+解码，换段即可即时续播
     useEffect(() => {
+        if (livePreview) return;
         const a = activeRef.current;
         const i = a === 0 ? 1 : 0;
         if (!nextUrl) return;
         if (loadedUrlRef.current[i] === nextUrl) return;
         loadedUrlRef.current[i] = nextUrl;
         setSlotSrc((cur) => { const next = [...cur] as [string, string]; next[i] = nextUrl; return next; });
-    }, [nextUrl, active]);
+    }, [nextUrl, active, livePreview]);
     // playToken 由 H3Workbench 在用户真正发起播放时（playAll / 续播换段）显式递增。
     // 只看 playToken 是否变化，**不**依赖 h3PlayRequest：metadata 里的 h3PlayRequest 残留值、
     // MCP / 多端同步、StrictMode dev 模式下 useEffect 跑两次都不会触发自动播放。
@@ -552,31 +582,34 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     // 必然是 paused=true，只判断 v.paused 会让每次刷新页面 / 节点重新挂载都自动播放。
     const playedTokenRef = useRef(playToken);
     useEffect(() => {
+        if (livePreview) return;
         if (playedTokenRef.current === playToken) return;
         playedTokenRef.current = playToken;
         userPausedRef.current = false;
         const v = videosRef.current[activeRef.current];
         if (!v) return;
         if (v.paused) void v.play().catch(() => undefined);
-    }, [playToken]);
+    }, [playToken, livePreview]);
     // 拖动刻度 seek / 换段：跳到 active 槽对应本地帧（playhead 为绝对时间，减时间轴偏移得本地帧）
     useEffect(() => {
+        if (livePreview) return;
         const v = videosRef.current[activeRef.current];
         if (!v || !Number.isFinite(playhead)) return;
         const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
         if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.1) v.currentTime = local;
-    }, [playhead, timelineOffset]);
+    }, [playhead, timelineOffset, livePreview]);
     // 点击播放（playToken 变化）时：先把当前帧跳到 playhead 再播放。
     // 依赖只放 [playToken]，playhead/timelineOffset 通过闭包拿最新值但不放进依赖——
     // 播放中 playhead 由 rAF 直接驱动 DOM（不回写 metadata），若也依赖 playhead，
     // 此 effect 会在每次外部 seek 后执行，把已自然前进的 currentTime 拉回上一帧造成卡顿/回跳。
     // 拖动刻度/换段导致的 seek 由上方依赖 [playhead] 的 seek effect 处理。
     useEffect(() => {
+        if (livePreview) return;
         const v = videosRef.current[activeRef.current];
         if (!v) return;
         const local = Math.max(0, Math.min(Number(playhead || 0) - timelineOffset, Number(v.duration || Infinity)));
         if (v.readyState >= 1 && Math.abs(v.currentTime - local) > 0.05) v.currentTime = local;
-    }, [playToken]);
+    }, [playToken, livePreview]);
     // 支持把输出视频/图片拖到画布变成独立节点（复用 storageKey，不重新上传）
     const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
         const payload = JSON.stringify({ url, type: kind, kind, name: name || "H3 输出", storageKey });
@@ -585,8 +618,8 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
         event.dataTransfer.setData("application/json", payload);
         event.dataTransfer.setData("text/plain", payload);
     };
-    if (!url) return <div className="minimax-player-content"><div className="minimax-player-empty">连接视频和角色参考图</div></div>;
-    if (kind === "image") return <div className="minimax-player-content minimax-player-image" draggable onDragStart={handleDragStart}><img src={url} alt="H3 reference" draggable={false} onLoad={(event) => setMediaResolution({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />{mediaResolution ? <div className="minimax-player-resolution">{mediaResolution.width} × {mediaResolution.height}</div> : null}</div>;
+    if (!url) return <div ref={playerContentRef} className="minimax-player-content"><div className="minimax-player-empty">连接视频和角色参考图</div>{aspectGuide}</div>;
+    if (kind === "image") return <div ref={playerContentRef} className="minimax-player-content minimax-player-image" draggable onDragStart={handleDragStart}><img src={url} alt="H3 reference" draggable={false} onLoad={(event) => setMediaResolution({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />{aspectGuide}{mediaResolution ? <div className="minimax-player-resolution">{mediaResolution.width} × {mediaResolution.height}</div> : null}</div>;
     if (kind === "audio") return <div className="minimax-player-content" draggable onDragStart={handleDragStart}><div className="minimax-player-empty"><audio loop={false} ref={(node) => { videosRef.current[0] = node; }} src={url} controls preload="metadata" draggable={false} onPause={(event) => { const m = event.currentTarget; const localTime = Math.max(0, Math.min(Number(m.currentTime || 0), Number(m.duration || Infinity))); ctx.updateMetadata({ playhead: timelineOffset + localTime }); }} /></div></div>;
     // 视频：双槽交叉淡入续播。两个 video 绝对叠放，active 槽可见且有 controls，另一槽透明且不接收事件；
     // 下一段已在 inactive 槽预载就绪，ended 时切换 active 即可即时续播，无 src 重载间隙。
@@ -596,6 +629,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
     // isMuted 的 useState 已提升到组件顶部 hooks 区（见上方注释），不能放在这些 return 之后。
     return (
         <div
+            ref={playerContentRef}
             className="minimax-player-content"
             onContextMenu={(event) => {
                 if (kind !== "video") return;
@@ -624,19 +658,19 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                     ref={(node) => { videosRef.current[slot] = node; }}
                     src={slotSrc[slot] ? resultUrl(slotSrc[slot]) : undefined}
                     controls={active === slot}
-                    // 单段预览不循环：播完停在末帧。
-                    // 之前这里用原生 loop，single clip 播放会反复从头循环；
-                    // 连续播放（h3PlaybackAll）仍靠 ended 事件触发双槽交叉淡入续播，两者互斥。
-                    loop={false}
+                    // 只有生成中的实时视频自动循环；普通成片仍由用户起播，播完停帧或续播下一段。
+                    autoPlay={livePreview && active === slot}
+                    loop={livePreview && active === slot}
                     muted={isMuted}
                     playsInline
                     preload="auto"
                     draggable={false}
                     style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#0b0c0e", transition: "opacity .15s ease", opacity: active === slot ? 1 : 0, pointerEvents: active === slot ? "auto" : "none" }}
                     onLoadedMetadata={(event) => {
-                        // 仅 active 槽按 playhead 定位；buffer 槽固定在 0，避免被当前 playhead 误 seek 到中段
-                        const local = slot === active ? Math.max(0, Math.min(playheadRef.current - timelineOffset, Number(event.currentTarget.duration || Infinity))) : 0;
+                        // 临时预览从头播放，不使用成片时间轴；普通成片的 buffer 槽仍固定在 0。
+                        const local = !livePreview && slot === active ? Math.max(0, Math.min(playheadRef.current - timelineOffset, Number(event.currentTarget.duration || Infinity))) : 0;
                         if (Math.abs(event.currentTarget.currentTime - local) > 0.1) event.currentTarget.currentTime = local;
+                        if (livePreview && slot === activeRef.current) void event.currentTarget.play().catch(() => undefined);
                         // 任一阵列加载完元数据即记录视频真实分辨率（两槽分辨率一致，重复写无副作用）
                         if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setMediaResolution({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight });
                     }}
@@ -647,7 +681,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                         if (next !== isMuted) setIsMuted(next);
                     }}
                     onPause={(event) => {
-                        if (slot !== activeRef.current) return;
+                        if (livePreview || slot !== activeRef.current) return;
                         const m = event.currentTarget;
                         // 自然播完也会触发 pause，不算「用户暂停」；只有未到末尾的 pause 才冻结换段。
                         if (!m.ended) userPausedRef.current = true;
@@ -657,6 +691,7 @@ export function H3PreviewPlayer({ ctx, url, kind, storageKey, name, playhead, ti
                     onPlay={() => { if (slot === activeRef.current) userPausedRef.current = false; }}
                 />
             ))}
+            {aspectGuide}
             {mediaResolution ? <div className="minimax-player-resolution">{mediaResolution.width} × {mediaResolution.height}</div> : null}
             {frameMenuPosition ? <div ref={frameMenuRef} className="minimax-frame-menu" role="menu" style={{ left: frameMenuPosition.x, top: frameMenuPosition.y }}>
                 <button type="button" role="menuitem" onClick={() => void captureVideoFrame("current")}>截取当前帧</button>

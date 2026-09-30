@@ -1236,6 +1236,7 @@ export class BackendDatabase {
             }
             const project = structuredClone(current) as Record<string, unknown>;
             this.db.prepare("INSERT OR IGNORE INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
+            const committedOperations: CanvasOperation[] = [];
             const operationResults = operations.flatMap((operation, index) => {
                 if (operation.type === "text_suggestion") throw new Error("text_suggestion 是服务端回执，不能直接提交");
                 // 文本增量与候选通知必须由本次事务计算，不能信任客户端夹带的回执字段。
@@ -1248,7 +1249,9 @@ export class BackendDatabase {
                 if (isSuggestion) operations[index] = this.applyTextSuggestion(id, project, operation);
                 else if (isText) operations[index] = this.applyCanvasTextOperation(id, project, operation);
                 if (!context?.runtimeWrite && operation.type !== "restore_h3_output") prepareClientCanvasOperation(project, operations[index]);
-                const result = applyCanvasProjectOperations(project, [operations[index]]);
+                const derivedOperations: CanvasOperation[] = [];
+                const result = applyCanvasProjectOperations(project, [operations[index]], { derivedOperations });
+                committedOperations.push(operations[index], ...derivedOperations);
                 if (!isText) {
                     // 每一步删除后立即清理；同批 delete + add 同 ID 也必须得到新文本身份。
                     if (["delete_node", "delete_h3_segment", "replace_h3_segments"].includes(operation.type) || (operation.type === "update_node" && (["segments", "texts"].some((key) => Object.hasOwn(operation.metadata as object || {}, key) || (operation.metadataDelete as string[] || []).includes(key)) || Object.hasOwn(operation.patch as object || {}, "type")))) {
@@ -1281,10 +1284,10 @@ export class BackendDatabase {
                 .run(JSON.stringify(project), String(project.updatedAt), id);
             const source = context?.source || { clientId: "system:backend", kind: "system", label: "后台" };
             this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-                .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(operations), JSON.stringify(operationResults), String(project.updatedAt));
+                .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(committedOperations), JSON.stringify(operationResults), String(project.updatedAt));
             this.db.prepare("INSERT INTO canvas_command_receipts (operation_id, request_hash) VALUES (?, ?)").run(operationId, fingerprint);
             this.db.exec("COMMIT");
-            commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations, operationResults, source, updatedAt: String(project.updatedAt) };
+            commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations: committedOperations, operationResults, source, updatedAt: String(project.updatedAt) };
         } catch (error) {
             this.db.exec("ROLLBACK");
             throw error;

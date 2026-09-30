@@ -1,4 +1,5 @@
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
+import { characterImageKey, type CharacterImageSelection } from "@basketikun/canvas-agent/reference-contract";
 import { shallow } from "zustand/vanilla/shallow";
 import i18n from "@/i18n";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
@@ -12,13 +13,10 @@ import { orderedGroupSlots } from "@/lib/canvas/ordered-group";
 
 export type CanvasResourceKind = "image" | "video" | "audio" | "text";
 
-export type CanvasCharacterReferenceSelection = {
-    imageKeys?: string[];
-    voiceEnabled?: boolean;
-};
+export type CanvasCharacterReferenceSelection = CharacterImageSelection;
 
 export function characterReferenceKey(image: { storageKey?: string; url?: string; name?: string }, index: number) {
-    return image.storageKey || image.url || image.name || `image-${index}`;
+    return characterImageKey(image, index);
 }
 
 export type CanvasResourceReference = {

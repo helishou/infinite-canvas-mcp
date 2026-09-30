@@ -4,6 +4,8 @@ import { request } from "./backend-api";
 export type StructuredSettingScope = "webdav" | "prompt-sources" | "custom-prompts" | "image-workbench-references";
 
 export type FrontendSettings = {
+    /** Individual keys let concurrent windows pin different projects without replacing a shared list. */
+    [key: `homePinnedProject:${string}`]: boolean | undefined;
     agentModel?: string;
     agentReasoningEffort?: string;
     agentPermissionMode?: string;

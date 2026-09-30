@@ -5,6 +5,9 @@ import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { type AiConfig } from "@/stores/use-config-store";
+import { h3VideoSettingChanges, isLocalH3VideoModel, resolveH3VideoSettings } from "@/lib/h3-video-settings";
+import { normalizeVideoSizeValue } from "@/lib/video-size";
+export { normalizeVideoSizeValue } from "@/lib/video-size";
 
 const resolutionOptions = [
     { value: "720", label: "720p" },
@@ -36,13 +39,22 @@ type VideoSettingsPanelProps = {
 
 export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
-    const seconds = config.videoSeconds || "6";
+    const seconds = config.videoSeconds ?? "6";
     const size = normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
-    const resolution = normalizeVideoResolutionValue(config.vquality);
+    const h3 = isLocalH3VideoModel(config);
+    const resolution = config.vquality === "" ? "" : h3 && size !== "auto" ? String(Math.min(dimensions.width, dimensions.height)) : normalizeVideoResolutionValue(config.vquality);
+    const change = (key: Parameters<typeof onConfigChange>[0], value: string) => {
+        if (!h3 || !["size", "vquality", "videoSeconds"].includes(key)) { onConfigChange(key, value); return; }
+        for (const [field, next] of Object.entries(h3VideoSettingChanges(config, key, value))) onConfigChange(field as "size" | "vquality" | "videoSeconds", next);
+    };
+    let h3Preview: ReturnType<typeof resolveH3VideoSettings> | undefined;
+    if (h3 && size !== "auto") {
+        try { h3Preview = resolveH3VideoSettings(config); } catch { /* Invalid duration remains editable. */ }
+    }
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 720));
-        onConfigChange("size", `${key === "width" ? next : dimensions.width}x${key === "height" ? next : dimensions.height}`);
+        change("size", `${key === "width" ? next : dimensions.width}x${key === "height" ? next : dimensions.height}`);
     };
 
     return (
@@ -52,11 +64,11 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 <SettingGroup title={t("settingsPanels.video.quality")} color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
                         {resolutionOptions.map((item) => (
-                            <OptionPill key={item.value} selected={resolution === item.value} theme={theme} onClick={() => onConfigChange("vquality", item.value)}>
+                            <OptionPill key={item.value} selected={resolution === item.value} theme={theme} onClick={() => change("vquality", item.value)}>
                                 {item.label}
                             </OptionPill>
                         ))}
-                        <ResolutionInput value={resolution} theme={theme} onChange={(value) => onConfigChange("vquality", value)} />
+                        <ResolutionInput value={resolution} theme={theme} onChange={(value) => change("vquality", value)} />
                     </div>
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.size")} color={theme.node.muted}>
@@ -73,7 +85,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                                 className="flex h-[78px] cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border bg-transparent text-sm transition hover:opacity-80"
                                 style={{ borderColor: size === item.value ? theme.node.text : theme.node.stroke, color: theme.node.text }}
                                 onMouseDown={(event) => event.stopPropagation()}
-                                onClick={() => onConfigChange("size", item.value)}
+                                onClick={() => change("size", item.value)}
                             >
                                 <SizePreview width={item.width} height={item.height} color={theme.node.text} />
                                 <span>{t(`settingsPanels.video.sizes.${item.labelKey}`)}</span>
@@ -88,14 +100,15 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.seconds")} color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {secondOptions.map((value) => (
-                            <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
+                        {(h3 ? [6, 10, 12, 15] : secondOptions).map((value) => (
+                            <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => change("videoSeconds", String(value))}>
                                 {value}s
                             </OptionPill>
                         ))}
-                        <NumberInput value={seconds} min={1} max={20} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
+                        <NumberInput value={seconds} min={1} max={h3 ? 15 : 20} theme={theme} onChange={(value) => change("videoSeconds", value)} />
                     </div>
                 </SettingGroup>
+                {h3 ? <div className="text-xs leading-relaxed" style={{ color: theme.node.muted }}>{h3Preview ? t("h3Video.preview", { size: h3Preview.parameters.size, seconds: h3Preview.parameters.seconds, megapixels: h3Preview.fields.megapixels }) : t(size === "auto" ? "h3Video.autoPreview" : "h3Video.durationError")}</div> : null}
             </div>
         </ImageSettingsTheme>
     );
@@ -115,12 +128,6 @@ export function videoSizeLabel(value: string) {
 export function videoSecondsLabel(value: string) {
     if (String(value).trim() === "-1") return i18n.t("settingsPanels.video.smart");
     return `${value || "6"}s`;
-}
-
-export function normalizeVideoSizeValue(value: string) {
-    if (value === "auto") return "auto";
-    if (/^\d+x\d+$/.test(value || "")) return value;
-    return ["9:16", "2:3", "3:4"].includes(value) ? "720x1280" : "1280x720";
 }
 
 export function normalizeVideoResolutionValue(value: string) {

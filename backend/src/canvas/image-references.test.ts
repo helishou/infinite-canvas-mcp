@@ -5,6 +5,16 @@ import { resolveCanvasImageReferences } from "./image-references.js";
 
 const image = (id: string, title: string) => ({ id, type: "image", title, metadata: { storageKey: `image:${id}`, mimeType: "image/png" } });
 
+test("失效的角色选图恢复当前主图，Backend 不再静默漏传人物参考", () => {
+    const project = { id: "project", nodes: [
+        { id: "config", type: "config", metadata: { characterReferences: { char: { imageKeys: ["image:deleted"] } } } },
+        { id: "char", type: "character", metadata: { characterPrimaryIndex: 1, characterImages: [
+            { storageKey: "image:identity" }, { storageKey: "image:primary" },
+        ] } },
+    ], connections: [{ id: "ref", fromNodeId: "char", toNodeId: "config" }] };
+    assert.deepEqual(resolveCanvasImageReferences(project, "config")?.map((ref) => ref.storageKey), ["image:primary"]);
+});
+
 test("图片生成从结果节点沿配置节点回溯全部参考图并保留顺序", () => {
     const project = {
         id: "project-1",

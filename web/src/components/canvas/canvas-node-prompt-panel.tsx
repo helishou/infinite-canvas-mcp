@@ -11,6 +11,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasGenerationControls } from "./canvas-generation-controls";
+import { getNodeImageReferenceCount } from "./canvas-node-image-reference-count";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
 import { CanvasCollaborativeText } from "./canvas-collaborative-text";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
@@ -63,10 +64,10 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
         : undefined;
     const historyReferences = activeHistoryImage?.generationSnapshot?.references;
     const visibleHistoryReferences = loopInputCount > 0 ? undefined : historyReferences;
-    // 当前版本已恢复时按该版本的图片数路由工作流，否则按实时连接和 @ 引用计算。
-    const referenceCount = visibleHistoryReferences !== undefined
-        ? visibleHistoryReferences.length
-        : new Set([...connectedNodes.filter((item) => item.type === CanvasNodeType.Image).map((item) => item.id), ...mentionReferences.filter((item) => item.kind === "image").map((item) => item.nodeId)]).size + loopInputCount;
+    // 已恢复版本使用快照；实时场景与生成器共用输入解析，@ 候选不是已使用参考。
+    const referenceCount = useMemo(() => getNodeImageReferenceCount(
+        node, nodes, connectedNodes, prompt, loopInputCount, visibleHistoryReferences?.length,
+    ), [node, nodes, connectedNodes, prompt, loopInputCount, visibleHistoryReferences]);
     // 音频场景要按「带了几段参考音频」路由工作流（0 = 纯文本，≥1 = 参考音色克隆），
     // 与图片引用数是两套计数，不能复用 referenceCount。
     const audioReferenceCount = new Set([

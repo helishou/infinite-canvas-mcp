@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
     applyCharacterGroupEdits,
+    promoteCharacterSourceReferences,
     refsForSegment,
     refsFromCharacterGroup,
     syncCharacterGroupFromSource,
@@ -87,6 +88,32 @@ const sourceOutfits = [
     { url: "https://media.test/shen-zhao-2.png", name: "婚后·常服", storageKey: "image:shen-zhao-2" },
     { url: "https://media.test/shen-zhao-3.png", name: "夜行·斗篷", storageKey: "image:shen-zhao-3" },
 ];
+
+test("图片源转角色后原位接入角色组，保留绑定、顺序和 Clip 职责", () => {
+    const segment: H3Segment = { id: "converted", taskMode: "ref2va", referenceBindings: [
+        { id: "before", assetId: "a", label: "场景", role: "scene", mediaType: "image", url: "https://media.test/scene.png" },
+        { id: "original", assetId: "b", label: "智能生成", role: "other", mediaType: "image", sourceNodeId: "converted-source", url: sourceOutfits[1].url, storageKey: sourceOutfits[1].storageKey, tags: ["keep"] },
+        { id: "disabled", assetId: "c", label: "保留参考", role: "other", mediaType: "image", url: "https://media.test/disabled.png", enabled: false },
+    ] };
+    const source = { characterName: "沈昭宁", characterNodeId: "converted-source", outfits: sourceOutfits };
+    const converted = promoteCharacterSourceReferences(segment, source);
+    const refs = refsForSegment(converted);
+    assert.deepEqual(refs.map((ref) => ref.bindingId), ["before", "original"]);
+    assert.equal(refs[1].name, "沈昭宁 · 婚后·常服");
+    assert.equal(refs[1].role, "character_turnaround");
+    assert.equal(refs[1].subjectId, "converted-source");
+    assert.equal(refs[1].assetId, "b");
+    assert.deepEqual(refs[1].tags, ["keep"]);
+    assert.deepEqual(converted.referenceBindings?.[2], segment.referenceBindings?.[2]);
+    assert.deepEqual(groupFrom(converted).outfits.map((outfit) => outfit.enabled), [false, true, false]);
+    assert.equal(promoteCharacterSourceReferences(converted, source), converted);
+    const refreshed = syncCharacterGroupFromSource(converted, groupFrom(converted).id, source);
+    assert.deepEqual(refsForSegment(refreshed).map((ref) => ref.bindingId), ["before", "original"]);
+    const storyboard = { ...segment, referenceBindings: segment.referenceBindings!.map((binding) => binding.id === "original" ? { ...binding, role: "storyboard" as const } : binding) };
+    assert.equal(promoteCharacterSourceReferences(storyboard, source), storyboard);
+    const unrelated = { ...source, characterNodeId: "unrelated" };
+    assert.equal(promoteCharacterSourceReferences(segment, unrelated), segment);
+});
 
 function groupFrom(segment: H3Segment): H3CharacterGroup {
     const group = Object.values(segment.h3CharacterGroups || {})[0];

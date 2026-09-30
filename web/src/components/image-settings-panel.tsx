@@ -49,9 +49,13 @@ type ImageSettingsPanelProps = {
     hideStandardImageOptions?: boolean;
     /** ComfyUI 模型但没解析出工作流字段：提示原因，同时保持标准项可见。 */
     workflowParamsMissing?: boolean;
+    /** 缺参数是因为该输入场景被模型配置标记为「不支持」，而不是配置读不到。 */
+    workflowParamsBlockedByScenario?: boolean;
+    /** 诊断：本次参考图数量与命中的输入场景。 */
+    debugScenario?: string;
 };
 
-export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10, customFields, customFieldValues, onCustomFieldChange, hideStandardImageOptions = false, workflowParamsMissing = false }: ImageSettingsPanelProps) {
+export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10, customFields, customFieldValues, onCustomFieldChange, hideStandardImageOptions = false, workflowParamsMissing = false, workflowParamsBlockedByScenario = false, debugScenario }: ImageSettingsPanelProps) {
     const { t } = useTranslation();
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const snapDimensionToStep = config.imageAlign16 !== false;
@@ -94,8 +98,13 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     <div className="space-y-1">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
                         <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.75 }}>
-                            {t("settingsPanels.image.workflowFieldsMissing")}
+                            {t(workflowParamsBlockedByScenario ? "settingsPanels.image.workflowFieldsScenarioUnsupported" : "settingsPanels.image.workflowFieldsMissing")}
                         </div>
+                    </div>
+                ) : null}
+                {debugScenario ? (
+                    <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.6 }}>
+                        {debugScenario}
                     </div>
                 ) : null}
                 {!hideStandardImageOptions && <div className="space-y-2.5">

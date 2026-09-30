@@ -128,6 +128,7 @@ test("角色参考默认只用主图，存量服装选择保持原样", () => {
     assert.deepEqual(resolve(baseTarget.metadata), ["media/outfit-b.png"]);
     assert.deepEqual(resolve({ ...baseTarget.metadata, characterReferences: { character: { imageKeys: ["media/outfit-a.png"] } } }), ["media/outfit-a.png"]);
     assert.deepEqual(resolve({ ...baseTarget.metadata, characterReferences: { character: { imageKeys: [] } } }), []);
+    assert.deepEqual(resolve({ ...baseTarget.metadata, characterReferences: { character: { imageKeys: ["media/deleted.png"] } } }), ["media/outfit-b.png"]);
 });
 
 test("循环节点按轮次选择上游图片并渲染循环变量", () => {

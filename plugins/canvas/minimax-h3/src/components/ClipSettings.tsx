@@ -6,6 +6,7 @@ import { h3LoraOptions, h3ModelOptions, H3_LORA_STRENGTH_MIN, H3_LORA_STRENGTH_M
 import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
 import { useH3DropdownOpen } from "../hooks/useH3DropdownOpen";
 import { H3_STYLE_TEMPLATES, styleTemplateFromPrompt } from "../../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
+import { H3_VIDEO_MEGAPIXELS as megapixels } from "../../../../../canvas-agent/src/plugins/minimax-h3/video-settings";
 import type { H3Segment } from "../types";
 
 type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; segment?: H3Segment; patch: (value: Partial<H3Segment>) => void };
@@ -17,7 +18,6 @@ const encoderDevices = ["default", "cpu"];
 const precisions = ["default", "fp8_e4m3fn", "fp8_e5m2"];
 const attentionModes = ["disabled", "auto", "sageattn_qk_int8_pv_fp16_cuda", "sageattn_qk_int8_pv_fp16_triton", "sageattn_qk_int8_pv_fp8_cuda", "sageattn_qk_int8_pv_fp8_cuda++", "sageattn3", "sageattn3_per_block_mean", "H3专用Sage加速"];
 const ratios = ["16:9 (Widescreen)", "9:16 (Portrait)", "1:1 (Square)", "4:3", "3:4", "21:9"];
-const megapixels = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.98, 1, 1.2, 1.5, 1.8, 2];
 const samplers = ["res_multistep", "南风采样器", "er_sde", "euler", "euler_cfg1_perpneg", "ddim", "uni_pc"];
 const schedulers = ["simple", "normal", "karras", "exponential", "sgm_uniform", "ddim_uniform"];
 const resizeModes = ["倍数缩放", "目标尺寸"];

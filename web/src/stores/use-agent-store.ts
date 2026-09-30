@@ -2,7 +2,7 @@ import { create } from "zustand";
 import i18n from "@/i18n";
 
 import { getBackendUrl } from "@/services/backend-api";
-import { fetchSettings, saveSettings } from "@/services/settings-api";
+import { fetchSettings, saveSettings, type FrontendSettings } from "@/services/settings-api";
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
@@ -101,7 +101,7 @@ function debouncedSaveAgentSettings(patch: Partial<AgentStore>) {
     if (saveSettingsTimer) clearTimeout(saveSettingsTimer);
     saveSettingsTimer = setTimeout(() => {
         saveSettingsTimer = null;
-        const s: Record<string, unknown> = {};
+        const s: Partial<FrontendSettings> = {};
         if (patch.width !== undefined) s.agentPanelWidth = patch.width;
         if ((patch as Partial<AgentStore>).permissionMode !== undefined) s.agentPermissionMode = (patch as Partial<AgentStore>).permissionMode;
         if (patch.model !== undefined) s.agentModel = patch.model;

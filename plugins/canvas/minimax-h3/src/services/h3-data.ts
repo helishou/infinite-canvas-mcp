@@ -442,6 +442,46 @@ export function syncCharacterGroupFromSource(
     return setSegmentCharacterGroups(segment, { ...(segment.h3CharacterGroups || {}), [groupId]: nextGroup });
 }
 
+/** 原图片就地转为角色后，把同源图片引用接入角色组，保留 Clip 的绑定与顺序。 */
+export function promoteCharacterSourceReferences(segment: H3Segment, source: UpsertCharacterGroupInput): H3Segment {
+    if (!source.characterNodeId) return segment;
+    const refs = refsForSegment(segment);
+    const matches = refs.flatMap((ref, index) => {
+        if (ref.groupId || ref.nodeId !== source.characterNodeId || ref.type !== "image") return [];
+        // 已明确指定的分镜、场景等职责仍属于当前 Clip，不能因源节点类型变化而覆盖。
+        if (!["other", "character_identity", "character_turnaround"].includes(inferReferenceRole(ref))) return [];
+        const outfitIndex = source.outfits.findIndex((outfit) => sameRef(ref, { ...outfit, type: "image", name: outfit.name }));
+        return outfitIndex < 0 ? [] : [{ ref, index, outfitIndex }];
+    });
+    if (!matches.length) return segment;
+    const existing = findCharacterGroupBySource(segment, source);
+    const groupId = existing?.id || genGroupId();
+    const outfits = source.outfits.map((outfit, index) => {
+        const previous = existing?.outfits.find((item) => outfitKey(item) === outfitKey(outfit));
+        return { ...outfit, id: previous?.id || genOutfitId(), enabled: previous?.enabled || matches.some((match) => match.outfitIndex === index) };
+    });
+    const group: H3CharacterGroup = {
+        ...existing, id: groupId, characterName: source.characterName,
+        characterNodeId: source.characterNodeId, characterAssetId: source.characterAssetId,
+        subjectId: existing?.subjectId || source.characterNodeId, outfits, outfitEnabled: true,
+        voice: source.voice, voiceEnabled: existing?.voiceEnabled ?? false,
+    };
+    const nextRefs = refs.map((ref, index) => {
+        const match = matches.find((item) => item.index === index);
+        if (!match) return ref;
+        const outfit = outfits[match.outfitIndex];
+        return { ...ref, name: `${source.characterName} · ${outfit.name}`, groupId, outfitId: outfit.id,
+            subjectId: group.subjectId, role: inferReferenceRole(ref) === "other" ? outfit.role || "character_turnaround" : ref.role };
+    });
+    const next = withSegmentRefs({ ...segment, h3CharacterGroups: { ...segment.h3CharacterGroups, [groupId]: group } }, nextRefs);
+    // refsForSegment 是启用引用的视图；转换不能丢掉用户保留但禁用的绑定。
+    if (segment.referenceBindings?.length) {
+        const updated = new Map(nextRefs.map((ref, index) => [ref.bindingId, refToBinding(ensureReferenceIdentity(ref, index))]));
+        next.referenceBindings = segment.referenceBindings.map((binding) => updated.get(binding.id) || binding);
+    }
+    return next;
+}
+
 export function removeCharacterGroup(segment: H3Segment, groupId: string): H3Segment {
     const groups = { ...(segment.h3CharacterGroups || {}) };
     if (!groups[groupId]) return segment;

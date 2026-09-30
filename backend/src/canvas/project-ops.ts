@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { referenceBindingsOf } from "@basketikun/canvas-agent/reference-contract";
+import { characterReferenceUpdates, referenceBindingsOf } from "@basketikun/canvas-agent/reference-contract";
 
 export type CanvasOperation = Record<string, unknown> & { type: string };
 
@@ -63,7 +63,7 @@ function assertFullSegmentsReplacement(node: Record<string, unknown>, incomingSe
     }
 }
 
-export function applyCanvasProjectOperations(project: Record<string, unknown>, operations: CanvasOperation[], options: { committedReplay?: boolean } = {}) {
+export function applyCanvasProjectOperations(project: Record<string, unknown>, operations: CanvasOperation[], options: { committedReplay?: boolean; derivedOperations?: CanvasOperation[] } = {}) {
     const nodes = nodesOf(project);
     const connections = connectionsOf(project);
     const results: CanvasOperationResult[] = [];
@@ -81,6 +81,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
 
     for (const operation of operations) {
         const result: CanvasOperationResult = { type: operation.type, ok: true };
+        const derived: CanvasOperation[] = [];
         if (!operation.type) throw new Error("画布操作缺少 type");
 
         if (operation.type === "text_suggestion") {
@@ -116,6 +117,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const id = String(operation.id || "");
             const node = nodes.find((item) => String(item.id) === id);
             if (!node) throw new Error(`找不到节点：${id}`);
+            const previousNode = { ...node, metadata: { ...recordOf(node.metadata) } };
             const previousGroupId = String(recordOf(node.metadata).groupId || "");
             Object.assign(node, operation.patch || {});
             if (operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)) {
@@ -141,6 +143,14 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const nextGroupId = String(recordOf(node.metadata).groupId || "");
             if (previousGroupId !== nextGroupId) {
                 syncOrderedGroupMembership(nodes, id, previousGroupId || undefined, Boolean((operation.patch as Record<string, unknown> | undefined)?.position));
+            }
+            if (!options.committedReplay) {
+                for (const update of characterReferenceUpdates(previousNode, node, nodes)) {
+                    const target = nodes.find((item) => String(item.id) === update.id)!;
+                    target.metadata = { ...recordOf(target.metadata), ...update.metadata };
+                    derived.push({ type: "update_node", ...update });
+                }
+                options.derivedOperations?.push(...derived);
             }
         } else if (operation.type === "update_h3_segment") {
             const nodeId = String(operation.nodeId || "");
@@ -356,6 +366,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             throw new Error(`未知画布操作：${operation.type}`);
         }
         results.push(result);
+        results.push(...derived.map((operation) => ({ type: operation.type, ok: true })));
     }
 
     // 绑定是用户意图；仅在素材第一次进入项目时登记媒体，不把 Clip 职责反写到共享资产。

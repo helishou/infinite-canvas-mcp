@@ -19,6 +19,17 @@ import { test } from "node:test";
 import { applyBackendCanvasDelta, diffCanvasProject, detectCanvasConflicts, isLocalProjectNewer, type CanvasProject } from "./use-canvas-store";
 import { reorderCanvasReferenceConnections } from "@/lib/canvas/canvas-resource-references";
 
+test("角色主图差量更新下游选择且不改旧基线或历史参考", () => {
+    const base = makeProject([
+        { id: "char", type: "character", metadata: { characterPrimaryIndex: 0, characterImages: [{ storageKey: "image:a" }, { storageKey: "image:b" }] } } as any,
+        { id: "target", type: "config", metadata: { characterReferences: { char: { imageKeys: ["image:a"], voiceEnabled: false } }, images: [{ id: "old", generationSnapshot: { references: [{ storageKey: "image:a" }] } }] } } as any,
+    ]);
+    const next = applyBackendCanvasDelta(base, [{ type: "update_node", id: "char", metadata: { characterPrimaryIndex: 1 } }], 2);
+    assert.deepEqual(next.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:b"]);
+    assert.deepEqual(base.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:a"]);
+    assert.deepEqual(next.nodes[1].metadata?.images, base.nodes[1].metadata?.images);
+});
+
 test("列表摘要只提交列表字段，不把未加载的空节点解释成删除", () => {
     const base = makeProject([makeH3Node("h", [])]);
     const summary = { ...base, summary: { nodeCount: 1, connectionCount: 0 }, nodes: [], title: "新名称" };

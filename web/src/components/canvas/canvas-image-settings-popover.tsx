@@ -7,7 +7,7 @@ import { useTranslation } from "react-i18next";
 import { ImageSettingsPanel, imageQualityLabel, imageSizeLabel } from "@/components/image-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, type AiConfig } from "@/stores/use-config-store";
+import { modelScenarioUnsupported, resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, type AiConfig } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField, workflowRequiresPrompt, type WorkflowDetail } from "@/services/api/workflows";
 import { migrateWorkflowParams, reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
 
@@ -128,6 +128,12 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     const hideStandardImageOptions = showsWorkflowParams;
     // ComfyUI 模型但没解析出参数：明确说明原因，不再给一个看不出所以然的空面板。
     const workflowParamsMissing = isLocalCustomWorkflow && !showsWorkflowParams;
+    // 缺参数有两种完全不同的原因：带参考图时该场景被配成「不支持」，以及真的读不到字段配置。
+    // 之前一律说「读取不到」，会把「模型不支持这种输入」误导成配置故障。
+    const workflowParamsBlockedByScenario = modelScenarioUnsupported(config, config.model, referenceCount);
+    // 把「本次参考图数量 → 命中的场景」直接显示出来：此前这个数字只存在于代码里，
+    // 参数不显示时无法判断到底是没配字段还是场景不支持，只能靠猜。
+    const scenario = referenceCount <= 0 ? "文生" : referenceCount === 1 ? "单图" : "多图";
 
     useEffect(() => {
         if (!workflowDetail || workflowDetail.name !== workflowName || !onComfyParamsChange) return;
@@ -167,6 +173,8 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                 } : undefined}
                 hideStandardImageOptions={hideStandardImageOptions}
                 workflowParamsMissing={workflowParamsMissing}
+                workflowParamsBlockedByScenario={workflowParamsBlockedByScenario}
+                debugScenario={`${scenario} · ${referenceCount} 张参考图`}
             />
         ) : null;
 
@@ -203,6 +211,8 @@ function ImageSettingsPortal({
     onCustomFieldChange,
     hideStandardImageOptions,
     workflowParamsMissing,
+    workflowParamsBlockedByScenario,
+    debugScenario,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -215,6 +225,8 @@ function ImageSettingsPortal({
     onCustomFieldChange?: Parameters<typeof ImageSettingsPanel>[0]["onCustomFieldChange"];
     hideStandardImageOptions: boolean;
     workflowParamsMissing: boolean;
+    workflowParamsBlockedByScenario: boolean;
+    debugScenario: string;
 }) {
     const width = 356;
     const gap = 8;
@@ -249,6 +261,8 @@ function ImageSettingsPortal({
                 onCustomFieldChange={onCustomFieldChange}
                 hideStandardImageOptions={hideStandardImageOptions}
                 workflowParamsMissing={workflowParamsMissing}
+                workflowParamsBlockedByScenario={workflowParamsBlockedByScenario}
+                debugScenario={debugScenario}
             />
         </div>,
         document.body,

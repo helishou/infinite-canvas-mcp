@@ -5,6 +5,65 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## H3 atomic batch configuration (1.5.8)
+
+- Source, isolated MCP HTTP transaction tests, and a fresh stdio development smoke test pass. The configured live HTTP Backend still serves the previous catalog; do not use a script or stdio connection as a production substitute.
+- Before an authorized reload, recheck that no tasks are queued, running, or awaiting confirmation. After reload, verify that the configured HTTP server and Hermes both discover `h3_update_clips`. In an isolated six-Clip canvas, confirm one write RPC, one revision increment, exact readback, and whole-batch rejection on invalid references or stale revision. Delete and verify only the test canvas; do not generate media or modify production canvases.
+
+## H3 model cache across consecutive tasks
+
+- With model caching enabled, run consecutive H3 tasks using the same model, encoder, and VAEs. Successful completion should not clear the global execution cache. A native NanFeng V15 node declaring the new capability should reuse Loader caches while still releasing VRAM before sampling and decoding. Compare loading logs and timings between the first and subsequent runs.
+- Changes to model files, encoders, VAEs, or VRAM reservation should invalidate the corresponding preparation. Disabling caching or a failed task should clear caches. Do not send unsupported fields to older native nodes or describe CPU Loader-cache reuse as keeping all models permanently resident on the GPU.
+
+## H3 workbench parameter adaptation
+
+- Select each local H3 model and change resolution, W/H, size presets, and duration. Resolution changes should update dimensions; dimension changes should update the short-edge resolution. Show the native aspect-ratio, pixel-count, and grid-aligned dimensions. Task inputs and generation records should match those effective values.
+- H3 duration presets are 6/10/12/15 seconds, with integer inputs from 1 to 15. Reject out-of-range submissions. Ordinary API video models retain their previous duration options.
+- Automatic size follows the first-frame aspect ratio for image-to-video and first/last frames, and the workflow aspect ratio for text-to-video and multi-reference. Resolution still controls pixel count. Check legacy 9:16 configuration against displayed W/H and preserve effective inputs in historical records after reload.
+
+## Four local H3 video models
+
+- The local ComfyUI video catalog should contain MiniMax H3 text-to-video, first/last frames, multi-reference, and image-to-video models. Text-to-video takes no image; image-to-video takes one first frame; first/last frames take two ordered images; multi-reference takes ordered character or scene reference images.
+- Check prompt, duration, aspect ratio, megapixels, sampling, and seed fields. Initial values inherit the H3 defaults at registration. Unsupported input scenarios must not fall back to another mode. Reject a third image for first/last frames rather than silently dropping it. Unused native multi-reference slots should retain their valid empty value.
+
+## Local workflow tasks in the video workbench
+
+- Select a ComfyUI video model without an API key and generate with zero, one, or multiple reference images. Submit the local workflow selected by the model's input scenario routing without asking for an API key. Explicitly unsupported scenarios should show a workflow configuration error without falling back to an API.
+- Reload or reopen the video workbench during generation. Resume polling the saved Backend task ID and display its output on success. Show workflow errors, cancellation, and missing-media failures. API video channels should still validate their keys.
+
+## Delete selected canvas nodes
+
+- Select one or more regular nodes and press Delete. The selected nodes and connected edges should be removed; Ctrl/Cmd+Z should restore them. Delete must not remove H3 nodes. In a mixed selection, remove only regular nodes and keep H3 nodes selected. Delete/Backspace should still remove a selected edge.
+- Press Delete in a prompt, input, rich-text editor, or a region marked to ignore canvas shortcuts. Only the current editing content should change. Backspace should not delete selected nodes.
+
+## Character image changes update downstream references
+
+- Connect a character to a regular generation node and switch its primary image. The reference card and the next generation input should follow immediately. Replacing or removing images through the web or MCP should also update references, including replacements with the same image count. Reloading and another window should show the same selection.
+- Existing references to removed character images should use the current primary image. Preserve valid independent outfit selections and explicitly disabled image inputs. Keep historical output reference snapshots unchanged and do not generate again automatically.
+
+## Character details in H3 storyboard prompts
+
+- Fill in a character node description, then generate a prompt in the H3 storyboard editor. Automatically generated subject definitions should omit that description. Check image/outfit references and characters with only voice enabled; character names, picture numbering, outfit details, and voice information should remain.
+- Manually enter a description in the storyboard editor's subject definitions and generate the prompt. That content should remain, and existing subject definitions should not be cleared automatically.
+
+## Home workspace
+
+- Reload home or return from an already-loaded canvas with portrait, landscape, video, and placeholder covers. Loading media must not resize the hero or move the project list. Late logs or drama data must not replace an already-selected cover for the same project version; a new update timestamp may refresh it.
+
+- Home lists real canvases by update time, with name search, canvas/drama/saved filters, grid/list views, and create-and-open. Bookmarks are stored in Backend; the view preference stays local. Verify reloads and bookmarks for different projects from concurrent windows.
+- Covers use loaded recent outputs, drama covers, or media from already-loaded nodes. Visible cards without a cover look up their project's most recent successful record, then fall back to an overview if no media is available; home never fetches every full canvas. Recent images, videos, and audio can be previewed and linked to their source canvas when it still exists.
+- Recent tasks show Backend status, progress, and failures and refresh on task events. Check disconnection, partial request failure, empty states, both themes and languages, and narrow screens. Generation, retry, and concurrency policies are unchanged.
+
+## H3 image references converted to characters
+
+- Convert an ordinary image or smart image node already referenced by an H3 Clip into a character in place. The reference area should show the character name and category and expose outfit settings, while preserving the original image, binding, and order without duplicate references.
+- Reopening the canvas should also recover existing ordinary image references from the same character source as character groups. References explicitly assigned storyboard or scene duties should retain those duties.
+
+## H3 live video preview playback
+
+- With realtime preview enabled during H3 generation, each incoming video preview should start muted from the beginning and loop until the next preview arrives. New previews should start automatically without moving the Clip timeline, changing the selected Clip, or continuing into an existing output.
+- Once generation finishes or the live preview is removed, ordinary outputs should still require manual playback; a single Clip should stop at its end, and Play All should retain its existing sequential playback. Image previews should remain still images.
+
 ## H3 visual style template row
 
 - In Settings → Model and basic parameters, the visual style template label and its empty or selected value should stay on one line at the same row height as nearby model fields. Long options should still open, search, select, and clear. Check common panel widths and both themes.
@@ -68,6 +127,9 @@ description: Implemented changes that still need manual verification
 - Keep an old draft blocked by a replaced Clip document, then edit and generate from a different smart image node in the same canvas. The current image prompt should sync and submit while the old Clip draft stays recoverable. A sync failure in the image prompt itself must still stop generation.
 
 ## References on a second smart image generation
+
+- After a smart image node produces its first result, open its settings with no live image input and no explicitly restored historical references. The settings should still show the text-to-image workflow fields, without treating the node's output or `@` candidates as used references. Check one image, two images, two selected character outfits, and prompt `@` selections against the generator's actual inputs.
+- Explicitly restored results should still use their reference snapshot. Clearing historical references should return to live inputs. Current loop inputs and ordinary image-node self-edit references should retain their behavior.
 
 - Connect a text node to a smart image node, then connect that image node to another generator that also has its own image reference. After the first result, generate again from the first node: it should still route as text to image, while the downstream generator retains its own image reference.
 
@@ -1404,7 +1466,6 @@ description: Implemented changes that still need manual verification
 
 + H3 卡死解锁：让节点停在「生成中」但无 taskId（或刷新页面中断轮询），确认按钮显示「重置并重新生成」，点击后立即重跑；不点击时最多 120 秒自动恢复为可点状态。
 
-+ 画布删除节点快捷键：选中节点按 Delete/Backspace 不应删除节点；选中连线按 Delete 仍能删除连线。
 
 + 整理布局（补充场景）：确认①**任意形状节点都不重叠**（链、菱形、分叉树、4×4 全连接、混合尺寸簇）；②H3 导演台等 park 节点仍单独排在最右一列且不与其它节点重叠；③真实坐标下（minX/minY 非零）整体不再被额外偏移。
 

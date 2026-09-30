@@ -75,8 +75,11 @@ Clip ID / 对应镜头 ID（合并时列全部镜头、依据、组内顺序和�
 
 ### 标准顺序
 
-1. **定向读取**：用 `h3_get_clip(projectId, nodeId, segmentId)`，或读取同等精度的 node/segment，确认目标 segment、最近已完成来源、角色组、binding、prompt、运行态和已有结果。不要先拉取整张画布。需要插入/改序时，先另存完整 `metadata.segments` 快照并读取最新 collaboration revision；优先逐段 `update_h3_segment` 修改 `start`/`title`。`replace_h3_segments` 会替换段数组顺序和成员，并按稳定 segment ID 合并字段；省略字段继承旧值，显式传入空值才清空。写后立即回读目标片段的 references、characterGroups、prompt 和时间轴。
-2. **准备输入**：构造一次 `h3_prepare_clip` 请求：
+- 执行编排按 [原生 MCP 操作预算](../../references/native-mcp-operation-budget.md) §二–四：独立定向读取同轮并行、关联字段合并写入、同项目写入串行；无并发编辑的简单配置可末尾集中核验，复杂引用变更、活动任务、CAS 冲突和部分成功立即定向回读。
+- 本节所有 `h3_prepare_clip` 示例仅在本轮实时 schema 确实提供该工具时适用；源码、旧文档和压缩摘要不证明可用。不提供时按当前注册的 `h3_update_clip`、`h3_set_reference_bindings`、`h3_bind_existing_character_groups` 及分镜写入工具执行必要步骤，每次引用变更核对实际映射，生成前完整预检；分步写入不能宣称原子成功，不用脚本模仿不可用工具。
+
+1. **定向读取**：用 `h3_get_clip` 的 `include` 一次取本次需要的 prompt/references/runtime，确认目标 segment、最近已完成来源、角色组、binding、运行态和已有结果；多个独立 Clip 在同一轮并行，不先拉整张画布。需要插入/改序时，先保留完整段目录、受影响段字段及最新 collaboration revision；优先逐段 `update_h3_segment` 修改 `start`/`title`。`replace_h3_segments` 会替换段数组顺序和成员，并按稳定 segment ID 合并字段；省略字段继承旧值，显式传入空值才清空。复杂引用/时间线变更立即核对目标片段，简单配置按共享操作预算集中回读实际值。
+2. **准备输入**：若实时 schema 提供原子准备工具，构造一次 `h3_prepare_clip` 请求；否则按上面的已注册分步路径准备同等完整输入，不猜旧参数：
    - `inheritFromSegmentId`：明确指定已完成来源；省略时由工具选择目标之前最近已完成 segment；
    - `patch`：只放本次要改的剧情、分镜、时长和提示词字段，以及用户明确要求改变的运行参数；
    - `referenceBindings`：完整的分镜/场景/道具 binding 集合；

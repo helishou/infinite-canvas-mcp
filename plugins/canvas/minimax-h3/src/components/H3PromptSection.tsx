@@ -281,10 +281,8 @@ function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment,
       const name = group?.characterName || String(metadata.characterName || characterNode?.title || (isCharacter ? ref.name : roleFallbackName[role] || "Reference"));
       const subjectId = canonicalSubjectId(name, group?.subjectId || group?.characterNodeId || id);
       const englishName = typeof metadata.characterEnglishName === "string" ? metadata.characterEnglishName.trim() : "";
-      const profile = [
-        typeof metadata.characterDescription === "string" ? metadata.characterDescription.trim() : "",
-        role === "storyboard" && isPictureAnchor(ref, role) ? "" : referenceDescription,
-      ].filter((value, index, all) => value && all.indexOf(value) === index).join("; ");
+      // 角色节点描述不自动带入分镜；主体资料只取本次参考，手动实体定义仍由 overrides 保留。
+      const profile = role === "storyboard" && isPictureAnchor(ref, role) ? "" : referenceDescription;
       const entry = subjects.get(subjectId) || { id: subjectId, name, englishName: englishName || undefined, aliases: new Set<string>(), shotMarkers: new Set<string>(), profile, outfits: new Set<string>(), pictures: [], role };
       [id, group?.id, group?.subjectId, group?.characterNodeId, group?.characterName, characterNode?.id, characterNode?.title, metadata.characterName, englishName]
         .forEach((alias) => { if (typeof alias === "string" && alias.trim()) entry.aliases.add(alias.trim()); });
@@ -334,8 +332,7 @@ function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment,
     const characterNode = group?.characterNodeId ? ctx.getNode(group.characterNodeId) : ctx.getNode(reference.subjectId!);
     const metadata = (characterNode?.metadata || {}) as Record<string, unknown>;
     const name = group?.characterName || String(metadata.characterName || characterNode?.title || reference.subjectName || reference.subjectId);
-    const profile = [typeof metadata.characterDescription === "string" ? metadata.characterDescription.trim() : "", group?.voice?.description || reference.description]
-      .filter((value, index, all) => value && all.indexOf(value) === index).join("; ");
+    const profile = group?.voice?.description || reference.description;
     const entry = subjects.get(subjectId) || { id: subjectId, name, englishName: undefined, aliases: new Set<string>(), shotMarkers: new Set<string>(), profile, outfits: new Set<string>(), pictures: [], role: "character_identity" };
     [reference.subjectId!, group?.id, group?.subjectId, group?.characterNodeId, group?.characterName, characterNode?.id, characterNode?.title, metadata.characterName]
       .forEach((alias) => { if (typeof alias === "string" && alias.trim()) entry.aliases.add(alias.trim()); });
