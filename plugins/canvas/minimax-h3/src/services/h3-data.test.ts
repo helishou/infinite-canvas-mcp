@@ -7,8 +7,80 @@ import {
     refsFromCharacterGroup,
     syncCharacterGroupFromSource,
     upsertCharacterGroup,
+    withSegmentRefs,
+    removeCharacterGroup,
+    segmentRefsPatch,
 } from "./h3-data";
 import type { H3CharacterGroup, H3Segment } from "../types";
+
+import { characterGroupBindings } from "../../../../../canvas-agent/src/canvas/reference-contract";
+
+function derivedFixture(): H3Segment {
+    const groups = Object.fromEntries(["su", "shen"].map((id) => [id, {
+        id, characterName: id, characterNodeId: `node-${id}`,
+        outfits: [{ id: `outfit-${id}`, name: "四视图", url: `https://media.test/${id}?token=new`, storageKey: `image:${id}`, enabled: true }],
+        voiceEnabled: false,
+    }]));
+    return { id: "derived", taskMode: "ref2va", h3CharacterGroups: groups, referenceBindings: [
+        { id: "scene", assetId: "scene-asset", label: "场景", role: "scene", mediaType: "image", storageKey: "image:scene" },
+        { id: "disabled", assetId: "disabled-asset", label: "保留", role: "other", mediaType: "image", storageKey: "image:disabled", enabled: false, tags: ["keep"] },
+    ] };
+}
+
+test("手工场景与两个角色组共享解析得到三张参考，ID 来源顺序对齐后台", () => {
+    const segment = derivedFixture();
+    const refs = refsForSegment(segment);
+    assert.deepEqual(refs.map((ref) => ref.storageKey), ["image:scene", "image:su", "image:shen"]);
+    const expected = Object.values(segment.h3CharacterGroups!).flatMap((group) => characterGroupBindings(group as unknown as Record<string, unknown>));
+    assert.deepEqual(refs.slice(1).map((ref) => [ref.bindingId, ref.assetId, ref.nodeId]), expected.map((binding) => [binding.id, binding.assetId, binding.sourceNodeId]));
+});
+
+test("历史角色快照由当前组刷新且删除孤儿，手工编辑不双写派生项并保留禁用绑定", () => {
+    const segment = derivedFixture();
+    segment.referenceBindings!.push(
+        { id: "old-su", assetId: "old-asset", label: "旧图", role: "character_turnaround", mediaType: "image", groupId: "su", outfitId: "outfit-su", storageKey: "image:old", url: "https://media.test/old?token=old" },
+        { id: "orphan", assetId: "orphan-asset", label: "已删", role: "other", mediaType: "image", groupId: "deleted", storageKey: "image:orphan" },
+    );
+    const refs = refsForSegment(segment);
+    assert.deepEqual(refs.map((ref) => ref.storageKey), ["image:scene", "image:su", "image:shen"]);
+    const edited = withSegmentRefs(segment, [...refs, { type: "image", url: "", storageKey: "image:prop", name: "道具" }]);
+    assert.equal(edited.referenceBindings?.some((binding) => binding.groupId), false);
+    assert.deepEqual(edited.referenceBindings?.find((binding) => binding.id === "disabled"), segment.referenceBindings![1]);
+    assert.equal(segmentRefsPatch(refs).referenceBindings?.length, 1);
+    assert.deepEqual(refsForSegment(removeCharacterGroup(edited, "su")).map((ref) => ref.storageKey), ["image:scene", "image:prop", "image:shen"]);
+});
+
+test("角色服装声线关闭与重开不泄漏快照也不删除可恢复目录", () => {
+    const segment = derivedFixture();
+    segment.h3CharacterGroups!.su.voice = { url: "https://media.test/voice", storageKey: "audio:su", name: "声线" };
+    segment.h3CharacterGroups!.su.voiceEnabled = true;
+    const off = applyCharacterGroupEdits(segment, "su", { outfitEnabled: false, voiceEnabled: false });
+    assert.ok(off.h3CharacterGroups?.su);
+    assert.deepEqual(refsForSegment(off).map((ref) => ref.storageKey), ["image:scene", "image:shen"]);
+    const on = applyCharacterGroupEdits(off, "su", { outfitEnabled: true, voiceEnabled: true });
+    assert.deepEqual(refsForSegment(on).map((ref) => ref.storageKey), ["image:scene", "image:su", "audio:su", "image:shen"]);
+    assert.equal(on.referenceBindings?.some((binding) => binding.groupId), false);
+});
+
+test("legacy buckets 和禁用手工引用仍兼容，token 更新按 storageKey 去重", () => {
+    const segment = derivedFixture();
+    const bindings = segment.referenceBindings!;
+    segment.referenceBindings = undefined;
+    segment.refItems = [];
+    segment.refs = { image: [
+        { type: "image", url: "", storageKey: "image:scene", name: "场景" },
+        { type: "image", url: "", storageKey: "image:disabled", name: "保留", enabled: false },
+        { type: "image", url: "https://media.test/su?token=old", storageKey: "image:su", name: "旧角色", groupId: "su", outfitId: "outfit-su" },
+    ] };
+    const refs = refsForSegment(segment);
+    assert.deepEqual(refs.map((ref) => ref.storageKey), ["image:scene", "image:su", "image:shen"]);
+    assert.equal(refs[1].url, "https://media.test/su?token=new");
+    const edited = withSegmentRefs(segment, refs);
+    assert.equal(edited.referenceBindings?.find((binding) => binding.storageKey === "image:disabled")?.enabled, false);
+    assert.equal(edited.referenceBindings?.some((binding) => binding.groupId), false);
+    const canonical = { ...segment, referenceBindings: bindings };
+    assert.deepEqual(segmentRefsPatch(refsForSegment(canonical), canonical).referenceBindings?.find((binding) => binding.id === "disabled"), bindings[1]);
+});
 
 const sourceOutfits = [
     { url: "https://media.test/shen-zhao-1.png", name: "三年前·退婚", storageKey: "image:shen-zhao-1" },

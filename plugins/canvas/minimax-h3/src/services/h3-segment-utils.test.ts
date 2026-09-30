@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { buildRestoreParamsPatch, exportH3Settings, importH3Settings } from "./h3-segment-utils";
 import type { H3Ref, H3Segment } from "../types";
+import { refsForSegment } from "./h3-data";
 
 const targetSegment: H3Segment = {
     id: "target-clip",
@@ -39,10 +40,11 @@ const historicalOutput: H3Ref = {
     },
 };
 
-test("还原历史输出时从当前角色组补齐角色 binding 的源角色节点", () => {
+test("还原历史输出从当前角色组派生源节点而不持久双写角色 binding", () => {
     const patch = buildRestoreParamsPatch([], historicalOutput, targetSegment);
-    const characterBinding = patch.referenceBindings?.find((binding) => binding.groupId === "group-shenhou");
-    assert.equal(characterBinding?.sourceNodeId, "character-shenhou");
+    assert.equal(patch.referenceBindings?.some((binding) => binding.groupId), false);
+    const characterRef = refsForSegment({ ...targetSegment, ...patch }).find((ref) => ref.groupId === "group-shenhou");
+    assert.equal(characterRef?.nodeId, "character-shenhou");
 });
 
 test("还原引用时丢弃旧 storyboardShots，按历史分镜引用重建，避免空槽叠加", () => {

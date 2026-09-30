@@ -1,9 +1,10 @@
 import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3CharacterOutfit, H3CharacterVoice, H3Ref, H3ReferenceBinding, H3ReferenceRole, H3Segment } from "../types";
 import { sameRef } from "./h3-compatibility";
+import { characterGroupBindings } from "../../../../../canvas-agent/src/canvas/reference-contract";
 
-export function refsForSegment(segment: H3Segment) {
+function storedRefsForSegment(segment: H3Segment): H3Ref[] {
     if (segment.referenceBindings?.length) {
-        return segment.referenceBindings.filter((binding) => binding.enabled !== false && (binding.url || binding.storageKey)).map((binding) => ({
+        return segment.referenceBindings.filter((binding) => (binding.url || binding.storageKey)).map((binding) => ({
             url: binding.url || "", type: inferH3ReferenceMediaType(binding), name: binding.label,
             storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId, role: binding.role,
             subjectId: binding.subjectId, storyboardSubjectIds: binding.storyboardSubjectIds, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, description: binding.description, enabled: binding.enabled, usage: binding.usage, retentionLevel: binding.retentionLevel,
@@ -20,10 +21,28 @@ export function refsForSegment(segment: H3Segment) {
     return refs.filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
 }
 
-export function segmentRefsPatch(refs: H3Ref[]): Pick<H3Segment, "referenceBindings" | "refItems" | "refs"> {
-    const normalized = refs.map((ref, index) => ensureReferenceIdentity(ref, index));
+export function refsForSegment(segment: H3Segment): H3Ref[] {
+    const stored = storedRefsForSegment(segment);
+    const derived = Object.values(segment.h3CharacterGroups || {}).flatMap(refsFromCharacterGroup).map((ref) => {
+        const snapshot = stored.find((old) => old.groupId === ref.groupId && old.type === ref.type && old.outfitId === ref.outfitId);
+        // Historical slot IDs/Clip metadata remain compatible; current group owns media and enabled state.
+        return snapshot ? { ...snapshot, ...ref, bindingId: snapshot.bindingId || ref.bindingId, assetId: sameRef(snapshot, ref) ? snapshot.assetId || ref.assetId : ref.assetId,
+            tags: snapshot.tags || ref.tags, retentionLevel: snapshot.retentionLevel } : ref;
+    });
+    const refs = [...stored.filter((ref) => !ref.groupId && ref.enabled !== false), ...derived];
+    return refs.filter((ref, index) => refs.findIndex((other) => sameRef(other, ref)) === index);
+}
+
+export function segmentRefsPatch(refs: H3Ref[], previous?: H3Segment): Pick<H3Segment, "referenceBindings" | "refItems" | "refs"> {
+    const normalized = refs.filter((ref) => !ref.groupId).map((ref, index) => ensureReferenceIdentity(ref, index));
     return {
-        referenceBindings: normalized.map(refToBinding),
+        referenceBindings: [
+            ...normalized.map(refToBinding),
+            ...storedRefsForSegment(previous || { id: "" }).filter((ref) => !ref.groupId && ref.enabled === false
+                && !normalized.some((other) => other.bindingId ? other.bindingId === ref.bindingId : sameRef(other, ref)))
+                .map((ref, index) => previous?.referenceBindings?.find((binding) => binding.id === ref.bindingId)
+                    || refToBinding(ensureReferenceIdentity(ref, normalized.length + index))),
+        ],
         refItems: undefined,
         refs: undefined,
     };
@@ -72,7 +91,7 @@ function inferRefType(value: string): H3Ref["type"] {
 }
 
 export function withSegmentRefs(segment: H3Segment, refs: H3Ref[]): H3Segment {
-    const next = { ...segment, ...segmentRefsPatch(refs) };
+    const next = { ...segment, ...segmentRefsPatch(refs, segment) };
     return reconcileStoryboardTrack(segment, next);
 }
 
@@ -251,76 +270,20 @@ function fitCharacterGroupToCapacity(segment: H3Segment, group: H3CharacterGroup
 
 /** 从一个角色组派生当前应在 ref 槽里的 refs：每张 enabled outfit 拆为 image ref，voiceEnabled 时 voice 拆为 audio ref。 */
 export function refsFromCharacterGroup(group: H3CharacterGroup): H3Ref[] {
-    const refs: H3Ref[] = [];
     const normalized = normalizeCharacterGroup(group);
-    const subjectId = normalized.subjectId || normalized.characterNodeId;
-    for (const outfit of normalized.outfits) {
-        if (!normalized.outfitEnabled || !outfit.enabled) continue;
-        refs.push({
-            url: outfit.url,
-            type: "image",
-            name: `${group.characterName} · ${outfit.name}`,
-            storageKey: outfit.storageKey,
-            mimeType: outfit.mimeType,
-            nodeId: group.characterNodeId,
-            role: outfit.role || "character_turnaround",
-            subjectId,
-            groupId: group.id,
-            outfitId: outfit.id,
-        });
-    }
-    if (normalized.voiceEnabled && normalized.voice?.url) {
-        refs.push({
-            url: normalized.voice.url,
-            type: "audio",
-            name: normalized.voice.name || `${normalized.characterName} · 声线`,
-            storageKey: normalized.voice.storageKey,
-            role: "character_voice",
-            nodeId: normalized.characterNodeId,
-            subjectId,
-            groupId: normalized.id,
-        });
-    }
-    return refs;
-}
-
-/** 把 segment 上的 refs 重写：原 refs 拆成 "group 派生 refs + 非 group refs"。character group 的 ref 必须由当前 group.outfits 的 enabled 状态决定 —— 用户在 modal 取消勾选后，旧 ref 应该从 fromGroups 里丢掉，让 ref 槽只显示仍 enabled 的 outfit。 */
-function rewriteRefsWithGroups(segment: H3Segment, groups: Record<string, H3CharacterGroup>): H3Ref[] {
-    const previous = refsForSegment(segment);
-    const fromGroups: H3Ref[] = [];
-    const standalone: H3Ref[] = [];
-    for (const ref of previous) {
-        if (ref.groupId && groups[ref.groupId]) {
-            // 服装总开关或逐套 enabled 任一关闭都移除图片 ref；声线只由 voiceEnabled 决定。
-            const group = groups[ref.groupId];
-            const matchingOutfit = group.outfits.find((outfit) => outfit.id === ref.outfitId);
-            const isAudioRef = ref.type === "audio";
-            const stillEnabled = isAudioRef
-                ? Boolean(group.voiceEnabled) && Boolean(group.voice?.url)
-                : Boolean(normalizeCharacterGroup(group).outfitEnabled) && Boolean(matchingOutfit?.enabled);
-            const sourceRef = refsFromCharacterGroup(group).find((item) => isAudioRef
-                ? item.type === "audio"
-                : item.type === ref.type && item.outfitId === ref.outfitId);
-            if (stillEnabled && sourceRef) fromGroups.push({ ...ref, ...sourceRef, bindingId: ref.bindingId, assetId: ref.assetId, order: ref.order, retentionLevel: ref.retentionLevel });
-        } else if (ref.groupId) {
-            // group 已被删，对应的 ref 一并丢弃
-        } else {
-            standalone.push(ref);
-        }
-    }
-    const derived: H3Ref[] = [];
-    for (const group of Object.values(groups)) {
-        for (const ref of refsFromCharacterGroup(group)) {
-            // derived 只补 fromGroups 没有的 ref（比如新增的 outfit / 之前没出现过的 audio ref）。
-            if (!fromGroups.some((item) => sameRef(item, ref) && item.groupId === ref.groupId)) derived.push(ref);
-        }
-    }
-    return [...standalone, ...fromGroups, ...derived].filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
+    const bindings = characterGroupBindings({ ...normalized,
+        outfits: normalized.outfitEnabled ? normalized.outfits.map((outfit) => ({ ...outfit, role: outfit.role || "character_turnaround" })) : [],
+    });
+    return bindings.map((binding) => ({
+        url: binding.url || "", type: binding.mediaType || "image", name: binding.label,
+        storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId,
+        role: binding.role, subjectId: binding.subjectId, groupId: binding.groupId, outfitId: binding.outfitId,
+        bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, enabled: binding.enabled, usage: binding.usage,
+    }));
 }
 
 export function setSegmentCharacterGroups(segment: H3Segment, groups: Record<string, H3CharacterGroup>): H3Segment {
-    const next = { ...segment, h3CharacterGroups: groups };
-    return withSegmentRefs(next, rewriteRefsWithGroups(next, groups));
+    return reconcileStoryboardTrack(segment, { ...segment, h3CharacterGroups: groups });
 }
 
 type CharacterOutfitInput = { url: string; name: string; storageKey?: string; mimeType?: string; role?: H3ReferenceRole };
@@ -502,10 +465,7 @@ export function applyCharacterGroupEdits(segment: H3Segment, groupId: string, pa
         outfitEnabled: group.outfits.length > 0 && outfitEnabled,
         voiceEnabled: patch.voiceEnabled ?? group.voiceEnabled,
     });
-    // 服装与声线是两个独立参考：全部关闭服装也不能删除角色组或声线。
-    if (!nextGroup.voiceEnabled && !nextGroup.outfitEnabled) {
-        return removeCharacterGroup(segment, groupId);
-    }
+    // Disabled groups retain their catalog so both switches can be re-enabled.
     return setSegmentCharacterGroups(segment, { ...(segment.h3CharacterGroups || {}), [groupId]: nextGroup });
 }
 

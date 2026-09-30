@@ -44,8 +44,8 @@ export function buildRestoreParamsPatch(segments: H3Segment[], ref: H3Ref, targe
         || (ref.segmentId ? segments.find((segment) => segment.id === ref.segmentId) : undefined);
     const snapshotRefs = Array.isArray(snapshot?.refs) ? snapshot.refs as H3Ref[] : Array.isArray(snapshot?.refItems) ? snapshot.refItems as H3Ref[] : undefined;
     const base = source ? restorableParams(source as Record<string, unknown>, ALL_RESTORABLE_PARAM_KEYS) : restorableParams(snapshot, ALL_RESTORABLE_PARAM_KEYS);
-    const rawRefsPatch = source ? segmentRefsPatch(refsForSegment(source)) : snapshotRefs ? segmentRefsPatch(snapshotRefs) : {};
-    const refsPatch = targetSegment ? restoreBindingsForTarget(rawRefsPatch, targetSegment) : rawRefsPatch;
+    const rawRefsPatch = source ? segmentRefsPatch(refsForSegment(source), source) : snapshotRefs ? segmentRefsPatch(snapshotRefs) : {};
+    const refsPatch = { ...rawRefsPatch, ...(source ? { h3CharacterGroups: source.h3CharacterGroups } : {}) };
     const storyboardPatch = refsPatch.referenceBindings?.length
         ? { storyboardShots: refsPatch.referenceBindings.filter((binding) => binding.role === "storyboard").map((binding) => ({ id: binding.id, referenceBindingId: binding.id })), storyboardDurations: {} }
         : {};
@@ -57,24 +57,4 @@ export function buildRestoreParamsPatch(segments: H3Segment[], ref: H3Ref, targe
     if (finalPrompt) return { ...base, ...refsPatch, ...storyboardPatch, prompt: finalPrompt } as Partial<H3Segment>;
     const { prompt: _drop, ...rest } = base as Record<string, unknown>;
     return { ...rest, ...refsPatch, ...storyboardPatch } as Partial<H3Segment>;
-}
-
-function restoreBindingsForTarget(patch: Pick<H3Segment, "referenceBindings" | "refItems" | "refs">, target: H3Segment) {
-    if (!patch.referenceBindings?.length) return patch;
-    const groups = target.h3CharacterGroups || {};
-    const sourceByGroupAndOutfit = new Map<string, string>();
-    for (const group of Object.values(groups)) {
-        const groupId = String(group.id || "");
-        const sourceNodeId = String(group.characterNodeId || "");
-        if (!groupId || !sourceNodeId) continue;
-        for (const outfit of group.outfits || []) sourceByGroupAndOutfit.set(JSON.stringify([groupId, String(outfit.id || "")]), sourceNodeId);
-    }
-    return {
-        ...patch,
-        referenceBindings: patch.referenceBindings.map((binding) => {
-            if (!binding.groupId) return binding;
-            const sourceNodeId = sourceByGroupAndOutfit.get(JSON.stringify([binding.groupId, String(binding.outfitId || "")]));
-            return sourceNodeId ? { ...binding, sourceNodeId } : binding;
-        }),
-    };
 }

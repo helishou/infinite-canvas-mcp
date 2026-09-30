@@ -878,7 +878,7 @@ export function H3PromptSection({
     const normalized = refsForSegment(withSegmentRefs(segment, nextRefs));
     const bindingIds = images.map((image) => normalized.find((ref) => ref.type === "image" && sameRef(ref, image))?.bindingId).filter((id): id is string => Boolean(id));
     if (bindingIds.length !== images.length) { setStoryboardError("分镜图引用未能完整登记，请重试。"); return; }
-    patchSelected(segmentRefsPatch(normalized));
+    patchSelected(segmentRefsPatch(normalized, segment));
     updateStoryboardShots((shots) => {
       const index = shots.findIndex((shot) => shot.id === shotId);
       if (index < 0) return shots;
@@ -914,7 +914,7 @@ export function H3PromptSection({
       changed = true;
       return { ...ref, retentionLevel };
     });
-    if (changed) patchSelected(segmentRefsPatch(nextRefs));
+    if (changed) patchSelected(segmentRefsPatch(nextRefs, segment));
     return true;
   };
   /** 实体定义编辑：写回 state 并把清单持久化到当前 Clip（方案 A：随 Clip 走）。 */
