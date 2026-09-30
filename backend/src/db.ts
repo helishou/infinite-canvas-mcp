@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
+import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
 import { completedImageSlots, dropImageSlots, imageSourceStatus } from "./canvas/image-result-slots.js";
 import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation } from "./canvas/project-ops.js";
 import { prepareClientCanvasOperation, stripCanvasLocalViewState } from "./canvas/operation-authority.js";
@@ -152,6 +153,8 @@ export class BackendDatabase {
 
     constructor(file: string = DB_FILE) {
         this.filePath = file;
+        const backup = prepareDatabaseUpgrade(file);
+        if (backup) console.info(`[database] Pre-migration backup: ${backup}`);
         ensureDataDirs();
         fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
         this.db = new DatabaseSync(file);
@@ -452,10 +455,10 @@ export class BackendDatabase {
             this.indexTaskQueries();
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (13, ?)").run(new Date().toISOString());
         }
-        if (currentVersion < 14) {
+        if (currentVersion < DATABASE_SCHEMA_VERSION) {
             if (currentVersion === 13) this.backupBeforeH3Migration("v14-reference-archive");
             this.migrateH3References();
-            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (14, ?)").run(new Date().toISOString());
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(DATABASE_SCHEMA_VERSION, new Date().toISOString());
         }
     }
 

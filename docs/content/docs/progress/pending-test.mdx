@@ -5,6 +5,17 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Local startup and upgrade protection
+
+- From a clean installation, root `npm run dev` should build the shared package before starting the Backend (17370) and Web (3001). A failed build must prevent startup. `dev:services` optionally includes the legacy proxy; Agent startup on Unix must not require Windows `set`.
+- Without Codex installed, HTTP/MCP and local ComfyUI should work; Codex chat should explain how to install it. After installation, check app-server startup through project dependencies and global PATH installations.
+- In temporary old databases, verify that pre-migration snapshots include committed WAL data, backup failure blocks migration, and retries never overwrite snapshots. Refuse newer schemas without changing the source. Protect media and browser drafts separately. Running services require a safe reload before verifying the new behavior.
+
+## Paste clipboard images onto the canvas
+
+- After clicking the canvas background, Ctrl/Cmd+V should import image, video, or audio files provided by the paste event directly. A separate clipboard read waiting for permission must not block media already available in the event. Verify that uploaded images display correctly and one paste creates only one node.
+- Check that copying canvas nodes still preserves their configuration and connections, and pasting inside inputs or rich-text editors retains normal editing behavior.
+
 ## H3 atomic batch configuration (1.5.8)
 
 - Source, isolated MCP HTTP transaction tests, and a fresh stdio development smoke test pass. The configured live HTTP Backend still serves the previous catalog; do not use a script or stdio connection as a production substitute.

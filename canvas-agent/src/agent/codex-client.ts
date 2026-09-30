@@ -1,5 +1,4 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
 import path from "node:path";
 
 import { createAgentLogWriter } from "../utils/agent-runtime.js";
@@ -12,6 +11,7 @@ import { field, type JsonRecord, errorMessage } from "../utils/value.js";
 import { codexEventHistory, type CodexEventHistory } from "./codex-event-history.js";
 import type { CodexNotificationParams, CodexPlanUpdate, CodexReasoningEffort, CodexRequestMethod, CodexRequestParams, CodexRequestResult, CodexSkillSelector, CodexThreadItemEntry, CodexTurnInput } from "./codex-protocol.js";
 import type { AgentEmit, AgentPermissionMode } from "./types.js";
+import { requireCodexLaunch } from "./codex-executable.js";
 
 type AgentEvent = JsonRecord & { type: string; usage?: unknown };
 type PendingRequest = { resolve: (value: unknown) => void; reject: (error: Error) => void; silent?: boolean };
@@ -21,7 +21,6 @@ type PendingDelta = { delta: string; itemType: string; params: ItemDeltaParams; 
 type ApprovalRequest = { id: number; method: string; params: JsonRecord; decision?: string };
 type PendingTurnStart = { threadId: string; prompt: string; messageText?: string; turnId?: string; onTurn?: (turnId: string) => void };
 
-const require = createRequire(import.meta.url);
 const STREAM_UPDATE_INTERVAL_MS = 40;
 const supplementalItemTypes = new Set(["agent_message", "reasoning", "plan", "mcp_tool_call", "command_execution", "file_change", "dynamic_tool_call", "collab_tool_call", "web_search", "image_view", "image_generation", "context_compaction"]);
 const SKILL_DRAFT_INSTRUCTIONS = "你只负责根据已提供的对话或画布快照生成可编辑的 Codex Skill 草稿。不要调用任何工具，不要执行命令，不要读取文件，不要访问网络，不要修改任何状态。严格按 outputSchema 返回结果，并排除凭证、密钥、Token、本地路径、临时错误、调试日志和一次性结果。";
@@ -68,9 +67,10 @@ export class CodexAppClient {
 
     /** 启动并初始化 Codex app-server。 */
     static async start(emit: AgentEmit, onExit: () => void) {
-        logger.info("Starting Codex app-server", { executable: process.execPath, codex: codexBin() });
+        const launch = requireCodexLaunch();
+        logger.info("Starting Codex app-server", { executable: launch.command, source: launch.source });
         fixCcSwitchModelCatalog();
-        const child = spawn(process.execPath, [codexBin(), "app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+        const child = spawn(launch.command, [...launch.args, "app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         const client = new CodexAppClient(child, emit);
         let stopped = false;
         const stop = () => {
@@ -949,11 +949,6 @@ function parseMaybeJson(value: unknown) {
 
 function isPaginatedThreadReadError(error: unknown) {
     return /paginated threads do not support thread\/read.*includeTurns\s*=\s*true/i.test(errorMessage(error));
-}
-
-/** 定位当前依赖中 Codex CLI 的执行文件。 */
-function codexBin() {
-    return path.join(path.dirname(require.resolve("@openai/codex/package.json")), "bin", "codex.js");
 }
 
 /** 检查并修复 ccswitch 代理生成的模型目录文件，补全 Codex 必填字段。 */

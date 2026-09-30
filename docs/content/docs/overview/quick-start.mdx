@@ -5,22 +5,53 @@ description: Run Infinite Canvas in a few steps
 
 # Quick Start
 
-The complete application requires three processes: the Backend, the Canvas Agent, and the `web/` frontend.
+Normal use requires the Backend and the `web/` frontend. The Backend integrates Agent and MCP endpoints; the separate Canvas Agent on port 17371 is a compatibility proxy for older clients.
 
 ## Run locally
 
 ```bash
-git clone git@github.com:helishou/infinite-canvas-mcp.git
+git clone --depth 1 https://github.com/helishou/infinite-canvas-mcp.git
 cd infinite-canvas-mcp
-npm install
-npm run dev:local
+npm ci
+npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open `http://localhost:3001`.
 
-`npm run dev:local` (`scripts\dev-local.bat` on Windows) first clears stale services on ports 17370, 17371, and 3001, then starts backend(17370), agent(17371), and web(3001). `npm run dev:services` skips the cleanup and starts all three concurrently. `dev` is not a watch command and not a liveness probe.
+`npm run dev` builds `canvas-agent/dist` before starting either service and does not clear existing services. Root-level `dev:backend`, `dev:web`, and `dev:services` also build the shared package first; direct workspace `dev` commands do not. Backend `dev` does not restart on edits; use `dev:watch` explicitly when needed.
 
-To run the full short-film production stack on your own machine, use the three-process local mode above. The Docker image contains only the frontend.
+| Address | Purpose |
+| --- | --- |
+| `http://localhost:3001` | Local development frontend |
+| `http://127.0.0.1:17370` | Backend, `/agent`, and `/mcp` |
+| `http://127.0.0.1:17371` | Optional legacy compatibility proxy |
+| `http://localhost:3000` | Docker static frontend, not the development server |
+
+Use `dev:services` when the compatibility proxy is needed. Windows-only `dev:local` clears old services on those ports before starting three processes; it is not a liveness probe.
+
+Use local Backend mode for the complete short-film production stack. The Docker image contains only the frontend.
+
+## Installation and startup troubleshooting
+
+- For slow downloads, use an HTTPS shallow clone, or download the source ZIP from GitHub's Code menu if Git history is unnecessary. The project does not switch to third-party mirrors automatically.
+- The repository maintains an npm lockfile; prefer `npm ci`. An already installed Bun can run `bun install` from the repository root, followed by Node/npm startup commands. Do not create separate workspace dependency trees or commit a parallel lockfile without review. The Backend requires the Node version declared in `backend/package.json`; Bun as an installer does not replace Node's SQLite runtime.
+- If `canvas-agent/dist/...` is missing, run `npm run build --workspace canvas-agent` or use the root startup commands. A failed build is not a Backend connection error.
+- If `safe-delete state lock timeout` comes from host-injected `NODE_OPTIONS`, investigate the host injection and Vite cache-cleanup conflict. Startup scripts preserve `NODE_OPTIONS` and do not automatically disable deletion guards or other host protections.
+- Codex CLI is optional. For sidebar Codex chat, run `npm install -g @openai/codex@0.146.0` and sign in. Canvas, MCP, and local ComfyUI can skip this installation.
+
+## Data and upgrades
+
+The default Backend directory is `~/.infinite-canvas/`, but runtime configuration can change data and media locations. Check the actual `/data-dir` response and configuration; back up original media alongside the SQLite media index.
+
+Before migrating an existing older SQLite database, the Backend creates and integrity-checks a `runtime.sqlite.pre-schema-*.sqlite` snapshot. Backup failure blocks migration. Newer or invalid schema versions are refused; deleting the database is not a recovery method. Snapshots exclude media and do not replace full backups. Preserve browser pending edits and conflict drafts. This protection covers SQLite schema upgrades, not automatic recovery of every historical format.
+
+## LAN access
+
+Defaults retain local listening and origin validation. If you decide to expose the service to your own LAN devices, change only `listenHost` to `0.0.0.0` in the actual data directory's `backend.json`, and add the frontend's full origin, such as `http://192.168.1.10:3001`, to existing `origins`. Preserve the existing URL, token, and local origins; do not use `*`.
+
+After reloading the relevant service, open the server's port-3001 frontend on the other device and enter the server Backend URL `http://192.168.1.10:17370` and existing connection key in connection settings. Loopback addresses on that device refer to itself. Allow the required firewall ports on the host, and do not expose them directly to the public internet.
+
+In development, Vite proxies `/media`, `/events`, and `/agent` on the frontend origin, avoiding direct browser SSE connections to port 17370 for a local Backend. Whether a system proxy truncates direct SSE connections depends on the environment.
 
 ## Run with Docker
 
@@ -39,8 +70,8 @@ The root `vercel.json` builds only `web/`, which is suitable for a frontend prev
 
 ## First-time setup
 
-- Open Settings and enter your `Base URL`, `API Key`, and model names.
+- Connect to the Backend first. API models require channel URLs, keys, and models; local ComfyUI requires its service and workflows without an OpenAI API key. Editing canvases alone needs no model endpoint.
 - Open `/prompts` to fetch prompt repositories directly from the browser and cache them in memory.
 - Configure WebDAV if you want to synchronize canvases, assets, and generation history across devices.
 
-Canvas projects, My Assets, generation records, and structured settings use the local Backend SQLite database as their authority. Media is stored in the Backend media directory. API keys are loaded from Backend channel settings and used by the browser to call the configured OpenAI-compatible endpoints directly.
+Canvas projects, My Assets, generation records, and structured settings use the local Backend SQLite database as their authority. Media is stored in the Backend media directory. Channel keys are stored in that database and used by the selected executor; canvas generation tasks are created and recorded by the Backend.

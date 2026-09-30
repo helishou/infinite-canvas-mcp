@@ -5,26 +5,57 @@ description: 用最少步骤把无限画布跑起来
 
 # 快速开始
 
-完整运行需要同时启动 Backend、Canvas Agent 与 `web/` 前端三个进程。
+日常运行需要 Backend 与 `web/` 前端。Backend 已集成 Agent 与 MCP；独立 Canvas Agent 的 17371 地址只用于旧客户端兼容。
 
 ## 本地启动
 
 ```bash
-git clone git@github.com:helishou/infinite-canvas-mcp.git
+git clone --depth 1 https://github.com/helishou/infinite-canvas-mcp.git
 cd infinite-canvas-mcp
-npm install
-npm run dev:local
+npm ci
+npm run dev
 ```
 
 启动后访问：
 
 ```text
-http://localhost:3000
+http://localhost:3001
 ```
 
-`npm run dev:local`（Windows 下为 `scripts\dev-local.bat`）会先清理 17370、17371、3001 三个端口上的旧服务，再拉起 backend(17370)、agent(17371) 与 web(3001)。`npm run dev:services` 不做清理，直接三进程并发启动。`dev` 不是 watch，也不是探活命令。
+`npm run dev` 先构建 `canvas-agent/dist`，成功后启动两个进程，不清理旧服务。根目录的 `dev:backend`、`dev:web` 和 `dev:services` 也会先构建共享包；直接调用 workspace 的 `dev` 不经过这个准备步骤。Backend `dev` 不自动重启，需要时显式使用 `dev:watch`。
 
-如果要在自己的机器上完整跑短片生产栈，用上面的本地三进程模式；Docker 镜像只包含前端。
+| 地址 | 用途 |
+| --- | --- |
+| `http://localhost:3001` | 本地开发网页 |
+| `http://127.0.0.1:17370` | Backend、`/agent`、`/mcp` |
+| `http://127.0.0.1:17371` | 可选旧客户端兼容代理 |
+| `http://localhost:3000` | Docker 静态前端，不是开发服务器 |
+
+需要旧代理时使用 `npm run dev:services`。Windows 专用 `dev:local` 会清理这些端口上的旧服务，再启动三进程，不作为检查服务状态的命令。
+
+完整短片生产栈使用本地 Backend 模式；Docker 镜像只包含前端。
+
+## 安装与启动排障
+
+- 下载慢时先使用 HTTPS 浅克隆；不需要 Git 历史时也可从 GitHub 的 Code 菜单下载源码 ZIP。项目不自动切换第三方镜像。
+- 本仓库维护 npm 锁文件，优先使用 `npm ci`。你也可以从仓库根目录使用已安装的 Bun 执行 `bun install`，再用 Node/npm 启动；不要在单个 workspace 中建立另一套依赖。Bun 生成的锁文件须单独核对，不提交并行锁文件。Backend 运行需要符合 `backend/package.json` 的 Node 版本，Bun 安装器不替代 Node 的 SQLite 运行时。
+- `canvas-agent/dist/...` 缺失时先运行 `npm run build --workspace canvas-agent`，或改用根目录的启动命令。不要把构建失败当作后端连接问题。
+- `safe-delete state lock timeout` 若来自宿主注入的 `NODE_OPTIONS`，应在该运行环境中排查注入与 Vite 缓存清理的冲突。项目启动脚本保留 `NODE_OPTIONS`，不自动移除删除守卫或其他宿主保护。
+- Codex CLI 不再是强制安装项。需要侧边栏 Codex 对话时执行 `npm install -g @openai/codex@0.146.0` 并登录；仅画布、MCP、本地 ComfyUI 可跳过。
+
+## 数据与升级
+
+Backend 默认使用 `~/.infinite-canvas/`，但数据和媒体目录可通过运行配置改变，以实际 `/data-dir` 和配置为准。SQLite 记录媒体索引，原始媒体文件需要一并备份。
+
+已有旧版 SQLite 数据库在迁移前生成 `runtime.sqlite.pre-schema-*.sqlite` 快照并校验完整性；备份失败会阻止迁移。较新或无效 schema 版本会拒绝打开，不能用删库解决。迁移快照不含媒体，也不替代完整数据备份；浏览器未确认编辑和冲突草稿须保留。该保护覆盖 SQLite schema 升级，不承诺所有历史格式都可自动恢复。
+
+## 局域网访问
+
+默认保持本机监听与来源校验。确定要向自己的局域网设备开放后，在实际数据目录的 `backend.json` 中只修改 `listenHost` 为 `0.0.0.0`，并在现有 `origins` 中加入网页的完整来源，例如 `http://192.168.1.10:3001`；保留现有地址、token 和本机来源，不使用 `*`。
+
+重载相关服务后，在另一台设备打开服务器的 3001 网页，并在连接设置填写服务器的 Backend 地址 `http://192.168.1.10:17370` 与已有连接密钥。另一台设备上的 `127.0.0.1` 指向它自己，不能用来连接服务器。宿主防火墙也须允许所需端口；不要把这些端口直接暴露到公网。
+
+开发环境的 `/media`、`/events`、`/agent` 经 Vite 同源代理转发，本机浏览器因此无需直接建立到 17370 的 SSE 长连接。系统代理是否截断 SSE 取决于环境；该问题不是所有浏览器直连 Backend 都会发生。
 
 ## Docker 启动
 
@@ -43,11 +74,11 @@ docker run --rm -p 3000:3000 infinite-canvas
 
 ## 首次使用建议
 
-- 先打开右上角配置弹窗，填入自己的 `Base URL`、`API Key` 和模型名。
+- 先连接 Backend。API 模型填写对应渠道地址、密钥和模型；本地 ComfyUI 配置服务与工作流，无需 OpenAI API Key；仅编辑画布无需模型接口。
 - 如果需要提示词仓库内容，打开 `/prompts` 会由浏览器前端直连拉取并使用内存缓存。
 - 如果需要跨设备同步画布、素材和生成记录，可在配置弹窗中填写 WebDAV。
 
 ## 说明
 
 - 画布项目、“我的素材”、生成记录和结构化配置统一写入本地 Backend SQLite；媒体文件写入 Backend 媒体目录，WebDAV 同步需要用户自行配置。
-- AI API Key 随渠道配置保存在 Backend SQLite，由前端读取后直接请求对应的 OpenAI 兼容接口。
+- AI API Key 随渠道配置保存在 Backend SQLite，调用位置取决于模型执行器；画布生成任务统一由 Backend 创建与记录。

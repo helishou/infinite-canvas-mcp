@@ -24,7 +24,7 @@
 这是一个独立维护的无限画布与 AI 影像生产工作台。本项目从 [basketikun/infinite-canvas](https://github.com/basketikun/infinite-canvas) 发展而来，并在其画布基础上持续建设短片生产能力，包括 H3 视频节点与 Clip 时间线、剧目与分集数据模型、参考与分镜绑定、画布与 H3 MCP 工具，以及贯穿剧本、分镜、关键帧和 Clip 视频的生产 SOP。感谢上游项目及其贡献者提供的基础工作。
 
 > [!CAUTION]
-> 项目仍在持续开发中，数据结构和本地存储格式可能调整。使用前请备份重要项目数据。
+> 项目仍在持续开发中。Backend 在升级已存在的旧版 SQLite 数据库前会生成并校验迁移快照；数据库版本高于当前代码支持的版本时拒绝打开，不会尝试降级覆盖。快照不包含媒体或浏览器待确认草稿，升级前仍应备份实际数据目录、媒体目录并保留本机草稿。
 
 ## 核心能力
 
@@ -32,7 +32,7 @@
 
 - 无限画布：多画布项目、节点拖拽缩放、连线、小地图、撤销重做、导入导出、复制粘贴。
 - 节点类型：文本、图片、视频、音频、生成配置、组；其余（Markdown、SVG、HTML、3D 全景、便利贴等）由插件提供。
-- AI 生成：浏览器前台直连你自己的 OpenAI 兼容接口，支持文生图、图生图、参考图编辑、文本、音频与视频；支持多渠道、自定义调用脚本、尺寸、质量、透明背景与推理强度等参数。
+- AI 生成：画布任务统一由 Backend 创建与记录；API 渠道使用你自己的接口和密钥，本地 ComfyUI 渠道使用已配置的工作流，无需 OpenAI API Key。支持文生图、参考图编辑、文本、音频与视频，以及多渠道和自定义调用脚本。
 - 有序组：把实际采用的图片按槽位编排进组，支持拖放整理、撤销重做与槽位稳定引用。
 - 提示词库：内置开源提示词来源并支持自定义标准 JSON 来源，支持标签过滤、搜索与插入画布。
 - “我的素材”：图片、视频、音频与文本资产的统一归档与引用。
@@ -62,20 +62,24 @@
 
 ## 快速开始
 
-画布、素材、生成记录、渠道配置和用户配置统一以本地 Backend SQLite 为权威存储；媒体文件保存在 Backend 媒体目录，浏览器只保留可丢弃缓存、界面状态和连接引导信息。
+画布、素材、生成记录、渠道配置和用户配置统一以本地 Backend SQLite 为权威存储；媒体文件保存在 Backend 媒体目录。浏览器还保存未确认编辑与冲突草稿，不能把它们当缓存清理。Backend 未连接时不能确认服务端保存。
 
-### 本地开发（Backend + Agent + Web 三进程）
+### 本地开发（Backend + Web）
 
 ```bash
-git clone git@github.com:helishou/infinite-canvas-mcp.git
+git clone --depth 1 https://github.com/helishou/infinite-canvas-mcp.git
 cd infinite-canvas-mcp
-npm install
-npm run dev:local        # Windows 下的 dev:local.bat → dev-local.ps1；或 npm run dev:services
+npm ci
+npm run dev
 ```
 
 启动后访问 `http://localhost:3001`。
 
-`npm run dev:local` 会先清理 17370、17371、3001 三个端口上的旧服务，再拉起 backend(17370)、agent(17371) 与 web(3001)。`npm run dev:services` 不做清理，直接三进程并发启动。Backend 的 `dev:backend` 默认直接运行源码，不自动重启；需要监听源码变更时运行 `npm run dev:watch --workspace backend`。开发命令不是探活命令。
+`npm run dev` 先构建 Backend 与 Web 使用的 `canvas-agent/dist`，构建成功后启动 Backend（17370）与 Web（3001），不清理已有服务。Backend 已提供 `/agent` 与 `/mcp`，17371 只用于旧客户端兼容代理；需要它时使用 `npm run dev:services`。
+
+Windows 专用 `npm run dev:local` 会清理 17370、17371、3001 上的旧服务，不作探活命令。单独使用根目录 `dev:backend` 或 `dev:web` 也会先构建共享包；直接运行 workspace 的 `dev` 时须自行先构建。Backend `dev` 不自动重启，需要时显式使用 `dev:watch`。
+
+Codex CLI 是可选依赖，普通画布、MCP 与 ComfyUI 不需要下载它。需要侧边栏 Codex 对话时安装 `npm install -g @openai/codex@0.146.0` 并完成登录；运行时优先使用已安装的项目依赖，其次从 PATH 查找。安装、端口、数据备份与局域网设置见[快速开始](docs/content/docs/overview/quick-start.zh-CN.mdx)。
 
 ### Docker 运行
 
@@ -88,7 +92,7 @@ docker compose up -d
 运行后默认端口 3000，可访问 `http://localhost:3000`。
 > 仓库 Dockerfile 只构建静态前端并由 nginx 提供，AI 请求由浏览器前台直连用户自己的接口。Backend、Canvas Agent、MCP 与 H3 短片生产栈位于源码层面，Docker 前端镜像不包含它们。
 
-首次打开后进入右上角配置，填入自己的 OpenAI 兼容 `Base URL` 与 `API Key`，设置默认文/图/视频模型。如果默认的 OpenAI 接口调用方式与你的 API 不同，可自定义生图与视频的脚本调用。
+首次打开后连接 Backend。使用 API 模型时配置对应渠道的地址、密钥与模型；使用本地 ComfyUI 时配置服务和工作流；仅编辑画布不需要模型接口。API 密钥随渠道配置保存在本地 SQLite，并按对应执行器用于调用。
 
 问题反馈与功能建议请通过本仓库的 [Issues](https://github.com/helishou/infinite-canvas-mcp/issues) 提交。
 

@@ -2896,6 +2896,12 @@ function InfiniteCanvasPage() {
                 pasteCopiedNodes();
                 return;
             }
+            // 原生粘贴已提供媒体文件时直接导入；额外读取剪贴板可能等待权限/焦点，
+            // 不应阻塞当前事件里的图片，也不能让后续剪贴板内容替换本次粘贴。
+            if (files.some((file) => /^(image|video|audio)\//.test(file.type))) {
+                void pasteEventClipboard(files, text);
+                return;
+            }
             void pasteSystemClipboard().then(async (handled) => {
                 if (handled) return;
                 if (await pasteEventClipboard(files, text)) return;

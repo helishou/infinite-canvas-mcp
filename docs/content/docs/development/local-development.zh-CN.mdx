@@ -1,29 +1,30 @@
 ---
 title: 本地开发
-description: 前端优先的本地开发方式
+description: Backend 与 Web 的本地开发与启动顺序
 ---
 
 # 本地开发
 
-当前主应用以 `web/` 前端为主，AI 请求由浏览器前台直连用户自己的 OpenAI 兼容接口。
+Backend 管理数据、媒体与画布任务，`web/` 提供界面。Backend 已集成 Agent 和 MCP，独立 17371 服务只用于兼容旧客户端。安装、数据备份和局域网配置详见[快速开始](/zh-CN/docs/overview/quick-start)。
 
-## 1. 启动前端
+## 1. 从仓库根目录启动
 
 ```bash
-cd web
-bun install
-bun run dev
+npm ci
+npm run dev
 ```
 
 前端默认访问：
 
 ```text
-http://localhost:3000
+http://localhost:3001
 ```
+
+根目录启动命令先构建 `canvas-agent/dist`，再启动 Backend（17370）与 Web（3001）；共享包构建失败时不会启动依赖它的服务。单独运行 workspace 命令前须先构建共享包。Backend 的 `dev` 不自动重启，`dev:watch` 才监听源码变化。
 
 ## 2. 配置模型
 
-打开右上角配置弹窗，填写自己的 `Base URL`、`API Key` 和模型名。第三方提示词和 WebDAV 都由浏览器前端直连。
+API 渠道填写自己的地址、密钥和模型；本地 ComfyUI 配置服务与工作流，无需 OpenAI API Key。仅画布编辑不需要模型接口。Codex CLI 按需安装，不是基础运行依赖。
 
 ## 3. 启动文档站
 
