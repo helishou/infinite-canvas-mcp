@@ -57,7 +57,10 @@ test("H3 历史输出按 generationLogId 还原生成时快照，不借用源 Cl
     });
     assert.equal(historical.prompt, "生成时提示词");
     assert.equal(historical.steps, 6);
-    assert.equal(historical.refItems?.[0]?.url, "/media/history.png");
+    assert.equal(historical.referenceBindings?.[0]?.url, "/media/history.png");
+    assert.equal(historical.referenceBindings?.[0]?.enabled, true);
+    assert.equal(historical.refItems, undefined);
+    assert.equal(historical.refs, undefined);
     const current = buildRestoreParamsPatch(segments, { url: "/media/old.mp4", type: "video", name: "当前结果", segmentId: "S03" });
     assert.equal(current.prompt, "后来修改");
     assert.equal(current.steps, 12);

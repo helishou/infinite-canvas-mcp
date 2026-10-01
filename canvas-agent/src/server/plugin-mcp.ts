@@ -57,9 +57,16 @@ export type PluginMcpContext = {
 /** 插件 MCP 实际使用的最小 Backend 能力。 */
 export type PluginMcpBackend = {
     backendUrl?: string;
+    /** Backend-owned local preparation artifacts, not arbitrary plugin filesystem access. */
+    preparedH3Updates?: {
+        readSource(filePath: string, fileSha256: string): Promise<{ value: unknown; sha256: string; bytes: number }>;
+        save(plan: Record<string, unknown>): Promise<string>;
+        read(preparedId: string): Promise<Record<string, unknown>>;
+        discard(preparedId: string): Promise<void>;
+    };
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
     getCanvasProject(projectId: string): Promise<Record<string, unknown>>;
-    applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number, operationId?: string, strictRevision?: boolean): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[] }>;
+    applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number, operationId?: string, strictRevision?: boolean): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[]; duplicated?: boolean }>;
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
     canvasRunGeneration(input: CanvasGenerationCommand): Promise<{ ok?: boolean } & CanvasGenerationStartResult>;
     getTask(id: string): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;

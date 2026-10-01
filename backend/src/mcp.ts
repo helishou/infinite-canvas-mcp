@@ -54,6 +54,7 @@ import {
 } from "@basketikun/canvas-agent/runtime/comfy-client";
 import { createLogger } from "./logger.js";
 import type { McpObservabilityStore } from "./stores/types.js";
+import { PreparedH3UpdateFiles } from "./canvas/prepared-h3-update-files.js";
 
 type McpProjectSource = "browser" | "session";
 type BrowserActiveProjectResolver = () => string | null;
@@ -85,6 +86,7 @@ async function createBackendMcpInstance(
   config: ResolvedConfig,
   recordEvent: McpEventRecorder = (event) => postMcpObservabilityEvent(config, event),
   getBrowserActiveProjectId?: BrowserActiveProjectResolver,
+  preparedH3Updates: NonNullable<PluginMcpBackend["preparedH3Updates"]> = new PreparedH3UpdateFiles(),
 ): Promise<BackendMcpInstance> {
   const state: McpSessionState = {
     activeProjectId: null,
@@ -97,6 +99,7 @@ async function createBackendMcpInstance(
   const backendComfy = backendComfyUi(backendApi, () => []);
   const directBackend: PluginMcpBackend = {
     backendUrl: config.url,
+    preparedH3Updates,
     listCanvasProjects: () => backendApi.listCanvasProjects(),
     getCanvasProject: (projectId) => backendApi.getCanvasProject(projectId),
     applyCanvasOperations: (projectId, operations, expectedRevision, operationId, strictRevision) =>
@@ -157,6 +160,7 @@ export function registerBackendMcpHttpRoutes(
   config: ResolvedConfig,
   observability?: McpObservabilityStore,
   getBrowserActiveProjectId?: BrowserActiveProjectResolver,
+  preparedH3Updates: NonNullable<PluginMcpBackend["preparedH3Updates"]> = new PreparedH3UpdateFiles(),
 ) {
   const sessions = new Map<string, HttpMcpSession>();
   let declarationSync: ReturnType<typeof setInterval> | null = null;
@@ -235,6 +239,7 @@ export function registerBackendMcpHttpRoutes(
             }
           : undefined,
         getBrowserActiveProjectId,
+        preparedH3Updates,
       );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
@@ -3613,6 +3618,7 @@ async function applyBackendCanvasOperations(
     operationResults?: unknown[];
     revision?: number;
     error?: string;
+    duplicated?: boolean;
   };
   if (!response.ok || !body.project)
     throw new Error(body.error || `画布操作失败: HTTP ${response.status}`);
@@ -3621,6 +3627,7 @@ async function applyBackendCanvasOperations(
     operationResults: body.operationResults || [],
     revision: Number(body.revision || body.project.revision || 0),
     operationId,
+    duplicated: body.duplicated === true,
   };
 }
 

@@ -3,6 +3,18 @@ import test, { type TestContext } from "node:test";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { adaptFlux2KleinWorkflow, CanvasImageDispatcher } from "./image-dispatcher.js";
+import { prepareCanvasLoopRun } from "./generation-target.js";
+
+function preparedLoop(stores: ReturnType<typeof createStores>, totalRounds: number) {
+    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), [
+        { type: "add_node", id: "loop", nodeType: "loop", title: "循环", position: { x: 0, y: 0 }, width: 380, height: 320, metadata: {} },
+    ], { runtimeWrite: true });
+    const plan = prepareCanvasLoopRun(stores, { projectId: "p", loopNodeId: "loop", runId: "fixture-run", mode: "image", totalRounds,
+        roundInputNodeIds: Array.from({ length: totalRounds }, () => []) });
+    return (roundIndex: number) => ({ nodeId: plan.slotNodeIds[roundIndex - 1],
+        loopOutput: { loopNodeId: "loop", roundIndex, slotIndex: roundIndex - 1, slotNodeId: plan.slotNodeIds[roundIndex - 1],
+            outputGroupId: plan.outputGroupId, totalRounds } });
+}
 
 function fixture(t: TestContext, childStatus: "queued" | "succeeded" | "failed" = "succeeded") {
     const db = new BackendDatabase(":memory:");
@@ -60,17 +72,16 @@ test("图片执行器自绑定与重试，先回写结果再发布成功，不�
 
 test("智能循环并行轮次绑定不同结果节点，完成顺序不会互相接管", async (t) => {
     const { db, stores, dispatcher, input } = fixture(t, "queued");
-    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), [
-        { type: "add_node", id: "loop", nodeType: "loop", title: "循环", position: { x: 0, y: 0 }, width: 380, height: 320, metadata: {} },
-        { type: "update_node", id: "source", metadata: { smart: true, generationMode: "image" } },
-        { type: "connect_nodes", id: "loop-source", fromNodeId: "loop", toNodeId: "source" },
-    ], { runtimeWrite: true });
-    const first = dispatcher.start({ ...input, count: 1, loopOutput: { loopNodeId: "loop", roundIndex: 1, slotIndex: 0 } });
-    const second = dispatcher.start({ ...input, count: 1, clientTaskId: "second", loopOutput: { loopNodeId: "loop", roundIndex: 2, slotIndex: 1 } });
+    const round = preparedLoop(stores, 2);
+    const first = dispatcher.start({ ...input, count: 1, ...round(1) });
+    const second = dispatcher.start({ ...input, count: 1, clientTaskId: "second", ...round(2) });
     assert.notEqual(first.taskId, second.taskId);
     const running = db.getCanvasProject("p")!;
-    const slots = (running.nodes as Array<Record<string, any>>).filter((node) => node.metadata?.loopOutputSlot);
+    const slots = (running.nodes as Array<Record<string, any>>).filter((node) => node.type !== "group" && node.metadata?.loopOutputSlot);
     assert.equal(slots.length, 2);
+    const group = (running.nodes as Array<Record<string, any>>).find((node) => node.type === "group" && node.metadata?.loopOutputGroup)!;
+    assert.deepEqual(new Set(group.metadata.groupSlots), new Set(slots.map((node) => node.id)));
+    assert.ok(slots.every((node) => node.metadata.groupId === group.id));
     assert.deepEqual(slots.map((node) => node.metadata.runtimeTaskId).sort(), ["first", "second"]);
     assert.equal((running.nodes as Array<Record<string, any>>).find((node) => node.id === "source")?.metadata.runtimeTaskId, undefined);
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -79,7 +90,7 @@ test("智能循环并行轮次绑定不同结果节点，完成顺序不会互�
     assert.ok(["queued", "running"].includes(db.getTask("first")!.status));
     stores.tasks.update("image-child-first", { status: "succeeded" });
     await settle(db, "first");
-    const completed = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.metadata?.loopOutputSlot);
+    const completed = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.type !== "group" && node.metadata?.loopOutputSlot);
     assert.deepEqual(completed.map((node) => node.metadata.status), ["success", "success"]);
     assert.deepEqual(completed.map((node) => node.metadata.runtimeTaskId), [undefined, undefined]);
 });
@@ -101,16 +112,12 @@ test("七轮图片输入独立于两张固定参考，逐轮产生七张结果",
         return value.data;
     };
     stores.media.url = (value) => `/media/${value.storageKey}`;
-    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), [
-        { type: "add_node", id: "loop", nodeType: "loop", title: "循环", position: { x: 0, y: 0 }, width: 380, height: 320, metadata: {} },
-        { type: "update_node", id: "source", metadata: { smart: true, generationMode: "image" } },
-        { type: "connect_nodes", id: "loop-source", fromNodeId: "loop", toNodeId: "source" },
-    ], { runtimeWrite: true });
+    const round = preparedLoop(stores, 7);
     const image = (value: string) => ({ name: `${value}.png`, dataUrl: `data:image/png;base64,${Buffer.from(value).toString("base64")}` });
     for (let index = 0; index < 7; index++) {
         const taskId = `round-${index + 1}`;
         dispatcher.start({ ...input, clientTaskId: taskId, count: 1, references: [image("fixed-1"), image("fixed-2")],
-            loopInputImages: [image(`group-${index + 1}`)], loopOutput: { loopNodeId: "loop", roundIndex: index + 1, slotIndex: index } });
+            loopInputImages: [image(`group-${index + 1}`)], ...round(index + 1) });
         await settle(db, taskId);
         const stored = db.getTask(taskId)!.input as Record<string, any>;
         assert.equal(stored.references.length, 2);
@@ -118,21 +125,20 @@ test("七轮图片输入独立于两张固定参考，逐轮产生七张结果",
         assert.equal(stored.loopInputImages[0].dataUrl, undefined);
         assert.deepEqual(requests[index].references?.map((reference) => reference.data.toString()), [`group-${index + 1}`, "fixed-1", "fixed-2"]);
     }
-    const outputs = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.metadata?.loopOutputSlot);
+    const outputs = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.type !== "group" && node.metadata?.loopOutputSlot);
     assert.equal(outputs.length, 7);
+    const groups = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.type === "group" && node.metadata?.loopOutputGroup);
+    assert.equal(groups.length, 1);
+    assert.deepEqual(new Set(groups[0].metadata.groupSlots), new Set(outputs.map((node) => node.id)));
     assert.deepEqual(outputs.map((node) => node.metadata.loopRoundIndex).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7]);
     assert.ok(outputs.every((node) => node.metadata.status === "success" && node.metadata.images.length === 1));
 });
 
 test("智能循环取消一轮只结束该轮输出槽", async (t) => {
     const { db, stores, dispatcher, input } = fixture(t, "queued");
-    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), [
-        { type: "add_node", id: "loop", nodeType: "loop", title: "循环", position: { x: 0, y: 0 }, width: 380, height: 320, metadata: {} },
-        { type: "update_node", id: "source", metadata: { smart: true, generationMode: "image" } },
-        { type: "connect_nodes", id: "loop-source", fromNodeId: "loop", toNodeId: "source" },
-    ], { runtimeWrite: true });
-    dispatcher.start({ ...input, count: 1, loopOutput: { loopNodeId: "loop", roundIndex: 1, slotIndex: 0 } });
-    dispatcher.start({ ...input, count: 1, clientTaskId: "second", loopOutput: { loopNodeId: "loop", roundIndex: 2, slotIndex: 1 } });
+    const round = preparedLoop(stores, 2);
+    dispatcher.start({ ...input, count: 1, ...round(1) });
+    dispatcher.start({ ...input, count: 1, clientTaskId: "second", ...round(2) });
     await new Promise<void>((resolve) => setImmediate(resolve));
     dispatcher.cancel("first");
     stores.tasks.update("image-child-first", { status: "succeeded" });
@@ -140,24 +146,20 @@ test("智能循环取消一轮只结束该轮输出槽", async (t) => {
     await settle(db, "second");
     // 等取消中的第一轮观察器结束，避免测试关库后仍有轮询读取。
     await new Promise((resolve) => setTimeout(resolve, 550));
-    const slots = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.metadata?.loopOutputSlot);
+    const slots = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.type !== "group" && node.metadata?.loopOutputSlot);
     assert.equal(slots.find((node) => node.metadata.loopRoundIndex === 1)?.metadata.status, "cancelled");
     assert.equal(slots.find((node) => node.metadata.loopRoundIndex === 2)?.metadata.status, "success");
 });
 
 test("智能循环重试回到原轮输出节点并追加新槽", async (t) => {
     const { db, stores, dispatcher, input } = fixture(t);
-    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), [
-        { type: "add_node", id: "loop", nodeType: "loop", title: "循环", position: { x: 0, y: 0 }, width: 380, height: 320, metadata: {} },
-        { type: "update_node", id: "source", metadata: { smart: true, generationMode: "image" } },
-        { type: "connect_nodes", id: "loop-source", fromNodeId: "loop", toNodeId: "source" },
-    ], { runtimeWrite: true });
-    dispatcher.start({ ...input, count: 1, loopOutput: { loopNodeId: "loop", roundIndex: 1, slotIndex: 0 } });
+    const round = preparedLoop(stores, 1);
+    dispatcher.start({ ...input, count: 1, ...round(1) });
     await settle(db, "first");
-    const original = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).find((node) => node.metadata?.loopOutputSlot)!;
+    const original = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).find((node) => node.type !== "group" && node.metadata?.loopOutputSlot)!;
     const retried = await dispatcher.retry(db.getTask("first")!);
     await settle(db, retried.id);
-    const slots = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.metadata?.loopOutputSlot);
+    const slots = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.type !== "group" && node.metadata?.loopOutputSlot);
     assert.equal(slots.length, 1);
     assert.equal(slots[0].id, original.id);
     assert.equal(slots[0].metadata.images.length, 2);

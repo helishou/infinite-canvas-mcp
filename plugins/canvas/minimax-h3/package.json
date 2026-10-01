@@ -1,6 +1,6 @@
 {
     "name": "canvas-plugin-minimax-h3",
-    "version": "1.5.8",
+    "version": "1.5.10",
     "private": true,
     "type": "module",
     "description": "Infinite Canvas MiniMax H3 视频节点插件",

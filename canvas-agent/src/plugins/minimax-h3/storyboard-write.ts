@@ -2,13 +2,14 @@ import { createHash } from "node:crypto";
 import { inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf } from "../../canvas/reference-contract.js";
 import { orderStoryboardImageReferences, orderStoryboardReferencesFirst, remapPictureTags } from "../../canvas/storyboard-reference-order.js";
 import { assembleH3Prompt } from "./prompt-sections.js";
+import { mergeSubjectDefinitions, subjectVisualSourceDetails, type H3SubjectDefinition, type StoryboardPromptSubject } from "./subject-definitions.js";
 import { deriveStoryboardDurations, formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, promptDetails, stripDuplicateTransition, stripStoryboardCues, validateDefinitionCoverage, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "./prompt-rules.js";
 
 type RecordValue = Record<string, unknown>;
 type Transition = "continuous" | "cut" | "dissolve" | "fade_black";
 type StoryboardShotInput = { description: string; switchTime?: string; transitionType?: Transition; pictureBindingId?: string };
 type StoryboardInput = { summary?: string; openingDescription: string; shots: StoryboardShotInput[]; overallSoundscape: string; nonDiegeticMusic: string };
-type PromptSubject = { id: string; name: string; englishName?: string; aliases: string[]; shotMarkers: string[]; profile: string; outfits: string[]; pictures: string[]; role?: string };
+type PromptSubject = StoryboardPromptSubject;
 type PromptReference = { tag: string; bindingId: string; type: "image" | "video" | "audio"; role: string; label: string; description: string; subjectId?: string; subjectIds?: string[]; subjectName?: string; speakerId?: string; usage?: string; retentionLevel?: "fully_preserved" | "partially_preserved" | "attribute_transfer" | "weak_reference"; shotNumbers: number[]; compositePanels?: Array<{ index: number; row: number; column: number; shotNumbers: number[] }> };
 type PromptShot = { description: string; referenceIds?: string[] };
 type CompositePanel = { bindingId: string; index: number; row: number; column: number; shotNumbers: number[] };
@@ -150,7 +151,7 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
     const subjectMarker = (subject: PromptSubject) => `<Subject ${subjectOrdinalById.get(subject.id) || 1}>`;
     const subjectDefinitions = subjects.map((subject) => {
         const identity = [subject.name, subject.englishName && subject.englishName !== subject.name ? subject.englishName : ""].filter(Boolean).join(" / ");
-        const details = promptDetails([subject.profile, ...subject.outfits]);
+        const details = [...promptDetails([subject.profile, ...subject.outfits]), ...subjectVisualSourceDetails(subject, references)];
         const identityPictures = subject.pictures.filter((tag) => !blockingTags.has(tag));
         const blockingPictures = subject.pictures.filter((tag) => blockingTags.has(tag));
         if (identityPictures.length) details.unshift(`visual identity defined by reference(s) ${identityPictures.join(", ")}`);
@@ -448,7 +449,7 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
             ? speakerBySubject.get(reference.subjectId)
             : undefined,
     }));
-    const subjectManifest: PromptSubject[] = [...subjects.values()].map((subject) => ({
+    const subjectManifest: PromptSubject[] = mergeSubjectDefinitions([...subjects.values()].map((subject) => ({
         id: subject.id,
         name: subject.name,
         englishName: subject.englishName,
@@ -458,7 +459,10 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
         outfits: [...subject.outfits],
         pictures: subject.pictures,
         role: subject.role,
-    }));
+    })), Array.isArray(segment.subjectDefinitions) ? segment.subjectDefinitions as H3SubjectDefinition[] : undefined);
+    // 关闭或删除的来源不参与当前提示词，但保存的描述仍留在实体草稿中。
+    const livePictureTags = new Set(referenceManifest.filter((reference) => reference.type === "image").map((reference) => reference.tag));
+    subjectManifest.forEach((subject) => { subject.pictures = subject.pictures.filter((tag) => livePictureTags.has(tag)); });
     validatePromptReferences([input.summary, input.openingDescription, ...input.shots.map((shot) => shot.description), input.overallSoundscape, input.nonDiegeticMusic].join("\n"), allRefs.map((ref) => ({ type: string(ref.type), bindingId: string(ref.bindingId) })), subjectManifest.length);
     const normalizeLegacyReferences = (description: string) => description.replace(/\{\{\s*ref:\s*([^{}]+?)\s*\}\}/gu, (marker, rawId: string) => {
         const id = rawId.trim();

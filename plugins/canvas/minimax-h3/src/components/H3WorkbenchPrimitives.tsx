@@ -373,10 +373,12 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
     const [active, setActive] = useState(0);
     const [slotSrc, setSlotSrc] = useState<[string, string]>([url || "", ""]);
     const playerContentRef = useRef<HTMLDivElement | null>(null);
+    const [mediaResolution, setMediaResolution] = useState<{ width: number; height: number } | null>(null);
     const [aspectFrame, setAspectFrame] = useState<{ width: number; height: number } | null>(null);
     const ratioMatch = aspectRatio.match(/(\d+(?:\.\d+)?)\s*[:/x]\s*(\d+(?:\.\d+)?)/i);
     const parsedRatio = ratioMatch ? Number(ratioMatch[1]) / Number(ratioMatch[2]) : 16 / 9;
-    const frameRatio = Number.isFinite(parsedRatio) && parsedRatio > 0 ? parsedRatio : 16 / 9;
+    const frameRatio = mediaResolution ? mediaResolution.width / mediaResolution.height
+        : Number.isFinite(parsedRatio) && parsedRatio > 0 ? parsedRatio : 16 / 9;
     useEffect(() => {
         const content = playerContentRef.current;
         if (!content) return;
@@ -398,9 +400,18 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
     const aspectGuide = aspectFrame
         ? <div className="minimax-player-aspect-guide" style={{ width: aspectFrame.width, height: aspectFrame.height }} aria-hidden="true" />
         : null;
-    // 预览分辨率：图片/视频加载后把真实尺寸写进来，叠加在预览左下角（见 minimax-player-resolution）。
-    const [mediaResolution, setMediaResolution] = useState<{ width: number; height: number } | null>(null);
+    // 预览分辨率只属于当前可见媒体；预加载槽可以具有不同的分辨率和画幅。
     useEffect(() => { setMediaResolution(null); }, [url, kind]);
+    useEffect(() => {
+        if (kind !== "video") return;
+        const slot = activeRef.current;
+        const video = videosRef.current[slot] as HTMLVideoElement | null;
+        const source = resultUrl(slotSrc[slot]);
+        const matches = source && video?.currentSrc === new URL(source, document.baseURI).href;
+        const resolution = matches && video?.videoWidth && video.videoHeight ? { width: video.videoWidth, height: video.videoHeight } : null;
+        // 切换到已预加载的槽不会再次触发 loadedmetadata，须同步读取活动槽。
+        setMediaResolution((current) => current?.width === resolution?.width && current?.height === resolution?.height ? current : resolution);
+    }, [active, slotSrc, kind]);
     // ⚠️ 必须放在下方所有提前 return（!url / image / audio）之前：hooks 数量在两次渲染间必须一致，
     // 否则预览源在「视频 ↔ 空/图片/音频」之间切换时（如选中有结果/无结果的 Clip）会直接抛
     // "Rendered more/fewer hooks than during the previous render"，整棵节点树被错误边界拆掉。
@@ -671,8 +682,9 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
                         const local = !livePreview && slot === active ? Math.max(0, Math.min(playheadRef.current - timelineOffset, Number(event.currentTarget.duration || Infinity))) : 0;
                         if (Math.abs(event.currentTarget.currentTime - local) > 0.1) event.currentTarget.currentTime = local;
                         if (livePreview && slot === activeRef.current) void event.currentTarget.play().catch(() => undefined);
-                        // 任一阵列加载完元数据即记录视频真实分辨率（两槽分辨率一致，重复写无副作用）
-                        if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setMediaResolution({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight });
+                        // 下一段的高清预加载不能覆盖当前一采的尺寸标注。
+                        const source = resultUrl(slotSrc[slot]);
+                        if (slot === activeRef.current && source && event.currentTarget.currentSrc === new URL(source, document.baseURI).href && event.currentTarget.videoWidth && event.currentTarget.videoHeight) setMediaResolution({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight });
                     }}
                     onVolumeChange={(event) => {
                         // 用户点了原生控件的音量 / 静音：把 React 状态同步过来，

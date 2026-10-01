@@ -379,6 +379,14 @@ export default {
         },
     },
     canvas: {
+        videoTrim: {
+            open: "Trim",
+            range: "Trim video", start: "Start time (seconds)", end: "End time (seconds)", setStart: "Set start to current time", setEnd: "Set end to current time",
+            current: "Current {{time}}s / Total {{duration}}s", selected: "Selected duration: {{duration}} seconds", preview: "Play selection", trim: "Trim to canvas", cancel: "Cancel trim",
+            hint: "Creates a new video node with the selected audio and preserves the original. Closing the preview cancels an ongoing trim.",
+            loading: "Reading video duration…", loadFailed: "Video failed to load", invalid: "Choose a valid range: end must be after start and within the video duration",
+            done: "Video trimmed and added as a new canvas node", failed: "Video trim failed: {{error}}",
+        },
         defaultTitle: "Infinite Canvas {{count}}",
         library: "Canvas library",
         title: "Infinite Canvas",

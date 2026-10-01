@@ -1,3 +1,4 @@
+import type { H3SubjectDefinition } from "../../../../canvas-agent/src/plugins/minimax-h3/subject-definitions";
 export type H3ReferenceRole = "character_identity" | "character_turnaround" | "storyboard" | "scene" | "blocking" | "keyframe" | "motion_reference" | "audio_reference" | "character_voice" | "style" | "palette" | "prop" | "other";
 export type H3ReferenceUsage = "reference" | "first_frame" | "last_frame";
 export type H3ReferenceRetention = "fully_preserved" | "partially_preserved" | "attribute_transfer" | "weak_reference";
@@ -43,7 +44,7 @@ export type H3CharacterGroupEditPatch = {
     voiceEnabled?: boolean;
 };
 
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; description?: string; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown> };
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; description?: string; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown>; runtime?: boolean };
 export type H3StoryboardShot = { id: string; duration?: number; referenceBindingId?: string };
 
 /**
@@ -51,20 +52,7 @@ export type H3StoryboardShot = { id: string; duration?: number; referenceBinding
  * 打开分镜编辑表单时按当前 Clip 引用规则生成一份默认值，用户可手动增删改。
  * 未自定义（缺省）时按下述规则即时生成，保证旧数据行为不变。
  */
-export type H3SubjectDefinition = {
-    /** 稳定主体 ID（对应 subjects manifest 的 id / groupId / subjectId）。 */
-    id: string;
-    /** 展示名，写入 `<Subject N> is <name>.`。 */
-    name: string;
-    englishName?: string;
-    /** 视觉来源的参考标签，如 `<Picture 2>`。 */
-    pictures?: string[];
-    /** 补充描述（profile / 服装 / 视觉特征）。 */
-    profile?: string;
-    outfits?: string[];
-    /** 主体类别，仅用于 UI 分组与配色。 */
-    role?: string;
-};
+export type { H3SubjectDefinition } from "../../../../canvas-agent/src/plugins/minimax-h3/subject-definitions";
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
@@ -169,6 +157,8 @@ export type H3Segment = {
     /** 连续生成模式：保留跨 Clip 的 H3 模型缓存，减少下一段冷启动。默认关闭。 */
     keepModelCache?: boolean;
     latentUpscaleEnabled?: boolean;
+    /** Only applies while latent upscaling is enabled; independent of face refinement confirmation. */
+    latentUpscaleConfirmationMode?: boolean;
     h3FirstSteps?: number;
     h3SecondSteps?: number;
     h3FullSigma?: string;
@@ -299,7 +289,7 @@ export type H3Segment = {
     // 只有链式续跑（runFromCurrent）时生效；标在本段上（index > 0 才有意义）。
     // 注意：唯一有效键名是 previousVideoAsReference，不要再引入别名。
     previousVideoAsReference?: boolean;
-    // 尾帧接续：本段运行结束后，下一段运行自动抓取本段尾帧作为首帧参考并拼接到提示词
+    // 尾帧参考：下一段运行时追加本段尾帧，参考动作、场景与连续性；独立于潜空间续写。
     // （仅运行时拼接，不写回 prompt 编辑区）。该开关标在本段上，表示「把我的尾帧传给下一段」。
     // 注意：唯一有效键名是 tailFrameContinuation；不要再引入 tailFrameEnabled 之类的别名。
     tailFrameContinuation?: boolean;

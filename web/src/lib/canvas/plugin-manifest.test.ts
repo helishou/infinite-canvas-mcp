@@ -14,6 +14,9 @@ test("H3 宿主清单版本一致且完整暴露参考素材 MCP 工具", () => 
     assert.equal(packageJson.version, h3PluginManifest.version);
     assert.equal(pluginManifest.version, h3PluginManifest.version);
     assert.deepEqual(ids, [
+        "h3_update_clips",
+        "h3_prepare_clip_updates",
+        "h3_discard_clip_updates",
         "h3_list_models",
         "h3_get_node",
         "h3_get_clip",

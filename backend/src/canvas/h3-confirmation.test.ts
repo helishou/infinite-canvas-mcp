@@ -5,19 +5,19 @@ import { BackendEventBus } from "../events.js";
 import { createStores } from "../stores/index.js";
 import { CanvasH3Runner } from "./h3-runner.js";
 
-function fixture(t: TestContext, count = 1, previousOutput = false, failSecondPass = false) {
+function fixture(t: TestContext, count = 1, previousOutput = false, failSecondPass = false, withoutCheckpoint = false) {
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());
-    db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: Array.from({ length: count }, (_, i) => ({ id: `clip-${i + 1}`, prompt: "a video", confirmationMode: true, mode: "t2v", ...(previousOutput ? { result: "old-video.mp4", resultStorageKey: "old:key", cacheFingerprint: "old:fingerprint" } : {}) })) } }], connections: [] });
+    db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: Array.from({ length: count }, (_, i) => ({ id: `clip-${i + 1}`, prompt: "a video", confirmationMode: true, faceRefineEnabled: true, mode: "t2v", ...(previousOutput ? { result: "old-video.mp4", resultStorageKey: "old:key", cacheFingerprint: "old:fingerprint" } : {}) })) } }], connections: [] });
     const stores = createStores(db);
     const events = new BackendEventBus();
     const submitted: Array<{ id: string; input: Record<string, unknown> }> = [];
     const comfy = {
         async run(_preset: string, input: Record<string, unknown>, params: Record<string, unknown>, _url?: string, id?: string, onCreated?: (task: ReturnType<typeof stores.tasks.create>) => void) {
-            const task = stores.tasks.create(id || `child-${submitted.length + 1}`, "comfyui:minimax-h3", input, params);
+            const task = stores.tasks.create(id || `child-${submitted.length + 1}`, "comfyui:minimax-h3", input, withoutCheckpoint ? { ...params, latentConfirmationPhase: "" } : params);
             submitted.push({ id: task.id, input });
             onCreated?.(task);
-            if (failSecondPass && input.video) return stores.tasks.update(task.id, { status: "failed", error: "二采模拟失败" });
+            if (failSecondPass && (input.video || params.confirmSecondPass === true)) return stores.tasks.update(task.id, { status: "failed", error: "二采模拟失败" });
             stores.media.store(Buffer.from("fake-video"), { name: `${task.id}.mp4`, storageKey: task.id, mimeType: "video/mp4", category: "output" });
             return stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [{ url: `/media/${task.id}`, storageKey: task.id, mimeType: "video/mp4" }] } });
         },
@@ -37,6 +37,182 @@ function decision(db: BackendDatabase, taskId: string, action: "confirm" | "keep
     const confirmation = db.getTask(taskId)?.result?.confirmation as { revision: number } | undefined;
     return { action, segmentId, expectedRevision: Number(confirmation?.revision || 0) };
 }
+
+test("同节点不同 Clip 并发暂停各自保留确认入口，放弃其中一个不影响另一个", async (t) => {
+    const { db, runner, segment, node, submitted, settle } = fixture(t, 2, true);
+    const first = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1" }, "parent-1");
+    const second = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-2" }, "parent-2");
+    await settle(first.id, "awaiting_confirmation");
+    await settle(second.id, "awaiting_confirmation");
+    for (const [clip, task] of [["clip-1", first], ["clip-2", second]] as const) {
+        assert.equal(segment(clip).status, "awaiting_confirmation");
+        assert.equal(segment(clip).firstPassReady, true);
+        assert.equal(segment(clip).runtimeTaskId, task.id);
+    }
+    const otherOutput = segment("clip-2").result;
+    runner.resolveConfirmation(first.id, decision(db, first.id, "discard"));
+    assert.equal(db.getTask(first.id)?.status, "cancelled");
+    assert.equal(segment().result, "old-video.mp4");
+    assert.equal(segment("clip-2").result, otherOutput);
+    assert.equal(segment("clip-2").runtimeTaskId, second.id);
+    assert.equal(node().runtimeTaskId, second.id);
+    runner.resolveConfirmation(second.id, decision(db, second.id, "keep_first_pass", "clip-2"));
+    await settle(second.id, "succeeded");
+    assert.equal(submitted.length, 2);
+});
+
+test("重新生成被暂停任务拒绝时恢复丢失的 Clip 确认投影，不覆盖其他 Clip", async (t) => {
+    const { db, stores, runner, segment, node, submitted, settle } = fixture(t, 2, true);
+    const first = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1" }, "parent-1");
+    await settle(first.id, "awaiting_confirmation");
+    const second = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-2" }, "parent-2");
+    await settle(second.id, "awaiting_confirmation");
+    stores.projects.applyOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: {
+        status: "success", firstPassReady: false, runtimeTaskId: "", parentTaskId: "", result: "old-video.mp4", firstPassFingerprint: "old:fingerprint",
+    } }], { runtimeWrite: true });
+    const other = { ...segment("clip-2") };
+    assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", forceRegenerate: true }, "retry"), /占用/);
+    assert.equal(segment().status, "awaiting_confirmation");
+    assert.equal(segment().firstPassReady, true);
+    assert.equal(segment().runtimeTaskId, first.id);
+    assert.deepEqual(segment("clip-2"), other);
+    assert.ok([first.id, second.id].includes(String(node().runtimeTaskId)), "顶层可聚合任一活动 Clip，不作为确认归属");
+    assert.equal(db.getTask("retry"), null);
+    runner.resolveConfirmation(first.id, decision(db, first.id, "keep_first_pass"));
+    await settle(first.id, "succeeded");
+    assert.equal(submitted.length, 2);
+});
+
+test("待确认恢复不抢占已经绑定其他父任务的 Clip", async (t) => {
+    const { db, stores, runner, segment, settle } = fixture(t);
+    const first = runner.start({ projectId: "p", nodeId: "n" }, "parent-1");
+    await settle(first.id, "awaiting_confirmation");
+    stores.projects.applyOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: {
+        parentTaskId: "another-parent", runtimeTaskId: "", status: "loading", firstPassReady: false,
+    } }], { runtimeWrite: true });
+    await runner.reconcileTerminal(db.getTask(first.id)!);
+    assert.equal(segment().parentTaskId, "another-parent");
+    assert.equal(segment().status, "loading");
+    assert.throws(() => runner.resolveConfirmation(first.id, decision(db, first.id, "discard")), /绑定已变化/);
+});
+
+test("启动恢复找回丢失的待确认投影，只恢复按钮状态而不继续生成", async (t) => {
+    const { db, stores, events, comfy, runner, segment, submitted, settle } = fixture(t, 2, true);
+    const first = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1" }, "parent-1");
+    await settle(first.id, "awaiting_confirmation");
+    const second = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-2" }, "parent-2");
+    await settle(second.id, "awaiting_confirmation");
+    stores.projects.applyOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: {
+        status: "success", firstPassReady: false, runtimeTaskId: "", parentTaskId: "",
+    } }], { runtimeWrite: true });
+    const replacement = new CanvasH3Runner(stores, events, comfy as never, {} as never);
+    for (const task of db.listStartupRecoveryTasks([], 10)) replacement.resume(task);
+    assert.equal(segment().status, "awaiting_confirmation");
+    assert.equal(segment().firstPassReady, true);
+    assert.equal(segment().runtimeTaskId, first.id);
+    assert.equal(segment("clip-2").runtimeTaskId, second.id);
+    assert.equal(db.getTask(first.id)?.status, "awaiting_confirmation");
+    assert.equal(db.getTask(second.id)?.status, "awaiting_confirmation");
+    assert.equal(submitted.length, 2);
+});
+
+test("潜空间二采关闭时残留确认字段不暂停、不提交视频重采样", async (t) => {
+    const { db, stores, runner, submitted, segment, settle } = fixture(t);
+    const project = stores.projects.get("p")!;
+    stores.projects.applyOperations("p", Number(project.revision || 0), [{ type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: {
+        latentUpscaleEnabled: false, latentUpscaleConfirmationMode: true, confirmationMode: true, faceRefineEnabled: false,
+    } }]);
+    const task = runner.start({ projectId: "p", nodeId: "n" }, "ordinary-parent");
+    await settle(task.id, "succeeded");
+    assert.equal(submitted.length, 1);
+    assert.equal(db.getTask(submitted[0].id)?.params.latentConfirmationPhase, undefined);
+    assert.equal(db.getTask(submitted[0].id)?.params.postGenerationOnly, undefined);
+    assert.equal(segment().firstPassReady, false);
+    assert.equal(stores.tasks.events(task.id).some((event) => event.type === "first_pass_ready"), false);
+});
+
+test("精修确认不能替代潜空间确认，已有普通一采不能被确认成潜空间二采", async (t) => {
+    const { db, stores, runner, submitted, settle } = fixture(t);
+    const project = stores.projects.get("p")!;
+    stores.projects.applyOperations("p", Number(project.revision || 0), [{ type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: {
+        latentUpscaleEnabled: true, latentUpscaleConfirmationMode: false,
+    } }]);
+    const task = runner.start({ projectId: "p", nodeId: "n" }, "automatic-latent");
+    await settle(task.id, "succeeded");
+    assert.equal(submitted.length, 1);
+    assert.equal(db.getTask(submitted[0].id)?.params.latentConfirmationPhase, undefined);
+});
+
+test("潜空间确认先暂停，重启后沿用快照二采且重复确认不重跑", async (t) => {
+    const { db, stores, events, comfy, runner, submitted, settle } = fixture(t);
+    const project = stores.projects.get("p")!;
+    stores.projects.applyOperations("p", Number(project.revision || 0), [{ type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: {
+        latentUpscaleEnabled: true, latentUpscaleConfirmationMode: true, h3FirstSteps: 6, h3SecondSteps: 4,
+    } }]);
+    const task = runner.start({ projectId: "p", nodeId: "n", params: { noiseSeedMode: "random", seed: 123 } }, "latent-parent");
+    await settle(task.id, "awaiting_confirmation");
+    assert.equal(submitted.length, 1);
+    const first = db.getTask(submitted[0].id)!;
+    assert.equal(first.params.latentConfirmationPhase, "first");
+    assert.equal(first.params.latentUpscaleEnabled, true);
+    assert.match(String(first.params.latentCheckpointId), /^[a-f0-9]{64}$/);
+    const replacement = new CanvasH3Runner(stores, events, comfy as never, {} as never);
+    replacement.resume(db.getTask(task.id)!);
+    assert.equal(submitted.length, 1);
+    const request = { ...decision(db, task.id, "confirm"), postpassParams: { latentUpscaleEnabled: false, h3FirstSteps: 20, h3SecondSteps: 12, latentUpscaleMegapixels: 2 } };
+    replacement.resolveConfirmation(task.id, request);
+    await settle(task.id, "succeeded");
+    replacement.resolveConfirmation(task.id, request);
+    assert.equal(submitted.length, 2);
+    const second = db.getTask(submitted[1].id)!;
+    assert.equal(second.params.latentConfirmationPhase, "second");
+    assert.equal(second.params.latentCheckpointId, first.params.latentCheckpointId);
+    assert.equal(second.params.seed, first.params.seed);
+    assert.equal(second.params.noiseSeed, first.params.noiseSeed);
+    assert.equal(second.params.latentUpscaleEnabled, true);
+    assert.equal(second.params.h3FirstSteps, 6);
+    assert.equal(second.params.h3SecondSteps, 4);
+    assert.equal(second.params.latentUpscaleMegapixels, 2);
+    assert.equal(second.params.postGenerationOnly, false);
+    assert.equal(second.input.video, undefined, "一采视频不能替代原生潜变量续采");
+});
+
+test("无潜变量身份的一采禁止进入潜空间二采，仍可保留一采", async (t) => {
+    const { db, stores, runner, submitted, settle } = fixture(t, 1, false, false, true);
+    const project = stores.projects.get("p")!;
+    stores.projects.applyOperations("p", Number(project.revision || 0), [{ type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: {
+        latentUpscaleEnabled: true, latentUpscaleConfirmationMode: true,
+    } }]);
+    const task = runner.start({ projectId: "p", nodeId: "n" }, "incompatible-first");
+    await settle(task.id, "awaiting_confirmation");
+    assert.throws(() => runner.resolveConfirmation(task.id, decision(db, task.id, "confirm")), /不匹配/);
+    assert.equal(submitted.length, 1);
+    assert.equal(db.getTask(task.id)?.status, "awaiting_confirmation");
+    runner.resolveConfirmation(task.id, decision(db, task.id, "keep_first_pass"));
+    await settle(task.id, "succeeded");
+});
+
+test("潜空间二采失败只重试二采，保留同一快照和一采结果", async (t) => {
+    const { db, stores, runner, submitted, segment, settle } = fixture(t, 1, false, true);
+    const project = stores.projects.get("p")!;
+    stores.projects.applyOperations("p", Number(project.revision || 0), [{ type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: { latentUpscaleEnabled: true, latentUpscaleConfirmationMode: true } }]);
+    const task = runner.start({ projectId: "p", nodeId: "n" }, "latent-failure");
+    await settle(task.id, "awaiting_confirmation");
+    const firstResult = segment().firstPassResult;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        runner.resolveConfirmation(task.id, decision(db, task.id, "confirm"));
+        for (let i = 0; i < 100 && !db.getTask(task.id)?.error; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+        await settle(task.id, "awaiting_confirmation");
+        assert.equal(submitted.length, attempt + 2);
+        assert.equal(segment().firstPassResult, firstResult);
+        assert.equal(db.getTask(submitted[attempt + 1].id)?.params.latentConfirmationPhase, "second");
+        assert.equal(db.getTask(submitted[attempt + 1].id)?.params.latentCheckpointId, db.getTask(submitted[0].id)?.params.latentCheckpointId);
+    }
+    runner.resolveConfirmation(task.id, decision(db, task.id, "keep_first_pass"));
+    await settle(task.id, "succeeded");
+    assert.equal(segment().result, firstResult);
+    assert.equal(submitted.length, 3);
+});
 
 test("一采就绪使同一父任务持久暂停，保留绑定且不提前提交后一段", async (t) => {
     const { db, runner, submitted, segment, node, settle } = fixture(t, 2);
@@ -194,15 +370,15 @@ test("放弃恢复旧输出、取消同一父任务且不删除历史媒体", as
     assert.ok(stores.media.meta(submitted[0].id), "一采媒体仍应保留");
 });
 
-test("保留一采后重新串行运行，复用的已收口 Clip 仍计入父任务媒体", async (t) => {
+test("固定种子保留一采后重新串行运行，复用的已收口 Clip 仍计入父任务媒体", async (t) => {
     const { db, runner, submitted, segment, settle } = fixture(t, 2);
-    const first = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true }, "first");
+    const first = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true, params: { noiseSeedMode: "fixed", seed: 123 } }, "first");
     await settle(first.id, "awaiting_confirmation");
     runner.resolveConfirmation(first.id, decision(db, first.id, "keep_first_pass"));
     for (let i = 0; i < 100 && segment("clip-2").status !== "awaiting_confirmation"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     await settle(first.id, "awaiting_confirmation");
     runner.resolveConfirmation(first.id, decision(db, first.id, "discard", "clip-2"));
-    const second = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true }, "second");
+    const second = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true, params: { noiseSeedMode: "fixed", seed: 123 } }, "second");
     await settle(second.id, "awaiting_confirmation");
     assert.equal(submitted.length, 3, "已收口的首 Clip 不应重跑");
     const media = db.getTask(second.id)?.result?.media;
@@ -235,9 +411,9 @@ test("二采失败返回同父任务待确认；显式重试使用新子任务�
     assert.equal(submitted.length, 3);
 });
 
-test("明确重新生成绕过缓存，普通再次运行仍可复用成品", async (t) => {
+test("固定种子明确重新生成绕过缓存，普通再次运行仍可复用成品", async (t) => {
     const { db, runner, submitted, settle } = fixture(t);
-    const first = runner.start({ projectId: "p", nodeId: "n" }, "first");
+    const first = runner.start({ projectId: "p", nodeId: "n", params: { noiseSeedMode: "fixed", seed: 123 } }, "first");
     await settle(first.id, "awaiting_confirmation");
     runner.resolveConfirmation(first.id, decision(db, first.id, "keep_first_pass"));
     await settle(first.id, "succeeded");

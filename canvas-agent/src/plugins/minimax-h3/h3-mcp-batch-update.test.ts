@@ -111,12 +111,20 @@ for (const field of ["id", "status", "runtimeTaskId", "resultStorageKey", "h3Cha
     });
 }
 
-test("active target blocks the whole batch", async () => {
-    const f = fixture();
-    f.project.nodes[0].metadata.segments[5].status = "loading";
-    await assert.rejects(() => f.run(updates()), /运行|活动|active/i);
-    assert.equal(f.calls.length, 0);
-});
+for (const status of ["loading", "queued", "running", "awaiting_confirmation", "success"]) {
+    test(`batch edits ${status} task-bound drafts without clearing runtime fields`, async () => {
+        const f = fixture();
+        const target = f.project.nodes[0].metadata.segments[5];
+        Object.assign(target, { status, runtimeTaskId: "child-active", parentTaskId: "parent-active", resultStorageKey: "video:existing" });
+        const result = await f.run([{ segmentId: "s6", patch: { prompt: "A sword and a jade pendant.", timeline: [{ description: "A sword." }] } }]);
+        assert.equal(result.count, 1);
+        const saved = f.project.nodes[0].metadata.segments[5];
+        assert.equal(saved.prompt, "A sword and a jade pendant.");
+        assert.deepEqual(saved.timeline, [{ description: "A sword." }]);
+        for (const field of ["status", "runtimeTaskId", "parentTaskId", "resultStorageKey"]) assert.equal(saved[field], target[field]);
+        assert.deepEqual(Object.keys(f.calls[0].operations[0].patch).sort(), ["prompt", "timeline"]);
+    });
+}
 
 test("old caller revision fails before commit; mid-flight revision change is not rebased", async () => {
     const f = fixture();

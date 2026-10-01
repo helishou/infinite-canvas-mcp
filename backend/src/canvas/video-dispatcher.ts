@@ -3,16 +3,17 @@ import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generatio
 
 import type { CanvasProject, RuntimeTask, WorkflowConfig, WorkflowField } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
-import type { VideoConcatBackend } from "../runtime/video-concat.js";
+import { validateVideoTrimRange, type VideoConcatBackend } from "../runtime/video-concat.js";
 import type { Stores, TaskStore } from "../stores/types.js";
 import type { WorkflowExecutor } from "../workflows/executor.js";
 import type { WorkflowStore } from "../workflows/store.js";
 import { builtinWorkflowName, decodeChannelModel, findChannelModel, modelOptionName, resolveWorkflowForModel, usesWorkflowExecutor, workflowResolutionMessage } from "./model-workflow.js";
 import type { CanvasImageReference } from "./image-dispatcher.js";
 import { DirectVideoBackend } from "../runtime/direct-video.js";
-import { prepareCanvasGenerationTarget } from "./generation-target.js";
+import { prepareCanvasGenerationTarget, prepareCanvasVideoTrimTarget } from "./generation-target.js";
 
 export const CANVAS_VIDEO_CONCAT_MODEL = "__local_video_concat__";
+export const CANVAS_VIDEO_TRIM_MODEL = "__local_video_trim__";
 
 export type CanvasVideoReference = CanvasImageReference;
 export type CanvasVideoGenerationInput = {
@@ -36,7 +37,7 @@ export type CanvasVideoGenerationInput = {
     loopOutput?: CanvasGenerationCommand["loopOutput"];
 };
 
-type Plan = { input: CanvasVideoGenerationInput; kind: "concat" | "workflow" | "preset" | "direct"; workflow?: string; preset?: string };
+type Plan = { input: CanvasVideoGenerationInput; kind: "concat" | "trim" | "workflow" | "preset" | "direct"; workflow?: string; preset?: string };
 
 /** Backend 权威的普通视频任务；H3 连续 Clip 仍由专用 runner 管理。 */
 export class CanvasVideoDispatcher {
@@ -49,10 +50,14 @@ export class CanvasVideoDispatcher {
         let plan = this.plan(input);
         const taskId = input.clientTaskId || `canvas-video-${crypto.randomUUID()}`;
         const existing = this.stores.tasks.get(taskId);
+        if (existing && plan.kind === "trim" && (existing.kind !== "canvas-video" || existing.input.model !== input.model || existing.projectId !== input.projectId
+            || JSON.stringify(existing.input.params) !== JSON.stringify(input.params) || JSON.stringify(existing.input.videoReferences) !== JSON.stringify(input.videoReferences))) {
+            throw new Error("视频裁剪任务 ID 已用于不同输入");
+        }
         if (existing) return { taskId: existing.id, executor: plan.kind };
         const active = this.findActive(input);
         if (active) return { taskId: active.id, executor: String(active.executor || plan.kind) };
-        const prepared = prepareCanvasGenerationTarget(this.stores, { ...input, mode: "video" }, taskId);
+        const prepared = (plan.kind === "trim" ? prepareCanvasVideoTrimTarget : prepareCanvasGenerationTarget)(this.stores, { ...input, mode: "video" }, taskId);
         input = prepared.command as CanvasVideoGenerationInput;
         plan = this.plan(input);
         const project = prepared.project;
@@ -66,7 +71,7 @@ export class CanvasVideoDispatcher {
             if (project) this.stores.projects.applyOperations(input.projectId!, Number(project.revision || 0), [
                 ...prepared.createOperations,
                 { type: "update_node", id: input.nodeId!, metadata: { runtimeTaskId: task.id, status: "loading", runProgress: 0 }, metadataDelete: ["errorDetails"] },
-                ...bindSource(project, input, task.id),
+                ...(plan.kind === "trim" ? [] : bindSource(project, input, task.id)),
             ], { operationId: `video-task-bind:${task.id}`, runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "视频生成任务" } });
         } catch (error) {
             this.stores.tasks.update(task.id, { status: "failed", error: messageOf(error) });
@@ -79,7 +84,7 @@ export class CanvasVideoDispatcher {
     retry(task: RuntimeTask) {
         if (task.kind !== "canvas-video") throw new Error(`任务类型 ${task.kind} 不是画布视频任务`);
         const previous = task.input as CanvasVideoGenerationInput;
-        const result = this.start({ ...previous, ...(previous.loopOutput ? { nodeId: previous.sourceNodeId } : {}), clientTaskId: `canvas-video-retry-${crypto.randomUUID()}` });
+        const result = this.start({ ...previous, ...(previous.loopOutput || previous.model === CANVAS_VIDEO_TRIM_MODEL ? { nodeId: previous.sourceNodeId } : {}), clientTaskId: `canvas-video-retry-${crypto.randomUUID()}` });
         const retried = this.stores.tasks.get(result.taskId)!;
         this.stores.tasks.addEvent(retried.id, "retry", { parentTaskId: task.id });
         return retried;
@@ -127,6 +132,16 @@ export class CanvasVideoDispatcher {
     }
 
     private async dispatch(plan: Plan, taskId: string): Promise<Record<string, unknown>> {
+        if (plan.kind === "trim") {
+            const reference = plan.input.videoReferences![0];
+            const childId = `video-trim-child-${taskId}`;
+            this.assertActive(taskId);
+            this.track(taskId, childId);
+            try {
+                const child = await this.concat.trim(reference.storageKey!, Number(plan.input.params!.start), Number(plan.input.params!.end), childId, taskId);
+                return firstMedia(await waitForTask(this.stores.tasks, child.id));
+            } finally { this.untrack(taskId, childId); }
+        }
         if (plan.kind === "concat") {
             const references = await Promise.all((plan.input.videoReferences || []).map((reference) => this.materialize(reference)));
             const childId = `video-concat-child-${taskId}`;
@@ -178,6 +193,12 @@ export class CanvasVideoDispatcher {
     }
 
     private plan(input: CanvasVideoGenerationInput): Plan {
+        if (input.model === CANVAS_VIDEO_TRIM_MODEL) {
+            validateVideoTrimRange(input.params?.start, input.params?.end);
+            if (!input.projectId || input.loopOutput || input.videoReferences?.length !== 1 || !input.videoReferences[0].storageKey) throw new Error("视频裁剪需要画布项目和一个已归档视频");
+            if (!this.stores.media.meta(input.videoReferences[0].storageKey)?.mimeType.startsWith("video/")) throw new Error("视频裁剪输入不是已归档的视频");
+            return { input, kind: "trim" };
+        }
         if (input.model === CANVAS_VIDEO_CONCAT_MODEL) return { input, kind: "concat" };
         const config = this.stores.settings.get("ai.config");
         if (usesWorkflowExecutor(config, input.model)) {
@@ -203,7 +224,7 @@ export class CanvasVideoDispatcher {
     }
 
     private findActive(input: CanvasVideoGenerationInput) {
-        if (!input.projectId) return null;
+        if (!input.projectId || input.model === CANVAS_VIDEO_TRIM_MODEL) return null;
         const source = input.sourceNodeId || input.nodeId;
         return this.stores.tasks.list({ kind: "canvas-video", projectId: input.projectId, limit: 500 })
             .find((task) => {

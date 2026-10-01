@@ -6,6 +6,21 @@ import { compileReferenceSubmission } from "../../canvas/reference-contract.js";
 import { buildStoryboardPromptSections } from "../../../../plugins/canvas/minimax-h3/src/services/storyboard-prompt.js";
 import { styleTemplateText } from "./style-templates.js";
 
+test("网页与原生分镜写入按各视觉来源独立编译描述，并计入缓存指纹", () => {
+    const bindings = ["face", "body"].map((id) => ({ id, assetId: id, label: id, role: "character_identity", tags: [], enabled: true, usage: "reference", mediaType: "image", url: `https://example.test/${id}.png`, subjectId: "hero" }));
+    const definition = { id: "hero", name: "Hero", profile: "old overall note", pictures: ["<Picture 1>", "<Picture 2>"], pictureDescriptions: { face: "FACE_ONLY", body: "BODY_ONLY" } };
+    const segment = { id: "clip", mode: "ref2va", referenceBindings: bindings, subjectDefinitions: [definition] };
+    const input = { openingDescription: "", shots: [{ description: "Hero walks forward." }], overallSoundscape: "", nonDiegeticMusic: "N/A" };
+    const generated = writeStoryboardPrompt({ nodes: [] }, segment, input);
+    const browser = buildStoryboardPromptSections(generated.content.subjects, generated.content.references, generated.content.shots);
+    assert.equal(browser.subjectDefinitions, generated.subjectDefinitions);
+    assert.match(generated.prompt, /<Picture 1> visual attributes: FACE_ONLY/);
+    assert.match(generated.prompt, /<Picture 2> visual attributes: BODY_ONLY/);
+    assert.match(generated.prompt, /old overall note/);
+    const changed = writeStoryboardPrompt({ nodes: [] }, { ...segment, subjectDefinitions: [{ ...definition, pictureDescriptions: { ...definition.pictureDescriptions, body: "NEW_BODY" } }] }, input);
+    assert.notEqual(changed.fingerprint, generated.fingerprint);
+});
+
 test("h3_write_storyboard_prompt 将旧版分镜引用占位符归一化为 Picture 标签", () => {
     const binding = {
         id: "ep01-s01-03",

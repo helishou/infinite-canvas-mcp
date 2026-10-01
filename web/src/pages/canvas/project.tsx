@@ -12,7 +12,7 @@ import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workfl
 import { resolveComfyImageSize } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, prepareCanvasLoop, request, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
 import { runCanvasAudioTask } from "@/services/api/canvas-audio";
@@ -5459,6 +5459,18 @@ function InfiniteCanvasPage() {
         setPreviewNodeId(node.id);
         setPreviewImageId(imageId || node.metadata?.primaryImageId || node.metadata?.images?.[0]?.id || null);
     }, []);
+    const openVideoTrim = useCallback((node: CanvasNodeData) => {
+        const video = Array.from(containerRef.current?.querySelectorAll<HTMLVideoElement>("video[data-canvas-video]") || [])
+            .find((item) => item.dataset.canvasVideo === node.id);
+        const storageKey = node.metadata?.storageKey;
+        const url = storageKey ? backendMediaUrl(storageKey) : video?.currentSrc || video?.src || resolveComfyMediaUrl(node.metadata?.content || node.metadata?.url || "");
+        if (!url) return;
+        video?.pause();
+        openMediaPreview({ type: "video", url, name: node.title || t("assets.kinds.video") });
+        setToolbarNodeId(null);
+        setDialogNodeId(null);
+        setContextMenu(null);
+    }, [openMediaPreview, t]);
     const openVideoComparison = useCallback((sourceNode: CanvasNodeData) => {
         // 同屏对比弹窗会用同一份 URL 渲染一份新 <video>；打开时先暂停画布里所有视频节点，
         // 避免两边同时播放造成音轨叠加；用户关掉弹窗后画布视频保持暂停状态，需要重新点播放。
@@ -5961,6 +5973,7 @@ function InfiniteCanvasPage() {
                     onDownload={downloadNodeImage}
                     onSaveAsset={(node) => void saveNodeAsset(node)}
                     onCompareVideo={openVideoComparison}
+                    onTrimVideo={openVideoTrim}
                     onConvertToCharacter={convertImageNodeToCharacter}
                     onConvertToScene={convertImageNodeToScene}
                     onSaveCharacterToAsset={(node) => void saveCharacterNodeToAsset(node)}
@@ -6102,7 +6115,7 @@ function InfiniteCanvasPage() {
                     onSave={saveSceneEdit}
                 />
 
-                <MediaPreviewModal item={mediaPreviewItem} onClose={closeMediaPreview} />
+                <MediaPreviewModal item={mediaPreviewItem} onClose={closeMediaPreview} projectId={projectId} />
                 {videoComparison ? <CanvasVideoCompareModal comparison={videoComparison} onClose={() => setVideoComparison(null)} /> : null}
 
                 <Modal

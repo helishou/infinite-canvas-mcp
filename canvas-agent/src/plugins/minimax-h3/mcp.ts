@@ -6,9 +6,11 @@ import { validateH3CharacterGroups } from "../../canvas/character-reference-cont
 import { buildCharacterGroupFromExistingNode } from "./character-groups.js";
 import { writeStoryboardPrompt } from "./storyboard-write.js";
 import { isReferenceNameEcho } from "./prompt-rules.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { H3_RUNTIME_SEGMENT_FIELDS } from "../../canvas/runtime-fields.js";
-import { H3_UPDATE_CLIPS_TOOL } from "./batch-update-tool.js";
+import { H3_GET_CLIP_TOOL, H3_UPDATE_CLIPS_TOOL, H3_PREPARE_CLIP_UPDATES_TOOL, H3_DISCARD_CLIP_UPDATES_TOOL } from "./batch-update-tool.js";
+import { buildNarrativeEditPatch, H3_MAX_EDIT_PREVIEWS, projectNarrativeFields, type H3EditSummary } from "./narrative-edits.js";
+import { readPreparedSource, assertPreparedInvariants, selectCompactUpdate, addPreparedPatchPreviews, type PreparedH3Plan } from "./prepared-updates.js";
 
 // H3 片段(节点 metadata.segments 中的元素)
 type H3Segment = Record<string, unknown>;
@@ -65,7 +67,9 @@ export function buildH3BatchUpdates(project: Record<string, unknown>, node: Agen
     const segments = segmentsOf(node);
     const seen = new Set<string>();
     const operations: Array<Record<string, unknown>> = [];
-    const entries: Array<{ segmentId: string; segmentIndex: number; updatedFields: string[] }> = [];
+    const entries: Array<{ segmentId: string; segmentIndex: number; updatedFields: string[]; editSummary?: H3EditSummary }> = [];
+    const candidates: H3Segment[] = [];
+    const previewBudget = { remaining: H3_MAX_EDIT_PREVIEWS };
     const projection: H3Segment = {};
     const protectedFields = new Set<string>([...H3_RUNTIME_SEGMENT_FIELDS, "id", "h3CharacterGroups", "characterGroups", "metadata", "segments", "__proto__", "constructor", "prototype"]);
     for (const raw of rawUpdates) {
@@ -77,20 +81,25 @@ export function buildH3BatchUpdates(project: Record<string, unknown>, node: Agen
         const segmentIndex = segments.findIndex((segment) => segment.id === segmentId);
         if (segmentIndex < 0) throw new Error(`找不到片段:${segmentId}`);
         const target = segments[segmentIndex];
-        if (["loading", "queued", "running", "awaiting_confirmation"].includes(String(target.status || "")) || target.runtimeTaskId) throw new Error(`Clip 有活动任务或任务绑定，先核对任务终态:${segmentId}`);
-        if (!item.patch || typeof item.patch !== "object" || Array.isArray(item.patch) || !Object.keys(item.patch).length) throw new Error(`Clip ${segmentId} 的 patch 必须为非空对象`);
-        const patch = structuredClone(item.patch) as H3Segment;
+        // Draft edits do not change the runner's persisted runPlan snapshot.
+        // Keep runtime fields protected below; editing must not detach an active task.
+        if (item.patch !== undefined && (!item.patch || typeof item.patch !== "object" || Array.isArray(item.patch))) throw new Error(`Clip ${segmentId} 的 patch 必须为对象`);
+        const suppliedPatch = structuredClone(item.patch || {}) as H3Segment;
+        const edited = Object.hasOwn(item, "edits") ? buildNarrativeEditPatch(target, item.edits, suppliedPatch, previewBudget) : undefined;
+        const patch: H3Segment = { ...suppliedPatch, ...(edited?.patch || {}) };
+        if (!Object.keys(patch).length) throw new Error(`Clip ${segmentId} 要求非空 patch 或 edits`);
         for (const key of Object.keys(patch)) if (protectedFields.has(key)) throw new Error(`批量更新禁止修改 ${key}；运行态由后台维护，角色组使用专用工具`);
         if (Object.hasOwn(patch, "duration") && (typeof patch.duration !== "number" || !Number.isFinite(patch.duration) || patch.duration <= 0)) throw new Error(`Clip ${segmentId} 的 duration 必须为正数`);
         for (const key of ["title", "prompt"]) if (Object.hasOwn(patch, key) && typeof patch[key] !== "string") throw new Error(`Clip ${segmentId} 的 ${key} 必须为字符串`);
         for (const key of ["referenceBindings", "subjects", "timeline"]) if (Object.hasOwn(patch, key) && !Array.isArray(patch[key])) throw new Error(`Clip ${segmentId} 的 ${key} 必须为数组`);
         assertH3ClipPatch(project, target, patch, true);
         operations.push({ type: "update_h3_segment", nodeId: node.id, segmentId, patch });
-        entries.push({ segmentId, segmentIndex, updatedFields: Object.keys(patch) });
+        entries.push({ segmentId, segmentIndex, updatedFields: Object.keys(patch), ...(edited ? { editSummary: edited.summary } : {}) });
+        candidates.push({ ...target, ...patch });
         Object.assign(projection, nodeProjection(patch));
     }
     if (Object.keys(projection).length) operations.push({ type: "update_node", id: node.id, metadata: projection });
-    return { operations, entries };
+    return { operations, entries, candidates };
 }
 
 function committedH3Fields(segment: H3Segment, fields: string[]) {
@@ -110,6 +119,8 @@ function committedH3Fields(segment: H3Segment, fields: string[]) {
 // 工具元信息(声明,供 Agent 动态注册)
 const TOOLS: PluginMcpToolWire[] = [
     H3_UPDATE_CLIPS_TOOL,
+    H3_PREPARE_CLIP_UPDATES_TOOL,
+    H3_DISCARD_CLIP_UPDATES_TOOL,
     {
         id: "h3_list_models",
         version: "1.2.0",
@@ -124,13 +135,7 @@ const TOOLS: PluginMcpToolWire[] = [
         description: "按节点 id 读取 MiniMax H3 节点摘要与当前时间线的稳定 Clip ID、顺序和状态；单段提示词、参考与运行参数请用 h3_get_clip 的定向工具读取。",
         inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string", description: "画布节点 id" } }, required: ["projectId", "nodeId"] },
     },
-    {
-        id: "h3_get_clip",
-        version: "1.2.0",
-        name: "H3 读取片段总览",
-        description: "按当前稳定 segmentId 读取 H3 Clip 的轻量状态；ID 不确定时先用 h3_get_node 查看当前时间线。可通过 include 附带提示词、参考或运行参数。",
-        inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, include: { type: "array", items: { type: "string", enum: ["prompt", "references", "runtime"] }, uniqueItems: true } }, required: ["projectId", "nodeId", "segmentId"] },
-    },
+    H3_GET_CLIP_TOOL,
     {
         id: "h3_get_clip_prompt",
         version: "1.0.0",
@@ -895,6 +900,7 @@ export const pluginMcp: PluginMcpModule = {
             h3_get_clip: async (input) => {
                 const { projectId, nodeId, segmentId, segment, timings, snapshot } = await readH3Clip(context, input);
                 const include = new Set(Array.isArray(input.include) ? input.include.map(String) : []);
+                const projected = input.fields === undefined ? {} : projectNarrativeFields(segment, input.fields);
                 const issueCounts = snapshot.issues.reduce<Record<string, number>>((counts, issue) => {
                     const severity = String(issue.severity || "unknown");
                     counts[severity] = (counts[severity] || 0) + 1;
@@ -919,6 +925,7 @@ export const pluginMcp: PluginMcpModule = {
                     characterGroupCount: snapshot.characterGroups.length,
                     issueCounts,
                     timings,
+                    ...projected,
                     ...(include.has("prompt") ? { prompt: snapshot.prompt } : {}),
                     ...(include.has("references") ? { references: snapshot.references, characterGroups: snapshot.characterGroups } : {}),
                     ...(include.has("runtime") ? { runtime: snapshot.runtime } : {}),
@@ -971,13 +978,84 @@ export const pluginMcp: PluginMcpModule = {
                 const taskId = String(input.taskId || "");
                 return summarizeRuntimeTask(await context.backend.cancelTask(taskId));
             },
+            h3_prepare_clip_updates: async (input) => {
+                const projectId = String(input.projectId || ""), nodeId = String(input.nodeId || "");
+                const files = context.backend.preparedH3Updates;
+                if (!files) throw new Error("当前 Backend 未提供原生修改稿文件入口");
+                const source = await files.readSource(String(input.filePath || ""), String(input.fileSha256 || ""));
+                const { project, node } = await getProjectNode(context, projectId, nodeId);
+                const revision = Number(project.revision || 0), segments = segmentsOf(node);
+                const originalUpdates = readPreparedSource(source.value, projectId, nodeId, revision, segments);
+                const original = buildH3BatchUpdates(project, node, originalUpdates);
+                assertPreparedInvariants(source.value, original.entries.map((entry) => segments[entry.segmentIndex]), original.candidates);
+                const selected = original.entries.map((entry, index) => selectCompactUpdate(segments[entry.segmentIndex], originalUpdates[index], original.operations[index].patch as Record<string, unknown>));
+                const updates = selected.map((value) => value.update);
+                const built = buildH3BatchUpdates(project, node, updates);
+                if (JSON.stringify(built.candidates) !== JSON.stringify(original.candidates)) throw new Error("紧凑表达与批准修改稿不一致");
+                const previewEntries = addPreparedPatchPreviews(built.entries, built.entries.map((entry) => segments[entry.segmentIndex]), built.candidates);
+                // A single bounded diff list, not both the literal-edit preview and the patch preview.
+                for (const entry of previewEntries) if (entry.editSummary) entry.editSummary = { ...entry.editSummary, previews: [], previewTruncated: true };
+                const plan: PreparedH3Plan = {
+                    formatVersion: 1, projectId, nodeId, revision, operationId: `h3-prepared:${randomUUID()}`,
+                    operations: built.operations, entries: previewEntries,
+                    previewItems: previewEntries.map((entry, index) => ({ ...entry, ...committedH3Fields(built.candidates[index], entry.updatedFields) })),
+                    selection: selected.map((value, index) => ({ segmentId: built.entries[index].segmentId, fields: value.fields })),
+                    sourceSha256: source.sha256, sourceBytes: source.bytes,
+                    originalUpdateBytes: Buffer.byteLength(JSON.stringify(originalUpdates)), selectedUpdateBytes: Buffer.byteLength(JSON.stringify(updates)),
+                };
+                const preparedId = await files.save(plan as unknown as Record<string, unknown>);
+                return { ok: true, applied: false, valueSource: "proposed", projectId, nodeId, preparedId, revision, count: plan.entries.length,
+                    items: plan.previewItems, selection: plan.selection, sourceSha256: plan.sourceSha256, sourceBytes: plan.sourceBytes,
+                    originalUpdateBytes: plan.originalUpdateBytes, selectedUpdateBytes: plan.selectedUpdateBytes };
+            },
+            h3_discard_clip_updates: async (input) => {
+                const files = context.backend.preparedH3Updates;
+                if (!files) throw new Error("当前 Backend 未提供原生修改稿文件入口");
+                const preparedId = String(input.preparedId || ""), plan = await files.read(preparedId);
+                if (plan.projectId !== input.projectId || plan.nodeId !== input.nodeId) throw new Error("冻结方案目标 projectId/nodeId 不符");
+                await files.discard(preparedId);
+                return { ok: true, discarded: true, preparedId, projectId: plan.projectId, nodeId: plan.nodeId };
+            },
             h3_update_clips: async (input) => {
                 const projectId = String(input.projectId || "");
                 const nodeId = String(input.nodeId || "");
+                if (input.dryRun !== undefined && typeof input.dryRun !== "boolean") throw new Error("dryRun 必须为布尔值");
+                if (input.preparedId !== undefined) {
+                    if (typeof input.preparedId !== "string" || !input.preparedId || input.updates !== undefined) throw new Error("preparedId 与 updates 互斥，且必须为非空句柄");
+                    const files = context.backend.preparedH3Updates;
+                    if (!files) throw new Error("当前 Backend 未提供原生修改稿文件入口");
+                    const plan = await files.read(input.preparedId) as unknown as PreparedH3Plan;
+                    if (plan.projectId !== projectId || plan.nodeId !== nodeId) throw new Error("冻结方案目标 projectId/nodeId 不符");
+                    if (input.expectedRevision !== undefined && input.expectedRevision !== plan.revision) throw new Error("expectedRevision 不能覆盖冻结方案 revision");
+                    if (input.dryRun === true) {
+                        const { project } = await getProjectNode(context, projectId, nodeId);
+                        if (Number(project.revision || 0) !== plan.revision) throw new Error(`画布版本冲突：expectedRevision=${plan.revision}，当前 revision=${String(project.revision)}`);
+                        return { ok: true, atomic: true, dryRun: true, applied: false, valueSource: "proposed", projectId, nodeId, preparedId: input.preparedId,
+                            revision: plan.revision, count: plan.entries.length, items: plan.previewItems };
+                    }
+                    // Exactly the frozen operations/revision/operationId: Backend resolves an old receipt before CAS.
+                    // Never recompile a retry against a new reference map or silently rebase after a lost response.
+                    const result = await context.backend.applyCanvasOperations(projectId, plan.operations, plan.revision, plan.operationId, true);
+                    const refreshedNode = (Array.isArray(result.project.nodes) ? result.project.nodes : []).find((value) => (value as Record<string, unknown>).id === nodeId) as AgentCanvasNode | undefined;
+                    if (!refreshedNode) throw new Error(`批量更新后读取失败:${nodeId}`);
+                    const refreshed = segmentsOf(refreshedNode);
+                    const items = plan.entries.map((entry) => {
+                        const segment = refreshed.find((value) => value.id === entry.segmentId);
+                        if (!segment) throw new Error(`批量更新后读取片段失败:${entry.segmentId}`);
+                        // Preparation diffs stay in the preparation receipt, not in every commit/replay receipt.
+                        return { segmentId: entry.segmentId, segmentIndex: entry.segmentIndex, updatedFields: entry.updatedFields, ...committedH3Fields(segment, entry.updatedFields) };
+                    });
+                    return { ok: true, atomic: true, dryRun: false, applied: true, valueSource: "committed", projectId, nodeId, preparedId: input.preparedId,
+                        operationId: plan.operationId, replayed: result.duplicated === true, revision: result.revision, count: items.length, items };
+                }
                 const { project, node } = await getProjectNode(context, projectId, nodeId);
                 const revision = Number(project.revision || 0);
                 if (input.expectedRevision !== undefined && (!Number.isInteger(input.expectedRevision) || Number(input.expectedRevision) < 0 || input.expectedRevision !== revision)) throw new Error(`画布版本冲突：expectedRevision=${String(input.expectedRevision)}，当前 revision=${revision}`);
-                const { operations, entries } = buildH3BatchUpdates(project, node, input.updates);
+                const { operations, entries, candidates } = buildH3BatchUpdates(project, node, input.updates);
+                if (input.dryRun === true) {
+                    const items = entries.map((entry, index) => ({ ...entry, ...committedH3Fields(candidates[index], entry.updatedFields) }));
+                    return { ok: true, atomic: true, dryRun: true, applied: false, valueSource: "proposed", projectId, nodeId, revision, count: items.length, items };
+                }
                 // Validation depends on references/assets too; do not rebase the validated batch.
                 const result = await context.backend.applyCanvasOperations(projectId, operations, revision, undefined, true);
                 const refreshedNode = (Array.isArray(result.project.nodes) ? result.project.nodes : []).find((value) => (value as Record<string, unknown>).id === nodeId) as AgentCanvasNode | undefined;
@@ -988,7 +1066,7 @@ export const pluginMcp: PluginMcpModule = {
                     if (!segment) throw new Error(`批量更新后读取片段失败:${entry.segmentId}`);
                     return { ...entry, ...committedH3Fields(segment, entry.updatedFields) };
                 });
-                return { ok: true, atomic: true, projectId, nodeId, revision: result.revision, count: items.length, items };
+                return { ok: true, atomic: true, dryRun: false, applied: true, valueSource: "committed", projectId, nodeId, revision: result.revision, count: items.length, items };
             },
             h3_update_clip: async (input) => {
                 const nodeId = String(input.nodeId || "");

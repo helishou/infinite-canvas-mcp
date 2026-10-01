@@ -1,4 +1,4 @@
-﻿
+
 [data-canvas-no-zoom].minimax-canvas-workbench { width:100%; height:100%; min-width:0; min-height:0; font-family:inherit; }
 .minimax-canvas-workbench.is-canvas-ref-drag-over { box-shadow:0 0 0 2px var(--h3-active),0 10px 28px color-mix(in srgb,var(--h3-active) 22%,transparent); }
 .minimax-canvas-workbench.is-canvas-ref-drag-over::after { content:"释放后添加到参考素材"; position:absolute; inset:8px; z-index:80; display:flex; align-items:flex-start; justify-content:center; padding-top:10px; border:1px dashed var(--h3-active); border-radius:10px; background:color-mix(in srgb,var(--h3-active) 8%,transparent); color:var(--h3-active); font-size:24px; font-weight:750; pointer-events:none; }
@@ -91,7 +91,7 @@
 .minimax-tick-extended b { color:#6b7787; }
 .minimax-motion-label,.minimax-motion-track,.minimax-motion-add { display:none; }
 .minimax-motion-segment { position:absolute; top:5px; bottom:5px; border-radius:4px; background:repeating-linear-gradient(135deg,#1d2935 0 4px,#253646 4px 8px); border:1px solid #334155; color:#7dd3fc; text-align:center; font-size:26px; display:flex; align-items:center; justify-content:center; }
-/* 尾帧接续与潜空间续写开关已移到 Clip 设置栏（ClipSettings「续段衔接」），
+/* 尾帧参考与潜空间续写开关已移到 Clip 设置栏（ClipSettings「续段衔接」），
    Clip 卡片不再有这两个角标，样式一并移除。 */
 
 .minimax-tl-clip { position:absolute; top:10px; bottom:10px; min-width:54px; border:1px solid #334155; border-radius:5px; background:#24272b; color:#e5e7eb; overflow:hidden; cursor:pointer; }
@@ -209,6 +209,11 @@
 .nfh3-subject-pictures .ant-select-selection-item-remove { font-size:12px; }
 .nfh3-subject-picture-chip { display:inline-flex; align-items:center; }
 .nfh3-subject-picture-chip img { width:34px; height:22px; object-fit:cover; border-radius:3px; display:block; }
+.nfh3-subject-source-description { display:flex; flex-direction:column; gap:8px; padding:10px; border:1px solid var(--h3-border); border-radius:6px; }
+.nfh3-subject-source-heading { display:flex; align-items:center; gap:10px; color:var(--h3-text); font-size:13px; }
+.nfh3-subject-source-heading img { width:64px; height:48px; object-fit:contain; border-radius:4px; }
+.nfh3-subject-source-heading span { min-width:0; overflow-wrap:anywhere; }
+.nfh3-subject-source-description textarea { background:var(--h3-panel); color:var(--h3-text); border-color:var(--h3-border); font-size:13px; }
 /* 下拉候选项使用更易扫描的缩略图尺寸。 */
 .nfh3-subject-pictures-popup .nfh3-storyboard-picture-option img { width:48px; height:30px; }
 .nfh3-subject-pictures-popup .nfh3-storyboard-picture-option { gap:8px; font-size:12px; }

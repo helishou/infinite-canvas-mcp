@@ -12,7 +12,8 @@ export type H3StyleTemplate = {
     text: string;
 };
 
-export const H3_STYLE_TEMPLATES: readonly H3StyleTemplate[] = [
+// 保留旧正文用于识别历史提示词；修订后的模板运行时替换旧前缀，不改写已保存内容。
+const ORIGINAL_H3_STYLE_TEMPLATES: readonly H3StyleTemplate[] = [
     {
         id: "japanese-ccd",
         label: "日式CCD",
@@ -72,6 +73,24 @@ export const H3_STYLE_TEMPLATES: readonly H3StyleTemplate[] = [
     },
 ] as const;
 
+const SCENE_PRESERVING_STYLES: Readonly<Record<string, string>> = {
+    "modern-korean": [
+        "Visual style: modern Korean webtoon / Korean-manhwa aesthetic, delicate low-saturation colors with balanced cool and warm tones, soft-focus matte texture and subtle diffusion glow.",
+        "Keep natural skin tones and gently rolled highlights, with clear environmental detail and restrained contrast.",
+        "Apply this style consistently as color grading and image texture to the specified scene. Preserve the described location, background, time of day, lighting direction, framing, character appearance and actions throughout every shot; scene and shot instructions take priority over the style treatment.",
+    ].join(" "),
+    "soft-light": [
+        "Visual style: gentle photographic diffusion, smooth highlight rolloff, soft tonal transitions and a delicate film texture, with natural skin tones and balanced cool and warm colors.",
+        "Retain background detail and readable shadows at the exposure specified by the scene.",
+        "Apply this style consistently as color grading and image texture to the specified scene. Preserve the described location, background, time of day, lighting direction, framing, character appearance and actions throughout every shot; scene and shot instructions take priority over the style treatment.",
+    ].join(" "),
+};
+
+export const H3_STYLE_TEMPLATES: readonly H3StyleTemplate[] = ORIGINAL_H3_STYLE_TEMPLATES.map((template) => ({
+    ...template,
+    text: SCENE_PRESERVING_STYLES[template.id] ?? template.text,
+}));
+
 /** 空串 = 不加模板（null 选项）。 */
 export type H3StyleTemplateId = string;
 
@@ -92,7 +111,8 @@ export function matchStyleTemplatePrefix(text: string): { id: H3StyleTemplateId;
     const body = text.trim();
     if (!body) return null;
     // 模板之间有共享句，先按文本长度降序匹配最长的完整段落。
-    const candidates = [...H3_STYLE_TEMPLATES].sort((left, right) => right.text.length - left.text.length);
+    const candidates = [...H3_STYLE_TEMPLATES, ...ORIGINAL_H3_STYLE_TEMPLATES]
+        .sort((left, right) => right.text.length - left.text.length);
     for (const template of candidates) {
         const index = body.indexOf(template.text);
         if (index < 0 || (index > 0 && !body.slice(0, index).endsWith("\n\n"))) continue;

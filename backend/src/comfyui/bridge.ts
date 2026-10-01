@@ -98,7 +98,7 @@ export function attachH3ActualSubmission(result: Record<string, any>, actualSubm
 /** 从最终 API prompt 图提取审计值，避免日志只反映 UI 的原始字段。 */
 export function summarizeH3Workflow(workflow: Record<string, any>, promptId: string): H3ActualSubmission {
     const nodes = Object.values(workflow) as Array<{ class_type?: string; inputs?: Record<string, any> }>;
-    const native = nodes.find((node) => node.class_type === NANFENG_H3_CLASS)?.inputs;
+    const native = nodes.find((node) => node.class_type === NANFENG_H3_CLASS || node.class_type === "InfiniteCanvasH3ConfirmedGeneratorV15")?.inputs;
     if (native) {
         const requestedRatio = String(native["画面比例"] || "16:9");
         const ratio = normalizeH3AspectRatio(requestedRatio);
@@ -110,7 +110,7 @@ export function summarizeH3Workflow(workflow: Record<string, any>, promptId: str
         const width = Math.ceil(Math.ceil(ratioWidth(ratio) * scale / 16) / latentAlign) * latentAlign * 16;
         const height = Math.ceil(Math.ceil(ratioHeight(ratio) * scale / 16) / latentAlign) * latentAlign * 16;
         const loras = Array.from({ length: 8 }, (_, index) => ({ name: String(native[`LoRA${index + 1}`] || ""), strength: Number(native[`LoRA${index + 1}强度`] ?? 1), enabled: native[`LoRA${index + 1}启用`] === true })).filter((item) => item.enabled && item.name && item.name !== "未选择").map(({ name, strength }) => ({ name, strength }));
-        const manual = native["V81一采使用手动Sigma"] === true ? native["H3完整Sigma序列"] : native["西格玛模式"] === "手动序列" ? native["手动西格玛"] : "";
+        const manual = native["启用H3潜空间放大二采"] === true || native["V81一采使用手动Sigma"] === true ? native["H3完整Sigma序列"] : native["西格玛模式"] === "手动序列" ? native["手动西格玛"] : "";
         const mediaInputs = { images: pickNativeSlots(native, "图片", 9), videos: pickNativeSlots(native, "视频", 3), audios: pickNativeSlots(native, "音频", 3) };
         const dedicatedAttention = String(native["H3专用注意力"] || "");
         const attention = native["启用H3 SLA"] === true
@@ -119,7 +119,9 @@ export function summarizeH3Workflow(workflow: Record<string, any>, promptId: str
                 ? dedicatedAttention
                 : String(native.SageAttention || dedicatedAttention || "disabled");
         const sigmaValues = manual ? String(manual).match(/[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g) : null;
-        const steps = sigmaValues && sigmaValues.length >= 2 ? sigmaValues.length - 1 : Number(native["采样步数"] || 0);
+        const steps = native.checkpoint_phase === "first" ? Number(native["H3一采步数"] || 6)
+            : native.checkpoint_phase === "second" ? Number(native["H3二采步数"] || 4)
+                : sigmaValues && sigmaValues.length >= 2 ? sigmaValues.length - 1 : Number(native["采样步数"] || 0);
         return { promptId, seed: Number(native["随机种子"]), seedMode: native["固定随机种子"] === true ? "fixed" : "random", frames: durationToFrames(Number(native["时长秒"] || 5)), ...(requestedRatio === "原图比例" ? {} : { width, height }), steps, sampler: String(native["采样器"] || ""), scheduler: String(native["调度器"] || ""), ...(loras.length ? { loras } : {}), attention, sigma: manual ? `手动：${String(manual)}` : `调度器：${String(native["调度器"] || "")} / ${Number(native["采样步数"] || 0)} 步`, mediaInputs };
     }
     const inputsOf = (type: string) => nodes.find((node) => node.class_type === type)?.inputs || {};
@@ -1100,7 +1102,13 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     // The native V15 node has no TE-speed input. Keep the visible switch
     // effective by using the expanded graph when it is enabled, where the
     // TESpeedMiniMaxH3 patcher is an actual model node.
-    if (params.teAccel === true) return buildExpandedNanFengV10Workflow(input, params, upload, _comfyUrl, signal);
+    if (params.latentConfirmationPhase) {
+        if (params.latentUpscaleEnabled !== true || !/^[a-f0-9]{64}$/.test(String(params.latentCheckpointId || ""))) throw new Error("潜空间二采确认缺少原任务的一采快照身份");
+        const checkpointClass = "InfiniteCanvasH3ConfirmedGeneratorV15";
+        const response = await fetch(`${_comfyUrl}/object_info/${checkpointClass}`, { signal });
+        const info = response.ok ? await response.json() as Record<string, unknown> : {};
+        if (!info[checkpointClass]) throw new Error("潜空间一采确认需要安装 InfiniteCanvasH3LatentConfirmation 节点并重载 ComfyUI。未提交一采任务。");
+    } else if (params.teAccel === true) return buildExpandedNanFengV10Workflow(input, params, upload, _comfyUrl, signal);
     const refs = Array.isArray(input.references) ? input.references.map(String).filter(Boolean).slice(0, 9) : [];
     const videos = (Array.isArray(input.videos) ? input.videos.map(String).filter(Boolean) : typeof input.video === "string" ? [input.video] : []).slice(0, 3);
     const audios = Array.isArray(input.audios) ? input.audios.map(String).filter(Boolean).slice(0, 3) : [];
@@ -1162,6 +1170,12 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     for (const [target, source, fallback] of [["南风ER_solver_type", "erSolverType", "ER-SDE"], ["南风ER_max_stage", "erMaxStage", 3], ["南风ER_eta", "erEta", 1], ["南风ER_s_noise", "erSNoise", 1]] as Array<[string, string, unknown]>) inputs[target] = value(source, fallback);
     if (params.nativeLoaderCacheSupported === true) inputs["复用加载器缓存"] = params.keepModelCache !== false;
     const graph: Record<string, any> = { nf_v15: { class_type: NANFENG_H3_CLASS, inputs } };
+    if (params.latentConfirmationPhase) {
+        graph.nf_v15.class_type = "InfiniteCanvasH3ConfirmedGeneratorV15";
+        inputs.checkpoint_phase = String(params.latentConfirmationPhase);
+        inputs.checkpoint_id = String(params.latentCheckpointId);
+        inputs.checkpoint_te_accel = params.teAccel === true;
+    }
     let outputImages: [string, number] = ["nf_v15", 0];
     let outputAudio: [string, number] = ["nf_v15", 1];
     if (params.faceRefineEnabled === true) {
@@ -1389,7 +1403,7 @@ export async function buildExpandedNanFengV10Workflow(
     let samplingModelRef = ready(0);
     if (v10SolAttnEnabled && params.solAttnEnabled === true && params.slaEnabled !== true && params.t8Enabled !== true) samplingModelRef = node("nf_solattn", "SolAttnMiniMaxH3Patcher", { model: samplingModelRef, enabled: true, tau: Number(params.solAttnTau ?? 1.2), thresh_type: String(params.solAttnThresholdType || "diag"), exact_mode: String(params.solAttnExactMode || "exact_kv"), dense_steps: Number(params.solAttnDenseSteps ?? 1), step_off: Number(params.solAttnStepOff ?? 0), sink_tokens: Number(params.solAttnSinkTokens ?? 0) })(0);
     if (params.uniBlockSwapEnabled === true) samplingModelRef = node("nf_uniblock", "NanFengH3ApplyUniBlockSwapV15", { model: samplingModelRef, conditioning_dependency: ready(1), num_blocks: Number(params.uniBlockSwapBlocks ?? 1) })(0);
-    if (params.realtimePreviewEnabled !== false) samplingModelRef = node("nf_preview", "NanFengH3KJPreviewBridgeV15", { model: samplingModelRef, target_node_id: String(params.targetNodeId || ""), max_resolution: Number(params.realtimePreviewLongEdge ?? 512), jpeg_quality: Number(params.realtimePreviewJpegQuality ?? 75), preview_frames: Number(params.realtimePreviewFrames ?? 12), preview_fps: Number(params.realtimePreviewFps ?? 8) })(0);
+    if (params.realtimePreviewEnabled !== false) samplingModelRef = node("nf_preview", "NanFengH3KJPreviewBridgeV15", { model: samplingModelRef, target_node_id: String(params.targetNodeId || ""), taeh3_enabled: params.taeh3Enabled === true, max_resolution: Number(params.realtimePreviewLongEdge ?? 512), jpeg_quality: Number(params.realtimePreviewJpegQuality ?? 75), preview_frames: Number(params.realtimePreviewFrames ?? 12), preview_fps: Number(params.realtimePreviewFps ?? 8) })(0);
     if (v10LegacySigmaEnabled && params.sigmaEnabled === true) samplingModelRef = node("nf_sigma_shift", "MiniMaxH3SigmaShift", { model: samplingModelRef, shift_video: Number(params.videoSigmaShift ?? 12), shift_audio: Number(params.audioSigmaShift ?? 3) })(0);
     const guider = node("nf_guider", "BasicGuider", { model: samplingModelRef, conditioning: ready(1) });
     const sampler = node("nf_sampler", "KSamplerSelect", { sampler_name: String(params.sampler || "res_multistep") });

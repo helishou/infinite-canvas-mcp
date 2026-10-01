@@ -512,7 +512,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     }, [dropTargetKey, clearDropTarget]);
     // 新建 Clip：继承基准 Clip 的设置（模式/提示词外的一切运行配置），内容清空。
     const buildClipAfter = (basis?: H3Segment) => {
-        const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, referenceBindings, storyboardModeEnabled, storyboardDurations, storyboardShots, ...settings } = basis || ({} as H3Segment);
+        const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, referenceBindings, h3CharacterGroups, storyboardModeEnabled, storyboardDurations, storyboardShots, ...settings } = basis || ({} as H3Segment);
         return applyH3GlobalSettings({
             ...settings,
             id: newClipId(),

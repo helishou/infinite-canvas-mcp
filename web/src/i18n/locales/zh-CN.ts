@@ -379,6 +379,14 @@ export default {
         },
     },
     canvas: {
+        videoTrim: {
+            open: "裁剪",
+            range: "视频裁剪", start: "开始时间（秒）", end: "结束时间（秒）", setStart: "当前位置设为开始", setEnd: "当前位置设为结束",
+            current: "当前位置 {{time}}s / 总时长 {{duration}}s", selected: "选段时长 {{duration}} 秒", preview: "播放选段", trim: "裁剪到画布", cancel: "取消裁剪",
+            hint: "裁剪后生成新的视频节点，保留原视频和选段声音。关闭预览会取消正在进行的裁剪。",
+            loading: "正在读取视频时长…", loadFailed: "视频加载失败", invalid: "请选择有效范围：结束时间必须大于开始时间且不超过总时长",
+            done: "裁剪完成，已生成新的视频节点", failed: "视频裁剪失败：{{error}}",
+        },
         defaultTitle: "无限画布 {{count}}",
         library: "画布库",
         title: "无限画布",

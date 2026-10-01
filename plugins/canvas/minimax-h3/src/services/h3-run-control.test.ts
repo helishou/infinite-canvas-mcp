@@ -34,3 +34,11 @@ test("取消失败且任务仍运行时不能提交第二个任务", async () =>
 test("待确认任务不能通过重置绕过确认", async () => {
     await assert.rejects(cancelActiveH3Task("parent", async () => ({ status: "awaiting_confirmation" }), async () => {}), /待确认/);
 });
+
+test("独立取消只查询并取消指定父任务，不提交重新生成", async () => {
+    const calls: string[] = [];
+    assert.equal(await cancelActiveH3Task("selected-parent", async (id) => {
+        calls.push(`read:${id}`); return { status: "running" };
+    }, async (id) => { calls.push(`cancel:${id}`); }), true);
+    assert.deepEqual(calls, ["read:selected-parent", "cancel:selected-parent"]);
+});

@@ -22,6 +22,12 @@ const labels = {
     music: ["非画内音乐", "Non-diegetic music"],
     optional: ["可留空", "Optional"],
     addStoryboardReference: ["请先在参考区添加分镜图", "Add storyboard images in References first"],
+    cancelGeneration: ["取消生成", "Cancel generation"],
+    cancellingGeneration: ["正在取消…", "Cancelling…"],
+    cancelScopeHint: ["取消当前生成任务；连续运行时同时停止其后续 Clip", "Cancel this generation task and stop its remaining Clips"],
+    cancelUnavailableHint: ["缺少父任务 ID，无法取消；请使用重置操作", "The parent task ID is missing; use reset to recover"],
+    generationCancelled: ["已取消生成", "Generation cancelled"],
+    generationAlreadyFinished: ["任务已结束", "The task has already finished"],
 } as const satisfies Record<string, readonly [string, string]>;
 
 export type H3Label = keyof typeof labels;

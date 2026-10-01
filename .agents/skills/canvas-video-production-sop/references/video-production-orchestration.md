@@ -100,7 +100,7 @@ BASE_H3_NODE_METADATA → nodeLevel(只取 NODE_LEVEL_KEYS) → panes → stored
 仅列**索引级提示**，不在此展开：
 
 - **gpt-image-2 多图**：参考顺序即 `image[]` 顺序；`size` 只影响宽高比、服务端不保证逐像素返回所请求数字；HTTP 405 的成因是 `/v1` 被拼了两次（详见 comfyui-call-chain.md）。
-- **尾帧接续（`tailFrameContinuation`）**：只有浏览器侧能触发（`H3ClipCard.tsx` UI 按钮 + `captureVideoTailFrameDataUrl` 仅浏览器环境）；MCP 跑不了。完整链路与 MCP 替代路径见 comfyui-call-chain.md。
+- **尾帧参考与潜空间续写**：场景选择和操作以 [Clip 视频 §尾帧参考与潜空间续写的使用场景](../subskills/canvas-video-clip-production/SKILL.md#尾帧参考与潜空间续写的使用场景) 为准。尾帧图片由 Backend 统一任务链截取并追加，网页与 MCP 共用执行器；不沿用“仅浏览器能做、MCP 跑不了”的旧路径。
 - **多段项目的正确组织**（「一次写齐 → 逐段只跑」）：`h3_apply_video_plan` 整段覆盖 `segments`、`h3_run_clip` 不碰 segments 结构、`replaceSegments: false` 残留导致下标错位、`canvas_run_generation` 两个静默跳过条件（顶层 `metadata.model` 缺失 + `referenceNodeIds` 没真连线）。详见 mcp-tool-development.md。
 - **画质类问题取证**（ComfyUI `/history` 清洗控制字符、`任务时间戳`、`越跑越慢` 根因 = 每段完整重载文本编码器、量化指标 `FIND_EDGES`/`L*`/`b*` 等）：详见 comfyui-call-chain.md。
 - **节点参数优先级（实测）**：显式参数 > Clip/segment > 节点级 > Backend 保存默认 > BASE；以及"删掉节点重建"还原到的是 Backend 当前已保存默认而非 BASE 常量。

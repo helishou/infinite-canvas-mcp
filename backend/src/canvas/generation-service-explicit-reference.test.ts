@@ -70,6 +70,7 @@ test("智能循环保留本轮显式参考，不回退到源节点的旧输出",
         },
     });
     await service.start({ mode: "image", projectId: "p", nodeId: "target", model: "gpt-image-2", prompt: "本轮",
-        references: [{ storageKey: "image:new" }], loopOutput: { loopNodeId: "loop", roundIndex: 2, slotIndex: 1 } });
+        references: [{ storageKey: "image:new" }], loopOutput: { loopNodeId: "loop", roundIndex: 2, slotIndex: 1,
+            slotNodeId: "target", outputGroupId: "loop-output-group-loop", totalRounds: 2 } });
     assert.deepEqual((received?.references as Array<{ storageKey: string }>).map((item) => item.storageKey), ["image:new"]);
 });

@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -9,7 +9,14 @@ import type { TaskStore } from "../stores/types.js";
 import type { MediaStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
 
-/** Backend 唯一的视频拼接任务服务；任务状态统一写入 TaskStore。 */
+export function validateVideoTrimRange(start: unknown, end: unknown) {
+    if (typeof start !== "number" || typeof end !== "number" || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) {
+        throw new Error("视频裁剪时间无效：开始时间必须大于等于 0，结束时间必须大于开始时间");
+    }
+    return { start, end };
+}
+
+/** Backend 的 FFmpeg 视频拼接与裁剪服务；任务状态统一写入 TaskStore。 */
 export class VideoConcatBackend {
     private readonly processes = new Map<string, ChildProcess>();
     private readonly executing = new Set<string>();
@@ -26,6 +33,55 @@ export class VideoConcatBackend {
         const params = { output, longEdge, layout: mode, ...(parentTaskId ? { parentTaskId } : {}) };
         const task = existing || (clientTaskId ? this.tasks.create(clientTaskId, "video-concat", { videos }, params) : this.tasks.create("video-concat", { videos }, params));
         this.executing.add(task.id); void this.execute(task).catch((error) => this.fail(task.id, error)).finally(() => this.executing.delete(task.id)); return task;
+    }
+    async trim(storageKey: string, start: number, end: number, clientTaskId: string, parentTaskId: string) {
+        validateVideoTrimRange(start, end);
+        if (!this.media?.meta(storageKey)?.mimeType.startsWith("video/")) throw new Error("视频裁剪输入不是已归档的视频");
+        const existing = this.tasks.get(clientTaskId);
+        if (existing && (existing.kind !== "video-trim" || existing.input.storageKey !== storageKey || existing.params.start !== start || existing.params.end !== end || existing.params.parentTaskId !== parentTaskId)) {
+            throw new Error("视频裁剪任务 ID 已用于不同输入");
+        }
+        if (existing && (!["queued", "running"].includes(existing.status) || this.executing.has(existing.id))) return existing;
+        const task = existing || this.tasks.create(clientTaskId, "video-trim", { storageKey }, { start, end, parentTaskId });
+        this.executing.add(task.id);
+        void this.executeTrim(task).catch((error) => this.fail(task.id, error)).finally(() => this.executing.delete(task.id));
+        return task;
+    }
+
+    private assertActive(id: string) {
+        if (!["queued", "running"].includes(this.tasks.get(id)?.status || "")) throw new Error("视频裁剪任务已停止");
+    }
+
+    private async executeTrim(task: RuntimeTask) {
+        this.update(task.id, { status: "running", progress: 0.05 });
+        const directory = await mkdtemp(path.join(os.tmpdir(), "canvas-video-trim-"));
+        try {
+            const input = path.join(directory, "input.mp4");
+            const output = path.join(directory, "output.mp4");
+            await writeFile(input, await this.media!.read(String(task.input.storageKey)));
+            this.assertActive(task.id);
+            const info = await this.probe(input);
+            this.assertActive(task.id);
+            const { start, end } = validateVideoTrimRange(task.params.start, task.params.end);
+            if (!info.duration || start >= info.duration || end > info.duration + 0.001) throw new Error("视频裁剪范围超出视频时长，或无法读取视频时长（需要 ffprobe）");
+            const duration = Math.min(end, info.duration) - start;
+            await this.spawnFfmpeg(task.id, ["-hide_banner", "-loglevel", "error", "-y", "-ss", String(start), "-i", input,
+                "-t", String(duration), "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast",
+                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", output]);
+            this.assertActive(task.id);
+            const data = await readFile(output);
+            this.assertActive(task.id);
+            if (!data.length) throw new Error("视频裁剪没有生成有效媒体");
+            const stored = this.media!.store(data, { name: "video-trim.mp4", mimeType: "video/mp4", category: "output",
+                width: Math.ceil(info.width / 2) * 2, height: Math.ceil(info.height / 2) * 2, durationMs: Math.round(duration * 1000) });
+            const media = { url: this.media!.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType,
+                width: stored.width, height: stored.height, durationMs: stored.durationMs };
+            this.update(task.id, { status: "succeeded", progress: 1, result: { media, start, end } });
+            this.tasks.addEvent(task.id, "result", { media, start, end });
+        } finally {
+            this.processes.delete(task.id);
+            await rm(directory, { recursive: true, force: true });
+        }
     }
     cancel(id: string) {
         this.processes.get(id)?.kill();

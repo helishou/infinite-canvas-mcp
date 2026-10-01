@@ -48,8 +48,9 @@ export function normalizeH3LoraSlots(params: Record<string, unknown>) {
 
 /**
  * Make the effective seed visible in the task snapshot before the prompt is
- * built. Random mode keeps an already generated non-zero seed (the UI dice
- * value); zero/empty is replaced once, so the UI, task and Comfy prompt agree.
+ * built. Keep a seed already resolved in the run plan; fill zero/empty values
+ * for legacy inputs. New runs reroll random seeds per Clip in CanvasH3Runner,
+ * so repeated graph construction and second-pass confirmation stay stable.
  */
 export function normalizeH3Params(params: Record<string, unknown>, generateRandomSeed = false) {
     const next: Record<string, unknown> = { ...params };

@@ -5,12 +5,13 @@ import { BetweenHorizontalStart, GalleryHorizontal, GalleryHorizontalEnd, Video 
 
 import { captureVideoFrame } from "@/lib/canvas/canvas-video-frame";
 import type { CanvasMediaPreview } from "@/types/canvas-plugin";
+import { CanvasVideoTrimPreview } from "./canvas-video-trim-preview";
 
 /**
  * 画布里唯一的媒体预览弹窗：图片节点双击、插件素材库 / 参考弹窗的放大预览都走这里，
  * 插件不再自带灯箱 UI（通过 ctx.openMediaPreview 调起本弹窗）。
  * - image：单图；给 beforeUrl 时进入 Before / After 对比滑块
- * - video / audio：直接播放
+ * - video：播放与裁剪；audio：直接播放
  * - 标题统一显示名称 + 真实分辨率（从媒体自身量出，不依赖 metadata，避免陈旧或缺失）
  */
 export type MediaPreviewItem = CanvasMediaPreview;
@@ -36,7 +37,7 @@ function MenuButton({ icon, label, onClick }: { icon: ReactNode; label: string; 
     </button>;
 }
 
-export function MediaPreviewModal({ item, onClose }: { item: MediaPreviewItem | null; onClose: () => void }) {
+export function MediaPreviewModal({ item, onClose, projectId }: { item: MediaPreviewItem | null; onClose: () => void; projectId?: string }) {
     const url = item?.url || "";
     const beforeUrl = item?.beforeUrl || "";
     const type = item?.type || "image";
@@ -216,26 +217,21 @@ export function MediaPreviewModal({ item, onClose }: { item: MediaPreviewItem | 
             footer={null}
             destroyOnHidden
             width="auto"
-            styles={{ body: { padding: 0, display: "flex", justifyContent: "center", alignItems: "center", maxHeight: "80vh" } }}
+            styles={{ body: { padding: 0, display: "flex", justifyContent: "center", alignItems: type === "video" ? "flex-start" : "center", maxHeight: "80vh", overflowY: "auto" } }}
         >
             {type === "audio" ? (
                 <audio ref={audioRef} src={url} controls autoPlay style={{ width: "min(640px, 92vw)", margin: 24 }} />
             ) : type === "video" ? (
-                <video
-                    ref={videoRef}
-                    src={url}
-                    controls
-                    autoPlay
-                    playsInline
-                    style={{ maxWidth: "100%", maxHeight: "80vh", background: "#000" }}
+                <CanvasVideoTrimPreview
+                    key={`${projectId}:${url}`}
+                    videoRef={videoRef}
+                    url={url}
+                    name={item?.name || "video"}
+                    projectId={projectId}
                     onContextMenu={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
                         setVideoMenu({ x: event.clientX, y: event.clientY });
-                    }}
-                    onLoadedMetadata={(event) => {
-                        const { videoWidth, videoHeight } = event.currentTarget;
-                        if (videoWidth && videoHeight) setResolution({ after: { width: videoWidth, height: videoHeight } });
                     }}
                 />
             ) : beforeUrl ? (

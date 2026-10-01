@@ -209,6 +209,25 @@ function isLoopOutputTarget(node: Record<string, any>) {
         || node.type === "config" && metadata.smart === true;
 }
 
+/** Trimming always creates a separate result; the preview's source remains untouched. */
+export function prepareCanvasVideoTrimTarget(stores: Stores, command: CanvasGenerationCommand, taskId: string): PreparedCanvasGenerationTarget {
+    const project = command.projectId && stores.projects.get(command.projectId);
+    if (!project) throw new Error("视频裁剪需要有效画布项目");
+    const nodes = records(project.nodes);
+    const storageKey = command.videoReferences?.[0]?.storageKey;
+    const sourceId = command.sourceNodeId || command.nodeId || nodes.find((node) => storageKey && record(node.metadata).storageKey === storageKey)?.id;
+    const source = sourceId ? nodes.find((node) => node.id === sourceId) : undefined;
+    if (sourceId && !source) throw new Error("视频裁剪来源节点不存在");
+    const size = defaultSize("video");
+    const outputId = `video-${taskId}`;
+    const operations = source ? createResultOperations(project, source, command, taskId, outputId, size) : [{
+        type: "add_node" as const, id: outputId, nodeType: "video", title: String(command.prompt || "视频裁剪").slice(0, 32),
+        position: { x: Math.max(0, ...nodes.map((node) => Number(record(node.position).x || 0) + Number(node.width || 0))) + 96, y: 0 },
+        ...size, metadata: { prompt: command.prompt, model: command.model, status: "idle", generationEngine: "backend" },
+    }];
+    return { command: { ...command, nodeId: outputId, sourceNodeId: sourceId }, project, createOperations: operations, targetSize: size };
+}
+
 /**
  * Media result-node creation belongs to Backend so browser, MCP and Agent runs
  * get the same IDs, placement and initial state.

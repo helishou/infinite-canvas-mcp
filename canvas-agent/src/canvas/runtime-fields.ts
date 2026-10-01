@@ -11,7 +11,7 @@ export const H3_LOCAL_VIEW_FIELDS = [
     "playhead", "selectedSegmentId", "h3PlaybackAll", "h3PlayRequest", "h3Scrubbing",
     "timelineScrollLeft", "minimaxOutputFilter", "minimaxPreviewH", "minimaxPreviewW",
     "minimaxPromptW", "minimaxTimelineH", "minimaxRefLaneH", "nanFengExpandedSections",
-    "h3SigmaPresetName", "promptEnhancing", "promptEnhanceError",
+    "h3SigmaPresetName", "h3SettingsScope", "promptEnhancing", "promptEnhanceError",
 ] as const;
 
 /** 普通生成节点在任务绑定期间由 Backend 独占的瞬态字段。媒体正文与结果槽仍允许细粒度用户操作。 */

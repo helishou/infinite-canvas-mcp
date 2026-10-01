@@ -45,9 +45,10 @@ export class CanvasGenerationService {
     ) {}
 
     async start(command: CanvasGenerationCommand) {
-        validateLoopGenerationCommand(command, command.projectId ? this.stores.projects.get(command.projectId) : null);
         const operation = command.operation || "generate";
+        // H3 uses its own runner validation and does not participate in generic loop slots.
         if (operation === "h3-run") return this.startH3(command);
+        validateLoopGenerationCommand(command, command.projectId ? this.stores.projects.get(command.projectId) : null);
         const script = command.model ? resolveModelScript(this.stores.settings?.get?.("ai.config"), command.model) : "";
         if (script) {
             if (!this.browserScript) throw new Error("浏览器脚本执行器未初始化");

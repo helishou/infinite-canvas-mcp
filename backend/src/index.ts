@@ -162,7 +162,7 @@ async function startBackendHttpServer() {
         return runtime.comfy.cancel(task.id);
       if (task.kind === "runninghub:minimax-h3")
         return runningHub.cancel(task.id);
-      if (task.kind === "video-concat") return videoConcat.cancel(task.id);
+      if (task.kind === "video-concat" || task.kind === "video-trim") return videoConcat.cancel(task.id);
       if (task.kind === "direct-video") return directVideo.cancel(task.id);
       if (task.kind === "direct-audio") return directAudio.cancel(task.id);
       if (task.kind === "workflow") return workflowExecutor.cancel(task.id);

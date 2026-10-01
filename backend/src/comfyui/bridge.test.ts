@@ -10,6 +10,38 @@ const promptA = "5ef69623-4030-4f1b-a00b-09e7355303e4";
 const promptB = "3d11bbd6-3b53-49c5-8514-d3fce9981704";
 const upload = async (file: string) => `uploaded-${file}`;
 
+test("latent confirmation selects the native checkpoint wrapper and refuses missing support before sampling", async () => {
+    const originalFetch = globalThis.fetch;
+    let checkpointInstalled = true;
+    globalThis.fetch = async (input) => {
+        const name = String(input).split("/").at(-1)!;
+        if (name === "InfiniteCanvasH3ConfirmedGeneratorV15") return Response.json(checkpointInstalled ? { [name]: { input: {} } } : {});
+        if (name === "H3LatentUpscalerNodeMegapixels") return Response.json({ [name]: { input: {} } });
+        if (name === "NanFengH3LowPeakLatentUpscalerV15") return Response.json({ [name]: { input: { required: { model_name: [["upscaler.safetensors"]] } } } });
+        return Response.json({});
+    };
+    try {
+        const params = { mode: "t2v", latentUpscaleEnabled: true, latentUpscaleModel: "upscaler.safetensors", latentCheckpointId: "a".repeat(64), h3FirstSteps: 6, h3SecondSteps: 4, teAccel: true };
+        for (const phase of ["first", "second"]) {
+            const graph = await buildNativeNanFengV15Workflow({ prompt: "a shot" }, { ...params, latentConfirmationPhase: phase }, upload, "http://comfy.test", new AbortController().signal);
+            assert.equal(graph.nf_v15.class_type, "InfiniteCanvasH3ConfirmedGeneratorV15");
+            assert.equal(graph.nf_v15.inputs.checkpoint_phase, phase);
+            assert.equal(graph.nf_v15.inputs.checkpoint_id, params.latentCheckpointId);
+            assert.equal(graph.nf_v15.inputs.checkpoint_te_accel, true);
+            assert.equal(graph.nf_v15.inputs["启用H3潜空间放大二采"], true);
+            assert.equal(graph.cached_first_pass, undefined);
+            const summary = summarizeH3Workflow(graph, promptA);
+            assert.equal(summary.steps, phase === "first" ? 6 : 4);
+            assert.ok(Number.isFinite(summary.seed));
+        }
+        const automatic = await buildNativeNanFengV15Workflow({ prompt: "a shot" }, { ...params, teAccel: false }, upload, "http://comfy.test", new AbortController().signal);
+        assert.equal(automatic.nf_v15.class_type, "NanFengH3MultiReferenceGeneratorV15");
+        assert.equal(automatic.nf_v15.inputs.checkpoint_phase, undefined);
+        checkpointInstalled = false;
+        await assert.rejects(buildNativeNanFengV15Workflow({ prompt: "a shot" }, { ...params, latentConfirmationPhase: "first" }, upload, "http://comfy.test", new AbortController().signal), /未提交一采任务/);
+    } finally { globalThis.fetch = originalFetch; }
+});
+
 test("H3 model catalog includes LoRAs outside the Minimax folder", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (input) => {
@@ -78,35 +110,32 @@ test("H3 audit summary reads the submitted API graph instead of raw UI fields", 
     assert.deepEqual(attachH3ActualSubmission({ promptId: promptA, media: [] }, summary, promptA).actualSubmission, summary);
 });
 
-test("FL2VA continuation places the captured tail in V15 picture 1 and keeps picture 2", async () => {
+test("尾帧参考进入V15额外图片槽，保留原首尾帧并以多参考执行", async () => {
     const routed = routeTailFrameInput("fl2v", ["saved-first.png", "saved-last.png"], [{ id: "first" }, { id: "last" }], { resolved: "captured-tail.png" });
     const graph = await buildNativeNanFengV15Workflow(
-        { prompt: "<Picture 1> opens; <Picture 2> closes", references: routed.images },
-        { mode: routed.taskMode, taskMode: routed.taskMode, seed: 123 },
-        upload, "http://comfy.local", new AbortController().signal,
+        { prompt: "<Picture 1> opening; <Picture 2> closing; <Picture 3> continuity", references: routed.images },
+        { mode: routed.taskMode, taskMode: routed.taskMode, seed: 123 }, upload, "http://comfy.local", new AbortController().signal,
     );
-    assert.equal(graph.nf_v15.inputs["首尾帧"], true);
-    assert.equal(graph.nf_v15.inputs["图片1"], "uploaded-captured-tail.png");
+    assert.equal(graph.nf_v15.inputs["首尾帧"], false);
+    assert.equal(graph.nf_v15.inputs["图片1"], "uploaded-saved-first.png");
     assert.equal(graph.nf_v15.inputs["图片2"], "uploaded-saved-last.png");
-    assert.deepEqual(summarizeH3Workflow(graph, promptA).mediaInputs?.images, ["uploaded-captured-tail.png", "uploaded-saved-last.png"]);
+    assert.equal(graph.nf_v15.inputs["图片3"], "uploaded-captured-tail.png");
 });
 
-test("Ref2VA continuation submits the captured tail as storyboard Picture 1 and cites it in Shot 1", async () => {
+test("Ref2VA尾帧参考保留本段分镜图1和Shot1的构图指令", async () => {
     const routed = routeTailFrameInput("ref2va", ["saved-board.png", "saved-next.png"], [
-        { id: "board-1", role: "storyboard", type: "image" },
-        { id: "board-2", role: "storyboard", type: "image" },
-    ], { id: "tail", resolved: "captured-tail.png" });
-    const prompt = appendTailFramePrompt("detailed_description:\n[Shot 1] Use the approved old board from <Picture 1> as the target composition reference for this shot. Move.\n[Shot 2] Continue with <Picture 2>.", "Clip 1", routed.replacedFirstFrame, true);
+        { id: "board-1", role: "storyboard", type: "image" }, { id: "board-2", role: "storyboard", type: "image" },
+    ], { resolved: "captured-tail.png" });
+    const prompt = appendTailFramePrompt("detailed_description:\n[Shot 1] Use the approved old board from <Picture 1> as the target composition reference for this shot. Move.\n[Shot 2] Continue with <Picture 2>.", "Clip 1", routed.tailImageOrdinal);
     const graph = await buildNativeNanFengV15Workflow(
-        { prompt, references: routed.images },
-        { mode: routed.taskMode, taskMode: routed.taskMode, seed: 123 },
-        upload, "http://comfy.local", new AbortController().signal,
+        { prompt, references: routed.images }, { mode: routed.taskMode, taskMode: routed.taskMode, seed: 123 }, upload, "http://comfy.local", new AbortController().signal,
     );
-    assert.equal(graph.nf_v15.inputs["图片1"], "uploaded-captured-tail.png");
+    assert.equal(graph.nf_v15.inputs["图片1"], "uploaded-saved-board.png");
     assert.equal(graph.nf_v15.inputs["图片2"], "uploaded-saved-next.png");
-    assert.match(prompt, /\[Shot 1\] Use the approved ending frame of Clip 1 from <Picture 1>/);
-    assert.doesNotMatch(prompt, /approved old board/);
-    assert.deepEqual(summarizeH3Workflow(graph, promptA).mediaInputs?.images, ["uploaded-captured-tail.png", "uploaded-saved-next.png"]);
+    assert.equal(graph.nf_v15.inputs["图片3"], "uploaded-captured-tail.png");
+    assert.match(prompt, /\[Shot 1\] Use the approved old board from <Picture 1>/);
+    assert.match(prompt, /Start this segment from the physical state shown in <Picture 3> from Clip 1/);
+    assert.deepEqual(summarizeH3Workflow(graph, promptA).mediaInputs?.images, ["uploaded-saved-board.png", "uploaded-saved-next.png", "uploaded-captured-tail.png"]);
 });
 
 test("V15 审计尺寸使用真实潜变量对齐规则，能区分 0.8MP 与 0.5MP 续写画布", async () => {
@@ -190,15 +219,25 @@ test("H3 TE acceleration uses a graph that contains the visible TE patcher", asy
     assert.equal(Object.values(graph).some((node: any) => node.class_type === "TESpeedMiniMaxH3"), true);
 });
 
-test("H3 realtime preview bridge receives the canvas target node and TAEH3 flag", async () => {
+test("H3 native realtime preview submits preview and TAEH3 flags without a model patcher", async () => {
     const graph = await buildNativeNanFengV15Workflow(
         { prompt: "@图片1", references: ["reference.png"] },
         { mode: "ref2va", seed: 123, targetNodeId: "h3-node-42", taeh3Enabled: true },
         upload, "http://comfy.local", new AbortController().signal,
     );
+    assert.equal(graph.nf_v15.inputs["启用实时预览"], true);
+    assert.equal(graph.nf_v15.inputs["启用TAEH3彩色预览"], true);
+    assert.deepEqual(graph.nf_output.inputs.images, ["nf_v15", 0]);
+});
+
+test("H3 expanded preview bridge receives the canvas target node and TAEH3 flag", async () => {
+    const graph = await buildNativeNanFengV15Workflow(
+        { prompt: "@图片1", references: ["reference.png"] },
+        { mode: "ref2va", teAccel: true, seed: 123, targetNodeId: "h3-node-42", taeh3Enabled: true },
+        upload, "http://comfy.local", new AbortController().signal,
+    );
     const preview = Object.values(graph).find((node: any) => node.class_type === "NanFengH3KJPreviewBridgeV15") as any;
-    assert.ok(preview, "实时预览开启时应插入预览桥接节点");
-    // 帧靠 target_node_id 推回画布节点；漏传会让预览开着却永远收不到帧。
+    assert.ok(preview);
     assert.equal(preview.inputs.target_node_id, "h3-node-42");
     assert.equal(preview.inputs.taeh3_enabled, true);
 });
@@ -210,6 +249,7 @@ test("H3 realtime preview is skipped only when explicitly disabled", async () =>
         upload, "http://comfy.local", new AbortController().signal,
     );
     assert.equal(Object.values(graph).some((node: any) => node.class_type === "NanFengH3KJPreviewBridgeV15"), false);
+    assert.equal(graph.nf_v15.inputs["启用实时预览"], false);
 });
 
 test("H3 V15 native workflow does not submit removed model-cache input", async () => {

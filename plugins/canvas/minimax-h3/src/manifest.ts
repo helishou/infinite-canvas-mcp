@@ -1,5 +1,5 @@
 import { H3_PLUGIN_VERSION } from "../../../../canvas-agent/src/plugins/minimax-h3/version";
-import { H3_UPDATE_CLIPS_TOOL } from "../../../../canvas-agent/src/plugins/minimax-h3/batch-update-tool";
+import { H3_GET_CLIP_TOOL, H3_UPDATE_CLIPS_TOOL, H3_PREPARE_CLIP_UPDATES_TOOL, H3_DISCARD_CLIP_UPDATES_TOOL } from "../../../../canvas-agent/src/plugins/minimax-h3/batch-update-tool";
 
 export const h3PluginManifest = {
     id: "minimax-h3",
@@ -11,9 +11,11 @@ export const h3PluginManifest = {
         version: H3_PLUGIN_VERSION,
         tools: [
             H3_UPDATE_CLIPS_TOOL,
+            H3_PREPARE_CLIP_UPDATES_TOOL,
+            H3_DISCARD_CLIP_UPDATES_TOOL,
             { id: "h3_list_models", version: "1.2.0", name: "H3 列出模型", description: "列出 MiniMax H3 可用的模型(unet)与 LoRA 清单。", inputJsonSchema: { type: "object", properties: {} }, annotations: { title: "H3 列出模型", readOnlyHint: true } },
             { id: "h3_get_node", version: "1.3.0", name: "H3 读取画布节点", description: "按节点 id 读取 H3 节点摘要与当前时间线的稳定 Clip ID、顺序和状态；单段详情使用 h3_get_clip。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string", description: "画布节点 id" } }, required: ["projectId", "nodeId"] }, annotations: { title: "H3 读取画布节点", readOnlyHint: true } },
-            { id: "h3_get_clip", version: "1.2.0", name: "H3 读取片段总览", description: "按当前稳定 segmentId 读取 H3 Clip 轻量状态；ID 不确定时先用 h3_get_node 查看时间线。可通过 include 附带提示词、参考或运行参数。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, include: { type: "array", items: { type: "string", enum: ["prompt", "references", "runtime"] }, uniqueItems: true } }, required: ["projectId", "nodeId", "segmentId"] }, annotations: { title: "H3 读取片段总览", readOnlyHint: true } },
+            H3_GET_CLIP_TOOL,
             { id: "h3_get_clip_prompt", version: "1.0.0", name: "H3 读取片段提示词", description: "按需读取指定 H3 Clip 的语义提示词和最终编译提示词。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] }, annotations: { title: "H3 读取片段提示词", readOnlyHint: true } },
             { id: "h3_get_clip_references", version: "1.0.0", name: "H3 读取片段参考", description: "按需读取指定 H3 Clip 编译后的参考素材、角色组和引用预检问题。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] }, annotations: { title: "H3 读取片段参考", readOnlyHint: true } },
             { id: "h3_get_clip_runtime", version: "1.0.0", name: "H3 读取片段运行参数", description: "按需读取指定 H3 Clip 的模型、采样、尺寸、LoRA 和其他运行参数。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] }, annotations: { title: "H3 读取片段运行参数", readOnlyHint: true } },

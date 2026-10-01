@@ -11,10 +11,10 @@ import type { RunningHubBackend } from "../runtime/runninghub.js";
 import type { Stores } from "../stores/types.js";
 import { writeBackH3Task } from "./h3-task-writeback.js";
 import { createLogger } from "../logger.js";
-import { h3ClipCacheFingerprint, h3ClipCacheFingerprintV1, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, pickH3PostpassParams, stableH3Fingerprint } from "./h3-cache.js";
+import { h3ClipCacheFingerprint, h3ClipCacheFingerprintV1, h3ConfirmationKind, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, pickH3PostpassParams, stableH3Fingerprint } from "./h3-cache.js";
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCompositePrompt, storyboardCompositeDirective, storyboardCompositePlan } from "./storyboard-composite.js";
-import { normalizeH3Params } from "./h3-params.js";
+import { normalizeH3Params, randomH3Seed } from "./h3-params.js";
 import type { CanvasOperation } from "./project-ops.js";
 
 type H3RunInput = {
@@ -72,7 +72,7 @@ const H3_PARAM_KEYS = [
     "sigmaEnabled", "videoSigmaShift", "audioSigmaShift", "sigmaMode", "lowSigmaStart", "lowSigmaEnd", "sigmaRefineSteps", "sigmaCurve", "manualSigma", "dualSampling", "dualSamplingRatio", "dualSampler",
     "secondPassEnabled", "firstPassSteps", "secondPassSteps", "secondPassMegapixels", "secondPassUpscaleMethod", "secondPassDenoise", "secondPassSampler", "secondPassScheduler", "secondPassModel", "secondPassSigma",
     "dedicatedAttention", "startupMode", "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "confirmationMode", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs", "lowMemoryAttentionHeads", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "keepModelCache",
-    "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
+    "latentUpscaleEnabled", "latentUpscaleConfirmationMode", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
     "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality",
     "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
     "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion",
@@ -85,14 +85,14 @@ const H3_OUTGOING_CONTEXT_KEYS = ["contextLength", "audioContextLength", "contin
 function compileH3Submission(project: Record<string, unknown>, segment: H3Segment, taskMode: string) {
     const original = compileReferenceSubmission(project, { ...segment, taskMode });
     const composite = storyboardCompositePlan({ ...segment, taskMode });
-    if (!composite) return { compilation: original, composite: null };
+    if (!composite) return { compilation: original, composite: null, editableReferences: original.references };
     const effectiveSegment = { ...segment, taskMode, referenceBindings: composite.bindings };
     const collapsed = compileReferenceSubmission(project, effectiveSegment);
     const mappedPrompt = remapCompositePrompt(String(segment.prompt || ""), composite, original.references, collapsed.references);
     const prompt = mappedPrompt.includes("A single submitted image is a composite storyboard sheet")
         ? mappedPrompt
         : appendToSection(mappedPrompt, "detailed_description", storyboardCompositeDirective(composite));
-    return { compilation: compileReferenceSubmission(project, { ...effectiveSegment, prompt }), composite };
+    return { compilation: compileReferenceSubmission(project, { ...effectiveSegment, prompt }), composite, editableReferences: original.references };
 }
 
 export class CanvasH3Runner {
@@ -118,6 +118,9 @@ export class CanvasH3Runner {
         if (existing) return existing;
         const duplicate = this.findActiveDuplicate(normalized);
         if (duplicate) {
+            // 旧投影可能因同节点另一 Clip 占据顶层 taskId 而丢失；即使拒绝新提交，
+            // 也恢复原任务的确认入口，不能让用户只看见重新生成按钮。
+            if (duplicate.status === "awaiting_confirmation") this.projectAwaiting(duplicate);
             const pending = confirmationOf(duplicate).pending[0];
             const { runPlan: _frozen, ...originalInput } = duplicate.input as H3RunInput;
             const sameInput = stableH3Fingerprint(normalized) === stableH3Fingerprint(originalInput);
@@ -196,6 +199,10 @@ export class CanvasH3Runner {
     }
 
     resume(task: RuntimeTask) {
+        if (task.kind === "canvas-h3-run" && task.status === "awaiting_confirmation") {
+            this.projectAwaiting(task);
+            return task;
+        }
         if (task.kind !== "canvas-h3-run" || !["queued", "running"].includes(task.status)) return task;
         void this.execute(task).catch((error) => this.fail(task.id, error));
         return task;
@@ -220,7 +227,7 @@ export class CanvasH3Runner {
         const project = this.stores.projects.get(input.projectId);
         const node = project && (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === pending.nodeId);
         const segment = Array.isArray(recordOf(node?.metadata).segments) ? (recordOf(node?.metadata).segments as H3Segment[]).find((item) => item.id === pending.segmentId) : undefined;
-        if (!segment || segment.firstPassReady !== true || String(segment.firstPassFingerprint || "") !== pending.firstPassFingerprint || String(segment.firstPassResult || "") !== pending.firstPassResult || String(recordOf(node?.metadata).runtimeTaskId || "") !== id) throw new Error("H3 一采或节点绑定已变化，请刷新后重试");
+        if (!segment || segment.firstPassReady !== true || String(segment.firstPassFingerprint || "") !== pending.firstPassFingerprint || String(segment.firstPassResult || "") !== pending.firstPassResult || String(segment.runtimeTaskId || "") !== id || (segment.parentTaskId && segment.parentTaskId !== id)) throw new Error("H3 一采或节点绑定已变化，请刷新后重试");
         const plans = this.plansForTask(current);
         const plan = plans.find((item) => item.nodeId === pending.nodeId && item.segmentId === pending.segmentId);
         if (!plan) throw new Error("H3 目标 Clip 已从执行计划中移除");
@@ -232,14 +239,19 @@ export class CanvasH3Runner {
         if (!frozenSegment) throw new Error("H3 运行快照缺少目标 Clip");
         let inFlight: H3Confirmation["inFlight"];
         if (request.action === "confirm") {
+            const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+            const frozenOverride = this.withPlannedSeed(input, plan, input.params || {});
+            const frozenParams = extractParams(frozenSegment, frozenOverride, frozenMetadata, defaults);
+            const kind = h3ConfirmationKind(frozenSegment, frozenParams);
+            const firstChild = this.stores.tasks.get(pending.firstPassChildTaskId);
+            if (!kind || (kind === "latent") !== (firstChild?.params.latentConfirmationPhase === "first")) throw new Error("待确认一采与生成模式不匹配，不能转为另一种二采；请保留一采或放弃后重新生成");
             const completedFingerprints = new Map(this.stores.tasks.events(id)
                 .filter((event) => (event.type === "clip_completed" || event.type === "clip_reused") && event.payload.fingerprint)
                 .map((event) => [`${event.payload.nodeId}:${event.payload.segmentId}`, String(event.payload.fingerprint)]));
             const cache = this.clipCacheState(input, plan, { ...input.params, confirmSecondPass: true }, completedFingerprints);
             if (![cache.fingerprint, cache.legacyFingerprint, cache.loggedLegacyFingerprint].includes(pending.firstPassFingerprint)) throw new Error("H3 参数或上游已变化，请重新生成一采");
             const attempt = this.stores.tasks.events(id).filter((item) => item.type === "h3_decision" && item.payload.action === "confirm" && item.payload.segmentId === pending.segmentId).length + 1;
-            const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
-            inFlight = { nodeId: pending.nodeId, segmentId: pending.segmentId, action: "confirm", attempt, childTaskId: h3ChildId(id, pending.nodeId, pending.segmentId, "second_pass", attempt), postpassParams: extractParams(frozenSegment, { ...input.params, ...pickH3PostpassParams(recordOf(request.postpassParams)), confirmSecondPass: true }, frozenMetadata, defaults) };
+            inFlight = { nodeId: pending.nodeId, segmentId: pending.segmentId, action: "confirm", attempt, childTaskId: h3ChildId(id, pending.nodeId, pending.segmentId, "second_pass", attempt), postpassParams: extractParams(frozenSegment, { ...frozenOverride, ...pickH3PostpassParams(recordOf(request.postpassParams), frozenParams.latentUpscaleEnabled === true), confirmSecondPass: true }, frozenMetadata, defaults) };
         }
         const nextConfirmation: H3Confirmation = { ...confirmation, revision: confirmation.revision + 1, ...(inFlight ? { inFlight } : {}) };
         if (!inFlight) delete nextConfirmation.inFlight;
@@ -376,7 +388,7 @@ export class CanvasH3Runner {
             });
         });
         const canonicalOps = plans.flatMap((plan) => {
-            const patch = this.canonicalSegmentPatch(before, plan, input.params || {});
+            const patch = this.canonicalSegmentPatch(before, plan, input.params || {}, true);
             return Object.keys(patch).length ? [{ type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch }] : [];
         });
         if (canonicalOps.length || sizeOps.length) this.stores.projects.applyOperations(input.projectId, Number(before.revision || 0), [...canonicalOps, ...sizeOps], { runtimeWrite: true, source: { clientId: "task:h3", kind: "task", label: "H3 参数规范化" } });
@@ -537,7 +549,7 @@ export class CanvasH3Runner {
                     this.publish(task, "task.updated");
                     continue;
                 }
-                const override = secondPass ? inFlight!.postpassParams : this.continuationOverride(input, plan, input.params || {});
+                const override = secondPass ? inFlight!.postpassParams : this.withPlannedSeed(input, plan, this.continuationOverride(input, plan, input.params || {}));
                 if (!secondPass && !input.runPlan) this.ensureCanonicalSegmentSubmission(input.projectId, plan, override);
                 const cache = this.clipCacheState(input, plan, override, effectiveFingerprints);
                 effectiveFingerprints.set(key, cache.fingerprint);
@@ -549,7 +561,7 @@ export class CanvasH3Runner {
                     completedByKey.set(key, { output, fingerprint: cache.fingerprint });
                     continue;
                 }
-                if (!secondPass && cache.segment.confirmationMode === true && !confirmation.prepared) {
+                if (!secondPass && h3ConfirmationKind(cache.segment, cache.params) && !confirmation.prepared) {
                     const previousOutput = { result: cache.segment.result, resultStorageKey: cache.segment.resultStorageKey, cacheFingerprint: String(cache.segment.cacheFingerprint || "") };
                     task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", result: { ...recordOf(task.result), phase: "first_pass", confirmation: { ...confirmation, cursor: planIndex, prepared: previousOutput, revision: confirmation.revision + 1 } } }, { type: "h3_first_pass_prepared", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId } })!;
                     if (!task) throw new Error("H3 一采快照持久化冲突");
@@ -568,7 +580,17 @@ export class CanvasH3Runner {
                 }
                 this.currentChildren.set(task.id, child.id);
                 task = this.update(task.id, { result: { ...recordOf(task.result), currentChildTaskId: child.id, currentChildKind: child.kind } });
-                child = await this.waitForTerminal(task.id, child.id);
+                // Equal Clip weights; only confirmation workflows split a Clip
+                // into two orchestration phases (generation / confirmed postpass).
+                // A native automatic two-pass workflow remains one child: its own
+                // reported progress already covers both passes.
+                const phaseWeight = h3ConfirmationKind(cache.segment, cache.params) ? 0.5 : 1;
+                child = await this.waitForTerminal(task.id, child.id,
+                    (planIndex + (secondPass ? 0.5 : 0)) / plans.length,
+                    phaseWeight / plans.length);
+                // Polling persists progress; never overwrite it with the pre-wait
+                // snapshot on pause, failure, retry or Clip completion.
+                task = this.stores.tasks.get(task.id)!;
                 this.currentChildren.delete(task.id);
                 await cleanupStoryboardCompositeDirectory(recordOf(child.params).storyboardCompositeTempDir);
                 if (secondPass && child.status !== "succeeded") {
@@ -584,7 +606,7 @@ export class CanvasH3Runner {
                 const alreadyWritten = String(segment.resultStorageKey || "") === String(output.storageKey || "") && segment.status === "success";
                 if (!alreadyWritten && !await writeBackH3Task(this.stores, this.events, child)) throw new Error(`Clip ${plan.segmentIndex + 1} 终态回写失败`);
                 const media = [...completedOutput(), output];
-                if (cache.segment.confirmationMode === true && !secondPass) {
+                if (h3ConfirmationKind(cache.segment, cache.params) && !secondPass) {
                     const snapshot = confirmation.prepared || {};
                     const waiting: PendingH3 = { nodeId: plan.nodeId, segmentId: plan.segmentId, firstPassFingerprint: cache.fingerprint, firstPassResult: String(output.url || ""), firstPassStorageKey: String(output.storageKey || ""), firstPassChildTaskId: child.id, previousOutput: snapshot };
                     task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "awaiting_confirmation", progress: Math.min(0.99, (planIndex + 0.5) / plans.length), result: { ...recordOf(task.result), phase: "awaiting_confirmation", confirmation: { ...confirmation, pending: [waiting], cursor: planIndex, prepared: undefined, revision: confirmation.revision + 1 }, media: completedOutput() } }, { type: "first_pass_ready", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, fingerprint: cache.fingerprint, output } })!;
@@ -618,6 +640,7 @@ export class CanvasH3Runner {
     }
 
     private clipCacheState(input: H3RunInput, plan: H3Plan, override: Record<string, unknown>, fingerprints: Map<string, string>) {
+        override = this.withPlannedSeed(input, plan, override);
         const projectId = input.projectId;
         const project = this.projectFor(input);
         const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId)!;
@@ -652,7 +675,7 @@ export class CanvasH3Runner {
             mimeType: "video/mp4",
             cacheFingerprint: fingerprint,
         } : null;
-        return { fingerprint, legacyFingerprint, loggedLegacyFingerprint, output, segment };
+        return { fingerprint, legacyFingerprint, loggedLegacyFingerprint, output, segment, params };
     }
 
     /** The switch and its context controls live on the source clip; the next clip consumes them. */
@@ -670,6 +693,17 @@ export class CanvasH3Runner {
         const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const sourceParams = extractParams(source, override, metadata, defaults);
         return { ...override, ...Object.fromEntries(H3_OUTGOING_CONTEXT_KEYS.filter((key) => sourceParams[key] !== undefined).map((key) => [key, sourceParams[key]])) };
+    }
+
+    private withPlannedSeed(input: H3RunInput, plan: H3Plan, override: Record<string, unknown>) {
+        if (!input.runPlan) return override;
+        // New runs resolve seeds per Clip. Preserve those exact values through
+        // shared request overrides, second-pass confirmation and recovery.
+        const node = input.runPlan.project.nodes.find((item) => item.id === plan.nodeId);
+        const segments = recordOf(node?.metadata).segments as H3Segment[] | undefined;
+        const segment = segments?.find((item) => item.id === plan.segmentId);
+        if (!segment) throw new Error("H3 运行快照缺少目标 Clip");
+        return { ...override, seed: segment.seed, noiseSeed: segment.noiseSeed, noiseSeedMode: segment.noiseSeedMode };
     }
 
     private patchSegment(projectId: string, nodeId: string, segmentId: string, patch: Record<string, unknown>) {
@@ -732,22 +766,18 @@ export class CanvasH3Runner {
         if (Object.keys(patch).length) this.patchSegment(projectId, plan.nodeId, plan.segmentId, patch);
     }
 
-    private canonicalSegmentPatch(project: Record<string, unknown>, plan: H3Plan, override: Record<string, unknown>) {
+    private canonicalSegmentPatch(project: Record<string, unknown>, plan: H3Plan, override: Record<string, unknown>, newRun = false) {
         const node = project && (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId);
         const metadata = node ? recordOf(node.metadata) : {};
         const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
         if (!segment) return {};
-        const normalized = normalizeH3Params({
-            ...recordOf(metadata.comfyParams),
-            ...metadata,
-            ...segment,
-            ...override,
-            mode: override.mode ?? segment.mode ?? segment.taskMode ?? metadata.mode ?? metadata.taskMode,
-        }, true);
-        const mode = normalizeTaskMode(override.mode ?? override.taskMode ?? segment.mode ?? segment.taskMode ?? metadata.mode ?? metadata.taskMode);
-        normalized.mode = mode;
-        normalized.taskMode = mode;
+        const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const normalized = normalizeH3Params(extractParams(segment, override, metadata, defaults), true);
+        if (newRun && normalized.noiseSeedMode === "random") {
+            normalized.seed = randomH3Seed();
+            normalized.noiseSeed = normalized.seed;
+        }
         const patch: Record<string, unknown> = {};
         for (const key of ["mode", "taskMode", "noiseSeedMode", "seed", "noiseSeed", "loraSlots"] as const) {
             if (JSON.stringify(segment[key]) !== JSON.stringify(normalized[key])) patch[key] = normalized[key];
@@ -770,12 +800,15 @@ export class CanvasH3Runner {
         let cachedFirstPassPath = "";
         if (confirmingSecondPass) {
             const pending = confirmationOf(parent).pending.find((item) => item.nodeId === plan.nodeId && item.segmentId === plan.segmentId);
-            if (segment.confirmationMode !== true || !pending?.firstPassResult) throw new Error("当前 Clip 没有可确认的一采缓存");
+            if (!h3ConfirmationKind(segment, params) || !pending?.firstPassResult) throw new Error("当前 Clip 没有匹配生成模式的待确认一采缓存");
             cachedFirstPassPath = await this.resolveRef({ url: pending.firstPassResult, storageKey: pending.firstPassStorageKey, name: `first-pass-${plan.segmentId}.mp4`, type: "video" });
         }
         params = h3ConfirmationPhaseParams(segment, params, confirmingSecondPass);
+        if (params.latentConfirmationPhase) {
+            params.latentCheckpointId = createHash("sha256").update(JSON.stringify([parent.id, plan.nodeId, plan.segmentId])).digest("hex");
+        }
         const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
-        const { compilation, composite } = compileH3Submission(project, segment, taskMode);
+        const { compilation, composite, editableReferences } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
         const scenePrompt = appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
         const styleTemplateId = segment.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode) : segment.styleTemplateId;
@@ -831,14 +864,14 @@ export class CanvasH3Runner {
             ? { ...previousSnapshot, result: String(previousOutput.url), resultStorageKey: String(previousOutput.storageKey || "") }
             : previousSnapshot;
         // 上一段成品视频有两种显式用途（规则见 resolveClipContinuation）：
-        //   1) tailFrameContinuation（标在【上一段】上）= 抓上一段尾帧，当本段首帧参考图（写出提示词，UI 可见）；
+        //   1) tailFrameContinuation（标在【上一段】上）= 追加尾帧图片，参考动作、场景与连续性；
         //   2) previousVideoAsReference（标在【本段】上）= 把上一段成品整体当「参考视频」喂进本段（默认关）。
         // Motion Context 本身走 V15 continuationTask 的 AV latent 链，不消费上一段成品视频，
         // 更不能隐式触发 2)；完整视频参考仍由 previousVideoAsReference 单独控制。
         const chained = parent.input.runFromCurrent === true && plan.segmentIndex > 0;
         const { usePreviousAsReference, useTailFrame, needsPreviousVideo } = resolveClipContinuation(segment, previous, chained, params);
         const seamNeedsPrevious = params.faceRefineEnabled === true && (Number(params.seamFaceFadeFrames || 0) > 0 || Number(params.seamColourMatch || 0) > 0 || Number(params.seamAudioCrossfadeMs || 0) > 0);
-        if (useTailFrame && !previous?.result) throw new Error(`Clip ${plan.segmentIndex} 已开启尾帧接续，但上一段没有可用成品视频`);
+        if (useTailFrame && !previous?.result) throw new Error(`Clip ${plan.segmentIndex} 已开启尾帧参考，但上一段没有可用成品视频`);
         const previousPath = (needsPreviousVideo || seamNeedsPrevious) && previous?.result
             ? await this.resolveRef({ url: previous.result, storageKey: previous.resultStorageKey, name: `clip-${plan.segmentIndex}.mp4`, type: "video" })
             : "";
@@ -855,13 +888,13 @@ export class CanvasH3Runner {
         if (previousPath && useTailFrame) {
             const tail = await this.captureTailFrame(previousPath, `h3-tail-${parent.id}-${plan.segmentIndex}.png`);
             const routed = routeTailFrameInput(taskMode, images, actualReferences, {
-                id: `runtime-tail-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 尾帧`, type: "image", role: taskMode === "ref2va" ? "storyboard" : "keyframe", usage: "first_frame",
+                id: `runtime-tail-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 尾帧参考`, type: "image", role: "motion_reference", usage: "continuity_reference",
                 runtime: true, sourceSegmentId: previous?.id, resolved: tail.filePath, url: this.stores.media.url(tail), storageKey: tail.storageKey,
-            }, Boolean(composite));
+            });
             images.splice(0, images.length, ...routed.images);
             actualReferences = routed.actualReferences;
             runtimeTaskMode = routed.taskMode;
-            prompt = appendTailFramePrompt(prompt, `Clip ${plan.segmentIndex}`, routed.replacedFirstFrame, taskMode === "ref2va", Boolean(composite));
+            prompt = appendTailFramePrompt(prompt, `Clip ${plan.segmentIndex}`, routed.tailImageOrdinal);
         }
         prompt = applyH3StyleTemplate(prompt, taskMode, styleTemplateId as string | null);
         // 组装最终送入工作流的参考视频列表：本段自有参考视频（最多 3 段）+ 显式开启时才追加的上一段成品。
@@ -870,6 +903,7 @@ export class CanvasH3Runner {
             actualReferences.push({ id: `runtime-previous-video-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 成品视频`, type: "video", role: "motion_reference", runtime: true, sourceSegmentId: previous?.id, url: previous?.result, storageKey: previous?.resultStorageKey, resolved: previousPath });
         }
         const engine = String(params.minimaxEngine || params.engine || metadata.minimaxEngine || "").toLowerCase();
+        if (engine === "runninghub" && params.latentConfirmationPhase) throw new Error("潜空间二采确认模式需要本地 ComfyUI；当前 RunningHub 工作流不支持保存与恢复一采潜变量。未提交一采任务。");
         Object.assign(params, {
             taskMode: runtimeTaskMode,
             mode: runtimeTaskMode,
@@ -887,6 +921,8 @@ export class CanvasH3Runner {
             useWallet: metadata.minimaxRunningHubUseWallet === true,
         });
         const submission = {
+            authoredPrompt: String(segment.prompt || ""),
+            editableReferences,
             semanticPrompt: compilation.semanticPrompt,
             compiledPrompt: prompt,
             bindingMap: compilation.references.map((reference) => ({ id: reference.id, assetId: reference.assetId, label: reference.label, role: reference.role, mediaType: reference.mediaType, ordinal: reference.ordinal, token: reference.token, usage: reference.usage })),
@@ -902,7 +938,7 @@ export class CanvasH3Runner {
         });
         this.events.publish({ type: "generation-log.created", entityId: log.id, payload: log });
         const childParams = { ...params, ...(compositeTempDir ? { storyboardCompositeTempDir: compositeTempDir } : {}), parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id, bindOnStart: false } };
-        const childInput = confirmingSecondPass ? {
+        const childInput = confirmingSecondPass && !params.latentConfirmationPhase ? {
             prompt,
             video: cachedFirstPassPath,
             ...(images.length ? { references: images } : {}),
@@ -980,8 +1016,8 @@ export class CanvasH3Runner {
         const pending = confirmationOf(task).pending[0];
         if (!pending) return;
         const node = (this.stores.projects.get(input.projectId)?.nodes as Array<Record<string, unknown>> | undefined)?.find((item) => item.id === pending.nodeId);
-        if (node && String(recordOf(node.metadata).runtimeTaskId || "") !== task.id && String(recordOf(node.metadata).runtimeTaskId || "")) return;
         const segment = this.segmentFor(input.projectId, { ...pending, segmentIndex: 0 });
+        if (segment.parentTaskId && segment.parentTaskId !== task.id) return;
         const boundTaskId = String(segment.runtimeTaskId || "");
         const boundTask = boundTaskId ? this.stores.tasks.get(boundTaskId) : null;
         const binding = recordOf(boundTask?.params?.canvasBinding);
@@ -991,11 +1027,14 @@ export class CanvasH3Runner {
             && String(binding.segmentId || "") === pending.segmentId;
         if (boundTaskId && ![task.id, pending.firstPassChildTaskId, confirmationOf(task).inFlight?.childTaskId].includes(boundTaskId) && !ownedChild) return;
         this.patchSegment(input.projectId, pending.nodeId, pending.segmentId, {
-            status: "awaiting_confirmation", runtimeTaskId: task.id, firstPassReady: true,
+            status: "awaiting_confirmation", parentTaskId: task.id, runtimeTaskId: task.id, firstPassReady: true,
             firstPassResult: pending.firstPassResult, firstPassStorageKey: pending.firstPassStorageKey || "", firstPassFingerprint: pending.firstPassFingerprint,
             result: pending.firstPassResult, resultStorageKey: pending.firstPassStorageKey || "",
         });
-        this.updateNode(input.projectId, pending.nodeId, { runtimeTaskId: task.id, status: "awaiting_confirmation", runProgress: Math.min(0.99, task.progress), errorDetails: task.error || "" });
+        // 顶层由 Clip 状态聚合，不能作为单段确认归属；另一任务占据顶层时，
+        // 只恢复本段投影，不额外写入该任务的进度与错误。
+        const nodeTaskId = String(recordOf(node?.metadata).runtimeTaskId || "");
+        if (!nodeTaskId || nodeTaskId === task.id) this.updateNode(input.projectId, pending.nodeId, { runtimeTaskId: task.id, status: "awaiting_confirmation", runProgress: Math.min(0.99, task.progress), errorDetails: task.error || "" });
     }
 
     private finishParentNode(task: RuntimeTask, status: string, error = "") {
@@ -1038,11 +1077,20 @@ export class CanvasH3Runner {
         this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [{ type: "update_node", id: nodeId, metadata }], { runtimeWrite: true, source: { clientId: "task:h3", kind: "task", label: "H3 任务" } });
     }
 
-    private async waitForTerminal(parentId: string, childId: string) {
+    private async waitForTerminal(parentId: string, childId: string, base: number, weight: number) {
         while (true) {
             this.assertActive(parentId);
             const child = this.stores.tasks.get(childId);
             if (!child) throw new Error(`H3 子任务不存在: ${childId}`);
+            const parent = this.stores.tasks.get(parentId);
+            // Read only this execution's selected child, never sum historical
+            // children/retry attempts. Failure/cancellation is not completion.
+            if (parent?.status === "running" && parent.result?.currentChildTaskId === childId) {
+                const raw = Number(child.progress);
+                const fraction = child.status === "succeeded" ? 1 : Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0;
+                const progress = Math.max(parent.progress, Math.min(0.99, base + weight * fraction));
+                if (progress > parent.progress) this.update(parentId, { progress });
+            }
             if (["succeeded", "failed", "cancelled"].includes(child.status)) return child;
             await new Promise((resolve) => setTimeout(resolve, 500));
         }
@@ -1109,39 +1157,34 @@ export class CanvasH3Runner {
     }
 }
 
-/** Fixed-frame modes replace Picture 1; Ref2VA replaces its first storyboard image unless it is a composite sheet. */
+/** Append a soft continuity reference without replacing saved keyframes or renumbering images. */
 export function routeTailFrameInput(
     taskMode: string,
     images: readonly string[],
     actualReferences: readonly Record<string, unknown>[],
     tailReference: Record<string, unknown>,
-    preserveStoryboardComposite = false,
 ) {
     const tailPath = String(tailReference.resolved || "");
-    if (!tailPath) throw new Error("尾帧接续缺少截取后的图片路径");
-    const fixedFirstFrame = taskMode === "i2v" || taskMode === "fl2v";
-    const firstStoryboard = taskMode === "ref2va" && !preserveStoryboardComposite && actualReferences[0]?.role === "storyboard";
-    const replacedFirstFrame = fixedFirstFrame || firstStoryboard;
-    if (replacedFirstFrame && !images.length) throw new Error("首帧槽位不存在，无法用上一段尾帧接续");
-    const routedImages = replacedFirstFrame ? [tailPath, ...images.slice(1)] : [tailPath, ...images];
-    if (routedImages.length > 9) throw new Error("尾帧续接后参考图片超过 MiniMax H3 的 9 张上限");
-    const firstReference = actualReferences[0];
+    if (!tailPath) throw new Error("尾帧参考缺少截取后的图片路径");
+    const routedImages = [...images, tailPath];
+    if (routedImages.length > 9) throw new Error("追加尾帧参考后图片超过 MiniMax H3 的 9 张上限，请减少下一段的其他图片参考");
     const routedTail: Record<string, unknown> = {
         ...tailReference,
-        ...(taskMode === "ref2va" ? { role: "storyboard" } : {}),
-        ...(replacedFirstFrame && firstReference ? { id: firstReference.id, replacesBindingId: firstReference.id } : {}),
+        role: "motion_reference", usage: "continuity_reference",
     };
     return {
         images: routedImages,
-        actualReferences: replacedFirstFrame ? [routedTail, ...actualReferences.slice(1)] : [routedTail, ...actualReferences],
-        taskMode: taskMode === "t2v" ? "i2v" : taskMode,
-        replacedFirstFrame,
+        actualReferences: [...actualReferences.slice(0, images.length), routedTail, ...actualReferences.slice(images.length)],
+        // A reference image is not a forced first/last keyframe. Persisted mode
+        // remains unchanged; the effective runtime mode is logged by the caller.
+        taskMode: "ref2va",
+        tailImageOrdinal: routedImages.length,
     };
 }
 
 /**
- * 决定本段是否消费上一段成品视频。尾帧接续可用于单独生成下一段；整段参考视频仍只在链式续跑中生效。
- *  - tailFrameContinuation 标在【上一段】上：生成本段时抓该段尾帧作为首帧参考图；
+ * 决定本段是否消费上一段成品视频。尾帧参考可用于单独生成下一段；整段参考视频仍只在链式续跑中生效。
+ *  - tailFrameContinuation 标在【上一段】上：生成本段时追加该段尾帧作为连续性参考；
  *  - previousVideoAsReference 标在【本段】上：链式续跑时把上一段成品整体作为参考视频喂进本段（默认关）。
  * motionContextEnabled 只控制 V15 AV latent 续写，不属于这里的成品视频消费逻辑；
  * 不得用它隐式触发 previousVideoAsReference。
@@ -1179,8 +1222,9 @@ function normalizeInput(input: H3RunInput): H3RunInput {
     if (!projectId) throw new Error("projectId 必填");
     if (!input.nodeId && !input.nodeIds?.length) throw new Error("nodeId 或 nodeIds 必填");
     const rawParams = recordOf(input.params);
-    const hasCanonicalizableOverride = ["mode", "taskMode", "noiseSeedMode", "noiseSeed", "seed", "loraSlots", "loraName", "loraStrength"].some((key) => Object.prototype.hasOwnProperty.call(rawParams, key));
-    return { ...input, projectId, nodeId: input.nodeId ? String(input.nodeId) : undefined, nodeIds: input.nodeIds?.map(String), segmentId: input.segmentId ? String(input.segmentId) : undefined, params: hasCanonicalizableOverride ? normalizeH3Params(rawParams, true) : rawParams };
+    // Normalize after merging each Clip's settings. Resolving defaults here
+    // would give the whole batch one seed and override unrelated fixed seeds.
+    return { ...input, projectId, nodeId: input.nodeId ? String(input.nodeId) : undefined, nodeIds: input.nodeIds?.map(String), segmentId: input.segmentId ? String(input.segmentId) : undefined, params: rawParams };
 }
 
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
@@ -1270,59 +1314,15 @@ function firstPassReferencesFromLog(logs: ReturnType<Stores["logs"]["list"]>, se
     return references.every(Boolean) ? references as Array<Record<string, unknown>> : null;
 }
 
-export function appendTailFramePrompt(prompt: string, fromClip: string, replacedFirstFrame = false, storyboardMode = false, preserveStoryboardComposite = false) {
-    let shifted = prompt;
-    if (!replacedFirstFrame) {
-        let max = 0;
-        for (const match of shifted.matchAll(/<Picture\s+(\d+)>/gi)) max = Math.max(max, Number(match[1]));
-        for (let index = max; index >= 1; index--) shifted = shifted.replace(new RegExp(`<Picture\\s+${index}>`, "gi"), `<Picture ${index + 1}>`);
-    }
-    if (storyboardMode && replacedFirstFrame) {
-        shifted = stripPictureOneSectionLine(stripPictureOneSectionLine(shifted, "subject_definitions"), "retention_analysis");
-    }
-    if (preserveStoryboardComposite) {
-        shifted = shifted.replace("A single submitted image is a composite storyboard sheet", "In addition to the opening frame, <Picture 2> is a composite storyboard sheet");
-    }
-    const definition = `<Picture 1> is the opening frame of this segment, hard-cut from the ending frame of ${fromClip} to anchor character and scene continuity.${replacedFirstFrame ? " This runtime frame replaces the saved first-frame image; use the runtime frame wherever the prompt describes <Picture 1>." : ""}`;
-    const retention = `<Picture 1> ([Shot 1] first frame): partially_preserved - the ending frame of ${fromClip} is hard-cut into this segment as the opening frame; preserve the character's identity, pose, and ongoing action across the cut, but treat it as a new shot/scene (not a seamless match-cut continuation).`;
-    const withDefinition = /^subject_definitions\s*[:：]/m.test(shifted) ? appendToSection(shifted, "subject_definitions", definition) : shifted;
+export function appendTailFramePrompt(prompt: string, fromClip: string, tailImageOrdinal = 1) {
+    if (!Number.isInteger(tailImageOrdinal) || tailImageOrdinal < 1 || tailImageOrdinal > 9) throw new Error("无效的尾帧参考图片编号");
+    const picture = `<Picture ${tailImageOrdinal}>`;
+    const definition = `${picture} is the ending frame from ${fromClip} and defines the required opening state of this segment.`;
+    const retention = `${picture}: partially_preserved - the first frame must inherit the character pose, movement direction, scene layout, lighting and ongoing action state, including who holds each prop and the stage of any ongoing interaction. The next shot may change camera position or framing while preserving this physical state.`;
+    const cue = `Start this segment from the physical state shown in ${picture} from ${fromClip}, then continue the planned action. If the current storyboard shows a conflicting opening pose, prop ownership or action phase, the tail frame takes priority for the first-frame state; adapt the planned camera and composition to that state. Do not reset or repeat an action already completed in the preceding segment.`;
+    const withDefinition = appendToSection(prompt, "subject_definitions", definition);
     const withRetention = appendToSection(withDefinition, "retention_analysis", retention);
-    return storyboardMode ? insertTailStoryboardCue(withRetention, fromClip) : withRetention;
-}
-
-function stripPictureOneSectionLine(prompt: string, section: string) {
-    const header = new RegExp(`^${section}\\s*[:：][ \\t]*(?:\\r?\\n)?`, "mi").exec(prompt);
-    if (!header) return prompt;
-    const start = header.index + header[0].length;
-    const rest = prompt.slice(start);
-    const next = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music)\s*[:：]/mi.exec(rest);
-    const end = start + (next?.index ?? rest.length);
-    const body = prompt.slice(start, end).replace(/^[ \t]*<Picture\s+1>[^\r\n]*(?:\r?\n)?/gmi, "");
-    return `${prompt.slice(0, start)}${body}${prompt.slice(end)}`;
-}
-
-function insertTailStoryboardCue(prompt: string, fromClip: string) {
-    const cue = `Use the approved ending frame of ${fromClip} from <Picture 1> as the shot-entry keyframe and composition anchor for this shot. After the keyframe, keep the camera setup and spatial relationship stable while allowing natural performance.`;
-    const section = /^detailed_description\s*[:：][ \t]*(?:\r?\n)?/mi.exec(prompt);
-    const sectionStart = section ? section.index + section[0].length : -1;
-    const remainder = sectionStart >= 0 ? prompt.slice(sectionStart) : "";
-    const nextSection = /^(?:subject_definitions|summary|retention_analysis|overall_soundscape|non_diegetic_music)\s*[:：]/mi.exec(remainder);
-    const sectionEnd = sectionStart < 0 ? prompt.length : sectionStart + (nextSection?.index ?? remainder.length);
-    const body = sectionStart < 0 ? "" : prompt.slice(sectionStart, sectionEnd);
-    const shot = /^[ \t]*\[Shot[ \t]+1\]/mi.exec(body);
-    if (!shot) {
-        const description = `[Shot 1] ${cue}${body.trim() ? ` ${body.trim()}` : ""}`;
-        return sectionStart < 0 ? appendToSection(prompt, "detailed_description", description) : `${prompt.slice(0, sectionStart)}${description}\n${prompt.slice(sectionEnd)}`;
-    }
-    const afterMarker = shot.index + shot[0].length;
-    let rest = body.slice(afterMarker);
-    // The storyboard editor emits this cue from the saved frame. Once the tail frame
-    // anchors Shot 1, that generated cue must not describe a competing frame.
-    rest = rest.replace(/^[ \t]*Use the approved .+? from <Picture\s+\d+> as (?:the visual anchor|the target composition reference|the shot-entry keyframe and composition anchor) for this shot\.(?:[ \t]*After the keyframe, keep the camera setup and spatial relationship stable while allowing natural performance\.)?[ \t]*/iu, "");
-    rest = rest.replace(/^In the composite storyboard image, this is Panel \d+ \(row \d+, column \d+\), shared by (?:\[Shot \d+\](?:, )?)+\.[ \t]*/iu, "");
-    const suffix = /^[\r\n]/u.test(rest) ? rest : rest.trimStart() ? ` ${rest.trimStart()}` : "";
-    const rewritten = `${body.slice(0, afterMarker)} ${cue}${suffix}`;
-    return `${prompt.slice(0, sectionStart)}${rewritten}${prompt.slice(sectionEnd)}`;
+    return appendToSection(withRetention, "detailed_description", cue);
 }
 
 function appendToSection(prompt: string, section: string, line: string) {
