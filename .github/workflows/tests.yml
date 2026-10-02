@@ -11,12 +11,13 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      INFINITE_CANVAS_DATA_DIR: ${{ runner.temp }}/canvas-unit-data
-      INFINITE_CANVAS_MEDIA_DIR: ${{ runner.temp }}/canvas-unit-media
-      INFINITE_CANVAS_AGENT_CONFIG_DIR: ${{ runner.temp }}/canvas-unit-agent
     steps:
       - uses: actions/checkout@v4
+      - name: Configure isolated test directories
+        run: |
+          echo "INFINITE_CANVAS_DATA_DIR=$RUNNER_TEMP/canvas-unit-data" >> "$GITHUB_ENV"
+          echo "INFINITE_CANVAS_MEDIA_DIR=$RUNNER_TEMP/canvas-unit-media" >> "$GITHUB_ENV"
+          echo "INFINITE_CANVAS_AGENT_CONFIG_DIR=$RUNNER_TEMP/canvas-unit-agent" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: 24
