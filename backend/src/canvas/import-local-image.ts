@@ -8,6 +8,7 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 
 /** 允许导入的图片 MIME → 扩展名。 */
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
@@ -20,6 +21,7 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
   ".tif": "image/tiff",
   ".tiff": "image/tiff",
   ".avif": "image/avif",
+  ".svg": "image/svg+xml",
 };
 
 /** 单个文件大小上限，与 Backend 媒体上传保持一致的保守值（32 MiB）。 */
@@ -41,6 +43,8 @@ export type PreparedImage = {
   mimeType: string;
   data: Buffer;
   bytes: number;
+  width?: number;
+  height?: number;
 };
 
 /** 从扩展名推 MIME；不认识就抛错，不猜。 */
@@ -114,12 +118,23 @@ export async function readImportableImage(source: ImportSource): Promise<Prepare
     );
   }
   const data = await fs.readFile(filePath);
+  let size: { width: number; height: number } | undefined;
+  if (mimeType === "image/svg+xml") {
+    try {
+      const metadata = await sharp(data).metadata();
+      if (metadata.format !== "svg" || !metadata.width || !metadata.height) throw new Error("invalid SVG");
+      size = { width: metadata.width, height: metadata.height };
+    } catch {
+      throw new Error(`SVG 文件无法解析：${filePath}`);
+    }
+  }
   return {
     filePath,
     name: path.basename(filePath),
     mimeType,
     data,
     bytes: data.length,
+    ...size,
   };
 }
 

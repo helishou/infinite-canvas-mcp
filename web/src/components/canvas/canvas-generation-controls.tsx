@@ -59,7 +59,7 @@ export function CanvasGenerationControls({
     const buttonClassName = grid ? GRID_BUTTON : INLINE_BUTTON;
 
     const comfyParams = node.metadata?.comfyParams;
-    const onComfyParamsChange = (value: Record<string, unknown>) => onConfigChange(node.id, { comfyParams: value });
+    const onComfyParamsChange = (value: Record<string, unknown>, size?: string) => onConfigChange(node.id, { comfyParams: value, ...(size ? { size } : {}) });
     const changeModel = (model: string) => {
         onConfigChange(node.id, { model });
         if (mode === "image") updateConfig("imageModel", model);

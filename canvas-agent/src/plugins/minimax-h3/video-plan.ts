@@ -53,15 +53,18 @@ export function validateVideoPlan(segments: H3PlannedSegment[]) {
         if (Object.prototype.hasOwnProperty.call(rawSegment, "h3CharacterGroups") || Object.prototype.hasOwnProperty.call(rawSegment, "characterGroups")) {
             throw new Error(`片段 ${segment.id || "?"} 不能直接携带角色组；请先绑定已有 character 节点`);
         }
-        if (!segment.id || ids.has(segment.id)) throw new Error(`视频计划片段 id 重复或为空:${segment.id}`);
+        if (!segment.id) throw new Error(`视频计划片段缺少 segments[].id；不要使用 segmentId（收到 ${String(rawSegment.segmentId || "空值")}）`);
+        if (ids.has(segment.id)) throw new Error(`视频计划片段 id 重复:${segment.id}`);
         ids.add(segment.id);
         if (!Number.isFinite(segment.duration) || segment.duration <= 0) throw new Error(`片段 ${segment.id} 的 duration 必须大于 0`);
         if (!Array.isArray(segment.timeline) || !segment.timeline.length) throw new Error(`片段 ${segment.id} 缺少时间轴`);
         const last = segment.timeline[segment.timeline.length - 1];
-        if (!last || last.end !== segment.duration) throw new Error(`片段 ${segment.id} 的时间轴末端必须等于 duration`);
+        if (!last || typeof last.end !== "number") throw new Error(`片段 ${segment.id} 缺少 timeline[${segment.timeline.length - 1}].end；每镜必须显式提供 end`);
+        if (last.end !== segment.duration) throw new Error(`片段 ${segment.id} 的时间轴末端必须等于 duration`);
         let cursor = 0;
-        for (const item of segment.timeline) {
-            if (item.start !== cursor || item.end <= item.start || item.end > segment.duration) throw new Error(`片段 ${segment.id} 时间轴不连续`);
+        for (const [index, item] of segment.timeline.entries()) {
+            if (typeof item.start !== "number" || typeof item.end !== "number") throw new Error(`片段 ${segment.id} 的 timeline[${index}] 缺少数字 start/end`);
+            if (item.start !== cursor || item.end <= item.start || item.end > segment.duration) throw new Error(`片段 ${segment.id} 时间轴不连续：timeline[${index}]`);
             cursor = item.end;
         }
         const refs = segment.references || [];

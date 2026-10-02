@@ -25,6 +25,24 @@ const STORYBOARD_KEYFRAME_GUIDANCE = "Storyboard images establish shot-entry key
 function record(value: unknown): RecordValue { return value && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : {}; }
 function string(value: unknown) { return typeof value === "string" ? value.trim() : ""; }
 
+function validateStoryboardPictureBindings(shots: StoryboardShotInput[], bindings: ReturnType<typeof referenceBindingsOf>["bindings"]) {
+    for (const [index, shot] of shots.entries()) {
+        const bindingId = string(shot.pictureBindingId);
+        if (!bindingId) continue;
+        const binding = bindings.find((item) => item.id === bindingId);
+        const reason = !binding
+            ? bindings.some((item) => item.assetId === bindingId) ? "收到的是 assetId；请使用当前 Clip 的 bindingId" : "当前 Clip 中没有这个 bindingId"
+            : !binding.enabled ? "该绑定已停用"
+            : binding.role !== "storyboard" ? `角色为 ${binding.role}，需要 storyboard`
+            : inferReferenceMediaType(binding) !== "image" ? `媒体类型为 ${inferReferenceMediaType(binding)}，需要 image`
+            : !(binding.storageKey || binding.url) ? "缺少 storageKey/url 媒体句柄"
+            : "";
+        if (!reason) continue;
+        const message = `分镜 ${index + 1} 的 pictureBindingId=${bindingId} 无效：${reason}`;
+        throw Object.assign(new Error(message), { code: "REFERENCE_INVALID", issues: [{ code: "storyboard_picture_binding_invalid", message, path: ["shots", index, "pictureBindingId"], bindingId }] });
+    }
+}
+
 const COMPOSITE_LAYOUTS: Record<number, { rows: number; columns: number }> = {
     2: { rows: 1, columns: 2 }, 3: { rows: 1, columns: 3 }, 4: { rows: 2, columns: 2 },
     5: { rows: 1, columns: 5 }, 6: { rows: 2, columns: 3 }, 7: { rows: 2, columns: 4 },
@@ -541,7 +559,13 @@ export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue
     const originalInput = rawInput as StoryboardInput;
     if (!Array.isArray(originalInput.shots) || !originalInput.shots.length) throw new Error("分镜至少需要一镜");
     const originalBindings = referenceBindingsOf(segment).bindings;
-    const bindings = orderStoryboardReferencesFirst(originalBindings,
+    const catalog = referenceCatalogOf(project);
+    const resolvedBindings = originalBindings.map((binding) => {
+        const asset = catalog.find((item) => item.id === binding.assetId);
+        return asset ? { ...binding, storageKey: binding.storageKey || asset.storageKey, url: binding.url || asset.url, mimeType: binding.mimeType || asset.mimeType, mediaType: binding.mediaType || asset.mediaType } : binding;
+    });
+    validateStoryboardPictureBindings(originalInput.shots, resolvedBindings);
+    const bindings = orderStoryboardReferencesFirst(resolvedBindings,
         originalInput.shots.flatMap((shot) => string(shot.pictureBindingId) ? [string(shot.pictureBindingId)] : []),
         (binding) => binding.id,
         (binding) => binding.enabled && Boolean(binding.url || binding.storageKey) && binding.role === "storyboard" && (binding.mediaType || inferReferenceMediaType(binding)) === "image");

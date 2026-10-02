@@ -10,6 +10,7 @@ const CanvasPage = lazy(() => import("@/pages/canvas"));
 const CanvasProjectPage = lazy(loadCanvasProjectPage);
 const CanvasPerformanceFixture = lazy(() => import("@/pages/canvas/performance-fixture"));
 const DramaPage = lazy(() => import("@/pages/drama"));
+const EpisodeProductionPage = lazy(() => import("@/pages/drama/production"));
 const ConfigPage = lazy(() => import("@/pages/config"));
 const HomePage = lazy(() => import("@/pages/home"));
 const ImagePage = lazy(() => import("@/pages/image"));
@@ -47,6 +48,7 @@ export const router = createBrowserRouter([
             { path: "/canvas/performance", element: lazyPage(CanvasPerformanceFixture) },
             { path: "/canvas/:id", element: lazyPage(CanvasProjectPage) },
             { path: "/drama", element: lazyPage(DramaPage) },
+            { path: "/drama/episodes/:episodeId/production", element: lazyPage(EpisodeProductionPage) },
             { path: "/workflows", element: lazyPage(WorkflowsPage) },
             { path: "/config", element: lazyPage(ConfigPage) },
             { path: "/diagnostics/mcp", element: lazyPage(McpObservabilityPage) },

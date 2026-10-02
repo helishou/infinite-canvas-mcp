@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import sharp from "sharp";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import { imageSlotStatus, imageSourceStatus } from "./image-result-slots.js";
 
@@ -411,6 +412,33 @@ export class CanvasImageDispatcher {
     this.stores.tasks.update(task.id, { status: "running", progress: 0.02 });
     const result = await this.dispatch(plan, task.id);
     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
+    let aspectFailure: Error | undefined;
+    if (plan.executor === "comfy-workflow") {
+      const expectedRatio = requestedImageRatio(plan.input);
+      for (const media of result.media) {
+        try {
+          if (!media.storageKey) throw new Error("结果缺少归档 storageKey");
+          const actual = await sharp(await this.stores.media.read(media.storageKey)).metadata();
+          media.width = actual.width ?? null;
+          media.height = actual.height ?? null;
+          if (expectedRatio !== null && (!actual.width || !actual.height || Math.abs(actual.width / actual.height - expectedRatio) >= 0.01)) {
+            throw new Error(`目标 ${plan.input.width && plan.input.height ? `${plan.input.width}×${plan.input.height}` : plan.input.size}，实际 ${actual.width || "?"}×${actual.height || "?"}`);
+          }
+        } catch (error) {
+          aspectFailure = new Error(`工作流输出画幅未通过验收：${error instanceof Error ? error.message : String(error)}；已归档媒体未绑定为正式结果`);
+          break;
+        }
+      }
+    }
+    if (aspectFailure) {
+      this.stores.tasks.update(task.id, { status: "failed", error: aspectFailure.message, result: { media: result.media } });
+      this.stores.tasks.addEvent(task.id, "result", { media: result.media, partial: true, error: aspectFailure.message });
+      if (logId) this.logs.update(logId, { status: "failed", error: aspectFailure.message,
+        outputs: result.media.map((media) => ({ url: media.url, storageKey: media.storageKey, mimeType: media.mimeType, width: media.width, height: media.height })),
+        finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAt });
+      await hooks?.onFailed?.(aspectFailure, this.stores.tasks.get(task.id) || task);
+      return;
+    }
     await hooks?.onCompleted?.(result, { ...task, status: "succeeded", progress: 1, result: { media: result.media } });
     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
     if (result.failure) {
@@ -436,6 +464,8 @@ export class CanvasImageDispatcher {
           url: media.url,
           storageKey: media.storageKey,
           mimeType: media.mimeType,
+          width: media.width,
+          height: media.height,
         })),
         finishedAt: new Date().toISOString(),
         durationMs: Date.now() - startedAt,
@@ -542,8 +572,8 @@ export class CanvasImageDispatcher {
     taskId: string,
   ) {
     const references = await Promise.all(
-      executionImageInputs(input).map((reference) =>
-        this.readReference(reference),
+      executionImageInputs(input).map(async (reference) =>
+        this.readReference(await this.modelReference(reference, taskId)),
       ),
     );
     const childTaskId = `image-child-${taskId}`;
@@ -621,8 +651,8 @@ export class CanvasImageDispatcher {
     suffix = "",
   ) {
     const references = await Promise.all(
-      executionImageInputs(input).map((reference) =>
-        this.materializeReference(reference),
+      executionImageInputs(input).map(async (reference) =>
+        this.materializeReference(await this.modelReference(reference, taskId)),
       ),
     );
     const childTaskId = `comfy-child-${taskId}${suffix}`;
@@ -664,18 +694,47 @@ export class CanvasImageDispatcher {
     const detail = await this.workflows.get(workflowName);
     const fields = detail.config?.fields || [];
     const fieldValues: Record<string, unknown> = { ...(input.params || {}) };
+    const dimensions = requestedImageDimensions(input);
+    const expectedRatio = requestedImageRatio(input);
     for (const field of fields) {
       if (
         field.type === "text" &&
         (field.isPrompt || field.id.toLowerCase() === "prompt")
       )
         fieldValues[field.id] = input.prompt;
-      if (
-        (field.id === "width" || field.id === "height") &&
-        fieldValues[field.id] === undefined
-      ) {
-        const value = field.id === "width" ? input.width : input.height;
-        if (value) fieldValues[field.id] = value;
+      if (field.input === "width" || field.input === "height") {
+        const value = field.input === "width" ? dimensions?.width : dimensions?.height;
+        if (value && fieldValues[field.id] !== undefined && Number(fieldValues[field.id]) !== value) throw new Error(`工作流字段「${field.name || field.input}」与目标尺寸冲突：已保存 ${fieldValues[field.id]}，目标 ${value}；请先修改工作流参数`);
+        if (value && fieldValues[field.id] === undefined) fieldValues[field.id] = value;
+      }
+      if (field.input === "aspect_ratio" && field.type === "dropdown" && expectedRatio !== null) {
+        const explicit = fieldValues[field.id];
+        if (explicit !== undefined) {
+          const selected = imageRatioFromText(String(explicit));
+          if (selected === null || Math.abs(selected - expectedRatio) >= 0.01) throw new Error(`工作流画幅与目标冲突：已保存「${explicit}」，目标「${input.size || `${input.width}x${input.height}`}」；请先修改工作流参数`);
+          if (!field.options?.includes(String(explicit))) {
+            const mapped = field.options?.find((option) => {
+              const ratio = imageRatioFromText(option);
+              return ratio !== null && Math.abs(ratio - expectedRatio) < 0.01;
+            });
+            if (!mapped) throw new Error(`工作流画幅字段「${field.name || field.input}」没有合法的目标选项；不能回退到默认比例`);
+            fieldValues[field.id] = mapped;
+          }
+        } else {
+          const option = field.options?.find((value) => {
+            const match = /^(\d+)\s*:\s*(\d+)/.exec(value);
+            return match && Math.abs(Number(match[1]) / Number(match[2]) - expectedRatio) < 0.01;
+          });
+          if (!option) throw new Error(`工作流画幅选项不支持目标「${input.size || `${input.width}x${input.height}`}」；请配置对应 aspect_ratio 选项`);
+          fieldValues[field.id] = option;
+        }
+      }
+    }
+    for (const field of fields.filter((field) => ["aspect_ratio", "width", "height"].includes(field.input))) {
+      if (fieldValues[field.id] === undefined) continue;
+      for (const nodeId of field.node.split(",")) {
+        const node = detail.workflow[nodeId.trim()] as { inputs?: Record<string, unknown> } | undefined;
+        if (!node?.inputs || !(field.input in node.inputs)) throw new Error(`工作流尺寸字段「${field.name || field.input}」未连接到真实节点输入 ${nodeId}.${field.input}`);
       }
     }
 
@@ -690,7 +749,7 @@ export class CanvasImageDispatcher {
       const field = imageFields[index];
       const reference = references[index];
       fieldValues[field.id] = reference
-        ? await this.referenceDataUrl(reference)
+        ? await this.referenceDataUrl(await this.modelReference(reference, taskId))
         : null;
     }
 
@@ -726,6 +785,20 @@ export class CanvasImageDispatcher {
     if (reference.dataUrl) return reference.dataUrl;
     const { data, mimeType } = await this.readReference(reference);
     return `data:${mimeType};base64,${data.toString("base64")}`;
+  }
+
+  private async modelReference(reference: CanvasImageReference, taskId: string): Promise<CanvasImageReference> {
+    const mimeType = this.stores.media.meta(reference.storageKey || "")?.mimeType || reference.mimeType || mimeFromName(reference.name);
+    if (mimeType !== "image/svg+xml") return reference;
+    const source = await this.readReferenceBuffer(reference);
+    const storageKey = `image:svg-png-${crypto.createHash("sha256").update(source).digest("hex")}`;
+    let media = this.stores.media.meta(storageKey);
+    if (!media) {
+      const data = await sharp(source).png().toBuffer();
+      media = this.stores.media.store(data, { name: `${reference.name || "reference"}.png`, mimeType: "image/png", category: "input", storageKey });
+    }
+    this.stores.tasks.addEvent(taskId, "reference_rasterized", { sourceStorageKey: reference.storageKey, sourceName: reference.name, submittedStorageKey: storageKey, mimeType: "image/png" });
+    return { ...reference, name: `${reference.name || "reference"}.png`, storageKey, url: this.stores.media.url(media), mimeType: "image/png", dataUrl: undefined };
   }
 
   private assertNotCancelled(taskId: string) {
@@ -949,8 +1022,32 @@ function sizeFromDimensions(width?: number, height?: number) {
   return width && height ? `${width}x${height}` : "1024x1024";
 }
 
+function requestedImageDimensions(input: Pick<CanvasImageGenerationInput, "width" | "height" | "size">) {
+  if (Number.isFinite(input.width) && Number.isFinite(input.height) && input.width! > 0 && input.height! > 0) return { width: input.width!, height: input.height! };
+  const match = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(String(input.size || "").trim());
+  if (!match) return null;
+  const width = Number(match[1]), height = Number(match[2]);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+function imageRatioFromText(value: string) {
+  const match = /^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)(?:\b|\s|$)/.exec(value.trim());
+  return match && Number(match[2]) > 0 ? Number(match[1]) / Number(match[2]) : null;
+}
+
+function requestedImageRatio(input: Pick<CanvasImageGenerationInput, "width" | "height" | "size">) {
+  const dimensions = requestedImageDimensions(input);
+  const sizeDimensions = requestedImageDimensions({ size: input.size });
+  const sizeRatio = sizeDimensions ? sizeDimensions.width / sizeDimensions.height : imageRatioFromText(String(input.size || ""));
+  if (input.width && input.height && sizeRatio !== null && Math.abs(input.width / input.height - sizeRatio) >= 0.01) {
+    throw new Error(`本轮图片尺寸参数冲突：width/height=${input.width}×${input.height}，size=${input.size}`);
+  }
+  return dimensions ? dimensions.width / dimensions.height : sizeRatio;
+}
+
 function mimeFromName(name?: string) {
   const value = String(name || "").toLowerCase();
+  if (value.endsWith(".svg")) return "image/svg+xml";
   if (value.endsWith(".jpg") || value.endsWith(".jpeg")) return "image/jpeg";
   if (value.endsWith(".webp")) return "image/webp";
   return "image/png";

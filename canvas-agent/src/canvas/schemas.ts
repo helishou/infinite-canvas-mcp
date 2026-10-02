@@ -94,6 +94,17 @@ export const toolNames = [
   "drama_create_episode",
   "drama_update_episode",
   "drama_delete_episode",
+  "drama_get_production",
+  "drama_edit_production",
+  "drama_preview_production_impact",
+  "drama_publish_production",
+  "drama_list_production_versions",
+  "drama_get_production_version",
+  "drama_list_production_legacy",
+  "drama_restore_production",
+  "drama_sync_production_clips",
+  "drama_get_production_run",
+  "drama_export_production_markdown",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 
@@ -291,7 +302,7 @@ export const toolInputSchemas = {
     path: z
       .string()
       .describe(
-        "页面路径，例如 '/canvas'、'/canvas/abc123'、'/image'、'/video'、'/prompts'、'/assets'、'/config'。操作画布前若不在画布页，先用本工具跳转。",
+        "页面路径，例如 '/canvas'、'/canvas/abc123'、'/drama'、'/image'、'/video'、'/prompts'、'/assets'、'/config'。操作画布前若不在画布页，先用本工具跳转。",
       ),
   }),
   canvas_list_projects: canvasProjectSchema.extend({
@@ -755,6 +766,7 @@ export const toolInputSchemas = {
       .string()
       .optional()
       .describe("分集剧情/梗概，独立保存于分集实体"),
+    fullPlot: z.string().optional().describe("旧剧情概述；正式分场剧本使用 drama_edit_production"),
     canvasId: z
       .string()
       .nullable()
@@ -766,6 +778,7 @@ export const toolInputSchemas = {
     episodeNumber: z.number().int().min(1).optional().describe("新的分集编号"),
     title: z.string().optional().describe("新的分集标题"),
     synopsis: z.string().optional().describe("新的分集剧情/梗概"),
+    fullPlot: z.string().optional().describe("旧剧情概述；正式分场剧本使用 drama_edit_production"),
     canvasId: z
       .string()
       .nullable()
@@ -775,12 +788,23 @@ export const toolInputSchemas = {
   drama_delete_episode: z.object({
     episodeId: z.string().min(1).describe("分集 ID；删除分集不会删除绑定画布"),
   }),
+  drama_get_production: z.object({ episodeId: z.string().min(1) }),
+  drama_edit_production: z.object({ episodeId: z.string().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0), ops: z.array(z.record(z.string(), z.unknown())).min(1) }),
+  drama_preview_production_impact: z.object({ episodeId: z.string().min(1), stage: z.enum(["script", "shots"]) }),
+  drama_publish_production: z.object({ episodeId: z.string().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots"]) }),
+  drama_list_production_versions: z.object({ episodeId: z.string().min(1) }),
+  drama_get_production_version: z.object({ episodeId: z.string().min(1), version: z.number().int().min(1) }),
+  drama_list_production_legacy: z.object({ episodeId: z.string().min(1) }),
+  drama_restore_production: z.object({ episodeId: z.string().min(1), version: z.number().int().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0) }),
+  drama_sync_production_clips: z.object({ episodeId: z.string().min(1) }),
+  drama_get_production_run: z.object({ episodeId: z.string().min(1), version: z.number().int().min(1) }),
+  drama_export_production_markdown: z.object({ episodeId: z.string().min(1), stage: z.enum(["script", "shots"]), version: z.number().int().min(1).optional() }),
 } satisfies Record<ToolName, z.AnyZodObject>;
 
 export const toolDescriptions: Record<ToolName, string> = {
   ...collaborationDescriptions,
   site_navigate:
-    "跳转网站页面。path 可为 / (首页)、/canvas (我的画布)、/canvas/:id (指定画布)、/image (生图工作台)、/video (视频创作台)、/prompts (提示词库)、/assets (我的素材)、/config (配置)。操作画布前若不在画布页，先用本工具打开画布。",
+    "跳转网站页面。path 可为 / (首页)、/canvas (我的画布)、/canvas/:id (指定画布)、/drama (短剧制作台)、/image (生图工作台)、/video (视频创作台)、/prompts (提示词库)、/assets (我的素材)、/config (配置)。操作画布前若不在画布页，先用本工具打开画布。",
   canvas_list_projects:
     "列出用户全部画布（仅标题、创建/更新时间、节点数、连线数，不含完整数据），支持 keyword 搜索和 page/pageSize 分页。返回的 id 可配合 site_navigate 跳转到 /canvas/:id 打开对应画布。",
   canvas_inspect:
@@ -792,7 +816,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_apply_ops:
     "批量操作画布。ops 支持 add_node、update_node、move_h3_segment、delete_node、delete_connections、connect_nodes、select_nodes、run_generation。H3 Clip 内容请使用专用 h3_update_clip 或 h3_apply_video_plan；move_h3_segment 按 beforeSegmentId/afterSegmentId 调整 Clip 顺序。运行状态与结果仍由 Backend 管理。需要替换生成节点参考图时使用 canvas_set_generation_references，避免旧媒体输入残留。",
   canvas_create_node:
-    "创建任意类型节点：text、image、config、video、audio。适合创建占位图、媒体占位、配置节点或自定义 metadata 节点。",
+    "创建任意类型节点：text、image、config、video、audio 或插件节点。创建 H3 视频节点须用 nodeType='minimax-h3:video'；canvas_create_config_node 只创建普通 config 节点。",
   canvas_create_attachment_nodes:
     "把当前对话中用户上传的图片附件创建成真实画布图片节点。attachmentIds 使用本轮附件清单中的 ID；返回的节点 ID 可传给 canvas_create_generation_flow.referenceNodeIds 作为生成参考图。",
   canvas_create_text_node:
@@ -800,7 +824,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_create_text_nodes:
     "批量创建文本节点。items 是数组，每项含 text 必填，可选 title/x/y/width/height。例：{ projectId: 'abc', items: [{ text: '第1集大纲' }, { text: '第2集大纲' }], gap: 32 }",
   canvas_create_config_node:
-    "创建生成配置节点：mode + prompt + 生成参数；可选 autoRun=true 创建后立即触发一次。例：{ mode: 'image', prompt: '古风女主立绘', size: '1024x1024', autoRun: false }",
+    "创建普通 config 生成配置节点：mode + prompt + 生成参数；可选 autoRun=true。此工具不能创建 H3 节点；H3 请用 canvas_create_node(nodeType='minimax-h3:video')。例：{ mode: 'image', prompt: '古风女主立绘', size: '1024x1024', autoRun: false }",
   canvas_create_image_prompt_flow:
     "创建提示词文本节点和图片生成配置节点，并自动连线；生图提示词默认可省略，当前工作流声明必填提示词时仍需传入。可选 autoRun=true 立即触发生图。",
   canvas_create_generation_flow:
@@ -834,7 +858,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_task_status:
     "即时查询 MCP 发起的画布生成任务。优先传 taskId 精确查询；传入 taskId 后忽略 projectId/nodeId 等过滤条件。不传 taskId 时默认使用当前活动画布，可用 nodeId 缩小范围。运行中任务建议使用 canvas_wait_tasks 等待收口；本工具用于即时查看，不会提交或重试任务。",
   canvas_wait_tasks:
-    "等待 Backend 任务进入终态或 H3 人工确认暂停态；awaiting_confirmation 表示等待已经返回，但工作流未完成。此时先查看一采，用户明确选择操作后调用 canvas_h3_confirmation，不要自动确认。",
+    "按原 taskId 有界等待 Backend 任务。timedOut=true 表示本轮等待结束，pendingTaskIds 和 next 给出原任务的继续查询入口；不要重新提交生成。awaiting_confirmation 表示等待人工确认，先查看一采再由用户选择操作。",
   canvas_h3_confirmation:
     "处理 H3 一采暂停任务：必须先查看一采并由用户明确选择确认二采、保留一采或放弃整个运行。沿用原父 taskId。",
   generation_get_status:
@@ -869,9 +893,20 @@ export const toolDescriptions: Record<ToolName, string> = {
   drama_get_episode:
     "读取单个分集的完整字段，并返回其绑定画布；未绑定画布时 canvas 为 null。",
   drama_create_episode:
-    "创建剧目下的一集。分集是剧目与画布之间的实体，剧情独立保存；可选绑定一个已有画布。",
+    "创建剧目下的一集。synopsis 和 fullPlot 分别保存梗概与完整剧情；可选绑定一个已有画布。",
   drama_update_episode:
-    "更新分集字段或更换绑定画布。传 canvasId=null 可解除绑定，不会删除画布或分集剧情。",
+    "更新分集梗概、完整剧情或画布绑定。传 canvasId=null 可解除绑定，不会删除画布或分集剧情。",
   drama_delete_episode:
     "删除分集记录；不会删除其绑定的画布，画布会变成独立资产。",
+  drama_get_production: "读取分集结构化制作稿、修订号和已发布版本；正式剧本与镜头以这里为准。",
+  drama_edit_production: "用稳定 operationId、expectedRevision 和细粒度 ops 编辑分集制作草稿；冲突时须先处理当前版本。",
+  drama_preview_production_impact: "预览发布剧本或镜头表将影响的场次、镜头、关键帧、Clip 与缺失资产。",
+  drama_publish_production: "发布分集剧本或镜头表新版本；自动模式仅在发布镜头表后推进受影响媒体任务，沿用既有模型配置。",
+  drama_list_production_versions: "读取分集制作稿历史版本及每次发布的影响范围。",
+  drama_get_production_version: "读取指定已发布版本的完整结构化制作稿。",
+  drama_list_production_legacy: "列出旧 fullPlot、script.md、storyboard.md 原文供用户选择导入待审核草稿。",
+  drama_restore_production: "将历史版本复制到当前草稿；保留已发布版本与媒体历史。",
+  drama_sync_production_clips: "把当前已发布镜头编组同步为画布 H3 Clip 草稿；不提交生成任务。",
+  drama_get_production_run: "读取指定发布版本的自动任务状态、暂停原因与每个精确 taskId。",
+  drama_export_production_markdown: "将已发布分场剧本或镜头表导出为 Markdown 文本；不改写旧 script.md/storyboard.md。",
 };

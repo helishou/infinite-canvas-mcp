@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { pluginMcp } from "./mcp.js";
+import { compilePluginInputSchema } from "../../server/plugin-json-schema.js";
+
+test("H3 视频计划公开 schema 在调用前指出 id 和 timeline.end", () => {
+    const tool = pluginMcp.tools.find((item) => item.id === "h3_apply_video_plan")!;
+    const validator = compilePluginInputSchema(tool.inputJsonSchema);
+    const base = { projectId: "p", nodeId: "n", segments: [{ duration: 7, timeline: [{ start: 0, end: 7 }] }] };
+    assert.throws(() => validator.validateInput(base), /segments\.0\.id/);
+    assert.throws(() => validator.validateInput({ ...base, segments: [{ id: "S01", duration: 7, timeline: [{ start: 0 }] }] }), /segments\.0\.timeline\.0\.end/);
+});
 
 function fixture() {
     const project: any = {
@@ -64,6 +73,23 @@ function fixture() {
     const handlers = pluginMcp.createHandler(context);
     return { project, calls, backend, handlers, handler: handlers.h3_prepare_clip! };
 }
+
+test("H3 分镜 dryRun 只读预检；错误节点类型和绑定不增加 revision", async () => {
+    const { project, calls, handlers } = fixture();
+    const segment = project.nodes[0].metadata.segments[1];
+    segment.referenceBindings = [{ id: "frame-binding", assetId: "frame-asset", label: "分镜图", role: "storyboard", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:frame" }];
+    const base = { projectId: project.id, nodeId: "h3-1", segmentId: "s2", openingDescription: "开场", shots: [{ description: "走入画面", pictureBindingId: "frame-binding" }], overallSoundscape: "脚步声", nonDiegeticMusic: "无" };
+    const preview: any = await handlers.h3_write_storyboard_prompt!({ ...base, dryRun: true });
+    assert.equal(preview.applied, false);
+    assert.match(preview.prompt, /走入画面/);
+    assert.equal(project.revision, 7);
+    assert.equal(calls.length, 0);
+    await assert.rejects(handlers.h3_write_storyboard_prompt!({ ...base, shots: [{ ...base.shots[0], pictureBindingId: "frame-asset" }] }), /收到的是 assetId/);
+    assert.equal(project.revision, 7);
+    project.nodes[0].type = "config";
+    await assert.rejects(handlers.h3_apply_video_plan!({ projectId: project.id, nodeId: "h3-1", segments: [{ id: "clip", duration: 1, timeline: [{ start: 0, end: 1 }] }] }), /nodeType=minimax-h3:video/);
+    assert.equal(calls.length, 0);
+});
 
 test("h3_prepare_clip 一次原子写入继承参数、角色组和已有节点连接", async () => {
     const { project, calls, handler } = fixture();

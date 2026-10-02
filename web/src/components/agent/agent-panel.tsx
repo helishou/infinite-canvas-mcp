@@ -46,7 +46,7 @@ export function AgentPanel() {
             initial={{ width: 0, opacity: 0 }}
             animate={{ width: panelOpen ? width + 1 : 0, opacity: panelOpen ? 1 : 0 }}
             transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: [0.22, 1, 0.36, 1] }}
-            style={{ overflow: "clip", pointerEvents: panelOpen && !panelClosing ? undefined : "none" }}
+            style={{ overflow: "clip", maxWidth: "100dvw", pointerEvents: panelOpen && !panelClosing ? undefined : "none" }}
         >
             <motion.aside
                 className="relative flex h-full shrink-0 flex-col border-l"
@@ -54,10 +54,10 @@ export function AgentPanel() {
                 initial={{ x: 48 }}
                 animate={{ x: panelClosing ? 28 : 0 }}
                 transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: [0.22, 1, 0.36, 1] }}
-                style={{ width, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+                style={{ width, maxWidth: "100dvw", background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
             >
                 <button type="button" className="absolute inset-y-0 left-0 z-40 w-4 -translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label={t("agent.panel.resize")} />
-                <LocalAgentPanel embedded />
+                <LocalAgentPanel embedded autoConnect={panelOpen} />
             </motion.aside>
         </motion.div>
     );

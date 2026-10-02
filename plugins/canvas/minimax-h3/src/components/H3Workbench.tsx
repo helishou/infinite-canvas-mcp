@@ -38,6 +38,16 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const storedSelectedId = String(metadata.selectedSegmentId || "");
     const selected = segments.find((item) => item.id === storedSelectedId) || segments[0];
     const selectedIndex = Math.max(0, segments.findIndex((item) => item.id === selected?.id));
+    const appliedDeepLinkRef = useRef("");
+    useEffect(() => {
+        const query = new URLSearchParams(window.location.search);
+        const segmentId = query.get("segmentId") || "";
+        if (query.get("nodeId") !== sharedContext.node.id || !segments.some((item) => item.id === segmentId)) return;
+        const key = `${sharedContext.projectId}:${sharedContext.node.id}:${segmentId}`;
+        if (appliedDeepLinkRef.current === key) return;
+        appliedDeepLinkRef.current = key;
+        ctx.updateMetadata({ selectedSegmentId: segmentId });
+    }, [ctx, segments, sharedContext.node.id, sharedContext.projectId]);
     // 远端删除当前 Clip 时，只修复本窗口的选择，不产生共享文档写入。
     useEffect(() => {
         if (!segments.length) return;
@@ -132,6 +142,10 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const [editingRef, setEditingRef] = useState<{ segmentId: string; ref: H3Ref } | null>(null);
     const editingRefSegment = editingRef ? segments.find((segment) => segment.id === editingRef.segmentId) : undefined;
     const editingRefGroup = editingRef?.ref.groupId ? editingRefSegment?.h3CharacterGroups?.[editingRef.ref.groupId] : undefined;
+    const currentEditingRef = editingRefSegment && editingRef
+        ? refsForSegment(editingRefSegment).find((ref) => editingRef.ref.bindingId && ref.bindingId === editingRef.ref.bindingId
+            || (editingRef.ref.groupId && ref.groupId === editingRef.ref.groupId && ref.outfitId === editingRef.ref.outfitId && ref.type === editingRef.ref.type)) || editingRef.ref
+        : editingRef?.ref;
     const referencedCharacterIds = new Set((editingRefSegment ? refsForSegment(editingRefSegment) : []).flatMap((ref) => {
         if (ref.enabled === false) return [];
         const nodeId = editingRefSegment?.h3CharacterGroups?.[ref.groupId || ""]?.characterNodeId || ref.nodeId;
@@ -161,7 +175,10 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                     if (source) nextSegment = promoteCharacterSourceReferences(nextSegment, source);
                 }
                 for (const [groupId, group] of Object.entries(nextSegment.h3CharacterGroups || {})) {
-                    if (!group.characterNodeId || (changedNodeIds && !changedNodeIds.has(group.characterNodeId))) continue;
+                    // Source edits are reconciled with every Clip in the Backend ops transaction.
+                    // This mount-time pass only repairs older snapshots, avoiding a second client write.
+                    if (changedNodeIds) continue;
+                    if (!group.characterNodeId) continue;
                     const sourceNode = ctx.getNode(group.characterNodeId);
                     if (sourceNode?.type !== "character") continue;
                     const source = readCharacterGroupFromNode(sourceNode);
@@ -592,7 +609,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         <H3RulerScrubber key="ruler-scrubber" ctx={ctx} segments={segments} total={total} previewH={effPreviewH} />
         <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} outputs={outputs} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} />
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
-        {editingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={editingRef.ref} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
+        {editingRef && currentEditingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={currentEditingRef} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
             <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={previewStorageKey ? ctx.mediaUrl(previewStorageKey) : preview} kind={previewKind} aspectRatio={String(selected?.aspectRatio || metadata.aspectRatio || "16:9 (Widescreen)")} storageKey={previewStorageKey} name={previewName} livePreview={showLivePreview} playhead={playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} patchAllSettings={patchAllSettings} /></div>

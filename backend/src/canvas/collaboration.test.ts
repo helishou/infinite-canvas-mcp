@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commandFingerprint, concurrentCommandConflicts, type CanvasCommit } from "./collaboration.js";
+import { compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
 
 function fixture(t: TestContext) {
     const db = new BackendDatabase(":memory:");
@@ -38,6 +39,56 @@ test("角色主图变更原子更新下游引用，回执/广播/历史重放一
     assert.equal(repeated.duplicated, true);
     assert.deepEqual(repeated.project, changed.project);
     assert.deepEqual(repeated.operations, changed.operations);
+});
+
+test("角色形象图原位替换在同一 ops 事务刷新所有 H3 Clip 与生成输入", (t) => {
+    const db = fixture(t);
+    const characterImages = [
+        { storageKey: "image:a", url: "https://media.test/a.png", outfit: "形象" },
+        { storageKey: "image:b", url: "https://media.test/b.png", outfit: "常服" },
+    ];
+    const characterGroup = {
+        id: "group-char", characterName: "苏青璃", characterNodeId: "char", characterAssetId: "asset-char",
+        subjectId: "char", outfitEnabled: true, voiceEnabled: false,
+        outfits: [
+            { id: "outfit-a", storageKey: "image:a", url: "https://media.test/a.png", name: "形象", role: "character_turnaround", enabled: true },
+            { id: "outfit-b", storageKey: "image:b", url: "https://media.test/b.png", name: "常服", role: "character_turnaround", enabled: false },
+        ],
+    };
+    db.applyCanvasProjectOperations("canvas", undefined, [
+        { type: "add_node", id: "char", nodeType: "character", title: "苏青璃", metadata: { characterAssetId: "asset-char", characterImages, characterPrimaryIndex: 0 } },
+        { type: "add_node", id: "h3", nodeType: "minimax-h3:video", metadata: { segments: [
+            { id: "clip-a", taskMode: "ref2va", h3CharacterGroups: { "group-char": characterGroup }, results: [{ url: "https://media.test/old-output.mp4" }] },
+            { id: "clip-b", taskMode: "ref2va", h3CharacterGroups: { "group-char": characterGroup } },
+        ] } },
+    ]);
+    const operations = [{ type: "update_node", id: "char", metadata: { characterImages: [
+        { storageKey: "image:new", url: "https://media.test/new.png", outfit: "新形象" }, characterImages[1],
+    ] } }];
+    const before = db.getCanvasProject("canvas")!;
+    assert.throws(() => db.applyCanvasProjectOperations("canvas", undefined, [...operations, { type: "update_node", id: "missing" }]));
+    assert.deepEqual(db.getCanvasProject("canvas"), before);
+    let broadcast: CanvasCommit | undefined;
+    db.onCanvasCommit((commit) => { broadcast = commit; });
+    const receipt = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "replace-character-image" });
+    assert.deepEqual(receipt.operations.map((operation: { type: string; segmentId?: string }) => [operation.type, operation.segmentId || ""]), [
+        ["update_node", ""], ["update_h3_segment", "clip-a"], ["update_h3_segment", "clip-b"],
+    ]);
+    const h3 = (receipt.project.nodes as Array<Record<string, any>>).find((node) => node.id === "h3")!;
+    const segments = h3.metadata.segments as Array<Record<string, any>>;
+    for (const segment of segments) {
+        const outfits = segment.h3CharacterGroups["group-char"].outfits;
+        assert.deepEqual(outfits.map((outfit: Record<string, unknown>) => [outfit.id, outfit.storageKey, outfit.enabled]), [
+            ["outfit-a", "image:new", true], ["outfit-b", "image:b", false],
+        ]);
+        const compiled = compileReferenceSubmission(receipt.project, segment);
+        assert.deepEqual(compiled.references.filter((ref) => ref.mediaType === "image").map((ref) => ref.storageKey), ["image:new"]);
+    }
+    assert.equal(segments[0].results[0].url, "https://media.test/old-output.mp4");
+    assert.deepEqual(broadcast?.operations, receipt.operations);
+    const replay = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "replace-character-image" });
+    assert.equal(replay.duplicated, true);
+    assert.deepEqual(replay.project, receipt.project);
 });
 
 test("持久候选不改原文，重复保存不重复；采用与状态确认是同一事务", (t) => {

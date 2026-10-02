@@ -32,3 +32,4 @@ tmp
 .codex
 .agent-artifacts
 .local-backups
+.tmp

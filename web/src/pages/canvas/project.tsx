@@ -1,3 +1,4 @@
+import { createCanvasGraphIndexSelector } from "@/lib/canvas/canvas-graph-index";
 import { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
@@ -10,7 +11,7 @@ import { useTranslation } from "react-i18next";
 import { defaultConfig, resolveModelChannel, resolveModelWorkflow, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workflows";
 import { resolveComfyImageSize } from "@/services/api/comfyui";
-import { uploadImage, resolveImageUrl, type UploadedImage } from "@/services/image-storage";
+import { uploadImage, resolveImageUrl, isImageFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
@@ -74,7 +75,7 @@ import { setBackendCanvasPresence } from "@/stores/use-backend-store";
 import { useCanvasDocument } from "@/pages/canvas/hooks/use-canvas-document";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
-import { buildCanvasGraphIndex, createMentionReferenceSelector, getFixedReferenceNodes, getGroupResourceNodes, isCanvasReferenceNode, nodeResourceItems, reorderCanvasReferenceConnections, type CanvasGraphIndex, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { createMentionReferenceSelector, getFixedReferenceNodes, getGroupResourceNodes, isCanvasReferenceNode, nodeResourceItems, reorderCanvasReferenceConnections, type CanvasGraphIndex, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
@@ -363,6 +364,22 @@ export default function CanvasPage() {
     return <InfiniteCanvasPage />;
 }
 
+type OrderedGroupDropPreview = { groupId: string; draggedId: string; drop: NonNullable<ReturnType<typeof orderedGroupDropTarget>> };
+
+function findOrderedGroupDrop(nodes: CanvasNodeData[], point: Position) {
+    const group = [...nodes].reverse().find((item) => item.type === CanvasNodeType.Group && item.metadata?.orderedGroup && point.x >= item.position.x && point.x <= item.position.x + item.width && point.y >= item.position.y && point.y <= item.position.y + item.height);
+    if (!group) return null;
+    const displaySlots = orderedGroupDisplaySlots(orderedGroupSlots(group, nodes), orderedGroupColumnCount(group));
+    const slotAreas = orderedGroupLayout(group, displaySlots.length).flatMap((cell, index) => {
+        const memberId = displaySlots[index];
+        if (!memberId) return [{ ...cell, x: group.position.x + cell.x, y: group.position.y + cell.y }];
+        const member = nodes.find((item) => item.id === memberId);
+        return member ? [{ index, x: member.position.x, y: member.position.y, width: member.width, height: member.height }] : [];
+    });
+    const drop = orderedGroupDropTarget(group, displaySlots.length, point, slotAreas);
+    return drop ? { group, drop } : null;
+}
+
 function InfiniteCanvasPage() {
     const { message, modal } = App.useApp();
     const { t } = useTranslation();
@@ -519,6 +536,7 @@ function InfiniteCanvasPage() {
     const [isNodeDragging, setIsNodeDragging] = useState(false);
     const [isNodeResizing, setIsNodeResizing] = useState(false);
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
+    const [orderedGroupDropPreview, setOrderedGroupDropPreview] = useState<OrderedGroupDropPreview | null>(null);
     const [referencePickerNodeId, setReferencePickerNodeId] = useState<string | null>(null);
     // 插件节点（如 H3 导演台）点击空 ref 槽时复用同一套「从画布选节点」交互：
     // 插件发出 canvas-reference-pick-request，画布进入选择态，选中节点通过 canvas-reference-pick 回抛给插件自己写进槽位。
@@ -621,11 +639,18 @@ function InfiniteCanvasPage() {
     const loopAbortRef = useRef<AbortController | null>(null);
     const loopPreparingRef = useRef(false);
     const dragPreviewPositionsRef = useRef<Map<string, Position>>(EMPTY_DRAG_PREVIEW);
+    const orderedGroupDropPreviewRef = useRef<OrderedGroupDropPreview | null>(null);
     const resizePreviewBoundsRef = useRef<Map<string, CanvasResizePreviewBounds>>(EMPTY_RESIZE_PREVIEW);
     const updateDropTargetGroupId = useCallback((next: string | null) => {
         if (dropTargetGroupIdRef.current === next) return;
         dropTargetGroupIdRef.current = next;
         setDropTargetGroupId(next);
+    }, []);
+    const updateOrderedGroupDropPreview = useCallback((next: OrderedGroupDropPreview | null) => {
+        const previous = orderedGroupDropPreviewRef.current;
+        if (previous?.groupId === next?.groupId && previous?.draggedId === next?.draggedId && previous?.drop.kind === next?.drop.kind && previous?.drop.index === next?.drop.index) return;
+        orderedGroupDropPreviewRef.current = next;
+        setOrderedGroupDropPreview(next);
     }, []);
     useEffect(
         () => () => {
@@ -924,7 +949,8 @@ function InfiniteCanvasPage() {
         setConnecting(null);
     }, [setConnecting]);
 
-    const graphIndex = useMemo(() => buildCanvasGraphIndex(nodes, connections), [connections, nodes]);
+    const selectGraphIndex = useMemo(() => createCanvasGraphIndexSelector(), []);
+    const graphIndex = useMemo(() => selectGraphIndex(nodes, connections), [selectGraphIndex, connections, nodes]);
     const nodeById = graphIndex.nodeById;
 
     const getConnectionDropTarget = useCallback(
@@ -1796,6 +1822,7 @@ function InfiniteCanvasPage() {
         setContextMenu(null);
     }, [commitViewport, size.height, size.width]);
 
+    const deepLinkFocusRef = useRef("");
     const focusNode = useCallback(
         (nodeId: string) => {
             const node = nodesRef.current.find((item) => item.id === nodeId);
@@ -1829,6 +1856,14 @@ function InfiniteCanvasPage() {
         },
         [applyViewportLive, commitViewport, size.height, size.width],
     );
+
+    useEffect(() => {
+        const nodeId = searchParams.get("nodeId") || "";
+        const key = `${projectId}:${nodeId}`;
+        if (!projectLoaded || !nodeId || deepLinkFocusRef.current === key || !nodes.some((node) => node.id === nodeId)) return;
+        deepLinkFocusRef.current = key;
+        focusNode(nodeId);
+    }, [focusNode, nodes, projectId, projectLoaded, searchParams]);
 
     useEffect(() => () => void (focusAnimRef.current && cancelAnimationFrame(focusAnimRef.current)), []);
 
@@ -2076,18 +2111,9 @@ function InfiniteCanvasPage() {
         const current = nodesRef.current;
         const dragged = current.find((item) => item.id === draggedId);
         if (!dragged || dragged.type === CanvasNodeType.Group) return false;
-        const targetGroup = current.find((item) => item.type === CanvasNodeType.Group && item.metadata?.orderedGroup && point.x >= item.position.x && point.x <= item.position.x + item.width && point.y >= item.position.y && point.y <= item.position.y + item.height);
-        if (!targetGroup) return false;
-        const displaySlots = orderedGroupDisplaySlots(orderedGroupSlots(targetGroup, current), orderedGroupColumnCount(targetGroup));
-        const slotAreas = orderedGroupLayout(targetGroup, displaySlots.length).flatMap((cell, index) => {
-            const memberId = displaySlots[index];
-            if (!memberId) return [{ ...cell, x: targetGroup.position.x + cell.x, y: targetGroup.position.y + cell.y }];
-            const member = current.find((item) => item.id === memberId);
-            return member ? [{ index, x: member.position.x, y: member.position.y, width: member.width, height: member.height }] : [];
-        });
-        // 图片通常从边角/标题处拖入，按图片中心而非鼠标抓取点确定槽位。
-        const drop = orderedGroupDropTarget(targetGroup, displaySlots.length, point, slotAreas);
-        if (!drop) return false;
+        const target = findOrderedGroupDrop(current, point);
+        if (!target) return false;
+        const { group: targetGroup, drop } = target;
         let inheritedOutputSourceId: string | undefined;
         setNodes((prev) => {
             const sourceGroup = prev.find((item) => item.type === CanvasNodeType.Group && item.metadata?.orderedGroup && orderedGroupSlots(item, prev).includes(draggedId));
@@ -2182,6 +2208,7 @@ function InfiniteCanvasPage() {
             nodeDraggingRef.current = false;
             setIsNodeDragging(false);
             updateDropTargetGroupId(null);
+            updateOrderedGroupDropPreview(null);
             const referenceDrag = dragRef.current.referenceDrag;
             const referenceTargetNodeId = dragRef.current.referenceTargetNodeId;
             if (referenceDrag && referenceTargetNodeId && clientX != null && clientY != null) {
@@ -2282,7 +2309,7 @@ function InfiniteCanvasPage() {
                 }
             }
         },
-        [applyOrderedGroupDrop, projectId, publishRealtimeDrag, screenToCanvas, updateDropTargetGroupId],
+        [applyOrderedGroupDrop, projectId, publishRealtimeDrag, screenToCanvas, updateDropTargetGroupId, updateOrderedGroupDropPreview],
     );
 
     const handleGlobalMouseMove = useCallback(
@@ -2320,6 +2347,7 @@ function InfiniteCanvasPage() {
                     dragPreviewPositionsRef.current = EMPTY_DRAG_PREVIEW;
                     writeCanvasDragPreview(projectId, EMPTY_DRAG_PREVIEW);
                     updateDropTargetGroupId(null);
+                    updateOrderedGroupDropPreview(null);
                     return;
                 }
                 if (referenceDrag && dragRef.current.referenceTargetNodeId) {
@@ -2342,6 +2370,12 @@ function InfiniteCanvasPage() {
                     publishRealtimeDrag(previewPositions);
                     writeCanvasDragPreview(projectId, previewPositions);
                     updateDropTargetGroupId(findGroupDropTarget(movedIds, nodesRef.current, previewPositions, groupDropCandidates)?.id || null);
+                    const draggedId = dragRef.current.hasMoved && movedIds.size === 1 && !groupDropCandidates.hasMovedGroup ? [...movedIds][0] : undefined;
+                    const draggedNode = draggedId ? nodesRef.current.find((node) => node.id === draggedId) : undefined;
+                    const initial = draggedId ? initialPositions.get(draggedId) : undefined;
+                    const point = draggedNode && initial ? orderedGroupDraggedCenter(initial, { x: dx, y: dy }, draggedNode) : null;
+                    const orderedTarget = point ? findOrderedGroupDrop(nodesRef.current, point) : null;
+                    updateOrderedGroupDropPreview(orderedTarget && draggedId ? { groupId: orderedTarget.group.id, draggedId, drop: orderedTarget.drop } : null);
                     rafRef.current = null;
                 });
                 return;
@@ -2351,7 +2385,7 @@ function InfiniteCanvasPage() {
                 scheduleConnectionPreview(event.clientX, event.clientY);
             }
         },
-        [finishNodeDrag, projectId, publishRealtimeCursor, publishRealtimeDrag, scheduleConnectionPreview, screenToCanvas],
+        [finishNodeDrag, projectId, publishRealtimeCursor, publishRealtimeDrag, scheduleConnectionPreview, screenToCanvas, updateOrderedGroupDropPreview],
     );
 
     const writeSelectionOverlay = useCallback((selection: SelectionBox) => {
@@ -2836,11 +2870,11 @@ function InfiniteCanvasPage() {
     }, [createAudioFileNode, createImageFileNode, createTextNodeFromClipboard, createVideoFileNode, getCanvasCenter, message, pasteCopiedNodes, t]);
 
     const pasteEventClipboard = useCallback(async (files: File[], text: string) => {
-        const file = files.find((item) => /^(image|video|audio)\//.test(item.type));
+        const file = files.find((item) => isImageFile(item) || /^(video|audio)\//.test(item.type));
         if (file) {
             const position = getCanvasCenter();
             try {
-                if (file.type.startsWith("image/")) {
+                if (isImageFile(file)) {
                     await createImageFileNode(file, position);
                     message.success(t("canvas.projectPage.clipboardImageAdded"));
                 } else if (file.type.startsWith("video/")) {
@@ -4351,7 +4385,7 @@ function InfiniteCanvasPage() {
         uploadTargetRef.current = { nodeId, position };
         if (imageInputRef.current) {
             const target = nodeId ? nodesRef.current.find((node) => node.id === nodeId) : null;
-            imageInputRef.current.accept = target && isImageConversionSource(target) ? "image/*" : "image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav";
+            imageInputRef.current.accept = target && isImageConversionSource(target) ? "image/*,.svg" : "image/*,.svg,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav";
         }
         imageInputRef.current?.click();
     }, []);
@@ -4360,7 +4394,7 @@ function InfiniteCanvasPage() {
         async (event: ReactChangeEvent<HTMLInputElement>) => {
             const uploadTargetNode = nodesRef.current.find((node) => node.id === uploadTargetRef.current?.nodeId);
             const imageTarget = Boolean(uploadTargetNode && isImageConversionSource(uploadTargetNode));
-            const files = Array.from(event.target.files || []).filter((f) => imageTarget ? f.type.startsWith("image/") : f.type.startsWith("image/") || f.type.startsWith("video/") || isAudioFile(f));
+            const files = Array.from(event.target.files || []).filter((f) => imageTarget ? isImageFile(f) : isImageFile(f) || f.type.startsWith("video/") || isAudioFile(f));
             if (!files.length) {
                 uploadTargetRef.current = null;
                 event.target.value = "";
@@ -4532,7 +4566,7 @@ function InfiniteCanvasPage() {
                 }
             }
 
-            const files = Array.from(event.dataTransfer.files).filter((item) => item.type.startsWith("image/") || item.type.startsWith("video/") || isAudioFile(item));
+            const files = Array.from(event.dataTransfer.files).filter((item) => isImageFile(item) || item.type.startsWith("video/") || isAudioFile(item));
             if (!files.length) return;
 
             const basePos = screenToCanvas(event.clientX, event.clientY);
@@ -5916,6 +5950,38 @@ function InfiniteCanvasPage() {
                         );
                     })}
 
+                    {orderedGroupDropPreview && (() => {
+                        const group = nodeById.get(orderedGroupDropPreview.groupId);
+                        if (!group) return null;
+                        const slots = orderedGroupSlots(group, nodes);
+                        const cells = orderedGroupLayout(group, orderedGroupDisplaySlots(slots, orderedGroupColumnCount(group)).length);
+                        const index = orderedGroupDropPreview.drop.index;
+                        const cell = cells[Math.min(index, cells.length - 1)];
+                        if (!cell) return null;
+                        const isInsert = orderedGroupDropPreview.drop.kind === "gap";
+                        const sourceIndex = slots.indexOf(orderedGroupDropPreview.draggedId);
+                        const finalIndex = isInsert && sourceIndex >= 0 && sourceIndex < index ? index - 1 : index;
+                        const markerWidth = Math.max(6, 3 / viewport.k);
+                        const left = group.position.x + cell.x + (index >= cells.length ? cell.width : 0);
+                        return (
+                            <div
+                                className="pointer-events-none absolute z-[85] rounded-lg"
+                                style={{
+                                    left: isInsert ? left - markerWidth / 2 : group.position.x + cell.x,
+                                    top: group.position.y + cell.y,
+                                    width: isInsert ? markerWidth : cell.width,
+                                    height: cell.height,
+                                    background: isInsert ? theme.canvas.selectionStroke : `${theme.canvas.selectionStroke}22`,
+                                    border: isInsert ? undefined : `2px solid ${theme.canvas.selectionStroke}`,
+                                }}
+                            >
+                                <span className="absolute bottom-full left-1/2 mb-1 -translate-x-1/2 whitespace-nowrap rounded px-2 py-1 text-xs shadow-sm" style={{ background: theme.toolbar.panel, color: theme.node.text }}>
+                                    {t(isInsert ? "canvas.orderedGroup.insertAt" : "canvas.orderedGroup.slotAt", { index: Math.min(finalIndex, slots.length) + 1 })}
+                                </span>
+                            </div>
+                        );
+                    })()}
+
                     {pendingVideoComparison ? (
                         <button type="button" className="absolute left-1/2 top-4 z-[90] -translate-x-1/2 rounded-full border px-4 py-2 text-sm font-medium shadow-lg backdrop-blur" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitReferencePick}>
                             {t("canvas.videoCompare.selectingHint")}
@@ -6072,7 +6138,7 @@ function InfiniteCanvasPage() {
                     />
                 ) : null}
 
-                <input ref={imageInputRef} type="file" multiple accept="image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" className="hidden" onChange={handleImageInputChange} />
+                <input ref={imageInputRef} type="file" multiple accept="image/*,.svg,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" className="hidden" onChange={handleImageInputChange} />
 
                 <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} onRename={handleNodeTitleChange} />
                 <CanvasPluginManagerModal open={pluginManagerOpen} onClose={() => setPluginManagerOpen(false)} />

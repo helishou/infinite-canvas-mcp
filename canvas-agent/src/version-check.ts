@@ -17,7 +17,7 @@ export function checkVersions() {
     logger.info("Optional Codex version", { version: installedCodexVersion || "not installed" });
     logger.info("Local Codex version", { version: localCodexVersion || "not found" });
     if (!installedCodexVersion && !localCodexVersion) {
-        logger.info("Codex chat is optional. To enable it: npm install -g @openai/codex@0.146.0");
+        logger.info("Codex chat is optional. To enable it: npm install -g @openai/codex@0.160.0");
     }
     void checkLatestVersions(localCodexVersion, installedCodexVersion);
 }

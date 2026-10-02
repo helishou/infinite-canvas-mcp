@@ -36,6 +36,15 @@ test("手工场景与两个角色组共享解析得到三张参考，ID 来源�
     assert.deepEqual(refs.slice(1).map((ref) => [ref.bindingId, ref.assetId, ref.nodeId]), expected.map((binding) => [binding.id, binding.assetId, binding.sourceNodeId]));
 });
 
+test("旧角色参考在场景之前时，参考卡与共享编译保留同一图片顺序", () => {
+    const segment = derivedFixture();
+    segment.referenceBindings!.unshift({
+        ...characterGroupBindings(segment.h3CharacterGroups!.su as unknown as Record<string, unknown>)[0],
+        id: "old-su", storageKey: "image:old", url: "https://media.test/old",
+    });
+    assert.deepEqual(refsForSegment(segment).map((ref) => ref.storageKey), ["image:su", "image:scene", "image:shen"]);
+});
+
 test("历史角色快照由当前组刷新且删除孤儿，手工编辑不双写派生项并保留禁用绑定", () => {
     const segment = derivedFixture();
     segment.referenceBindings!.push(
@@ -232,4 +241,24 @@ test("源角色刷新不因临时切换到文生视频而清空已选参考", ()
     assert.equal(groupFrom(refreshed).outfitEnabled, true);
     assert.equal(groupFrom(refreshed).voiceEnabled, true);
     assert.deepEqual(refsForSegment({ ...refreshed, mode: "ref2va", taskMode: "ref2va" }).map((ref) => ref.storageKey), before);
+});
+
+test("源角色原位置换已选形象图后，H3 参考槽显示新图并保留服装绑定", () => {
+    const initial = upsertCharacterGroup({ id: "clip-replace", taskMode: "ref2va", refItems: [] }, {
+        characterName: "苏青璃", characterNodeId: "character-su", outfits: sourceOutfits,
+        selectedOutfitKeys: [sourceOutfits[0].storageKey!],
+    });
+    const group = groupFrom(initial);
+    const before = refsForSegment(initial).find((ref) => ref.type === "image")!;
+    const replacement = { url: "https://media.test/new-appearance.png", storageKey: "image:new-appearance", name: "新形象" };
+    const updated = syncCharacterGroupFromSource(initial, group.id, {
+        characterName: "苏青璃", characterNodeId: "character-su", outfits: [replacement, ...sourceOutfits.slice(1)],
+    });
+    const after = refsForSegment(updated).find((ref) => ref.type === "image")!;
+    assert.equal(after.storageKey, replacement.storageKey);
+    assert.equal(after.url, replacement.url);
+    assert.equal(after.outfitId, before.outfitId);
+    assert.equal(after.bindingId, before.bindingId);
+    assert.equal(groupFrom(updated).outfits.length, sourceOutfits.length);
+    assert.equal(syncCharacterGroupFromSource(updated, group.id, { characterName: "苏青璃", characterNodeId: "character-su", outfits: [replacement, ...sourceOutfits.slice(1)] }), updated);
 });

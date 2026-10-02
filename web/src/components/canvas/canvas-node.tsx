@@ -798,7 +798,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 const target = event.target as HTMLElement;
                 const isH3 = data.type === "minimax-h3:video";
                 const interactive = target.closest("button, input, textarea, select, video, .ant-select-dropdown");
-                const isH3DragHandle = target.closest("[data-canvas-node-drag-handle]");
+                const isExplicitDragHandle = target.closest("[data-canvas-node-drag-handle]");
                 // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
                 // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
                 // onMouseDown（冒泡阶段）无法执行，缩放被拖拽彻底劫持。故需显式排除缩放手柄。
@@ -810,7 +810,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 // 节点下方的面板（提示词/参考内容等）是纯交互区：面板已在冒泡阶段 stopPropagation，
                 // 但 capture 先于冒泡执行，会先在这里触发拖拽。命中面板时跳过拖拽，把交互留给面板自身。
                 const onNodePanel = target.closest("[data-canvas-node-panel]");
-                if (!interactive && !onResizeHandle && !onConnectionHandle && !onNodePanel && (!isH3 || isH3DragHandle)) onMouseDown(event, data.id);
+                if ((!interactive || isExplicitDragHandle) && !onResizeHandle && !onConnectionHandle && !onNodePanel && (!isH3 || isExplicitDragHandle)) onMouseDown(event, data.id);
             }}
             onClickCapture={(event) => {
                 if (!referenceSelectionState && !pickedReferenceOnMouseDown.current) return;
@@ -848,6 +848,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     ) : (
                         <button
                             type="button"
+                            data-canvas-node-drag-handle={hasVideoContent ? "true" : undefined}
                             className="block max-w-full truncate border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100"
                             style={{ color: theme.node.text }}
                             title={t("canvas.node.renameHint")}

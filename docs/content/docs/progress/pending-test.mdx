@@ -5,6 +5,74 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## H3 reference compatibility and migration recovery
+
+- With the development Web server running, `node scripts/test-h3-reference-compatibility.mjs` checks the real reference dialog and cards on an independent in-memory page. Set `CANVAS_TEST_WEB` for a non-default Web URL; no model requests or project writes are made.
+- Open an existing Clip with character images before or between scene references. Its reference cards and saved Picture tags should still refer to the same images; storyboard-first submission must preserve those associations. Generating must not rewrite the saved prompt.
+- Disable a character's outfit switch while individual outfits remain selected. No outfit images should be submitted, enabled voice references should remain, and re-enabling outfits should restore the selections.
+- In an isolated old database, interrupt H3 migration after a backup is created, then retry after resolving the failure. Startup should complete with the original project intact; earlier fixed-name backups and backups from failed attempts must remain unchanged.
+
+## Canvas history maintenance and performance
+
+- Run `npm run prune-canvas-batches --workspace backend -- 30` to preview only. Explicit `--apply` creates and verifies a unique backup, advances each checkpoint and removes only the contiguous expired prefix in one transaction. Invalid history or backup failures must preserve all existing records. Maintenance is manual; the default retention remains 30 days.
+- A retained request must recover its original receipt after cleanup. Older committed requests must never execute again: the browser fetches the latest canvas, acknowledges the original command durably, and preserves subsequent edits or conflict drafts. A failed refresh must keep the pending command. Existing databases receive a verified backup before the receipt schema migration.
+- Check content editing, reference order, grouping, node movement, fast panning and 5% zoom on large canvases. Content updates should reuse spatial geometry while displaying the latest content. Viewport thresholds remain unchanged.
+- PR checks include Web types/build, Backend build, H3 types/tests and isolated browser collaboration scenarios. After building `canvas-agent` and Backend and installing the locked Playwright Chromium, use `node scripts/run-canvas-browser-tests.mjs collaboration` or `node scripts/run-canvas-browser-tests.mjs performance label`. Tests isolate Backend data, media, Agent configuration, ports and Vite cache; measurements and failure evidence are saved under `artifacts/browser-tests`. No paid generation is submitted.
+
+## Agent sidebar automatic connection
+
+- Opening the Agent sidebar should discover the current Backend connection details and connect without another click. Closing and reopening a connected sidebar should preserve its connection. A manual disconnect should remain in effect while the sidebar stays open; reopening should connect again.
+- A failed first connection should not keep starting new attempts. Reopening after service recovery should connect again. Launch links containing connection details should still connect automatically. Concurrent automatic and manual connection actions should create one connection, and late discovery results should not reset an established connection.
+
+## Episode script, shots, storyboard, and H3 Clips
+
+- Open an episode's **Produce** page. Edit scene actions/dialogue and shots, reorder them, preview impact, then publish the script before the shot list. Saving a draft alone must not submit generation. Another window's stale revision must return the current draft without replacing either window's edits. A missing response must preserve the original operation ID, revision, and payload through refresh; recovering its receipt must not perform a second edit or publication.
+- Import one of `fullPlot`, `script.md`, or `storyboard.md` as a review draft; the original source remains. After publication, the structured Backend version is the formal source, while legacy text stays available. Export published script/shot versions as Markdown and restore an older version into a draft without deleting published history.
+- Bind a storyboard frame to its stable shot ID, group only adjacent shots with a recorded action transition, and sync H3 drafts. Existing Clip segment IDs and historical output must survive targeted updates.
+- Auto mode advances affected media after publishing the shot list, freezing models inherited from Canvas nodes or existing settings without task budgets. With a disposable executor, check model inheritance and freezing, ignored legacy budgets, missing references, failure pause, exact task IDs, media storage keys, Canvas binding, and H3 Clip writeback. Real paid generation has not been run.
+
+## Canvas image workflow aspect ratio
+
+- Set a canvas image node to 16:9 and choose the `qwen_image_2_1` workflow. Confirm the final ComfyUI graph receives the 16:9 option on its actual aspect-ratio input. If a saved workflow field remains 1:1, submission must stop before ComfyUI runs and explain the conflict. Check that archived output dimensions come from the file: a square output stays in task history but cannot become the active keyframe. An output with the requested ratio records its actual pixel dimensions. No paid generation is needed for automated checks.
+
+## Import SVG images into the canvas
+
+- Import an `.svg` with the file picker, canvas drop, and asset sidebar. It should appear as an image node or asset, stay sharp when scaled, and still load from the original SVG after refresh. Replacing an image node should also accept SVG.
+- Import a local SVG with a `viewBox` through `canvas_import_local_images`. The original file, MIME type, and dimensions should be preserved; a non-SVG file renamed to `.svg` should be rejected. Opening the media URL directly must not execute scripts in the SVG.
+- SVG files remain editable canvas images. When selected as model references, Backend should submit a deterministic PNG derivative and record both the source and submitted storage keys on the task; no manual browser conversion is needed.
+
+## H3 plan, references, and task waiting
+
+- The served `h3_apply_video_plan` schema should require each Clip's `id` and every timeline item's `start/end`. A generic `config` node should be rejected with the correct H3 node type in the error before any canvas revision changes.
+- A character node missing `characterAssetId` or a complete outfit media catalog should fail before group binding. `h3_write_storyboard_prompt(dryRun: true)` must return a preview without writing; invalid picture binding IDs, roles, states, media types, and handles should each identify the failing shot and field.
+- A timed-out `canvas_wait_tasks` call should return the original pending task IDs and a next wait action. Repeating that wait must not create a new generation task.
+
+## MCP contract and H3 atomic preparation (1.5.11)
+
+- Verify served plugin schemas preserve field descriptions, integer/range constraints, array limits, unknown-field policy and declared cross-field conditions. Updating a registered plugin must update the existing tool schema and handler, rather than only re-enable stale registration.
+- `h3_prepare_clip` prepares prompt/configuration, existing character outfit selections and reference bindings as one final candidate. `dryRun: true` validates without writing; revision conflicts or invalid final references reject the complete transaction. Runtime ownership, results and task history remain protected. It does not run generation.
+- Reference failures return `REFERENCE_INVALID` with issue codes and `retryPolicy: after_input_change`. H3 diagnostic tools explicitly advertise `readOnlyHint: true`; writes and mixed preview/write tools remain write-capable. Do not repeat unchanged rejected requests.
+- `h3_get_clip` with `include: ["result"]` verifies the exact project/node/Clip/task/storageKey chain. Optional `taskId` and `storageKey` select a historical result and must be used with result scope. A different Clip's task or media is rejected. Shared-parent results require the matching Clip completion/reuse event, not an unlabelled parent media array. Missing proof returns no verifiable result or an error, never a directory's latest file.
+- Verify the same generation idempotency key recovers its original task without starting another run; reusing a key for a different target or request must reject. Historical receipts must not overwrite a newer draft or active task. No real generation is required to test these contracts with isolated task stores.
+- Source/build and disposable real HTTP checks are separate from configured Backend and Hermes activation. Load the changed Backend/shared package only after authorized safe service handling, then refresh MCP discovery. The companion Hermes client repair also requires its running process to load the changed Python code; refreshing Canvas declarations alone does not do that. No production draft, output or active task should be changed merely to verify deployment.
+
+## Creative conversations from the canvas library
+
+- Choose asset or drama creation on the canvas library page, enter an idea, and submit it. A new Agent conversation should start with the original idea as the visible user message. Preserve the draft when disconnected, busy, an unsent Agent draft exists, or the production SOP is unavailable; reconnecting or double clicking must not send twice.
+- The asset path should create a canvas and record an asset plan once the direction is clear. The drama path should create a drama, first episode, and bound canvas; read back the separate synopsis and full plot. Submit canvas media tasks only when explicitly requested, then verify task ID, archived media, and node writeback.
+- Verify the Agent loads the production SOP in development and packaged builds, preserves local edits during upgrades, and reports conflicts. Follow-up turns should keep the creative rules. Check both languages, themes, and narrow layouts.
+- The Agent model picker should use the connected Codex service's catalog. With the bundled Codex 0.160.0, verify that GPT-6 models appear after restarting Canvas Agent. A saved model that service no longer supports should fall back to its default model and a supported reasoning effort, avoiding a 400 on the creative turn.
+
+## H3 references follow character image replacements
+
+- Replace an image selected by an H3 Clip in its source character node. Every Clip referencing that character should show and submit the new image while preserving outfit choices, voice settings, other Clip content and historical outputs. Verify the result after reopening the canvas and in another window.
+- Reordering outfits should preserve selection by image; adding an outfit should leave it disabled; deleting the only selected outfit should fall back to the character's current primary image. Replaying an edit should not apply it twice, and a failed batch should leave no partial update.
+
+## H3 character outfit selection
+
+- Double-click a character reference in the current Clip. The dialog should list every outfit from the character node with a thumbnail, name and preview action. Applying a selection should place only the chosen outfits in this Clip's reference slots and generation input.
+- Turning the outfit switch off and back on should restore the selected outfits. Changing outfits must preserve the character node's full catalog, other Clips' selections and the voice switch. A newly added outfit must not become active automatically in existing Clips.
+
 ## H3 personal settings scope and preview paths
 
 - Changing the settings scope stays in the current window and must not enter shared canvas metadata. Verify two windows editing the same H3 node independently.
@@ -321,6 +389,7 @@ description: Implemented changes that still need manual verification
 
 - In a test canvas, swap members within an ordered group, drag one out, and drag it back in. Undo and redo each move immediately. Slot order, group membership, position, width, and height should match the respective before and after states without a second layout jump. Refresh and confirm the Backend receipt matches the page.
 - In a test canvas, drag a member to a gap on its right and then use Arrange. The saved order should match the visible order; dragging an image by its edge should target the slot under the image center. Dropping outside the slot area should leave the member movable.
+- Drag a node into or within the group over the left or right side of an occupied member. The “Insert at N” marker should match the final order, shifting existing members forward. Over the member's center, the slot marker should preserve swap or replacement. Check empty cells, column gaps, and a zoomed canvas too.
 - Shrink an ordered group and enlarge it again. Slots and members should stay within the frame, preserve each member's aspect ratio, and restore the size of members that fitted their original slots. Add the fourth member to a three-member group and confirm that the new row reflows the existing members.
 - Add a member through MCP to a small ordered group, then refresh the canvas. The new member and existing members should remain inside their recorded slots. The Backend process must load the new build before this check.
 

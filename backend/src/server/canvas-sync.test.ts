@@ -123,7 +123,7 @@ test("摘要不包含节点内容，详情单独读取；SSE 断线补发和实�
         assert.equal(delta.revision, 1);
         assert.equal("project" in delta, false);
         assert.equal((delta.operations as unknown[]).length, 1);
-        assert.deepEqual(await (await request(receiptPath)).json(), { ok: true, committed: true, revision: 1 });
+        assert.deepEqual(await (await request(receiptPath)).json(), { ok: true, committed: true, revision: 1, snapshotAvailable: true });
         assert.equal((db.getCanvasProject("p")!.nodes as Array<Record<string, unknown>>)[0].title, "新标题");
         const duplicate = await fetch(`${url}/canvas/projects/p/ops?response=delta`, {
             method: "POST", headers: { Authorization: "Bearer test", "Content-Type": "application/json" }, body: JSON.stringify(operationBody),

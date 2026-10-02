@@ -7,6 +7,8 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { readAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
+import { CANVAS_CREATIVE_SKILL_NAME, creativeLaunchPrompt } from "@/lib/agent/creative-launch";
+import { selectAvailableAgentModel } from "@/lib/agent/agent-model-selection";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { imageMetadata } from "@/lib/canvas/canvas-node-factory";
@@ -18,7 +20,7 @@ import { uploadImage } from "@/services/image-storage";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useAgentSkillStore } from "@/stores/use-agent-skill-store";
 import { useShallow } from "zustand/react/shallow";
-import { useAgentStore, type AgentAttachment, type AgentBootstrapStatus, type AgentCanvasContext, type AgentCanvasReference, type AgentChatItem, type AgentConversationState, type AgentModel, type AgentPendingApproval, type AgentPendingToolCall, type AgentPermissionMode, type AgentReasoningEffort, type AgentThreadSummary } from "@/stores/use-agent-store";
+import { useAgentStore, type AgentAttachment, type AgentBootstrapStatus, type AgentCanvasContext, type AgentCanvasReference, type AgentChatItem, type AgentConversationState, type AgentCreativeLaunch, type AgentModel, type AgentPendingApproval, type AgentPendingToolCall, type AgentPermissionMode, type AgentReasoningEffort, type AgentThreadSummary } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { discoverBackendToken } from "@/services/backend-api";
 import { type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
@@ -77,11 +79,6 @@ const AGENT_PROTOCOL_VERSION = 6;
 const HISTORY_RETRY_DELAYS_MS = [0, 150, 350, 700, 1200];
 const rt = (key: string, options?: Record<string, unknown>) => i18n.t(`agent.runtime.${key}`, options);
 
-function fixedAgentModel(id: string, displayName: string, defaultReasoningEffort: AgentReasoningEffort, isDefault = false): AgentModel {
-    const supportedReasoningEfforts: AgentModel["supportedReasoningEfforts"] = ["low", "medium", "high", "xhigh", "max"].map((reasoningEffort) => ({ reasoningEffort: reasoningEffort as AgentReasoningEffort }));
-    return { id, model: id, displayName, defaultReasoningEffort, supportedReasoningEfforts, ...(isDefault ? { isDefault: true } : {}) };
-}
-
 type AgentWorkspace = { workspacePath: string; activeThreadId?: string };
 type AgentThreadsResponse = { ok?: boolean; workspace?: AgentWorkspace; conversation?: AgentConversationState; data?: AgentThreadSummary[] };
 type AgentThreadResponse = { ok?: boolean; workspace?: AgentWorkspace; conversation?: AgentConversationState; thread?: AgentThreadSummary; messages?: AgentChatItem[]; settledTurnIds?: string[]; historyReady?: boolean };
@@ -89,12 +86,6 @@ type AgentWorkspaceResponse = { ok?: boolean; workspace?: AgentWorkspace; conver
 type AgentTurnResponse = { ok?: boolean; threadId?: string };
 type AgentCodexState = { busy?: boolean; threadId?: string; turnId?: string };
 
-// Keep the Canvas Agent model picker pinned to the GPT-6 family.
-const GPT6_AGENT_MODELS: AgentModel[] = [
-    fixedAgentModel("gpt-6-astra", "GPT-6 Astra", "high"),
-    fixedAgentModel("gpt-6-sol", "GPT-6 Sol", "high"),
-    fixedAgentModel("gpt-6-luna", "GPT-6 Luna", "medium", true),
-];
 type AgentHelloEvent = { ok?: boolean; protocolVersion?: number; clientId?: string; workspace?: { activeThreadId?: string }; conversation?: AgentConversationState; codex?: AgentCodexState; pendingApprovals?: AgentPendingApproval[] };
 type AgentWorkspaceEvent = { activeThreadId?: string; threadId?: string; sourceClientId?: string; emptyThread?: boolean; draftThread?: boolean; conversation?: AgentConversationState };
 type AgentChatEvent = { threadId?: string; turnId?: string; sourceClientId?: string; replayed?: boolean; message?: AgentChatItem };
@@ -145,7 +136,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     // canvasContext is intentionally excluded because project updates it every frame during dragging and resizing.
     // The panel uses it only for ref synchronization and debounced postState calls, never during rendering.
     // Subscribing here would rerender the panel every frame and amplify the #185 crash, so it is observed imperatively below.
-    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, tokenUsage, eventLogs, threads, activeThreadId, workspacePath, loadingThreads, activeTab, confirmTools, permissionMode, models, model, reasoningEffort, activity, conversation, connectError, pendingTool, pendingApprovals } = useAgentStore(
+    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, tokenUsage, eventLogs, threads, activeThreadId, workspacePath, loadingThreads, activeTab, confirmTools, permissionMode, models, model, reasoningEffort, activity, conversation, connectError, pendingTool, pendingApprovals, creativeLaunch } = useAgentStore(
         useShallow((state) => ({
             width: state.width,
             url: state.url,
@@ -173,6 +164,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             connectError: state.connectError,
             pendingTool: state.pendingTool,
             pendingApprovals: state.pendingApprovals,
+            creativeLaunch: state.creativeLaunch,
         })),
     );
     const setAgentState = useAgentStore((state) => state.setAgentState);
@@ -190,6 +182,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     const confirmToolsRef = useRef(confirmTools);
     const pendingToolRef = useRef<AgentPendingToolCall | null>(null);
     const autoConnectRef = useRef(false);
+    const urlAutoConnectRef = useRef(false);
+    const connectionPendingRef = useRef(false);
     const connectedRef = useRef(false);
     const errorLoggedRef = useRef(false);
     const attachmentUrlsRef = useRef(new Set<string>());
@@ -610,15 +604,20 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
 
     useEffect(() => {
         if (!connected) return;
-        const models = GPT6_AGENT_MODELS;
-        const savedModel = useAgentStore.getState().model;
-        const current = models.find((item) => item.model === savedModel) || models.find((item) => item.isDefault) || models[0];
-        if (!current) return;
-        const savedEffort = useAgentStore.getState().reasoningEffort;
-        const efforts = current.supportedReasoningEfforts.map((item) => item.reasoningEffort);
-        const nextEffort = efforts.includes(savedEffort as AgentReasoningEffort) ? savedEffort as AgentReasoningEffort : current.defaultReasoningEffort || efforts[0];
-        setAgentState({ models, model: current.model, reasoningEffort: nextEffort });
-    }, [connected, setAgentState]);
+        let disposed = false;
+        void fetchAgentJson<{ data?: AgentModel[] }>(endpoint, token, "/codex/models")
+            .then((response) => {
+                if (disposed) return;
+                const state = useAgentStore.getState();
+                setAgentState(selectAvailableAgentModel(response.data || [], state.model, state.reasoningEffort));
+            })
+            .catch((error) => {
+                if (disposed) return;
+                setAgentState({ models: [], model: "", reasoningEffort: "" });
+                addEventLog(rt("modelListFailed"), error);
+            });
+        return () => { disposed = true; };
+    }, [connected, endpoint, setAgentState, token]);
 
     useEffect(() => {
         if (!connected) return;
@@ -633,11 +632,16 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             document.removeEventListener("visibilitychange", activateVisible);
         };
     }, [connected, endpoint, token]);
-    const sendPrompt = async () => {
-        const text = prompt.trim();
+    const sendPrompt = async (launch?: AgentCreativeLaunch): Promise<boolean> => {
+        const text = launch?.text.trim() || prompt.trim();
         const files = attachments;
         const skillState = useAgentSkillStore.getState();
-        const selectedSkill = skillState.selectedSkill;
+        const inheritedSkill = useAgentStore.getState().messages.some((item) => item.role === "user" && item.skill?.name === CANVAS_CREATIVE_SKILL_NAME)
+            ? skillState.skills.find((item) => item.name === CANVAS_CREATIVE_SKILL_NAME && item.enabled) || null
+            : null;
+        const selectedSkill = launch
+            ? skillState.skills.find((item) => item.name === CANVAS_CREATIVE_SKILL_NAME && item.enabled) || null
+            : skillState.selectedSkill || inheritedSkill;
         const selectedSkillRevision = skillState.selectionRevision;
         const currentState = useAgentStore.getState();
         const canvasNodeIds = new Set(currentState.canvasContext?.snapshot.nodes.map((node) => node.id) || []);
@@ -646,8 +650,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             setAgentState({ canvasReferences });
             message.warning(rt(canvasReferences.length ? "someCanvasReferencesMissing" : "canvasReferencesMissing"));
         }
-        const requestPrompt = promptWithCanvasReferences(promptWithAttachments(text, files), canvasReferences);
-        if (!currentState.connected || !requestPrompt || currentState.sending || currentState.waiting || currentState.loadingThreads || !["ready", "warning"].includes(currentState.conversation.status)) return;
+        const requestPrompt = promptWithCanvasReferences(promptWithAttachments(launch ? creativeLaunchPrompt(launch) : text, files), canvasReferences);
+        if (!currentState.connected || !requestPrompt || currentState.sending || currentState.waiting || currentState.loadingThreads || !["ready", "warning"].includes(currentState.conversation.status) || (launch && !selectedSkill)) return false;
         let referenceImages: AgentAttachment[] = [];
         if (canvasReferences.some((item) => item.kind === "image")) {
             setAgentState({ sending: true, activity: rt("readingCanvasImages") });
@@ -656,19 +660,19 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             } catch (error) {
                 setAgentState({ sending: false, activity: rt("canvasImageReadFailed") });
                 addMessage({ role: "error", title: rt("canvasImageReadFailed"), text: error instanceof Error ? error.message : rt("canvasImageReadFailed") });
-                return;
+                return false;
             }
         }
         const requestFiles = [...files, ...referenceImages.filter((reference) => !files.some((file) => file.dataUrl === reference.dataUrl))];
         if (requestFiles.length > MAX_ATTACHMENTS) {
             setAgentState({ sending: false, activity: rt("tooManyImages") });
             addMessage({ role: "error", title: rt("tooManyImages"), text: rt("imageCountLimit", { count: MAX_ATTACHMENTS }) });
-            return;
+            return false;
         }
         if (attachmentPayloadBytes(requestFiles) > MAX_ATTACHMENT_PAYLOAD_BYTES) {
             setAgentState({ sending: false, activity: rt("imageTooLarge") });
             addMessage({ role: "error", title: rt("imageTooLarge"), text: rt("imagePayloadTooLarge") });
-            return;
+            return false;
         }
         const messageId = createId();
         const userText = text || rt(files.length ? "imagesSent" : "canvasReferencesSent", { count: files.length || canvasReferences.length });
@@ -677,6 +681,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             return { nodeId, label, title, kind, previewUrl: image ? (await createMessageAttachmentMetadata(image)).url : previewUrl, text };
         }));
         const messageSkill = selectedSkill ? { name: selectedSkill.name, path: selectedSkill.path, displayName: selectedSkill.interface?.displayName || undefined } : undefined;
+        const availableModel = models.find((item) => item.model === model);
+        const requestedEffort = availableModel?.supportedReasoningEfforts.some((item) => item.reasoningEffort === reasoningEffort) ? reasoningEffort : undefined;
         loadThreadsSequenceRef.current += 1;
         const currentBeforeSend = useAgentStore.getState();
         const requestThreadId = currentBeforeSend.activeThreadId;
@@ -690,8 +696,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 ...(messageReferences.length ? { canvasReferences: messageReferences } : {}),
                 ...(messageSkill ? { skill: messageSkill } : {}),
             };
-            const modelName = models.find((item) => item.model === model)?.displayName || model || rt("defaultModel");
-            const effortName = reasoningEffort ? i18n.t(`agent.composer.effort.${reasoningEffort}`) : rt("defaultEffort");
+            const modelName = availableModel?.displayName || rt("defaultModel");
+            const effortName = requestedEffort ? i18n.t(`agent.composer.effort.${requestedEffort}`) : rt("defaultEffort");
             addEventLog(rt("sendTask"), `${modelName} · ${effortName}${selectedSkill ? ` · Skill ${selectedSkill.name}` : ""}${files.length ? ` · ${rt("attachmentCount", { count: files.length })}` : ""}${canvasReferences.length ? ` · ${rt("canvasReferenceCount", { count: canvasReferences.length })}` : ""} · ${compactText(text) || rt(canvasReferences.length ? "canvasReferencesOnly" : "attachmentsOnly")}`);
             const accepted = await fetchAgentJson<AgentTurnResponse>(endpoint, token, "/codex/turn", {
                 method: "POST",
@@ -705,8 +711,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                     conversationId: currentBeforeSend.conversation.conversationId,
                     expectedRevision: currentBeforeSend.conversation.revision,
                     permissionMode,
-                    model,
-                    effort: reasoningEffort,
+                    model: availableModel?.model,
+                    effort: requestedEffort,
                     skill: selectedSkill ? { name: selectedSkill.name, path: selectedSkill.path } : undefined,
                     attachments: requestFiles.map(({ id, name, type, size, width, height, dataUrl }) => ({ id, name, type, size, width, height, dataUrl })),
                     messageMetadata,
@@ -714,11 +720,12 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             });
             threadId = accepted.threadId || threadId;
             if (!threadId) throw new Error(rt("startConversationFailed"));
-            if (selectedSkill) clearSkillSelection(selectedSkillRevision);
+            if (skillState.selectedSkill) clearSkillSelection(selectedSkillRevision);
             files.forEach((item) => {
                 URL.revokeObjectURL(item.url);
                 attachmentUrlsRef.current.delete(item.url);
             });
+            return true;
         } catch (error) {
             const text = error instanceof Error ? error.message : rt("sendFailed");
             const response = error instanceof AgentApiError ? error.response as { code?: string; state?: AgentConversationState } : undefined;
@@ -745,8 +752,50 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 setAgentState({ sending: false, messages: removeFailedPending(state.messages), ...restoreDraft });
             }
             addEventLog(rt("sendFailed"), error);
+            return false;
         }
     };
+
+    useEffect(() => {
+        if (!creativeLaunch || !connected || !clientReady) return;
+        if (creativeLaunch.phase === "reset") {
+            if (useAgentStore.getState().creativeLaunch?.phase !== "reset") return;
+            if (!conversationReady || loadingThreads || sending || waiting) return;
+            setAgentState({ creativeLaunch: { ...creativeLaunch, phase: "resetting" }, activeTab: "chat", loadingThreads: true });
+            void fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ clientId: clientIdRef.current, permissionMode }),
+            }).then((result) => {
+                if (useAgentStore.getState().creativeLaunch?.id !== creativeLaunch.id) return;
+                if (result.conversation) applyConversationState(result.conversation);
+                clearSkillSelection();
+                setAgentState({ creativeLaunch: { ...creativeLaunch, phase: "send" }, loadingThreads: false });
+            }).catch((error) => {
+                if (useAgentStore.getState().creativeLaunch?.id !== creativeLaunch.id) return;
+                setAgentState({ creativeLaunch: null, loadingThreads: false, prompt: creativeLaunch.text, activity: rt("newConversationFailed") });
+                message.error(error instanceof Error ? error.message : rt("newConversationFailed"));
+            });
+            return;
+        }
+        if (creativeLaunch.phase === "send" && conversationReady && !loadingThreads && !sending && !waiting) {
+            if (useAgentStore.getState().creativeLaunch?.phase !== "send") return;
+            setAgentState({ creativeLaunch: { ...creativeLaunch, phase: "sending" } });
+            void sendPrompt(creativeLaunch).then((sent) => {
+                if (useAgentStore.getState().creativeLaunch?.id !== creativeLaunch.id) return;
+                setAgentState({ creativeLaunch: null, ...(sent ? {} : { prompt: useAgentStore.getState().prompt || creativeLaunch.text }) });
+            }).catch((error) => {
+                if (useAgentStore.getState().creativeLaunch?.id !== creativeLaunch.id) return;
+                setAgentState({ creativeLaunch: null, sending: false, prompt: useAgentStore.getState().prompt || creativeLaunch.text });
+                message.error(error instanceof Error ? error.message : rt("sendFailed"));
+            });
+        }
+    }, [applyConversationState, clearSkillSelection, clientReady, connected, conversationReady, creativeLaunch, endpoint, loadingThreads, message, permissionMode, sending, setAgentState, token, waiting]);
+
+    useEffect(() => {
+        if (connected || !creativeLaunch || creativeLaunch.phase === "sending") return;
+        setAgentState({ creativeLaunch: null, loadingThreads: false, prompt: useAgentStore.getState().prompt || creativeLaunch.text });
+    }, [connected, creativeLaunch, setAgentState]);
 
     const stopTurn = async () => {
         if (!connected || (!sending && !waiting)) return;
@@ -912,44 +961,58 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         });
     };
 
-    const toggleAgentConnection = async ({ silent = false }: { silent?: boolean } = {}) => {
-        if (enabled) {
+    const connectLocalAgent = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+        const current = useAgentStore.getState();
+        if (current.enabled || current.connected || connectionPendingRef.current) return;
+        connectionPendingRef.current = true;
+        try {
+            const urlToken = searchParams.get("agentToken") || "";
+            const urlEndpoint = searchParams.get("agentUrl") || "";
+            const nextEndpoint = (urlEndpoint || backendAgentUrl).trim().replace(/\/$/, "");
+            const nextToken = (urlToken || current.token.trim() || (await discoverBackendToken()).token || "").trim();
+            if (!nextEndpoint) {
+                const text = rt("addressRequired");
+                if (!silent) {
+                    setAgentState({ connectError: text });
+                    if (!headless) message.warning(text);
+                }
+                return;
+            }
+            if (!nextToken) {
+                const text = rt("agentNotFound");
+                if (!silent) {
+                    setAgentState({ connectError: text });
+                    if (!headless) message.warning(text);
+                }
+                return;
+            }
+            try {
+                const parsed = new URL(nextEndpoint);
+                if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("invalid protocol");
+            } catch {
+                const text = rt("invalidAddress");
+                if (!silent) {
+                    setAgentState({ connectError: text });
+                    if (!headless) message.warning(text);
+                }
+                return;
+            }
+            // Token discovery may finish after another entry point has already connected.
+            const latest = useAgentStore.getState();
+            if (latest.enabled || latest.connected) return;
+            errorLoggedRef.current = false;
+            setAgentState({ url: nextEndpoint, token: nextToken, enabled: true, connected: false, silentConnect: silent, fragmentBootstrap: false, activity: rt("connecting"), connectError: "", activeTab: "setup" });
+        } finally {
+            connectionPendingRef.current = false;
+        }
+    }, [backendAgentUrl, headless, message, searchParams, setAgentState]);
+
+    const toggleAgentConnection = async () => {
+        if (useAgentStore.getState().enabled) {
             clearAgentSession({ enabled: false, connected: false, activity: rt("offline"), connectError: "" });
             return;
         }
-        const urlToken = searchParams.get("agentToken") || "";
-        const urlEndpoint = searchParams.get("agentUrl") || "";
-        const nextEndpoint = (urlEndpoint || backendAgentUrl).trim().replace(/\/$/, "");
-        const nextToken = (urlToken || token.trim() || (await discoverBackendToken()).token || "").trim();
-        if (!nextEndpoint) {
-            const text = rt("addressRequired");
-            if (!silent) {
-                setAgentState({ connectError: text });
-                if (!headless) message.warning(text);
-            }
-            return;
-        }
-        if (!nextToken) {
-            const text = rt("agentNotFound");
-            if (!silent) {
-                setAgentState({ connectError: text });
-                if (!headless) message.warning(text);
-            }
-            return;
-        }
-        try {
-            const parsed = new URL(nextEndpoint);
-            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("invalid protocol");
-        } catch {
-            const text = rt("invalidAddress");
-            if (!silent) {
-                setAgentState({ connectError: text });
-                if (!headless) message.warning(text);
-            }
-            return;
-        }
-        errorLoggedRef.current = false;
-        setAgentState({ url: nextEndpoint, token: nextToken, enabled: true, connected: false, silentConnect: silent, fragmentBootstrap: false, activity: rt("connecting"), connectError: "", activeTab: "setup" });
+        await connectLocalAgent();
     };
 
     useLayoutEffect(() => {
@@ -978,10 +1041,20 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     }, [confirmTools, setAgentState, urlAgentAutoConnect]);
 
     useEffect(() => {
-        if ((!autoConnect && !urlAgentAutoConnect) || autoConnectRef.current || enabled || connected) return;
+        if (!autoConnect) {
+            autoConnectRef.current = false;
+            return;
+        }
+        if (autoConnectRef.current) return;
         autoConnectRef.current = true;
-        void toggleAgentConnection({ silent: true });
-    }, [autoConnect, connected, enabled, urlAgentAutoConnect]);
+        void connectLocalAgent({ silent: true });
+    }, [autoConnect, connectLocalAgent]);
+
+    useEffect(() => {
+        if (!urlAgentAutoConnect || urlAutoConnectRef.current) return;
+        urlAutoConnectRef.current = true;
+        void connectLocalAgent({ silent: true });
+    }, [connectLocalAgent, urlAgentAutoConnect]);
 
     function clearAgentSession(patch: Parameters<typeof setAgentState>[0] = {}) {
         loadThreadsSequenceRef.current += 1;
@@ -1353,7 +1426,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 right={
                     <>
                         <Tooltip title={t("agent.history.newThread")} placement="bottom">
-                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0 @min-[560px]:!w-auto @min-[560px]:!min-w-0 @min-[560px]:!px-[7px]" aria-label={t("agent.history.newThread")} disabled={!connected || loadingThreads || sending || waiting || conversationBusy} icon={<Plus className="size-3.5" />} onClick={startNewThread}>
+                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0 @min-[560px]:!w-auto @min-[560px]:!min-w-0 @min-[560px]:!px-[7px]" aria-label={t("agent.history.newThread")} disabled={!connected || loadingThreads || sending || waiting || conversationBusy || Boolean(creativeLaunch)} icon={<Plus className="size-3.5" />} onClick={startNewThread}>
                                 <span className="hidden @min-[560px]:inline">{t("agent.history.newThread")}</span>
                             </Button>
                         </Tooltip>
@@ -1410,8 +1483,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                     <AgentChatComposer
                         prompt={prompt}
                         attachments={attachments.map((attachment) => agentAttachmentToChatAttachment(attachment, endpoint, token))}
-                        disabled={!connected || !conversationReady || loadingThreads}
-                        sending={sending || waiting}
+                        disabled={!connected || !conversationReady || loadingThreads || Boolean(creativeLaunch)}
+                        sending={sending || waiting || Boolean(creativeLaunch)}
                         placeholder={conversation.status === "idle" || conversation.status === "preparing"
                             ? t("agent.panel.mcpInitializing")
                             : conversation.status === "failed"

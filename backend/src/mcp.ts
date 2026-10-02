@@ -361,6 +361,17 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "drama_create_episode",
   "drama_update_episode",
   "drama_delete_episode",
+  "drama_get_production",
+  "drama_edit_production",
+  "drama_preview_production_impact",
+  "drama_publish_production",
+  "drama_list_production_versions",
+  "drama_get_production_version",
+  "drama_list_production_legacy",
+  "drama_restore_production",
+  "drama_sync_production_clips",
+  "drama_get_production_run",
+  "drama_export_production_markdown",
   "drama_delete_project",
   "comfyui_status",
   "comfyui_get_task",
@@ -1354,7 +1365,7 @@ function registerBackendCanvasTools(
     "canvas_import_local_images",
     {
       description:
-        "把本地磁盘上的图片文件导入画布，成为带 storageKey 的真实图片节点，可直接作为 canvas_create_generation_flow / canvas_run_generation 的参考图。与 assets_add 的区别：assets_add 用 dataURL 存素材库、不进 media_files、没有 storageKey，当不了生成参考；本工具走 Backend 媒体上传，落 media_files 并返回 storageKey/url/像素尺寸。items 接受字符串路径或 {filePath,title}，按顺序网格排列。",
+        "把本地磁盘上的图片文件导入画布，成为带 storageKey 的真实图片节点，可作为 canvas_create_generation_flow / canvas_run_generation 的参考图。SVG 保留原始矢量文件；作为 Backend 图片模型参考时自动使用可追溯 PNG 派生图。与 assets_add 的区别：assets_add 用 dataURL 存素材库、不进 media_files、没有 storageKey，当不了生成参考；本工具走 Backend 媒体上传，落 media_files 并返回 storageKey/url/像素尺寸。items 接受字符串路径或 {filePath,title}，按顺序网格排列。",
       inputSchema: z.object({
         projectId: z.string().optional(),
         items: z
@@ -1411,7 +1422,9 @@ function registerBackendCanvasTools(
           failed.push({ filePath: source.filePath, error: String((error as Error).message || error) });
           continue;
         }
-        const probed = probeImageSize(prepared.data);
+        const probed = prepared.width && prepared.height
+          ? { width: prepared.width, height: prepared.height }
+          : probeImageSize(prepared.data);
         const media = await uploadMediaBinary(config, prepared.data, {
           name: prepared.name,
           mimeType: prepared.mimeType,
@@ -1594,6 +1607,7 @@ function registerBackendCanvasTools(
       .string()
       .optional()
       .describe("分集剧情/梗概，独立存储在分集实体，不要只写进画布文本节点"),
+    fullPlot: z.string().optional().describe("旧剧情概述；正式剧本请写入分集制作稿"),
     canvasId: z
       .string()
       .nullable()
@@ -1610,6 +1624,7 @@ function registerBackendCanvasTools(
       .describe("新的分集编号；同一剧目不可重复"),
     title: z.string().optional().describe("新的分集标题"),
     synopsis: z.string().optional().describe("新的分集剧情/梗概"),
+    fullPlot: z.string().optional().describe("旧剧情概述；正式剧本请写入分集制作稿"),
     canvasId: z
       .string()
       .nullable()
@@ -1658,6 +1673,7 @@ function registerBackendCanvasTools(
         episodeNumber: input.episodeNumber,
         title: input.title,
         synopsis: input.synopsis,
+        fullPlot: input.fullPlot,
         canvasId: input.canvasId,
       });
       return textResult(result);
@@ -1692,6 +1708,85 @@ function registerBackendCanvasTools(
       });
     },
   );
+  const productionPath = (episodeId: string) => `/drama/episodes/${encodeURIComponent(episodeId)}/production`;
+  const productionIdSchema = z.object({ episodeId: z.string().trim().min(1) });
+  server.registerTool("drama_get_production", {
+    description: "读取单集结构化剧本、镜头表、关键帧与 H3 映射。fullPlot 仅为剧情概述。",
+    inputSchema: productionIdSchema,
+  }, async (rawInput: Record<string, unknown>) => {
+    const { episodeId } = productionIdSchema.parse(rawInput);
+    return textResult(await backendApi.get(productionPath(episodeId)));
+  });
+  server.registerTool("drama_list_production_versions", {
+    description: "读取单集制作稿的历史发布版本。",
+    inputSchema: productionIdSchema,
+  }, async (rawInput: Record<string, unknown>) => {
+    const { episodeId } = productionIdSchema.parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(episodeId)}/versions`));
+  });
+  server.registerTool("drama_get_production_version", {
+    description: "读取指定已发布版本的剧本、镜头与映射。",
+    inputSchema: productionIdSchema.extend({ version: z.number().int().min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ version: z.number().int().min(1) }).parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(input.episodeId)}/versions/${input.version}`));
+  });
+  server.registerTool("drama_list_production_legacy", {
+    description: "读取 fullPlot、script.md 与 storyboard.md 原文及哈希，供用户选择导入。",
+    inputSchema: productionIdSchema,
+  }, async (rawInput: Record<string, unknown>) => {
+    const { episodeId } = productionIdSchema.parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(episodeId)}/legacy`));
+  });
+  server.registerTool("drama_preview_production_impact", {
+    description: "发布前预览受影响场次、镜头、图片、Clip 和缺失资产。",
+    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots"]) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots"]) }).parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(input.episodeId)}/impact?stage=${input.stage}`));
+  });
+  server.registerTool("drama_edit_production", {
+    description: "编辑制作草稿。每次请求提供新 operationId 与读取时的 expectedRevision；冲突返回当前版本，不能直接覆盖。",
+    inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), ops: z.array(z.record(z.string(), z.unknown())).min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const { episodeId, ...input } = rawInput;
+    return textResult(await backendApi.post(`${productionPath(String(episodeId))}/ops`, input));
+  });
+  server.registerTool("drama_publish_production", {
+    description: "发布单集剧本或镜头表新版本。自动模式仅在本次额度已配置时尝试媒体任务。",
+    inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots"]) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const { episodeId, ...input } = rawInput;
+    return textResult(await backendApi.post(`${productionPath(String(episodeId))}/publish`, input));
+  });
+  server.registerTool("drama_restore_production", {
+    description: "将历史发布版本恢复到草稿；不删除现有发布历史或媒体。",
+    inputSchema: productionIdSchema.extend({ version: z.number().int().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const { episodeId, ...input } = rawInput;
+    return textResult(await backendApi.post(`${productionPath(String(episodeId))}/restore`, input));
+  });
+  server.registerTool("drama_sync_production_clips", {
+    description: "同步当前已发布镜头的 H3 Clip 草稿，不发起视频生成。",
+    inputSchema: productionIdSchema,
+  }, async (rawInput: Record<string, unknown>) => {
+    const { episodeId } = productionIdSchema.parse(rawInput);
+    return textResult(await backendApi.post(`${productionPath(episodeId)}/sync-clips`, {}));
+  });
+  server.registerTool("drama_get_production_run", {
+    description: "读取发布版本自动生产状态、暂停原因和已提交的精确任务 ID。",
+    inputSchema: productionIdSchema.extend({ version: z.number().int().min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ version: z.number().int().min(1) }).parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(input.episodeId)}/runs/${input.version}`));
+  });
+  server.registerTool("drama_export_production_markdown", {
+    description: "导出已发布剧本或镜头表 Markdown，不覆盖旧制作文件。",
+    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots"]), version: z.number().int().min(1).optional() }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots"]), version: z.number().int().min(1).optional() }).parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(input.episodeId)}/export?stage=${input.stage}${input.version ? `&version=${input.version}` : ""}`));
+  });
   server.registerTool(
     "drama_delete_project",
     {
@@ -2208,6 +2303,7 @@ async function waitForCanvasTasks(
         .filter(Boolean);
       return {
         timedOut: !complete,
+        pendingTaskIds,
         elapsedMs,
         pollCount,
         eventCount,
@@ -3006,7 +3102,12 @@ function toolErrorResult(
           {
             ok: false,
             traceId,
-            error: { code, message, recoverable: classified.recoverable },
+            error: {
+              code, message, recoverable: classified.recoverable,
+              ...(classified.retryPolicy ? { retryPolicy: classified.retryPolicy } : {}),
+              ...(classified.handlerInvoked !== undefined ? { handlerInvoked: classified.handlerInvoked } : {}),
+              ...(classified.issues.length ? { issues: classified.issues } : {}),
+            },
             currentState: {
               tool,
               activeProjectId: state.activeProjectId,
@@ -3170,7 +3271,8 @@ function classifyToolError(
     (/模型/.test(message) && /未配置|没有配置|缺少/.test(message));
   const conflict =
     backendError.code === "REVISION_CONFLICT" || /revision|冲突|基线/.test(message);
-  const invalidInput = error instanceof z.ZodError;
+  const invalidInput = error instanceof z.ZodError || backendError.code === "INVALID_INPUT";
+  const domainCode = ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT"].includes(backendError.code || "") ? backendError.code : undefined;
   const authFailure = backendError.status === 401 || backendError.status === 403;
   const timeout = backendError.kind === "timeout";
   const networkFailure = backendError.kind === "network";
@@ -3178,6 +3280,8 @@ function classifyToolError(
   const payloadOverflow = error instanceof McpPayloadOverflowError;
   const code = payloadOverflow
     ? "OUTPUT_TOO_LARGE"
+    : domainCode
+      ? domainCode
     : selectionRequired
     ? "PROJECT_SELECTION_REQUIRED"
     : missingProject
@@ -3207,7 +3311,15 @@ function classifyToolError(
                           : "CANVAS_TOOL_FAILED";
   const taskIds = inputTaskIds(input);
   const projectId = String(input.projectId || state.activeProjectId || "");
-  const suggestedAction = payloadOverflow
+  const suggestedAction = domainCode === "REFERENCE_INVALID"
+    ? { tool: "h3_get_clip_references", input: { projectId: String(input.projectId || state.activeProjectId || ""), nodeId: String(input.nodeId || ""), segmentId: String(input.segmentId || "") } }
+    : domainCode === "MEDIA_IDENTITY_MISMATCH"
+      ? { action: "按精确 Clip 和原 taskId 核对归档媒体；不要使用目录最新文件，也不要重提生成" }
+    : domainCode === "IDEMPOTENCY_CONFLICT"
+      ? (typeof input.idempotencyKey === "string" && input.idempotencyKey
+          ? { tool: "canvas_task_status", input: { taskId: input.idempotencyKey } }
+          : { action: "原幂等键属于另一份生成输入；先查原任务，不能把它当作本次任务或重复排队" })
+    : payloadOverflow
     ? {
         action:
           "缩小返回体后重试：为查询类工具传更小的 limit / nodeIds，或用 canvas_inspect 代替整图快照工具。",
@@ -3235,10 +3347,19 @@ function classifyToolError(
             ? { action: "检查 Backend 地址、Token 和权限后再重试" }
             : { action: "检查 errorContext 后修正输入或连接；不要重复提交完全相同的失败请求" };
   const recoverable = selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingModel || conflict || timeout || payloadOverflow;
+  const issueSource = error && typeof error === "object" ? (error as Record<string, unknown>).issues : undefined;
+  const issues = Array.isArray(issueSource) ? issueSource.map((issue) => {
+    const item = recordOf(issue);
+    return { code: String(item.code || "validation_error"), message: safeErrorMessage(new Error(String(item.message || ""))), ...(Array.isArray(item.path) ? { path: item.path } : {}), ...(typeof item.bindingId === "string" ? { bindingId: item.bindingId } : {}), ...(Array.isArray(item.allowedFields) ? { allowedFields: item.allowedFields.filter((field) => typeof field === "string") } : {}) };
+  }) : [];
+  const retryPolicy = domainCode || invalidInput ? "after_input_change" : undefined;
   return {
     code,
     message,
     recoverable,
+    retryPolicy,
+    issues,
+    handlerInvoked: typeof recordOf(error).handlerInvoked === "boolean" ? recordOf(error).handlerInvoked as boolean : undefined,
     suggestedAction,
     suggestedTool: "tool" in suggestedAction ? suggestedAction.tool : undefined,
   };

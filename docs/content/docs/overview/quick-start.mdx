@@ -37,7 +37,7 @@ Use local Backend mode for the complete short-film production stack. The Docker 
 - The repository maintains an npm lockfile; prefer `npm ci`. An already installed Bun can run `bun install` from the repository root, followed by Node/npm startup commands. Do not create separate workspace dependency trees or commit a parallel lockfile without review. The Backend requires the Node version declared in `backend/package.json`; Bun as an installer does not replace Node's SQLite runtime.
 - If `canvas-agent/dist/...` is missing, run `npm run build --workspace canvas-agent` or use the root startup commands. A failed build is not a Backend connection error.
 - If `safe-delete state lock timeout` comes from host-injected `NODE_OPTIONS`, investigate the host injection and Vite cache-cleanup conflict. Startup scripts preserve `NODE_OPTIONS` and do not automatically disable deletion guards or other host protections.
-- Codex CLI is optional. For sidebar Codex chat, run `npm install -g @openai/codex@0.146.0` and sign in. Canvas, MCP, and local ComfyUI can skip this installation.
+- Codex CLI is optional. For sidebar Codex chat, run `npm install -g @openai/codex@0.160.0` and sign in. Canvas, MCP, and local ComfyUI can skip this installation. The model picker uses the catalog returned by the Codex app-server that Canvas Agent actually starts.
 
 ## Data and upgrades
 

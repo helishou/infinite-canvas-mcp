@@ -8,9 +8,10 @@ import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageToDataUrl } from "@/services/image-storage";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasNodeResource } from "@/types/canvas-plugin";
-import { buildCanvasSpatialIndex, type CanvasSpatialIndex } from "@/lib/canvas/canvas-spatial-index";
+import { buildCanvasGraphIndex, connectionOrder, type CanvasGraphIndex } from "./canvas-graph-index";
 import { orderedGroupSlots } from "@/lib/canvas/ordered-group";
 
+export { buildCanvasGraphIndex, type CanvasGraphIndex } from "./canvas-graph-index";
 export type CanvasResourceKind = "image" | "video" | "audio" | "text";
 
 export type CanvasCharacterReferenceSelection = CharacterImageSelection;
@@ -31,20 +32,6 @@ export type CanvasResourceReference = {
     active: boolean;
 };
 
-export type CanvasGraphIndex = {
-    nodeById: Map<string, CanvasNodeData>;
-    incomingByNodeId: Map<string, CanvasNodeData[]>;
-    outgoingByNodeId: Map<string, CanvasNodeData[]>;
-    connectionsByNodeId: Map<string, CanvasConnection[]>;
-    groupChildrenById: Map<string, CanvasNodeData[]>;
-    nodeSpatialIndex: CanvasSpatialIndex<CanvasNodeData>;
-    connectionSpatialIndex: CanvasSpatialIndex<CanvasConnection>;
-};
-
-function connectionOrder(connection: CanvasConnection) {
-    return typeof connection.order === "number" && Number.isFinite(connection.order) ? connection.order : Number.MAX_SAFE_INTEGER;
-}
-
 /** Move a source to the target source's position without changing its endpoints or other nodes' references. */
 export function reorderCanvasReferenceConnections(connections: CanvasConnection[], targetNodeId: string, sourceNodeId: string, overNodeId: string) {
     if (sourceNodeId === overNodeId) return connections;
@@ -62,61 +49,6 @@ export function reorderCanvasReferenceConnections(connections: CanvasConnection[
     return connections.map((connection) => connection.toNodeId === targetNodeId
         ? { ...connection, order: orderBySource.get(connection.fromNodeId) }
         : connection);
-}
-
-function connectionBounds(connection: CanvasConnection, nodeById: Map<string, CanvasNodeData>) {
-    const from = nodeById.get(connection.fromNodeId);
-    const to = nodeById.get(connection.toNodeId);
-    if (!from || !to) return null;
-    const startX = from.position.x + from.width;
-    const startY = from.position.y + from.height / 2;
-    const endX = to.position.x;
-    const endY = to.position.y + to.height / 2;
-    const curvature = Math.max(Math.abs(endX - startX) * 0.5, 50);
-    return {
-        left: Math.min(startX, endX - curvature),
-        top: Math.min(startY, endY),
-        right: Math.max(startX + curvature, endX),
-        bottom: Math.max(startY, endY),
-    };
-}
-
-export function buildCanvasGraphIndex(nodes: CanvasNodeData[], connections: CanvasConnection[]): CanvasGraphIndex {
-    const nodeById = new Map(nodes.map((node) => [node.id, node]));
-    const incomingByNodeId = new Map<string, CanvasNodeData[]>();
-    const incomingLinksByNodeId = new Map<string, Array<{ source: CanvasNodeData; connection: CanvasConnection; index: number }>>();
-    const outgoingByNodeId = new Map<string, CanvasNodeData[]>();
-    const connectionsByNodeId = new Map<string, CanvasConnection[]>();
-    connections.forEach((connection, index) => {
-        const source = nodeById.get(connection.fromNodeId);
-        const target = nodeById.get(connection.toNodeId);
-        if (!source || !target) return;
-        for (const nodeId of [source.id, target.id]) {
-            const related = connectionsByNodeId.get(nodeId) || [];
-            related.push(connection);
-            connectionsByNodeId.set(nodeId, related);
-        }
-        const incoming = incomingLinksByNodeId.get(target.id) || [];
-        incoming.push({ source, connection, index });
-        incomingLinksByNodeId.set(target.id, incoming);
-        const outgoing = outgoingByNodeId.get(source.id) || [];
-        outgoing.push(target);
-        outgoingByNodeId.set(source.id, outgoing);
-    });
-    for (const [nodeId, links] of incomingLinksByNodeId) {
-        incomingByNodeId.set(nodeId, links.sort((left, right) => connectionOrder(left.connection) - connectionOrder(right.connection) || left.index - right.index).map(({ source }) => source));
-    }
-    const groupChildrenById = new Map<string, CanvasNodeData[]>();
-    nodes.forEach((node) => {
-        const groupId = node.metadata?.groupId;
-        if (!groupId) return;
-        const children = groupChildrenById.get(groupId) || [];
-        children.push(node);
-        groupChildrenById.set(groupId, children);
-    });
-    const nodeSpatialIndex = buildCanvasSpatialIndex(nodes, (node) => ({ left: node.position.x, top: node.position.y, right: node.position.x + node.width, bottom: node.position.y + node.height }));
-    const connectionSpatialIndex = buildCanvasSpatialIndex(connections, (connection) => connectionBounds(connection, nodeById));
-    return { nodeById, incomingByNodeId, outgoingByNodeId, connectionsByNodeId, groupChildrenById, nodeSpatialIndex, connectionSpatialIndex };
 }
 
 function graphIndex(nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex) {

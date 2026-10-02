@@ -5,7 +5,7 @@ description: 把已确认镜头与关键帧转为 MiniMax H3 等分段视频提�
 
 # Clip 视频
 
-开始前读取制作目录的文字分镜表 `storyboard.md`，按 Clip 编组确定每段覆盖的连续镜头；再从 `progress.md` 取得分镜图有序组 ID，按组的 `metadata.groupSlots` 核对实际采用的关键帧。文字镜头与图片不要求一一对应。
+剧目分集开始前读取 `drama_get_production` 的已发布镜头、Clip 编组和关键帧映射；旧项目继续读取制作目录的 `storyboard.md` 与 `progress.md`。默认一镜一个 Clip；只有相邻镜头有明确动作承接并记录理由时才合并。新 Clip 追加到 H3 节点，已有草稿按稳定 `nodeId/segmentId` 定向更新；含历史结果的节点不可整组替换。生成仍通过 Backend 任务、媒体与节点回写链，技术收口不等于用户验收。
 
 ## 依赖技能
 
@@ -16,6 +16,7 @@ description: 把已确认镜头与关键帧转为 MiniMax H3 等分段视频提�
 将项目内的 [h3-prompt-enhancer](references/h3-prompt-enhancer/SKILL.md) 作为提示词工程参考，`h3-prompt-writing` 的官方格式仍是唯一格式权威。以下规则用于构思与核对 Clip 提示词：
 
 - **先按实际输入建立 manifest**：图片、视频、音频分别按实际绑定顺序编号为 `<Picture N>`、`<Video N>`、`<Audio N>`。角色主体用独立的 `<Subject N>` 编号，并显式映射到角色来源图片；Subject 编号独立于 Picture 编号。提示词引用、参考槽与 manifest 必须一致，不推测缺失素材，不擅自重编号。
+- **每段可独立执行**：逐段展开本段角色、服装、场景、开始状态、动作因果、机位、声音与收尾交接；内部状态代号只能用于制作索引，正文不能要求模型从上一段提示词猜定义。逐段核对 Shot 需求、已批准素材版本、实际绑定和提示词标签；缺图时保留草案与缺项，不伪称参考已经上传或生效。
 - **按 H3 模式组织提示词**：Ref2VA 使用官方六段式，普通参考图不自动写成 0 秒首帧；I2VA 从 Picture 1 的 0 秒首帧向后发展；FL2VA 锚定首尾图并描述连续路径；L2VA 收敛到末帧；T2VA 不引用图片/视频/音频标签。首尾帧对齐句、字段名和段落顺序遵守 `h3-prompt-writing` 对应模式规范。
 - **时间线与切镜**：一个文字镜头一段 Clip 时写单镜时间线。经文字分镜表明确合并的多镜头 Clip，首镜 `[Shot 1]` 不写时间戳；后续 `[Shot N]` 可以写切镜时间和画面变化。镜头切分、合并和切点精度是制作策略，不是固定验收门槛；只要动作顺序、人物/道具状态和连续性成立即可。确有硬切要求时保留硬切，只有明确需要连续动作过渡时才描述跨镜运动。机位运动写清类型，必要时写幅度和速度。
 - **对白原文与说话人**：按首次发声顺序分配稳定 `(S1)`、`(S2)` 等 speaker ID，并跨镜复用。每句对白用官方 `<d>[语言]原文</d>` 标签，逐字保留用户台词和标点；speaker ID 紧跟对应主体引用。画外音写清 off-screen voiceover、说话人和起止镜头/时间；对白不在声景字段重复。
@@ -117,8 +118,10 @@ Clip ID / 对应镜头 ID（合并时列全部镜头、依据、组内顺序和�
    - `referenceBindings`：完整的分镜/场景/道具 binding 集合；
    - `characters`：每个已有角色的 `characterNodeId`、显式 `subjectId`、当前 Clip 的 `selectedOutfitStorageKeys` 和 `voiceEnabled`。
 3. **原子预检写入**：工具从已有角色节点读取完整服装目录，派生启用 binding，编译 `<Picture N>`/`<Subject N>` 和最终 payload；只有 `assertReferenceCompilation` 通过后，才在一次画布事务中更新 segment 并补已有角色节点连线。预检失败不得留下部分 patch、临时 prompt 或重复连接。
+   首次采用新的角色组或分镜绑定结构时，先选一个 Clip 验证；结构化分镜提示词先用 `h3_write_storyboard_prompt(dryRun: true)` 核对 `pictureBindingId`、角色、媒体与最终文字，成功后再提交适用的批量配置。失败时按返回的字段路径修正，不把同一错误循环应用到其他 Clip。
 4. **核对返回 snapshot**：检查 `sourceSegmentId`、运行参数差异、编译后 prompt、参考顺序、角色节点 ID、subject ID、服装目录数/启用数以及连接；任何映射不一致都在提交前停止。
 5. **提交与观测**：普通单段及仅尾帧参考用 `h3_run_clip`；潜空间连续组按「生成前潜空间续写判定」使用 `h3_run_all_clips`，不以单段提交替代续写。保存精确 `taskId`。读取 progress、error、queue 和 generation log；默认 90 秒无进度变化触发 watchdog，取消后确认任务终态为 `cancelled` 且没有输出媒体。
+   `canvas_wait_tasks` 返回 `timedOut: true` 时使用 `pendingTaskIds` 和 `next` 继续等待原任务；超时不是失败证据，不重新提交或更换幂等键。
 6. **生成后技术性收口**：按精确 `taskId` 查询任务终态，确认输出媒体已落库且可访问，并回读目标 segment 确认结果已写入；记录实际 `taskId` 和 `storageKey`。工具回显或 `succeeded` 单独不能证明媒体已落库。除非用户明确要求检查，不检查视频画面、音频、剧情或质量，不评分、不返修，也不要求用户验收。
 
 ### 分段、删参考与纯道具 Clip

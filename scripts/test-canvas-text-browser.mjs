@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
+import { applyCanvasHistoryPrune } from "../backend/dist/canvas/history-maintenance.js";
 
 const require = createRequire(import.meta.url);
 const { chromium } = process.env.CANVAS_PLAYWRIGHT_DIR
     ? createRequire(path.join(process.env.CANVAS_PLAYWRIGHT_DIR, "package.json"))("playwright")
     : require("playwright");
-const rootConfig = path.join(os.homedir(), ".infinite-canvas-root.json");
-const root = fs.existsSync(rootConfig) ? JSON.parse(fs.readFileSync(rootConfig, "utf8")) : {};
-const config = JSON.parse(fs.readFileSync(path.join(process.env.INFINITE_CANVAS_DATA_DIR || root.dataDir || path.join(os.homedir(), ".infinite-canvas"), "backend.json"), "utf8"));
+if (!process.env.INFINITE_CANVAS_DATA_DIR || !process.env.CANVAS_TEST_BACKEND || !process.env.CANVAS_TEST_WEB) throw new Error("Run through scripts/run-canvas-browser-tests.mjs with an isolated test Backend");
+const config = JSON.parse(fs.readFileSync(path.join(process.env.INFINITE_CANVAS_DATA_DIR, "backend.json"), "utf8"));
 const backend = process.env.CANVAS_TEST_BACKEND || "http://127.0.0.1:17370";
 const web = process.env.CANVAS_TEST_WEB || "http://localhost:3001";
 const projectId = "collaboration-test-" + randomUUID();
@@ -33,7 +33,7 @@ try {
     created = true;
     console.log("Temporary fixture:", projectId);
     browser = await chromium.launch({
-        channel: process.env.CANVAS_BROWSER_CHANNEL || "chrome",
+        ...(process.env.CANVAS_BROWSER_CHANNEL ? { channel: process.env.CANVAS_BROWSER_CHANNEL } : {}),
         headless: true,
         // 新版 Chromium 即使已 grant local-network-access，自动化上下文仍可能在导航前拦截 loopback。
         // 仅测试进程关闭该检查；生产页面的连接与 CORS 校验不受影响。
@@ -280,33 +280,46 @@ try {
     assert.deepEqual(actionRequests[0].operations, [{ type: "update_project", patch: { title: "动作队列标题" } }]);
     await a.unroute(opsRoute);
     console.log("PASS: 前一动作等待回执时后续动作独立入队，另一窗口编辑的字段不会被旧快照覆盖");
-    const retryBodies = [];
-    await a.route(opsRoute, async (route) => {
-        const request = route.request();
-        retryBodies.push(request.postDataJSON());
-        const response = await fetch(request.url(), {
-            method: request.method(),
-            headers: request.headers(),
-            body: request.postData() || undefined,
+    for (const compactHistory of [false, true]) {
+        const retryBodies = [];
+        const recoveredTitle = `丢回执的整图动作 ${compactHistory ? "已清理历史" : "保留历史"}`;
+        await a.route(opsRoute, async (route) => {
+            const request = route.request();
+            retryBodies.push(request.postDataJSON());
+            const response = await fetch(request.url(), {
+                method: request.method(),
+                headers: request.headers(),
+                body: request.postData() || undefined,
+            });
+            assert.ok(response.ok, `动作队列丢回执测试的直达请求失败：${response.status}`);
+            await route.abort("connectionfailed");
         });
-        assert.ok(response.ok, `动作队列丢回执测试的直达请求失败：${response.status}`);
-        await route.abort("connectionfailed");
-    });
-    await editCanvas(a, { kind: "title", value: "丢回执的整图动作" });
-    await editCanvas(a, { kind: "flush" });
-    await editCanvas(a, { kind: "node-title", value: "刷新后仍保留的后续动作" });
-    await editCanvas(a, { kind: "flush" });
-    // 先撤销故障注入再刷新，避免旧页面导航取消仍在处理的 route 后，handler 又调用 abort。
-    await a.unroute(opsRoute);
-    await a.reload();
-    await editCanvas(a, { kind: "init" });
-    await editCanvas(a, { kind: "flush" });
-    const recoveredProject = (await api("GET", "/canvas/projects/" + projectId)).project;
-    assert.equal(recoveredProject.title, "丢回执的整图动作");
-    assert.equal(recoveredProject.nodes.find((node) => node.id === "live-text").title, "刷新后仍保留的后续动作");
-    assert.ok(retryBodies.length >= 2);
-    for (const body of retryBodies) assert.deepEqual(body, retryBodies[0]);
-    console.log("PASS: 动作队列丢回执后刷新重放原请求，后续动作仍按顺序提交");
+        await editCanvas(a, { kind: "title", value: recoveredTitle });
+        await editCanvas(a, { kind: "flush" });
+        await editCanvas(a, { kind: "node-title", value: `后续动作 ${recoveredTitle}` });
+        await editCanvas(a, { kind: "flush" });
+        // 先撤销故障注入再刷新，避免旧页面导航取消仍在处理的 route 后，handler 又调用 abort。
+        await a.unroute(opsRoute);
+        const beforeRecoveryRevision = (await api("GET", "/canvas/projects/" + projectId)).project.revision;
+        if (compactHistory) {
+            const file = path.join(process.env.INFINITE_CANVAS_DATA_DIR, "runtime.sqlite");
+            const database = new DatabaseSync(file);
+            try { assert.ok(applyCanvasHistoryPrune(database, file, new Date(Date.now() + 1000).toISOString()).removed > 0); }
+            finally { database.close(); }
+            const receipt = await api("GET", `/canvas/projects/${projectId}/ops/${encodeURIComponent(retryBodies[0].operationId)}/receipt`);
+            assert.equal(receipt.snapshotAvailable, false);
+        }
+        await a.reload();
+        await editCanvas(a, { kind: "init" });
+        await editCanvas(a, { kind: "flush" });
+        const recoveredProject = (await api("GET", "/canvas/projects/" + projectId)).project;
+        assert.equal(recoveredProject.title, recoveredTitle);
+        assert.equal(recoveredProject.nodes.find((node) => node.id === "live-text").title, `后续动作 ${recoveredTitle}`);
+        assert.equal(recoveredProject.revision, beforeRecoveryRevision + 1, "only the subsequent uncommitted command may increase revision");
+        assert.ok(retryBodies.length >= 2);
+        for (const body of retryBodies) assert.deepEqual(body, retryBodies[0]);
+        console.log(`PASS: 动作队列丢回执后刷新恢复，后续动作仍按顺序提交；历史清理=${compactHistory}`);
+    }
     for (const decision of ["keep", "remote"]) {
         const remoteRequests = [];
         await b.route(opsRoute, async (route) => {
@@ -633,7 +646,7 @@ try {
     console.log("PASS: 连接设置验证密钥、取消不改监听配置；切换只影响本窗口，另一窗口刷新仍保留原后台");
 
     const disconnected = await browser.newPage();
-    await disconnected.route("**/127.0.0.1:17370/**", (route) => route.abort("connectionfailed"));
+    await disconnected.route(backend + "/**", (route) => route.abort("connectionfailed"));
     await disconnected.goto(web + "/canvas");
     await disconnected.getByRole("button", { name: "连接设置", exact: true }).click();
     await disconnected.getByLabel("后台地址", { exact: true }).waitFor();
@@ -641,6 +654,15 @@ try {
     await disconnected.close();
     console.log("PASS: 后台离线、配置尚未加载时仍可进入连接设置，不被加载状态挡住");
     assert.deepEqual(errors, []);
+} catch (error) {
+    const output = process.env.CANVAS_TEST_ARTIFACTS;
+    if (output && browser) {
+        fs.mkdirSync(output, { recursive: true });
+        for (const [index, page] of browser.contexts().flatMap((context) => context.pages()).entries()) {
+            await page.screenshot({ path: path.join(output, `failure-${index}.png`) }).catch(() => {});
+        }
+    }
+    throw error;
 } finally {
     releaseCommandResponse?.();
     await Promise.allSettled([mcpTransport?.terminateSession(), mcp?.close(), browser?.close()]);

@@ -11,6 +11,10 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      INFINITE_CANVAS_DATA_DIR: ${{ runner.temp }}/canvas-unit-data
+      INFINITE_CANVAS_MEDIA_DIR: ${{ runner.temp }}/canvas-unit-media
+      INFINITE_CANVAS_AGENT_CONFIG_DIR: ${{ runner.temp }}/canvas-unit-agent
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,4 +24,17 @@ jobs:
       - run: npm ci
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm run build --workspace canvas-agent
+      - run: npm run typecheck --workspace web
+      - run: npm run build --workspace backend
+      - run: npm run build --workspace web
+      - run: npm ci --prefix plugins/canvas/minimax-h3
+      - run: npm run typecheck --prefix plugins/canvas/minimax-h3
+      - run: npm test --prefix plugins/canvas/minimax-h3
       - run: npm test
+      - run: npx --no-install playwright install --with-deps chromium
+      - run: node scripts/run-canvas-browser-tests.mjs collaboration
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-test-evidence
+          path: artifacts/browser-tests

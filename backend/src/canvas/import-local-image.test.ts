@@ -47,6 +47,7 @@ test("mimeTypeForPath 按扩展名返回，不猜", () => {
   assert.equal(mimeTypeForPath("a/b/shot.PNG"), "image/png");
   assert.equal(mimeTypeForPath("a/b/shot.jpeg"), "image/jpeg");
   assert.equal(mimeTypeForPath("a/b/shot.webp"), "image/webp");
+  assert.equal(mimeTypeForPath("a/b/diagram.SVG"), "image/svg+xml");
   assert.throws(() => mimeTypeForPath("a/b/clip.mp4"), /不支持的图片格式/);
   assert.throws(() => mimeTypeForPath("a/b/noext"), /不支持的图片格式/);
 });
@@ -71,6 +72,24 @@ test("readImportableImage 读回字节与尺寸", async () => {
   assert.ok(prepared.bytes > 0);
   assert.deepEqual(probeImageSize(prepared.data), { width: 1216, height: 672 });
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("readImportableImage 保留 SVG 原文件并读取 viewBox 尺寸，拒绝伪造的 SVG", async () => {
+  const dir = await tmpDir();
+  try {
+    const file = path.join(dir, "diagram.svg");
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360"><rect width="640" height="360" fill="red"/></svg>';
+    await fs.writeFile(file, svg);
+    const prepared = await readImportableImage({ filePath: file });
+    assert.equal(prepared.mimeType, "image/svg+xml");
+    assert.equal(prepared.name, "diagram.svg");
+    assert.equal(prepared.data.toString(), svg);
+    assert.deepEqual({ width: prepared.width, height: prepared.height }, { width: 640, height: 360 });
+    await fs.writeFile(file, "<html>not an image</html>");
+    await assert.rejects(readImportableImage({ filePath: file }), /SVG 文件无法解析/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("readImportableImage 拒绝不存在 / 空 / 非图片", async () => {

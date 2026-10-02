@@ -6,6 +6,7 @@ import { nanoid } from "nanoid";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
 import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
 import { ensureCanvasDraftLease } from "@/lib/canvas/canvas-draft-session";
+import type { EpisodeProductionData, ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 
 export type BackendMediaResult = {
     storageKey: string;
@@ -216,6 +217,19 @@ export function deleteBackendDramaEpisode(episodeId: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/episodes/${encodeURIComponent(episodeId)}`);
 }
 
+export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[] }; replayed?: boolean };
+const productionPath = (episodeId: string) => `/drama/episodes/${encodeURIComponent(episodeId)}/production`;
+export function fetchEpisodeProduction(episodeId: string) { return request<{ ok: boolean; production: EpisodeProduction }>("GET", productionPath(episodeId)); }
+export function fetchEpisodeProductionLegacy(episodeId: string) { return request<{ ok: boolean; sources: Array<{ source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string }> }>("GET", `${productionPath(episodeId)}/legacy`); }
+export function editEpisodeProduction(episodeId: string, expectedRevision: number, ops: ProductionOperation[], operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/ops`, { operationId, expectedRevision, ops }); }
+export function previewEpisodeProductionImpact(episodeId: string, stage: "script" | "shots") { return request<{ ok: boolean; impact: NonNullable<EpisodeProduction["impact"]> }>("GET", `${productionPath(episodeId)}/impact?stage=${stage}`); }
+export function publishEpisodeProduction(episodeId: string, expectedRevision: number, stage: "script" | "shots", operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/publish`, { operationId, expectedRevision, stage }); }
+export function fetchEpisodeProductionVersions(episodeId: string) { return request<{ ok: boolean; versions: Array<{ version: number; stage: "script" | "shots"; impact: NonNullable<EpisodeProduction["impact"]>; createdAt: string }> }>("GET", `${productionPath(episodeId)}/versions`); }
+export function restoreEpisodeProduction(episodeId: string, expectedRevision: number, version: number, operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/restore`, { operationId, expectedRevision, version }); }
+export function syncEpisodeProductionClips(episodeId: string) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/sync-clips`); }
+export function fetchEpisodeProductionRun(episodeId: string, version: number) { return request<{ ok: boolean; run: { status: string; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string }>; error: string | null } | null }>("GET", `${productionPath(episodeId)}/runs/${version}`); }
+export function exportEpisodeProductionMarkdown(episodeId: string, stage: "script" | "shots", version?: number) { return request<{ ok: boolean; fileName: string; markdown: string }>("GET", `${productionPath(episodeId)}/export?stage=${stage}${version ? `&version=${version}` : ""}`); }
+
 export type DramaCustomAsset = {
     id: string;
     title: string;
@@ -258,7 +272,7 @@ export function applyBackendCanvasOperations(projectId: string, operations: Arra
 }
 
 export function fetchBackendCanvasOperationReceipt(projectId: string, operationId: string) {
-    return request<{ ok: boolean; committed: boolean; revision?: number }>(
+    return request<{ ok: boolean; committed: boolean; revision?: number; snapshotAvailable?: boolean }>(
         "GET", `/canvas/projects/${encodeURIComponent(projectId)}/ops/${encodeURIComponent(operationId)}/receipt`,
     );
 }

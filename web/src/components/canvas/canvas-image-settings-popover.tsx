@@ -9,7 +9,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { modelScenarioUnsupported, resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, type AiConfig } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField, workflowRequiresPrompt, type WorkflowDetail } from "@/services/api/workflows";
-import { migrateWorkflowParams, reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
+import { migrateWorkflowParams, reconcileWorkflowParams, workflowAspectOption } from "@/lib/canvas/canvas-workflow-params";
 
 type CanvasImageSettingsPopoverProps = {
     config: AiConfig;
@@ -23,7 +23,7 @@ type CanvasImageSettingsPopoverProps = {
     // 选中本地 ComfyUI 工作流时，把工作流的非 image / 非 prompt 自定义字段渲染到面板顶部；
     // comfyParams 存在 node.metadata，运行时由 runLocalComfyImage 合并进 workflow fields。
     comfyParams?: Record<string, unknown>;
-    onComfyParamsChange?: (value: Record<string, unknown>) => void;
+    onComfyParamsChange?: (value: Record<string, unknown>, size?: string) => void;
     onPromptRequiredChange?: (required: boolean) => void;
     // 本次将带上的参考图数量：决定输入场景（0 = 文生 / 1 = 单图 / ≥2 = 多图），从而决定读哪个工作流的参数。
     referenceCount?: number;
@@ -122,6 +122,10 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     }, [onPromptRequiredChange, workflowDetail, workflowName]);
 
     const customFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, workflowDetail?.workflow) && !field.isPrompt);
+    const aspectField = customFields.find((field) => field.input === "aspect_ratio" && field.type === "dropdown");
+    const routedParams = aspectField ? resolveModelWorkflowParams(config, config.model, referenceCount) : {};
+    const selectedAspect = aspectField ? workflowAspectOption(aspectField, comfyParams?.[aspectField.id], routedParams[aspectField.id], activeSize) : undefined;
+    const displayedSize = selectedAspect?.match(/^\s*(\d+\s*:\s*\d+)/)?.[1].replace(/\s/g, "") || imageSizeLabel(activeSize);
     // 隐藏标准项的唯一依据是「本次真的要渲染工作流参数」。之前只判断渠道是不是 comfyui，
     // 于是取不到工作流字段时标准项也被一起藏掉，面板只剩透明背景和张数。
     const showsWorkflowParams = customFields.length > 0;
@@ -145,7 +149,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
         // 模型设置里为当前输入场景配的参数优先于内部实现字段默认值。
         const routedParams = resolveModelWorkflowParams(config, config.model, referenceCount);
         const currentParams = comfyParamsRef.current;
-        const next = reconcileWorkflowParams(currentParams, customFields, routedParams, workflowChanged);
+        const next = reconcileWorkflowParams(currentParams, customFields, routedParams, workflowChanged, activeSize);
         if (next && next !== currentParams) {
             comfyParamsRef.current = next;
             onComfyParamsChange(next);
@@ -169,7 +173,9 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                 onCustomFieldChange={onComfyParamsChange ? (id, value) => {
                     const next = { ...(comfyParamsRef.current || {}), [id]: value };
                     comfyParamsRef.current = next;
-                    onComfyParamsChange(next);
+                    const ratio = id === aspectField?.id ? String(value).match(/^\s*(\d+\s*:\s*\d+)/)?.[1].replace(/\s/g, "") : undefined;
+                    onComfyParamsChange(next, ratio);
+                    if (ratio) updateConfig("size", ratio);
                 } : undefined}
                 hideStandardImageOptions={hideStandardImageOptions}
                 workflowParamsMissing={workflowParamsMissing}
@@ -190,7 +196,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                     onClick={() => updateOpen(!open)}
                 >
                     <span className="truncate">
-                        {imageQualityLabel(quality)} · {imageSizeLabel(activeSize)} · {t("canvas.controls.images", { count })}
+                        {imageQualityLabel(quality)} · {displayedSize} · {t("canvas.controls.images", { count })}
                     </span>
                 </Button>
             </span>

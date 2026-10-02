@@ -35,6 +35,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const [description, setDescription] = useState(refItem.description || "");
     const [storyboardSubjectIds, setStoryboardSubjectIds] = useState<string[]>(refItem.storyboardSubjectIds || []);
     const [outfitEnabled, setOutfitEnabled] = useState(group?.outfitEnabled ?? Boolean(group?.outfits.some((outfit) => outfit.enabled)));
+    const [outfitEnabledById, setOutfitEnabledById] = useState<Record<string, boolean>>(() => Object.fromEntries(group?.outfits.map((outfit) => [outfit.id, outfit.enabled]) || []));
     const [voiceEnabled, setVoiceEnabled] = useState(group?.voiceEnabled ?? false);
     const [analyzing, setAnalyzing] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -50,6 +51,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         setDescription(refItem.description || "");
         setStoryboardSubjectIds(refItem.storyboardSubjectIds || []);
         setOutfitEnabled(group?.outfitEnabled ?? Boolean(group?.outfits.some((outfit) => outfit.enabled)));
+        setOutfitEnabledById(Object.fromEntries(group?.outfits.map((outfit) => [outfit.id, outfit.enabled]) || []));
         setVoiceEnabled(group?.voiceEnabled ?? false);
         setAnalysis("");
         setSaveError("");
@@ -85,8 +87,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
             await ctx.references.upsert({ id: next.assetId, analysis: nextAnalysis });
             persistedAnalysis.current = nextAnalysis;
         }
-        // 服装与声线分别开关：只提交总开关，不覆盖逐套服装的 enabled 目录状态。
-        const characterPatch = group ? { outfitEnabled, voiceEnabled } : undefined;
+        const characterPatch = group ? { outfitEnabled, outfitEnabledById, voiceEnabled } : undefined;
         onApply(next, characterPatch);
         onClose();
         } catch (error) {
@@ -119,6 +120,18 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
 
     // 放大预览走宿主的统一预览弹窗（ctx.openMediaPreview），插件不自带灯箱。
     const openPreview = () => ctx.openMediaPreview({ url: refItem.url, name: refItem.name, type: refItem.type });
+    const selectedOutfitCount = group?.outfits.filter((outfit) => outfitEnabledById[outfit.id]).length || 0;
+    const toggleOutfit = (id: string, checked: boolean) => {
+        const next = { ...outfitEnabledById, [id]: checked };
+        setOutfitEnabledById(next);
+        setOutfitEnabled(group?.outfits.some((outfit) => next[outfit.id]) || false);
+    };
+    const toggleOutfitReference = (checked: boolean) => {
+        if (checked && !selectedOutfitCount && group?.outfits.length) {
+            setOutfitEnabledById((current) => ({ ...current, [group.outfits[0].id]: true }));
+        }
+        setOutfitEnabled(checked);
+    };
 
     return <>
         <Modal open title="参考素材职责" onCancel={onClose} onOk={() => void apply()} confirmLoading={saving} okText="应用到当前 Clip" cancelText="取消" width={560} destroyOnHidden>
@@ -136,10 +149,23 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                     {!characterReference ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>主要职责</span><Select value={role} options={ROLE_OPTIONS} onChange={setRole} /></label> : null}
                     {/* 服装与声线是两个独立参考；关闭服装不会删除声线或角色组。 */}
-                    {group ? <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 8, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
-                        <span style={{ fontSize: 12 }}>服装参考</span>
-                        <span style={{ flex: 1, minWidth: 0, fontSize: 12, opacity: group.outfits.length ? 0.8 : 0.45 }}>{group.outfits.length ? `${group.outfits.length} 套服装` : "暂无服装，仅使用声线"}</span>
-                        <Switch size="small" checked={outfitEnabled && group.outfits.length > 0} disabled={!group.outfits.length} onChange={setOutfitEnabled} />
+                    {group ? <div style={{ padding: 8, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <span style={{ fontSize: 12 }}>服装参考</span>
+                            <span style={{ flex: 1, minWidth: 0, fontSize: 12, opacity: group.outfits.length ? 0.8 : 0.45 }}>{group.outfits.length ? `已选 ${selectedOutfitCount} / ${group.outfits.length} 套` : "暂无服装，仅使用声线"}</span>
+                            <Switch size="small" checked={outfitEnabled && group.outfits.length > 0} disabled={!group.outfits.length} onChange={toggleOutfitReference} aria-label="启用服装参考" />
+                        </div>
+                        {group.outfits.length ? <div style={{ display: "grid", gap: 6, maxHeight: 220, overflowY: "auto", marginTop: 8 }}>
+                            {group.outfits.map((outfit, index) => <div key={outfit.id} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                                <Checkbox checked={Boolean(outfitEnabledById[outfit.id])} onChange={(event) => toggleOutfit(outfit.id, event.target.checked)} aria-label={`选择服装 ${outfit.name || `服装 ${index + 1}`}`} style={{ flex: 1, minWidth: 0 }}>
+                                    <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                                        {outfit.url ? <img src={outfit.url} alt="" style={{ width: 36, height: 36, flex: "0 0 auto", objectFit: "cover", borderRadius: 4 }} /> : null}
+                                        <span style={{ minWidth: 0, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={outfit.name}>{outfit.name || `服装 ${index + 1}`}</span>
+                                    </span>
+                                </Checkbox>
+                                {outfit.url ? <Button type="text" size="small" onClick={() => ctx.openMediaPreview({ url: outfit.url, name: outfit.name, type: "image" })} aria-label={`预览服装 ${outfit.name || `服装 ${index + 1}`}`}>预览</Button> : null}
+                            </div>)}
+                        </div> : null}
                     </div> : null}
                     {group?.voice ? <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 8, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
                         <span style={{ fontSize: 12 }}>声线</span>

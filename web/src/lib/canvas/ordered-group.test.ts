@@ -120,6 +120,14 @@ test("drop target distinguishes an occupied member from visual whitespace betwee
     assert.equal(visualGap?.index, 1);
 });
 
+test("occupied member edges provide broad insertion targets while its center keeps the slot action", () => {
+    const target = group(["a", "b", "c"]);
+    const occupied = [{ index: 1, x: 250, y: 90, width: 120, height: 100 }];
+    assert.deepEqual(orderedGroupDropTarget(target, 4, { x: 270, y: 130 }, occupied), { kind: "gap", index: 1 });
+    assert.deepEqual(orderedGroupDropTarget(target, 4, { x: 350, y: 130 }, occupied), { kind: "gap", index: 2 });
+    assert.deepEqual(orderedGroupDropTarget(target, 4, { x: 310, y: 130 }, occupied), { kind: "slot", index: 1 });
+});
+
 test("drop targeting follows the dragged node center instead of the grabbed cursor offset", () => {
     assert.deepEqual(orderedGroupDraggedCenter({ x: 100, y: 80 }, { x: 200, y: 40 }, { width: 160, height: 100 }), { x: 380, y: 170 });
 });

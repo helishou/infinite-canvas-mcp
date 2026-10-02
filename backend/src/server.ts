@@ -662,6 +662,8 @@ export function startServer(
         project?: CanvasProject;
         revision?: number;
         conflictTargets?: string[];
+        committed?: boolean;
+        snapshotAvailable?: boolean;
       };
       if (
         [
@@ -684,6 +686,8 @@ export function startServer(
             revision: value.revision,
             project: value.project,
             conflictTargets: value.conflictTargets,
+            committed: value.committed,
+            snapshotAvailable: value.snapshotAvailable,
           });
       if (value.message.startsWith("画布不存在:"))
         return void res.status(404).json({ ok: false, error: value.message });
@@ -1308,6 +1312,10 @@ export function startServer(
     try {
       res.setHeader("Cache-Control", "private, max-age=3600");
       res.setHeader("Content-Type", media.mimeType);
+      if (media.mimeType === "image/svg+xml") {
+        res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+      }
       res.setHeader("Accept-Ranges", "bytes");
       const bytes = fs.statSync(media.filePath).size;
       const range = req.headers.range;

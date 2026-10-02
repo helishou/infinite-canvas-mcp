@@ -69,15 +69,47 @@ export const H3_DISCARD_CLIP_UPDATES_TOOL = {
 } as const;
 
 export const H3_GET_CLIP_TOOL = {
-    id: "h3_get_clip", version: "1.3.0", name: "H3 读取片段总览",
-    description: "按稳定 segmentId 读取 H3 Clip 轻量状态。fields 只读指定叙事字段，缺失字段单列 missingFields，不伪造空值；避免全节点 metadata。include 可另外附带完整 semantic/compiled 提示词、参考或运行参数；只核对少数字段时用 fields，不额外带 include:prompt。",
+    id: "h3_get_clip", version: "1.4.0", name: "H3 读取片段总览",
+    description: "按稳定 segmentId 读取 H3 Clip 轻量状态。fields 只读指定叙事字段，缺失字段单列 missingFields，不伪造空值；避免全节点 metadata。include 可另外附带完整 semantic/compiled 提示词、参考、运行参数或 result（按精确任务核验媒体归属）；只核对少数字段时用 fields，不额外带 include:prompt。",
     inputJsonSchema: {
         type: "object",
         properties: {
             projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" },
-            include: { type: "array", items: { type: "string", enum: ["prompt", "references", "runtime"] }, uniqueItems: true },
+            include: { type: "array", items: { type: "string", enum: ["prompt", "references", "runtime", "result"] }, uniqueItems: true },
+            taskId: { type: "string", minLength: 1, description: "include:result 时核对的精确历史/当前任务 ID；省略从 Clip 的结果记录解析" },
+            storageKey: { type: "string", minLength: 1, description: "include:result 时核对的精确归档视频；必须属于此 Clip 和任务，不按目录最新文件猜测" },
             fields: { type: "array", minItems: 1, maxItems: H3_NARRATIVE_FIELDS.length, items: { type: "string", enum: H3_NARRATIVE_FIELDS }, uniqueItems: true },
         }, required: ["projectId", "nodeId", "segmentId"],
     },
     annotations: { title: "H3 读取片段总览", readOnlyHint: true },
+} as const;
+
+
+/** Jointly prepare the final candidate, avoiding transient broken prompt/reference numbering. */
+export const H3_PREPARE_CLIP_TOOL = {
+    id: "h3_prepare_clip", version: "1.0.0", name: "H3 原子准备片段",
+    description: "一次准备同一 Clip 的正文配置、角色选择与参考绑定；只编译最终候选，全部通过才在现有 ops 事务保存，失败不留中间状态、不生成。dryRun=true 返回预览且零写入；expectedRevision 防过期基线，提交期间 revision 变化整笔拒绝、不自动 rebase。可明确 inheritFromSegmentId 沿用已完成片段参数；省略兼容现有最近已完成段继承行为，正文和时长只按 patch 指定值修改。characters 只接受当前 character 节点中真实服装 storageKey，普通图片不能充当服装。",
+    inputJsonSchema: {
+        type: "object",
+        properties: {
+            projectId: { type: "string", minLength: 1, description: "精确画布 ID" },
+            nodeId: { type: "string", minLength: 1, description: "精确 H3 节点 ID" },
+            segmentId: { type: "string", minLength: 1, description: "当前 Clip 稳定 ID" },
+            expectedRevision: { type: "integer", minimum: 0, description: "读取基线；不符则不提交" },
+            dryRun: { type: "boolean", description: "true 仅编译最终候选，零画布写入" },
+            inheritFromSegmentId: { type: "string", minLength: 1, description: "显式已完成继承来源；不存在或未完成则拒绝" },
+            patch: { type: "object", minProperties: 1, additionalProperties: true, description: "正文/配置增量；不能改 id、角色组、参考绑定或 Backend 运行字段" },
+            referenceBindings: { type: "array", description: "完整非角色参考绑定；必须有稳定 id 和 assetId，角色绑定由角色组派生", items: { type: "object", additionalProperties: true } },
+            characters: { type: "array", minItems: 1, description: "当前 Clip 的已有角色选图，不创建角色", items: {
+                type: "object", properties: {
+                    characterNodeId: { type: "string", minLength: 1 },
+                    selectedOutfitStorageKeys: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, uniqueItems: true },
+                    subjectId: { type: "string", minLength: 1 }, voiceEnabled: { type: "boolean" },
+                }, required: ["characterNodeId", "selectedOutfitStorageKeys"], additionalProperties: false,
+            } },
+        }, required: ["projectId", "nodeId", "segmentId"],
+        anyOf: [{ required: ["patch"] }, { required: ["characters"] }, { required: ["referenceBindings"] }, { required: ["inheritFromSegmentId"] }],
+        additionalProperties: false,
+    },
+    annotations: { title: "H3 原子准备片段", readOnlyHint: false },
 } as const;

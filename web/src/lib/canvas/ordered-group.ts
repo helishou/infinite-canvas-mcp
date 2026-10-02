@@ -81,7 +81,14 @@ export function orderedGroupDropTarget(group: CanvasNodeData, slotCount: number,
     const inside =
         slotAreas?.find((area) => point.x >= area.x && point.x <= area.x + area.width && point.y >= area.y && point.y <= area.y + area.height) ??
         (!slotAreas ? layouts.find((cell) => localX >= cell.x && localX <= cell.x + cell.width && localY >= cell.y && localY <= cell.y + cell.height) : undefined);
-    if (inside) return { kind: "slot" as const, index: inside.index };
+    if (inside) {
+        // 留出成员左右两侧作为宽阔的插入区；中央仍可交换组内成员或替换组外成员。
+        // 这样无需精确命中仅有 GAP 宽度的列间空隙。
+        const edgeWidth = inside.width * 0.3;
+        if (point.x < inside.x + edgeWidth) return { kind: "gap" as const, index: inside.index };
+        if (point.x > inside.x + inside.width - edgeWidth) return { kind: "gap" as const, index: inside.index + 1 };
+        return { kind: "slot" as const, index: inside.index };
+    }
     if (localX < PADDING.left || localX > group.width - PADDING.right || localY < PADDING.top || localY > group.height - PADDING.bottom) return null;
     const first = layouts[0];
     if (first && slotCount % columns !== 0) {

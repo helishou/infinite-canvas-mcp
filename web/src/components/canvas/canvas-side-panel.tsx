@@ -16,7 +16,7 @@ import { CustomPromptDialog } from "@/components/prompts/custom-prompt-dialog";
 import { fetchBackendCanvasDrama } from "@/services/backend-api";
 import { fetchSourcePrompts, isCustomPrompt, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
-import { ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, getImagePreviewRevision, isImageFile, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
@@ -489,7 +489,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
         const dramaId = dramaFilter !== ALL_ASSET_DRAMAS && dramaFilter !== UNASSIGNED_ASSET_DRAMA ? dramaFilter : null;
         try {
             for (const file of files) {
-                if (file.type.startsWith("image/")) {
+                if (isImageFile(file)) {
                     const image = await uploadImage(file);
                     addAsset({ kind: "image", title: file.name || t("assets.kinds.image"), coverUrl: image.url, tags: [], dramaId, data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
                     added += 1;
@@ -525,7 +525,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
                     <Plus className="size-3.5" />
                     {t("canvas.sidePanel.add")}
                 </button>
-                <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple className="hidden" onChange={(e) => void handleFiles(e.target.files)} />
+                <input ref={fileInputRef} type="file" accept="image/*,.svg,video/*" multiple className="hidden" onChange={(e) => void handleFiles(e.target.files)} />
             </div>
             <div className="flex items-center gap-2 px-3 pb-2">
                 <Clapperboard className="size-3.5 shrink-0 opacity-45" />

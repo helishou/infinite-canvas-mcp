@@ -1,4 +1,4 @@
-import { stableReferenceId, type ReferenceBinding, type ReferenceRole } from "../../canvas/reference-contract.js";
+import { ReferenceCompilationError, stableReferenceId, type ReferenceBinding, type ReferenceRole } from "../../canvas/reference-contract.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -63,17 +63,21 @@ function groupId(nodeId: string) {
  */
 export function buildCharacterGroupFromExistingNode(node: JsonRecord, request: CharacterGroupRequest): CharacterGroupBuildResult {
     const nodeId = stringOf(node.id);
-    if (!nodeId || String(node.type || "") !== "character") throw new Error(`只能绑定已有 character 节点：${nodeId || "未知节点"}`);
-    if (!request.selectedOutfitStorageKeys.length) throw new Error("当前 Clip 至少选择一套角色服装");
+    if (!nodeId || String(node.type || "") !== "character") throw new ReferenceCompilationError([{ severity: "error", code: "character_node_required", message: `只能绑定已有 character 节点：${nodeId || "未知节点"}` }]);
+    if (!request.selectedOutfitStorageKeys.length) throw new ReferenceCompilationError([{ severity: "error", code: "character_outfit_selection_required", message: "当前 Clip 至少选择一套角色服装" }]);
 
     const metadata = recordOf(node.metadata);
+    const characterAssetId = stringOf(metadata.characterAssetId);
+    if (!characterAssetId) throw new ReferenceCompilationError([{ severity: "error", code: "character_group_asset_missing", message: `character 节点 ${nodeId} 缺少正式 characterAssetId；先用 assets_upsert_batch 登记角色资产，再把返回的资产 ID 写回源角色节点` }]);
     const rawImages = Array.isArray(metadata.characterImages) ? metadata.characterImages : [];
-    const images = rawImages.map(recordOf).map((image) => ({ image, key: sourceKey(image), url: stringOf(image.url) })).filter((item) => item.key && item.url);
-    if (!images.length) throw new Error(`character 节点没有可用服装目录：${nodeId}`);
+    const images = rawImages.map(recordOf).map((image) => ({ image, key: sourceKey(image), url: stringOf(image.url) }));
+    const invalidIndex = images.findIndex((item) => !item.key || !item.url);
+    if (invalidIndex >= 0) throw new ReferenceCompilationError([{ severity: "error", code: "character_outfit_media_missing", message: `character 节点 ${nodeId} 的 characterImages[${invalidIndex}] 缺少可用的 storageKey/url；请补齐服装媒体目录后再绑定` }]);
+    if (!images.length) throw new ReferenceCompilationError([{ severity: "error", code: "character_outfit_catalog_missing", message: `character 节点没有可用服装目录：${nodeId}` }]);
     const availableKeys = new Set(images.map((item) => item.key));
     const selectedKeys = new Set(request.selectedOutfitStorageKeys.map(String));
     const unknownKey = [...selectedKeys].find((key) => !availableKeys.has(key));
-    if (unknownKey) throw new Error(`选择的服装不属于源角色节点：${unknownKey}`);
+    if (unknownKey) throw new ReferenceCompilationError([{ severity: "error", code: "character_outfit_source_mismatch", message: `选择的服装不属于源角色节点：${unknownKey}` }]);
 
     const existingGroup = recordOf(request.existingGroup);
     const previousOutfits = Array.isArray(existingGroup.outfits) ? existingGroup.outfits.map(recordOf) : [];
@@ -97,7 +101,7 @@ export function buildCharacterGroupFromExistingNode(node: JsonRecord, request: C
     const group: BuiltCharacterGroup = {
         id,
         characterName,
-        characterAssetId: stringOf(metadata.characterAssetId) || undefined,
+        characterAssetId,
         characterNodeId: nodeId,
         subjectId,
         voice,

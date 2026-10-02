@@ -8,6 +8,7 @@ import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { normalizeViewportTransform } from "@/lib/canvas/canvas-viewport";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, createBackendProject, deleteBackendCanvasFolder, deleteBackendDramaProject, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendCanvasOperationReceipt, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder } from "@/services/backend-api";
+import { recoverCompactedCanvasReceipt } from "@/lib/canvas/canvas-compacted-receipt";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId } from "@/services/backend-api";
 import { CanvasCommandQueue, type CanvasCommand } from "@/lib/canvas/canvas-command-queue";
@@ -131,7 +132,10 @@ function captureCanvasAction(before: CanvasProject, after: CanvasProject) {
     const operations = diffCanvasProject(before, after);
     if (!operations.length) return;
     if (getBackendUrl() !== commandBackend) throw new Error("后台地址已改变，请刷新后继续编辑；原后台草稿仍保留");
-    pendingCommands.enqueue({ operationId: nanoid(), projectId: before.id, ownerId: draftSessionId, backend: commandBackend, source: getCanvasCollaborationClient(), order: ++commandOrder, base: buildCanvasConflictBaseline(before, operations), operations });
+    // The first edit of an unsaved project also owns its immutable creation seed.
+    // A scoped baseline cannot recreate that seed after later edits or a refresh.
+    const needsCreationSeed = before.revision === undefined && !knownProjectIds.has(before.id) && !pendingCommands.list(before.id).length;
+    pendingCommands.enqueue({ operationId: nanoid(), projectId: before.id, ownerId: draftSessionId, backend: commandBackend, source: getCanvasCollaborationClient(), order: ++commandOrder, base: needsCreationSeed ? before : buildCanvasConflictBaseline(before, operations), operations });
     invalidateDeletedCanvasTextSessions(before.id, operations);
 }
 function projectCanvasCommands(remote: CanvasProject) {
@@ -339,12 +343,16 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
                     }
                 }
                 const command = await pendingCommands.prepare(active.operationId, Number(base.revision || 0));
-                const response = await applyBackendCanvasOperations(project.id, command.operations, command.baseRevision, command.operationId, command.source);
+                const response = await applyBackendCanvasOperations(project.id, command.operations, command.baseRevision, command.operationId, command.source).catch(async (error: unknown) => {
+                    const latest = await recoverCompactedCanvasReceipt(error, project.id, async () => normalizeProjectMediaUrls((await fetchBackendProject(project.id)).project as unknown as CanvasProject));
+                    if (!latest) throw error;
+                    return { project: latest, revision: Number(latest.revision) };
+                });
                 const received = normalizeProjectMediaUrls(response.project as unknown as CanvasProject);
                 // 重放旧请求的回执可能落后于已收到的远端文档；不能回退权威基线。
                 base = Number(base.revision || 0) > response.revision ? base : received;
-                syncBases.set(project.id, base);
                 await pendingCommands.acknowledge(command.operationId);
+                syncBases.set(project.id, base);
                 const current = useCanvasStore.getState().projects.find((item) => item.id === project.id);
                 const { projection, conflicts } = projectCanvasCommands(base);
                 if (conflicts.length) setCanvasCommandConflict(project.id, base, "后续编辑与远端改动冲突，已保留命令", conflicts);

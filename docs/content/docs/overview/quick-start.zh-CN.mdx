@@ -41,7 +41,7 @@ http://localhost:3001
 - 本仓库维护 npm 锁文件，优先使用 `npm ci`。你也可以从仓库根目录使用已安装的 Bun 执行 `bun install`，再用 Node/npm 启动；不要在单个 workspace 中建立另一套依赖。Bun 生成的锁文件须单独核对，不提交并行锁文件。Backend 运行需要符合 `backend/package.json` 的 Node 版本，Bun 安装器不替代 Node 的 SQLite 运行时。
 - `canvas-agent/dist/...` 缺失时先运行 `npm run build --workspace canvas-agent`，或改用根目录的启动命令。不要把构建失败当作后端连接问题。
 - `safe-delete state lock timeout` 若来自宿主注入的 `NODE_OPTIONS`，应在该运行环境中排查注入与 Vite 缓存清理的冲突。项目启动脚本保留 `NODE_OPTIONS`，不自动移除删除守卫或其他宿主保护。
-- Codex CLI 不再是强制安装项。需要侧边栏 Codex 对话时执行 `npm install -g @openai/codex@0.146.0` 并登录；仅画布、MCP、本地 ComfyUI 可跳过。
+- Codex CLI 不再是强制安装项。需要侧边栏 Codex 对话时执行 `npm install -g @openai/codex@0.160.0` 并登录；仅画布、MCP、本地 ComfyUI 可跳过。模型下拉框使用 Canvas Agent 实际启动的 Codex app-server 返回的目录。
 
 ## 数据与升级
 

@@ -14,6 +14,10 @@ description: >
 
 资产准备与站位/色彩基准可并行准备，但二者都达到本项目所需的完成条件后，才进入镜头设计与生成。
 
+从画布主页进入时先区分「独立资产」与「剧目」。独立资产可直接进入资产准备，不强制先编剧或建立分镜；剧目先确定故事范围，在短剧制作台创建剧目、首集及其绑定画布，后续分集按对话中的实际范围续建。对话可先完成创意简报与计划；创建对象和提交媒体生成分别依据用户已表达的意图，不把讨论创意自动解释为批量出图或出片。
+
+剧目分集已有单集制作页时，先调用 `drama_get_production` 读取 Backend 制作稿与修订号。已发布的结构化场次、动作/对白块与稳定镜头 ID 是正式剧本和镜头表；通过 `drama_edit_production` 按 `operationId`、`expectedRevision` 编辑草稿，冲突时读取返回的当前版本再处理，不覆盖另一窗口草稿。用 `drama_preview_production_impact` 核对受影响范围，再按该集的阶段确认/自动通过模式调用 `drama_publish_production` 发布新版本。`fullPlot` 仅作剧情概述；旧 `script.md`、`storyboard.md` 可由用户选取为待审核草稿，不能自动覆盖已发布制作稿。自动模式在发布镜头表后推进受影响媒体任务，无需填写任务额度；发布时继承画布节点或现有配置并冻结本次模型，缺参考或任务失败时暂停。保存草稿不触发媒体任务。独立资产画布仍沿用原制作文档流程。
+
 ## 阶段路由
 
 先根据用户当前请求、画布现状和已验收记录判断阶段，再完整读取对应子 Skill。只加载当前阶段；仅在输入缺失时补读直接上游，不要一次读取全部子 Skill。
@@ -27,7 +31,7 @@ description: >
 | 分镜关键帧 | 文字分镜表判定某镜需要新图，或需要检查、重做静态分镜图 | [分镜关键帧](subskills/canvas-video-storyboard-frames/SKILL.md) | 需要的关键帧已验收，跳过镜头有明确依据 |
 | Clip 视频 | 需要编写 H3 提示词，或生成、检查、返修分段视频 | [Clip 视频](subskills/canvas-video-clip-production/SKILL.md) | 默认完成任务终态、媒体落库/可访问性及 `taskId`/`storageKey` 记录；只有用户要求质量验收时才以验收及承接作为完成条件 |
 
-**题材叠加层**（不是阶段）：用户点名打斗 / 动作戏 / 元素对轰 / 召唤 / 长镜头 / 赛车追车时，在当前阶段之上叠加读取 [动作片题材](subskills/canvas-video-action-camera/SKILL.md)。它的触发关键词、加载顺序与冲突裁决都在那份文件里；跨阶段通用规则的真值在 `references/action-camera-principles.md`，题材玩法在 `references/action-camera-playbook.md`，**按小节名引用、不通读**。叠加层不新增阶段、不改变阶段顺序、不改变 Clip 默认只做技术性收口的口径。题材密度与 `references/prevention-by-construction.md` §四 的 H3 段内镜数预算冲突时，预算为默认路径，越界需用户显式授权并在 `storyboard.md` 记风险。
+**题材叠加层**（不是阶段）：用户点名打斗 / 动作戏 / 元素对轰 / 召唤 / 长镜头 / 赛车追车时，在当前阶段之上叠加读取 [动作片题材](subskills/canvas-video-action-camera/SKILL.md)。它的触发关键词、加载顺序与冲突裁决都在那份文件里；跨阶段通用规则的真值在 `references/action-camera-principles.md`，题材玩法在 `references/action-camera-playbook.md`，**按小节名引用、不通读**。叠加层不新增阶段、不改变阶段顺序、不改变 Clip 默认只做技术性收口的口径。题材密度与 `references/prevention-by-construction.md` §四 的 H3 段内镜数预算冲突时，预算为默认路径，越界需用户显式授权并在当前镜头计划记录风险；旧项目可写入 `storyboard.md`。
 
 用户明确指定阶段时直接进入该阶段；不要因为总流程存在就重做已获批上游。若当前阶段的硬输入缺失，停在最早的缺失项并说明缺什么。用户只要求规划、检查、连线、写提示词或试跑一张时，不得自动跨到生成、批量运行或下一阶段。
 
@@ -58,6 +62,7 @@ description: >
 - 用户要求“先检查”“不要运行”“只跑一张”“每张确认”或限定镜头范围时，严格停在相应闸门。
 - 用户已授权连续或批量制作时，可在明确的镜头、模型、预算和验收规则内继续；扩大范围、增加成本或改变创作基准前必须重新确认。
 - 同一问题连续失败两次后停止盲目重跑，回查提示词、参考职责、模型路由和实际日志。
+- 跨镜、跨集延续时保存人物知情、关系、伏笔、伤势、服装、道具与场景的当前事实及来源；索引指向已确认原文，不能以摘要替代剧本。计划、提示词就绪、真实媒体完成分别记录，不将结构检查写成画面验收。
 
 ### 画布真值与可追溯性
 
@@ -102,11 +107,11 @@ productions/<canvasProjectId>/
 
 首次使用时，从本 Skill 的 [进度](assets/production-progress-template.md)、[返修日志](assets/rework-log-template.md)、[剧本](assets/script-template.md)、[文字分镜表](assets/storyboard-template.md) 和 [资产索引](assets/asset-register-template.md) 模板创建缺失文件；已有文件先读取，绝不按模板覆盖。没有画布项目 ID 时先记录本轮计划，待项目建立后再创建对应目录。已存在旧“短片制作进度”画布文本节点时，先读取并核对，再将可确认的状态并入 `progress.md`，保留原节点。
 
-`script.md` 与 `storyboard.md` 分别是剧本和文字分镜表的当前版本；用户批准后若要大改，先复制为同目录的 `script.<旧版本>.md` 或 `storyboard.<旧版本>.md`，再更新固定文件名及 `progress.md` 中的版本。画布有序组只收纳分镜图，`progress.md` 记录其精确组 ID；可视分镜图顺序从该组的 `metadata.groupSlots` 回读。画布节点、任务、生成记录和媒体以 Backend 为准；`assets.md` 记录 nodeId、assetId 与 storageKey，不复制图片和视频到制作目录。
+未进入剧目分集制作页的旧短片项目，`script.md` 与 `storyboard.md` 继续保存原有剧本和文字镜头表；用户批准后若要大改，先复制旧版本再更新。剧目分集发布结构化版本后，这两个 Markdown 文件仅作旧稿留存或导出，不再反向覆盖 Backend 正式版本。画布有序组只收纳分镜图，`progress.md` 记录其精确组 ID；可视分镜图顺序从该组的 `metadata.groupSlots` 回读。画布节点、任务、生成记录和媒体以 Backend 为准；`assets.md` 记录 nodeId、assetId 与 storageKey，不复制图片和视频到制作目录。
 
 ## 进度更新与恢复
 
-1. 开始或恢复制作时先读取该项目的 `progress.md`，再读取当前阶段需要的 `script.md`、`storyboard.md` 或 `assets.md`；文字镜头计划以 `storyboard.md` 为准，可视分镜图通过记录的组 ID 和 `metadata.groupSlots` 回读，再核对任务日志。
+1. 开始或恢复剧目分集制作时先读取单集 Backend 制作稿及已发布版本；旧项目才以 `progress.md` 和阶段所需的 `script.md`、`storyboard.md` 或 `assets.md` 为文本依据。可视分镜图从画布回读，核对精确节点 ID、taskId、storageKey 与任务日志。
 2. 确定本轮范围后，在 `progress.md` 记录阶段状态、已验收/目标数、关键资产/画布/节点/分镜组 ID、在途 taskId、当前阶段结论和下一项可执行动作。没有真实结果的字段写“待生成/待核对”。`progress.md` 保持摘要，不逐项展开返修原因、重试次数和日志细节；具体问题与每次尝试写入 `rework-log.md`，进度文件只保留指向该日志的简短索引。
 3. 每个返修问题在 `rework-log.md` 使用稳定镜头/Clip/资产 ID 建立条目，并记录问题、证据原因、改动内容、尝试次数、前后 taskId/storageKey、独立验收结论和下一动作。H3 一次 `canvas-h3-run` 父任务计一次尝试；它的 ComfyUI 子任务属于同一次尝试，不得重复计数。任务成功不等于质量验收通过。
 4. 阶段产物、任务终态、验收或返修结论、用户授权范围发生变化，或本轮暂停/结束时，更新受影响的文件并回读确认。任务轮询无变化时不重复写入。

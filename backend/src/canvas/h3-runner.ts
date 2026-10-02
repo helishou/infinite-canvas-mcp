@@ -95,6 +95,15 @@ function compileH3Submission(project: Record<string, unknown>, segment: H3Segmen
     return { compilation: compileReferenceSubmission(project, { ...effectiveSegment, prompt }), composite, editableReferences: original.references };
 }
 
+export class H3IdempotencyConflictError extends Error {
+    readonly code = "IDEMPOTENCY_CONFLICT";
+
+    constructor(readonly taskId: string) {
+        super(`H3 幂等键 ${taskId} 已用于其他任务或不同运行请求`);
+        this.name = "H3IdempotencyConflictError";
+    }
+}
+
 export class CanvasH3Runner {
     private readonly currentChildren = new Map<string, string>();
     private readonly cancelled = new Set<string>();
@@ -109,13 +118,20 @@ export class CanvasH3Runner {
 
     start(input: H3RunInput, clientTaskId?: string) {
         const normalized = normalizeInput(input);
+        // Replay immutable caller intent before consulting today's draft/defaults.
+        // The persisted runPlan is execution history, not part of that intent.
+        const existing = clientTaskId ? this.stores.tasks.get(clientTaskId) : null;
+        if (existing) {
+            if (existing.kind !== "canvas-h3-run" || h3RunIntentFingerprint(normalized) !== h3RunIntentFingerprint(existing.input as H3RunInput)) {
+                throw new H3IdempotencyConflictError(existing.id);
+            }
+            return existing;
+        }
         if (normalized.params?.confirmSecondPass === true) throw new Error("请通过 H3 确认接口继续原任务，不能另建二采任务");
         const project = this.stores.projects.get(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
         // 单个 Clip 的参考素材不完整只跳过它自己；其余 Clip 必须照常入队，不能整批卡死。
         const blockedPlans = this.validatePlannedReferences(project, normalized);
-        const existing = clientTaskId ? this.stores.tasks.get(clientTaskId) : null;
-        if (existing) return existing;
         const duplicate = this.findActiveDuplicate(normalized);
         if (duplicate) {
             // 旧投影可能因同节点另一 Clip 占据顶层 taskId 而丢失；即使拒绝新提交，
@@ -1215,6 +1231,11 @@ export function appendPreviousReference(videos: readonly string[], previousPath:
 /** V15 会用 ComfyUI unique_id 校验 node；原生提交图中的主节点 ID 固定为 nf_v15。 */
 export function buildH3ContinuationTask(workflow: string, group: string, run: string, index: number): string {
     return JSON.stringify({ workflow, node: "nf_v15", group, run, index });
+}
+
+function h3RunIntentFingerprint(input: H3RunInput): string {
+    const { runPlan: _frozen, ...intent } = normalizeInput(input);
+    return stableH3Fingerprint(intent);
 }
 
 function normalizeInput(input: H3RunInput): H3RunInput {

@@ -18,10 +18,22 @@ test("媒体 GET 免 token，但上传和删除仍要求 token", async (t) => {
       headers: { authorization: "Bearer test-secret", "content-type": "application/json" },
       body: JSON.stringify({ dataUrl: "data:text/plain;base64,aGVsbG8=", name: "x.txt" }),
     });
-    assert.equal(created.status, 201);
-    const { media } = await created.json() as { media: { url: string } };
+    const createdBody = await created.json() as { media: { url: string }; error?: string };
+    assert.equal(created.status, 201, createdBody.error);
+    const { media } = createdBody;
     const readMedia = await fetch(`${url}${media.url}`);
     assert.equal(readMedia.status, 200);
+    const svg = await fetch(`${url}/media/upload`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-secret", "content-type": "application/json" },
+      body: JSON.stringify({ dataUrl: `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>').toString("base64")}`, name: "diagram.svg" }),
+    });
+    assert.equal(svg.status, 201);
+    const svgMedia = await svg.json() as { media: { url: string } };
+    const readSvg = await fetch(`${url}${svgMedia.media.url}`);
+    assert.equal(readSvg.status, 200);
+    assert.equal(readSvg.headers.get("content-type"), "image/svg+xml");
+    assert.match(readSvg.headers.get("content-security-policy") || "", /sandbox; default-src 'none'/);
     const upload = await fetch(`${url}/media/upload`, {
       method: "POST",
       headers: { "content-type": "application/json" },

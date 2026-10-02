@@ -15,6 +15,7 @@ import { textSuggestionInputSchema, type CanvasTextSuggestion } from "@basketiku
 import { H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, textOperation, textTargetSchema, type CanvasTextTarget } from "./canvas/collaborative-text.js";
 import type { McpObservabilityReportOptions } from "./stores/types.js";
+import { reconstructCanvasHistory, migrateCanvasReceipts } from "./canvas/history-maintenance.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -455,18 +456,70 @@ export class BackendDatabase {
             this.indexTaskQueries();
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (13, ?)").run(new Date().toISOString());
         }
-        if (currentVersion < DATABASE_SCHEMA_VERSION) {
+        if (currentVersion < 14) {
             if (currentVersion === 13) this.backupBeforeH3Migration("v14-reference-archive");
             this.migrateH3References();
-            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(DATABASE_SCHEMA_VERSION, new Date().toISOString());
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (14, ?)").run(new Date().toISOString());
+        }
+        if (currentVersion < 15) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`
+                    CREATE TABLE IF NOT EXISTS episode_productions (
+                        episode_id TEXT PRIMARY KEY REFERENCES drama_episodes(id) ON DELETE CASCADE,
+                        revision INTEGER NOT NULL DEFAULT 0,
+                        draft_json TEXT NOT NULL,
+                        published_json TEXT,
+                        published_version INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS episode_production_operations (
+                        operation_id TEXT PRIMARY KEY,
+                        episode_id TEXT NOT NULL REFERENCES drama_episodes(id) ON DELETE CASCADE,
+                        request_hash TEXT NOT NULL,
+                        receipt_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS episode_production_operations_episode ON episode_production_operations(episode_id);
+                    CREATE TABLE IF NOT EXISTS episode_production_versions (
+                        episode_id TEXT NOT NULL REFERENCES drama_episodes(id) ON DELETE CASCADE,
+                        version INTEGER NOT NULL,
+                        stage TEXT NOT NULL,
+                        snapshot_json TEXT NOT NULL,
+                        impact_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (episode_id, version)
+                    );
+                    CREATE TABLE IF NOT EXISTS episode_production_runs (
+                        episode_id TEXT NOT NULL REFERENCES drama_episodes(id) ON DELETE CASCADE,
+                        version INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        plan_json TEXT NOT NULL,
+                        submitted_json TEXT NOT NULL DEFAULT '[]',
+                        error TEXT,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (episode_id, version)
+                    );
+                `);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (15, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 16) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                migrateCanvasReceipts(this.db);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (16, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
     }
 
     private backupBeforeH3Migration(version = "v13") {
         const file = this.filePath;
         if (!file || file === ":memory:") return;
-        const backup = `${file}.pre-h3-${version}.sqlite`;
-        if (fs.existsSync(backup)) throw new Error(`已有 H3 迁移备份，拒绝覆盖：${backup}`);
+        // A failed migration must be retryable while every earlier snapshot stays intact.
+        const backup = `${file}.pre-h3-${version}-${crypto.randomUUID()}.sqlite`;
         this.db.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`);
         if (fs.statSync(backup).size === 0) throw new Error("H3 数据库迁移备份为空");
         const copy = new DatabaseSync(backup, { readOnly: true });
@@ -1185,24 +1238,13 @@ export class BackendDatabase {
     }
 
     private canvasProjectAt(id: string, revision: number): CanvasProject {
-        const row = this.db.prepare("SELECT revision, data_json FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id) as { revision: number; data_json: string } | undefined;
-        if (!row || row.revision > revision) throw collaborationError("RECEIPT_UNAVAILABLE", "旧请求没有可恢复回执，请读取最新画布后重新操作");
-        const project = stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject;
-        const rows = this.db.prepare("SELECT revision, operations_json, created_at FROM canvas_operation_batches WHERE project_id = ? AND revision > ? AND revision <= ? ORDER BY revision").all(id, row.revision, revision) as Array<{ revision: number; operations_json: string; created_at: string }>;
-        if (rows.length !== revision - row.revision) throw collaborationError("RECEIPT_UNAVAILABLE", "操作历史不连续，不能还原旧请求回执");
-        for (const entry of rows) {
-            // 这里只重建已经提交过的回执；历史格式与当前新写入校验可能不同。
-            applyCanvasProjectOperations(project, JSON.parse(entry.operations_json), { committedReplay: true });
-            project.revision = entry.revision;
-            project.updatedAt = entry.created_at;
-        }
-        return stripCanvasLocalViewState(project as unknown as Record<string, unknown>) as unknown as CanvasProject;
+        return reconstructCanvasHistory(this.db, id, revision) as CanvasProject;
     }
 
-    getCanvasOperationReceipt(id: string, operationId: string): { committed: boolean; revision?: number } {
-        const row = this.db.prepare("SELECT b.revision FROM canvas_operation_batches b JOIN canvas_command_receipts r ON r.operation_id = b.operation_id WHERE b.project_id = ? AND b.operation_id = ?")
-            .get(id, operationId) as { revision: number } | undefined;
-        return row ? { committed: true, revision: Number(row.revision) } : { committed: false };
+    getCanvasOperationReceipt(id: string, operationId: string): { committed: boolean; revision?: number; snapshotAvailable?: boolean } {
+        const row = this.db.prepare("SELECT r.committed_revision AS revision, b.operation_id AS batchId FROM canvas_command_receipts r LEFT JOIN canvas_operation_batches b ON b.operation_id = r.operation_id WHERE r.project_id = ? AND r.operation_id = ?")
+            .get(id, operationId) as { revision: number; batchId: string | null } | undefined;
+        return row ? { committed: true, revision: Number(row.revision), snapshotAvailable: Boolean(row.batchId) } : { committed: false };
     }
 
     applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, inputOperations: CanvasOperation[], context?: CanvasCommandContext) {
@@ -1216,13 +1258,16 @@ export class BackendDatabase {
             if (!current) throw new Error(`画布不存在: ${id}`);
             const currentRevision = Number(current.revision || 0);
             {
-                const existing = this.db.prepare("SELECT b.project_id AS projectId, b.revision, b.operations_json AS operationsJson, b.results_json AS resultsJson, r.request_hash AS requestHash FROM canvas_operation_batches b LEFT JOIN canvas_command_receipts r ON r.operation_id = b.operation_id WHERE b.operation_id = ?").get(operationId) as { projectId: string; revision: number; operationsJson: string; resultsJson: string; requestHash?: string } | undefined;
+                const existing = this.db.prepare("SELECT r.project_id AS projectId, r.committed_revision AS revision, b.operations_json AS operationsJson, b.results_json AS resultsJson, r.request_hash AS requestHash FROM canvas_command_receipts r LEFT JOIN canvas_operation_batches b ON b.operation_id = r.operation_id WHERE r.operation_id = ?").get(operationId) as { projectId: string; revision: number; operationsJson: string | null; resultsJson: string | null; requestHash?: string } | undefined;
                 if (existing) {
                     if (existing.projectId !== id || existing.requestHash !== fingerprint) throw collaborationError("OPERATION_ID_REUSED", "operationId 已用于不同请求，请勿修改重试请求内容");
+                    if (existing.operationsJson === null || existing.resultsJson === null) throw Object.assign(collaborationError("RECEIPT_UNAVAILABLE", "操作已提交，历史快照已清理；请读取最新画布确认同步"), { committed: true, revision: Number(existing.revision), snapshotAvailable: false });
                     const project = this.canvasProjectAt(id, Number(existing.revision));
                     this.db.exec("COMMIT");
                     return { project, revision: Number(existing.revision), operationId, operationResults: JSON.parse(existing.resultsJson), operations: JSON.parse(existing.operationsJson), duplicated: true };
                 }
+                // Legacy batches without a request hash must never be executed again.
+                if (this.db.prepare("SELECT 1 FROM canvas_operation_batches WHERE operation_id = ?").get(operationId)) throw collaborationError("OPERATION_ID_REUSED", "历史 operationId 缺少可核验的请求指纹，拒绝重新执行");
             }
             if (!operations.length || operations.some((operation) => !operation || typeof operation.type !== "string")) throw new Error("operations 必须为非空有效操作数组");
             if (context?.baseRevision !== undefined) {
@@ -1237,8 +1282,11 @@ export class BackendDatabase {
                 (error as Error & { revision?: number }).revision = currentRevision;
                 throw error;
             }
-            const project = structuredClone(current) as Record<string, unknown>;
-            this.db.prepare("INSERT OR IGNORE INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
+            // getCanvasProject parses a fresh snapshot for this transaction; it has no shared owner.
+            const project = current as Record<string, unknown>;
+            if (!this.db.prepare("SELECT 1 FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id)) {
+                this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
+            }
             const committedOperations: CanvasOperation[] = [];
             const operationResults = operations.flatMap((operation, index) => {
                 if (operation.type === "text_suggestion") throw new Error("text_suggestion 是服务端回执，不能直接提交");
@@ -1288,7 +1336,7 @@ export class BackendDatabase {
             const source = context?.source || { clientId: "system:backend", kind: "system", label: "后台" };
             this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
                 .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(committedOperations), JSON.stringify(operationResults), String(project.updatedAt));
-            this.db.prepare("INSERT INTO canvas_command_receipts (operation_id, request_hash) VALUES (?, ?)").run(operationId, fingerprint);
+            this.db.prepare("INSERT INTO canvas_command_receipts (operation_id, project_id, request_hash, committed_revision) VALUES (?, ?, ?, ?)").run(operationId, id, fingerprint, revision);
             this.db.exec("COMMIT");
             commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations: committedOperations, operationResults, source, updatedAt: String(project.updatedAt) };
         } catch (error) {

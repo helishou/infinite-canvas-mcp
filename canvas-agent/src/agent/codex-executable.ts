@@ -33,6 +33,6 @@ export function findCodexLaunch(pathValue = process.env.PATH || "", resolvePacka
 
 export function requireCodexLaunch(): CodexLaunch {
     const launch = findCodexLaunch();
-    if (!launch) throw new Error("Codex CLI is not installed. Canvas, MCP and ComfyUI remain available. To use Codex chat, install it with: npm install -g @openai/codex@0.146.0");
+    if (!launch) throw new Error("Codex CLI is not installed. Canvas, MCP and ComfyUI remain available. To use Codex chat, install it with: npm install -g @openai/codex@0.160.0");
     return launch;
 }

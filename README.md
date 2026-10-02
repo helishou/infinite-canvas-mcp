@@ -79,7 +79,7 @@ npm run dev
 
 Windows 专用 `npm run dev:local` 会清理 17370、17371、3001 上的旧服务，不作探活命令。单独使用根目录 `dev:backend` 或 `dev:web` 也会先构建共享包；直接运行 workspace 的 `dev` 时须自行先构建。Backend `dev` 不自动重启，需要时显式使用 `dev:watch`。
 
-Codex CLI 是可选依赖，普通画布、MCP 与 ComfyUI 不需要下载它。需要侧边栏 Codex 对话时安装 `npm install -g @openai/codex@0.146.0` 并完成登录；运行时优先使用已安装的项目依赖，其次从 PATH 查找。安装、端口、数据备份与局域网设置见[快速开始](docs/content/docs/overview/quick-start.zh-CN.mdx)。
+Codex CLI 是可选依赖，普通画布、MCP 与 ComfyUI 不需要下载它。需要侧边栏 Codex 对话时安装 `npm install -g @openai/codex@0.160.0` 并完成登录；运行时优先使用已安装的项目依赖，其次从 PATH 查找。模型选项由实际启动的 Codex app-server 返回。安装、端口、数据备份与局域网设置见[快速开始](docs/content/docs/overview/quick-start.zh-CN.mdx)。
 
 ### Docker 运行
 

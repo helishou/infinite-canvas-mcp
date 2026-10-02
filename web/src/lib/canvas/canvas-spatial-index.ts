@@ -5,15 +5,16 @@ export type CanvasSpatialBounds = {
     bottom: number;
 };
 
-type SpatialEntry<T> = {
-    item: T;
+type SpatialEntry = {
+    id: string;
     bounds: CanvasSpatialBounds;
     order: number;
 };
 
 export type CanvasSpatialIndex<T extends { id: string }> = {
     cellSize: number;
-    entriesById: Map<string, SpatialEntry<T>>;
+    entriesById: Map<string, SpatialEntry>;
+    itemsById: ReadonlyMap<string, T>;
     buckets: Map<string, string[]>;
     overflowIds: Set<string>;
 };
@@ -39,7 +40,8 @@ function intersects(a: CanvasSpatialBounds, b: CanvasSpatialBounds) {
 }
 
 export function buildCanvasSpatialIndex<T extends { id: string }>(items: T[], getBounds: (item: T) => CanvasSpatialBounds | null, cellSize = DEFAULT_CELL_SIZE): CanvasSpatialIndex<T> {
-    const entriesById = new Map<string, SpatialEntry<T>>();
+    const entriesById = new Map<string, SpatialEntry>();
+    const itemsById = new Map(items.map((item) => [item.id, item]));
     const buckets = new Map<string, string[]>();
     const overflowIds = new Set<string>();
     const safeCellSize = cellSize > 0 ? cellSize : DEFAULT_CELL_SIZE;
@@ -47,7 +49,7 @@ export function buildCanvasSpatialIndex<T extends { id: string }>(items: T[], ge
     items.forEach((item, order) => {
         const bounds = getBounds(item);
         if (!bounds || ![bounds.left, bounds.top, bounds.right, bounds.bottom].every(Number.isFinite) || bounds.right < bounds.left || bounds.bottom < bounds.top) return;
-        const entry = { item, bounds, order };
+        const entry = { id: item.id, bounds, order };
         entriesById.set(item.id, entry);
         const range = cellRange(bounds, safeCellSize);
         const cellCount = (range.right - range.left + 1) * (range.bottom - range.top + 1);
@@ -65,7 +67,12 @@ export function buildCanvasSpatialIndex<T extends { id: string }>(items: T[], ge
         }
     });
 
-    return { cellSize: safeCellSize, entriesById, buckets, overflowIds };
+    return { cellSize: safeCellSize, entriesById, itemsById, buckets, overflowIds };
+}
+
+/** Geometry is immutable and stores IDs; content is bound to this render's snapshot. */
+export function bindCanvasSpatialItems<T extends { id: string }>(index: CanvasSpatialIndex<{ id: string }>, itemsById: ReadonlyMap<string, T>): CanvasSpatialIndex<T> {
+    return { ...index, itemsById };
 }
 
 export function queryCanvasSpatialIndex<T extends { id: string }>(index: CanvasSpatialIndex<T>, bounds: CanvasSpatialBounds) {
@@ -78,7 +85,7 @@ export function queryCanvasSpatialIndex<T extends { id: string }>(index: CanvasS
         return Array.from(index.entriesById.values())
             .filter((entry) => intersects(entry.bounds, bounds))
             .sort((a, b) => a.order - b.order)
-            .map((entry) => entry.item);
+            .flatMap((entry) => { const item = index.itemsById.get(entry.id); return item ? [item] : []; });
     }
     const candidateIds = new Set<string>();
     index.overflowIds.forEach((id) => candidateIds.add(id));
@@ -90,7 +97,7 @@ export function queryCanvasSpatialIndex<T extends { id: string }>(index: CanvasS
 
     return Array.from(candidateIds)
         .map((id) => index.entriesById.get(id))
-        .filter((entry): entry is SpatialEntry<T> => Boolean(entry && intersects(entry.bounds, bounds)))
+        .filter((entry): entry is SpatialEntry => Boolean(entry && intersects(entry.bounds, bounds)))
         .sort((a, b) => a.order - b.order)
-        .map((entry) => entry.item);
+        .flatMap((entry) => { const item = index.itemsById.get(entry.id); return item ? [item] : []; });
 }

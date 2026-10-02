@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { compileReferenceSubmission } from "./reference-contract.js";
+import { characterGroupBindings, compileReferenceSubmission } from "./reference-contract.js";
 
 test("分镜图片固定占用最前 Picture 槽，旧提示词按绑定身份改写", () => {
     const binding = (id: string, role: "storyboard" | "character_identity") => ({
@@ -153,6 +153,44 @@ test("整组替换 bindings 不含角色组派生行时，编译器仍提交角�
     assert.deepEqual([...new Set(groupRefs.map((ref) => ref.subjectId))], ["shen-hou"]);
     assert.ok(result.references.some((ref) => ref.label === "雪庭院"));
 });
+
+test("关闭服装总开关不提交图片，保留单件选择且不关闭声线", () => {
+    const segment = groupSegment([]);
+    const group = segment.h3CharacterGroups["group-1"];
+    const enabledRefs = characterGroupBindings(group);
+    segment.referenceBindings = enabledRefs;
+    group.outfitEnabled = false;
+    const withVoice = { ...segment, h3CharacterGroups: { "group-1": {
+        ...group, voiceEnabled: true, voice: { url: "http://media.test/voice.mp3", storageKey: "audio:voice" },
+    } } };
+    const before = structuredClone(withVoice);
+    const result = compileReferenceSubmission(groupProject, withVoice);
+    assert.deepEqual(result.references.map((ref) => ref.mediaType), ["audio"]);
+    assert.deepEqual(result.issues.filter((issue) => issue.severity === "error"), []);
+    assert.deepEqual(withVoice, before, "编译不得清空服装目录或单件选择");
+    group.outfitEnabled = true;
+    assert.deepEqual(compileReferenceSubmission(groupProject, segment).references.map((ref) => ref.storageKey), ["image:a", "image:b"]);
+});
+
+for (const role of ["scene", "storyboard"] as const) {
+    test(`刷新旧角色绑定保持 Picture 的媒体语义，兼容${role}排序`, () => {
+        const segment = groupSegment([]);
+        const outfits = characterGroupBindings(segment.h3CharacterGroups["group-1"]);
+        segment.referenceBindings = [
+            { ...outfits[1], id: "legacy-outfit-b", storageKey: "image:stale-b" },
+            { id: "scene", assetId: "scene", label: "场景", role, mediaType: "image", storageKey: "image:scene", enabled: true, tags: [], usage: "reference" },
+            { ...outfits[0], id: "legacy-outfit-a", storageKey: "image:stale-a" },
+        ];
+        segment.prompt = "<Picture 1> / <Picture 2> / <Picture 3>";
+        const before = structuredClone(segment);
+        const result = compileReferenceSubmission(groupProject, segment);
+        const media = [...result.compiledPrompt.matchAll(/<Picture (\d+)>/g)]
+            .map((match) => result.references.filter((ref) => ref.mediaType === "image")[Number(match[1]) - 1].storageKey);
+        assert.deepEqual(media, ["image:b", "image:scene", "image:a"]);
+        assert.deepEqual(result.issues.filter((issue) => issue.severity === "error"), []);
+        assert.deepEqual(segment, before, "生成编译不得改写已保存提示词和参考快照");
+    });
+}
 
 test("角色组派生 binding 的存量快照被逐条覆盖，id 与顺序保持稳定", () => {
     const stale = [{

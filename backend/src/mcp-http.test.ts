@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import express from "express";
@@ -274,7 +277,7 @@ async function mockManyNodesBackend(t: import("node:test").TestContext, count: n
 
 async function mockGenerationBackend(
   t: import("node:test").TestContext,
-  options: { conflictOnOps?: boolean } = {},
+  options: { conflictOnOps?: boolean; runningTaskIds?: string[] } = {},
 ) {
   const app = express();
   app.use(express.json());
@@ -295,8 +298,8 @@ async function mockGenerationBackend(
   const taskRecord = (id: string) => ({
     id,
     kind: "canvas-image",
-    status: "succeeded",
-    progress: 1,
+    status: options.runningTaskIds?.includes(id) ? "running" : "succeeded",
+    progress: options.runningTaskIds?.includes(id) ? 0.5 : 1,
     input: { projectId: "canvas-generate", nodeId: id === "task-generated" ? "image-generated" : `image-${id}` },
     params: { model: "test::default-image" },
     result: { media: [{ storageKey: id === "task-generated" ? "image:generated" : `image:${id}` }] },
@@ -767,6 +770,30 @@ test("canvas_wait_tasks polls all taskIds through one bulk request per round", a
   assert.deepEqual(backend.taskRequestCounts(), { single: 0, bulk: 1 });
 });
 
+test("canvas_wait_tasks 超时只返回原任务继续等待入口，不创建新任务", async (t) => {
+  const backend = await mockGenerationBackend(t, { runningTaskIds: ["task-1"] });
+  const client = await mcpClient(t, await fixture(t, backend.url));
+  const result = await client.callTool({ name: "canvas_wait_tasks", arguments: { taskIds: ["task-1"], timeoutMs: 1000, pollMs: 250 } });
+  const payload = textPayload(result);
+  assert.equal(payload.timedOut, true);
+  assert.deepEqual(payload.pendingTaskIds, ["task-1"]);
+  assert.deepEqual(payload.next.input.taskIds, ["task-1"]);
+  assert.equal(payload.tasks[0].taskId, "task-1");
+});
+
+test("无效 SVG 本地导入在任何画布 ops 前拒绝", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "canvas-invalid-svg-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "fake.svg");
+  await fs.writeFile(filePath, "<html>not an image</html>");
+  const backend = await mockGenerationBackend(t);
+  const client = await mcpClient(t, await fixture(t, backend.url));
+  const result = await client.callTool({ name: "canvas_import_local_images", arguments: { projectId: "canvas-generate", items: [filePath] } });
+  assert.equal(result.isError, true);
+  assert.equal(backend.opsRequestCount(), 0);
+  assert.equal((backend.project().nodes as unknown[]).length, 0);
+});
+
 test("assets_upsert_batch writes complete assets and verifies them by id", async (t) => {
   const backend = await mockGenerationBackend(t);
   const client = await mcpClient(t, await fixture(t, backend.url));
@@ -1010,4 +1037,40 @@ test("业务失败体只有 ok:false 和 message 时，观测事件保留真实�
     "观测事件必须保留真实失败原因，而不是 MCP 工具执行失败",
   );
   assert.notEqual(payload.error?.message, "MCP 工具执行失败", "返回给调用方的错误也必须带真实原因");
+});
+
+test("drama episode MCP forwards separate synopsis and fullPlot fields", async (t) => {
+  const backend = express();
+  backend.use(express.json());
+  backend.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  backend.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
+  const received: Array<Record<string, unknown>> = [];
+  backend.post("/drama/projects/drama-1/episodes", (req, res) => {
+    received.push(req.body as Record<string, unknown>);
+    res.status(201).json({ ok: true, episode: { id: "episode-1", ...req.body } });
+  });
+  backend.patch("/drama/episodes/episode-1", (req, res) => {
+    received.push(req.body as Record<string, unknown>);
+    res.json({ ok: true, episode: { id: "episode-1", ...req.body } });
+  });
+  const server = backend.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => { server.close(); await once(server, "close"); });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  const created = textPayload(await client.callTool({
+    name: "drama_create_episode",
+    arguments: { dramaId: "drama-1", episodeNumber: 1, synopsis: "一集梗概", fullPlot: "从开场到结尾的完整剧情", canvasId: "canvas-1" },
+  }));
+  assert.equal(created.episode.fullPlot, "从开场到结尾的完整剧情");
+  const updated = textPayload(await client.callTool({
+    name: "drama_update_episode",
+    arguments: { episodeId: "episode-1", synopsis: "新版梗概", fullPlot: "新版完整剧情" },
+  }));
+  assert.equal(updated.episode.fullPlot, "新版完整剧情");
+  assert.deepEqual(received.map(({ synopsis, fullPlot }) => ({ synopsis, fullPlot })), [
+    { synopsis: "一集梗概", fullPlot: "从开场到结尾的完整剧情" },
+    { synopsis: "新版梗概", fullPlot: "新版完整剧情" },
+  ]);
 });

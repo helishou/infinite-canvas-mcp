@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { characterReferenceUpdates, referenceBindingsOf } from "@basketikun/canvas-agent/reference-contract";
+import { characterReferenceUpdates, h3CharacterSourceFromNode, referenceBindingsOf, syncH3CharacterGroupSource } from "@basketikun/canvas-agent/reference-contract";
 
 export type CanvasOperation = Record<string, unknown> & { type: string };
 
@@ -149,6 +149,31 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                     const target = nodes.find((item) => String(item.id) === update.id)!;
                     target.metadata = { ...recordOf(target.metadata), ...update.metadata };
                     derived.push({ type: "update_node", ...update });
+                }
+                const source = h3CharacterSourceFromNode(node);
+                if (source && JSON.stringify(source) !== JSON.stringify(h3CharacterSourceFromNode(previousNode))) {
+                    for (const target of nodes.filter(isH3CanvasNode)) {
+                        const segments = segmentsOf(target);
+                        let changed = false;
+                        for (const segment of segments) {
+                            const groups = recordOf(segment.h3CharacterGroups);
+                            let nextGroups: Record<string, unknown> | undefined;
+                            for (const [groupId, rawGroup] of Object.entries(groups)) {
+                                const group = recordOf(rawGroup);
+                                if (group.characterNodeId !== source.characterNodeId) continue;
+                                const nextGroup = syncH3CharacterGroupSource(group as Parameters<typeof syncH3CharacterGroupSource>[0], source);
+                                if (nextGroup === group) continue;
+                                nextGroups ||= { ...groups };
+                                if (nextGroup) nextGroups[groupId] = nextGroup;
+                                else delete nextGroups[groupId];
+                            }
+                            if (!nextGroups) continue;
+                            segment.h3CharacterGroups = nextGroups;
+                            changed = true;
+                            derived.push({ type: "update_h3_segment", nodeId: String(target.id), segmentId: String(segment.id), patch: { h3CharacterGroups: nextGroups } });
+                        }
+                        if (changed) target.metadata = { ...recordOf(target.metadata), segments };
+                    }
                 }
                 options.derivedOperations?.push(...derived);
             }

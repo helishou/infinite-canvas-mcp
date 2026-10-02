@@ -6,6 +6,23 @@ import { compileReferenceSubmission } from "../../canvas/reference-contract.js";
 import { buildStoryboardPromptSections } from "../../../../plugins/canvas/minimax-h3/src/services/storyboard-prompt.js";
 import { styleTemplateText } from "./style-templates.js";
 
+test("分镜写入按当前 Clip 的 bindingId 诊断引用错误", () => {
+    const binding = { id: "binding-frame", assetId: "asset-frame", label: "分镜图", role: "storyboard", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:frame" };
+    const segment = { id: "clip", mode: "ref2va", duration: 5, referenceBindings: [binding] };
+    const input = { openingDescription: "开场", shots: [{ description: "主体入场", pictureBindingId: binding.id }], overallSoundscape: "环境声", nonDiegeticMusic: "无" };
+    assert.doesNotThrow(() => writeStoryboardPrompt({ nodes: [] }, segment, input));
+    assert.doesNotThrow(() => writeStoryboardPrompt({ nodes: [], referenceCatalog: [{ id: binding.assetId, label: binding.label, mediaType: "image", role: "storyboard", tags: [], storageKey: "image:catalog-frame" }] }, { ...segment, referenceBindings: [{ ...binding, storageKey: "" }] }, input));
+    let identityError: any;
+    try { writeStoryboardPrompt({ nodes: [] }, segment, { ...input, shots: [{ ...input.shots[0], pictureBindingId: binding.assetId }] }); } catch (error) { identityError = error; }
+    assert.match(identityError.message, /收到的是 assetId/);
+    assert.equal(identityError.code, "REFERENCE_INVALID");
+    assert.deepEqual(identityError.issues[0].path, ["shots", 0, "pictureBindingId"]);
+    assert.throws(() => writeStoryboardPrompt({ nodes: [] }, { ...segment, referenceBindings: [{ ...binding, enabled: false }] }, input), /该绑定已停用/);
+    assert.throws(() => writeStoryboardPrompt({ nodes: [] }, { ...segment, referenceBindings: [{ ...binding, role: "scene" }] }, input), /需要 storyboard/);
+    assert.throws(() => writeStoryboardPrompt({ nodes: [] }, { ...segment, referenceBindings: [{ ...binding, mediaType: "video", storageKey: "video:frame" }] }, input), /需要 image/);
+    assert.throws(() => writeStoryboardPrompt({ nodes: [] }, { ...segment, referenceBindings: [{ ...binding, storageKey: "" }] }, input), /缺少 storageKey\/url/);
+});
+
 test("网页与原生分镜写入按各视觉来源独立编译描述，并计入缓存指纹", () => {
     const bindings = ["face", "body"].map((id) => ({ id, assetId: id, label: id, role: "character_identity", tags: [], enabled: true, usage: "reference", mediaType: "image", url: `https://example.test/${id}.png`, subjectId: "hero" }));
     const definition = { id: "hero", name: "Hero", profile: "old overall note", pictures: ["<Picture 1>", "<Picture 2>"], pictureDescriptions: { face: "FACE_ONLY", body: "BODY_ONLY" } };

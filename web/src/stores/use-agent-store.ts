@@ -23,6 +23,7 @@ export type AgentModel = {
     defaultReasoningEffort: AgentReasoningEffort;
     supportedReasoningEfforts: Array<{ reasoningEffort: AgentReasoningEffort; description?: string }>;
     isDefault?: boolean;
+    hidden?: boolean;
 };
 export type AgentApprovalDecision = "accept" | "acceptForSession" | "decline";
 export type AgentPendingApproval = { requestId: string; method: string; threadId?: string; turnId?: string; itemId?: string; reason?: string; command?: unknown; cwd?: string; grantRoot?: string; networkApprovalContext?: unknown; permissions?: unknown; deciding?: AgentApprovalDecision };
@@ -40,6 +41,7 @@ export type AgentConversationState = {
     error?: string;
 };
 export type AgentPanelTab = "chat" | "setup" | "history" | "skills" | "log";
+export type AgentCreativeLaunch = { id: string; mode: "asset" | "drama"; text: string; phase: "reset" | "resetting" | "send" | "sending" };
 
 let agentSource: EventSource | null = null;
 
@@ -48,6 +50,7 @@ type AgentStore = {
     panelOpen: boolean;
     panelMounted: boolean;
     panelClosing: boolean;
+    creativeLaunch: AgentCreativeLaunch | null;
     canvasContext: AgentCanvasContext | null;
     url: string;
     token: string;
@@ -115,6 +118,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     panelOpen: false,
     panelMounted: true,
     panelClosing: false,
+    creativeLaunch: null,
     canvasContext: null,
     url: getBackendUrl().replace(/\/$/, "") + "/agent",
     token: "",

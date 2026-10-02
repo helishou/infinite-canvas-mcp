@@ -28,7 +28,7 @@ test("H3 旧引用迁移保留 Clip 语义并拆分冲突媒体", (t) => {
         { id: "c", prompt: "c", refItems: [{ bindingId: "bind-c", assetId: "shared", name: "另一个书房用途", type: "image", role: "storyboard", storageKey: "image:a" }] },
     ] } }] as typeof project.nodes;
     db.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = 'p'").run(JSON.stringify(project));
-    db.db.prepare("DELETE FROM schema_migrations WHERE version = 14").run();
+    db.db.prepare("DELETE FROM schema_migrations WHERE version >= 14").run();
     db.close();
 
     migrated = new BackendDatabase(file);
@@ -43,7 +43,7 @@ test("H3 旧引用迁移保留 Clip 语义并拆分冲突媒体", (t) => {
     assert.ok(segments.every((segment) => !("refItems" in segment) && !("refs" in segment)));
     assert.equal((saved.referenceCatalog as unknown[] | undefined)?.length, 2);
     assert.equal((migrated.db.prepare("SELECT COUNT(*) AS n FROM h3_reference_legacy_archive").get() as { n: number }).n, 3);
-    assert.ok(fs.statSync(`${file}.pre-h3-v14-reference-archive.sqlite`).size > 0);
+    assert.ok(fs.readdirSync(directory).some((name) => name.startsWith("runtime.sqlite.pre-h3-v14-reference-archive-") && fs.statSync(path.join(directory, name)).size > 0));
 });
 
 test("旧绑定与参考不一致时保留绑定真值并原样归档旧字段", (t) => {
@@ -66,7 +66,7 @@ test("旧绑定与参考不一致时保留绑定真值并原样归档旧字段",
     assert.throws(() => canonicalizeH3References(structuredClone(legacyNode)), /拒绝丢弃原数据/);
     project.nodes = [legacyNode] as typeof project.nodes;
     db.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = 'p'").run(JSON.stringify(project));
-    db.db.prepare("DELETE FROM schema_migrations WHERE version = 14").run();
+    db.db.prepare("DELETE FROM schema_migrations WHERE version >= 14").run();
     db.close();
     migrated = new BackendDatabase(file);
     const saved = migrated.getCanvasProject("p")!;
@@ -75,7 +75,7 @@ test("旧绑定与参考不一致时保留绑定真值并原样归档旧字段",
     assert.equal("refItems" in segment, false);
     const archive = migrated.db.prepare("SELECT legacy_json FROM h3_reference_legacy_archive WHERE project_id = 'p' AND node_id = 'h3' AND segment_id = 'clip'").get() as { legacy_json: string };
     assert.equal((JSON.parse(archive.legacy_json) as { refItems: unknown[] }).refItems.length, 2);
-    assert.ok(fs.statSync(`${file}.pre-h3-v14-reference-archive.sqlite`).size > 0);
+    assert.ok(fs.readdirSync(directory).some((name) => name.startsWith("runtime.sqlite.pre-h3-v14-reference-archive-") && fs.statSync(path.join(directory, name)).size > 0));
 });
 
 test("关闭角色服装后前端重发旧 refItems 不应被当作丢弃原数据", (t) => {

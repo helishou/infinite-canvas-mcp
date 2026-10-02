@@ -1,5 +1,5 @@
 import { validateH3CharacterGroups } from "./character-reference-contract.js";
-export { characterImageKey, resolveCharacterImageKeys, characterReferenceUpdates, type CharacterImageSelection } from "./character-image-selection.js";
+export { characterImageKey, resolveCharacterImageKeys, characterReferenceUpdates, h3CharacterSourceFromNode, syncH3CharacterGroupSource, type CharacterImageSelection, type H3CharacterSource } from "./character-image-selection.js";
 
 import { orderStoryboardReferencesFirst, remapPictureTags } from "./storyboard-reference-order.js";
 
@@ -149,7 +149,7 @@ export function characterGroupBindings(group: Record<string, unknown>): Referenc
     const characterName = String(group.characterName || "角色");
     const subjectId = String(group.subjectId || "").trim() || characterNodeId;
     if (!groupId || !characterNodeId || !subjectId) return [];
-    const outfitRows = Array.isArray(group.outfits) ? group.outfits : [];
+    const outfitRows = group.outfitEnabled !== false && Array.isArray(group.outfits) ? group.outfits : [];
     const refs: ReferenceBinding[] = outfitRows.filter((row) => recordOf(row).enabled !== false).map((row, index) => {
         const outfit = recordOf(row);
         const outfitKey = String(outfit.id || "");
@@ -195,19 +195,29 @@ export function characterGroupBindings(group: Record<string, unknown>): Referenc
     return refs;
 }
 
-/** 合并手工参考与角色组派生参考；同 id 时以派生结果为准。 */
-function withDerivedCharacterGroupBindings(bindings: ReferenceBinding[], segment: Record<string, unknown>) {
+/** Refresh group snapshots in their saved slots so existing Picture/Audio numbers keep their meaning. */
+export function resolveCharacterGroupBindings(bindings: ReferenceBinding[], segment: Record<string, unknown>) {
     const groups = recordOf(segment.h3CharacterGroups);
     const derived = Object.values(groups).flatMap((raw) => characterGroupBindings(recordOf(raw)));
-    if (!derived.length) return bindings.filter((binding) => !binding.groupId);
     const derivedIds = new Set(derived.map((binding) => binding.id));
-    return [...bindings.filter((binding) => !binding.groupId && !derivedIds.has(binding.id)), ...derived];
+    const used = new Set<string>();
+    const ordered = bindings.flatMap((binding) => {
+        if (!binding.groupId) return derivedIds.has(binding.id) ? [] : [binding];
+        // Legacy IDs may differ from today's derived IDs; the group/outfit identifies the slot.
+        const current = derived.find((item) => item.groupId === binding.groupId
+            && item.outfitId === binding.outfitId
+            && item.mediaType === (binding.mediaType || inferReferenceMediaType(binding)));
+        if (!current || used.has(current.id)) return [];
+        used.add(current.id);
+        return [current];
+    });
+    return [...ordered, ...derived.filter((binding) => !used.has(binding.id))];
 }
 
 export function compileReferenceSubmission(project: Record<string, unknown>, segment: Record<string, unknown>): ReferenceCompilation {
     const catalog = new Map(referenceCatalogOf(project).map((asset) => [asset.id, asset]));
     const { bindings: rawBindings, migratedLegacyRefs } = referenceBindingsOf(segment);
-    const originalBindings = withDerivedCharacterGroupBindings(rawBindings, segment);
+    const originalBindings = resolveCharacterGroupBindings(rawBindings, segment);
     const shotIds = (Array.isArray(segment.storyboardShots) ? segment.storyboardShots : [])
         .map((shot) => String(recordOf(shot).referenceBindingId || "")).filter(Boolean);
     const bindings = orderStoryboardReferencesFirst(originalBindings, shotIds,
@@ -353,9 +363,19 @@ function bindLiteralSubjectsToPictures(
     });
 }
 
+export class ReferenceCompilationError extends Error {
+    readonly code = "REFERENCE_INVALID";
+    readonly issues: ReferenceIssue[];
+    constructor(issues: ReferenceIssue[]) {
+        super(issues.map((issue) => issue.message).join("；"));
+        this.name = "ReferenceCompilationError";
+        this.issues = structuredClone(issues);
+    }
+}
+
 export function assertReferenceCompilation(compilation: ReferenceCompilation) {
     const errors = compilation.issues.filter((issue) => issue.severity === "error");
-    if (errors.length) throw new Error(errors.map((issue) => issue.message).join("；"));
+    if (errors.length) throw new ReferenceCompilationError(errors);
 }
 
 function validatePromptReferences(prompt: string, references: CompiledReference[], subjectCount: number | undefined, issues: ReferenceIssue[]) {

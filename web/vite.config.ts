@@ -7,6 +7,7 @@ import { defineConfig, type Plugin } from "vite";
 import { parseChangelog } from "./src/lib/release";
 
 const webDir = dirname(fileURLToPath(import.meta.url));
+const backendTarget = process.env.CANVAS_TEST_BACKEND || "http://127.0.0.1:17370";
 const localVersion = readFileSync(resolve(webDir, "../VERSION"), "utf8").trim() || "dev";
 const localChangelog = readFileSync(resolve(webDir, "../CHANGELOG.md"), "utf8");
 
@@ -39,6 +40,7 @@ function localPluginsManifest(): Plugin {
 }
 
 export default defineConfig({
+    cacheDir: process.env.CANVAS_TEST_VITE_CACHE || "node_modules/.vite",
     base: process.env.VITE_BASE || "/",
     plugins: [react(), localPluginsManifest()],
     // 开发模式下把总后台媒体接口代理为同源，避免前端直连 127.0.0.1:17370 触发跨域 CORS。
@@ -47,6 +49,7 @@ export default defineConfig({
     // 代理会截断 SSE（net::ERR_INCOMPLETE_CHUNKED_ENCODING）；改走 Vite 同源代理后由 Node 转发，
     // 浏览器不再直连 17370，长连接不再被代理掐断。/events、/agent 均非 SPA 路由，不会与前端冲突。
     server: {
+        ...(process.env.CANVAS_TEST_VITE_CACHE ? { hmr: false, watch: null } : {}),
         // H3 内置插件走源码 HMR；构建会覆盖 public 中的分发包，Windows 上监听该文件可能触发 EBUSY。
         // 静态文件仍由 Vite 提供，插件清单仍按请求读取目录。
         watch: {
@@ -57,11 +60,11 @@ export default defineConfig({
             ],
         },
         proxy: {
-            "/api": { target: "http://127.0.0.1:17370", changeOrigin: true },
-            "/media": { target: "http://127.0.0.1:17370", changeOrigin: true },
-            "/events": { target: "http://127.0.0.1:17370", changeOrigin: true },
-            "/agent": { target: "http://127.0.0.1:17370", changeOrigin: true },
-            "/canvas/realtime": { target: "ws://127.0.0.1:17370", ws: true, changeOrigin: true },
+            "/api": { target: backendTarget, changeOrigin: true },
+            "/media": { target: backendTarget, changeOrigin: true },
+            "/events": { target: backendTarget, changeOrigin: true },
+            "/agent": { target: backendTarget, changeOrigin: true },
+            "/canvas/realtime": { target: backendTarget.replace(/^http/, "ws"), ws: true, changeOrigin: true },
         },
     },
     resolve: {

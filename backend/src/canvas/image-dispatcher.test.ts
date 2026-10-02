@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import sharp from "sharp";
+import { injectParams } from "../workflows/executor.js";
 
 import { CanvasImageDispatcher, type CanvasImageReference } from "./image-dispatcher.js";
 
@@ -109,4 +111,109 @@ test("同一源节点的不同提示词不能复用运行中任务", () => {
     const result = dispatcher.start({ sourceNodeId: "source-config", model: "gpt-image-2", prompt: "dog" });
     assert.notEqual(result.taskId, active.id);
     assert.equal(created, 1);
+});
+
+test("canvas workflow maps 16:9 into the submitted graph and blocks a saved 1:1 choice", async () => {
+    const aspect = { id: "f_1790686390394_nzk9", node: "11", input: "aspect_ratio", name: "Aspect ratio", type: "dropdown", default: "9:16 (Portrait Widescreen)", options: ["1:1 (Square)", "9:16 (Portrait Widescreen)", "16:9 (Widescreen)"] };
+    const values: Array<Record<string, unknown>> = [];
+    const workflow = { "11": { class_type: "EmptyLatentImage", inputs: { aspect_ratio: "9:16 (Portrait Widescreen)" } } };
+    const dispatcher = new CanvasImageDispatcher(
+        { url: "http://127.0.0.1:17370" } as never,
+        { tasks: { get: () => null } } as never,
+        {} as never,
+        {} as never,
+        { get: async () => ({
+            workflow,
+            config: { title: "2.1文生图", backend: "comfyui", operation: "image", description: "", fields: [aspect] },
+        }) } as never,
+        { run: async (_workflow: unknown, _config: unknown, fields: Record<string, unknown>) => { values.push(fields); return { media: [] }; } } as never,
+    );
+    const run = (params?: Record<string, unknown>) => (dispatcher as unknown as { dispatchWorkflow: (input: Record<string, unknown>, taskId: string, workflowName: string) => Promise<unknown> }).dispatchWorkflow(
+        { model: "qwen_image_2_1", prompt: "test", width: 1824, height: 1024, params }, "task", "custom/2.1文生图.json",
+    );
+    await run();
+    await run({ [aspect.id]: "16:9" });
+    await assert.rejects(run({ [aspect.id]: "1:1 (Square)" }), /工作流画幅与目标冲突/);
+    assert.equal(values[0][aspect.id], "16:9 (Widescreen)");
+    assert.equal(values[1][aspect.id], "16:9 (Widescreen)");
+    assert.equal(values.length, 2);
+    const submitted = injectParams(workflow, { "11": { aspect_ratio: values[0][aspect.id] } });
+    assert.equal((submitted["11"] as { inputs: { aspect_ratio: string } }).inputs.aspect_ratio, "16:9 (Widescreen)");
+});
+
+test("workflow 使用真实节点输入名映射 width/height 并拒绝旧尺寸", async () => {
+    const fields = [
+        { id: "field-width", node: "7", input: "width", name: "宽度", type: "number" },
+        { id: "field-height", node: "7", input: "height", name: "高度", type: "number" },
+    ];
+    const values: Array<Record<string, unknown>> = [];
+    const dispatcher = new CanvasImageDispatcher(
+        { url: "http://127.0.0.1:17370" } as never, { tasks: { get: () => null } } as never,
+        {} as never, {} as never,
+        { get: async () => ({ workflow: { "7": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024 } } }, config: { fields } }) } as never,
+        { run: async (_workflow: unknown, _config: unknown, input: Record<string, unknown>) => { values.push(input); return { media: [] }; } } as never,
+    );
+    const run = (params?: Record<string, unknown>) => (dispatcher as any).dispatchWorkflow({ model: "qwen_image_2_1", prompt: "test", width: 1024, height: 576, size: "16:9", params }, "task", "qwen.json");
+    await run();
+    assert.deepEqual([values[0]["field-width"], values[0]["field-height"]], [1024, 576]);
+    await assert.rejects(run({ "field-height": 1024 }), /与目标尺寸冲突/);
+    assert.equal(values.length, 1);
+});
+
+test("workflow 方图结果保留归档证据且不写回画布结果槽", async () => {
+    const image = await sharp({ create: { width: 64, height: 64, channels: 3, background: "red" } }).png().toBuffer();
+    const updates: Array<Record<string, unknown>> = [];
+    let completed = 0, failed = 0;
+    const taskRecord = { ...task("square-output", {}, "running"), result: null as unknown };
+    const dispatcher = dispatcherWith({
+        tasks: { get: () => taskRecord, update: (_id: string, patch: Record<string, unknown>) => { updates.push(patch); Object.assign(taskRecord, patch); }, addEvent: () => ({}) },
+        media: { read: async () => image },
+    });
+    (dispatcher as any).dispatch = async () => ({ taskId: "square-output", media: [{ url: "/media/square", storageKey: "image:square", mimeType: "image/png" }] });
+    await (dispatcher as any).execute({ executor: "comfy-workflow", input: { size: "16:9" } }, taskRecord, {
+        onCompleted: () => { completed++; }, onFailed: () => { failed++; },
+    });
+    assert.equal(completed, 0);
+    assert.equal(failed, 1);
+    assert.equal(taskRecord.status, "failed");
+    assert.deepEqual((taskRecord.result as any).media.map((item: any) => [item.storageKey, item.width, item.height]), [["image:square", 64, 64]]);
+    assert.match(String(updates.at(-1)?.error), /目标 16:9，实际 64×64/);
+});
+
+test("workflow 横图结果按真实像素写入任务并允许回写", async () => {
+    const image = await sharp({ create: { width: 64, height: 36, channels: 3, background: "blue" } }).png().toBuffer();
+    const taskRecord = { ...task("wide-output", {}, "running"), result: null as unknown };
+    const dispatcher = dispatcherWith({ tasks: { get: () => taskRecord, update: (_id: string, patch: Record<string, unknown>) => Object.assign(taskRecord, patch), addEvent: () => ({}) }, media: { read: async () => image } });
+    (dispatcher as any).dispatch = async () => ({ taskId: "wide-output", media: [{ url: "/media/wide", storageKey: "image:wide", mimeType: "image/png" }] });
+    let written: Array<{ width: number; height: number }> = [];
+    await (dispatcher as any).execute({ executor: "comfy-workflow", input: { size: "16:9" } }, taskRecord, {
+        onCompleted: (result: { media: Array<{ width: number; height: number }> }) => { written = result.media; },
+    });
+    assert.equal(taskRecord.status, "succeeded");
+    assert.deepEqual(written.map((item) => [item.width, item.height]), [[64, 36]]);
+});
+
+test("SVG 参考保留原件并以确定性 PNG 句柄送入模型", async () => {
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 36"><rect width="64" height="36" fill="red"/></svg>');
+    const media = new Map<string, { storageKey: string; mimeType: string; filePath: string }>([["image:source-svg", { storageKey: "image:source-svg", mimeType: "image/svg+xml", filePath: "source.svg" }]]);
+    const stored = new Map<string, Buffer>();
+    const events: Array<Record<string, unknown>> = [];
+    const dispatcher = dispatcherWith({
+        tasks: { addEvent: (_id: string, _type: string, event: Record<string, unknown>) => { events.push(event); } },
+        media: {
+            meta: (key: string) => media.get(key) || null,
+            read: async (key: string) => key === "image:source-svg" ? svg : stored.get(key),
+            store: (data: Buffer, options: { storageKey: string }) => { stored.set(options.storageKey, data); const entry = { storageKey: options.storageKey, mimeType: "image/png", filePath: "derived.png" }; media.set(entry.storageKey, entry); return entry; },
+            url: (entry: { storageKey: string }) => `/media/${entry.storageKey}`,
+        },
+    });
+    const reference = { storageKey: "image:source-svg", mimeType: "image/svg+xml", name: "diagram.svg" };
+    const first = await (dispatcher as any).modelReference(reference, "task-svg");
+    const again = await (dispatcher as any).modelReference(reference, "task-svg");
+    assert.equal(first.storageKey, again.storageKey);
+    assert.equal(stored.size, 1);
+    assert.equal(first.mimeType, "image/png");
+    const dimensions = await sharp(stored.get(first.storageKey)!).metadata();
+    assert.deepEqual([dimensions.width, dimensions.height], [64, 36]);
+    assert.deepEqual(events[0], { sourceStorageKey: "image:source-svg", sourceName: "diagram.svg", submittedStorageKey: first.storageKey, mimeType: "image/png" });
 });

@@ -8,9 +8,10 @@ import { writeStoryboardPrompt } from "./storyboard-write.js";
 import { isReferenceNameEcho } from "./prompt-rules.js";
 import { createHash, randomUUID } from "node:crypto";
 import { H3_RUNTIME_SEGMENT_FIELDS } from "../../canvas/runtime-fields.js";
-import { H3_GET_CLIP_TOOL, H3_UPDATE_CLIPS_TOOL, H3_PREPARE_CLIP_UPDATES_TOOL, H3_DISCARD_CLIP_UPDATES_TOOL } from "./batch-update-tool.js";
+import { H3_GET_CLIP_TOOL, H3_UPDATE_CLIPS_TOOL, H3_PREPARE_CLIP_UPDATES_TOOL, H3_DISCARD_CLIP_UPDATES_TOOL, H3_PREPARE_CLIP_TOOL } from "./batch-update-tool.js";
 import { buildNarrativeEditPatch, H3_MAX_EDIT_PREVIEWS, projectNarrativeFields, type H3EditSummary } from "./narrative-edits.js";
 import { readPreparedSource, assertPreparedInvariants, selectCompactUpdate, addPreparedPatchPreviews, type PreparedH3Plan } from "./prepared-updates.js";
+import { readClipResult } from "./clip-result.js";
 
 // H3 片段(节点 metadata.segments 中的元素)
 type H3Segment = Record<string, unknown>;
@@ -121,15 +122,16 @@ const TOOLS: PluginMcpToolWire[] = [
     H3_UPDATE_CLIPS_TOOL,
     H3_PREPARE_CLIP_UPDATES_TOOL,
     H3_DISCARD_CLIP_UPDATES_TOOL,
+    H3_PREPARE_CLIP_TOOL,
     {
-        id: "h3_list_models",
+        id: "h3_list_models", annotations: { readOnlyHint: true },
         version: "1.2.0",
         name: "H3 列出模型",
         description: "列出 MiniMax H3 可用的模型(unet)与 LoRA 清单。",
         inputJsonSchema: { type: "object", properties: {} },
     },
     {
-        id: "h3_get_node",
+        id: "h3_get_node", annotations: { readOnlyHint: true },
         version: "1.3.0",
         name: "H3 读取画布节点",
         description: "按节点 id 读取 MiniMax H3 节点摘要与当前时间线的稳定 Clip ID、顺序和状态；单段提示词、参考与运行参数请用 h3_get_clip 的定向工具读取。",
@@ -137,21 +139,21 @@ const TOOLS: PluginMcpToolWire[] = [
     },
     H3_GET_CLIP_TOOL,
     {
-        id: "h3_get_clip_prompt",
+        id: "h3_get_clip_prompt", annotations: { readOnlyHint: true },
         version: "1.0.0",
         name: "H3 读取片段提示词",
         description: "按需读取指定 H3 Clip 的语义提示词和最终编译提示词。",
         inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] },
     },
     {
-        id: "h3_get_clip_references",
+        id: "h3_get_clip_references", annotations: { readOnlyHint: true },
         version: "1.0.0",
         name: "H3 读取片段参考",
         description: "按需读取指定 H3 Clip 编译后的参考素材、角色组和引用预检问题。",
         inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] },
     },
     {
-        id: "h3_get_clip_runtime",
+        id: "h3_get_clip_runtime", annotations: { readOnlyHint: true },
         version: "1.0.0",
         name: "H3 读取片段运行参数",
         description: "按需读取指定 H3 Clip 的模型、采样、尺寸、LoRA 和其他运行参数。",
@@ -176,7 +178,7 @@ const TOOLS: PluginMcpToolWire[] = [
         },
     },
     {
-        id: "h3_get_defaults",
+        id: "h3_get_defaults", annotations: { readOnlyHint: true },
         version: "1.2.0",
         name: "H3 读取默认参数",
         description: "读取 Backend 中保存的 MiniMax H3 默认参数。",
@@ -198,7 +200,7 @@ const TOOLS: PluginMcpToolWire[] = [
     },
     {
         id: "h3_apply_video_plan",
-        version: "1.5.0",
+        version: "1.6.0",
         name: "H3 应用结构化视频计划",
         description: "把按镜号拆分的结构化中文视频计划写入 H3 节点，并按角色化参考清单生成最终提示词。追加模式可指定锚点 Clip 前后原子插入，多段保持输入顺序。",
         inputJsonSchema: {
@@ -210,14 +212,23 @@ const TOOLS: PluginMcpToolWire[] = [
                 beforeSegmentId: { type: "string", description: "仅追加模式：把新 Clip 插入此稳定 Clip ID 之前" },
                 afterSegmentId: { type: "string", description: "仅追加模式：把新 Clip 插入此稳定 Clip ID 之后" },
                 language: { type: "string", enum: ["zh-CN"] },
-                segments: { type: "array", items: { type: "object" } },
+                segments: { type: "array", minItems: 1, items: { type: "object", properties: {
+                    id: { type: "string", minLength: 1, description: "Clip 稳定 id；字段名是 id，不是 segmentId" },
+                    duration: { type: "number", exclusiveMinimum: 0 },
+                    timeline: { type: "array", minItems: 1, items: { type: "object", properties: {
+                        start: { type: "number", minimum: 0 }, end: { type: "number", exclusiveMinimum: 0 },
+                        action: { type: "string" }, camera: { type: "string" }, composition: { type: "string" }, effects: { type: "string" },
+                    }, required: ["start", "end"] } },
+                    sourceShotId: { type: "string" }, title: { type: "string" }, openingState: { type: "string" }, endingState: { type: "string" },
+                    subjects: { type: "array", items: { type: "object" } }, references: { type: "array", items: { type: "object" } }, settings: { type: "object" },
+                }, required: ["id", "duration", "timeline"] } },
             },
             required: ["projectId", "nodeId", "segments"],
         },
     },
     {
         id: "h3_write_storyboard_prompt",
-        version: "1.2.0",
+        version: "1.3.0",
         name: "H3 写入结构化分镜提示词",
         description: "按分镜编辑器的新结构写入单个 Clip：开场总体描述、逐镜描述/切换时间/切换方式/已绑定分镜图、声景和配乐；Ref2VA 模式另写 summary，并由当前人物引用按规则生成 subject_definitions 与 retention_analysis，使用共享 SHA-256 缓存。",
         inputJsonSchema: {
@@ -226,6 +237,7 @@ const TOOLS: PluginMcpToolWire[] = [
                 projectId: { type: "string", description: "画布项目 id" },
                 nodeId: { type: "string", description: "H3 节点 id" },
                 segmentId: { type: "string", description: "目标 Clip 的稳定 id" },
+                dryRun: { type: "boolean", description: "只预检并返回拟写入提示词，不修改画布" },
                 summary: { type: "string", description: "Ref2VA 模式的摘要；其他模式忽略" },
                 openingDescription: { type: "string", description: "detailed_description 开头的非分镜总体描述" },
                 shots: {
@@ -327,14 +339,14 @@ const TOOLS: PluginMcpToolWire[] = [
             required: ["projectId"],
         },
     },
-    { id: "canvas_list_reference_assets", version: "1.0.0", name: "列出项目参考资产", description: "列出项目级参考资产库及其主要职责、标签和媒体句柄。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" } }, required: ["projectId"] } },
+    { id: "canvas_list_reference_assets", annotations: { readOnlyHint: true }, version: "1.0.0", name: "列出项目参考资产", description: "列出项目级参考资产库及其主要职责、标签和媒体句柄。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" } }, required: ["projectId"] } },
     { id: "canvas_update_reference_asset", version: "1.0.0", name: "更新项目参考资产", description: "新增或更新项目参考资产；职责只保存一个 primary role，补充语义放 tags。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, asset: { type: "object" } }, required: ["projectId", "asset"] } },
     { id: "canvas_analyze_reference_asset", version: "1.0.0", name: "记录参考资产分析", description: "把模型对参考素材的职责、标签和摘要写入项目资产；调用方应先实际查看素材再提交分析。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, assetId: { type: "string" }, role: { type: "string" }, tags: { type: "array", items: { type: "string" } }, summary: { type: "string" }, model: { type: "string" } }, required: ["projectId", "assetId", "role", "tags", "summary"] } },
     { id: "h3_set_reference_bindings", version: "1.3.0", name: "设置 Clip 参考绑定", description: "整组替换指定 Clip 的手工参考绑定（场景、分镜、关键帧、音频、色卡、道具等），不修改节点位置或运行状态。角色组人物与其服装图片的参考绑定是 h3CharacterGroups 的派生视图，由编译器自动生成：增删改角色、服装或启用状态请调用 h3_bind_existing_character_groups，本工具只需管好非角色组参考。单张分镜图替换请用 h3_replace_storyboard_binding。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, bindings: { type: "array", items: { type: "object" } }, expectedBindings: { type: "array", items: { type: "object" } } }, required: ["projectId", "nodeId", "segmentId", "bindings"] } },
     { id: "h3_replace_storyboard_binding", version: "1.0.0", name: "替换单个 Clip 分镜绑定", description: "按 bindingId 和旧 storageKey 只替换一个 storyboard 参考；服务端读取原始绑定做 CAS，保留角色组、其他参考与任务历史。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, bindingId: { type: "string" }, expectedStorageKey: { type: "string" }, assetId: { type: "string", description: "已登记且指向新分镜图的项目参考资产 ID" } }, required: ["projectId", "nodeId", "segmentId", "bindingId", "expectedStorageKey", "assetId"] } },
     { id: "canvas_replace_storyboard_slots", version: "1.0.0", name: "替换分镜组指定槽位", description: "一次画布事务替换有序分镜组的指定槽位、来源槽位及关联参考资产；旧节点和媒体保留。新图尺寸需符合 expectedAspectRatio。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, groupId: { type: "string" }, expectedAspectRatio: { type: "string", description: "目标画幅，例如 9:16" }, slots: { type: "array", items: { type: "object", properties: { slot: { type: "integer", description: "从 1 开始的槽位序号" }, expectedNodeId: { type: "string" }, nodeId: { type: "string", description: "已生成新图的节点 ID" }, assetIds: { type: "array", items: { type: "string" } }, label: { type: "string" } }, required: ["slot", "expectedNodeId", "nodeId", "assetIds"] } } }, required: ["projectId", "groupId", "expectedAspectRatio", "slots"] } },
     { id: "h3_bind_existing_character_groups", version: "1.2.0", name: "绑定或移除 Clip 角色组", description: "从已有 character 节点构建当前 Clip 的角色组；也可按稳定 groupId 移除角色组及其角色参考绑定。characters 与 removeGroupIds 至少提供一项；不删除角色节点或画布连线。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, characters: { type: "array", items: { type: "object", properties: { characterNodeId: { type: "string" }, subjectId: { type: "string", description: "提示词使用的稳定 subjectId；将同步写入角色组和全部角色参考绑定" }, selectedOutfitStorageKeys: { type: "array", items: { type: "string" } }, voiceEnabled: { type: "boolean" } }, required: ["characterNodeId", "selectedOutfitStorageKeys"] } }, removeGroupIds: { type: "array", items: { type: "string" }, description: "要从当前 Clip 移除的稳定角色组 ID；对应角色组参考绑定也会一起移除" } }, required: ["projectId", "nodeId", "segmentId"] } },
-    { id: "canvas_validate_generation", version: "1.1.0", name: "生成预检", description: "使用与 Backend 实际提交相同的编译器预检语义提示词、参考顺序、模式上限和缺失媒体。调用成功即代表预检已跑完；是否可生成看返回的 ready（true 可生成）与 blockingIssues 列表，不要把 ready:false 当作工具调用失败。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] } },
+    { id: "canvas_validate_generation", annotations: { readOnlyHint: true }, version: "1.1.0", name: "生成预检", description: "使用与 Backend 实际提交相同的编译器预检语义提示词、参考顺序、模式上限和缺失媒体。调用成功即代表预检已跑完；是否可生成看返回的 ready（true 可生成）与 blockingIssues 列表，不要把 ready:false 当作工具调用失败。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] } },
 ];
 
 function segmentsOf(node: AgentCanvasNode): H3Segment[] {
@@ -732,11 +744,13 @@ export const pluginMcp: PluginMcpModule = {
                 const { project, node } = await getProjectNode(context, projectId, nodeId);
                 const projectNodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
                 if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
+                const expectedRevision = Number(project.revision || 0);
+                if (input.expectedRevision !== undefined && input.expectedRevision !== expectedRevision) throw Object.assign(new Error(`revision 基线冲突：期望 ${input.expectedRevision}，当前 ${expectedRevision}`), { code: "REVISION_CONFLICT", expectedRevision: input.expectedRevision, actualRevision: expectedRevision });
                 const segments = segmentsOf(node);
                 const segment = segments.find((item) => String(item.id || "") === segmentId);
                 if (!segment) throw new Error(`找不到片段:${segmentId}`);
                 const rawPatch = input.patch && typeof input.patch === "object" && !Array.isArray(input.patch) ? input.patch as Record<string, unknown> : {};
-                for (const key of ["h3CharacterGroups", "characterGroups", "referenceBindings", "status", "result", "resultStorageKey", "runtimeTaskId", "progress", "errorDetails", "cacheFingerprint"]) {
+                for (const key of new Set(["id", "metadata", "segments", "__proto__", "constructor", "prototype", "h3CharacterGroups", "characterGroups", "referenceBindings", ...H3_RUNTIME_SEGMENT_FIELDS])) {
                     if (Object.prototype.hasOwnProperty.call(rawPatch, key)) throw new Error(`h3_prepare_clip 不允许直接修改 ${key}`);
                 }
                 const explicitSourceId = input.inheritFromSegmentId ? String(input.inheritFromSegmentId) : undefined;
@@ -759,8 +773,11 @@ export const pluginMcp: PluginMcpModule = {
                     preparedPatch.referenceBindings = characterCandidate.nextBindings;
                     candidate = { ...segment, ...preparedPatch };
                 }
+                if (Object.hasOwn(preparedPatch, "duration") && (typeof preparedPatch.duration !== "number" || !Number.isFinite(preparedPatch.duration) || preparedPatch.duration <= 0)) throw Object.assign(new Error("patch.duration 必须为正数"), { code: "INVALID_INPUT" });
+                if (Object.hasOwn(preparedPatch, "prompt") && typeof preparedPatch.prompt !== "string") throw Object.assign(new Error("patch.prompt 必须为字符串"), { code: "INVALID_INPUT" });
                 const compilation = compileReferenceSubmission(project, candidate);
                 assertReferenceCompilation(compilation);
+                if (input.dryRun === true) return { ok: true, applied: false, projectId, nodeId, segmentId, revision: expectedRevision, snapshot: buildH3ClipSnapshot(candidate, compilation, { ...(source?.id ? { sourceSegmentId: String(source.id) } : {}), changedSettings: diffH3Settings(inherited, candidate) }) };
                 const operations: Record<string, unknown>[] = [{
                     type: "update_h3_segment",
                     nodeId,
@@ -779,7 +796,8 @@ export const pluginMcp: PluginMcpModule = {
                         if (!alreadyConnected) operations.push({ type: "connect_nodes", fromNodeId: item.characterNodeId, toNodeId: nodeId, role: "reference", order: nextOrder++ });
                     }
                 }
-                const result = await context.backend.applyCanvasOperations(projectId, operations, Number(project.revision || 0));
+                const operationId = randomUUID();
+                const result = await context.backend.applyCanvasOperations(projectId, operations, expectedRevision, operationId, true);
                 const refreshedProject = result.project;
                 const refreshedNode = refreshedProject && (Array.isArray(refreshedProject.nodes) ? refreshedProject.nodes : []).find((item) => String((item as Record<string, unknown>).id || "") === nodeId) as AgentCanvasNode | undefined;
                 const refreshedSegment = refreshedNode && segmentsOf(refreshedNode).find((item) => String(item.id || "") === segmentId);
@@ -788,6 +806,8 @@ export const pluginMcp: PluginMcpModule = {
                 assertReferenceCompilation(refreshedCompilation);
                 return {
                     ok: true,
+                    applied: true,
+                    operationId,
                     projectId,
                     nodeId,
                     segmentId,
@@ -820,6 +840,7 @@ export const pluginMcp: PluginMcpModule = {
                 if (beforeSegmentId && afterSegmentId) throw new Error("beforeSegmentId 与 afterSegmentId 只能指定一个");
                 if (input.replaceSegments !== false && (beforeSegmentId || afterSegmentId)) throw new Error("beforeSegmentId / afterSegmentId 只支持 replaceSegments=false 追加模式");
                 const { project, node } = await getProjectNode(context, projectId, nodeId);
+                if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点；请用 canvas_create_node 创建 nodeType=minimax-h3:video`);
                 const rawSegments = Array.isArray(input.segments) ? input.segments as H3PlannedSegment[] : [];
                 if (rawSegments.some((item) => Object.prototype.hasOwnProperty.call(item, "h3CharacterGroups") || Object.prototype.hasOwnProperty.call(item, "characterGroups"))) throw new Error("角色组必须通过 h3_bind_existing_character_groups 写入");
                 validateVideoPlan(rawSegments);
@@ -872,6 +893,7 @@ export const pluginMcp: PluginMcpModule = {
                 const promptStarted = Date.now();
                 const generated = writeStoryboardPrompt(project, segment, input);
                 const promptBuildMs = Date.now() - promptStarted;
+                if (input.dryRun === true) return { ok: true, dryRun: true, applied: false, unchanged: generated.unchanged, projectId, nodeId, segmentId, revision: Number(project.revision || 0), fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, prompt: generated.prompt, promptLength: generated.prompt.length, timings: { promptBuildMs, applyMs: 0 } };
                 if (generated.unchanged) return { ok: true, unchanged: true, projectId, nodeId, segmentId, fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, promptLength: String(segment.prompt || "").length, timings: { promptBuildMs, applyMs: 0 } };
                 const applyStarted = Date.now();
                 const result = await context.backend.applyCanvasOperations(projectId, [{ type: "update_h3_segment", nodeId, segmentId, patch: {
@@ -900,6 +922,8 @@ export const pluginMcp: PluginMcpModule = {
             h3_get_clip: async (input) => {
                 const { projectId, nodeId, segmentId, segment, timings, snapshot } = await readH3Clip(context, input);
                 const include = new Set(Array.isArray(input.include) ? input.include.map(String) : []);
+                if ((input.taskId !== undefined || input.storageKey !== undefined) && !include.has("result")) throw Object.assign(new Error("taskId/storageKey 必须与 include:result 一起使用，不能被总览查询忽略"), { code: "INVALID_INPUT" });
+                const result = include.has("result") ? await readClipResult(context, input, segment) : undefined;
                 const projected = input.fields === undefined ? {} : projectNarrativeFields(segment, input.fields);
                 const issueCounts = snapshot.issues.reduce<Record<string, number>>((counts, issue) => {
                     const severity = String(issue.severity || "unknown");
@@ -929,6 +953,7 @@ export const pluginMcp: PluginMcpModule = {
                     ...(include.has("prompt") ? { prompt: snapshot.prompt } : {}),
                     ...(include.has("references") ? { references: snapshot.references, characterGroups: snapshot.characterGroups } : {}),
                     ...(include.has("runtime") ? { runtime: snapshot.runtime } : {}),
+                    ...(result ? { result } : {}),
                 };
             },
             h3_get_clip_prompt: async (input) => {

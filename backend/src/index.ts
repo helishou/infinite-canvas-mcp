@@ -37,6 +37,9 @@ import { registerCanvasBrowserScriptRoutes } from "./server/browser-script-route
 import { acquireBackendInstanceLock } from "./instance-lock.js";
 import { CanvasReferenceService } from "./canvas/reference-service.js";
 import { registerCanvasReferenceRoutes } from "./server/canvas-reference-routes.js";
+import { EpisodeProductionService } from "./drama/production.js";
+import { EpisodeProductionRunner } from "./drama/production-runner.js";
+import { registerDramaProductionRoutes } from "./server/drama-production-routes.js";
 import { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
 import {
   applyNetworkSettings,
@@ -223,6 +226,9 @@ async function startBackendHttpServer() {
     },
   );
   registerCanvasGenerationRoutes(app, canvasGeneration);
+  const episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
+  const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
+  registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner);
   registerCanvasBrowserScriptRoutes(app, canvasBrowserScriptDispatcher);
   registerCanvasReferenceRoutes(app, canvasReferences);
   registerAgentRuntimeRoutes(
@@ -378,6 +384,7 @@ async function startBackendHttpServer() {
     }
     // canvas-*/direct-* 类型：上面的 resume 循环已尝试恢复，此处不再处理
   }
+  void episodeProductionRunner.resumePending();
   app.get("/canvas/projects/:id/collaboration", (req, res) => {
     const project = db.getCanvasProject(req.params.id);
     if (!project)

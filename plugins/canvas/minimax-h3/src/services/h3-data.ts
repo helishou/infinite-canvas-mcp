@@ -1,6 +1,11 @@
 import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3CharacterOutfit, H3CharacterVoice, H3Ref, H3ReferenceBinding, H3ReferenceRole, H3Segment } from "../types";
 import { sameRef } from "./h3-compatibility";
-import { characterGroupBindings } from "../../../../../canvas-agent/src/canvas/reference-contract";
+import { characterGroupBindings, resolveCharacterGroupBindings, syncH3CharacterGroupSource } from "../../../../../canvas-agent/src/canvas/reference-contract";
+
+function sameReferenceEntry(left: H3Ref, right: H3Ref) {
+    if (left.bindingId && right.bindingId) return left.bindingId === right.bindingId;
+    return sameRef(left, right);
+}
 
 function storedRefsForSegment(segment: H3Segment): H3Ref[] {
     if (segment.referenceBindings?.length) {
@@ -18,19 +23,25 @@ function storedRefsForSegment(segment: H3Segment): H3Ref[] {
     // once refItems contains entries it is the canonical ordered list.
     const items = segment.refItems?.length ? segment.refItems : bucketItems;
     const refs = items.filter((item) => item?.url || item?.storageKey).map((item) => ({ ...item, type: inferH3ReferenceMediaType(item as H3Ref & { kind?: H3Ref["type"] }) }));
-    return refs.filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
+    return refs.filter((item, index, all) => all.findIndex((other) => sameReferenceEntry(other, item)) === index);
 }
 
 export function refsForSegment(segment: H3Segment): H3Ref[] {
-    const stored = storedRefsForSegment(segment);
+    const stored = storedRefsForSegment(segment).map(ensureReferenceIdentity);
     const derived = Object.values(segment.h3CharacterGroups || {}).flatMap(refsFromCharacterGroup).map((ref) => {
         const snapshot = stored.find((old) => old.groupId === ref.groupId && old.type === ref.type && old.outfitId === ref.outfitId);
         // Historical slot IDs/Clip metadata remain compatible; current group owns media and enabled state.
         return snapshot ? { ...snapshot, ...ref, bindingId: snapshot.bindingId || ref.bindingId, assetId: sameRef(snapshot, ref) ? snapshot.assetId || ref.assetId : ref.assetId,
             tags: snapshot.tags || ref.tags, retentionLevel: snapshot.retentionLevel } : ref;
     });
-    const refs = [...stored.filter((ref) => !ref.groupId && ref.enabled !== false), ...derived];
-    return refs.filter((ref, index) => refs.findIndex((other) => sameRef(other, ref)) === index);
+    const ordered = resolveCharacterGroupBindings(stored.map(refToBinding), { ...segment });
+    const refs = ordered.filter((binding) => binding.enabled).flatMap((binding) => {
+        const ref = binding.groupId
+            ? derived.find((item) => item.groupId === binding.groupId && item.outfitId === binding.outfitId && item.type === binding.mediaType)
+            : stored.find((item) => item.bindingId === binding.id);
+        return ref ? [ref] : [];
+    });
+    return refs.filter((ref, index) => refs.findIndex((other) => sameReferenceEntry(other, ref)) === index);
 }
 
 export function segmentRefsPatch(refs: H3Ref[], previous?: H3Segment): Pick<H3Segment, "referenceBindings" | "refItems" | "refs"> {
@@ -395,50 +406,13 @@ export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterG
 export function syncCharacterGroupFromSource(
     segment: H3Segment,
     groupId: string,
-    source: { characterName: string; characterAssetId?: string; characterNodeId: string; outfits: CharacterOutfitInput[]; voice?: H3CharacterVoice },
+    source: { characterName: string; characterAssetId?: string; characterNodeId: string; characterPrimaryIndex?: number; outfits: CharacterOutfitInput[]; voice?: H3CharacterVoice },
 ): H3Segment {
     const existing = segment.h3CharacterGroups?.[groupId];
     if (!existing || existing.characterNodeId !== source.characterNodeId) return segment;
-    if (!source.outfits.length && !source.voice) return removeCharacterGroup(segment, groupId);
-
-    const previousByKey = new Map(existing.outfits.map((outfit) => [outfitKey(outfit), outfit]));
-    const outfits = source.outfits.map((outfit) => {
-        const previous = previousByKey.get(outfitKey(outfit));
-        return {
-            id: previous?.id || genOutfitId(),
-            ...outfit,
-            enabled: previous?.enabled ?? true,
-        };
-    });
-    const voice = source.voice;
-    // Source refresh updates the catalog only. The current mode may temporarily hide
-    // references (for example t2v); applying its capacity here would erase the
-    // user's saved outfit/voice selection when the node mounts or the source changes.
-    const nextGroup: H3CharacterGroup = {
-        ...existing,
-        characterName: source.characterName || existing.characterName,
-        characterAssetId: source.characterAssetId || existing.characterAssetId,
-        characterNodeId: source.characterNodeId,
-        subjectId: existing.subjectId || source.characterNodeId,
-        voice,
-        outfits,
-        outfitEnabled: outfits.length > 0 && (existing.outfitEnabled ?? outfits.some((outfit) => outfit.enabled)),
-        voiceEnabled: voice ? (existing.voice ? existing.voiceEnabled : true) : false,
-    };
-    const sameOutfits = existing.outfits.length === nextGroup.outfits.length && existing.outfits.every((outfit, index) => {
-        const next = nextGroup.outfits[index];
-        return outfit.id === next.id && outfit.url === next.url && outfit.name === next.name
-            && outfit.storageKey === next.storageKey && outfit.mimeType === next.mimeType && outfit.role === next.role && outfit.enabled === next.enabled;
-    });
-    if (existing.characterName === nextGroup.characterName
-        && existing.characterAssetId === nextGroup.characterAssetId
-        && existing.characterNodeId === nextGroup.characterNodeId
-        && existing.subjectId === nextGroup.subjectId
-        && JSON.stringify(existing.voice) === JSON.stringify(nextGroup.voice)
-        && existing.outfitEnabled === nextGroup.outfitEnabled
-        && existing.voiceEnabled === nextGroup.voiceEnabled
-        && sameOutfits) return segment;
-
+    const nextGroup = syncH3CharacterGroupSource(existing, source);
+    if (!nextGroup) return removeCharacterGroup(segment, groupId);
+    if (nextGroup === existing) return segment;
     return setSegmentCharacterGroups(segment, { ...(segment.h3CharacterGroups || {}), [groupId]: nextGroup });
 }
 

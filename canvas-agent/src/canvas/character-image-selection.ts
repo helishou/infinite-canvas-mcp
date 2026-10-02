@@ -1,6 +1,27 @@
-type Node = { id?: unknown; type?: unknown; metadata?: unknown };
+type Node = { id?: unknown; type?: unknown; title?: unknown; metadata?: unknown };
 type Image = { storageKey?: unknown; url?: unknown; name?: unknown };
 export type CharacterImageSelection = { imageKeys?: string[]; voiceEnabled?: boolean };
+export type H3CharacterOutfitSource = { url: string; name: string; storageKey?: string; mimeType?: string; role?: string };
+export type H3CharacterSource = {
+    characterName: string;
+    characterAssetId?: string;
+    characterNodeId: string;
+    characterPrimaryIndex?: number;
+    outfits: H3CharacterOutfitSource[];
+    voice?: { url: string; name: string; description?: string; storageKey?: string; assetId?: string };
+};
+type H3CharacterOutfit = H3CharacterOutfitSource & { id: string; enabled: boolean };
+type H3CharacterGroup = {
+    characterName: string;
+    characterAssetId?: string;
+    characterNodeId?: string;
+    subjectId?: string;
+    outfits: H3CharacterOutfit[];
+    outfitEnabled?: boolean;
+    voice?: H3CharacterSource["voice"];
+    voiceEnabled: boolean;
+};
+const H3_IMAGE_ROLES = new Set(["character_identity", "character_turnaround", "storyboard", "scene", "blocking", "keyframe", "motion_reference", "style", "palette", "prop", "other"]);
 
 function record(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -52,4 +73,81 @@ export function characterReferenceUpdates(previous: Node, current: Node, nodes: 
         if (JSON.stringify(keys) === JSON.stringify(selection.imageKeys)) return [];
         return [{ id: String(node.id), metadata: { characterReferences: { ...references, [characterId]: { ...selection, imageKeys: keys } } } }];
     });
+}
+
+/** Read the full costume catalog from the source character node, including disabled costumes. */
+export function h3CharacterSourceFromNode(node: Node): H3CharacterSource | null {
+    if (node.type !== "character" || !node.id) return null;
+    const metadata = record(node.metadata);
+    const outfits = imagesOf(metadata).flatMap((image) => {
+        const media = record(image);
+        const url = String(media.url || media.dataUrl || media.localUrl || "").trim();
+        const storageKey = String(media.storageKey || record(media.assetRef).storageKey || "").trim();
+        if (!url && !storageKey) return [];
+        const role = String(media.role || "");
+        return [{ url, name: String(media.outfit || media.name || "outfit"), storageKey: storageKey || undefined,
+            mimeType: String(media.mimeType || "") || undefined, role: H3_IMAGE_ROLES.has(role) ? role : "character_turnaround" }];
+    });
+    const voiceUrl = String(metadata.characterVoiceUrl || "").trim();
+    const rawPrimary = Number(metadata.characterPrimaryIndex || 0);
+    return {
+        characterName: String(metadata.characterName || node.title || "角色"),
+        characterAssetId: String(metadata.characterAssetId || "") || undefined,
+        characterNodeId: String(node.id),
+        characterPrimaryIndex: Number.isFinite(rawPrimary) ? Math.min(Math.max(Math.trunc(rawPrimary), 0), Math.max(outfits.length - 1, 0)) : 0,
+        outfits,
+        voice: voiceUrl ? {
+            url: voiceUrl,
+            name: String(metadata.characterVoiceName || "声线"),
+            description: String(metadata.characterVoiceDescription || "") || undefined,
+            storageKey: String(metadata.characterVoiceStorageKey || "") || undefined,
+            assetId: String(metadata.characterVoiceAssetId || "") || undefined,
+        } : undefined,
+    };
+}
+
+function h3OutfitKey(outfit: H3CharacterOutfitSource) {
+    return outfit.storageKey || outfit.url;
+}
+
+function stableOutfitId(characterNodeId: string, key: string) {
+    let hash = 2166136261;
+    for (const char of `${characterNodeId}:outfit:${key}`) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+    return `outfit-${(hash >>> 0).toString(36)}`;
+}
+
+/** Keep Clip selection by media key; a same-length in-place replacement inherits its slot's selection and ID. */
+export function syncH3CharacterGroupSource<T extends H3CharacterGroup>(existing: T, source: H3CharacterSource): T | null {
+    if (existing.characterNodeId !== source.characterNodeId) return existing;
+    if (!source.outfits.length && !source.voice) return null;
+    const incomingKeys = new Set(source.outfits.map(h3OutfitKey));
+    const existingByKey = new Map(existing.outfits.map((outfit) => [h3OutfitKey(outfit), outfit]));
+    const usedIds = new Set<string>();
+    const outfits = source.outfits.map((outfit, index) => {
+        const key = h3OutfitKey(outfit);
+        let previous = existingByKey.get(key);
+        if (previous && usedIds.has(previous.id)) previous = undefined;
+        if (!previous && source.outfits.length === existing.outfits.length) {
+            const slot = existing.outfits[index];
+            if (slot && !incomingKeys.has(h3OutfitKey(slot)) && !usedIds.has(slot.id)) previous = slot;
+        }
+        if (previous) usedIds.add(previous.id);
+        return { ...outfit, id: previous?.id || stableOutfitId(source.characterNodeId, key), enabled: previous?.enabled ?? false };
+    });
+    if (existing.outfitEnabled !== false && existing.outfits.some((outfit) => outfit.enabled) && outfits.length && !outfits.some((outfit) => outfit.enabled)) {
+        const index = Math.min(Math.max(source.characterPrimaryIndex || 0, 0), outfits.length - 1);
+        outfits[index] = { ...outfits[index], enabled: true };
+    }
+    const next = {
+        ...existing,
+        characterName: source.characterName || existing.characterName,
+        characterAssetId: source.characterAssetId || existing.characterAssetId,
+        characterNodeId: source.characterNodeId,
+        subjectId: existing.subjectId || source.characterNodeId,
+        voice: source.voice,
+        outfits,
+        outfitEnabled: outfits.length > 0 && (existing.outfitEnabled ?? outfits.some((outfit) => outfit.enabled)),
+        voiceEnabled: source.voice ? (existing.voice ? existing.voiceEnabled : true) : false,
+    } as T;
+    return JSON.stringify(next) === JSON.stringify(existing) ? existing : next;
 }
