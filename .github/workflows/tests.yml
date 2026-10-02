@@ -28,7 +28,20 @@ jobs:
       - run: npm run build --workspace canvas-agent
       - run: npm run typecheck --workspace web
       - run: npm run build --workspace backend
-      - run: npm run build --workspace web
+      - name: Build Web
+        shell: bash
+        run: |
+          if npm run build --workspace web > "$RUNNER_TEMP/web-build.log" 2>&1; then
+            cat "$RUNNER_TEMP/web-build.log"
+          else
+            cat "$RUNNER_TEMP/web-build.log"
+            while IFS= read -r line; do
+              line="${line//'%'/'%25'}"
+              line="${line//$'\r'/'%0D'}"
+              printf '::error title=Web build::%s\n' "$line"
+            done < <(tail -n 30 "$RUNNER_TEMP/web-build.log")
+            exit 1
+          fi
       - run: npm run typecheck --prefix plugins/canvas/minimax-h3
       - run: npm test --prefix plugins/canvas/minimax-h3
       - run: npm test
