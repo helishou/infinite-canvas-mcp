@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
+import sharp from "sharp";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { CanvasImageDispatcher } from "./image-dispatcher.js";
@@ -11,13 +12,14 @@ import { WorkflowExecutor } from "../workflows/executor.js";
  * ComfyUI 用假 fetch 顶掉，专注数日志条数。
  */
 async function withStubbedComfy<T>(fn: () => Promise<T>): Promise<T> {
+    const image = await sharp({ create: { width: 1024, height: 1024, channels: 3, background: "white" } }).png().toBuffer();
     const originalFetch = globalThis.fetch;
     const originalWs = (globalThis as any).WebSocket;
     (globalThis as any).WebSocket = undefined;
     globalThis.fetch = (async (url: string) => {
         if (String(url).endsWith("/prompt")) return new Response(JSON.stringify({ prompt_id: "p1" }), { status: 200, headers: { "content-type": "application/json" } });
         if (String(url).includes("/history")) return new Response(JSON.stringify({ p1: { outputs: { "1": { images: [{ filename: "o.png", subfolder: "", type: "output" }] } } } }), { status: 200, headers: { "content-type": "application/json" } });
-        if (String(url).includes("/view")) return new Response(new Uint8Array([137, 80, 78, 71]), { status: 200, headers: { "content-type": "image/png" } });
+        if (String(url).includes("/view")) return new Response(new Uint8Array(image), { status: 200, headers: { "content-type": "image/png" } });
         if (String(url).includes("/upload/image")) return new Response(JSON.stringify({ name: "shot1.png", subfolder: "", type: "input" }), { status: 200, headers: { "content-type": "application/json" } });
         throw new Error(`unexpected fetch: ${url}`);
     }) as never;

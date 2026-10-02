@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { BackendDatabase } from "../db.js";
+import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { EpisodeProductionRunner } from "./production-runner.js";
 import { createStores } from "../stores/index.js";
@@ -166,13 +167,13 @@ test("schema 14 upgrade snapshots the old database and preserves episode data", 
     const old = new BackendDatabase(file);
     old.upsertCanvasFolder({ id: "drama", name: "历史剧目", createdAt: new Date().toISOString(), isDrama: true });
     old.upsertDramaEpisode({ id: "episode", dramaId: "drama", episodeNumber: 1, title: "历史首集", synopsis: "旧梗概", fullPlot: "旧原文" });
-    old.db.prepare("DELETE FROM schema_migrations WHERE version=15").run();
+    old.db.prepare("DELETE FROM schema_migrations WHERE version>=15").run();
     old.close();
     const reopened = new BackendDatabase(file);
     try {
         assert.equal(reopened.getDramaEpisode("episode")?.fullPlot, "旧原文");
-        assert.equal((reopened.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 15);
-        assert.ok(readdirSync(dir).some((name) => name.includes("pre-schema-v14-to-v15")));
+        assert.equal((reopened.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, DATABASE_SCHEMA_VERSION);
+        assert.ok(readdirSync(dir).some((name) => name.includes(`pre-schema-v14-to-v${DATABASE_SCHEMA_VERSION}`)));
     } finally { reopened.close(); }
 });
 
