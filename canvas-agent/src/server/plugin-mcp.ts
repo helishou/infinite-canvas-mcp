@@ -1,5 +1,5 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z, type ZodRawShape, type ZodTypeAny } from "zod";
+import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { compilePluginInputSchema } from "./plugin-json-schema.js";
 
 import { BackendClient } from "../runtime/backend-client.js";
 import type { ComfyUiClient } from "../runtime/comfy-client.js";
@@ -57,9 +57,16 @@ export type PluginMcpContext = {
 /** 插件 MCP 实际使用的最小 Backend 能力。 */
 export type PluginMcpBackend = {
     backendUrl?: string;
+    /** Backend-owned local preparation artifacts, not arbitrary plugin filesystem access. */
+    preparedH3Updates?: {
+        readSource(filePath: string, fileSha256: string): Promise<{ value: unknown; sha256: string; bytes: number }>;
+        save(plan: Record<string, unknown>): Promise<string>;
+        read(preparedId: string): Promise<Record<string, unknown>>;
+        discard(preparedId: string): Promise<void>;
+    };
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
     getCanvasProject(projectId: string): Promise<Record<string, unknown>>;
-    applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[] }>;
+    applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number, operationId?: string, strictRevision?: boolean): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[]; duplicated?: boolean }>;
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
     canvasRunGeneration(input: CanvasGenerationCommand): Promise<{ ok?: boolean } & CanvasGenerationStartResult>;
     getTask(id: string): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;
@@ -190,12 +197,20 @@ type RegisteredPlugin = {
     handlers: Record<string, McpToolHandler>;
 };
 
+type RegisteredPluginTool = {
+    ownerId: string;
+    schemaKey: string;
+    handle: RegisteredTool;
+    handler: McpToolHandler;
+    validateInput: ReturnType<typeof compilePluginInputSchema>["validateInput"];
+};
+
 /**
  * 插件 MCP 动态注册表。
  *
  * 设计要点:
  * - 官方/本地插件(minimax-h3)经 KNOWN_FIRST_PARTY 白名单加载本地打包的 MCP 模块;
- *   其工具在 enable 时注册,disable 时通过 enabled 标志隐藏(MCP SDK 无 removeTool)。
+ *   其工具在 enable 时注册,disable 时经 SDK handle 隐藏。
  * - 第三方远程插件仅加载前端节点,MCP 执行需显式授权;当前未授权时只记录、不注册工具,
  *   满足「远程插件 MCP 需用户显式安装 + Agent 授权」的安全边界。
  * - 声明持久化到 SQLite:浏览器(HTTP 进程)启用/禁用写入,stdio MCP 进程冷启动/轮询读取,
@@ -203,6 +218,7 @@ type RegisteredPlugin = {
  */
 export class PluginMcpRegistry {
     private plugins = new Map<string, RegisteredPlugin>();
+    private registeredTools = new Map<string, RegisteredPluginTool>();
 
     constructor(private readonly server: McpServer, private readonly context: PluginMcpContext) {}
 
@@ -226,15 +242,15 @@ export class PluginMcpRegistry {
 
     private async enable(declaration: PluginMcpDeclaration) {
         const existing = this.plugins.get(declaration.id);
-        if (existing?.enabled && existing.version === declaration.version && existing.tools.length === declaration.mcp.tools.length) {
-            return; // 已注册且未变,跳过(避免重复注册抛错)
-        }
         const firstParty = KNOWN_FIRST_PARTY[declaration.id];
         if (!firstParty) {
             // 第三方远程插件:MCP 执行需显式授权,未授权仅记录、不注册工具
             logger.warn(`插件 ${declaration.id} 的 MCP 执行未获授权(非官方/本地白名单),仅注册前端节点`);
             this.plugins.set(declaration.id, { id: declaration.id, version: declaration.version, enabled: false, firstParty: false, tools: declaration.mcp.tools, handlers: {} });
             return;
+        }
+        if (existing?.enabled && existing.version === firstParty.version) {
+            return; // 本地版本权威；滞后的浏览器声明不应触发每轮重载。
         }
         if (firstParty.version !== declaration.version) {
             logger.warn(`插件 ${declaration.id} MCP 模块版本(${firstParty.version}) 与声明(${declaration.version})不一致,以本地模块为准`);
@@ -243,46 +259,61 @@ export class PluginMcpRegistry {
         if (mod.id !== declaration.id) throw new Error(`MCP 模块 id 不匹配: ${mod.id} != ${declaration.id}`);
         const handlers = mod.createHandler(this.context);
         const plugin: RegisteredPlugin = { id: declaration.id, version: mod.version, enabled: true, firstParty: true, tools: mod.tools, handlers };
-        this.plugins.set(declaration.id, plugin);
         this.registerTools(plugin);
+        this.plugins.set(declaration.id, plugin);
     }
 
     private registerTools(plugin: RegisteredPlugin) {
-        for (const tool of plugin.tools) {
+        // Compile before changing served tools: malformed declarations must not
+        // hide the old working tools or leave an enabled unvalidated callback.
+        const prepared = plugin.tools.flatMap((tool) => {
             const handler = plugin.handlers[tool.id];
-            if (!handler) continue;
-            const entry = (this.server as unknown as { _registeredTools?: Record<string, { enabled: boolean }> })._registeredTools?.[tool.id];
-            if (entry) {
-                entry.enabled = true; // 已存在(曾注册后隐藏),直接重新启用
+            if (!handler) return [];
+            const entry = this.registeredTools.get(tool.id);
+            if (entry && entry.ownerId !== plugin.id) throw new Error(`MCP tool id already owned: ${tool.id}`);
+            const schemaKey = JSON.stringify(tool.inputJsonSchema);
+            const compiled = entry?.schemaKey === schemaKey ? undefined : compilePluginInputSchema(tool.inputJsonSchema);
+            return [{ tool, handler, schemaKey, compiled }];
+        });
+        const activeIds = new Set(prepared.map(({ tool }) => tool.id));
+        for (const [id, entry] of this.registeredTools) {
+            if (entry.ownerId === plugin.id && !activeIds.has(id) && entry.handle.enabled) entry.handle.disable();
+        }
+        for (const { tool, handler, schemaKey, compiled } of prepared) {
+            const entry = this.registeredTools.get(tool.id);
+            if (entry && !compiled) {
+                // Stable dispatch updates the handler without overwriting the
+                // registration-time Backend observability wrapper.
+                entry.handler = handler;
+                entry.handle.update({ title: tool.name, description: tool.description, annotations: (tool.annotations ?? {}) as RegisteredTool["annotations"], enabled: true });
                 continue;
             }
-            const shape = jsonSchemaToZodShape(tool.inputJsonSchema);
-            this.server.registerTool(tool.id, {
+            // SDK update(paramsSchema) only accepts a raw shape and constructs
+            // a new stripping object. Use its documented remove/register APIs
+            // when the full root schema changes, preserving conditions/meta.
+            entry?.handle.remove();
+            const current = { ownerId: plugin.id, schemaKey, handler, validateInput: compiled!.validateInput } as RegisteredPluginTool;
+            current.handle = this.server.registerTool(tool.id, {
                 title: tool.name,
                 description: tool.description,
-                inputSchema: shape,
+                inputSchema: compiled!.inputSchema,
                 ...(tool.annotations ? { annotations: tool.annotations as never } : {}),
             }, async (input: Record<string, unknown>) => {
-                const result = await handler(input, this.context);
+                current.validateInput(input);
+                const result = await current.handler(input, this.context);
                 return { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result) }] };
             });
+            this.registeredTools.set(tool.id, current);
         }
-        this.server.sendToolListChanged();
     }
 
     private unregister(id: string) {
         const plugin = this.plugins.get(id);
-        if (!plugin) return;
+        if (!plugin?.enabled) return;
         plugin.enabled = false;
-        // MCP SDK 无 removeTool:通过 enabled 标志隐藏工具
-        const registered = (this.server as unknown as { _registeredTools?: Record<string, { enabled: boolean }> })._registeredTools;
-        if (registered) {
-            for (const tool of plugin.tools) {
-                const entry = registered[tool.id];
-                if (entry) entry.enabled = false;
-            }
+        for (const entry of this.registeredTools.values()) {
+            if (entry.ownerId === id && entry.handle.enabled) entry.handle.disable();
         }
-        this.server.sendToolListChanged();
     }
 
     /** 当前已注册插件与工具清单(供调试/状态查询)。 */
@@ -293,50 +324,9 @@ export class PluginMcpRegistry {
             enabled: plugin.enabled,
             firstParty: plugin.firstParty,
             tools: plugin.tools.map((tool) => {
-                const registered = (this.server as unknown as { _registeredTools?: Record<string, { enabled: boolean }> })._registeredTools?.[tool.id];
-                return { id: tool.id, name: tool.name, registered: Boolean(registered), enabled: Boolean(registered?.enabled) };
+                const registered = this.registeredTools.get(tool.id);
+                return { id: tool.id, name: tool.name, registered: Boolean(registered?.ownerId === plugin.id), enabled: Boolean(registered?.ownerId === plugin.id && registered.handle.enabled) };
             }),
         }));
-    }
-}
-
-// ---- JSON Schema -> Zod raw shape 转换(支持常见子集) ----
-function jsonSchemaToZodShape(schema: Record<string, unknown>): ZodRawShape {
-    const props = (schema.properties as Record<string, unknown> | undefined) || {};
-    const required = Array.isArray(schema.required) ? (schema.required as string[]) : [];
-    const shape: ZodRawShape = {};
-    for (const [key, value] of Object.entries(props)) {
-        const zodType = jsonTypeToZod(value);
-        shape[key] = required.includes(key) ? zodType : zodType.optional();
-    }
-    return shape;
-}
-
-function jsonTypeToZod(node: unknown): ZodTypeAny {
-    if (!node || typeof node !== "object") return z.any();
-    const spec = node as Record<string, unknown>;
-    if (Array.isArray(spec.enum) && spec.enum.length) return z.enum(spec.enum.map(String) as [string, ...string[]]);
-    if (Array.isArray(spec.oneOf)) {
-        const options = (spec.oneOf as unknown[]).map(jsonTypeToZod);
-        return options.length >= 2 ? z.union(options as unknown as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]]) : (options[0] ?? z.any());
-    }
-    switch (spec.type) {
-        case "string":
-            return z.string();
-        case "number":
-        case "integer":
-            return z.coerce.number();
-        case "boolean":
-            return z.boolean();
-        case "array": {
-            const item = spec.items ? jsonTypeToZod(spec.items) : z.any();
-            return z.array(item);
-        }
-        case "object":
-            // JSON Schema 默认 additionalProperties=true,故对象需 passthrough,
-            // 否则 Zod 默认 strip 会丢弃 patch/params 等开放字段。
-            return z.object(jsonSchemaToZodShape(spec)).passthrough();
-        default:
-            return z.any();
     }
 }

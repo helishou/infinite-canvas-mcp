@@ -21,13 +21,15 @@ const REFERENCE_ROLE_LABELS: Record<string, string> = {
 };
 import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
+import { applyH3GlobalSettings } from "../services/h3-global-settings";
 import { inferReferenceRole, refsForSegment, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
-import { addStoryboardShot, assignStoryboardShotRef, H3_STORYBOARD_MIN_DURATION, insertStoryboardShotAfter, isStoryboardModeEnabled, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences } from "../services/h3-storyboard-track";
+import { addStoryboardShot, assignStoryboardShotRef, H3_STORYBOARD_MIN_DURATION, insertStoryboardShotAfter, isStoryboardModeEnabled, moveStoryboardShotBetweenSegments, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { sameRef } from "../services/h3-compatibility";
 import { H3_RUNTIME_REF_LIMITS, normalizeDroppedH3Ref, readCharacterGroupFromDrop } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
 import { H3ClipCard } from "./H3ClipCard";
 import { h3ThemeVars } from "../h3-theme";
+import { h3Label, useH3Locale } from "../h3-locale";
 
 function newClipId() {
     const randomUUID = typeof globalThis.crypto?.randomUUID === "function" ? globalThis.crypto.randomUUID.bind(globalThis.crypto) : undefined;
@@ -55,12 +57,14 @@ type H3TimelineProps = {
 };
 
 export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEditRef, onRequestReplaceRef, onRequestPickRef, onRequestPickStoryboardShot, pickingShotKey, onSegmentChange, pickingKey, onPlayAll, fmt }: H3TimelineProps) {
+    const locale = useH3Locale();
     const compactMedia = ctx.scale < 0.2;
     const trackScrollRef = useRef<HTMLDivElement | null>(null);
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
     const pendingScrollIdRef = useRef<string | null>(null);
     const restoredRef = useRef(false);
-    const scrollPersistRafRef = useRef<number | null>(null);
+    const scrollPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingScrollLeftRef = useRef(0);
     const [storyboardResize, setStoryboardResize] = useState<{ segmentId: string; index: number; leftDuration: number } | null>(null);
     const storyboardResizeRef = useRef<{ segmentId: string; index: number; leftDuration: number; startX: number; startDuration: number; pairDuration: number } | null>(null);
     // 时间轴右键菜单（两种 kind）：
@@ -302,27 +306,20 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     for (let t = 0; t <= containerSeconds + 0.0001; t += tickInterval) {
         tickPositions.push(Math.round(t * 10) / 10);
     }
-    // 末端对齐：最后一个刻度距离容器右边缘 > 2s 时再加一个末端刻度
+    // 末端对齐：距离最后刻度至少 2 秒时补一个末端刻度。
     const lastTick = tickPositions[tickPositions.length - 1] ?? 0;
-    if (containerSeconds - lastTick > 2 && lastTick + 5 > containerSeconds + 0.0001) {
-        // 上面的循环已经跳过了末端 5s 倍数，但 0..containerSeconds 之间本应该有刻度
-        // 实际上 tickPositions 一直会到 lastTick ≤ containerSeconds 但最后一个 5s 倍数 > containerSeconds 时不加入
-        // 比如 containerSeconds=22, lastTick=20, 20+5=25>22 — 22 距离 lastTick 2s 不加末端
-        // 比如 containerSeconds=42, lastTick=40, 40+5=45>42, 42 距离 lastTick 2s 不加末端
-    }
     if (containerSeconds - lastTick >= 2 && lastTick + tickInterval > containerSeconds + 0.0001) {
         tickPositions.push(Math.round(containerSeconds * 10) / 10);
     }
     const majorTicks = tickPositions.map((t) => ({ time: t, left: t * 100 }));
-    const minorTicks: Array<{ left: number }> = [];
-
-    // 节流持久化时间轴滚动位置，刷新后可恢复（避免每次 onScroll 都 updateMetadata）
+    // DOM 滚动实时发生；只在停下后保存个人视图，避免逐帧重渲染整个工作台。
     const persistScroll = useCallback((left: number) => {
-        if (scrollPersistRafRef.current != null) return;
-        scrollPersistRafRef.current = requestAnimationFrame(() => {
-            scrollPersistRafRef.current = null;
-            ctx.updateMetadata({ timelineScrollLeft: Math.round(left) });
-        });
+        pendingScrollLeftRef.current = left;
+        if (scrollPersistTimerRef.current) clearTimeout(scrollPersistTimerRef.current);
+        scrollPersistTimerRef.current = setTimeout(() => {
+            scrollPersistTimerRef.current = null;
+            ctx.updateMetadata({ timelineScrollLeft: Math.round(pendingScrollLeftRef.current) });
+        }, 180);
     }, [ctx]);
     // 把时间轴滚动到指定 clip：使其右边缘与可见区最右侧对齐（右侧对齐该 clip 最右侧）
     // 整个时间线（Ruler+Video+Refs）共用单一滚动容器，无需跨容器同步
@@ -357,7 +354,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     // 卸载时清理 rAF，避免内存泄漏或已卸载组件的状态更新
     useEffect(() => {
         return () => {
-            if (scrollPersistRafRef.current != null) cancelAnimationFrame(scrollPersistRafRef.current);
+            if (scrollPersistTimerRef.current) clearTimeout(scrollPersistTimerRef.current);
         };
     }, []);
     const startRefDrag = (event: React.DragEvent<HTMLDivElement>) => {
@@ -436,12 +433,20 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             // 没落到具体 cell，targetIndex 留 -1 表示"追加到末尾"
         }
         if (!target) {
+            // 横向滚动发生在祖先 .minimax-tracks-scroll 上（.minimax-ref-row 自己 overflow:hidden），
+            // 且 ref 内容还要减去左侧固定轨道槽的偏移；直接用 ref-row 的 scrollLeft/clientX
+            // 会在长时间轴上算出完全错误的时间，把素材落到别的 Clip 上。
+            const content = refContentRef.current;
             const track = event.currentTarget as HTMLDivElement;
-            const rect = track.getBoundingClientRect();
-            // 内容坐标 = 已滚动偏移 + 鼠标在可见区内偏移；每单位 100px
-            const contentX = track.scrollLeft + (event.clientX - rect.left);
+            const scroller = track.closest<HTMLElement>(".minimax-tracks-scroll") || track;
+            const rect = (content || track).getBoundingClientRect();
+            // 内容坐标 = 已滚动偏移 + 鼠标在内容内的偏移；每单位 100px
+            const contentX = scroller.scrollLeft + (event.clientX - rect.left);
             const time = Math.max(0, Math.min(total, contentX / 100));
             target = segments.find((item) => time >= Number(item.start || 0) && time < Number(item.start || 0) + Math.max(0.5, Number(item.duration || 1))) || selected;
+            // 按位置推算只允许用于「确实没落在任何 Clip 网格上」的情况；
+            // 落在某个 ref-grid 上却没解析出 segmentId 时必须放弃，不能猜一个 Clip。
+            if (target && (clipEl || gridEl)) return;
         }
         if (!target) return;
         const mode = String(target.mode || target.taskMode || "ref2va");
@@ -507,8 +512,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     }, [dropTargetKey, clearDropTarget]);
     // 新建 Clip：继承基准 Clip 的设置（模式/提示词外的一切运行配置），内容清空。
     const buildClipAfter = (basis?: H3Segment) => {
-        const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, referenceBindings, storyboardModeEnabled, storyboardDurations, storyboardShots, ...settings } = basis || ({} as H3Segment);
-        return {
+        const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, referenceBindings, h3CharacterGroups, storyboardModeEnabled, storyboardDurations, storyboardShots, ...settings } = basis || ({} as H3Segment);
+        return applyH3GlobalSettings({
             ...settings,
             id: newClipId(),
             prompt: defaultPrompt,
@@ -517,11 +522,9 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             progress: 0,
             result: "",
             results: [],
-            refs: { image: [], video: [], audio: [] },
-            refItems: [],
             referenceBindings: [],
             runtimeTaskId: "",
-        } as H3Segment;
+        } as H3Segment, ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {});
     };
     // 在 index 处插入新 Clip 并选中：compactSegmentStarts 会重排各 Clip 的 start；
     // pendingScrollIdRef 让 DOM 提交后把时间轴滚到新 Clip 最右侧。
@@ -596,7 +599,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                 }}
                 className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isAddSlot ? "is-add-slot" : ""} ${pickingKey === `${segment.id}:${refIndex}` ? "is-picking" : ""} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""} ${overLimit ? "is-over-limit" : ""} ${dropTargetKey === `${segment.id}:${refIndex}` ? "is-drop-target" : ""}`}
                 title={ref ? `双击编辑参考素材职责${overLimit ? `（已超出 H3 运行上限：图片最多 ${H3_RUNTIME_REF_LIMITS.image} 张、视频/音频最多 ${H3_RUNTIME_REF_LIMITS.video} 个，运行会报错）` : ""}` : pickingKey === `${segment.id}:${refIndex}` ? "在画布上点选节点作为参考（Esc 取消）" : "点击进入画布选节点模式，挑一个节点作为参考（也可直接拖素材进来）"}
-            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-role" title="参考职责">{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
+            >{ref ? <><div className="minimax-ref-media">{ref.type === "video" ? compactMedia ? <H3Icon name="clapperboard" /> : <video src={ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url} muted playsInline preload="metadata" draggable={false} /> : ref.type === "image" ? <img src={ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url} alt={ref.name} draggable={false} /> : <span>{ref.name}</span>}</div><span className="minimax-ref-role" title="参考职责">{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
         })}</div>;
     };
     const renderStoryboardTrack = (segment: H3Segment) => {
@@ -630,7 +633,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                     draggable
                     style={{ left: `${start * 100}px`, width: `${imageWidth}px` }}
                     title={`${item.ref?.name || `分镜 ${index + 1}`} · ${item.duration.toFixed(2)} 秒 · ${item.ref ? "双击编辑参考素材职责" : "单击进入画布选节点，为该分镜绑定参考图"} · 右键插入/移除`}
-                    onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-h3-storyboard", item.id); }}
+                    onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-h3-storyboard", item.id); event.dataTransfer.setData("application/x-h3-storyboard-source", segment.id); }}
                     onDragOver={(event) => {
                         if (event.dataTransfer.types.includes("application/x-h3-storyboard")) { event.preventDefault(); event.stopPropagation(); return; }
                         // 空分镜接受外部图片素材拖入直接绑定
@@ -639,17 +642,31 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                     onDrop={(event) => {
                         const sourceId = event.dataTransfer.getData("application/x-h3-storyboard");
                         if (sourceId) {
-                            if (sourceId === item.id) return;
                             event.preventDefault();
                             event.stopPropagation();
+                            const sourceSegmentId = event.dataTransfer.getData("application/x-h3-storyboard-source");
+                            if (sourceSegmentId && sourceSegmentId !== segment.id) {
+                                const sourceSegment = segments.find((candidate) => candidate.id === sourceSegmentId);
+                                if (sourceSegment) {
+                                    const moved = moveStoryboardShotBetweenSegments(sourceSegment, segment, sourceId, item.id);
+                                    ctx.updateMetadata({ segments: segments.map((candidate) => candidate.id === sourceSegmentId ? moved.source : candidate.id === segment.id ? moved.target : candidate), selectedSegmentId: segment.id });
+                                    void syncStoryboardPrompt(ctx, moved.source, sourceSegment);
+                                    void syncStoryboardPrompt(ctx, moved.target, segment);
+                                    return;
+                                }
+                            }
+                            if (sourceId === item.id) return;
                             onSegmentChange(reorderStoryboardShots(segment, sourceId, item.id));
                             return;
                         }
+                        // 已绑定的分镜卡片也要吞掉 Ref 拖放：否则事件冒泡到 ref-row 的
+                        // addRef，会按光标 X 坐标回退到「时间轴位置推算目标 Clip」，
+                        // 素材就被落到光标附近的另一个 Clip 上（错位）。
+                        event.preventDefault();
+                        event.stopPropagation();
                         if (item.ref) return;
                         const dropped = normalizeDroppedH3Ref(event);
                         if (!dropped || dropped.type !== "image") return;
-                        event.preventDefault();
-                        event.stopPropagation();
                         onSegmentChange(assignStoryboardShotRef(segment, item.id, dropped));
                     }}
                     onClick={(event) => {
@@ -666,7 +683,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                         onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setTimelineMenu({ kind: "storyboard", segmentId: segment.id, x: event.clientX, y: event.clientY, afterId: item.id, index }); }}
                     >
                         <div className="minimax-storyboard-card-visual">
-                            {item.ref ? <img src={item.ref.url} alt={item.ref.name} draggable={false} /> : <div className="minimax-storyboard-placeholder">分镜 {index + 1} · 单击绑图</div>}
+                            {item.ref ? <img src={item.ref.storageKey ? ctx.mediaUrl(item.ref.storageKey) : item.ref.url} alt={item.ref.name} draggable={false} /> : <div className="minimax-storyboard-placeholder">分镜 {index + 1} · 单击绑图</div>}
                             {index > 0 ? <span className="minimax-storyboard-time" title="切镜点 · 前序分镜累计时长">{start.toFixed(2)}s</span> : null}
                             {item.ref ? <span className="minimax-storyboard-role" style={{ cursor: "default" }}>分镜 {index + 1}</span> : null}
                             <button type="button" className="minimax-storyboard-remove" title="移除分镜" onClick={(event) => { event.stopPropagation(); onSegmentChange(removeStoryboardShot(segment, item.id)); }} onDoubleClick={(event) => event.stopPropagation()}>×</button>
@@ -792,8 +809,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         <div className="minimax-edit-timeline">
         <div className="minimax-timeline-controls"><button type="button" title="连续播放全部 Clip" onClick={onPlayAll}><H3Icon name="play" /></button></div>
         <div className="minimax-left-labels">
-            <div className="minimax-video-label">Video</div>
-            <div className="minimax-ref-label">Refs</div>
+            <div className="minimax-video-label">{h3Label(locale, "video")}</div>
+            <div className="minimax-ref-label">{h3Label(locale, "references")}</div>
         </div>
         <div className="minimax-ruler-row" style={{ width: trackWidth }}>
             <div ref={rulerInnerRef} style={{ width: trackWidth }}>

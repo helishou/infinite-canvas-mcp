@@ -7,6 +7,10 @@ export { textTargetSchema };
 export type CanvasTextTarget = z.infer<typeof textTargetSchema>;
 export const textKey = (target: CanvasTextTarget) => JSON.stringify([target.nodeId || "", target.segmentId || "", target.field, ...(target.textItemId ? [target.textItemId] : [])]);
 
+function isEditableTextNode(node: Record<string, unknown>, metadata: Record<string, unknown>): boolean {
+    return node.type === "text" || (node.type === "config" && metadata.smart === true && metadata.generationMode === "text");
+}
+
 export function readText(project: Record<string, unknown>, target: CanvasTextTarget): string {
     if (!target.nodeId) {
         if (target.field !== "globalPrompt" || target.segmentId || target.textItemId) throw new Error("项目级协作文本仅支持 globalPrompt");
@@ -16,7 +20,7 @@ export function readText(project: Record<string, unknown>, target: CanvasTextTar
     if (!node) throw new Error(`找不到节点：${target.nodeId}`);
     const metadata = (node.metadata || {}) as Record<string, unknown>;
     if (target.textItemId) {
-        if (target.field !== "content" || target.segmentId || node.type !== "text") throw new Error("文本项只支持 content");
+        if (target.field !== "content" || target.segmentId || !isEditableTextNode(node, metadata)) throw new Error("文本项只支持 content");
         const item = (metadata.texts as Array<Record<string, unknown>> || []).find((item) => item.id === target.textItemId);
         if (!item) throw new Error(`找不到文本项：${target.textItemId}`);
         return String(item.content || "");
@@ -27,7 +31,7 @@ export function readText(project: Record<string, unknown>, target: CanvasTextTar
         if (!segment) throw new Error(`找不到 Clip：${target.segmentId}`);
         return String(segment.prompt || "");
     }
-    if (target.field === "globalPrompt" || (target.field === "content" && node.type !== "text")) throw new Error("该字段不是可协作文本");
+    if (target.field === "globalPrompt" || (target.field === "content" && !isEditableTextNode(node, metadata))) throw new Error("该字段不是可协作文本");
     return String(metadata[target.field] || "");
 }
 
@@ -54,12 +58,13 @@ export function editedTextTargets(operation: CanvasOperation, project: Record<st
     if (operation.type !== "update_node") return [];
     const node = (project.nodes as Array<Record<string, unknown>> || []).find((node) => node.id === operation.id);
     const keys = new Set([...Object.keys(operation.metadata as object || {}), ...(operation.metadataDelete as string[] || [])]);
-    const targets: CanvasTextTarget[] = (["prompt", "composerContent", ...(node?.type === "text" ? ["content"] : [])] as CanvasTextTarget["field"][]).filter((field) => keys.has(field)).map((field) => ({ nodeId: String(operation.id), field }));
+    const editableText = node ? isEditableTextNode(node, (node.metadata || {}) as Record<string, unknown>) : false;
+    const targets: CanvasTextTarget[] = (["prompt", "composerContent", ...(editableText ? ["content"] : [])] as CanvasTextTarget["field"][]).filter((field) => keys.has(field)).map((field) => ({ nodeId: String(operation.id), field }));
     if (keys.has("segments")) {
         const segments = (node?.metadata as { segments?: Array<{ id: string }> } | undefined)?.segments || [];
         targets.push(...segments.map((segment): CanvasTextTarget => ({ nodeId: String(operation.id), segmentId: segment.id, field: "prompt" })));
     }
-    if (node?.type === "text" && keys.has("texts")) {
+    if (editableText && node && keys.has("texts")) {
         const texts = (node.metadata as { texts?: Array<{ id: string }> })?.texts || [];
         targets.push(...texts.map((item): CanvasTextTarget => ({ nodeId: String(operation.id), textItemId: item.id, field: "content" })));
     }

@@ -620,7 +620,7 @@ export class BackendClient {
     return data.task;
   }
 
-  async resolveH3Confirmation(id: string, request: { action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean }): Promise<RuntimeTask> {
+  async resolveH3Confirmation(id: string, request: { action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> }): Promise<RuntimeTask> {
     const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(h3ConfirmationPath(id), request);
     if (!data.task) throw new Error(`backend H3 confirmation returned no task: ${id}`);
     return data.task;

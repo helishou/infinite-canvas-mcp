@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
 import type { ResolvedConfig } from "../config.js";
 import type { RuntimeTask } from "../db.js";
@@ -26,6 +27,7 @@ export type CanvasTextGenerationInput = {
     references?: CanvasTextReference[];
     count?: number;
     params?: Record<string, unknown>;
+    loopOutput?: CanvasGenerationCommand["loopOutput"];
     clientTaskId?: string;
     resultPolicy?: "replace-active" | "append";
 };
@@ -286,7 +288,7 @@ export class CanvasTextDispatcher {
         const targetTextNodeId = String(input.params?.targetTextNodeId || (
             source.type === "text" && sourceMetadata.generationEngine === "backend" ? input.nodeId : ""
         ));
-        if ((input.resultPolicy || "replace-active") === "replace-active") {
+        if (!input.loopOutput && (input.resultPolicy || "replace-active") === "replace-active") {
             for (const id of previousIds) if (id !== targetTextNodeId && nodes.some((node) => String(node.id || "") === id)) operations.push({ type: "delete_node", id });
         }
         const textItems = contents.map((content) => ({ id: `text-value-${crypto.randomUUID()}`, status: "success", content }));
@@ -296,7 +298,8 @@ export class CanvasTextDispatcher {
                 textCount: contents.length, texts: textItems, primaryTextId: textItems[0].id, source: "Backend canvas text dispatcher",
             };
             operations.push({ type: "update_node", id: targetTextNodeId, metadata: targetTextNodeId === sourceNodeId
-                ? { ...resultMetadata, primaryTextNodeId: targetTextNodeId, generatedTextResultIds: [targetTextNodeId], generationTaskId: taskId }
+                ? { ...resultMetadata, primaryTextNodeId: targetTextNodeId,
+                    generatedTextResultIds: input.loopOutput ? [...new Set([...previousIds, targetTextNodeId])] : [targetTextNodeId], generationTaskId: taskId }
                 : resultMetadata, metadataDelete: ["runtimeTaskId", "errorDetails"] });
             if (targetTextNodeId !== sourceNodeId) operations.push({ type: "update_node", id: sourceNodeId,
                 metadata: { status: "success", primaryTextNodeId: targetTextNodeId, generatedTextResultIds: [targetTextNodeId], generationTaskId: taskId },

@@ -14,7 +14,7 @@ const asset = (label = "书房") => ({
     url: "/media/image%3Amissing",
 });
 
-test("批量同步重复 assetId 保持输入顺序与后项覆盖语义", (t) => {
+test("批量写入重复 assetId 只提交最后一个资产版本", (t) => {
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());
     db.createCanvasProject({ id: "p", nodes: [], connections: [] });
@@ -26,9 +26,9 @@ test("批量同步重复 assetId 保持输入顺序与后项覆盖语义", (t) =
     ]);
 
     assert.equal(assets.length, 2);
-    assert.deepEqual(assets.map((item) => item.label), ["书房", "另一个 Clip 的局部名称"]);
-    assert.deepEqual(assets.map((item) => item.role), ["scene", "prop"]);
-    assert.deepEqual(service.monitor("p").assets, [{ assetId: "scene", attempts: 2, changed: 2 }]);
+    assert.deepEqual(assets.map((item) => item.label), ["另一个 Clip 的局部名称", "另一个 Clip 的局部名称"]);
+    assert.deepEqual(assets.map((item) => item.role), ["prop", "prop"]);
+    assert.deepEqual(service.monitor("p").assets, [{ assetId: "scene", attempts: 1, changed: 1 }]);
     assert.deepEqual(service.list("p").map((item) => ({ id: item.id, label: item.label, role: item.role, tags: item.tags })), [
         { id: "scene", label: "另一个 Clip 的局部名称", role: "prop", tags: ["other"] },
     ]);

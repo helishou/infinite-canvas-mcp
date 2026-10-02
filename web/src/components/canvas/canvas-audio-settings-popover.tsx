@@ -7,7 +7,9 @@ import { AudioSettingsPanel } from "@/components/audio-settings-panel";
 import { audioFormatLabel, audioSpeedLabel, audioVoiceLabel } from "@/lib/audio-generation";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import type { AiConfig } from "@/stores/use-config-store";
+import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, type AiConfig } from "@/stores/use-config-store";
+import { fetchWorkflowDetail, isWorkflowAudioField, type WorkflowDetail } from "@/services/api/workflows";
+import { reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
 
 export type CanvasAudioSettingKey = "audioVoice" | "audioFormat" | "audioSpeed" | "audioInstructions";
 
@@ -16,14 +18,38 @@ type CanvasAudioSettingsPopoverProps = {
     onConfigChange: (key: CanvasAudioSettingKey, value: string) => void;
     buttonClassName?: string;
     placement?: "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
+    // 与图像设置面板一致：选中本地 ComfyUI 音频工作流时，把工作流的非 audio / 非 prompt
+    // 自定义字段渲染到面板顶部。comfyParams 存在 node.metadata，
+    // 运行时由后端 buildCanvasAudioRequest 合并进 params。
+    comfyParams?: Record<string, unknown>;
+    onComfyParamsChange?: (value: Record<string, unknown>) => void;
+    // 本次会带上的参考音频数量：决定输入场景（0 = 纯文本 / ≥1 = 参考音色克隆），从而读哪个工作流的参数。
+    referenceCount?: number;
 };
 
-export function CanvasAudioSettingsPopover({ config, onConfigChange, buttonClassName, placement = "topLeft" }: CanvasAudioSettingsPopoverProps) {
+export function CanvasAudioSettingsPopover({
+    config,
+    onConfigChange,
+    buttonClassName,
+    placement = "topLeft",
+    comfyParams,
+    onComfyParamsChange,
+    referenceCount = 0,
+}: CanvasAudioSettingsPopoverProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
+    const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
+    const workflowDetailRef = useRef<WorkflowDetail | null>(null);
+    const comfyParamsRef = useRef(comfyParams);
+    const onComfyParamsChangeRef = useRef(onComfyParamsChange);
+    comfyParamsRef.current = comfyParams;
+    onComfyParamsChangeRef.current = onComfyParamsChange;
+    // 已按哪个「模型 + 场景工作流」把参数落进节点 metadata：切换后要改用渠道配置重新铺一遍，
+    // 否则同一字段名会沿用上一个场景的值。
+    const appliedWorkflowRef = useRef("");
 
     useEffect(() => {
         if (!open) return;
@@ -32,6 +58,9 @@ export function CanvasAudioSettingsPopover({ config, onConfigChange, buttonClass
             const target = event.target;
             if (!(target instanceof Node)) return;
             if (buttonRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+            // antd 下拉挂在 body 上，点它的选项不应被当成「点外面」而关掉面板。
+            if (target instanceof Element && target.closest(".ant-select-dropdown")) return;
+            if (document.activeElement instanceof HTMLElement && panelRef.current?.contains(document.activeElement)) document.activeElement.blur();
             setOpen(false);
         };
 
@@ -46,7 +75,80 @@ export function CanvasAudioSettingsPopover({ config, onConfigChange, buttonClass
         };
     }, [open]);
 
-    const panel = open && buttonRect ? <AudioSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} /> : null;
+    // 按「本次带几段参考音频」解析该场景实际会跑的工作流（渠道模型挂多个工作流时逐场景不同），
+    // 再拉它的字段渲染到面板顶部；模型切回云端 / 无可用工作流时清空。
+    const comfyChannel = resolveModelChannel(config, config.model);
+    const isLocalCustomWorkflow = comfyChannel.kind === "comfyui";
+    const workflowName = isLocalCustomWorkflow ? resolveModelWorkflow(config, config.model, referenceCount) : "";
+
+    useEffect(() => {
+        if (!workflowName) {
+            workflowDetailRef.current = null;
+            setWorkflowDetail(null);
+            return;
+        }
+        // 面板每次打开时重新取字段，避免使用已过期的字段 ID。
+        // 必须读 ref 而不是 state：state 不在本 effect 的依赖里，闭包只会拿到首次渲染的 null。
+        if (!open && workflowDetailRef.current?.name === workflowName) return;
+        let cancelled = false;
+        fetchWorkflowDetail(workflowName)
+            .then((detail) => {
+                if (cancelled) return;
+                workflowDetailRef.current = detail;
+                setWorkflowDetail(detail);
+            })
+            .catch(() => {
+                if (cancelled) return;
+                workflowDetailRef.current = null;
+                setWorkflowDetail(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [open, workflowName]);
+
+    const customFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowAudioField(field, workflowDetail?.workflow) && !field.isPrompt);
+
+    useEffect(() => {
+        if (!workflowDetail || workflowDetail.name !== workflowName || !onComfyParamsChange) return;
+        // 换了模型或换了当前场景的工作流 → 本次以渠道配置（+字段默认值）重新铺一遍，
+        // 同名但属于上一个工作流/场景的参数不再沿用。
+        const signature = `${config.model}::${workflowName}`;
+        const workflowChanged = Boolean(appliedWorkflowRef.current && appliedWorkflowRef.current !== signature);
+        appliedWorkflowRef.current = signature;
+        // 模型设置里为当前输入场景配的参数优先于内部实现字段默认值。
+        const routedParams = resolveModelWorkflowParams(config, config.model, referenceCount);
+        const currentParams = comfyParamsRef.current;
+        const next = reconcileWorkflowParams(currentParams, customFields, routedParams, workflowChanged);
+        if (next && next !== currentParams) {
+            comfyParamsRef.current = next;
+            onComfyParamsChange(next);
+        }
+    }, [comfyParams, customFields, onComfyParamsChange, workflowDetail, workflowName, config, referenceCount]);
+
+    const panel =
+        open && buttonRect ? (
+            <AudioSettingsPortal
+                buttonRect={buttonRect}
+                panelRef={panelRef}
+                placement={placement}
+                theme={theme}
+                config={config}
+                onConfigChange={onConfigChange}
+                customFields={customFields}
+                customFieldValues={comfyParams}
+                onCustomFieldChange={
+                    onComfyParamsChange
+                        ? (id, value) => {
+                              const next = { ...(comfyParamsRef.current || {}), [id]: value };
+                              comfyParamsRef.current = next;
+                              onComfyParamsChange(next);
+                          }
+                        : undefined
+                }
+                hideStandardAudioOptions={isLocalCustomWorkflow}
+            />
+        ) : null;
 
     return (
         <>
@@ -69,6 +171,10 @@ function AudioSettingsPortal({
     theme,
     config,
     onConfigChange,
+    customFields,
+    customFieldValues,
+    onCustomFieldChange,
+    hideStandardAudioOptions,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -76,6 +182,10 @@ function AudioSettingsPortal({
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
     onConfigChange: (key: CanvasAudioSettingKey, value: string) => void;
+    customFields: Parameters<typeof AudioSettingsPanel>[0]["customFields"];
+    customFieldValues: Parameters<typeof AudioSettingsPanel>[0]["customFieldValues"];
+    onCustomFieldChange: Parameters<typeof AudioSettingsPanel>[0]["onCustomFieldChange"];
+    hideStandardAudioOptions: boolean;
 }) {
     const width = 356;
     const gap = 8;
@@ -107,7 +217,16 @@ function AudioSettingsPortal({
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
         >
-            <AudioSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" />
+            <AudioSettingsPanel
+                config={config}
+                onConfigChange={(key, value) => onConfigChange(key, value)}
+                theme={theme}
+                className="space-y-4"
+                customFields={customFields}
+                customFieldValues={customFieldValues}
+                onCustomFieldChange={onCustomFieldChange}
+                hideStandardAudioOptions={hideStandardAudioOptions}
+            />
         </div>,
         document.body,
     );

@@ -1,5 +1,6 @@
 import { characterSwapLora, defaultH3Model } from "../constants";
 import type { H3Ref, H3Segment } from "../types";
+import { refsForSegment } from "./h3-data";
 
 export function normalizeH3Model(value: unknown) {
     const model = String(value || "").trim();
@@ -20,12 +21,7 @@ export function normalizeH3Model(value: unknown) {
 
 export function compatibleH3Settings(segment: H3Segment, fallbackModel: string, fallbackLora: string, suppliedRefs: H3Ref[] = []) {
     const taskMode = String(segment.taskMode || "r2v");
-    const bucketRefs = [
-        ...(segment.refs?.image || []),
-        ...(segment.refs?.video || []),
-        ...(segment.refs?.audio || []),
-    ];
-    const segmentRefs = segment.refItems?.length ? segment.refItems : bucketRefs;
+    const segmentRefs = refsForSegment(segment);
     const refs = [...segmentRefs, ...suppliedRefs].filter((ref, index, all) => all.findIndex((item) => sameRef(item, ref)) === index);
     const hasImage = refs.some((ref) => ref.type === "image");
     const hasVideo = refs.some((ref) => ref.type === "video");

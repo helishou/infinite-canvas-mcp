@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import localforage from "localforage";
 
+// Unmocked background sync must never reach a developer's resident Backend.
+globalThis.fetch = (async () => Response.json({ ok: false, error: "isolated test: no Backend configured" }, { status: 503 })) as typeof fetch;
+
 const cache = new Map<string, unknown>();
 const writes: string[] = [];
 let failCacheWrites = false;
@@ -27,6 +30,20 @@ test("普通生成节点运行中只提交用户字段，不夹带 Backend 瞬�
     next.nodes[0].position = { x: 12, y: 18 };
     next.nodes[0].metadata = { prompt: "新", status: "success", runtimeTaskId: "", runProgress: 1, errorDetails: "旧窗口错误" };
     assert.deepEqual(diffCanvasProject(base, next), [{ type: "update_node", id: "image", patch: { position: { x: 12, y: 18 } }, metadata: { prompt: "新" } }]);
+});
+
+test("未保存项目的首个命令保存初始种子，后续命令继续使用精简基线", async () => {
+    const id = useCanvasStore.getState().createProject("creation seed");
+    useCanvasStore.getState().renameProject(id, "first edit");
+    useCanvasStore.getState().renameProject(id, "second edit");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const commands = [...buckets.get("infinite-canvas-command-outbox")!.values()].filter((value: any) => value.projectId === id).sort((a: any, b: any) => a.order - b.order) as any[];
+    assert.equal(commands.length, 2);
+    assert.equal(commands[0].base.title, "creation seed");
+    assert.equal(commands[0].base.v, undefined);
+    assert.deepEqual(commands[0].base.nodes, []);
+    assert.equal(commands[1].base.v, 1);
+    useCanvasStore.getState().deleteProjects([id]);
 });
 
 test("向既有画布批量导入新实体时生成细粒度节点和连线操作", () => {

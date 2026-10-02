@@ -54,6 +54,8 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
     const [voiceStorageKey, setVoiceStorageKey] = useState("");
     const [voiceAssetId, setVoiceAssetId] = useState("");
     const [saving, setSaving] = useState(false);
+    const [uploadingVoice, setUploadingVoice] = useState(false);
+    const [replaceImageIndex, setReplaceImageIndex] = useState<number | null>(null);
     const voiceInputRef = useRef<HTMLInputElement>(null);
     const lastCanvasImagePickRef = useRef("");
 
@@ -79,19 +81,43 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
     useEffect(() => {
         if (!canvasImagePick || canvasImagePick.id === lastCanvasImagePickRef.current) return;
         lastCanvasImagePickRef.current = canvasImagePick.id;
+        if (replaceImageIndex !== null) {
+            setImages((current) => current.map((image, index) => index === replaceImageIndex
+                ? { ...image, ...canvasImagePick.image, outfit: image.outfit, outfitDescription: image.outfitDescription, role: image.role }
+                : image));
+            setReplaceImageIndex(null);
+            return;
+        }
         setImages((current) => current.some((image) => image.storageKey && image.storageKey === canvasImagePick.image.storageKey || image.url === canvasImagePick.image.url) ? current : [...current, canvasImagePick.image]);
-    }, [canvasImagePick]);
+    }, [canvasImagePick, replaceImageIndex]);
+
+    useEffect(() => {
+        if (!selectingCanvasImage && replaceImageIndex !== null && (!canvasImagePick || canvasImagePick.id === lastCanvasImagePickRef.current)) {
+            setReplaceImageIndex(null);
+        }
+    }, [canvasImagePick, replaceImageIndex, selectingCanvasImage]);
 
     const handleVoiceUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         e.target.value = "";
         if (!file) return;
-        const result = await uploadMediaFile(file, "audio", "library");
-        setVoiceUrl(result.url);
-        setVoiceName(file.name);
-        setVoiceStorageKey(result.storageKey || "");
-        setVoiceAssetId("");
-    }, []);
+        setUploadingVoice(true);
+        try {
+            const result = await uploadMediaFile(file, "audio", "library", { characterVoiceCompression: true });
+            setVoiceUrl(result.url);
+            setVoiceName(result.compression ? `${file.name.replace(/\.[^.]+$/, "")}-24k-64kbps.mp3` : file.name);
+            setVoiceStorageKey(result.storageKey || "");
+            setVoiceAssetId("");
+            if (result.compression) message.success(t("canvas.character.voiceCompressed", { before: Math.round(file.size / 1024), after: Math.round(result.bytes / 1024) }));
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            message.error(reason === "CHARACTER_VOICE_COMPRESSION_UNAVAILABLE"
+                ? t("canvas.character.voiceBackendRestartRequired")
+                : t("canvas.character.voiceUploadFailed", { reason }));
+        } finally {
+            setUploadingVoice(false);
+        }
+    }, [t]);
 
     const updateImage = (idx: number, patch: Partial<CharacterImage>) => {
         setImages((current) => current.map((image, i) => (i === idx ? { ...image, ...patch } : image)));
@@ -114,8 +140,9 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
     };
 
     const handleSave = () => {
-        if (!images.length) {
-            message.error(t("assets.characterRequireOneImage"));
+        if (uploadingVoice) return;
+        if (!images.length && !hasCharacterVoiceSource({ url: voiceUrl, storageKey: voiceStorageKey, assetId: voiceAssetId })) {
+            message.error(t("assets.characterRequireReference"));
             return;
         }
         setSaving(true);
@@ -124,7 +151,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
             characterName: title.trim(),
             characterDescription: description.trim(),
             characterImages: images.map((image) => ({ ...image, role: image.role || "character_turnaround" })),
-            characterPrimaryIndex: Math.min(primaryIndex, images.length - 1),
+            characterPrimaryIndex: images.length ? Math.min(primaryIndex, images.length - 1) : 0,
             characterVoiceUrl: voiceUrl,
             characterVoiceName: resolveCharacterVoiceName(voiceName),
             characterVoiceDescription: voiceDescription.trim(),
@@ -226,6 +253,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
                                     <Button size="small" onClick={() => setPrimaryIndex(idx)} type={idx === primaryIndex ? "primary" : "default"}>
                                         {idx === primaryIndex ? t("canvas.character.primary") : t("canvas.character.setPrimary")}
                                     </Button>
+                                    <Button size="small" icon={<ImagePlus className="size-3.5" />} title={t("canvas.character.replaceImageFromCanvas")} aria-label={t("canvas.character.replaceImageFromCanvas")} onClick={() => { setReplaceImageIndex(idx); onPickCanvasImage(); }} />
                                     <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removeImage(idx)} />
                                 </div>
                             </div>
@@ -235,7 +263,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
             </div>
             <div className="mt-6 flex justify-end gap-2">
                 <Button onClick={onClose}>{t("common.cancel")}</Button>
-                <Button type="primary" icon={<Save className="size-3.5" />} loading={saving} onClick={handleSave}>
+                <Button type="primary" icon={<Save className="size-3.5" />} loading={saving || uploadingVoice} onClick={handleSave}>
                     {t("common.save")}
                 </Button>
             </div>

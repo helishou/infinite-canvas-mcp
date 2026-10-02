@@ -3,7 +3,9 @@ import type { H3Ref, H3Segment, H3StoryboardShot } from "../types";
 import { readH3PromptSection, replaceH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import type { H3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import { stripDuplicateTransition } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
+import { orderStoryboardReferencesFirst, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 import { sameRef } from "./h3-compatibility";
+import { storyboardShotLabelMarkers } from "./h3-storyboard-markers";
 import { inferReferenceRole, refsForSegment, withSegmentRefs } from "./h3-data";
 
 export const H3_STORYBOARD_MIN_DURATION = 0.5;
@@ -15,6 +17,14 @@ export function supportsStoryboardTrack(segment: H3Segment) {
 
 export function storyboardRefsForSegment(segment: H3Segment) {
     return refsForSegment(segment).filter((ref) => ref.type === "image" && inferReferenceRole(ref) === "storyboard");
+}
+
+export function alignStoryboardReferenceOrder(segment: H3Segment) {
+    const refs = refsForSegment(segment);
+    const ordered = orderStoryboardReferencesFirst(refs,
+        (segment.storyboardShots || []).flatMap((shot) => shot.referenceBindingId ? [shot.referenceBindingId] : []),
+        (ref) => ref.bindingId, (ref) => ref.type === "image" && inferReferenceRole(ref) === "storyboard");
+    return ordered.some((ref, index) => ref.bindingId !== refs[index]?.bindingId) ? withSegmentRefs(segment, ordered) : segment;
 }
 
 export function isStoryboardModeEnabled(segment: H3Segment) {
@@ -87,11 +97,51 @@ export function removeStoryboardShot(segment: H3Segment, shotId: string) {
     const remaining = items.filter((item) => item.id !== shotId);
     const recipientId = items[targetIndex + 1]?.id || items[targetIndex - 1]?.id;
     const merged = remaining.map((item) => item.id === recipientId ? { ...item, duration: item.duration + target.duration } : item);
+    // 删分镜卡就是删这张分镜图：必须把它的引用一起摘掉。
+    // 旧实现只把 role 改成 other，素材就「从分镜轨掉进 ref 区」，用户还得再删一次。
     const refs = target.ref?.bindingId
-        ? refsForSegment(segment).map((ref) => ref.bindingId === target.ref?.bindingId ? { ...ref, role: "other" as const } : ref)
+        ? refsForSegment(segment).filter((ref) => ref.bindingId !== target.ref?.bindingId)
         : refsForSegment(segment);
-    const updated = withSegmentRefs(segment, refs);
+    const durations = { ...(segment.storyboardDurations || {}) };
+    if (target.ref?.bindingId) delete durations[target.ref.bindingId];
+    const updated = withSegmentRefs({ ...segment, storyboardDurations: durations }, refs);
     return { ...updated, storyboardModeEnabled: true, storyboardShots: shotsFromItems(merged) };
+}
+
+/**
+ * 被替换的引用曾经挂在某张分镜卡上时，把这张卡改绑到替换后的 bindingId，
+ * 卡片位置、序号与时长分配都保持不变（角色组替换这类拿不到原 bindingId 的分支走这里）。
+ */
+export function rebindStoryboardShot(segment: H3Segment, oldBindingId: string | undefined, nextBindingId: string | undefined, duration?: number): H3Segment {
+    if (!oldBindingId || !nextBindingId || oldBindingId === nextBindingId) return segment;
+    // 只改写已存下来的 storyboardShots：不再从 storyboardTrackItems 取（它会自动把未挂载的分镜
+    // 引用追加到末尾，换图后会和改绑后的原卡片重复出现一张）。
+    const stored = segment.storyboardShots;
+    if (!stored?.some((shot) => shot.referenceBindingId === oldBindingId)) return segment;
+    const storyboardShots = stored.map((shot) => shot.referenceBindingId === oldBindingId ? { ...shot, referenceBindingId: nextBindingId } : shot);
+    const storyboardDurations = { ...(segment.storyboardDurations || {}) };
+    // 替换前原分镜卡的时长由调用方带进来：引用已在前面被摘掉，这里拿不到原值。
+    const inherited = duration ?? storyboardDurations[oldBindingId];
+    if (inherited !== undefined) storyboardDurations[nextBindingId] = inherited;
+    delete storyboardDurations[oldBindingId];
+    return withSegmentRefs({ ...segment, storyboardShots, storyboardDurations }, refsForSegment(segment));
+}
+
+/**
+ * 自愈：storyboardShots 里指向已不存在 / 已不是分镜职责引用的 bindingId（旧版本替换或删除留下的
+ * 孤儿），清掉标记让这一格变成干净的「单击绑图」空卡，而不是永远读不到素材的坏卡。
+ */
+export function dropUnboundStoryboardReferences(segment: H3Segment): H3Segment {
+    const shots = segment.storyboardShots;
+    if (!shots?.length) return segment;
+    const ids = new Set(storyboardRefsForSegment(segment).flatMap((ref) => ref.bindingId ? [ref.bindingId] : []));
+    if (!shots.some((shot) => shot.referenceBindingId && !ids.has(shot.referenceBindingId))) return segment;
+    return {
+        ...segment,
+        storyboardShots: shots.map((shot) => shot.referenceBindingId && !ids.has(shot.referenceBindingId)
+            ? { id: shot.id, duration: shot.duration }
+            : shot),
+    };
 }
 
 export function removeStoryboardImageReference(segment: H3Segment, reference: H3Ref) {
@@ -137,7 +187,28 @@ export function reorderStoryboardShots(segment: H3Segment, sourceId: string, tar
     if (from < 0 || to < 0 || from === to) return segment;
     const reordered = [...storyboard];
     [reordered[from], reordered[to]] = [reordered[to], reordered[from]];
-    return { ...segment, storyboardShots: shotsFromItems(reordered) };
+    return alignStoryboardReferenceOrder({ ...segment, storyboardShots: shotsFromItems(reordered) });
+}
+
+/** Move a storyboard card (and its bound image reference) between clips. */
+export function moveStoryboardShotBetweenSegments(source: H3Segment, target: H3Segment, sourceId: string, targetId?: string) {
+    const sourceItems = storyboardTrackItems(source);
+    const sourceItem = sourceItems.find((item) => item.id === sourceId);
+    if (!sourceItem?.ref?.bindingId) return { source, target };
+    const sourceRef = sourceItem.ref;
+    const targetItems = storyboardTrackItems(target);
+    const insertionIndex = targetId ? Math.max(0, targetItems.findIndex((item) => item.id === targetId)) : targetItems.length;
+    const targetRefs = refsForSegment(target);
+    const movedRef = sourceRef;
+    const nextTargetRefs = targetRefs.some((ref) => sameRef(ref, movedRef)) ? targetRefs : [...targetRefs, movedRef];
+    const targetShot = { id: `storyboard-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, duration: sourceItem.duration, referenceBindingId: movedRef.bindingId };
+    const targetShots: H3StoryboardShot[] = [...targetItems.map(({ id, duration, referenceBindingId }) => ({ id, duration, ...(referenceBindingId ? { referenceBindingId } : {}) }))];
+    targetShots.splice(Math.min(insertionIndex, targetShots.length), 0, targetShot);
+    const nextTarget = alignStoryboardReferenceOrder(withSegmentRefs({ ...target, storyboardModeEnabled: true, storyboardShots: targetShots }, nextTargetRefs));
+    const nextSourceItems = sourceItems.filter((item) => item.id !== sourceId);
+    const nextSourceRefs = refsForSegment(source).map((ref) => ref.bindingId === sourceRef.bindingId ? { ...ref, role: "other" as const } : ref);
+    const nextSource = alignStoryboardReferenceOrder(withSegmentRefs({ ...source, storyboardModeEnabled: true, storyboardShots: shotsFromItems(nextSourceItems) }, nextSourceRefs));
+    return { source: nextSource, target: nextTarget };
 }
 
 export function swapStoryboardReferences(segment: H3Segment, sourceBindingId: string, targetBindingId: string) {
@@ -164,7 +235,44 @@ export function assignStoryboardShotRef(segment: H3Segment, shotId: string, ref:
     const storyboardShots = items.map((item) => item.id === shotId
         ? { id: item.id, duration: item.duration, referenceBindingId: bindingId }
         : { id: item.id, duration: item.duration, ...(item.ref?.bindingId ? { referenceBindingId: item.ref.bindingId } : {}) });
-    return { ...withSegmentRefs(segment, nextRefs), storyboardModeEnabled: true, storyboardShots };
+    return alignStoryboardReferenceOrder(withSegmentRefs({ ...segment, storyboardModeEnabled: true, storyboardShots }, nextRefs));
+}
+
+/** Bind a group at one storyboard card and insert its remaining frames immediately after it. */
+export function assignStoryboardShotRefs(segment: H3Segment, shotId: string, refs: H3Ref[]): H3Segment {
+    const images = refs.filter((ref, index) => ref.type === "image" && (ref.url || ref.storageKey)
+        && refs.findIndex((other) => other.type === "image" && sameRef(other, ref)) === index);
+    if (!images.length) return segment;
+    if (images.length === 1) return assignStoryboardShotRef(segment, shotId, images[0]);
+    const items = storyboardTrackItems(segment);
+    const targetIndex = items.findIndex((item) => item.id === shotId);
+    if (targetIndex < 0 || items.length + images.length - 1 > Math.max(0.5, Number(segment.duration || 1)) / H3_STORYBOARD_MIN_DURATION + 1e-6) return segment;
+    const target = items[targetIndex];
+    const newIds = images.slice(1).map(() => `storyboard-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`);
+    const expanded = items.flatMap((item, index) => index === targetIndex
+        ? [item, ...newIds.map((id) => ({ id, duration: 0, ref: undefined, referenceBindingId: undefined }))]
+        : [item]);
+    const splitDuration = target.duration / images.length;
+    const durationById = new Map<string, number>();
+    if (splitDuration >= H3_STORYBOARD_MIN_DURATION) {
+        items.forEach((item) => durationById.set(item.id, item.id === shotId ? splitDuration : item.duration));
+        newIds.forEach((id) => durationById.set(id, splitDuration));
+    } else {
+        const total = items.reduce((sum, item) => sum + item.duration, 0);
+        const extra = total - expanded.length * H3_STORYBOARD_MIN_DURATION;
+        expanded.forEach((item) => durationById.set(item.id, H3_STORYBOARD_MIN_DURATION + extra * (item.id === shotId || newIds.includes(item.id) ? splitDuration : item.duration) / total));
+    }
+    let updated: H3Segment = {
+        ...segment,
+        storyboardModeEnabled: true,
+        storyboardShots: expanded.map((item) => ({
+            id: item.id,
+            duration: durationById.get(item.id)!,
+            ...(item.ref?.bindingId ? { referenceBindingId: item.ref.bindingId } : {}),
+        })),
+    };
+    for (const [index, ref] of images.entries()) updated = assignStoryboardShotRef(updated, index ? newIds[index - 1] : shotId, ref);
+    return updated;
 }
 
 const PROMPT_SECTION_END = /^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|integrated_multimodal_description|storyboard_timeline):/mi;
@@ -191,7 +299,7 @@ function normalizeLegacyPictureTokens(content: string, imageRefs: H3Ref[]) {
 }
 
 function promptShotsOf(content: string, storyboardIds: Set<string>, imageRefs: H3Ref[]): { opening: string; shots: PromptShot[] } {
-    const markers = [...content.matchAll(/\[Shot\s+\d+\]/giu)];
+    const markers = storyboardShotLabelMarkers(content);
     if (!markers.length) return { opening: content.trim(), shots: [] };
     const shots = markers.map((marker, index) => {
         const start = marker.index! + marker[0].length;
@@ -361,7 +469,7 @@ function escapeRegExp(value: string) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Segment) {
+export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Segment, previous?: H3Segment) {
     if (!segment.id) return false;
     const target = { nodeId: ctx.node.id, segmentId: segment.id, field: "prompt" as const };
     const document = ctx.textDocument(target);
@@ -369,12 +477,15 @@ export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Se
         await document.flush();
         const snapshot = document.getSnapshot();
         if (!snapshot.ready || snapshot.blocked) return false;
-        const prompt = removeLegacyTimelineSection(snapshot.text);
+        const currentRefs = refsForSegment(segment);
+        const prompt = removeLegacyTimelineSection(previous
+            ? remapPictureTags(snapshot.text, refsForSegment(previous), currentRefs, (ref) => ref.bindingId, (ref) => ref.type === "image")
+            : snapshot.text);
         const enabled = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment) && storyboardTrackItems(segment).length > 0;
         const mode = String(segment.mode || segment.taskMode || "ref2va");
         const section = (mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description") as H3PromptSection;
         const sectionText = readH3PromptSection(prompt, section);
-        const refs = refsForSegment(segment);
+        const refs = currentRefs;
         const imageRefs = refs.filter((ref) => ref.type === "image");
         const normalizedSection = normalizeLegacyPictureTokens(sectionText, imageRefs);
         const activeItems = enabled ? storyboardTrackItems(segment) : [];

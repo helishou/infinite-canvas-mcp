@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commandFingerprint, concurrentCommandConflicts, type CanvasCommit } from "./collaboration.js";
+import { compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
 
 function fixture(t: TestContext) {
     const db = new BackendDatabase(":memory:");
@@ -14,6 +15,81 @@ function fixture(t: TestContext) {
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "text", nodeType: "text", metadata: { content: "甲乙" } }]);
     return db;
 }
+
+test("角色主图变更原子更新下游引用，回执/广播/历史重放一致，失败不留下半次更新", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [
+        { type: "add_node", id: "char", nodeType: "character", metadata: { characterPrimaryIndex: 0, characterImages: [{ storageKey: "image:a" }, { storageKey: "image:b" }] } },
+        { type: "add_node", id: "target", nodeType: "config", metadata: { characterReferences: { char: { imageKeys: ["image:a"], voiceEnabled: false } }, images: [{ id: "old", generationSnapshot: { references: [{ storageKey: "image:a" }] } }] } },
+        { type: "connect_nodes", fromNodeId: "char", toNodeId: "target" },
+    ]);
+    const before = db.getCanvasProject("canvas")!;
+    const operations = [{ type: "update_node", id: "char", metadata: { characterPrimaryIndex: 1 } }];
+    assert.throws(() => db.applyCanvasProjectOperations("canvas", undefined, [...operations, { type: "update_node", id: "missing" }]));
+    assert.deepEqual(db.getCanvasProject("canvas"), before);
+    let broadcast: CanvasCommit | undefined;
+    db.onCanvasCommit((commit) => { broadcast = commit; });
+    const changed = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "primary-change" });
+    assert.deepEqual(changed.operations.map((op: { type: string; id?: unknown }) => [op.type, op.id]), [["update_node", "char"], ["update_node", "target"]]);
+    const target = (changed.project.nodes as Array<Record<string, any>>).find((node) => node.id === "target")!;
+    assert.deepEqual(target.metadata.characterReferences.char, { imageKeys: ["image:b"], voiceEnabled: false });
+    assert.equal(target.metadata.images[0].generationSnapshot.references[0].storageKey, "image:a");
+    assert.deepEqual(broadcast?.operations, changed.operations);
+    const repeated = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "primary-change" });
+    assert.equal(repeated.duplicated, true);
+    assert.deepEqual(repeated.project, changed.project);
+    assert.deepEqual(repeated.operations, changed.operations);
+});
+
+test("角色形象图原位替换在同一 ops 事务刷新所有 H3 Clip 与生成输入", (t) => {
+    const db = fixture(t);
+    const characterImages = [
+        { storageKey: "image:a", url: "https://media.test/a.png", outfit: "形象" },
+        { storageKey: "image:b", url: "https://media.test/b.png", outfit: "常服" },
+    ];
+    const characterGroup = {
+        id: "group-char", characterName: "苏青璃", characterNodeId: "char", characterAssetId: "asset-char",
+        subjectId: "char", outfitEnabled: true, voiceEnabled: false,
+        outfits: [
+            { id: "outfit-a", storageKey: "image:a", url: "https://media.test/a.png", name: "形象", role: "character_turnaround", enabled: true },
+            { id: "outfit-b", storageKey: "image:b", url: "https://media.test/b.png", name: "常服", role: "character_turnaround", enabled: false },
+        ],
+    };
+    db.applyCanvasProjectOperations("canvas", undefined, [
+        { type: "add_node", id: "char", nodeType: "character", title: "苏青璃", metadata: { characterAssetId: "asset-char", characterImages, characterPrimaryIndex: 0 } },
+        { type: "add_node", id: "h3", nodeType: "minimax-h3:video", metadata: { segments: [
+            { id: "clip-a", taskMode: "ref2va", h3CharacterGroups: { "group-char": characterGroup }, results: [{ url: "https://media.test/old-output.mp4" }] },
+            { id: "clip-b", taskMode: "ref2va", h3CharacterGroups: { "group-char": characterGroup } },
+        ] } },
+    ]);
+    const operations = [{ type: "update_node", id: "char", metadata: { characterImages: [
+        { storageKey: "image:new", url: "https://media.test/new.png", outfit: "新形象" }, characterImages[1],
+    ] } }];
+    const before = db.getCanvasProject("canvas")!;
+    assert.throws(() => db.applyCanvasProjectOperations("canvas", undefined, [...operations, { type: "update_node", id: "missing" }]));
+    assert.deepEqual(db.getCanvasProject("canvas"), before);
+    let broadcast: CanvasCommit | undefined;
+    db.onCanvasCommit((commit) => { broadcast = commit; });
+    const receipt = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "replace-character-image" });
+    assert.deepEqual(receipt.operations.map((operation: { type: string; segmentId?: string }) => [operation.type, operation.segmentId || ""]), [
+        ["update_node", ""], ["update_h3_segment", "clip-a"], ["update_h3_segment", "clip-b"],
+    ]);
+    const h3 = (receipt.project.nodes as Array<Record<string, any>>).find((node) => node.id === "h3")!;
+    const segments = h3.metadata.segments as Array<Record<string, any>>;
+    for (const segment of segments) {
+        const outfits = segment.h3CharacterGroups["group-char"].outfits;
+        assert.deepEqual(outfits.map((outfit: Record<string, unknown>) => [outfit.id, outfit.storageKey, outfit.enabled]), [
+            ["outfit-a", "image:new", true], ["outfit-b", "image:b", false],
+        ]);
+        const compiled = compileReferenceSubmission(receipt.project, segment);
+        assert.deepEqual(compiled.references.filter((ref) => ref.mediaType === "image").map((ref) => ref.storageKey), ["image:new"]);
+    }
+    assert.equal(segments[0].results[0].url, "https://media.test/old-output.mp4");
+    assert.deepEqual(broadcast?.operations, receipt.operations);
+    const replay = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "replace-character-image" });
+    assert.equal(replay.duplicated, true);
+    assert.deepEqual(replay.project, receipt.project);
+});
 
 test("持久候选不改原文，重复保存不重复；采用与状态确认是同一事务", (t) => {
     const db = fixture(t);
@@ -216,4 +292,24 @@ test("批量文本按文本项 ID 编辑，另一人切换主项不改变编辑�
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { texts: [{ id: "b", content: "乙" }] } }]);
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { texts: [{ id: "a", content: "重新添加" }, { id: "b", content: "乙" }] } }]);
     assert.notEqual(db.getCanvasText("canvas", target).documentId, initial.documentId);
+});
+
+test("智能文字配置节点可编辑生成结果，且不改输入提示词", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "smart-text", nodeType: "config", metadata: {
+        smart: true, generationMode: "text", prompt: "输入提示词", composerContent: "输入提示词",
+        content: "原生成结果", texts: [{ id: "result-1", content: "原生成结果", status: "success" }], primaryTextId: "result-1",
+    } }]);
+    const target = { nodeId: "smart-text", textItemId: "result-1", field: "content" as const };
+    const initial = db.getCanvasText("canvas", target);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "text_replace", target, documentId: initial.documentId, expectedText: initial.text, text: "人工改过的结果" }]);
+    const node = (db.getCanvasProject("canvas")!.nodes as Array<{ id: string; metadata: Record<string, unknown> }>).find((item) => item.id === "smart-text")!;
+    assert.equal(node.metadata.content, "人工改过的结果");
+    assert.equal((node.metadata.texts as Array<{ content: string }>)[0].content, "人工改过的结果");
+    assert.equal(node.metadata.prompt, "输入提示词");
+    assert.equal(node.metadata.composerContent, "输入提示词");
+    assert.equal(db.getCanvasText("canvas", target).text, "人工改过的结果");
+
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "image-config", nodeType: "config", metadata: { smart: true, generationMode: "image", content: "非文字结果" } }]);
+    assert.throws(() => db.getCanvasText("canvas", { nodeId: "image-config", field: "content" }), /不是可协作文本/);
 });

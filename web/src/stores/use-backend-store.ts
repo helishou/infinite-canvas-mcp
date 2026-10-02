@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { backendHealth, discoverBackendToken, getBackendUrl } from "@/services/backend-api";
+import { backendHealth, discoverBackendToken, getBackendUrl, probeBackendBusinessApi } from "@/services/backend-api";
 import { getBackendTokenShared, setBackendToken } from "@/lib/backend-token";
 import { persistBackendConnection } from "@/lib/backend-connection";
 
@@ -9,6 +9,9 @@ type BackendStore = {
     connected: boolean;
     checking: boolean;
     error: string;
+    /** 地址能应答 /health 与 /config、但业务接口不可用（连错后台/密钥失效）。此时不置 disconnected，
+     *  以免误报"后台没启动"；横幅单独提示真实原因。 */
+    businessError: string;
     setConnection: (url: string, token?: string) => void;
     checkConnection: () => Promise<void>;
     reset: () => void;
@@ -97,6 +100,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
     connected: false,
     checking: true,
     error: "",
+    businessError: "",
 
     setConnection: (url, token) => {
         persistBackendConnection({ url: url.replace(/\/$/, ""), token: token || "" });
@@ -111,7 +115,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         if (!health.ok) {
             stopBackendEvents();
             structuredSettingsHydrated = false;
-            set({ connected: false, checking: false, error: `无法连接总后台 ${getBackendUrl()}` });
+            set({ connected: false, checking: false, businessError: "", error: `无法连接总后台 ${getBackendUrl()}` });
             return;
         }
         // 后端 /config 是 token 权威来源，连接时以后端为准刷新，避免缓存旧 token 导致 401。
@@ -119,7 +123,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         if (!discovered.ok) {
             stopBackendEvents();
             structuredSettingsHydrated = false;
-            set({ connected: false, checking: false, error: "后台可达，但连接未授权；请在连接与协作设置中检查密钥和允许的网页来源" });
+            set({ connected: false, checking: false, businessError: "", error: "后台可达，但连接未授权；请在连接与协作设置中检查密钥和允许的网页来源" });
             return;
         }
         if (discovered.ok && discovered.token && discovered.token !== get().token) {
@@ -130,7 +134,11 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
             await get().checkConnection();
             return;
         }
-        set({ connected: true, checking: true, error: "" });
+        // /health + /config 都通过还不够：旧版 canvas-agent 兼容代理（17371）同样返回 200，
+        // 却在 /canvas/* 全部 404，页面会安静地显示"素材库是空的"。业务接口探活失败时
+        // 仍保持 connected（后台确实在跑），但把真实原因挂到 businessError 上横幅显示。
+        const business = await probeBackendBusinessApi();
+        set({ connected: true, checking: true, error: "", businessError: business.detail });
         startBackendEvents(getBackendUrl(), get().token);
         if (!structuredSettingsHydrated) {
             const [{ hydrateConfigFromBackend }, { hydratePromptSourcesFromBackend }] = await Promise.all([
@@ -146,7 +154,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         }
     },
 
-    reset: () => { stopBackendEvents(); structuredSettingsHydrated = false; set({ connected: false, checking: false, error: "" }); },
+    reset: () => { stopBackendEvents(); structuredSettingsHydrated = false; set({ connected: false, checking: false, error: "", businessError: "" }); },
 }));
 
 /** 启动时自动检测总后台连接。 */

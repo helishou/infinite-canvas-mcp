@@ -1,4 +1,5 @@
 import type { CanvasProject } from "../db.js";
+import { resolveCharacterImageKeys } from "@basketikun/canvas-agent/reference-contract";
 
 export type ResolvedCanvasImageReference = {
     id: string;
@@ -198,10 +199,7 @@ function addCharacterImageReferences(node: Record<string, unknown>, referenceTar
     const targetMetadata = recordOf(referenceTarget.metadata);
     const selections = recordOf(targetMetadata.characterReferences);
     const selection = recordOf(selections[id]);
-    const primaryIndex = Math.min(Math.max(Number(metadata.characterPrimaryIndex ?? 0), 0), Math.max(images.length - 1, 0));
-    const primaryImage = images[primaryIndex];
-    const primaryKey = primaryImage ? String(primaryImage.storageKey || primaryImage.url || primaryImage.name || `image-${primaryIndex}`) : "";
-    const selectedKeys = Array.isArray(selection.imageKeys) ? new Set(selection.imageKeys.map(String)) : new Set(primaryKey ? [primaryKey] : []);
+    const selectedKeys = new Set(resolveCharacterImageKeys(metadata, selection));
     images.forEach((image, index) => {
         const key = String(image.storageKey || image.url || image.name || `image-${index}`);
         if (selectedKeys && !selectedKeys.has(key)) return;

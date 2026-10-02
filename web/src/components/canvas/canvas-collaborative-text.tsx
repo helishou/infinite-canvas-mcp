@@ -8,6 +8,7 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { canvasTextKey } from "@/lib/canvas/collaborative-text-session";
+import { unresolvedClipReferenceTokens } from "@/lib/canvas/canvas-text-reference-tags";
 import { getCanvasTextSession } from "@/services/api/canvas-text";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasSpeakerOption, CanvasTextEditorProps, CanvasTextReference } from "@/types/canvas-plugin";
@@ -421,7 +422,7 @@ class UnresolvedReferenceChip extends WidgetType {
     toDOM() {
         const span = document.createElement("span");
         const match = /^<(Subject|Picture|Video|Audio)\s+(\d+)>$/iu.exec(this.token);
-        const kind = match?.[1].toLowerCase() === "subject" ? "人物" : match ? "图片/视频/音频" : "引用";
+        const kind = match?.[1].toLowerCase() === "subject" ? "主体" : match ? "图片/视频/音频" : "引用";
         const id = match ? `${match[1]} ${match[2]}` : this.token;
         span.className = "cm-canvas-reference cm-canvas-reference-error";
         span.title = `未找到对应的${kind}引用（${id}），点击后从当前 Clip 引用中重新选择，或删除此标记`;
@@ -474,17 +475,15 @@ function removeAdjacentReference(view: EditorView, tokens: string[], direction: 
     return true;
 }
 
-function mentionExtensions(references: CanvasTextReference[], chips: boolean, preview: (url: string) => void) {
+function mentionExtensions(references: CanvasTextReference[], chips: boolean, clipReferenceTags: boolean, preview: (url: string) => void) {
     const active = references.filter((reference) => reference.active !== false && reference.label);
     const suggestible = active.filter((reference) => reference.suggestible !== false);
     const byToken = new Map<string, CanvasTextReference>();
     active.forEach((reference) => (reference.tokens?.length ? reference.tokens : [reference.label]).forEach((token) => { if (token) byToken.set(token.toLocaleLowerCase(), reference); }));
     const tokens = [...byToken.keys()].sort((a, b) => b.length - a.length);
+    const knownTokens = new Set(byToken.keys());
     const pattern = tokens.length ? new RegExp(tokens.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "giu") : null;
-    const unresolvedTokens = (text: string) => {
-        const referenceTag = /<(?:Subject|Picture|Video|Audio)\s+\d+>/giu;
-        return [...new Set([...text.matchAll(referenceTag)].map((match) => match[0]).filter((token) => !byToken.has(token.toLocaleLowerCase())))];
-    };
+    const unresolvedTokens = (text: string) => unresolvedClipReferenceTokens(text, knownTokens, clipReferenceTags);
     const decorations = (view: EditorView) => {
         if (!chips || view.composing) return Decoration.none;
         const ranges = [];
@@ -514,7 +513,7 @@ function mentionExtensions(references: CanvasTextReference[], chips: boolean, pr
     };
     return [
         autocompletion({ defaultKeymap: false, override: [(context) => {
-            const unresolved = context.matchBefore(/<(Subject|Picture|Video|Audio)\s+\d+>?/iu);
+            const unresolved = clipReferenceTags ? context.matchBefore(/<(Subject|Picture|Video|Audio)\s+\d+>?/iu) : null;
             if (unresolved && !byToken.has(unresolved.text.toLocaleLowerCase())) {
                 const expectedKind = unresolved.text.match(/^<(Subject|Picture|Video|Audio)/iu)?.[1].toLowerCase();
                 const tagFor = (item: CanvasTextReference) => item.tokens?.find((token) => token.match(/^<(Subject|Picture|Video|Audio)/iu)?.[1].toLowerCase() === expectedKind);
@@ -548,7 +547,7 @@ export function CanvasCollaborativeText(props: CanvasTextEditorProps) {
 }
 
 function CanvasStandaloneText(props: CanvasTextEditorProps) {
-    const { placeholder = "请输入文本", references = [], chips = false, dialogue = false, lineMap = false, editorRef, className, style, autoFocus = false, autoHeight = false } = props;
+    const { placeholder = "请输入文本", references = [], chips = false, clipReferenceTags = false, dialogue = false, lineMap = false, editorRef, className, style, autoFocus = false, autoHeight = false } = props;
     const parent = useRef<HTMLDivElement>(null);
     const editor = useRef<EditorView | null>(null);
     const applyingValue = useRef(false);
@@ -614,7 +613,7 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
                 lineMapCompartment.of(lineMapExtension),
                 history(),
                 keymap.of([...defaultKeymap, ...historyKeymap]),
-                mentions.of(mentionExtensions(references, chips, setImagePreview)),
+                mentions.of(mentionExtensions(references, chips, clipReferenceTags, setImagePreview)),
                 ...(dialogue ? [dialogueHighlightExtension(setDialogueMenu, speakersRef), dialogueContextMenuExtension(setDialogueMenu, speakersRef)] : []),
                 EditorView.updateListener.of((update) => {
                     if (update.docChanged && !applyingValue.current) callbacks.current.onChange?.(update.state.doc.toString());
@@ -637,7 +636,7 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
         }
     }, [props.value]);
     useEffect(() => { editor.current?.dispatch({ effects: appearance.reconfigure(themeExtension) }); }, [appearance, themeExtension]);
-    useEffect(() => { editor.current?.dispatch({ effects: mentions.reconfigure(mentionExtensions(references, chips, setImagePreview)) }); }, [mentions, references, chips]);
+    useEffect(() => { editor.current?.dispatch({ effects: mentions.reconfigure(mentionExtensions(references, chips, clipReferenceTags, setImagePreview)) }); }, [mentions, references, chips, clipReferenceTags]);
     useEffect(() => { editor.current?.dispatch({ effects: lineMapCompartment.reconfigure(lineMapExtension) }); }, [lineMapCompartment, lineMapExtension]);
 
     return <div className={className} style={style} data-canvas-shortcuts-ignore onKeyDown={(event) => {
@@ -654,7 +653,7 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
 
 /** 不接受受控全文：Yjs binding 负责远端增量、输入法、光标与本地撤销。 */
 function CanvasYjsText(props: CanvasTextEditorProps) {
-    const { projectId, target, placeholder = "请输入文本", references = [], chips = false, dialogue = false, lineMap = false, editorRef, className, style, autoFocus = false } = props;
+    const { projectId, target, placeholder = "请输入文本", references = [], chips = false, clipReferenceTags = false, dialogue = false, lineMap = false, editorRef, className, style, autoFocus = false } = props;
     const targetKey = canvasTextKey(target);
     const session = useMemo(() => getCanvasTextSession(projectId, target), [projectId, targetKey]);
     const status = useSyncExternalStore(session.subscribe, session.getSnapshot);
@@ -729,7 +728,7 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
                 EditorView.lineWrapping, placeholderExtension(placeholder), appearance.of(themeExtension),
                 keymap.of(defaultKeymap),
                 editable.of(EditorView.editable.of(!status.blocked)),
-                mentions.of(mentionExtensions(references, chips, setImagePreview)),
+                mentions.of(mentionExtensions(references, chips, clipReferenceTags, setImagePreview)),
                 ...(dialogue ? [dialogueHighlightExtension(setDialogueMenu, speakersRef), dialogueContextMenuExtension(setDialogueMenu, speakersRef)] : []),
                 EditorView.contentAttributes.of({ "aria-label": placeholder }),
                 EditorView.domEventHandlers({ blur: () => { callbacks.current.onBlur?.(); } }),
@@ -741,7 +740,7 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
     }, [session, status.ready, placeholder, appearance, editable, mentions]);
     useEffect(() => { editor.current?.dispatch({ effects: appearance.reconfigure(themeExtension) }); }, [appearance, themeExtension]);
     useEffect(() => { editor.current?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(!status.blocked)) }); }, [editable, status.blocked]);
-    useEffect(() => { editor.current?.dispatch({ effects: mentions.reconfigure(mentionExtensions(references, chips, setImagePreview)) }); }, [mentions, references, chips]);
+    useEffect(() => { editor.current?.dispatch({ effects: mentions.reconfigure(mentionExtensions(references, chips, clipReferenceTags, setImagePreview)) }); }, [mentions, references, chips, clipReferenceTags]);
     useEffect(() => { editor.current?.dispatch({ effects: lineMapCompartment.reconfigure(lineMapExtension) }); }, [lineMapCompartment, lineMapExtension]);
 
     return <div className={className} style={style} data-canvas-shortcuts-ignore onKeyDown={(event) => {

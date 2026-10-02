@@ -1,4 +1,5 @@
 export const CANVAS_GENERATION_PATH = "/canvas/generation" as const;
+export const CANVAS_LOOP_PREPARE_PATH = "/canvas/generation/prepare-loop" as const;
 export const CANVAS_TASKS_PATH = "/tasks" as const;
 export const CANVAS_TASK_ROUTE = `${CANVAS_TASKS_PATH}/:id` as const;
 export const CANVAS_TASK_ACTIONS = ["cancel", "retry"] as const;

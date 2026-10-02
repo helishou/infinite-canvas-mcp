@@ -126,7 +126,7 @@ export class CanvasBrowserScriptDispatcher {
         if (task.kind !== CANVAS_BROWSER_TASK_KIND) throw new Error(`任务类型 ${task.kind} 不是浏览器模型任务`);
         const input = task.input as BrowserScriptTaskInput;
         const executor = task.executor === "browser-provider" ? "browser-provider" : "browser-script";
-        const result = this.start({ ...input, idempotencyKey: undefined, clientTaskId: `canvas-browser-retry-${crypto.randomUUID()}` }, input.script, executor);
+        const result = this.start({ ...input, ...(input.loopOutput ? { nodeId: input.sourceNodeId, imageIds: undefined } : {}), idempotencyKey: undefined, clientTaskId: `canvas-browser-retry-${crypto.randomUUID()}` }, input.script, executor);
         const retried = this.stores.tasks.get(result.taskId);
         if (!retried) throw new Error("浏览器模型重试任务创建失败");
         this.stores.tasks.addEvent(retried.id, "retry", { parentTaskId: task.id });
@@ -165,7 +165,7 @@ export class CanvasBrowserScriptDispatcher {
             metadata: { runtimeTaskId: taskId, status: "loading", runProgress: 0 },
             metadataDelete: ["errorDetails"],
         }];
-        if (input.sourceNodeId && input.sourceNodeId !== input.nodeId) {
+        if (!input.loopOutput && input.sourceNodeId && input.sourceNodeId !== input.nodeId) {
             const source = arrayRecords(project.nodes).find((node) => String(node.id || "") === input.sourceNodeId);
             if (source?.type === "config") operations.push({
                 type: "update_node", id: input.sourceNodeId,
@@ -207,7 +207,14 @@ export class CanvasBrowserScriptDispatcher {
         if (!input.projectId || !input.nodeId) return null;
         for (const status of ["running", "queued"] as const) {
             const active = this.stores.tasks.list({ kind: CANVAS_BROWSER_TASK_KIND, status, projectId: input.projectId, limit: 500 })
-                .find((task) => String((task.input as BrowserScriptTaskInput).nodeId || "") === input.nodeId);
+                .find((task) => {
+                    const previous = task.input as BrowserScriptTaskInput;
+                    if (input.loopOutput) return previous.loopOutput?.loopNodeId === input.loopOutput.loopNodeId
+                        && previous.loopOutput?.roundIndex === input.loopOutput.roundIndex
+                        && previous.loopOutput?.slotIndex === input.loopOutput.slotIndex
+                        && (previous.sourceNodeId || previous.nodeId) === input.nodeId;
+                    return String(previous.nodeId || "") === input.nodeId;
+                });
             if (active) return active;
         }
         return null;

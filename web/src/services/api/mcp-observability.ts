@@ -38,6 +38,10 @@ export type McpObservabilityPayloadSummary = {
 
 export type McpObservabilityReport = {
     generatedAt: string;
+    filters?: {
+        from: string | null;
+        to: string | null;
+    };
     calls: {
         started: number;
         completed: number;
@@ -82,6 +86,17 @@ export type McpObservabilityReport = {
         failed: number;
         successRate: number | null;
         averageDurationMs: number | null;
+        averageOutputChars?: number | null;
+    }>;
+    dailyByTool: Array<{
+        date: string;
+        tool: string;
+        calls: number;
+        succeeded: number;
+        failed: number;
+        successRate: number | null;
+        averageDurationMs: number | null;
+        averageOutputChars: number | null;
     }>;
     diagnostics: Array<{
         severity: "success" | "info" | "warning" | "error";
@@ -118,9 +133,34 @@ export type McpObservabilityEvent = {
     createdAt: string;
 };
 
-export async function fetchMcpObservabilityReport() {
-    const data = await request<{ ok: boolean; report: McpObservabilityReport }>("GET", "/mcp/observability/report");
+export type McpOptimizationMarker = {
+    id: string;
+    at: string;
+    label: string;
+    createdAt: string;
+};
+
+export async function fetchMcpObservabilityReport(options?: { from?: string; to?: string }) {
+    const params = new URLSearchParams();
+    if (options?.from) params.set("from", options.from);
+    if (options?.to) params.set("to", options.to);
+    const query = params.toString();
+    const data = await request<{ ok: boolean; report: McpObservabilityReport }>("GET", `/mcp/observability/report${query ? `?${query}` : ""}`);
     return data.report;
+}
+
+export async function fetchMcpOptimizationMarkers() {
+    const data = await request<{ ok: boolean; markers: McpOptimizationMarker[] }>("GET", "/mcp/observability/optimization-markers");
+    return data.markers;
+}
+
+export async function saveMcpOptimizationMarker(input: { at?: string; label: string }) {
+    const data = await request<{ ok: boolean; marker: McpOptimizationMarker }>("POST", "/mcp/observability/optimization-markers", input);
+    return data.marker;
+}
+
+export async function deleteMcpOptimizationMarker(id: string) {
+    await request<{ ok: boolean }>("DELETE", `/mcp/observability/optimization-markers/${encodeURIComponent(id)}`);
 }
 
 export async function fetchMcpObservabilityTrace(traceId: string) {

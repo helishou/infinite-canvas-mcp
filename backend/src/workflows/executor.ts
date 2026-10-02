@@ -26,6 +26,54 @@ function workflowRequestError(action: string, url: string, error: unknown) {
 
 
 /**
+ * 工作流重新保存后字段 ID 会重新生成（f_<时间戳>_<后缀>），而节点 metadata.comfyParams
+ * 里存的还是旧 ID。buildParams 按 `field.id in values` 取值，旧 ID 不在其中就会被静默丢弃，
+ * 生成时回落到字段默认值 —— 表现为「面板改了参数但输出没变」。
+ *
+ * 这里在默认值铺开之前，把已失效的 ID 迁到当前字段定义上。旧 ID 本身不携带任何语义
+ * （它只是时间戳），所以用**值**反查：只有当恰好一个字段把这个值列为合法取值
+ * （default 或 dropdown options）时才迁移。
+ *
+ * 宁可漏迁也不误迁：
+ * - 键不像工作流字段 ID → 是 channelId / size 这类渠道键，不碰；
+ * - 命中 0 个 → 字段已被删除，保持孤儿不动；
+ * - 命中 ≥2 个 → 定义有歧义（如两个 slider 默认值相同），跳过；
+ * - 目标 ID 已有值 → 用户改过新字段，不覆盖。
+ */
+// 前端生成字段 ID 的格式：`f_${Date.now()}_${random}`（见 web/src/pages/workflows/workflow-graph-panel.tsx）。
+// 只有这种 ID 会因工作流重新保存而失效；内置的稳定 ID（reference_audio / text 等）不参与。
+const WORKFLOW_FIELD_ID_RE = /^f_\d+_[a-z0-9]{4}$/;
+
+export function migrateStaleFieldValues(fields: WorkflowField[], values: FieldValues): FieldValues {
+    if (!values || typeof values !== "object") return values;
+    const knownIds = new Set(fields.map((field) => field.id));
+    const orphans = Object.keys(values).filter((id) => !knownIds.has(id));
+    if (!orphans.length) return values;
+
+    const accepts = (field: WorkflowField, value: unknown) => {
+        if (field.default === value) return true;
+        return Array.isArray(field.options) && field.options.some((option) => option === value);
+    };
+
+    const migrated: FieldValues = { ...values };
+    for (const orphan of orphans) {
+        const value = values[orphan];
+        if (value === undefined || value === null) continue;
+        // 只迁「看起来是工作流字段 ID」的孤儿。comfyParams 里还混着 channelId / size /
+        // quality 这类渠道级键，它们不是工作流字段 ID（后端不会生成 f_ 前缀），
+        // 若不排除，一个恰好等于某个 dropdown 选项的渠道值就会被误当成字段参数搬走。
+        if (!WORKFLOW_FIELD_ID_RE.test(orphan)) continue;
+        const candidates = fields.filter((field) => field.input && accepts(field, value));
+        if (candidates.length !== 1) continue;
+        const [target] = candidates;
+        if (target.id in migrated) continue;
+        migrated[target.id] = value;
+        delete migrated[orphan];
+    }
+    return migrated;
+}
+
+/**
  * 将用户字段值转换为 {node_id: {input_name: value}} 格式
  * 对应 Python run_workflow() L15690-15711
  */
@@ -100,7 +148,7 @@ function buildPrompt(fields: WorkflowField[], values: FieldValues): string | und
  * 注入参数到 workflow JSON 副本
  * 对应 Python generate() L15098-15108
  */
-function injectParams(
+export function injectParams(
     workflow: Record<string, unknown>,
     params: RunParams,
 ): Record<string, unknown> {
@@ -112,7 +160,10 @@ function injectParams(
         if (!node.inputs) node.inputs = {};
         for (const [inputName, value] of Object.entries(nodeInputs as Record<string, unknown>)) {
             if (value === null) {
-                delete (node.inputs as Record<string, unknown>)[inputName];
+                // 原生 H3 把空媒体槽定义为必选 COMBO；保持其合法空值，不能删掉必需的 input。
+                if (node.class_type === "NanFengH3MultiReferenceGeneratorV15" && /^(图片[1-9]|视频[1-3]|音频[1-3])$/.test(inputName)) {
+                    (node.inputs as Record<string, unknown>)[inputName] = "未选择";
+                } else delete (node.inputs as Record<string, unknown>)[inputName];
             } else {
                 (node.inputs as Record<string, unknown>)[inputName] = value;
             }
@@ -164,12 +215,12 @@ function isNodePresent(workflow: Record<string, unknown>, id: string): boolean {
  * 并修正 Flux2-Klein 这类多分支共用输出/尺寸链的工作流）：
  * 1. 只移除空图片字段对应的 LoadImage 节点本身。
  * 2. 级联裁剪：
- *    - 普通节点：只要「任一」必需连线输入指向已删除节点就移除；Qwen 图像编码节点的图片槽位可选。
+ *    - 普通节点：只要「任一」必需连线输入指向已删除节点就移除；Qwen 图像编码和提示词增强节点的图片槽位可选。
  *    - ComfySwitchNode：仅当「选中分支」指向已删除节点才移除；未选中分支悬空不影响执行。
  *    - SaveImage / PreviewImage 永远保留（但其悬空输入会在提交前被校验捕获）。
  * 3. 清理存活节点上指向已删除节点的悬空连线（删除该 input 而不是删节点）。
  */
-function removeEmptyImageNodes(workflow: Record<string, unknown>, fields: WorkflowField[], values: FieldValues) {
+export function removeEmptyImageNodes(workflow: Record<string, unknown>, fields: WorkflowField[], values: FieldValues) {
     // 用 graph 真相判断“哪些 LoadImage 未被提供”：只要节点的 inputs.image 为空即视为缺失。
     // 不再依赖 values[field.id]（processedValues 在上传异常时可能为 null）。
     const present = getPresentLoadImages(workflow);
@@ -208,7 +259,7 @@ function removeEmptyImageNodes(workflow: Record<string, unknown>, fields: Workfl
                 ([name, v]) =>
                     Array.isArray(v) &&
                     typeof (v as unknown[])[0] === "string" &&
-                    !(cls === "TextEncodeQwenImage21" && name.startsWith("images.")),
+                    !isOptionalImageLink(workflow, cls, name, v as unknown[]),
             );
             if (!linkEntries.length) continue;
             let shouldRemove = false;
@@ -244,6 +295,14 @@ function removeEmptyImageNodes(workflow: Record<string, unknown>, fields: Workfl
         }
     }
     return result;
+}
+
+function isOptionalImageLink(workflow: Record<string, unknown>, classType: string | undefined, inputName: string, link: unknown[]) {
+    if (classType === "TextEncodeQwenImage21" && inputName.startsWith("images.")) return true;
+    // ComfyUI declares every image input on this prompt enhancer optional. Removing
+    // an unused LoadImage must clear that link, not delete the prompt/output chain.
+    return classType === "TE_Qwen_Image_2_1_Prompt_Enhancer"
+        && (workflow[String(link[0])] as WfNode)?.class_type === "LoadImage";
 }
 
 /**
@@ -307,7 +366,7 @@ function routeSizeImage(workflow: Record<string, unknown>, presentLoadImages: Se
  *
  * @param prepared 裁剪 + 清理后的最终 workflow（即将提交给 ComfyUI）
  */
-function validatePromptGraph(prepared: Record<string, unknown>): void {
+export function validatePromptGraph(prepared: Record<string, unknown>): void {
     // 1) 兜底：没有任何媒体输出节点
     const hasOutput = Object.values(prepared).some(
         (n) =>
@@ -512,10 +571,15 @@ export class WorkflowExecutor {
         nodeId: string | undefined;
         name: string | undefined;
         configTitle: string;
+        parentTaskId: string | undefined;
     }> {
         const controller = new AbortController();
         const url = comfyUrl ?? this.bridge.getUrl();
-        const effectiveFieldValues = applyWorkflowFieldDefaults(config.fields || [], fieldValues);
+        // 先把工作流重新保存后失效的旧字段 ID 迁回当前字段定义，再铺默认值。
+        // 顺序不能反：applyWorkflowFieldDefaults 会用 default 占位每个字段，
+        // 之后再迁就会因为「目标 ID 已有值」而被跳过。
+        const resolvedFieldValues = migrateStaleFieldValues(config.fields || [], fieldValues);
+        const effectiveFieldValues = applyWorkflowFieldDefaults(config.fields || [], resolvedFieldValues);
         for (const field of config.fields || []) {
             const value = effectiveFieldValues[field.id];
             if (field.required === true && !isMediaField(field, workflowJson) && (value === undefined || value === null || value === "")) {
@@ -612,7 +676,7 @@ export class WorkflowExecutor {
             : this.tasks.create("workflow", { workflow: "custom", fields: persistedFieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) });
         this.controllers.set(task.id, controller);
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
-        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title };
+        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title, parentTaskId };
     }
 
     /**
@@ -632,14 +696,21 @@ export class WorkflowExecutor {
         nodeId: string | undefined;
         name: string | undefined;
         configTitle: string;
+        /** 画布父任务已自行写过生成日志时，内层不再重复写。 */
+        parentTaskId: string | undefined;
     }): Promise<RunResult> {
-        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle } = ctx;
+        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle, parentTaskId } = ctx;
+        // 画布任务（image/video/audio）已经写过一条更完整的生成日志时，这里不再重复写。
+        // 否则同一次生图会在日志面板出现「生图」+「工作流」两条几乎一致的记录：
+        // 同一 nodeId、同一 prompt、同一产物 storageKey，只有耗时和任务 ID 不同。
+        // 父日志（platform:"canvas-image"）字段更全：模型、参考图、loopInputImages、t2i/i2i。
+        const skipLog = Boolean(parentTaskId);
         try {
             this.tasks.update(task.id, { status: "running", progress: 0.05 });
             const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId);
             this.tasks.update(task.id, { status: "succeeded", progress: 1, result: finalResult });
             this.events?.publish({ type: "task.completed", entityId: task.id, payload: finalResult });
-            this.db?.createGenerationLog({
+            if (!skipLog) this.db?.createGenerationLog({
                 projectId: projectId || "workflow",
                 nodeId,
                 status: "success",
@@ -665,7 +736,7 @@ export class WorkflowExecutor {
                 this.tasks.update(task.id, { status: "failed", error: message });
                 this.events?.publish({ type: "task.failed", entityId: task.id, payload: { error: message } });
             }
-            this.db?.createGenerationLog({
+            if (!skipLog) this.db?.createGenerationLog({
                 projectId: projectId || "workflow",
                 nodeId,
                 status: "failed",
@@ -687,6 +758,12 @@ export class WorkflowExecutor {
         }
     }
 
+    /**
+     * @param parentTaskId 画布任务已自行写过生成日志时传入（如图片生成走 comfy-workflow）。
+     *   内层不再重复写 platform:"workflow" 日志——同一次生图会在日志面板出现两条几乎
+     *   一致的记录（同一 nodeId、同一 prompt、同一产物 storageKey），只有耗时和任务 ID 不同。
+     *   父日志（platform:"canvas-image"）字段更全：模型、参考图、loopInputImages、t2i/i2i。
+     */
     async run(
         workflowJson: Record<string, unknown>,
         config: WorkflowConfig,

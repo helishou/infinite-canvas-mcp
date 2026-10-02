@@ -1,21 +1,22 @@
 ---
 title: Local Development
-description: Frontend-first local development
+description: Local Backend and Web development and startup order
 ---
 
 # Local Development
 
-The main application lives in `web/`. The browser sends AI requests directly to the user's OpenAI-compatible endpoint.
+The Backend manages data, media, and canvas tasks; `web/` provides the interface. Agent and MCP are integrated into the Backend, while port 17371 is a compatibility service. See [Quick Start](/docs/overview/quick-start) for installation, backups, and LAN configuration.
 
-## Start the frontend
+## Start from the repository root
 
 ```bash
-cd web
-bun install
-bun run dev
+npm ci
+npm run dev
 ```
 
-Open `http://localhost:3000`, then enter your `Base URL`, `API Key`, and model names in Settings. Prompt sources and WebDAV are also accessed directly by the browser.
+Open `http://localhost:3001`. Root startup commands build `canvas-agent/dist` before starting the Backend (17370) and Web (3001); a failed shared build prevents dependent services from starting. Build the shared package yourself before invoking workspace commands directly. Backend `dev` does not restart on source edits; `dev:watch` does.
+
+API channels require your endpoint, key, and model settings. Local ComfyUI needs its service and workflows without an OpenAI API key; canvas editing alone needs no model endpoint. Codex CLI is installed only when needed.
 
 ## Start the documentation site
 

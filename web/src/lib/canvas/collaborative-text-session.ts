@@ -30,6 +30,7 @@ export class CollaborativeTextSession {
     private initialized?: Promise<void>;
     private sending?: Promise<void>;
     private sequence = 0;
+    private replacedDocument = false;
 
     constructor(private transport: Transport) {
         this.doc.on("update", (update: Uint8Array, origin: unknown) => {
@@ -55,8 +56,10 @@ export class CollaborativeTextSession {
         this.setStatus({ error: error instanceof Error ? error.message : String(error), blocked: this.status.blocked || this.transport.isPermanentError(error) });
     }
     getDocumentId = () => this.documentId;
+    hasReplacedDocument = () => this.replacedDocument;
     receive({ state, documentId }: TextState) {
         if (!documentId || (this.documentId && this.documentId !== documentId)) {
+            if (documentId && this.documentId && this.documentId !== documentId) this.replacedDocument = true;
             this.setStatus({ blocked: true, error: "目标文本已被替换；旧草稿已保留，不能自动写入新对象" });
             throw new Error(this.status.error);
         }
@@ -69,13 +72,25 @@ export class CollaborativeTextSession {
     }
     private async restore() {
         try {
-            this.drafts = (await this.transport.load()).sort((a, b) => a.order - b.order);
-            this.setStatus({ pending: this.drafts.length });
-            for (const draft of this.drafts) this.receive(draft);
-            try { this.receive(await this.transport.read()); }
+            const savedDrafts = (await this.transport.load()).sort((a, b) => a.order - b.order);
+            let remote: TextState | undefined;
+            try { remote = await this.transport.read(); }
             catch (error) {
+                // Offline recovery still applies the locally saved Yjs state. An identity mismatch
+                // can only be decided after the authoritative document becomes readable again.
+                this.drafts = savedDrafts;
+                this.setStatus({ pending: this.drafts.length });
+                for (const draft of this.drafts) this.receive(draft);
                 this.failed(error);
                 if (!this.drafts.length || this.status.blocked) return;
+            }
+            if (remote) {
+                // A deleted and recreated target has a new document ID. Keep old drafts on disk,
+                // but never merge or submit them against the new target.
+                this.drafts = savedDrafts.filter((draft) => draft.documentId === remote.documentId);
+                this.setStatus({ pending: this.drafts.length });
+                this.receive(remote);
+                for (const draft of this.drafts) this.receive(draft);
             }
             this.setStatus({ ready: true });
         } catch (error) { this.failed(error); }

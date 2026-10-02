@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { characterReferenceUpdates } from "@basketikun/canvas-agent/reference-contract";
 import localforage from "localforage";
 
 import { nanoid } from "nanoid";
@@ -6,7 +7,8 @@ import i18n from "@/i18n";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { normalizeViewportTransform } from "@/lib/canvas/canvas-viewport";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
-import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, createBackendProject, deleteBackendCanvasFolder, deleteBackendDramaProject, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder } from "@/services/backend-api";
+import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, createBackendProject, deleteBackendCanvasFolder, deleteBackendDramaProject, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendCanvasOperationReceipt, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder } from "@/services/backend-api";
+import { recoverCompactedCanvasReceipt } from "@/lib/canvas/canvas-compacted-receipt";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId } from "@/services/backend-api";
 import { CanvasCommandQueue, type CanvasCommand } from "@/lib/canvas/canvas-command-queue";
@@ -14,7 +16,7 @@ import { buildCanvasConflictBaseline, isCanvasConflictBaseline, type CanvasConfl
 import { canvasDraftPersistence } from "@/lib/canvas/canvas-draft-persistence";
 import { syncOrderedGroupMembership } from "@/lib/canvas/ordered-group";
 import { CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS, H3_LOCAL_VIEW_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
-import { flushCanvasTexts, onCanvasTextCommit, prepareCanvasTextWith, receiveCanvasTextEvent } from "@/services/api/canvas-text";
+import { flushCanvasTexts, invalidateDeletedCanvasTextSessions, onCanvasTextCommit, prepareCanvasTextWith, receiveCanvasTextEvent } from "@/services/api/canvas-text";
 
 export type CanvasProject = {
     id: string;
@@ -130,7 +132,11 @@ function captureCanvasAction(before: CanvasProject, after: CanvasProject) {
     const operations = diffCanvasProject(before, after);
     if (!operations.length) return;
     if (getBackendUrl() !== commandBackend) throw new Error("后台地址已改变，请刷新后继续编辑；原后台草稿仍保留");
-    pendingCommands.enqueue({ operationId: nanoid(), projectId: before.id, ownerId: draftSessionId, backend: commandBackend, source: getCanvasCollaborationClient(), order: ++commandOrder, base: buildCanvasConflictBaseline(before, operations), operations });
+    // The first edit of an unsaved project also owns its immutable creation seed.
+    // A scoped baseline cannot recreate that seed after later edits or a refresh.
+    const needsCreationSeed = before.revision === undefined && !knownProjectIds.has(before.id) && !pendingCommands.list(before.id).length;
+    pendingCommands.enqueue({ operationId: nanoid(), projectId: before.id, ownerId: draftSessionId, backend: commandBackend, source: getCanvasCollaborationClient(), order: ++commandOrder, base: needsCreationSeed ? before : buildCanvasConflictBaseline(before, operations), operations });
+    invalidateDeletedCanvasTextSessions(before.id, operations);
 }
 function projectCanvasCommands(remote: CanvasProject) {
     let projection = remote;
@@ -314,6 +320,17 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
             while ((active = pendingCommands.list(project.id)[0])) {
                 if (!active.operations.length) { await pendingCommands.acknowledge(active.operationId); continue; }
                 if (active.rejected) {
+                    // 旧 Backend 曾在“已提交命令重取回执”时误报 400。只在服务端确认
+                    // 原 ID 已提交后解除拒绝，再用原请求取回执；未提交的拒绝仍须用户决策。
+                    if (active.baseRevision !== undefined) {
+                        try {
+                            const receipt = await fetchBackendCanvasOperationReceipt(project.id, active.operationId);
+                            if (receipt.committed) {
+                                await pendingCommands.retryCommittedReceipt(active.operationId);
+                                continue;
+                            }
+                        } catch (error) { console.error("未能核对画布原操作回执，拒绝草稿仍保留", error); }
+                    }
                     setCanvasCommandConflict(project.id, base, active.rejected);
                     break;
                 }
@@ -326,12 +343,16 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
                     }
                 }
                 const command = await pendingCommands.prepare(active.operationId, Number(base.revision || 0));
-                const response = await applyBackendCanvasOperations(project.id, command.operations, command.baseRevision, command.operationId, command.source);
+                const response = await applyBackendCanvasOperations(project.id, command.operations, command.baseRevision, command.operationId, command.source).catch(async (error: unknown) => {
+                    const latest = await recoverCompactedCanvasReceipt(error, project.id, async () => normalizeProjectMediaUrls((await fetchBackendProject(project.id)).project as unknown as CanvasProject));
+                    if (!latest) throw error;
+                    return { project: latest, revision: Number(latest.revision) };
+                });
                 const received = normalizeProjectMediaUrls(response.project as unknown as CanvasProject);
                 // 重放旧请求的回执可能落后于已收到的远端文档；不能回退权威基线。
                 base = Number(base.revision || 0) > response.revision ? base : received;
-                syncBases.set(project.id, base);
                 await pendingCommands.acknowledge(command.operationId);
+                syncBases.set(project.id, base);
                 const current = useCanvasStore.getState().projects.find((item) => item.id === project.id);
                 const { projection, conflicts } = projectCanvasCommands(base);
                 if (conflicts.length) setCanvasCommandConflict(project.id, base, "后续编辑与远端改动冲突，已保留命令", conflicts);
@@ -674,9 +695,21 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         scheduleCanvasSync();
     },
     updateProject: (id, patch) => {
-        const normalizedPatch = patch.viewport ? { ...patch, viewport: normalizeViewportTransform(patch.viewport) } : patch;
+        let normalizedPatch = patch.viewport ? { ...patch, viewport: normalizeViewportTransform(patch.viewport) } : patch;
         const before = get().projects.find((project) => project.id === id);
         if (!before) return;
+        if (normalizedPatch.nodes) {
+            let nodes = normalizedPatch.nodes;
+            const previousById = new Map(before.nodes.map((node) => [node.id, node]));
+            for (const node of normalizedPatch.nodes) {
+                const previous = previousById.get(node.id);
+                if (!previous || previous === node) continue;
+                for (const update of characterReferenceUpdates(previous, node, nodes)) {
+                    nodes = nodes.map((target) => target.id === update.id ? { ...target, metadata: { ...target.metadata, ...update.metadata } } : target);
+                }
+            }
+            normalizedPatch = { ...normalizedPatch, nodes };
+        }
         // patch 实际未改变 project 时跳过 setState：节点 / 连线 / 会话字段
         // 是 map/filter/concat 之类函数式 action，每次都生成新数组引用，Object.is
         // 浅比较挡不住；React 18 StrictMode dev 模式或 zustand 通知顺序中反复
@@ -1013,6 +1046,7 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
         } else if (type === "update_node") {
             const node = nodes.find((item) => item.id === String(operation.id || ""));
             if (!node) continue;
+            const previousNode = { ...node, metadata: node.metadata };
             const previousGroupId = node.metadata?.groupId;
             Object.assign(node, operation.patch || {});
             if (operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)) node.metadata = { ...((node.metadata || {}) as Record<string, unknown>), ...(operation.metadata as Record<string, unknown>) } as CanvasNodeData["metadata"];
@@ -1021,7 +1055,11 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
                 for (const key of operation.metadataDelete.map(String)) delete metadata[key];
                 node.metadata = metadata as CanvasNodeData["metadata"];
             }
-            nodes = syncOrderedGroupMembership(nodes, node.id, previousGroupId);
+            for (const update of characterReferenceUpdates(previousNode, node, nodes)) {
+                nodes = nodes.map((target) => target.id === update.id ? { ...target, metadata: { ...target.metadata, ...update.metadata } } : target);
+            }
+            // 成员位置/尺寸的显式回放（含撤销、重做）必须保持原值；只有归属变化才自动整理槽位。
+            if (previousGroupId !== node.metadata?.groupId) nodes = syncOrderedGroupMembership(nodes, node.id, previousGroupId);
         } else if (type === "delete_node") {
             const ids = new Set((Array.isArray(operation.ids) ? operation.ids : [operation.id]).filter(Boolean).map(String));
             for (let index = nodes.length - 1; index >= 0; index--) if (ids.has(nodes[index].id)) nodes.splice(index, 1);

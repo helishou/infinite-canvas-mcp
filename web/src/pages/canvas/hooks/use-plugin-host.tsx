@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { storeGeneratedVideo } from "@/services/api/video";
 import { getLocalH3Task, getRunningHubH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
-import { backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, resolveBackendH3Confirmation, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
+import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, resolveBackendH3Confirmation, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
 import { observeCanvasGenerationTask } from "@/services/api/canvas-generation-task";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
@@ -15,7 +15,7 @@ import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
-import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost, CanvasReferenceService } from "@/types/canvas-plugin";
+import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasMediaPreview, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost, CanvasReferenceService } from "@/types/canvas-plugin";
 import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 import { flushCanvasProjectBeforeGeneration, useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -34,6 +34,7 @@ type PluginHostParams = {
     setNodes: Dispatch<SetStateAction<CanvasNodeData[]>>;
     setDialogNodeId: Dispatch<SetStateAction<string | null>>;
     openAssetPicker: (options?: { kind?: "image" }) => Promise<CanvasAssetPickerImage | null>;
+    openMediaPreview: (item: CanvasMediaPreview) => void;
     applyAgentOps: (ops?: CanvasAgentOp[]) => unknown;
 };
 
@@ -59,7 +60,7 @@ async function persistH3Result<T extends { url: string; mimeType: string; storag
  */
 export function usePluginHost(params: PluginHostParams) {
     const { t } = useTranslation();
-    const { projectId, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, applyAgentOps } = params;
+    const { projectId, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, openMediaPreview, applyAgentOps } = params;
     const getProject = useCallback(() => useCanvasStore.getState().projects.find((item) => item.id === projectId), [projectId]);
     const generationLogs = useMemo<CanvasGenerationLogs>(() => {
         return {
@@ -127,7 +128,7 @@ export function usePluginHost(params: PluginHostParams) {
             generateText: async (prompt, options) => {
                 const config = { ...buildGenerationConfig(effectiveConfig, undefined, "text"), ...(options?.model ? { model: options.model } : {}) };
                 ensureReady(config);
-                const references = (options?.references || []).map((reference, index) => ({ id: `plugin-ref-${index}`, name: reference.name || `ref-${index}.png`, mimeType: "image/png", ...(reference.url.startsWith("data:") ? { dataUrl: reference.url } : { url: reference.url }) }));
+                const references = (options?.references || []).map((reference, index) => ({ id: `plugin-ref-${index}`, name: reference.name || `ref-${index}.png`, mimeType: reference.mimeType || "image/png", ...(reference.storageKey ? { storageKey: reference.storageKey } : {}), ...(reference.url.startsWith("data:") ? { dataUrl: reference.url } : { url: reference.url }) }));
                 // 传入 log 时登记生成日志（platform=canvas-text，进「生文」筛选）；节点/Clip 写进任务 params，任务中心按其展示归属。
                 const logMeta = options?.log;
                 const startedAtMs = Date.now();
@@ -177,6 +178,11 @@ export function usePluginHost(params: PluginHostParams) {
                 if (!response.ok || !data.task) throw new Error(data.error || `取消 H3 运行失败（HTTP ${response.status}）`);
                 return data.task;
             },
+            restoreH3Output: async (input) => {
+                const project = getProject();
+                if (!project) throw new Error("画布已关闭，无法还原历史输出");
+                await applyBackendCanvasOperations(projectId, [{ type: "restore_h3_output", ...input }], Number(project.revision || 0));
+            },
             runVideoConcat: async (videos, options) => {
                 const { endpoint, token } = resolveBackendAgentEndpoint();
                 return runVideoConcatTask(endpoint, token, videos, options?.signal);
@@ -201,6 +207,7 @@ export function usePluginHost(params: PluginHostParams) {
     const pluginHost = useMemo<CanvasPluginHost>(
         () => ({
             projectId,
+            mediaUrl: backendMediaUrl,
             getNode: (id) => getProject()?.nodes.find((node) => node.id === id) || null,
             getNodes: () => getProject()?.nodes || [],
             getConnections: () => getProject()?.connections || [],
@@ -236,9 +243,10 @@ export function usePluginHost(params: PluginHostParams) {
             openPanel: (nodeId) => setDialogNodeId(nodeId),
             closePanel: () => setDialogNodeId(null),
             openAssetPicker,
+            openMediaPreview,
             generationLogs,
         }),
-        [applyAgentOps, generationLogs, getProject, h3Defaults, openAssetPicker, pluginAi, projectId, references, setNodes],
+        [applyAgentOps, generationLogs, getProject, h3Defaults, openAssetPicker, openMediaPreview, pluginAi, projectId, references, setNodes],
     );
 
     const renderPluginPanel = useCallback(

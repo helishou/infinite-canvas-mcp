@@ -5,6 +5,459 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Cross-platform local image import
+
+- On Linux, import two image files whose names differ only by case; both should remain in the result. Repeating the same normalized path should import it once. On Windows, case differences and forward/backslash variants should still deduplicate.
+
+## H3 reference compatibility and migration recovery
+
+- With the development Web server running, `node scripts/test-h3-reference-compatibility.mjs` checks the real reference dialog and cards on an independent in-memory page. Set `CANVAS_TEST_WEB` for a non-default Web URL; no model requests or project writes are made.
+- Open an existing Clip with character images before or between scene references. Its reference cards and saved Picture tags should still refer to the same images; storyboard-first submission must preserve those associations. Generating must not rewrite the saved prompt.
+- Disable a character's outfit switch while individual outfits remain selected. No outfit images should be submitted, enabled voice references should remain, and re-enabling outfits should restore the selections.
+- In an isolated old database, interrupt H3 migration after a backup is created, then retry after resolving the failure. Startup should complete with the original project intact; earlier fixed-name backups and backups from failed attempts must remain unchanged.
+
+## Canvas history maintenance and performance
+
+- Run `npm run prune-canvas-batches --workspace backend -- 30` to preview only. Explicit `--apply` creates and verifies a unique backup, advances each checkpoint and removes only the contiguous expired prefix in one transaction. Invalid history or backup failures must preserve all existing records. Maintenance is manual; the default retention remains 30 days.
+- A retained request must recover its original receipt after cleanup. Older committed requests must never execute again: the browser fetches the latest canvas, acknowledges the original command durably, and preserves subsequent edits or conflict drafts. A failed refresh must keep the pending command. Existing databases receive a verified backup before the receipt schema migration.
+- Check content editing, reference order, grouping, node movement, fast panning and 5% zoom on large canvases. Content updates should reuse spatial geometry while displaying the latest content. Viewport thresholds remain unchanged.
+- PR checks include Web types/build, Backend build, H3 types/tests and isolated browser collaboration scenarios. After building `canvas-agent` and Backend and installing the locked Playwright Chromium, use `node scripts/run-canvas-browser-tests.mjs collaboration` or `node scripts/run-canvas-browser-tests.mjs performance label`. Tests isolate Backend data, media, Agent configuration, ports and Vite cache; measurements and failure evidence are saved under `artifacts/browser-tests`. No paid generation is submitted.
+
+## Agent sidebar automatic connection
+
+- Opening the Agent sidebar should discover the current Backend connection details and connect without another click. Closing and reopening a connected sidebar should preserve its connection. A manual disconnect should remain in effect while the sidebar stays open; reopening should connect again.
+- A failed first connection should not keep starting new attempts. Reopening after service recovery should connect again. Launch links containing connection details should still connect automatically. Concurrent automatic and manual connection actions should create one connection, and late discovery results should not reset an established connection.
+
+## Episode script, shots, storyboard, and H3 Clips
+
+- Open an episode's **Produce** page. Edit scene actions/dialogue and shots, reorder them, preview impact, then publish the script before the shot list. Saving a draft alone must not submit generation. Another window's stale revision must return the current draft without replacing either window's edits. A missing response must preserve the original operation ID, revision, and payload through refresh; recovering its receipt must not perform a second edit or publication.
+- Import one of `fullPlot`, `script.md`, or `storyboard.md` as a review draft; the original source remains. After publication, the structured Backend version is the formal source, while legacy text stays available. Export published script/shot versions as Markdown and restore an older version into a draft without deleting published history.
+- Bind a storyboard frame to its stable shot ID, group only adjacent shots with a recorded action transition, and sync H3 drafts. Existing Clip segment IDs and historical output must survive targeted updates.
+- Auto mode advances affected media after publishing the shot list, freezing models inherited from Canvas nodes or existing settings without task budgets. With a disposable executor, check model inheritance and freezing, ignored legacy budgets, missing references, failure pause, exact task IDs, media storage keys, Canvas binding, and H3 Clip writeback. Real paid generation has not been run.
+
+## Canvas image workflow aspect ratio
+
+- Set a canvas image node to 16:9 and choose the `qwen_image_2_1` workflow. Confirm the final ComfyUI graph receives the 16:9 option on its actual aspect-ratio input. If a saved workflow field remains 1:1, submission must stop before ComfyUI runs and explain the conflict. Check that archived output dimensions come from the file: a square output stays in task history but cannot become the active keyframe. An output with the requested ratio records its actual pixel dimensions. No paid generation is needed for automated checks.
+
+## Import SVG images into the canvas
+
+- Import an `.svg` with the file picker, canvas drop, and asset sidebar. It should appear as an image node or asset, stay sharp when scaled, and still load from the original SVG after refresh. Replacing an image node should also accept SVG.
+- Import a local SVG with a `viewBox` through `canvas_import_local_images`. The original file, MIME type, and dimensions should be preserved; a non-SVG file renamed to `.svg` should be rejected. Opening the media URL directly must not execute scripts in the SVG.
+- SVG files remain editable canvas images. When selected as model references, Backend should submit a deterministic PNG derivative and record both the source and submitted storage keys on the task; no manual browser conversion is needed.
+
+## H3 plan, references, and task waiting
+
+- The served `h3_apply_video_plan` schema should require each Clip's `id` and every timeline item's `start/end`. A generic `config` node should be rejected with the correct H3 node type in the error before any canvas revision changes.
+- A character node missing `characterAssetId` or a complete outfit media catalog should fail before group binding. `h3_write_storyboard_prompt(dryRun: true)` must return a preview without writing; invalid picture binding IDs, roles, states, media types, and handles should each identify the failing shot and field.
+- A timed-out `canvas_wait_tasks` call should return the original pending task IDs and a next wait action. Repeating that wait must not create a new generation task.
+
+## MCP contract and H3 atomic preparation (1.5.11)
+
+- Verify served plugin schemas preserve field descriptions, integer/range constraints, array limits, unknown-field policy and declared cross-field conditions. Updating a registered plugin must update the existing tool schema and handler, rather than only re-enable stale registration.
+- `h3_prepare_clip` prepares prompt/configuration, existing character outfit selections and reference bindings as one final candidate. `dryRun: true` validates without writing; revision conflicts or invalid final references reject the complete transaction. Runtime ownership, results and task history remain protected. It does not run generation.
+- Reference failures return `REFERENCE_INVALID` with issue codes and `retryPolicy: after_input_change`. H3 diagnostic tools explicitly advertise `readOnlyHint: true`; writes and mixed preview/write tools remain write-capable. Do not repeat unchanged rejected requests.
+- `h3_get_clip` with `include: ["result"]` verifies the exact project/node/Clip/task/storageKey chain. Optional `taskId` and `storageKey` select a historical result and must be used with result scope. A different Clip's task or media is rejected. Shared-parent results require the matching Clip completion/reuse event, not an unlabelled parent media array. Missing proof returns no verifiable result or an error, never a directory's latest file.
+- Verify the same generation idempotency key recovers its original task without starting another run; reusing a key for a different target or request must reject. Historical receipts must not overwrite a newer draft or active task. No real generation is required to test these contracts with isolated task stores.
+- Source/build and disposable real HTTP checks are separate from configured Backend and Hermes activation. Load the changed Backend/shared package only after authorized safe service handling, then refresh MCP discovery. The companion Hermes client repair also requires its running process to load the changed Python code; refreshing Canvas declarations alone does not do that. No production draft, output or active task should be changed merely to verify deployment.
+
+## Creative conversations from the canvas library
+
+- Choose asset or drama creation on the canvas library page, enter an idea, and submit it. A new Agent conversation should start with the original idea as the visible user message. Preserve the draft when disconnected, busy, an unsent Agent draft exists, or the production SOP is unavailable; reconnecting or double clicking must not send twice.
+- The asset path should create a canvas and record an asset plan once the direction is clear. The drama path should create a drama, first episode, and bound canvas; read back the separate synopsis and full plot. Submit canvas media tasks only when explicitly requested, then verify task ID, archived media, and node writeback.
+- Verify the Agent loads the production SOP in development and packaged builds, preserves local edits during upgrades, and reports conflicts. Follow-up turns should keep the creative rules. Check both languages, themes, and narrow layouts.
+- The Agent model picker should use the connected Codex service's catalog. With the bundled Codex 0.160.0, verify that GPT-6 models appear after restarting Canvas Agent. A saved model that service no longer supports should fall back to its default model and a supported reasoning effort, avoiding a 400 on the creative turn.
+
+## H3 references follow character image replacements
+
+- Replace an image selected by an H3 Clip in its source character node. Every Clip referencing that character should show and submit the new image while preserving outfit choices, voice settings, other Clip content and historical outputs. Verify the result after reopening the canvas and in another window.
+- Reordering outfits should preserve selection by image; adding an outfit should leave it disabled; deleting the only selected outfit should fall back to the character's current primary image. Replaying an edit should not apply it twice, and a failed batch should leave no partial update.
+
+## H3 character outfit selection
+
+- Double-click a character reference in the current Clip. The dialog should list every outfit from the character node with a thumbnail, name and preview action. Applying a selection should place only the chosen outfits in this Clip's reference slots and generation input.
+- Turning the outfit switch off and back on should restore the selected outfits. Changing outfits must preserve the character node's full catalog, other Clips' selections and the voice switch. A newly added outfit must not become active automatically in existing Clips.
+
+## H3 personal settings scope and preview paths
+
+- Changing the settings scope stays in the current window and must not enter shared canvas metadata. Verify two windows editing the same H3 node independently.
+- Native H3 sends the realtime-preview and TAEH3 switches directly to its generator; the TE-accelerated expanded graph sends the target node and TAEH3 switch to its preview bridge. Verify previews after an authorized safe reload; automated graph tests do not constitute a real ComfyUI generation run.
+
+## Canvas video trimming
+
+- Click Trim in a video node toolbar to open the trimming preview; ordinary videos and smart nodes with video results both show this action. Choose start and end with the range slider, second inputs or the current playback position, then play the selection or trim it to the canvas.
+- Trimming creates a separate video node and preserves the original video and the selected audio. Silent videos are supported. The Backend uses local FFmpeg and FFprobe, archives the output and synchronizes it through the existing task and canvas operations.
+- Check invalid or empty ranges, cancelling during processing, closing or switching previews, and refresh recovery. Check Chinese/English and light/dark themes. Previewing or moving the selection must not submit a trim task.
+
+## Separate descriptions for H3 visual sources
+
+- In storyboard subject definitions, each selected visual source has its own thumbnail, name and visual description. The previous description remains an overall subject note. Completing the form should associate each face, costume or morphology description with its own picture in the prompt.
+- Descriptions are saved by reference binding within the current Clip and follow the original source when reordered. Deselected sources are omitted from the prompt; reselecting the same source restores its saved description. Empty fields use only that source's analysis. Other Clips remain independent.
+
+
+## H3 prepared-edit files and short handles (1.5.10)
+
+- `h3_prepare_clip_updates` loads a JSON file from the Backend user's Hermes `cache/scratch` (one optional `INFINITE_CANVAS_PREPARED_UPDATES_ROOT` override). Supply the exact target and the SHA-256 of the raw file bytes. The file contains `formatVersion: 1`, `projectId`, `nodeId`, `expectedRevision`, and `items: [{segmentId, before, update: {segmentId, patch or edits}}]`. Changed existing root fields require their actual `before` values; stale values, bad counts, references or revision reject the whole plan before freezing.
+- The file path must be absolute, resolve within the allowed source directory, have a `.json` extension and match its digest; the existing local-file import size ceiling applies. The plan is frozen in Backend-owned files, separate from the source file and Canvas, and is available after MCP reconnection. Changing the source afterwards does not change an existing handle. No script or private RPC submits Canvas operations.
+- Review the returned bounded `changePreviews`, field list, selection and digests, then call `h3_update_clips` with `preparedId` instead of inline `updates`. The preparation itself validates without a Canvas write; optional `dryRun` rechecks its revision. Preparation chooses an exact smaller edits/patch expression per field. By default it protects `<d>...</d>` dialogue, duration, timeline boundaries and prompt time ranges; file `allowChanges` may name `dialogue` or `timing` only when the user explicitly authorized such edits. Compiler validity and byte equivalence do not prove creative correctness.
+- Commit/recovery uses the frozen operationId, revision and operations with the existing atomic transaction. A repeated handle returns the original receipt without another write; `replayed: true` describes historical committed values, not the latest project state. Strict conflict rejection does not silently rebase a plan. `h3_discard_clip_updates` removes only the exact frozen file after verification or explicit abandonment, retaining the original source, Canvas, media and database receipts.
+- Independent real MCP HTTP tests cover ten Clips and 191 edits, zero-write preparation/preview, one commit, raw Yjs synchronization, current-state preservation after receipt replay, cross-connection recovery, late rollback and explicit cleanup. A local replay of the recorded real ten-Clip cleanup corpus also matches every prepared change without production writes. Configured running Backend/Hermes registration and user-prompt-to-completion latency still need separate verification after an authorized safe reload; the protocol/corpus measurements are not model end-to-end speed results.
+
+## H3 awaiting-confirmation tasks and action recovery
+
+- When different Clips in the same H3 node await first-pass confirmation, selecting each Clip should expose confirm, keep-first-pass and discard actions. Resolving one task must preserve the other Clip's task and preview.
+- If an older Clip projection shows completion while its task still awaits confirmation, Backend startup recovery or rejection of an overlapping regeneration request should restore its confirmation actions without submitting more generation. Discard preserves historical media and restores the previous output.
+
+
+## H3 visual styles preserve the scene
+
+- Apply **Soft light** or **Modern Korean** to a Clip with a night scene, pond or another explicit background. The style should preserve the location, lighting direction, framing and actions without adding an overexposed cool-white window background, daylight or long-lens framing. Soft light no longer implies a comic style. Actual video output still needs manual inspection for abrupt white backgrounds.
+- Saved legacy prefixes for these styles are replaced for each submission while preserving the selected style, scene, shots, dialogue and sound. Clearing the style removes only recognized template prefixes. Saved prompts and historical videos are not automatically rewritten or regenerated.
+- New-run cache comparison includes template content, preventing reuse of output from an older template under the same ID. Clips without a style retain their cache identity. Submitted tasks retain their submitted inputs; active tasks must not be interrupted to load this fix.
+
+## H3 prompt enhancement isolation between Clips
+
+- Switch Clips and immediately enhance the prompt: the input text, document identity, mode, duration and references must all belong to the selected Clip. A Clip whose text is loading, blocked or empty must not use another Clip's text.
+- Switch to another Clip while enhancement is running: the result remains bound to the original Clip and may only replace its unchanged source text. An explicitly bound video from another Clip remains part of the current reference manifest.
+- An independent browser page reproduced the old mixed input (target B with text A) and verified the fixed input and candidate destination using an in-memory model. Related tests, plugin type checking and bundle build passed; real model output still requires user verification.
+
+## H3 random seeds per Clip
+
+- In **Random** mode, copied Clips and continuous runs should receive independent seeds for each new run. The panel, generation log and submitted input should agree; starting another run should assign fresh values.
+- **Fixed** mode preserves the entered value, including 0. Unrelated LoRA changes should preserve each Clip's seed. Second-pass confirmation, second-pass retries and recovery of the same task retain the resolved seeds; duplicate requests do not create another task or reroll seeds.
+
+## Separate H3 cancel button
+
+- Queued/running single-Clip and continuous tasks show **Cancel generation** separately from reset-and-run. It cancels only the selected Clip's bound parent task, stopping that task's remaining Clips without submitting new generation or cancelling concurrent parents.
+- While cancellation is pending, display **Cancelling…** and disable cancel/reset actions. Handle a task finishing during cancellation safely. Disable cancellation when the parent identity is missing; awaiting-confirmation tasks retain confirm, keep-first-pass and discard actions.
+
+## H3 preview dimensions and preloading
+
+- When a first-pass video is visible while a different-resolution next Clip preloads, the resolution label must show only the visible video. Switching to the preloaded Clip and back must update the label from the active slot.
+- The aspect guide follows the loaded media's actual width-to-height ratio; an empty preview still uses the configured ratio. Check grid-aligned frame edges, video/image switching, no automatic playback, and proportional display after resizing the preview container.
+
+## H3 custom Subject references in storyboard fields
+
+- Define a scene, prop, or another custom entity, then reference its `<Subject N>` in the summary, opening description, shot descriptions, soundscape, or music. The chip should show the entity name and visual preview when available; insertion and repair menus should include all defined Subjects.
+- Rename or reorder entities and verify the chips follow their current names and definition order. Picture tags keep their own numbering, and the dialogue speaker roster continues to include characters only.
+
+## H3 narrative deltas and field projection (1.5.9)
+
+- `h3_update_clips` accepts per-Clip `edits` with `field`, exact case-sensitive `find`, `replace`, and positive `expectedMatches`. This is literal replacement, not regex or automatic rewriting. `timeline[].action` and other declared string columns count matches across the selected column; timing and unrequested fields remain untouched. A `patch` can accompany edits only on different root fields. Existing full patches remain supported.
+- `dryRun: true` validates all targets and returns `applied: false`, proposed values/digests, bounded preview samples and the current revision without a write. Review the scope, then submit the same edits with that `expectedRevision`. `editSummary.remainingLiteralFields` flags remaining literal occurrences in other declared narrative fields; it is a review hint, not permission to change dialogue or a semantic all-clear. Missing text, wrong counts, invalid references or revision conflicts reject the entire batch.
+- `h3_get_clip` with `fields` reads only selected narrative values, including continuity and timeline; missing values appear in `missingFields`. Do not add `include: ["prompt"]` when only small fields are needed, since it explicitly requests both full prompt bodies.
+- Isolated MCP HTTP tests verify a ten-Clip transaction, unchanged unrequested fields/runtime bindings/history, raw Yjs document synchronization, preview with zero persistence, and complete rollback after a late Backend rejection. After the user restarted the Backend, the configured Hermes native tools exposed edits/dryRun/fields and passed a disposable ten-Clip preview/commit/readback acceptance: preview kept revision 2, commit advanced it to 3 once, all actual fields and receipt digests agreed, and count mismatch, invalid reference and stale revision each rejected the whole batch without changing targets or revision. The extra control Clip stayed unchanged, and the exact test canvas was deleted and its absence verified. No production canvas or generation was used; this functional acceptance is not an end-to-end latency benchmark.
+
+## H3 latent upscale second-pass confirmation
+
+- Latent second-pass confirmation and face-refinement confirmation use separate switches. Disabling latent upscaling disables and clears its confirmation switch. Dormant confirmation fields must neither pause a task nor trigger decoded-video resampling when the corresponding feature is disabled. Confirmation must validate the original first-pass latent identity; a missing or incompatible identity rejects continuation while keep-first-pass and discard remain available.
+
+- Enable **First-pass confirmation** under **H3 latent upscale second pass**. The first pass produces a preview and pauses the task; upscaling and the second pass begin only after confirming the first pass. Subsequent Clips wait for the current Clip to resolve. With confirmation disabled, both passes run continuously.
+- Confirmation restores the original task's video/audio latent, reference conditioning and remaining sigmas. Both pass step counts and the full sigma schedule are frozen at launch; upscale model, target size, precision and postprocessing can be adjusted before confirming. Check keep-first-pass, discard, refresh/restart recovery, duplicate confirmation and explicit retry after second-pass failure.
+- Local ComfyUI requires `backend/comfyui-custom-nodes/InfiniteCanvasH3LatentConfirmation` and a reload. Missing nodes or checkpoints must reject execution without rerunning the first pass. RunningHub does not support this confirmation mode.
+
+## Local startup and upgrade protection
+
+- From a clean installation, root `npm run dev` should build the shared package before starting the Backend (17370) and Web (3001). A failed build must prevent startup. `dev:services` optionally includes the legacy proxy; Agent startup on Unix must not require Windows `set`.
+- Without Codex installed, HTTP/MCP and local ComfyUI should work; Codex chat should explain how to install it. After installation, check app-server startup through project dependencies and global PATH installations.
+- In temporary old databases, verify that pre-migration snapshots include committed WAL data, backup failure blocks migration, and retries never overwrite snapshots. Refuse newer schemas without changing the source. Protect media and browser drafts separately. Running services require a safe reload before verifying the new behavior.
+
+## Paste clipboard images onto the canvas
+
+- After clicking the canvas background, Ctrl/Cmd+V should import image, video, or audio files provided by the paste event directly. A separate clipboard read waiting for permission must not block media already available in the event. Verify that uploaded images display correctly and one paste creates only one node.
+- Check that copying canvas nodes still preserves their configuration and connections, and pasting inside inputs or rich-text editors retains normal editing behavior.
+
+## H3 atomic batch configuration (1.5.8)
+
+- Native six-Clip acceptance completed on 2026-10-01 through Hermes's configured HTTP MCP tools: one `h3_update_clips` call, revision 2 → 3, exact title/duration readback for all six targets. An invalid final reference and a stale revision each rejected the whole batch; all six values and revision stayed unchanged. The isolated test canvas was deleted and a native listing returned zero matches; no media was generated or production canvas modified.
+- The MCP transport session expired during final readback, then recovered after cooldown. Only reads resumed before cleanup; the successful batch was not resubmitted. Evidence: `C:/Users/wxy/.hermes/plans/2026-10-01-h3-native-six-acceptance.json`. This acceptance is not a user end-to-end latency benchmark.
+
+## H3 model cache across consecutive tasks
+
+- With model caching enabled, run consecutive H3 tasks using the same model, encoder, and VAEs. Successful completion should not clear the global execution cache. A native NanFeng V15 node declaring the new capability should reuse Loader caches while still releasing VRAM before sampling and decoding. Compare loading logs and timings between the first and subsequent runs.
+- Changes to model files, encoders, VAEs, or VRAM reservation should invalidate the corresponding preparation. Disabling caching or a failed task should clear caches. Do not send unsupported fields to older native nodes or describe CPU Loader-cache reuse as keeping all models permanently resident on the GPU.
+
+## H3 workbench parameter adaptation
+
+- Select each local H3 model and change resolution, W/H, size presets, and duration. Resolution changes should update dimensions; dimension changes should update the short-edge resolution. Show the native aspect-ratio, pixel-count, and grid-aligned dimensions. Task inputs and generation records should match those effective values.
+- H3 duration presets are 6/10/12/15 seconds, with integer inputs from 1 to 15. Reject out-of-range submissions. Ordinary API video models retain their previous duration options.
+- Automatic size follows the first-frame aspect ratio for image-to-video and first/last frames, and the workflow aspect ratio for text-to-video and multi-reference. Resolution still controls pixel count. Check legacy 9:16 configuration against displayed W/H and preserve effective inputs in historical records after reload.
+
+## Four local H3 video models
+
+- The local ComfyUI video catalog should contain MiniMax H3 text-to-video, first/last frames, multi-reference, and image-to-video models. Text-to-video takes no image; image-to-video takes one first frame; first/last frames take two ordered images; multi-reference takes ordered character or scene reference images.
+- Check prompt, duration, aspect ratio, megapixels, sampling, and seed fields. Initial values inherit the H3 defaults at registration. Unsupported input scenarios must not fall back to another mode. Reject a third image for first/last frames rather than silently dropping it. Unused native multi-reference slots should retain their valid empty value.
+
+## Local workflow tasks in the video workbench
+
+- Select a ComfyUI video model without an API key and generate with zero, one, or multiple reference images. Submit the local workflow selected by the model's input scenario routing without asking for an API key. Explicitly unsupported scenarios should show a workflow configuration error without falling back to an API.
+- Reload or reopen the video workbench during generation. Resume polling the saved Backend task ID and display its output on success. Show workflow errors, cancellation, and missing-media failures. API video channels should still validate their keys.
+
+## Delete selected canvas nodes
+
+- Select one or more regular nodes and press Delete. The selected nodes and connected edges should be removed; Ctrl/Cmd+Z should restore them. Delete must not remove H3 nodes. In a mixed selection, remove only regular nodes and keep H3 nodes selected. Delete/Backspace should still remove a selected edge.
+- Press Delete in a prompt, input, rich-text editor, or a region marked to ignore canvas shortcuts. Only the current editing content should change. Backspace should not delete selected nodes.
+
+## Character image changes update downstream references
+
+- Connect a character to a regular generation node and switch its primary image. The reference card and the next generation input should follow immediately. Replacing or removing images through the web or MCP should also update references, including replacements with the same image count. Reloading and another window should show the same selection.
+- Existing references to removed character images should use the current primary image. Preserve valid independent outfit selections and explicitly disabled image inputs. Keep historical output reference snapshots unchanged and do not generate again automatically.
+
+## Character details in H3 storyboard prompts
+
+- Fill in a character node description, then generate a prompt in the H3 storyboard editor. Automatically generated subject definitions should omit that description. Check image/outfit references and characters with only voice enabled; character names, picture numbering, outfit details, and voice information should remain.
+- Manually enter a description in the storyboard editor's subject definitions and generate the prompt. That content should remain, and existing subject definitions should not be cleared automatically.
+
+## Home workspace
+
+- Reload home or return from an already-loaded canvas with portrait, landscape, video, and placeholder covers. Loading media must not resize the hero or move the project list. Late logs or drama data must not replace an already-selected cover for the same project version; a new update timestamp may refresh it.
+
+- Home lists real canvases by update time, with name search, canvas/drama/saved filters, grid/list views, and create-and-open. Bookmarks are stored in Backend; the view preference stays local. Verify reloads and bookmarks for different projects from concurrent windows.
+- Covers use loaded recent outputs, drama covers, or media from already-loaded nodes. Visible cards without a cover look up their project's most recent successful record, then fall back to an overview if no media is available; home never fetches every full canvas. Recent images, videos, and audio can be previewed and linked to their source canvas when it still exists.
+- Recent tasks show Backend status, progress, and failures and refresh on task events. Check disconnection, partial request failure, empty states, both themes and languages, and narrow screens. Generation, retry, and concurrency policies are unchanged.
+
+## H3 image references converted to characters
+
+- Convert an ordinary image or smart image node already referenced by an H3 Clip into a character in place. The reference area should show the character name and category and expose outfit settings, while preserving the original image, binding, and order without duplicate references.
+- Reopening the canvas should also recover existing ordinary image references from the same character source as character groups. References explicitly assigned storyboard or scene duties should retain those duties.
+
+## H3 live video preview playback
+
+- With realtime preview enabled during H3 generation, each incoming video preview should start muted from the beginning and loop until the next preview arrives. New previews should start automatically without moving the Clip timeline, changing the selected Clip, or continuing into an existing output.
+- Once generation finishes or the live preview is removed, ordinary outputs should still require manual playback; a single Clip should stop at its end, and Play All should retain its existing sequential playback. Image previews should remain still images.
+
+## H3 visual style template row
+
+- In Settings → Model and basic parameters, the visual style template label and its empty or selected value should stay on one line at the same row height as nearby model fields. Long options should still open, search, select, and clear. Check common panel widths and both themes.
+
+## Character labels at small canvas scales
+
+- Zoom out a character node with a cover image. Its character icon and name should remain readable without obscuring the main image. Continue into overview and compact modes and check that the label stays within the node. Verify selection, hover, and both themes.
+
+## Drag ordering for canvas references
+
+- Connect at least two image references to a smart image node and drag their cards into a new order. The order should survive a canvas reload, and the next generation log and submitted inputs should follow it. Check a mix of character and image cards as well.
+- Dragging should not move canvas nodes or remove connections. Remove, add, and hover preview actions should still work. Historical references from an older output remain read only, and indirect loop references should not be reordered as direct connections.
+
+## Template append node in the workflow graph
+
+- Open the imported "2.1 text to image" workflow. Node #25 should show the template append label, reveal its full `PromptTemplateSuffix` class on hover, and retain its editable `template` field. The #4 → #25 → #10 connection and the node structure after export and reimport should remain intact. Check the label in both languages.
+
+## Qwen Image 2.1 two-image editing
+
+- Run the Qwen Image 2.1 editing workflow through the canvas model with two reference images. The prepared graph should retain only those two image inputs, keep the prompt enhancer and media output, and return an image for that run. One-image, all-image, and missing required-input cases should continue to follow their field settings.
+
+## H3 node copy and mode switching
+
+- Copy an H3 node with character outfit and voice references and previous outputs. Switch either node between text to video and multi reference modes, then reload the canvas. Each node should retain its own reference selection; returning to multi reference mode should show the saved references. Editing one node must not change the other node's Clip data.
+- The original node's outputs and generation logs should remain accessible. Text to video mode may hide reference slots that do not apply, but switching modes must not delete saved references.
+- Duplicate a node with both incoming and outgoing connections using the context menu and Ctrl+C/V. The copy should keep usable incoming references without connecting to an unselected downstream node. Copying two connected selected nodes together should preserve their internal connection.
+
+## H3 visual style template setting
+
+- Select a visual style template under Settings → Model and basic parameters. Check both Current Clip and Global settings scopes: the global selection should update existing Clips and be inherited by new Clips. Clearing the selection should stop template injection.
+- After saving a Ref2VA storyboard, `detailed_description` in the editor should contain no template text. The generation log and submitted prompt should include the selected template once at the start of that section. For I2V, FL2V, and T2V, it should appear in `integrated_multimodal_description`. A legacy saved template prefix should not be duplicated; changing or clearing the setting should take effect without rewriting the saved prompt on refresh.
+- Exporting, importing, or saving default settings should include the template choice without including the prompt body in the settings file.
+
+## H3 playhead selects its Clip
+
+- In a multi-Clip H3 timeline, click the ruler inside another Clip, then drag the playhead across a Clip boundary and back. The selected Clip highlight, current Clip panel, and preview should follow the playhead. Seeking to the timeline end should select the final Clip.
+
+## H3 node settings scope
+
+- In an H3 node with several Clips, switch to Global settings and check the prominent notice. Change a model, sampling parameter, and duration. Every existing Clip should show the new values, timeline starts should follow the changed durations, and each Clip should retain its own prompt and references.
+- Add and insert Clips on the timeline. They should inherit fields edited in Global settings. Switch back to Current Clip and change one field; only that Clip should change. After reloading the canvas, new Clips should still receive the global fields. Check the scope controls and notice in both languages.
+
+## H3 node interface language
+
+- Open an H3 node in Chinese and check the Prompt, Settings, Output, Video/References timeline labels, media types, and storyboard field headings are displayed in Chinese. Switch to English and back; the labels should update immediately while the serialized prompt section names and generation input remain unchanged.
+
+## H3 tail-frame references and Motion Context
+
+- Restoring historical output settings must use original editable references, authored prompts and saved modes. Runtime tail images, effective modes and injected prompt text remain in logs without becoming editable refs. Legacy first-frame replacement logs may restore only when the original asset is recoverable; otherwise reject without dropping references. Manually added images with the same label must remain intact.
+
+- Rename tail-frame continuation to **Tail-frame reference**. When enabled on a Clip, its ending frame is captured when the next Clip runs and appended after the next Clip's existing image references. It defines the first-frame physical state of the next Clip: pose, prop ownership, action progress and scene state. Retain saved references, image numbering and planned camera/framing; conflicting storyboard states must yield to the tail frame, and completed actions must not reset or repeat.
+- The next Clip receives the additional image in Ref2VA mode; its effective mode and input slots are logged. Saved mode, reference bindings and prompts remain unchanged, including when running the next Clip alone. Missing previous output or exceeding the existing nine-image limit must reject execution. Outputs produced by the old opening-frame replacement behavior must not be reused as caches.
+- **Motion Context** independently carries video/audio latents and context parameters. Tail-frame reference alone must not enable it; both switches may be enabled independently.
+- Historical logs retain their original tail-frame inputs and previews, or names when media is unavailable. Verify appended image ordinals, preserved storyboard instructions, and switch labels/state after refresh.
+
+## Restore an H3 Clip prompt after Undo
+
+- Delete a Clip with an existing prompt, then immediately press Ctrl+Z. Confirm that the Clip and prompt return without a persistent "Clip not found" error. Edit and save the prompt, refresh the canvas, and check that the text remains.
+- Other Clips on the node should remain editable. Any unconfirmed text draft from before deletion must remain recoverable instead of being silently applied to the restored document identity.
+- Immediately open and save the storyboard editor after restoring the Clip. Saving should wait for the new prompt session to load. Old-identity drafts should remain in the draft box and must not be merged into the new document. If Backend has not restored the Clip yet, the editor should show the specific read error and keep form edits.
+- Keep an old draft blocked by a replaced Clip document, then edit and generate from a different smart image node in the same canvas. The current image prompt should sync and submit while the old Clip draft stays recoverable. A sync failure in the image prompt itself must still stop generation.
+
+## References on a second smart image generation
+
+- After a smart image node produces its first result, open its settings with no live image input and no explicitly restored historical references. The settings should still show the text-to-image workflow fields, without treating the node's output or `@` candidates as used references. Check one image, two images, two selected character outfits, and prompt `@` selections against the generator's actual inputs.
+- Explicitly restored results should still use their reference snapshot. Clearing historical references should return to live inputs. Current loop inputs and ordinary image-node self-edit references should retain their behavior.
+
+- Connect a text node to a smart image node, then connect that image node to another generator that also has its own image reference. After the first result, generate again from the first node: it should still route as text to image, while the downstream generator retains its own image reference.
+
+## Loop image output preview comparison
+
+- Connect an ordered image input group and a fixed reference image to an image loop. After generation, open each round's output preview: the before side of the comparison slider should show the matching image from the input group. Selecting an older result in the same slot should still compare with that slot's current input. An old loop slot whose source input was deleted should not show an unrelated fixed reference as its before image. Ordinary image results should continue to use their generation snapshot for comparison.
+
+## H3 latent-upscale compatibility preflight
+
+- On a ComfyUI instance without `H3LatentUpscalerNodeMegapixels`, enable H3 latent-upscale second pass and submit a Clip. The Backend should reject it before a first-pass Comfy task starts, with a clear missing-node message. With the compatibility node installed, check that the selected upscaler model appears in `NanFengH3LowPeakLatentUpscalerV15` and that submission proceeds. Verify first-pass speed separately; preflight only prevents the known late failure.
+- If H3 Motion Context continuation and latent-upscale second pass are both enabled, submission should reject the incompatible combination before sampling.
+
+## H3 Motion Context resume from a middle Clip
+
+- After a completed Motion Context chain, edit Clip 3 and run the current Clip and later Clips. The Backend should reuse the AV latent from the currently bound Clip 2 result, render from Clip 3, and leave the earlier run's latent files and Clip 1–2 outputs intact. Check the new task's continuation index and archived output.
+- Change Clip 3's model or dimensions, replace Clip 2's active result, or remove its latent file: resume should fail before a ComfyUI sampling task starts. A remote ComfyUI without a configured local root should receive a clear unsupported message.
+
+## H3 prompt enhancement receives the original prompt
+
+- Enter a complete six-section Ref2VA prompt, including dialogue, in a Clip and click Enhance Prompt. The text-generation request should include the entire current editor prompt and the current reference manifest; a structured prompt alone should no longer be rejected as having no free-form user text. Check the returned candidate before accepting it, especially subject references and dialogue.
+- When free-form user text precedes an older structured draft, the request should include both and identify the free-form text as higher priority. While collaborative text is still syncing, Enhance Prompt should remain disabled instead of doing nothing on click.
+
+## Character voice upload compression
+
+- After restarting Backend, upload a voice file larger than 0.5 MB in either the canvas character editor or the character asset editor. The active voice should become a 24 kHz mono, 64 kbps MP3; the UI should show the original and compressed sizes, and the original media should remain stored. Voice files at or below 0.5 MB and ordinary audio asset uploads should retain their source format. The existing Phoebe character and speaking H3 Clips should reference the approved compressed MP3.
+- Before Backend is restarted, a character voice upload should report that compression is unavailable instead of silently storing a large file as the active voice.
+
+## Smart text result editing
+
+- After restarting Backend, double-click a successful smart text node's result. Editing the text should save the active result and keep the node's input prompt unchanged. A normal image smart node should not expose its media content as editable text.
+
+## H3 storyboard editor follows the prompt shot count
+
+- Write two line-start `[Shot N]` entries in a Clip prompt and add four storyboard images. Opening the storyboard editor should show only two shots. Shots without an explicit image cue should stay unbound so each image can be chosen manually. After completing the edit, reopen it to check that the shot count and manual bindings remain.
+- When image and shot counts match, empty shots may still initialize from image order. Explicit prompt bindings should keep their shot order; duplicate or missing bindings should clear without adding shots.
+
+## H3 V15 LoRA strength range
+
+- After ComfyUI reloads the updated V15 custom node, check `/object_info/NanFengH3MultiReferenceGeneratorV15`: all eight `LoRA N strength` inputs should accept -4 through 10. Set a Clip LoRA strength to 7, verify the canvas retains it, and inspect a newly submitted task's V15 input and generation log; both should show 7. Values above 10 or below -4 should be clamped before submission. Do not use an existing log to verify the new node schema.
+
+## Smart image node tools
+
+- On an image-mode smart node with multiple generated images, choose a primary image and use Reverse Prompt, Crop, Split, Mask Edit, Upscale, Auto Levels, Angle, View, Download, and Add to Assets. Each tool should use the selected primary image, including when it is stored only by media key. Reverse Prompt should create its connected text and configuration nodes. Replace Image should keep the smart node's model and prompt settings.
+
+## H3 storyboard images first in Picture order
+
+- In a Clip with character images followed by storyboard images, reorder storyboard cards and complete the storyboard editor. The storyboard images should occupy the first Picture slots in shot order, followed by other image references. Existing `<Picture N>` mentions should still point to their original images after renumbering. Check the new generation log's input refs and actual submitted image slots in the same order; older logs remain historical snapshots.
+
+## Local Backend startup
+
+- From a VS Code terminal, run `npm run dev:local`. Backend should report that it has started and `/health` should respond before opening the canvas; Web and Agent should remain available. The default `dev:backend` command should run without a watch child. Use `npm run dev:watch --workspace backend` only when source watching is needed.
+- Start `npm run dev:backend` with a canvas that has accumulated H3 history. The Backend health check should become available promptly, and opening the canvas should connect without waiting for all historical H3 tasks to replay. Startup should process at most the 10 newest recovery candidates, including unfinished tasks and terminal H3 tasks still bound to a node or Clip. Older candidates should remain unchanged if excluded. A selected terminal H3 task should finish its saved writeback even if its older generation log has been pruned.
+
+## Canvas video comparison
+
+- On a canvas with at least two video nodes, open one video's toolbar and choose Compare. The canvas should enter node selection, highlight other video nodes, and allow Escape or the top hint to cancel without opening a dialog. Click another video node to open the comparison with that video already selected; non-video nodes and the source video should not open it. Add or remove more videos inside the dialog without changing canvas nodes.
+- Play, pause, and drag the shared timeline. All visible videos should move to the same elapsed time. With videos of different lengths, the shorter one should hold its final frame while the longer one continues. Only the current video's audio should play. Close and reopen Compare to confirm it starts fresh.
+- Repeat play and seek while the pointer rests over the timeline and while the video picker is expanded. The comparison should remain usable without a React update-depth error.
+
+## H3 LoRA discovery
+
+- Add a LoRA outside the `Minimax` subfolder of the active ComfyUI model directory. Open the H3 Clip LoRA section and confirm it appears in the dropdown with its relative path; add another file while the section stays open, click "Refresh LoRA list", and confirm it appears without reloading the page. Select it and confirm the saved Clip keeps that path after a refresh.
+- While Backend still has an older model catalog, type `H3_speed_slider_1.1.safetensors` into a LoRA slot and press Enter. The slot should enable and retain that exact ComfyUI relative filename after reopening the Clip.
+- Search for `speed_slider` in the LoRA section. All LoRA slot dropdowns should show only matching filenames; clearing the search should restore the full list without changing a selected slot. Typing a complete relative filename directly in a slot should still work.
+
+## Smart generation and H3 Clip reference display
+
+- Type or paste `<Picture 1>` in a regular smart generation prompt in image, video, audio, or text mode. It should remain plain text without a red "missing Clip reference" chip; `@` resource suggestions should still work. In an H3 Clip prompt or storyboard editor, unresolved `<Picture N>` and `<Subject N>` tags should still show clickable repair chips.
+
+## H3 storyboard image and Picture order
+
+- Paste a prompt with 12 line-opening `[Shot X]` labels, inline `shared by [Shot X]` composite storyboard references, and shot references in other sections into an H3 Clip. The storyboard editor should show only the 12 line-opening shots from `detailed_description`. Save and reopen it to confirm the shot count, descriptions, and inline composite references remain intact.
+- Create an ordered canvas group with several storyboard images and rearrange its slots. Pick that group from an empty H3 storyboard card: every usable image should enter consecutive cards in slot order, ahead of existing later cards. Also choose the group in the storyboard prompt editor's "Bind storyboard image" selector: the images should join the current Clip and bind to consecutive shots. Refresh and compare the track, references, and Picture order. Non-image members and stale slots should be skipped. If the Clip cannot give every storyboard card at least 0.5 seconds, track import should report the limit without a partial write.
+- Bind three storyboard images to one Clip, then move the third storyboard card before the first, or bind a later card before an earlier empty card. Storyboard images in the reference list should follow the storyboard track, while each `<Picture N>` tag still points to its original image and other image references keep their slots.
+- For an existing Clip with mismatched order, complete the storyboard editor or write its shot bindings with `h3_write_storyboard_prompt`. Check that storyboard and Picture order agree. Refresh and compare the track, reference list, and actual reference submission before generation.
+
+## Remember the last image settings
+
+- In a canvas image node, change the image model, quality, size, image count, transparency, and 16-pixel alignment. Create another image node and confirm it starts with the latest model, quality, size, count, and transparency. Reopen the settings panel and confirm the alignment switch keeps its choice.
+- Refresh the page and create another image node. The same choices should remain. Reopen the original node and confirm its own saved settings still take priority when they differ from the latest defaults.
+
+## Editing H3 Clips with stale Picture references
+
+- Paste a Ref2VA prompt that defines `<Subject 1>` as a marriage booklet in `subject_definitions` while its Picture references are bound. The editor should show a neutral Subject chip rather than a missing-character error. Remove that definition while keeping another `<Subject 1>` mention: the unresolved chip should say "subject missing". Existing Picture chips should keep their bindings.
+- Select an H3 Clip and confirm its current Clip header shows both `Clip N` and the internal ID. Click the ID to copy its full value, and hover the timeline Clip card to see the same ID. Reorder Clips: the displayed number should follow the new order while each internal ID stays with its original Clip.
+- With `<Picture 4>` in a Clip prompt, remove its third character outfit image from the reference lane or the reference editor. The removal should save through Backend ops without a prompt reference warning or a legacy reference mismatch error, including when an old page sends the previous reference list. Refresh and confirm the removed image stays removed, the saved prompt remains editable, and character audio and other Clips stay unchanged. Check the remaining Picture numbers before generating.
+- In a Clip with its character outfit master switch off but a retained outfit catalog entry still marked enabled, generation preflight should not require an image binding for that disabled outfit; voice references remain valid. If the prompt still contains an invalid `<Picture N>`, the generation error should identify the visible Clip number and the missing tag, without showing the internal segment ID.
+- When an already committed canvas operation is retried with the same operation ID after its response is lost, the Backend should return its original receipt even if an older checkpoint contains H3 legacy references. No new revision should be created, and new reference edits should still reject unknown legacy media.
+- Reopen a canvas whose local draft marked that committed operation as rejected by the old Backend. The page should check the saved receipt, retry the unchanged operation ID, and clear the draft without creating another revision. A rejected operation with no saved receipt should remain available for explicit conflict resolution.
+- Open a Clip with three current image references while its saved storyboard summary still mentions `<Picture 4>`. The H3 node and page should remain usable. Opening the storyboard editor should show the missing reference error within the form and allow the summary to be edited.
+- Complete should keep the editor open with an error until the stale number is fixed. After correcting the summary, Complete should regenerate subject definitions and retention analysis from current references. Opening the page must not silently rewrite the prompt.
+- In a Clip with a storyboard frame, a prop image, a character outfit image, and an off-screen voice reference, leave the prop out of the Subject list. Complete should save successfully and define the prop image as an independent reference; the outfit image should remain the character's visual source, and the voice reference should remain attached to the off-screen speaker.
+
+## H3 reference input lines for the selected Clip
+
+- Select different Clips in an H3 canvas node. Only enabled references for the selected Clip should show dashed arrows from storyboard frames and other source media into H3. For a frame below H3, the line should enter the bottom of H3 from the top of the frame.
+- When multiple canvas nodes share a media file, the arrow should start at the binding's recorded source node. Existing solid image generation and crop provenance lines should keep their original meaning. Switching Clips should not add project connections or revisions.
+
+## Ordered group drag and resize
+
+- In a test canvas, swap members within an ordered group, drag one out, and drag it back in. Undo and redo each move immediately. Slot order, group membership, position, width, and height should match the respective before and after states without a second layout jump. Refresh and confirm the Backend receipt matches the page.
+- In a test canvas, drag a member to a gap on its right and then use Arrange. The saved order should match the visible order; dragging an image by its edge should target the slot under the image center. Dropping outside the slot area should leave the member movable.
+- Drag a node into or within the group over the left or right side of an occupied member. The “Insert at N” marker should match the final order, shifting existing members forward. Over the member's center, the slot marker should preserve swap or replacement. Check empty cells, column gaps, and a zoomed canvas too.
+- Shrink an ordered group and enlarge it again. Slots and members should stay within the frame, preserve each member's aspect ratio, and restore the size of members that fitted their original slots. Add the fourth member to a three-member group and confirm that the new row reflows the existing members.
+- Add a member through MCP to a small ordered group, then refresh the canvas. The new member and existing members should remain inside their recorded slots. The Backend process must load the new build before this check.
+
+## H3 blocking-map prompt references
+
+- In a Ref2VA Clip with a blocking/axis image and character images, open the storyboard editor and click Complete. Confirm that `subject_definitions` contains a standalone `<Picture N>` line identifying the blocking map as a spatial plan, while `retention_analysis` contains a matching line for positions, movement paths, and the 180-degree axis. Character identity sources should not treat that image as an appearance reference. Repeat through `h3_write_storyboard_prompt` and confirm the same reference role.
+- Reopen a Clip whose saved entity definitions already include the blocking image. Confirm the generated Subject lines describe it as spatial guidance, and the standalone Picture definition and retention line still appear. Check any hand-edited prompt text before regenerating, since Complete rewrites the generated sections.
+
+## MCP 分镜换槽与图片输入预检
+
+- 对有多张图的角色节点调用 `canvas_image_input_manifest`，确认返回实际参考顺序与 storageKey，并提示未明确选择的角色图；提供 `characterImageKeys` 后再提交图片生成，输入清单应与生成快照一致。
+- 用 `canvas_replace_storyboard_slots` 一次替换有序分镜组的指定槽位及参考资产，确认只改指定槽位、画幅校验生效，旧图片与结果历史仍可读取。
+- 用 `h3_replace_storyboard_binding` 替换一个 Clip 的分镜绑定，确认人物、服装、声音和其他分镜绑定保持原值，旧 storageKey 不匹配时拒绝写入。
+
+## 角色资产与画布节点同步
+
+- 编辑角色的一张参考图并点击卡片上的替换按钮，从画布选择另一张图片后保存；确认新图片来源和尺寸已替换，卡片原有职责、服装说明、顺序及主图选择保留。取消画布选图后再用顶部“从画布添加”，确认此次操作会追加而不会误替换。
+- 将角色节点存为角色资产，在两个画布中插入同一角色；修改资产描述、名称、参考图或声线后，已打开的画布不立即改动，分别重新打开画布时更新各自的关联节点，未关联节点不变。重复打开且资产未变时不应增加 revision。
+- 在画布上修改已关联角色节点的描述，确认资产库仍保留原值；点击该节点“存为角色资产”后，资产库才更新，其他画布要重新打开后才读取新版本。
+- 在两个关联节点分别选择不同主图，再修改资产描述或资产主图并重新打开画布；两个节点应继续显示各自选中的主图。重排资产参考图后，节点仍应选中原来那张图片。
+
+## MCP canvas state pagination
+
+- A 449-node canvas should return all node IDs, types, titles, and available generation modes in one default `canvas_get_state` call, without positions, media keys, metadata, or a `connections` array. `view: "graph"` should return layout dimensions and connections.
+- When the summary would exceed the configured MCP output limit (512 KiB by default), the tool should return a page with `nextNodeOffset`; repeat the call with that offset until all IDs are read. Keep the same project revision across pages and deduplicate connections by ID when combining them.
+- `nodeLimit` should cap a caller-requested page for token control. A single node summary that cannot fit even without connections should still return `OUTPUT_TOO_LARGE` rather than a non-advancing page.
+- With an explicit `projectId`, `ifRevision` should return `unchanged: true` without nodes when the persisted revision matches; a changed revision should return the current directory. Combining it with graph, node IDs, or pagination should fail.
+
+## H3 分镜提示词不再泄漏素材名
+
+- 打开一个分镜图素材名被写进过 `analysis.summary` 的 Clip（例如素材名「S01-02·沈侯持婚书单人对峙·新版分镜组第2槽」），重新保存分镜后确认 `subject_definitions` 与 `detailed_description` 里只剩通用 storyboard frame / storyboard keyframe 描述，不再出现素材名、槽位号或 EP01 / S01-02 / group-… 这类归档标签。
+- 确认同一镜的正文里不再出现两条「Use the approved … from <Picture N> …」cue（旧 cue 应被剥掉，只保留本次编译生成的一条）。
+- MCP `canvas_analyze_reference_asset` 传入与素材名相同的 `summary` 时应报错拒绝写入，而不是把文件名存成视觉摘要。
+
+## MCP scoped canvas reads
+
+- `canvas_get_state({ nodeIds: ["<node id>"] })` should include only connections touching that node while retaining the project's `connectionCount`; `view: "graph"` should include all connections when unpaged.
+- `canvas_inspect` should keep full node summaries in `nodes` while `referenceCandidates` and `generationTargets` contain only their selection fields. Check that a reference candidate still exposes its `storageKey` and a generation target still exposes its model and status.
+
+## MCP large-node reads and stale Clip IDs
+
+- On a canvas with a large H3 node, `h3_get_node` should return the current Clip IDs and order without full segment metadata; use a returned ID with `h3_get_clip` to read one Clip.
+- `canvas_get_state({ nodeIds: ["<large node id>"] })` should return a node summary with `metadataTruncated: true` instead of `OUTPUT_TOO_LARGE`. Small nodes should still return full metadata.
+- A removed or mistyped Clip ID should report `SEGMENT_NOT_FOUND` and suggest `h3_get_node`; re-read the index before retrying. Reload the MCP client after updating Backend and canvas-agent runtime output.
+
+## H3 MCP 按锚点插入结构化视频计划
+
+- 使用 `h3_apply_video_plan` 并设 `replaceSegments: false`，传 `beforeSegmentId` 或 `afterSegmentId`；新增 Clip 应在单次 Backend 画布操作后出现在锚点位置，返回的 `positions` 应与读回的时间线索引一致。
+- 同批追加多个 Clip 时应保持 `segments` 输入顺序；两个插入锚点同时提供、替换模式下提供锚点、锚点不存在或新增 ID 重复时应明确失败且不留下部分写入。
+- 不传锚点时维持原有追加到末尾行为；`replaceSegments: true` 的整体替换行为保持不变。
+
+## H3 architecture refactor
+
+- Browser verified on isolated data: a canonical 30-clip node mounts, reloads, switches clips, and scrolls without extra revisions or reference writes; two tabs keep separate clip selection and receive each other's persisted mode edits. Historical output restoration, offline edit recovery, and the rebuilt static site were also verified.
+- Real local ComfyUI runs completed for T2V (including first-pass confirmation and full-frame second pass), I2V, FL2V, Ref2VA, a two-clip Motion Context chain, and a two-image 1×2 storyboard composite. Browser actions covered confirm, keep first pass, discard, duplicate click, cancel, second-pass failure, Backend restart, and frozen later-clip input. The three reference modes and the composite each produced an archived, playable video. A local mock verified RunningHub upload, submission, polling, media archival, and confirmation; the real RunningHub cloud workflow remains untested because this machine has no RunningHub API key or workflow ID configured. Artistic quality of generated outputs still needs human review.
+- In a 2,000-task in-memory fixture, a 50-task filtered page took 0.173 ms median using SQLite filtering, versus 36.599 ms median for the former read-all/filter algorithm (20 warmed iterations, same process). A separate startup fixture processed all 1,101 active orphan tasks beyond the former 500-item boundary, giving each an explicit failure outcome.
+- Open a 30-clip H3 node, switch clips, enter and leave overview, and scroll the timeline. Mounting and scrolling should produce no reference-catalog writes or extra canvas revisions; prompt and settings should not commit on every scroll frame.
+- Reuse one asset with different labels, roles, and subjects across clips. Reopen the canvas to verify isolation. Regenerate a source image: a new run should use its latest primary image, while an already-started run keeps its frozen reference.
+- During a paused multi-clip run, edit a later clip and the current clip's refinement settings. The later clip should use its start-time prompt; confirmation should use the new postpass settings. Check keep, discard, failed postpass retry, and Backend restart on the original parent task.
+- Restore a historical Output to the current clip and verify its result and inputs survive refresh and another window. Failed asset-analysis or default-settings saves should remain visible and must not claim success.
+- Import a legacy H3 canvas with `refItems` / `refs`; verify the SQLite backup, reference order, media, and per-clip semantics. Conflicting asset IDs must split by media identity. When current `referenceBindings` differ from old lists, keep the bindings authoritative and archive the exact old lists in `h3_reference_legacy_archive` rather than blocking startup.
+- The local database copy was rehearsed across 79 H3 clips with unchanged compiled inputs and 61 archived legacy reference snapshots; the actual database reached schema v14. Reopen the affected canvas for manual verification.
+- Review the visual and audio quality of the generated ComfyUI samples and verify the same modes against a configured real RunningHub cloud workflow. Automated tests cover pagination, confirmation, and migration.
+
 ## H3 first-pass confirmation
 
 - Run a confirmation-mode clip on a test canvas. After the first pass, the original parent task, node, and clip should show `awaiting_confirmation`; the task center should preview the first pass and offer confirm second pass, keep first pass, and discard. Refresh and restart Backend normally, then confirm that the same task ID can continue.
@@ -22,8 +475,8 @@ description: Implemented changes that still need manual verification
 
 **MCP 返回体瘦身**
 
-- 调 `canvas_get_state`（不带参数）：返回节点摘要（`totalNodes` 为真实节点总数，节点项不含 `metadata`），231 节点画布应在几百 KB 以内、不再报 `OUTPUT_TOO_LARGE`。
-- 调 `canvas_get_state({ nodeIds: ["<某节点 id>"] })`：只回该节点的完整 metadata。
+- 调 `canvas_get_state`（不带参数）：尽量返回全部精简节点目录（`totalNodes` 为真实节点总数，节点项不含布局或 `metadata`）；超出输出上限时返回 `nextNodeOffset`，按同一 revision 继续翻页。`view: "graph"` 才返回布局与连线。
+- 调 `canvas_get_state({ nodeIds: ["<某节点 id>"] })`：小节点返回完整 metadata；超过现有输出上限时返回摘要并标记 `metadataTruncated`。
 - 调 `canvas_export_snapshot`：仍返回完整画布（契约未变）；在超大画布上会返回可自助恢复的 `OUTPUT_TOO_LARGE` 错误并给出缩小范围建议。
 - 调 `assets_list`：不再返回内联 base64（`coverUrl` 显示为 `[inline-media:image/png]`），`pageSize`/`page`/`keyword` 真正生效。
 - **后端进程需要重启后上述 MCP 改动才生效**（backend 是 `tsx src/index.ts`，无热重载）。
@@ -275,7 +728,9 @@ description: Implemented changes that still need manual verification
 - 挂载一张由角色节点参与生成的分镜图，打开其「参考素材职责」弹窗，确认「分镜中出现的人物」已自动勾选本次生成实际引用的角色；未参与生成的角色不应被勾选。分别通过画布选节点和拖拽挂载验证，旧图片节点沿参考连线回溯角色的场景也应生效。
 - 对分镜图片点击预览左上角删除按钮，确认只移除当前 Clip 的图片引用，分镜卡片及其时长保留为空分镜，画布上的原始素材不受影响；「去除素材」仍移除整个当前引用。
 
-- 在 H3 Clip 的 Refs 行双击普通素材、角色参考和分镜素材，确认均打开「参考素材职责」；单击职责标签不再打开弹窗。点击「从画布替换」并选取相同类型素材，确认替换发生在原引用位置且原职责/用途保留；点击「去除素材」只移除当前引用。双击素材卡片左侧预览的放大按钮后，灯箱展示完整图片/视频/音频，点遮罩、点关闭按钮、按 Esc 都能关闭。
+- 在 H3 Clip 的 Refs 行双击普通素材、角色参考和分镜素材，确认均打开「参考素材职责」；单击职责标签不再打开弹窗。点击「从画布替换」并选取相同类型素材，确认替换发生在原引用位置且原职责/用途保留；点击「去除素材」只移除当前引用。
+- 双击分镜轨上的分镜卡 → 「从画布替换」选中另一张图片节点，确认**卡片留在原位置**（序号、时长不变）只换成新图，不会多出一格、原格不变成空卡，提示词里的 `<Picture N>` 仍指向该格；用角色节点替换时该分镜卡同样保留原位与原时长。
+- 在参考行直接点分镜图的 × 删除，确认轨道上留的是一张空的分镜卡（可再次绑图），而不是指向已删素材的坏卡；刷新后仍一致。存量项目里已经坏掉的卡片（例如 ep01-v07 第二格）重新打开画布后应自动变成可绑图的空卡。双击素材卡片左侧预览的放大按钮后，灯箱展示完整图片/视频/音频，点遮罩、点关闭按钮、按 Esc 都能关闭。
 - 双击角色组引用确认仍显示服装目录和声线开关；逐项启用/停用服装、切换声线后应用，确认 Refs 与提交输入同步更新；“从本段移除整组”仍能移除该角色组。
 - 确认每套服装缩略图的放大按钮可查看未裁切原图，点击缩略图切换启用状态、点击放大按钮不会改变启用状态。
 - 角色参考图的职责与提交用途仍由源角色节点控制并固定为普通参考；打开角色参考素材编辑时不再显示职责、提交用途说明和标签字段，在浅色与深色主题下确认预览和控制清晰可用。
@@ -522,6 +977,7 @@ description: Implemented changes that still need manual verification
   - **文本类**（专用文本生成节点 / 智能生成选 text）：渲染为**文本格**——文本图标 + 角色名角标。
   - **视频类**（H3 等）：维持原角色专用卡片，声线可开关。
 - 打开角色参考弹窗时，引用方为图像类或文本类会隐藏「声线」开关（这两类不消费声线）。
+- 图像类/视频类角色卡支持 hover 预览：与图片引用一致，悬停弹出所选角色图的大图缩略（未选图时显示角色名）；音频格、文本格维持图标形态不加大图。
 - 角色节点本体**始终显示主图**（`metadata.characterPrimaryIndex` 指向的那张），画布上其它生成节点选了哪张角色参考图都不会改写角色节点封面；参考选择只在生成节点的参考卡上体现。
 - 验证：同一角色节点分别连到生图节点、音频模式智能节点、文本模式智能节点，确认参考栏格子随模式切换；再改连 H3 视频节点，确认恢复角色卡片与声线开关。切换过程中控制台不应出现「Rendered more hooks than during the previous render」。浅色/深色主题各验一次。
 - 再验角色封面：给多个生图节点分别选不同服装图（含四视图那张）作角色参考，角色节点封面应始终是主图（底部缩略图条里高亮第 1 张），不会被后选的分镜节点改掉。
@@ -642,9 +1098,16 @@ description: Implemented changes that still need manual verification
 ## 画布循环节点
 
 - 从顶部工具栏、空白画布创建菜单和连线创建菜单分别新建「循环」节点，确认节点标题、侧栏筛选、节点图标和连线手柄均正常显示。
-- 将文本或图片节点连接到循环节点，开启对应的提示词/图片输入，设置循环次数和起始序号；连接一个下游智能生成节点后运行，确认每一轮使用当前序号对应的输入，且每轮只提交一个结果。
-- 在循环提示词中使用 `《计数》`、`《总数》` 和 `《进度》`，确认下游提示词按当前轮次替换变量；刷新画布后确认循环参数仍保留。
-- 分别测试串行和并行模式，以及图片每轮数量/视频每轮数量设置，确认下游节点任务、结果槽和失败/停止行为不会互相覆盖；循环运行中点击停止，确认当前任务可取消且不会继续启动后续轮次。
+- 将 8 个输入节点放入左侧有序组，设置起始序号与每轮数量，确认轮数随可用槽位自动计算且面板不提供手填轮数；序号越界时不提交任务。无可计数输入时默认一轮。
+- 将 8 张图片和 2 张固定参考连到循环，右侧连 2 个生成节点后运行；确认 Backend 将它们按顺序纳入单个右侧有序组并补足到 8 个槽。所有结果都使用循环节点的模型与提示词，每轮参考内容依次对应输入槽；已有节点 ID、旧媒体与生成历史保留。重跑仍写回对应槽。
+- Put two usable images in the left ordered group. With the legacy image switch set to off and one image per round, the loop should still show and run two rounds. A visible reference line should connect each input image to its matching output slot. After changing the start index or batch size, the lines should follow the new inputs, including in the grouped connection overview.
+- 将旧画布连线整理成「循环 → 生成 A → 生成 B」后运行，确认 A、B 都被纳入同一个输出有序组，分别承接前两轮；旧 A→B 连线被移除，不将 A 的结果传给 B。多余既有输出节点不删除。
+- 分别设置图片、视频、音频和文本输出模式，确认生成面板的模型、提示词和参数与循环节点本身一致；四种结果均写入指定输出槽，重跑保留旧媒体/文本历史。
+- 输入组包含文本提示词时，确认轮数按组内节点槽位数计算，每轮文本与循环提示词正确组合；`《计数》`、`《总数》`、`《进度》`按本轮序号替换。每轮数量大于 1 时按有序组相邻槽分批，不回绕。
+- 在一轮失败、并行轮次反向完成和点击停止时确认任务只回写自己的槽；失败或停止后不启动待运行轮次，已完成轮次结果保留。重复准备同一个 runId 返回原输出组和槽位，不重复创建节点。
+- 图片任务日志分开展示「固定 refs」和「本轮组图」。当本轮需要 1 张组图 + 2 张固定图、选用的工作流却只有 2 个图片输入槽时，运行前提示槽位不足；Backend 也拒绝提交到模型，不能静默丢掉第三张。选择具有 3 个图片输入槽的工作流后逐轮运行。
+- Flux2-Klein 工作流若使用旧 Inspire 单模型加载节点，执行时转换为当前 ComfyUI 内置 CLIP/UNET 加载节点，不覆盖用户工作流文件；ComfyUI 服务恢复后用三图输入验证真实推理与结果归档。
+- 并行轮次反向完成时，结果仍回到各自输出节点；一个轮次失败或点击停止后，取消正在运行的轮次且不再启动待运行轮次。非媒体生成链选择并行时显示明确提示，不提交任务；视频结果不能被图片生成节点静默当成参考图。
 
 ## 画布资产自动归类
 
@@ -1110,6 +1573,7 @@ description: Implemented changes that still need manual verification
 - 在 ComfyUI 未启动时运行一个 H3 Clip，确认生成日志显示失败后，H3 节点与对应 Clip 都退出“生成中”、清空任务 ID，并显示同一失败原因。
 - 在任务终态事件到达前刷新或断开页面实时连接，确认前端任务轮询仍能把节点和 Clip 收敛到成功、失败或取消状态。
 - 构造一个任务已终态但日志仍为 `queued` / `running` 的历史记录并重启 Backend，确认日志自动修复为对应终态，不影响已被新任务接管的 Clip。
+- 让 H3 子任务失败后立即在 Clip 设置中点「重置并重新生成」：父任务已是 `failed` 时不得再调用取消；Clip 应退出 `loading`、清空旧父/子任务 ID并保留旧输出，然后可提交新任务。并发运行另一 Clip 时，失败收口不能清掉另一 Clip 的任务绑定；若查询后才转为终态，也应继续重生而不显示「任务状态 failed 不可取消」。
 
 - Vite Windows 文件监听：运行前端开发服务并执行测试/诊断输出，确认 `web/_test_report.txt`、`web/_diag.txt` 不会触发 `EBUSY`，Vite 进程保持运行，页面仍可访问。
 
@@ -1164,7 +1628,6 @@ description: Implemented changes that still need manual verification
 
 + H3 卡死解锁：让节点停在「生成中」但无 taskId（或刷新页面中断轮询），确认按钮显示「重置并重新生成」，点击后立即重跑；不点击时最多 120 秒自动恢复为可点状态。
 
-+ 画布删除节点快捷键：选中节点按 Delete/Backspace 不应删除节点；选中连线按 Delete 仍能删除连线。
 
 + 整理布局（补充场景）：确认①**任意形状节点都不重叠**（链、菱形、分叉树、4×4 全连接、混合尺寸簇）；②H3 导演台等 park 节点仍单独排在最右一列且不与其它节点重叠；③真实坐标下（minX/minY 非零）整体不再被额外偏移。
 
@@ -1267,11 +1730,11 @@ The current release needs manual verification in these areas:
 
 + H3 南风 V15 适配：重启 ComfyUI 后分别执行文生、图生、首尾帧和 Ref2VA，确认 prompt graph 的主节点为 `NanFengH3MultiReferenceGeneratorV15`，输出正常回写；确认模型、参考槽位、LoRA、Sigma、二采、实时预览、显存预留和 RTX 与 Clip 设置一致，潜空间放大模型下拉能从 `NanFengH3LowPeakLatentUpscalerV15` 读取。
 
-+ H3 南风 V15 新字段默认行为：确认未配置 TRT、DLSS、TAEH3、Motion Context 和 ER 采样器时任务仍按原流程运行；通过 MCP 透传这些字段时，确认 V15 主节点收到对应值，且未把现有的尾帧接续误当成潜空间续写。
++ H3 南风 V15 新字段默认行为：确认未配置 TRT、DLSS、TAEH3、Motion Context 和 ER 采样器时任务仍按原流程运行；通过 MCP 透传这些字段时，确认 V15 主节点收到对应值，且未把现有的尾帧参考误当成潜空间续写。
 
-+ H3 南风 V15 设置面板：在 Clip settings 的「南风 V15 增强」中分别切换 TAEH3 彩色预览、DLSS 超分模式、DLSS 输出细节强度、DLSS 补帧、TRT 视频 VAE 和「南风采样器」，确认值写回当前 Clip；DLSS/补帧的帧率、引擎、编码和 TRT 的 encoder/decoder 选项应来自 `/comfy/models` 的真实 schema，不应凭空显示本机不存在的引擎。
++ H3 南风 V15 设置面板：这些 V15 开关已并入各自分区，不再有独立的「南风 V15 增强」菜单——分别在「模型与基础参数」切换 TRT 视频 VAE、「实时预览」切换 TAEH3 彩色预览、「RTX 视频超分」切换 DLSS 超分模式/输出细节强度/DLSS 补帧、「采样设置」选中「南风采样器」后切换 ER 求解参数，确认值写回当前 Clip；DLSS/补帧的帧率、引擎、编码和 TRT 的 encoder/decoder 选项应来自 `/comfy/models` 的真实 schema，不应凭空显示本机不存在的引擎；各分区摘要（RTX/实时预览/采样设置）也要跟着反映这些开关。
 
-+ H3 南风 V15 Motion Context 提示：确认 Clip 卡片保留唯一的 Motion Context 开关，设置面板不再出现第二个同义开关，并明确说明它就是潜空间续写；在画布单段运行中不会自动把尾帧接续转换成 V15 潜空间续写。
++ H3 南风 V15 Motion Context 提示：确认 Clip 卡片保留唯一的 Motion Context 开关，设置面板不再出现第二个同义开关，并明确说明它就是潜空间续写；开启后「采样设置」底部才出现 Motion Context 帧数/音频上下文帧数/续写音频精修，且该分区摘要带「潜空间续写」标记；在画布单段运行中不会自动把尾帧参考转换成 V15 潜空间续写。
 
 + H3 南风 V15 Motion Context 连续组：在连续分镜首段开启「Motion Context（潜空间续写）」，使用「运行当前及后续分镜」提交；确认描述符的 `node` 固定为 ComfyUI 图节点 `nf_v15`，各段收到同一 workflow/group/run 与递增 index，首段保存 AV latent、后续段加载上一段 latent；直接运行单段时应明确提示必须使用批量入口。
 
@@ -1591,13 +2054,11 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - 在已有 Backend 运行时直接启动另一套 Backend，确认新实例因 `backend.lock` 明确退出，不会打开同一份 SQLite。
 - 保持 MCP stdio 连接调用画布操作，确认多个 MCP 客户端仍统一经由唯一 HTTP Backend 写入，且不会各自创建 SQLite/ComfyUI 业务副本。
 
-### H3 尾帧接续
+### H3 tail-frame reference
 
-- 开启 S03 的尾帧接续后，只点击“生成当前 Clip”运行 S04，确认实际提交图片数量比 S04 自有参考图多 1 张，且生成日志提示词包含上一段尾帧首帧锚定说明。
-- 开启尾帧接续但清除上一段成品后运行下一段，确认任务直接报告缺少上一段成品，不创建一个未接续的伪成功任务。
-
+- Verify the independent tail-frame reference behavior described above, including running the next Clip alone and rejecting a missing previous output.
 - 分别点击前端「生成当前 Clip」和调用 `h3_run_clip`，确认两者都只创建一个 `canvas-h3-run` 父任务，并由 Backend 创建相同的 H3 子任务、生成日志和 Clip 绑定。
-- 点击「运行当前及后续」及调用 `h3_run_all_clips`，确认后一 Clip 只在前一 Clip 成功并完成画布回写后才提交，上一段结果会作为 Motion Context；任一 Clip 失败后不再提交后续 Clip。
+- 点击「运行当前及后续」及调用 `h3_run_all_clips`，确认后一 Clip 只在前一 Clip 成功并完成画布回写后才提交；只在前段潜空间续写开关开启时传递 AV latent，任一 Clip 失败后不再提交后续 Clip。
 - 在多 Clip 运行期间刷新或关闭画布页面，确认 Backend 继续运行；重启 Backend 后父任务从持久事件恢复，不重复提交已完成 Clip。
 - 取消父任务，确认当前 ComfyUI / RunningHub 子任务同步取消，节点与当前 Clip 均进入取消状态。
 
@@ -1657,3 +2118,17 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - 拖动滑块本体：拖动比例应与光标位移一致，且拖到两端时能到达最左/最右。
 - H3 主提示词右侧竖向滚动条：确认不再有彩色区块刻度；按下轨道即瞬时跳位，按住可连续拖动，不再出现「点空白处却滚到某个区块居中就停」。
 - 两条滚动条在画布缩放（建议 30% 与 100% 各试一次）下都应指哪打哪，不出现点位与内容位置错位。
+
+### H3 MCP 按计划追加 Clip
+
+- 使用 `h3_apply_video_plan` 的 append 模式向现有 H3 节点新增一个或多个 Clip，确认追加成功且不会重置节点运行状态。
+- 新增片段后检查原有 Clip 的顺序、状态、结果和任务历史均保留；再生成新增片段并确认 Backend 正常回写运行状态。
+- 使用 H3「删除片段」工具移除一个 Clip，确认该段退出当前时间线，而对应生成任务、日志和已归档媒体仍可查询。
+- MCP 重载后确认 `h3_delete_clip` 出现在工具列表中；调用时按项目、H3 节点和稳定 Clip ID 删除目标，其他片段的顺序与结果不变。
+
+
+### 画布图像自动色阶工作流
+
+- 在 ComfyUI 已启动且 moyou 自动色阶节点可用时，对画布图片点击「自动色阶」；确认 Backend 提交任务后，在原图右侧创建并连接一个结果图片节点，原图保持不变。
+- 确认结果节点只包含色阶校正后的图片，不额外创建直方图或前后对比图；刷新画布后结果仍可读取。
+- 使用已有图片工具栏自定义配置的用户刷新画布后，确认「自动色阶」已加入工具栏，之后仍可自行隐藏或显示。

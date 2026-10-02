@@ -19,13 +19,13 @@ export type GenerateVideoOptions = GenerateOptions & { size?: string; seconds?: 
 export type GenerateVideoResult = { url: string; mimeType: string; width?: number; height?: number; durationMs?: number };
 // 插件文本调用的日志归属元数据：传入后宿主把本次调用登记进生成日志，并把节点/Clip 写进运行任务。
 export type GenerateTextLogMeta = { taskMode: string; prompt?: string; nodeId?: string; segmentId?: string; references?: Array<Record<string, unknown>> };
-export type GenerateTextOptions = { signal?: AbortSignal; model?: string; system?: string; references?: Array<{ url: string; name?: string }>; onDelta?: (text: string) => void; log?: GenerateTextLogMeta };
+export type GenerateTextOptions = { signal?: AbortSignal; model?: string; system?: string; references?: Array<{ url: string; name?: string; storageKey?: string; mimeType?: string }>; onDelta?: (text: string) => void; log?: GenerateTextLogMeta };
 export type GenerateTextResult = { text: string; taskId?: string };
 export type LocalH3ActualSubmission = { promptId: string; seed?: number; seedMode?: "random" | "fixed"; frames?: number; width?: number; height?: number; steps?: number; sampler?: string; scheduler?: string; teAccel?: boolean; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
 export type LocalH3Result = { url: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; actualSubmission?: LocalH3ActualSubmission; segments?: Array<{ media?: Array<{ url: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Preview = { dataUrl: string; mime?: string; promptId?: string; step?: number; total?: number };
-export type LocalH3Task = { id: string; status: "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled"; progress: number; result?: (LocalH3Result & { currentChildTaskId?: string; currentChildKind?: string; confirmation?: { pending: Array<{ nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string }> } }) | null; preview?: LocalH3Preview | null; error?: string | null };
+export type LocalH3Task = { id: string; status: "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled"; progress: number; result?: (LocalH3Result & { currentChildTaskId?: string; currentChildKind?: string; confirmation?: { revision: number; pending: Array<{ nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string }> } }) | null; preview?: LocalH3Preview | null; error?: string | null };
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 export type PluginModelCapability = "image" | "video" | "text" | "audio";
 export type ModelOption = { value: string; label: string };
@@ -50,10 +50,11 @@ export type CanvasPluginAi = {
     generateVideo: (prompt: string, options?: GenerateVideoOptions) => Promise<GenerateVideoResult>;
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
     runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
-    resolveH3Confirmation: (input: { taskId: string; action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean }) => Promise<LocalH3Task>;
+    resolveH3Confirmation: (input: { taskId: string; action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> }) => Promise<LocalH3Task>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
     cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
+    restoreH3Output: (input: { nodeId: string; segmentId: string; generationLogId: string; storageKey?: string; settings: Record<string, unknown> }) => Promise<void>;
     runVideoConcat: (videos: Array<{ name: string; url?: string; storageKey?: string }>, options?: LocalH3Options) => Promise<LocalVideoConcatResult>;
     listLocalH3Models: () => Promise<{ models: string[]; loras: string[]; textEncoders?: string[]; videoVaes?: string[]; audioVaes?: string[]; latentUpscaleModels?: string[] }>;
     getRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
@@ -82,7 +83,7 @@ export type CanvasReferenceAsset = { id: string; label: string; mediaType: "imag
 export type CanvasReferenceValidation = { semanticPrompt: string; compiledPrompt: string; bindings: Array<Record<string, unknown>>; references: Array<Record<string, unknown>>; issues: Array<{ severity: "error" | "warning"; code: string; message: string; bindingId?: string }>; migratedLegacyRefs: boolean };
 export type CanvasReferenceService = {
     list: () => Promise<CanvasReferenceAsset[]>;
-    upsert: (asset: Partial<CanvasReferenceAsset> & { label: string }) => Promise<CanvasReferenceAsset>;
+    upsert: (asset: Partial<CanvasReferenceAsset> & { id?: string }) => Promise<CanvasReferenceAsset>;
     upsertMany: (assets: Array<Partial<CanvasReferenceAsset> & { label: string }>) => Promise<CanvasReferenceAsset[]>;
     remove: (assetId: string) => Promise<void>;
     validate: (nodeId: string, segmentId: string) => Promise<CanvasReferenceValidation>;
@@ -117,6 +118,8 @@ export type CanvasSpeakerOption = { id: string; name?: string; previewUrl?: stri
 export type CanvasTextEditorProps = {
     projectId: string; target: CanvasTextTarget; placeholder?: string;
     references?: CanvasTextReference[]; chips?: boolean;
+    /** H3 Clip only: mark unresolved <Picture N> and related tags for rebinding. */
+    clipReferenceTags?: boolean;
     /** 台词说话人名册：菜单/徽标按此显示角色名与头像；省略时回退 S1–S6。 */
     speakers?: CanvasSpeakerOption[];
     /** Local rich text editor for transient fields that are persisted through their owning document. */
@@ -134,6 +137,7 @@ export type CanvasTextEditorProps = {
 };
 
 export type CanvasNodeContext = {
+    mediaUrl: (storageKey: string) => string;
     TextEditor: ComponentType<CanvasTextEditorProps>;
     textDocument: (target: CanvasTextTarget) => CanvasTextDocument;
     textSuggestions: (target: CanvasTextTarget) => CanvasTextSuggestions;
@@ -172,6 +176,11 @@ export type CanvasNodeContext = {
     openPanel: () => void;
     closePanel: () => void;
     openAssetPicker: (options?: { kind?: "image" }) => Promise<CanvasAssetPickerImage | null>;
+    /**
+     * 打开宿主的统一媒体预览（图片 / 视频 / 音频，可带 Before / After 对比）。
+     * 插件不再自带灯箱 UI，避免画布里出现多套预览弹窗。
+     */
+    openMediaPreview: (item: CanvasMediaPreview) => void;
     // Plugin-private persistence isolated by namespace.
     storage: PluginStorage;
     generationLogs: CanvasGenerationLogs;
@@ -185,6 +194,7 @@ export type PluginStorage = {
 
 // Node-independent host capabilities constructed by the canvas page and injected into the render chain.
 export type CanvasPluginHost = {
+    mediaUrl: (storageKey: string) => string;
     projectId: string;
     getNode: (id: string) => CanvasNodeData | null;
     getNodes: () => CanvasNodeData[];
@@ -203,7 +213,16 @@ export type CanvasPluginHost = {
     openPanel: (nodeId: string) => void;
     closePanel: () => void;
     openAssetPicker: (options?: { kind?: "image" }) => Promise<CanvasAssetPickerImage | null>;
+    openMediaPreview: (item: CanvasMediaPreview) => void;
     generationLogs: CanvasGenerationLogs;
+};
+
+/** 宿主统一媒体预览的入参：给 `beforeUrl` 时进入 Before / After 对比模式。 */
+export type CanvasMediaPreview = {
+    url: string;
+    name?: string;
+    type?: "image" | "video" | "audio";
+    beforeUrl?: string;
 };
 
 // Configuration for reusing the host's built-in generation panel; see SDK CanvasBuiltinPanelConfig.

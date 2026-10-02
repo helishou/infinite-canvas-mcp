@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
-import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Scissors, Sparkles, Upload, ZoomIn } from "lucide-react";
+import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Scissors, SlidersHorizontal, Sparkles, Upload, ZoomIn } from "lucide-react";
 
 import type { CanvasNodeData } from "@/types/canvas";
 import i18n from "@/i18n";
 
-export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "view";
+export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "split" | "upscale" | "superResolve" | "autoLevels" | "angle" | "view";
 export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | "convertToCharacter" | "convertToScene" | ImageNodeActionToolId;
 
 export type ImageToolHandlers = {
@@ -15,6 +15,7 @@ export type ImageToolHandlers = {
     onSplit: (node: CanvasNodeData) => void;
     onUpscale: (node: CanvasNodeData) => void;
     onSuperResolve: (node: CanvasNodeData) => void;
+    onAutoLevels: (node: CanvasNodeData) => void;
     onAngle: (node: CanvasNodeData) => void;
     onViewImage: (node: CanvasNodeData) => void;
     onCopyPrompt: (node: CanvasNodeData) => void;
@@ -113,6 +114,14 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         title: () => i18n.t("canvas.imageTools.superResolveTitle"),
         icon: () => <Sparkles className="size-4" />,
         run: (node, handlers) => handlers.onSuperResolve(node),
+    },
+    {
+        id: "autoLevels",
+        defaultVisible: true,
+        label: () => i18n.t("canvas.imageTools.autoLevels"),
+        title: () => i18n.t("canvas.imageTools.autoLevelsTitle"),
+        icon: () => <SlidersHorizontal className="size-4" />,
+        run: (node, handlers) => handlers.onAutoLevels(node),
     },
     {
         id: "angle",

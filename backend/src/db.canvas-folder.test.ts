@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { BackendDatabase } from "./db.js";
+import { DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
 
 test("v7 迁移：把 v6 的 folder_id 搬到 drama_episodes，并给所有 drama 建 episode 1", (context) => {
     const directory = mkdtempSync(path.join(tmpdir(), "infinite-canvas-folder-v7-"));
@@ -93,7 +94,7 @@ test("v7 迁移：把 v6 的 folder_id 搬到 drama_episodes，并给所有 dram
 
         // 7. 后续迁移同样完整执行
         const versions = db["db"].prepare("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: number }>;
-        assert.deepEqual(versions.map((v) => v.version), [6, 7, 8, 9, 10, 11, 12]);
+        assert.deepEqual(versions.map((v) => v.version), Array.from({ length: DATABASE_SCHEMA_VERSION - 5 }, (_, index) => index + 6));
     } finally {
         db.close();
     }

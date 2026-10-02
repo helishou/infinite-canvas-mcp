@@ -1,37 +1,36 @@
 import { execFile, execFileSync } from "node:child_process";
-import { createRequire } from "node:module";
 import { promisify } from "node:util";
 
 import { VERSION } from "./config.js";
 import { logger } from "./utils/logger.js";
+import { findCodexLaunch } from "./agent/codex-executable.js";
 
-const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
-const CODEX_VERSION = String((require("@openai/codex/package.json") as { version: string }).version);
 
 /** 输出当前版本，并在后台检查 npm 最新版本。 */
 export function checkVersions() {
     const localCodexVersion = commandVersion("codex");
+    let installedCodexVersion = "";
+    try { installedCodexVersion = findCodexLaunch()?.version || ""; }
+    catch (error) { logger.warn("Optional Codex installation is unavailable", { error: String(error) }); }
     logger.info("Canvas Agent version", { version: VERSION });
-    logger.info("Bundled Codex version", { version: CODEX_VERSION });
+    logger.info("Optional Codex version", { version: installedCodexVersion || "not installed" });
     logger.info("Local Codex version", { version: localCodexVersion || "not found" });
-    if (!localCodexVersion) {
-        logger.warn("Local Codex was not found. Install the latest version with: npm install -g @openai/codex@latest");
-    } else if (localCodexVersion !== CODEX_VERSION) {
-        logger.warn(`Bundled Codex ${CODEX_VERSION} does not match local Codex ${localCodexVersion}. Keep both current with: npm install -g @openai/codex@latest && npx -y @basketikun/canvas-agent@latest`);
+    if (!installedCodexVersion && !localCodexVersion) {
+        logger.info("Codex chat is optional. To enable it: npm install -g @openai/codex@0.160.0");
     }
-    void checkLatestVersions(localCodexVersion);
+    void checkLatestVersions(localCodexVersion, installedCodexVersion);
 }
 
 /** 查询 npm，提醒升级不再维护的旧版本。 */
-async function checkLatestVersions(localCodexVersion: string) {
+async function checkLatestVersions(localCodexVersion: string, installedCodexVersion: string) {
     try {
         const [latestAgent, latestCodex] = await Promise.all([
             npmVersion("@basketikun/canvas-agent"),
             npmVersion("@openai/codex"),
         ]);
         if (isOlder(VERSION, latestAgent)) logger.warn(`Update available: Canvas Agent ${VERSION} -> ${latestAgent}. Run: npx -y @basketikun/canvas-agent@latest`);
-        if (isOlder(CODEX_VERSION, latestCodex)) logger.warn(`Update available: bundled Codex ${CODEX_VERSION} -> ${latestCodex}. Upgrade Canvas Agent with: npx -y @basketikun/canvas-agent@latest`);
+        if (installedCodexVersion && isOlder(installedCodexVersion, latestCodex)) logger.info(`Update available: optional Codex ${installedCodexVersion} -> ${latestCodex}`);
         if (localCodexVersion && isOlder(localCodexVersion, latestCodex)) logger.warn(`Update available: local Codex ${localCodexVersion} -> ${latestCodex}. Run: npm install -g @openai/codex@latest`);
     } catch {
         logger.warn("Unable to check the latest npm versions; startup will continue.");

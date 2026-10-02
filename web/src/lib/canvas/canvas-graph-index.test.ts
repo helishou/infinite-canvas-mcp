@@ -1,0 +1,43 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { CanvasNodeData } from "@/types/canvas";
+import { createCanvasGraphIndexSelector } from "./canvas-graph-index";
+import { queryCanvasSpatialIndex } from "./canvas-spatial-index";
+
+const node = (id: string, x = 0): CanvasNodeData => ({ id, type: "text", title: id, position: { x, y: 0 }, width: 100, height: 100, metadata: { content: id } });
+const bounds = { left: -10, top: -10, right: 1000, bottom: 1000 };
+test("content updates reuse geometry and expose latest content without mutating earlier render snapshots", () => {
+    const select = createCanvasGraphIndexSelector();
+    const a = node("a"), b = node("b", 200);
+    const links = [{ id: "ab", fromNodeId: "a", toNodeId: "b" }];
+    const first = select([a, b], links);
+    const edited = { ...a, metadata: { content: "new" } };
+    const next = select([edited, b], links);
+    assert.equal(next.nodeSpatialIndex.buckets, first.nodeSpatialIndex.buckets);
+    assert.equal(next.connectionSpatialIndex.buckets, first.connectionSpatialIndex.buckets);
+    assert.equal(queryCanvasSpatialIndex(next.nodeSpatialIndex, bounds)[0], edited);
+    assert.equal(queryCanvasSpatialIndex(first.nodeSpatialIndex, bounds)[0], a);
+    assert.equal(next.incomingByNodeId.get("b")![0], edited);
+    assert.equal(first.incomingByNodeId.get("b")![0], a);
+    assert.equal(next.outgoingByNodeId.get("a"), first.outgoingByNodeId.get("a"));
+});
+test("geometry, topology order, grouping and node order invalidate only their own structures", () => {
+    const select = createCanvasGraphIndexSelector();
+    const a = node("a"), b = node("b", 200), c = node("c", 400);
+    const links = [{ id: "ac", fromNodeId: "a", toNodeId: "c", order: 0 }, { id: "bc", fromNodeId: "b", toNodeId: "c", order: 1 }];
+    const first = select([a, b, c], links);
+    const ordered = select([a, b, c], [{ ...links[0], order: 2 }, links[1]]);
+    assert.deepEqual(ordered.incomingByNodeId.get("c")!.map((n) => n.id), ["b", "a"]);
+    assert.equal(first.connectionSpatialIndex.buckets, ordered.connectionSpatialIndex.buckets);
+    const movedA = { ...a, position: { x: 2000, y: 0 } };
+    const moved = select([movedA, b, c], links);
+    assert.notEqual(moved.nodeSpatialIndex.buckets, first.nodeSpatialIndex.buckets);
+    assert.notEqual(moved.connectionSpatialIndex.buckets, first.connectionSpatialIndex.buckets);
+    assert.deepEqual(queryCanvasSpatialIndex(moved.nodeSpatialIndex, bounds).map((n) => n.id), ["b", "c"]);
+    const grouped = select([movedA, { ...b, metadata: { groupId: "g" } }, c], links);
+    assert.equal(grouped.nodeSpatialIndex.buckets, moved.nodeSpatialIndex.buckets);
+    assert.equal(grouped.groupChildrenById.get("g")![0].id, "b");
+    const removed = select([c, b], links);
+    assert.deepEqual(removed.incomingByNodeId.get("c")!.map((n) => n.id), ["b"]);
+    assert.deepEqual(queryCanvasSpatialIndex(removed.nodeSpatialIndex, bounds).map((n) => n.id), ["c", "b"]);
+});

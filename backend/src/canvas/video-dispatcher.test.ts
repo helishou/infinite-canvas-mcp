@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
+import { prepareCanvasLoopRun } from "./generation-target.js";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { CanvasVideoDispatcher, CANVAS_VIDEO_CONCAT_MODEL } from "./video-dispatcher.js";
@@ -113,4 +114,38 @@ test("从 MCP 配置节点触发视频时先创建唯一结果节点再绑定任
     assert.equal(output?.metadata?.content, "video.mp4");
     assert.equal(nodes.length, 3);
     assert.ok(stores.tasks.get("config-video"));
+});
+
+test("智能循环视频轮次各有独立节点，重跑保留旧媒体并复用节点", async (t) => {
+    const { db, stores, dispatcher, input, node } = fixture(t);
+    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), [
+        { type: "add_node", id: "loop", nodeType: "loop", title: "循环", position: { x: -480, y: 0 }, width: 380, height: 320, metadata: {} },
+    ], { runtimeWrite: true });
+    const plan = prepareCanvasLoopRun(stores, { projectId: "p", loopNodeId: "loop", runId: "video-fixture", mode: "video", totalRounds: 2, roundInputNodeIds: [[], []] });
+    const round = (index: number) => ({ nodeId: plan.slotNodeIds[index], sourceNodeId: plan.slotNodeIds[index],
+        loopOutput: { loopNodeId: "loop", roundIndex: index + 1, slotIndex: index, slotNodeId: plan.slotNodeIds[index], outputGroupId: plan.outputGroupId, totalRounds: 2 } });
+    const base = { ...input, ...round(0) };
+    dispatcher.start({ ...base, clientTaskId: "round-1" });
+    dispatcher.start({ ...base, clientTaskId: "round-2", ...round(1) });
+    await Promise.all([settle(db, "round-1"), settle(db, "round-2")]);
+    const slots = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((item) => item.type !== "group" && item.metadata?.loopOutputSlot);
+    assert.equal(slots.length, 2);
+    const groups = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((item) => item.type === "group" && item.metadata?.loopOutputGroup);
+    assert.equal(groups.length, 1);
+    assert.deepEqual(new Set(groups[0].metadata.groupSlots), new Set(slots.map((item) => item.id)));
+    assert.ok(slots.every((item) => item.metadata.groupId === groups[0].id));
+    assert.equal(node("video").metadata.runtimeTaskId, undefined);
+    const first = slots.find((item) => item.metadata.loopRoundIndex === 1)!;
+    assert.equal(first.metadata.status, "success");
+    dispatcher.start({ ...base, clientTaskId: "round-1-again" });
+    await settle(db, "round-1-again");
+    const rerun = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((item) => item.type !== "group" && item.metadata?.loopOutputSlot);
+    assert.equal(rerun.length, 2);
+    assert.equal(rerun.find((item) => item.metadata.loopRoundIndex === 1)?.id, first.id);
+    assert.equal(rerun.find((item) => item.metadata.loopRoundIndex === 1)?.metadata.loopOutputHistory?.length, 1);
+    const retried = dispatcher.retry(db.getTask("round-1")!);
+    await settle(db, retried.id);
+    const afterRetry = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((item) => item.type !== "group" && item.metadata?.loopOutputSlot);
+    assert.equal(afterRetry.length, 2);
+    assert.equal(afterRetry.find((item) => item.metadata.loopRoundIndex === 1)?.metadata.loopOutputHistory?.length, 2);
 });

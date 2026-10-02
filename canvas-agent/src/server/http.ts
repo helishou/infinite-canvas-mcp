@@ -50,6 +50,7 @@ import {
 import { logger } from "../utils/logger.js";
 import { checkVersions } from "../version-check.js";
 import { SkillStore, SkillStoreError } from "../skills/store.js";
+import { bundledProductionSkillWarnings } from "../skills/bundled.js";
 import {
   backendComfyUi,
   createBackendClient,
@@ -710,6 +711,21 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             String(input.episodeId || ""),
           ),
         });
+      if (["drama_get_production", "drama_edit_production", "drama_preview_production_impact", "drama_publish_production", "drama_list_production_versions", "drama_get_production_version", "drama_list_production_legacy", "drama_restore_production", "drama_sync_production_clips", "drama_get_production_run", "drama_export_production_markdown"].includes(name)) {
+        const path = `/drama/episodes/${encodeURIComponent(String(input.episodeId || ""))}/production`;
+        const result = name === "drama_get_production" ? await backend.get(path)
+          : name === "drama_list_production_versions" ? await backend.get(`${path}/versions`)
+          : name === "drama_get_production_version" ? await backend.get(`${path}/versions/${encodeURIComponent(String(input.version || ""))}`)
+          : name === "drama_list_production_legacy" ? await backend.get(`${path}/legacy`)
+          : name === "drama_get_production_run" ? await backend.get(`${path}/runs/${encodeURIComponent(String(input.version || ""))}`)
+          : name === "drama_export_production_markdown" ? await backend.get(`${path}/export?stage=${encodeURIComponent(String(input.stage || ""))}${input.version ? `&version=${encodeURIComponent(String(input.version))}` : ""}`)
+          : name === "drama_preview_production_impact" ? await backend.get(`${path}/impact?stage=${encodeURIComponent(String(input.stage || ""))}`)
+          : name === "drama_edit_production" ? await backend.post(`${path}/ops`, { operationId: input.operationId, expectedRevision: input.expectedRevision, ops: input.ops })
+          : name === "drama_restore_production" ? await backend.post(`${path}/restore`, { version: input.version, operationId: input.operationId, expectedRevision: input.expectedRevision })
+          : name === "drama_sync_production_clips" ? await backend.post(`${path}/sync-clips`, {})
+          : await backend.post(`${path}/publish`, { operationId: input.operationId, expectedRevision: input.expectedRevision, stage: input.stage });
+        return void res.json({ ok: true, result });
+      }
       return void res.json({
         ok: true,
         result: await session.callTool(name, input),
@@ -770,7 +786,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           ...skill,
           managed: skillStore.isManagedPath(skill.path),
         })),
-        errors: result.errors,
+        errors: [...result.errors, ...bundledProductionSkillWarnings(workspace.workspacePath)],
       });
     }),
   );

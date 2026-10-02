@@ -2,9 +2,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { syncBundledProductionSkill } from "./skills/bundled.js";
 
 export const DEFAULT_PORT = 17371;
-export const CONFIG_DIR = path.join(os.homedir(), ".infinite-canvas");
+export const CONFIG_DIR = process.env.INFINITE_CANVAS_AGENT_CONFIG_DIR
+    ? path.resolve(process.env.INFINITE_CANVAS_AGENT_CONFIG_DIR)
+    : path.join(os.homedir(), ".infinite-canvas");
 export const CONFIG_FILE = path.join(CONFIG_DIR, "canvas-agent.json");
 export const VERSION = readPackageVersion();
 export const AGENT_PROMPT = fs.readFileSync(new URL("../agent-instructions.md", import.meta.url), "utf8");
@@ -76,6 +81,9 @@ function initializeWorkspace(workspacePath: string) {
     const instructionsFile = path.join(workspacePath, "AGENTS.md");
     const current = fs.existsSync(instructionsFile) ? fs.readFileSync(instructionsFile, "utf8") : "";
     if (!current || current.startsWith("# Infinite Canvas Agent")) fs.writeFileSync(instructionsFile, AGENT_PROMPT);
+    const bundle = fileURLToPath(new URL("./bundled-skills/canvas-video-production-sop/", import.meta.url));
+    const developmentSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", ".agents", "skills", "canvas-video-production-sop");
+    syncBundledProductionSkill(workspacePath, fs.existsSync(bundle) ? bundle : developmentSource);
     initializedWorkspaces.add(workspacePath);
 }
 

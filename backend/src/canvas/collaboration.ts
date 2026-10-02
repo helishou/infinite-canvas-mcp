@@ -45,6 +45,7 @@ function paths(operation: CanvasOperation): string[][] {
         case "text_suggestion": return [];
         case "update_node": return [...fields(node, operation.patch), ...fields([...node, "metadata"], operation.metadata, operation.metadataDelete)];
         case "update_h3_segment": return fields([...node, "metadata", "segments", String(operation.segmentId)], operation.patch, operation.patchDelete);
+        case "restore_h3_output": return [[...node, "metadata", "segments", String(operation.segmentId)]];
         case "add_h3_segment": return [[...node, "metadata", "segments", String((operation.segment as Record<string, unknown>)?.id)]];
         case "delete_h3_segment": return [[...node, "metadata", "segments", String(operation.segmentId)]];
         case "replace_h3_segments": return [[...node, "metadata", "segments"]];

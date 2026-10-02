@@ -20,6 +20,7 @@ import { useCanvasNodePreview } from "@/lib/canvas/canvas-drag-preview";
 import { ensureVideoPreview, getVideoPreviewRevision, subscribeVideoPreview, videoPreviewUrlFor } from "@/lib/canvas/canvas-video-frame";
 import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupLayout } from "@/lib/canvas/ordered-group";
+import { hasRenderableCanvasImage } from "@/lib/canvas/canvas-image-renderability";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
@@ -44,6 +45,7 @@ export type CanvasNodeProps = {
     isConnecting: boolean;
     isConnectionSource?: boolean;
     referenceSelectionState?: "target" | "disabled" | "available";
+    selectionPurpose?: "reference" | "video-compare";
     showPanel: boolean;
     showImageInfo: boolean;
     mentionReferences?: CanvasResourceReference[];
@@ -157,7 +159,7 @@ function overviewSummary(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Audio || metadata?.generationMode === "audio") return `${node.title || "音频"}${metadata?.durationMs ? ` · ${Math.round(metadata.durationMs / 1000)} 秒` : ""}`;
     if (node.type === CanvasNodeType.Video || metadata?.generationMode === "video") return `${node.title || "视频"}${metadata?.status ? ` · ${metadata.status}` : ""}`;
     if (node.type === CanvasNodeType.Group) return `${node.title || "分组"} · ${metadata?.groupLocked ? "已锁定" : "分组"}`;
-    if (node.type === CanvasNodeType.Loop) return `${node.title || "循环"} · ${metadata?.loopCount || 1} 次`;
+    if (node.type === CanvasNodeType.Loop) return node.title || "循环";
     return metadata?.prompt || metadata?.content || node.title || node.type;
 }
 
@@ -292,6 +294,10 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     // 字号在低倍率时维持约 14px 屏幕高度，但必须同时受节点宽高和两行标题容量约束，不能用 transform 放大后溢出。
     const textOverviewFontSize = Math.max(12, Math.min(14 / Math.max(scale, 0.01), (width * 0.8) / Math.max(1, Math.ceil(Array.from(textOverviewTitle).length / 2)), height * 0.28));
     const overviewIconSize = Math.min(44 / Math.max(scale, 0.01), Math.min(width, height) * 0.42);
+    const characterBadgeFontSize = Math.min(15 / Math.max(scale, 0.01), width * 0.22, height * 0.3);
+    const characterBadgeIconSize = Math.min(17 / Math.max(scale, 0.01), Math.min(width, height) * 0.38);
+    const characterBadgePaddingX = Math.min(8 / Math.max(scale, 0.01), width * 0.05);
+    const characterBadgePaddingY = Math.min(4 / Math.max(scale, 0.01), height * 0.04);
     const hasMediaPreview = Boolean(image || videoSource || isH3);
     const generating = isNodeGenerating(data);
     const generatingPercent = generating ? nodeRunProgress(data) : undefined;
@@ -371,9 +377,12 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
             {/* 缩略图/文本会盖住底色，生成中再叠一层活动色，保证缩小后整块仍然泛橙。 */}
             {generating && (hasMediaPreview || isTextOverview) ? <div className="pointer-events-none absolute inset-0" style={{ background: generatingTint }} /> : null}
             {image || videoSource || isH3 ? (
-                <div className="pointer-events-none absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1 bg-black/45 px-2 py-1 text-[10px] text-white">
-                    <Icon className="size-3 shrink-0" />
-                    <span className="truncate">{data.title || summary}</span>
+                <div
+                    className={`pointer-events-none absolute bottom-0 flex min-w-0 items-center text-white ${isCharacter ? "left-0 max-w-full rounded-tr-lg bg-black/70 font-semibold" : "inset-x-0 gap-1 bg-black/45 px-2 py-1 text-[10px]"}`}
+                    style={isCharacter ? { gap: Math.min(5 / Math.max(scale, 0.01), width * 0.03), padding: `${characterBadgePaddingY}px ${characterBadgePaddingX}px`, fontSize: characterBadgeFontSize, lineHeight: 1.15 } : undefined}
+                >
+                    <Icon className={isCharacter ? "shrink-0" : "size-3 shrink-0"} style={isCharacter ? { width: characterBadgeIconSize, height: characterBadgeIconSize } : undefined} />
+                    <span className="min-w-0 truncate">{isCharacter ? data.metadata?.characterName || data.title || summary : data.title || summary}</span>
                 </div>
             ) : null}
             {generating ? (
@@ -498,6 +507,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     isConnectionTarget,
     isConnecting,
     referenceSelectionState,
+    selectionPurpose = "reference",
     showPanel,
     showImageInfo,
     mentionReferences = [],
@@ -546,6 +556,11 @@ export const CanvasNode = React.memo(function CanvasNode({
     const hasTextContent = (data.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text")) && Boolean(data.metadata?.content?.trim());
     const hasImageContent = (data.type === CanvasNodeType.Image || (isSmartGenerationNode && smartMode === "image")) && Boolean(data.metadata?.content || data.metadata?.images?.length);
     const hasVideoContent = (data.type === CanvasNodeType.Video || (isSmartGenerationNode && smartMode === "video")) && Boolean(data.metadata?.content);
+    const selectionLabel = referenceSelectionState
+        ? selectionPurpose === "video-compare"
+            ? t(referenceSelectionState === "target" ? "canvas.videoCompare.selectingSource" : "canvas.videoCompare.chooseNode")
+            : t(referenceSelectionState === "target" ? "canvas.references.selecting" : "canvas.references.choose")
+        : "";
     const hasAudioContent = (data.type === CanvasNodeType.Audio || (isSmartGenerationNode && smartMode === "audio")) && Boolean(data.metadata?.content);
     const isCharacter = data.type === CanvasNodeType.Character;
     const hasCharacterContent = isCharacter && (data.metadata?.characterImages?.length || 0) > 0;
@@ -727,8 +742,8 @@ export const CanvasNode = React.memo(function CanvasNode({
             startTop: data.position.y,
             startWidth: data.width,
             startHeight: data.height,
-            keepRatio: isAspectLockedImage || data.type === CanvasNodeType.Video || Boolean(definition?.keepAspectRatio?.(data)),
-            ratio: imageAspectRatio(data),
+            keepRatio: isAspectLockedImage || data.type === CanvasNodeType.Video || (isGroup && data.metadata?.orderedGroup === true) || Boolean(definition?.keepAspectRatio?.(data)),
+            ratio: isGroup && data.metadata?.orderedGroup === true ? data.width / Math.max(data.height, 1) : imageAspectRatio(data),
         };
         window.addEventListener("mousemove", handleResizeMove);
         window.addEventListener("mouseup", handleResizeUp);
@@ -783,7 +798,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 const target = event.target as HTMLElement;
                 const isH3 = data.type === "minimax-h3:video";
                 const interactive = target.closest("button, input, textarea, select, video, .ant-select-dropdown");
-                const isH3DragHandle = target.closest("[data-canvas-node-drag-handle]");
+                const isExplicitDragHandle = target.closest("[data-canvas-node-drag-handle]");
                 // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
                 // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
                 // onMouseDown（冒泡阶段）无法执行，缩放被拖拽彻底劫持。故需显式排除缩放手柄。
@@ -795,7 +810,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 // 节点下方的面板（提示词/参考内容等）是纯交互区：面板已在冒泡阶段 stopPropagation，
                 // 但 capture 先于冒泡执行，会先在这里触发拖拽。命中面板时跳过拖拽，把交互留给面板自身。
                 const onNodePanel = target.closest("[data-canvas-node-panel]");
-                if (!interactive && !onResizeHandle && !onConnectionHandle && !onNodePanel && (!isH3 || isH3DragHandle)) onMouseDown(event, data.id);
+                if ((!interactive || isExplicitDragHandle) && !onResizeHandle && !onConnectionHandle && !onNodePanel && (!isH3 || isExplicitDragHandle)) onMouseDown(event, data.id);
             }}
             onClickCapture={(event) => {
                 if (!referenceSelectionState && !pickedReferenceOnMouseDown.current) return;
@@ -833,6 +848,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     ) : (
                         <button
                             type="button"
+                            data-canvas-node-drag-handle={hasVideoContent ? "true" : undefined}
                             className="block max-w-full truncate border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100"
                             style={{ color: theme.node.text }}
                             title={t("canvas.node.renameHint")}
@@ -876,13 +892,21 @@ export const CanvasNode = React.memo(function CanvasNode({
                     // 节点内的按钮/输入控件自己消费双击：click 上的 stopPropagation 拦不住独立的 dblclick 事件，
                     // 不判断落点会让「下载 / 创建副本 / 张数」这类工具条按钮的双击冒泡到节点，误触发预览或编辑。
                     if (event.target instanceof Element && event.target.closest("button, [role='button'], input, textarea, select")) return;
+                    if (data.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text")) {
+                        event.stopPropagation();
+                        setIsEditingContent(true);
+                        return;
+                    }
                     if (definition?.onDoubleClick && pluginContext) {
                         if (definition.onDoubleClick(pluginContext)) event.stopPropagation();
                         return;
                     }
                     if ((data.type === CanvasNodeType.Image || isSmartGenerationNode) && hasImageContent) {
                         event.stopPropagation();
-                        onViewImage?.(data);
+                        const activeImageId = isSmartGenerationNode && data.metadata?.activeImageHistoryExplicit === true
+                            ? data.metadata.activeImageHistoryId
+                            : data.metadata?.primaryImageId || data.metadata?.images?.[0]?.id;
+                        onViewImage?.(data, activeImageId || undefined);
                         return;
                     }
                     if (data.type === CanvasNodeType.Character) {
@@ -895,9 +919,6 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onEditScene?.(data);
                         return;
                     }
-                    if (data.type !== CanvasNodeType.Text) return;
-                    event.stopPropagation();
-                    setIsEditingContent(true);
                 }}
                 onDragOver={(event) => {
                     if (data.type !== CanvasNodeType.Character && data.type !== CanvasNodeType.Scene) return;
@@ -980,7 +1001,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     >
                         {referenceSelectionState !== "disabled" ? (
                             <span className="rounded-lg px-3 py-2 text-sm font-medium shadow-sm" style={{ background: theme.toolbar.panel, color: theme.node.text }}>
-                                {t(referenceSelectionState === "target" ? "canvas.references.selecting" : "canvas.references.choose")}
+                                {selectionLabel}
                             </span>
                         ) : null}
                     </div>
@@ -1061,9 +1082,10 @@ function NodeContent(props: NodeContentRendererProps) {
 function CompactNodeContent({ node, theme, scale }: Pick<NodeContentRendererProps, "node" | "theme" | "scale">) {
     const Icon = nodeTypeIcon(node);
     const isGroup = node.type === CanvasNodeType.Group;
+    const isCharacter = node.type === CanvasNodeType.Character;
     // 紧凑壳是 scale 低于 0.24 时的内容降级，同样要能让远处看出「这个节点在跑任务」。
     const generating = isNodeGenerating(node);
-    const iconSize = Math.min(44 / Math.max(scale, 0.01), Math.min(node.width, node.height) * 0.42);
+    const iconSize = Math.min((isCharacter ? 50 : 44) / Math.max(scale, 0.01), Math.min(node.width, node.height) * (isCharacter ? 0.48 : 0.42));
     return (
         <div
             className="relative flex h-full w-full items-center justify-center overflow-hidden"
@@ -1072,13 +1094,15 @@ function CompactNodeContent({ node, theme, scale }: Pick<NodeContentRendererProp
         >
             {/* 缩略壳存在的意义就是省开销：生成中只靠活动色铺底 + 活动色图标区分，不做旋转动画。 */}
             {!isGroup ? (
-                <Icon aria-hidden="true" style={{ width: iconSize, height: iconSize, color: generating ? theme.node.generating : nodeAccentColor(node, theme) }} />
+                <Icon aria-hidden="true" style={{ width: iconSize, height: iconSize, color: generating ? theme.node.generating : nodeAccentColor(node, theme), transform: isCharacter ? `translateY(${-6 / Math.max(scale, 0.01)}px)` : undefined }} />
             ) : null}
             <span
                 className={`absolute inset-x-1 truncate text-center opacity-75 ${isGroup ? "inset-y-0 flex items-center justify-center" : "bottom-1"}`}
-                style={isGroup ? { fontSize: Math.min(12 / Math.max(scale, 0.01), Math.min(node.width, node.height) * 0.35) } : undefined}
+                style={isGroup ? { fontSize: Math.min(12 / Math.max(scale, 0.01), Math.min(node.width, node.height) * 0.35) }
+                    : isCharacter ? { fontSize: Math.min(14 / Math.max(scale, 0.01), node.width * 0.22, node.height * 0.38), fontWeight: 600, bottom: Math.min(5 / Math.max(scale, 0.01), node.height * 0.04) }
+                    : undefined}
             >
-                {node.title || node.type}
+                {isCharacter ? node.metadata?.characterName || node.title || node.type : node.title || node.type}
             </span>
         </div>
     );
@@ -1102,7 +1126,6 @@ function EmptyLoopContent({ node, theme }: NodeContentRendererProps) {
             <ListRestart className="size-5 shrink-0 opacity-70" />
             <div className="min-w-0">
                 <div className="truncate text-sm font-semibold">{node.title}</div>
-                <div className="mt-1 text-xs opacity-60">{node.metadata?.loopCount || 1} ×</div>
             </div>
         </div>
     );
@@ -1114,6 +1137,19 @@ function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererP
     const occupiedSlots = ordered ? (node.metadata?.groupSlots || []).filter((slot): slot is string => typeof slot === "string") : [];
     const slots = ordered ? orderedGroupDisplaySlots(occupiedSlots, orderedGroupColumnCount(node)) : [];
     const cells = orderedGroupLayout(node, slots.length);
+    // 抽首帧时组先落地成壳，边抽边显示进度，避免长任务期间画布毫无反馈。
+    // 复用既有的 runProgress 契约，角标逻辑不用另起一套。
+    const extracting = node.metadata?.status === "loading";
+    const progress = nodeRunProgress(node);
+    if (extracting) {
+        return (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2" style={{ color: theme.node.activeStroke }}>
+                <div className="size-8 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
+                <span className="text-[10px] tracking-[0.2em]">{t("canvas.videoFrames.extracting")}</span>
+                {progress === undefined ? null : <span className="text-[10px] tabular-nums opacity-70">{progress}%</span>}
+            </div>
+        );
+    }
     return (
         <div className="relative h-full w-full p-3">
             {ordered
@@ -1320,7 +1356,7 @@ function TextSlotStatus({ text }: { text: CanvasNodeText }) {
 }
 
 function ImageNodeContent(props: NodeContentRendererProps) {
-    if (!props.node.metadata?.content && !props.isBatchRoot) {
+    if (!hasRenderableCanvasImage(props.node) && !props.isBatchRoot) {
         if (props.node.metadata?.status === "loading" || props.node.metadata?.images?.[0]?.status === "loading") return <LoadingContent theme={props.theme} />;
         if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
         return <EmptyImageContent {...props} />;
@@ -1725,7 +1761,10 @@ function ExpandedCharacterImageCard({
 
 function VideoNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     const { t } = useTranslation();
-    if (!node.metadata?.content)
+    const [historyIndex, setHistoryIndex] = useState(-1);
+    const history = node.metadata?.loopOutputHistory || [];
+    useEffect(() => setHistoryIndex(-1), [node.metadata?.generationTaskId]);
+    if (!node.metadata?.content && !history.length)
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
                 <Video className="size-7 opacity-35" />
@@ -1740,7 +1779,27 @@ function VideoNodeContent({ node, theme, scale }: NodeContentRendererProps) {
             </div>
         );
     }
-    return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />;
+    const selectedIndex = !node.metadata?.content && historyIndex < 0 ? history.length - 1 : historyIndex;
+    const source = selectedIndex >= 0 ? history[selectedIndex]?.content || node.metadata?.content : node.metadata?.content;
+    return (
+        <div className="relative h-full w-full">
+            <video src={source} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />
+            {history.length ? (
+                <select
+                    value={selectedIndex}
+                    onChange={(event) => setHistoryIndex(Number(event.target.value))}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    className="absolute right-2 top-2 max-w-[65%] rounded-md border px-1.5 py-1 text-xs"
+                    style={{ background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text }}
+                    data-canvas-no-zoom
+                    aria-label={t("canvas.loopNode.videoHistory")}
+                >
+                    <option value={-1} disabled={!node.metadata?.content}>{t("canvas.loopNode.currentResult")}</option>
+                    {history.map((item, index) => <option key={`${item.storageKey || index}-${index}`} value={index}>{t("canvas.loopNode.historyResult", { count: index + 1 })}</option>)}
+                </select>
+            ) : null}
+        </div>
+    );
 }
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
@@ -1794,6 +1853,7 @@ function ImageContent({
     const primaryImageId = node.metadata?.primaryImageId || images[0]?.id;
     const primaryImage = images.find((image) => image.id === primaryImageId);
     useImagePreviewRevision(primaryImage?.storageKey || node.metadata?.storageKey);
+    const primaryStorageKey = primaryImage?.storageKey || node.metadata?.storageKey;
     const primaryContent = primaryImage?.content || node.metadata?.content;
     const [primaryUrl, setPrimaryUrl] = useState("");
     const backendConnected = useBackendStore((state) => state.connected);
@@ -1801,21 +1861,21 @@ function ImageContent({
 
     useEffect(() => {
         let cancelled = false;
-        if (!primaryContent) {
+        if (!primaryContent && !primaryStorageKey) {
             setPrimaryUrl("");
             return;
         }
-        void ensureImagePreview(primaryImage?.storageKey || node.metadata?.storageKey);
-        resolveImageUrl(primaryImage?.storageKey || node.metadata?.storageKey, primaryContent).then((url) => {
+        void ensureImagePreview(primaryStorageKey);
+        resolveImageUrl(primaryStorageKey, primaryContent).then((url) => {
             if (!cancelled) setPrimaryUrl(url);
         });
         return () => {
             cancelled = true;
         };
-    }, [backendConnected, backendToken, node.metadata?.storageKey, primaryContent, primaryImage?.storageKey]);
+    }, [backendConnected, backendToken, primaryContent, primaryStorageKey]);
     const primarySource = primaryUrl
         ? pickImageSource({
-              previewUrl: previewUrlFor(primaryImage?.storageKey || node.metadata?.storageKey),
+              previewUrl: previewUrlFor(primaryStorageKey),
               originalUrl: primaryUrl,
               naturalWidth: primaryImage?.naturalWidth || node.metadata?.naturalWidth,
               naturalHeight: primaryImage?.naturalHeight || node.metadata?.naturalHeight,

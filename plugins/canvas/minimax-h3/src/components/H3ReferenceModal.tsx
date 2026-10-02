@@ -1,11 +1,10 @@
-import { useEffect, useState } from "react";
-import { Button, Checkbox, Input, Modal, Select, Switch } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { Alert, Button, Checkbox, Input, Modal, Select, Switch } from "antd";
 import { ImagePlus, Play, Trash2 } from "lucide-react";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3Ref, H3ReferenceRole, H3ReferenceUsage } from "../types";
 import { inferReferenceRole } from "../services/h3-data";
 import { H3Icon } from "./H3Icon";
-import { H3PreviewLightbox } from "./H3PreviewLightbox";
 
 const ROLE_OPTIONS: Array<{ value: H3ReferenceRole; label: string }> = [
     ["character_identity", "人物形象"], ["character_turnaround", "人物四视图"], ["scene", "场景基准"],
@@ -35,25 +34,32 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const [usage, setUsage] = useState<H3ReferenceUsage>(characterReference ? "reference" : refItem.usage || "reference");
     const [description, setDescription] = useState(refItem.description || "");
     const [storyboardSubjectIds, setStoryboardSubjectIds] = useState<string[]>(refItem.storyboardSubjectIds || []);
+    const [outfitEnabled, setOutfitEnabled] = useState(group?.outfitEnabled ?? Boolean(group?.outfits.some((outfit) => outfit.enabled)));
+    const [outfitEnabledById, setOutfitEnabledById] = useState<Record<string, boolean>>(() => Object.fromEntries(group?.outfits.map((outfit) => [outfit.id, outfit.enabled]) || []));
     const [voiceEnabled, setVoiceEnabled] = useState(group?.voiceEnabled ?? false);
     const [analyzing, setAnalyzing] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [saveError, setSaveError] = useState("");
     const [analysis, setAnalysis] = useState("");
     const [analysisSummary, setAnalysisSummary] = useState(typeof refItem.analysis?.summary === "string" ? refItem.analysis.summary : "");
     const [analysisMetadata, setAnalysisMetadata] = useState<Record<string, unknown>>(refItem.analysis || {});
-    const [previewItem, setPreviewItem] = useState<H3Ref | null>(null);
+    const persistedAnalysis = useRef<Record<string, unknown>>(refItem.analysis || {});
 
     useEffect(() => {
         setRole(characterReference ? sourceRole : inferReferenceRole(refItem));
         setUsage(characterReference ? "reference" : refItem.usage || "reference");
         setDescription(refItem.description || "");
         setStoryboardSubjectIds(refItem.storyboardSubjectIds || []);
+        setOutfitEnabled(group?.outfitEnabled ?? Boolean(group?.outfits.some((outfit) => outfit.enabled)));
+        setOutfitEnabledById(Object.fromEntries(group?.outfits.map((outfit) => [outfit.id, outfit.enabled]) || []));
         setVoiceEnabled(group?.voiceEnabled ?? false);
         setAnalysis("");
-        setPreviewItem(null);
+        setSaveError("");
         let cancelled = false;
         void ctx.references.list().then((assets) => {
             const metadata = assets.find((asset) => asset.id === refItem.assetId)?.analysis || refItem.analysis || {};
             if (!cancelled) {
+                persistedAnalysis.current = metadata;
                 setAnalysisMetadata(metadata);
                 setAnalysisSummary(typeof metadata.summary === "string" ? metadata.summary : "");
                 setAnalysis(typeof metadata.summary === "string" ? metadata.summary : "");
@@ -65,6 +71,9 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const isStoryboardImage = role === "storyboard" && refItem.type === "image";
     const canRemoveStoryboardImage = refItem.type === "image" && inferReferenceRole(refItem) === "storyboard";
     const apply = async () => {
+        setSaving(true);
+        setSaveError("");
+        try {
         const nextAnalysis = analysisSummary.trim() ? { ...analysisMetadata, summary: analysisSummary.trim() } : analysisMetadata;
         const appliedRole = characterReference ? sourceRole : role;
         const appliedUsage = characterReference ? "reference" : usage;
@@ -72,12 +81,20 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         if (appliedRole !== "storyboard" || refItem.type !== "image") delete next.retentionLevel;
         if (appliedRole === "storyboard" && refItem.type === "image") next.storyboardSubjectIds = storyboardSubjectIds.filter((id) => characters.some((character) => character.id === id));
         else delete next.storyboardSubjectIds;
-        if (next.assetId) await ctx.references.upsert({ id: next.assetId, label: next.name, mediaType: next.type, role: appliedRole, tags: next.tags || [], url: next.url, storageKey: next.storageKey, mimeType: next.mimeType, sourceNodeId: next.nodeId, subjectId: next.subjectId, ...(Object.keys(nextAnalysis).length ? { analysis: nextAnalysis } : {}) }).catch(() => undefined);
-        // 服装选择区已在 UI 中移除：patch 里不带 outfitEnabled，避免覆盖存量的 outfit.enabled；
-        // 声线开关保留，照旧提交 voiceEnabled。
-        const characterPatch = group ? { voiceEnabled } : undefined;
+        if (JSON.stringify(nextAnalysis) !== JSON.stringify(persistedAnalysis.current)) {
+            if (!next.assetId) throw new Error("参考素材缺少资产 ID，无法保存分析");
+            await ctx.flush();
+            await ctx.references.upsert({ id: next.assetId, analysis: nextAnalysis });
+            persistedAnalysis.current = nextAnalysis;
+        }
+        const characterPatch = group ? { outfitEnabled, outfitEnabledById, voiceEnabled } : undefined;
         onApply(next, characterPatch);
         onClose();
+        } catch (error) {
+            setSaveError(error instanceof Error ? error.message : String(error));
+        } finally {
+            setSaving(false);
+        }
     };
 
     const analyze = async () => {
@@ -101,10 +118,23 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         } finally { setAnalyzing(false); }
     };
 
-    const openPreview = () => setPreviewItem(refItem);
+    // 放大预览走宿主的统一预览弹窗（ctx.openMediaPreview），插件不自带灯箱。
+    const openPreview = () => ctx.openMediaPreview({ url: refItem.url, name: refItem.name, type: refItem.type });
+    const selectedOutfitCount = group?.outfits.filter((outfit) => outfitEnabledById[outfit.id]).length || 0;
+    const toggleOutfit = (id: string, checked: boolean) => {
+        const next = { ...outfitEnabledById, [id]: checked };
+        setOutfitEnabledById(next);
+        setOutfitEnabled(group?.outfits.some((outfit) => next[outfit.id]) || false);
+    };
+    const toggleOutfitReference = (checked: boolean) => {
+        if (checked && !selectedOutfitCount && group?.outfits.length) {
+            setOutfitEnabledById((current) => ({ ...current, [group.outfits[0].id]: true }));
+        }
+        setOutfitEnabled(checked);
+    };
 
     return <>
-        <Modal open title="参考素材职责" onCancel={onClose} onOk={() => void apply()} okText="应用到当前 Clip" cancelText="取消" width={560} destroyOnHidden keyboard={!previewItem}>
+        <Modal open title="参考素材职责" onCancel={onClose} onOk={() => void apply()} confirmLoading={saving} okText="应用到当前 Clip" cancelText="取消" width={560} destroyOnHidden>
             <div style={{ display: "grid", gridTemplateColumns: "144px 1fr", gap: 18, paddingTop: 8 }}>
                 <div style={{ position: "relative", alignSelf: "start", border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 8, overflow: "hidden", background: ctx.theme.node.panel, minHeight: 110 }}>
                     {refItem.type === "image" ? <img src={refItem.url} alt={refItem.name} style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }} /> : refItem.type === "video" && refItem.url ? <video src={`${refItem.url}${refItem.url.includes("?") ? "&" : "?"}t=0.001`} preload="metadata" muted playsInline style={{ width: "100%", height: 110, objectFit: "cover", display: "block", background: "#000" }} /> : <div style={{ display: "grid", placeItems: "center", height: 110, fontSize: 12, opacity: 0.65 }}>{refItem.type === "video" ? "视频参考" : "音频参考"}</div>}
@@ -118,14 +148,32 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                     {!characterReference ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>主要职责</span><Select value={role} options={ROLE_OPTIONS} onChange={setRole} /></label> : null}
-                    {/* 服装缩略图选择区已移除：角色节点连 H3 时按 characterPrimaryIndex 自动取主图，不再在 modal 里展示/勾选服装。 */}
+                    {/* 服装与声线是两个独立参考；关闭服装不会删除声线或角色组。 */}
+                    {group ? <div style={{ padding: 8, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <span style={{ fontSize: 12 }}>服装参考</span>
+                            <span style={{ flex: 1, minWidth: 0, fontSize: 12, opacity: group.outfits.length ? 0.8 : 0.45 }}>{group.outfits.length ? `已选 ${selectedOutfitCount} / ${group.outfits.length} 套` : "暂无服装，仅使用声线"}</span>
+                            <Switch size="small" checked={outfitEnabled && group.outfits.length > 0} disabled={!group.outfits.length} onChange={toggleOutfitReference} aria-label="启用服装参考" />
+                        </div>
+                        {group.outfits.length ? <div style={{ display: "grid", gap: 6, maxHeight: 220, overflowY: "auto", marginTop: 8 }}>
+                            {group.outfits.map((outfit, index) => <div key={outfit.id} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                                <Checkbox checked={Boolean(outfitEnabledById[outfit.id])} onChange={(event) => toggleOutfit(outfit.id, event.target.checked)} aria-label={`选择服装 ${outfit.name || `服装 ${index + 1}`}`} style={{ flex: 1, minWidth: 0 }}>
+                                    <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                                        {outfit.url ? <img src={outfit.url} alt="" style={{ width: 36, height: 36, flex: "0 0 auto", objectFit: "cover", borderRadius: 4 }} /> : null}
+                                        <span style={{ minWidth: 0, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={outfit.name}>{outfit.name || `服装 ${index + 1}`}</span>
+                                    </span>
+                                </Checkbox>
+                                {outfit.url ? <Button type="text" size="small" onClick={() => ctx.openMediaPreview({ url: outfit.url, name: outfit.name, type: "image" })} aria-label={`预览服装 ${outfit.name || `服装 ${index + 1}`}`}>预览</Button> : null}
+                            </div>)}
+                        </div> : null}
+                    </div> : null}
                     {group?.voice ? <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 8, border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 6, background: ctx.theme.node.panel }}>
                         <span style={{ fontSize: 12 }}>声线</span>
                         <span style={{ flex: 1, minWidth: 0 }}>
                             <span style={{ display: "block", fontSize: 12, opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.voice.name}</span>
                             {group.voice.description ? <span style={{ display: "block", marginTop: 2, fontSize: 11, opacity: 0.55 }}>{group.voice.description}</span> : null}
                         </span>
-                        <Button type="text" size="small" icon={<Play className="size-3.5" />} onClick={() => setPreviewItem({ ...group.voice!, type: "audio" })}>试听</Button>
+                        <Button type="text" size="small" icon={<Play className="size-3.5" />} onClick={() => ctx.openMediaPreview({ url: group.voice!.url, name: group.voice!.name, type: "audio" })}>试听</Button>
                         <Switch size="small" checked={voiceEnabled} onChange={setVoiceEnabled} />
                     </div> : null}
                     {isStoryboardImage ? <div style={{ display: "grid", gap: 6 }}>
@@ -147,10 +195,10 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
                         {!isStoryboardImage ? <label style={{ display: "grid", gap: 5, fontSize: 14 }}><span style={{ opacity: 0.65 }}>描述</span><Input.TextArea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述这份参考素材的职责与用法，生成时会作为参考说明进入提示词" autoSize={{ minRows: 2, maxRows: 5 }} /></label> : null}
                     </> : null}
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}><Button type="text" loading={analyzing} onClick={() => void analyze()}>用模型分析</Button><span style={{ minWidth: 0, fontSize: 13, opacity: 0.6 }}>{analysis}</span></div>
+                    {saveError ? <Alert type="error" showIcon message={saveError} /> : null}
                     {group && onDeleteGroup ? <Button type="text" danger size="small" style={{ alignSelf: "flex-start", paddingInline: 0 }} onClick={onDeleteGroup}>从本段移除整组</Button> : null}
                 </div>
             </div>
         </Modal>
-        <H3PreviewLightbox item={previewItem} onClose={() => setPreviewItem(null)} />
     </>;
 }

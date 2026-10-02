@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { pluginMcp } from "./mcp.js";
+import { compilePluginInputSchema } from "../../server/plugin-json-schema.js";
+
+test("H3 视频计划公开 schema 在调用前指出 id 和 timeline.end", () => {
+    const tool = pluginMcp.tools.find((item) => item.id === "h3_apply_video_plan")!;
+    const validator = compilePluginInputSchema(tool.inputJsonSchema);
+    const base = { projectId: "p", nodeId: "n", segments: [{ duration: 7, timeline: [{ start: 0, end: 7 }] }] };
+    assert.throws(() => validator.validateInput(base), /segments\.0\.id/);
+    assert.throws(() => validator.validateInput({ ...base, segments: [{ id: "S01", duration: 7, timeline: [{ start: 0 }] }] }), /segments\.0\.timeline\.0\.end/);
+});
 
 function fixture() {
     const project: any = {
@@ -62,8 +71,25 @@ function fixture() {
         getCanvasNodes: async () => project.nodes,
     };
     const handlers = pluginMcp.createHandler(context);
-    return { project, calls, handlers, handler: handlers.h3_prepare_clip! };
+    return { project, calls, backend, handlers, handler: handlers.h3_prepare_clip! };
 }
+
+test("H3 分镜 dryRun 只读预检；错误节点类型和绑定不增加 revision", async () => {
+    const { project, calls, handlers } = fixture();
+    const segment = project.nodes[0].metadata.segments[1];
+    segment.referenceBindings = [{ id: "frame-binding", assetId: "frame-asset", label: "分镜图", role: "storyboard", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:frame" }];
+    const base = { projectId: project.id, nodeId: "h3-1", segmentId: "s2", openingDescription: "开场", shots: [{ description: "走入画面", pictureBindingId: "frame-binding" }], overallSoundscape: "脚步声", nonDiegeticMusic: "无" };
+    const preview: any = await handlers.h3_write_storyboard_prompt!({ ...base, dryRun: true });
+    assert.equal(preview.applied, false);
+    assert.match(preview.prompt, /走入画面/);
+    assert.equal(project.revision, 7);
+    assert.equal(calls.length, 0);
+    await assert.rejects(handlers.h3_write_storyboard_prompt!({ ...base, shots: [{ ...base.shots[0], pictureBindingId: "frame-asset" }] }), /收到的是 assetId/);
+    assert.equal(project.revision, 7);
+    project.nodes[0].type = "config";
+    await assert.rejects(handlers.h3_apply_video_plan!({ projectId: project.id, nodeId: "h3-1", segments: [{ id: "clip", duration: 1, timeline: [{ start: 0, end: 1 }] }] }), /nodeType=minimax-h3:video/);
+    assert.equal(calls.length, 0);
+});
 
 test("h3_prepare_clip 一次原子写入继承参数、角色组和已有节点连接", async () => {
     const { project, calls, handler } = fixture();
@@ -132,4 +158,31 @@ test("h3_get_clip 默认只返回总览，详细内容由定向工具读取", as
     assert.equal(runtime.runtime.modelName, "wrong-draft");
     const references: any = await handlers.h3_get_clip_references!(input);
     assert.deepEqual(references.references, []);
+});
+
+test("h3_get_node 只返回当前 Clip 索引，不泄漏整段 metadata", async () => {
+    const { project, handlers } = fixture();
+    project.nodes[0].metadata.segments[0].prompt = "长提示词".repeat(100_000);
+    const node: any = await handlers.h3_get_node!({ projectId: "project-1", nodeId: "h3-1" });
+    assert.deepEqual(node.segments.map((segment: any) => [segment.id, segment.index]), [["s1", 0], ["s2", 1]]);
+    assert.equal(node.segments[0].hasResult, true);
+    assert.equal("metadata" in node, false);
+    assert.ok(JSON.stringify(node).length < 1_000);
+    await assert.rejects(() => handlers.h3_get_clip!({ projectId: "project-1", nodeId: "h3-1", segmentId: "stale" }), /当前 Clip ID：s1、s2.*h3_get_node/);
+});
+
+test("h3_run_all_clips 可从指定组首不跳过已完成段地提交潜空间续写", async () => {
+    const { backend, handlers } = fixture();
+    const requests: any[] = [];
+    (backend as any).canvasRunGeneration = async (request: any) => {
+        requests.push(request);
+        return { task: { id: "chain-task", kind: "canvas-h3-run", status: "queued", projectId: "project-1", progress: 0, outputs: [] } };
+    };
+    await handlers.h3_run_all_clips!({ projectId: "project-1", nodeIds: ["h3-1"], startSegmentId: "s1", skipCompleted: false });
+    assert.deepEqual(requests[0], {
+        mode: "video", operation: "h3-run", projectId: "project-1", nodeIds: ["h3-1"], segmentId: "s1",
+        runFromCurrent: true, skipCompleted: false, params: {},
+    });
+    await assert.rejects(() => handlers.h3_run_all_clips!({ projectId: "project-1", nodeIds: ["h3-1"], startSegmentId: "missing", skipCompleted: false }), /精确选择一个/);
+    assert.equal(requests.length, 1);
 });

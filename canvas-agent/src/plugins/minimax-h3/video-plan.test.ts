@@ -26,3 +26,8 @@ test("视频计划不能直接携带角色组", () => {
 test("视频计划仍接受普通引用计划", () => {
     assert.doesNotThrow(() => validateVideoPlan([baseSegment]));
 });
+
+test("视频计划缺少稳定 id 或显式镜头 end 时指向具体字段", () => {
+    assert.throws(() => validateVideoPlan([{ ...baseSegment, id: undefined, segmentId: "legacy" } as unknown as H3PlannedSegment]), /segments\[\]\.id.*segmentId/);
+    assert.throws(() => validateVideoPlan([{ ...baseSegment, timeline: [{ start: 0, action: "hold", camera: "static" }] } as H3PlannedSegment]), /timeline\[0\]\.end/);
+});

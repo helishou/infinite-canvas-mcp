@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import torch
-from .face_refine.runtime import apply_face_refine
+from .face_refine.runtime import apply_face_refine, apply_full_frame_refine
 
 
 class InfiniteCanvasH3FaceRefine:
@@ -100,5 +100,47 @@ class InfiniteCanvasH3FaceRefine:
         return refined, audio, str(report)
 
 
-NODE_CLASS_MAPPINGS = {"InfiniteCanvasH3FaceRefine": InfiniteCanvasH3FaceRefine}
-NODE_DISPLAY_NAME_MAPPINGS = {"InfiniteCanvasH3FaceRefine": "Infinite Canvas H3 Face Refine"}
+class MiniMaxH3PostGenerationFullFrameRefine:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "images": ("IMAGE",), "audio": ("AUDIO",), "model": ("MODEL",),
+            "vae": ("VAE",), "audio_vae": ("VAE",), "clip": ("CLIP",),
+            "prompt": ("STRING", {"default": "", "multiline": True}),
+            "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+            "steps": ("INT", {"default": 4, "min": 1, "max": 100}),
+            "denoise": ("FLOAT", {"default": 0.28, "min": 0.01, "max": 1.0}),
+            "sampler": ("STRING", {"default": "res_multistep"}),
+            "scheduler": ("STRING", {"default": "simple"}),
+            "target_megapixels": ("FLOAT", {"default": 0.4, "min": 0.1, "max": 2.0}),
+        }, "optional": {
+            "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 30.0}),
+            "shift_video": ("FLOAT", {"default": 12.0}),
+            "shift_audio": ("FLOAT", {"default": 3.0}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "AUDIO")
+    RETURN_NAMES = ("images", "audio")
+    FUNCTION = "refine"
+    CATEGORY = "InfiniteCanvas/MiniMaxH3"
+
+    def refine(self, images, audio, model, vae, audio_vae, clip, prompt, seed,
+               steps, denoise, sampler, scheduler, target_megapixels,
+               cfg=1.0, shift_video=12.0, shift_audio=3.0):
+        refined = apply_full_frame_refine(
+            frames=images, model=model, vae=vae, audio_vae=audio_vae, clip=clip,
+            prompt=prompt, seed=seed, steps=steps, denoise=denoise,
+            sampler=sampler, scheduler=scheduler, target_megapixels=target_megapixels,
+            cfg=cfg, shift_video=shift_video, shift_audio=shift_audio,
+        )
+        return refined, audio
+
+
+NODE_CLASS_MAPPINGS = {
+    "InfiniteCanvasH3FaceRefine": InfiniteCanvasH3FaceRefine,
+    "MiniMaxH3PostGenerationFullFrameRefine": MiniMaxH3PostGenerationFullFrameRefine,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "InfiniteCanvasH3FaceRefine": "Infinite Canvas H3 Face Refine",
+    "MiniMaxH3PostGenerationFullFrameRefine": "MiniMax H3 Full Frame Refine",
+}

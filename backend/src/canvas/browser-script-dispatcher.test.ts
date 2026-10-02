@@ -78,3 +78,48 @@ test("浏览器图片渠道也由 Backend 创建并绑定统一结果节点", (t
     assert.equal(output.metadata.storageKey, media.storageKey);
     assert.equal(output.metadata.status, "success");
 });
+
+test("智能循环的浏览器图片轮次可分别认领并反向完成", (t) => {
+    const { db, stores, dispatcher, input } = fixture(t);
+    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), [
+        { type: "add_node", id: "loop", nodeType: "loop", title: "循环", position: { x: -480, y: 0 }, width: 380, height: 320, metadata: {} },
+        { type: "update_node", id: "source", metadata: { smart: true, generationMode: "image" } },
+        { type: "connect_nodes", id: "loop-source", fromNodeId: "loop", toNodeId: "source" },
+    ], { runtimeWrite: true });
+    const first = dispatcher.start({ ...input, mode: "image", model: "gemini::image", clientTaskId: "round-1", count: 1,
+        loopOutput: { loopNodeId: "loop", roundIndex: 1, slotIndex: 0 } }, "", "browser-provider");
+    const second = dispatcher.start({ ...input, mode: "image", model: "gemini::image", clientTaskId: "round-2", count: 1,
+        loopOutput: { loopNodeId: "loop", roundIndex: 2, slotIndex: 1 } }, "", "browser-provider");
+    assert.notEqual(first.taskId, second.taskId);
+    const media1 = stores.media.store(Buffer.from("first"), { name: "first.png", mimeType: "image/png", category: "output" });
+    const media2 = stores.media.store(Buffer.from("second"), { name: "second.png", mimeType: "image/png", category: "output" });
+    dispatcher.claim(second.taskId, "tab-b");
+    dispatcher.complete(second.taskId, "tab-b", { media: [media2.storageKey] });
+    dispatcher.claim(first.taskId, "tab-a");
+    dispatcher.complete(first.taskId, "tab-a", { media: [media1.storageKey] });
+    const slots = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.metadata?.loopOutputSlot);
+    assert.equal(slots.find((node) => node.metadata.loopRoundIndex === 1)?.metadata.storageKey, media1.storageKey);
+    assert.equal(slots.find((node) => node.metadata.loopRoundIndex === 2)?.metadata.storageKey, media2.storageKey);
+});
+
+test("智能循环的浏览器视频轮次写入各自结果节点", (t) => {
+    const { db, stores, dispatcher, input } = fixture(t);
+    stores.projects.applyOperations("p", Number(stores.projects.get("p")!.revision || 0), [
+        { type: "add_node", id: "loop", nodeType: "loop", title: "循环", position: { x: -480, y: 0 }, width: 380, height: 320, metadata: {} },
+        { type: "update_node", id: "source", metadata: { smart: true, generationMode: "video" } },
+        { type: "connect_nodes", id: "loop-source", fromNodeId: "loop", toNodeId: "source" },
+    ], { runtimeWrite: true });
+    const first = dispatcher.start({ ...input, mode: "video", model: "gemini::video", clientTaskId: "video-round-1",
+        loopOutput: { loopNodeId: "loop", roundIndex: 1, slotIndex: 0 } }, "", "browser-provider");
+    const second = dispatcher.start({ ...input, mode: "video", model: "gemini::video", clientTaskId: "video-round-2",
+        loopOutput: { loopNodeId: "loop", roundIndex: 2, slotIndex: 1 } }, "", "browser-provider");
+    const firstMedia = stores.media.store(Buffer.from("first"), { name: "first.mp4", mimeType: "video/mp4", category: "output" });
+    const secondMedia = stores.media.store(Buffer.from("second"), { name: "second.mp4", mimeType: "video/mp4", category: "output" });
+    dispatcher.claim(second.taskId, "tab-b");
+    dispatcher.complete(second.taskId, "tab-b", { media: [secondMedia.storageKey] });
+    dispatcher.claim(first.taskId, "tab-a");
+    dispatcher.complete(first.taskId, "tab-a", { media: [firstMedia.storageKey] });
+    const slots = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.metadata?.loopOutputSlot);
+    assert.equal(slots.find((node) => node.metadata.loopRoundIndex === 1)?.metadata.storageKey, firstMedia.storageKey);
+    assert.equal(slots.find((node) => node.metadata.loopRoundIndex === 2)?.metadata.storageKey, secondMedia.storageKey);
+});

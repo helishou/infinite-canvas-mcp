@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import type { WorkflowField } from "@/types/workflow";
 import { fetchWorkflowComboOptions } from "@/services/api/workflows";
 
@@ -146,6 +147,7 @@ type Props = {
 };
 
 export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onWorkflowChange }: Props) {
+    const { t } = useTranslation();
     const svgRef = useRef<SVGSVGElement>(null);
     const wrapRef = useRef<HTMLDivElement>(null);
     const [view, setView] = useState({ k: 1, x: 0, y: 0 });
@@ -295,12 +297,14 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onW
                             <g
                                 key={node.id}
                                 className={`gnode ${node.hasExposed ? "has-exposed" : ""} ${popupNodeId === node.id ? "is-active" : ""}`}
+                                aria-label={`${node.classType} #${node.id}`}
                                 transform={`translate(${node.x},${node.y})`}
                                 onClick={() => setPopupNodeId(popupNodeId === node.id ? null : node.id)}
                                 style={{ cursor: "pointer" }}
                             >
+                                <title>{node.classType} #{node.id}</title>
                                 <rect width={NODE_W} height={NODE_H} rx={8} fill={node.hasExposed ? "#dbeafe" : "#ffffff"} stroke={popupNodeId === node.id ? "#3b82f6" : node.hasExposed ? "#60a5fa" : "#d1d5db"} strokeWidth={popupNodeId === node.id ? 2 : 1} />
-                                <text x={10} y={20} fontSize={11} fill="#1e293b" fontWeight={600}>{node.label}</text>
+                                <text x={10} y={20} fontSize={11} fill="#1e293b" fontWeight={600}>{node.classType === "PromptTemplateSuffix" ? t("workflowGraph.promptTemplateSuffix") : node.label}</text>
                                 <text x={10} y={38} fontSize={9} fill="#64748b">#{node.id}</text>
                                 {node.exposedCount > 0 && <text x={NODE_W - 8} y={42} fontSize={9} textAnchor="end" fill="#2563eb" fontWeight={500}>{node.exposedCount} 字段</text>}
                             </g>

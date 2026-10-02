@@ -1,4 +1,7 @@
 import { validateH3CharacterGroups } from "./character-reference-contract.js";
+export { characterImageKey, resolveCharacterImageKeys, characterReferenceUpdates, h3CharacterSourceFromNode, syncH3CharacterGroupSource, type CharacterImageSelection, type H3CharacterSource } from "./character-image-selection.js";
+
+import { orderStoryboardReferencesFirst, remapPictureTags } from "./storyboard-reference-order.js";
 
 export const REFERENCE_ROLES = [
     "character_identity", "character_turnaround", "scene", "blocking", "storyboard",
@@ -132,29 +135,94 @@ export function referenceBindingsOf(segment: Record<string, unknown>): { binding
     return { bindings, migratedLegacyRefs: bindings.length > 0 };
 }
 
-function normalizeCharacterGroupBindingSubjects(bindings: ReferenceBinding[], segment: Record<string, unknown>) {
-    const groups = recordOf(segment.h3CharacterGroups);
-    const subjectByBinding = new Map<string, string>();
-    for (const [groupKey, rawGroup] of Object.entries(groups)) {
-        const group = recordOf(rawGroup);
-        const groupId = String(group.id || groupKey);
-        const subjectId = String(group.subjectId || "").trim() || String(group.characterNodeId || "").trim();
-        if (!subjectId) continue;
-        for (const rawOutfit of Array.isArray(group.outfits) ? group.outfits : []) {
-            const outfitId = String(recordOf(rawOutfit).id || "");
-            if (outfitId) subjectByBinding.set(JSON.stringify([groupId, outfitId]), subjectId);
-        }
+/**
+ * 角色组的参考绑定是 `h3CharacterGroups` 的派生视图，不是独立数据。
+ *
+ * 历史实现把派生副本写进 segment.referenceBindings，任何整组替换 bindings 的工具都必须
+ * 手工重建它们，否则预检报 character_group_binding_count / character_group_binding_source_mismatch。
+ * 现在改成：编译器每次从角色组本体现场派生，写入端只负责把 h3CharacterGroups 改对。
+ * 存量 segment 里已有的派生行保留作为 UI 可读快照，但不再参与正确性判断。
+ */
+export function characterGroupBindings(group: Record<string, unknown>): ReferenceBinding[] {
+    const groupId = String(group.id || "");
+    const characterNodeId = String(group.characterNodeId || "").trim();
+    const characterName = String(group.characterName || "角色");
+    const subjectId = String(group.subjectId || "").trim() || characterNodeId;
+    if (!groupId || !characterNodeId || !subjectId) return [];
+    const outfitRows = group.outfitEnabled !== false && Array.isArray(group.outfits) ? group.outfits : [];
+    const refs: ReferenceBinding[] = outfitRows.filter((row) => recordOf(row).enabled !== false).map((row, index) => {
+        const outfit = recordOf(row);
+        const outfitKey = String(outfit.id || "");
+        const url = String(outfit.url || "");
+        const key = String(outfit.storageKey || url);
+        if (!outfitKey || !key) return null;
+        return {
+            id: stableReferenceId("binding", `${groupId}:${outfitKey}`, index),
+            assetId: stableReferenceId("asset", `${characterNodeId}:${key}`),
+            label: `${characterName} · ${String(outfit.name || "outfit")}`,
+            role: inferReferenceRole(outfit),
+            tags: ["character-group", String(outfit.role || "character_turnaround")],
+            enabled: true,
+            usage: "reference",
+            subjectId,
+            mediaType: "image",
+            url,
+            storageKey: String(outfit.storageKey || "") || undefined,
+            mimeType: String(outfit.mimeType || "") || undefined,
+            sourceNodeId: characterNodeId,
+            groupId,
+            outfitId: outfitKey,
+        } as ReferenceBinding;
+    }).filter(Boolean) as ReferenceBinding[];
+    const voice = recordOf(group.voice);
+    if (group.voiceEnabled === true && String(voice.url || "")) {
+        refs.push({
+            id: stableReferenceId("binding", `${groupId}:voice`),
+            assetId: String(voice.assetId || "") || stableReferenceId("asset", `${characterNodeId}:voice`),
+            label: `${characterName} · ${String(voice.name || "声线")}`,
+            role: "character_voice",
+            tags: ["character-group"],
+            enabled: true,
+            usage: "reference",
+            subjectId,
+            mediaType: "audio",
+            url: String(voice.url),
+            storageKey: String(voice.storageKey || "") || undefined,
+            sourceNodeId: characterNodeId,
+            groupId,
+        });
     }
-    return bindings.map((binding) => {
-        const subjectId = subjectByBinding.get(JSON.stringify([binding.groupId || "", binding.outfitId || ""]));
-        return subjectId && binding.subjectId !== subjectId ? { ...binding, subjectId } : binding;
+    return refs;
+}
+
+/** Refresh group snapshots in their saved slots so existing Picture/Audio numbers keep their meaning. */
+export function resolveCharacterGroupBindings(bindings: ReferenceBinding[], segment: Record<string, unknown>) {
+    const groups = recordOf(segment.h3CharacterGroups);
+    const derived = Object.values(groups).flatMap((raw) => characterGroupBindings(recordOf(raw)));
+    const derivedIds = new Set(derived.map((binding) => binding.id));
+    const used = new Set<string>();
+    const ordered = bindings.flatMap((binding) => {
+        if (!binding.groupId) return derivedIds.has(binding.id) ? [] : [binding];
+        // Legacy IDs may differ from today's derived IDs; the group/outfit identifies the slot.
+        const current = derived.find((item) => item.groupId === binding.groupId
+            && item.outfitId === binding.outfitId
+            && item.mediaType === (binding.mediaType || inferReferenceMediaType(binding)));
+        if (!current || used.has(current.id)) return [];
+        used.add(current.id);
+        return [current];
     });
+    return [...ordered, ...derived.filter((binding) => !used.has(binding.id))];
 }
 
 export function compileReferenceSubmission(project: Record<string, unknown>, segment: Record<string, unknown>): ReferenceCompilation {
     const catalog = new Map(referenceCatalogOf(project).map((asset) => [asset.id, asset]));
     const { bindings: rawBindings, migratedLegacyRefs } = referenceBindingsOf(segment);
-    const bindings = normalizeCharacterGroupBindingSubjects(rawBindings, segment);
+    const originalBindings = resolveCharacterGroupBindings(rawBindings, segment);
+    const shotIds = (Array.isArray(segment.storyboardShots) ? segment.storyboardShots : [])
+        .map((shot) => String(recordOf(shot).referenceBindingId || "")).filter(Boolean);
+    const bindings = orderStoryboardReferencesFirst(originalBindings, shotIds,
+        (binding) => binding.id,
+        (binding) => binding.enabled && binding.role === "storyboard" && (binding.mediaType || inferReferenceMediaType(binding)) === "image");
     const issues: ReferenceIssue[] = [...validateH3CharacterGroups(project, { ...segment, referenceBindings: bindings })];
     const counters: Record<ReferenceMediaType, number> = { image: 0, video: 0, audio: 0 };
     const references = bindings.filter((binding) => binding.enabled).flatMap((binding): CompiledReference[] => {
@@ -162,13 +230,16 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         const merged = {
             ...binding,
             ...(asset || {}),
+            ...sourceMediaOf(project, { ...binding, sourceNodeId: binding.sourceNodeId || asset?.sourceNodeId }),
             id: binding.id,
             assetId: binding.assetId,
             enabled: binding.enabled,
             usage: binding.usage,
             role: binding.role,
-            tags: binding.tags.length ? binding.tags : asset?.tags || [],
-            subjectId: binding.subjectId || asset?.subjectId,
+            label: binding.label,
+            tags: binding.tags,
+            subjectId: binding.subjectId,
+            sourceNodeId: binding.sourceNodeId || asset?.sourceNodeId,
         } as ReferenceBinding & ProjectReferenceAsset;
         const mediaType = inferReferenceMediaType(merged);
         if (!merged.storageKey && !merged.url) {
@@ -182,6 +253,12 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         return [{ ...merged, mediaType, ordinal, token }];
     });
     const semanticPrompt = String(segment.prompt || "");
+    // Existing Clips keep their saved prompt until an explicit edit. Preserve each Picture's
+    // source image when compiling the storyboard-first execution order.
+    const orderedPrompt = bindings.some((binding, index) => binding.id !== originalBindings[index]?.id)
+        ? remapPictureTags(semanticPrompt, originalBindings.filter((binding) => binding.enabled), bindings.filter((binding) => binding.enabled),
+            (binding) => binding.id, (binding) => (binding.mediaType || inferReferenceMediaType(binding)) === "image")
+        : semanticPrompt;
     const bySubjectId = new Map<string, { reference: CompiledReference; ordinal: number }>();
     let nextSubjectOrdinal = 1;
     const registerSubject = (reference: CompiledReference, ids: Array<string | undefined>) => {
@@ -201,13 +278,35 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
             if (!bySubjectId.has(id)) registerSubject(reference, [id]);
         });
     });
-    validatePromptReferences(semanticPrompt, references, new Set(bySubjectId.values()).size, issues);
-    const compiledPrompt = semanticPrompt
+    // Subject is a semantic prompt token, not a media-slot reference. It may
+    // describe a character, prop, scene, object, or an entity defined elsewhere;
+    // never validate it against character bindings or enabled media count.
+    validatePromptReferences(semanticPrompt, references, undefined, issues);
+    const compiledPrompt = orderedPrompt
         .replace(/<(subject|picture|video|audio)\s+(\d+)>/giu, (_marker, kind: string, ordinal: string) => `<${kind[0].toUpperCase()}${kind.slice(1).toLowerCase()} ${ordinal}>`)
         .replace(/(<Subject\s+\d+>)(?=[\p{L}\p{N}(])/gu, "$1 ");
     const promptWithBoundSubjects = bindLiteralSubjectsToPictures(compiledPrompt, references, bySubjectId);
     validateLimits(segment, semanticPrompt, references, issues);
     return { semanticPrompt, compiledPrompt: promptWithBoundSubjects, bindings, references, issues, migratedLegacyRefs };
+}
+
+function sourceMediaOf(project: Record<string, unknown>, binding: ReferenceBinding) {
+    if (!binding.sourceNodeId) return {};
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+    const node = nodes.find((item) => String(item.id || "") === binding.sourceNodeId);
+    if (!node) return {};
+    const metadata = recordOf(node.metadata);
+    let media = metadata;
+    if (node.type === "scene") media = recordOf(metadata.sceneImage);
+    else if (node.type === "config" && metadata.smart === true && (metadata.generationMode || "image") === "image") {
+        const images = Array.isArray(metadata.images) ? metadata.images.map(recordOf) : [];
+        media = images.find((item) => item.id === metadata.primaryImageId && (item.content || item.storageKey))
+            || images.find((item) => item.content || item.storageKey) || metadata;
+    } else if (node.type === "character") return {};
+    const storageKey = String(media.storageKey || recordOf(media.assetRef).storageKey || "");
+    const url = String(media.content || media.url || media.localUrl || media.sourceUrl || "");
+    if (!storageKey && !url) return {};
+    return { ...(storageKey ? { storageKey } : {}), ...(url ? { url } : {}), ...(media.mimeType ? { mimeType: String(media.mimeType) } : {}) };
 }
 
 function bindLiteralSubjectsToPictures(
@@ -264,12 +363,22 @@ function bindLiteralSubjectsToPictures(
     });
 }
 
-export function assertReferenceCompilation(compilation: ReferenceCompilation) {
-    const errors = compilation.issues.filter((issue) => issue.severity === "error");
-    if (errors.length) throw new Error(errors.map((issue) => issue.message).join("；"));
+export class ReferenceCompilationError extends Error {
+    readonly code = "REFERENCE_INVALID";
+    readonly issues: ReferenceIssue[];
+    constructor(issues: ReferenceIssue[]) {
+        super(issues.map((issue) => issue.message).join("；"));
+        this.name = "ReferenceCompilationError";
+        this.issues = structuredClone(issues);
+    }
 }
 
-function validatePromptReferences(prompt: string, references: CompiledReference[], subjectCount: number, issues: ReferenceIssue[]) {
+export function assertReferenceCompilation(compilation: ReferenceCompilation) {
+    const errors = compilation.issues.filter((issue) => issue.severity === "error");
+    if (errors.length) throw new ReferenceCompilationError(errors);
+}
+
+function validatePromptReferences(prompt: string, references: CompiledReference[], subjectCount: number | undefined, issues: ReferenceIssue[]) {
     const counts = {
         subject: subjectCount,
         picture: references.filter((reference) => reference.mediaType === "image").length,
@@ -280,6 +389,7 @@ function validatePromptReferences(prompt: string, references: CompiledReference[
     for (const match of prompt.matchAll(/<(Subject|Picture|Video|Audio)\s+(\d+)>/giu)) {
         const kind = match[1].toLowerCase() as keyof typeof counts;
         const ordinal = Number(match[2]);
+        if (kind === "subject") continue;
         if (ordinal > 0 && ordinal <= counts[kind]) continue;
         const key = `${kind}:${ordinal}`;
         if (reported.has(key)) continue;

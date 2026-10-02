@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { characterReferenceUpdates, h3CharacterSourceFromNode, referenceBindingsOf, syncH3CharacterGroupSource } from "@basketikun/canvas-agent/reference-contract";
 
 export type CanvasOperation = Record<string, unknown> & { type: string };
 
@@ -62,13 +63,25 @@ function assertFullSegmentsReplacement(node: Record<string, unknown>, incomingSe
     }
 }
 
-export function applyCanvasProjectOperations(project: Record<string, unknown>, operations: CanvasOperation[]) {
+export function applyCanvasProjectOperations(project: Record<string, unknown>, operations: CanvasOperation[], options: { committedReplay?: boolean; derivedOperations?: CanvasOperation[] } = {}) {
     const nodes = nodesOf(project);
     const connections = connectionsOf(project);
     const results: CanvasOperationResult[] = [];
+    const previousH3Segments = new Map<string, Map<string, Record<string, unknown>>>();
+    for (const operation of operations) {
+        const touchesReferences = operation.type === "update_h3_segment" && Object.hasOwn(recordOf(operation.patch), "referenceBindings")
+            || ["add_h3_segment", "replace_h3_segments"].includes(operation.type);
+        const nodeId = operation.type === "update_node" && Object.hasOwn(recordOf(operation.metadata), "segments")
+            ? String(operation.id || "")
+            : touchesReferences ? String(operation.nodeId || "") : "";
+        if (!nodeId || previousH3Segments.has(nodeId)) continue;
+        const node = nodes.find((item) => String(item.id) === nodeId);
+        if (isH3CanvasNode(node)) previousH3Segments.set(nodeId, new Map(segmentsOf(node!).map((segment) => [String(segment.id || ""), segment])));
+    }
 
     for (const operation of operations) {
         const result: CanvasOperationResult = { type: operation.type, ok: true };
+        const derived: CanvasOperation[] = [];
         if (!operation.type) throw new Error("画布操作缺少 type");
 
         if (operation.type === "text_suggestion") {
@@ -94,12 +107,17 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             });
             syncOrderedGroupMembership(nodes, id);
             const createdNode = nodes.find((node) => String(node.id) === id);
-            if (createdNode?.metadata && orderedGroupForMember(nodes, createdNode)) operation.position = createdNode.position;
+            if (createdNode?.metadata && orderedGroupForMember(nodes, createdNode)) {
+                operation.position = createdNode.position;
+                operation.width = Number(createdNode.width);
+                operation.height = Number(createdNode.height);
+            }
             result.createdNodeIds = [id];
         } else if (operation.type === "update_node") {
             const id = String(operation.id || "");
             const node = nodes.find((item) => String(item.id) === id);
             if (!node) throw new Error(`找不到节点：${id}`);
+            const previousNode = { ...node, metadata: { ...recordOf(node.metadata) } };
             const previousGroupId = String(recordOf(node.metadata).groupId || "");
             Object.assign(node, operation.patch || {});
             if (operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)) {
@@ -125,6 +143,39 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const nextGroupId = String(recordOf(node.metadata).groupId || "");
             if (previousGroupId !== nextGroupId) {
                 syncOrderedGroupMembership(nodes, id, previousGroupId || undefined, Boolean((operation.patch as Record<string, unknown> | undefined)?.position));
+            }
+            if (!options.committedReplay) {
+                for (const update of characterReferenceUpdates(previousNode, node, nodes)) {
+                    const target = nodes.find((item) => String(item.id) === update.id)!;
+                    target.metadata = { ...recordOf(target.metadata), ...update.metadata };
+                    derived.push({ type: "update_node", ...update });
+                }
+                const source = h3CharacterSourceFromNode(node);
+                if (source && JSON.stringify(source) !== JSON.stringify(h3CharacterSourceFromNode(previousNode))) {
+                    for (const target of nodes.filter(isH3CanvasNode)) {
+                        const segments = segmentsOf(target);
+                        let changed = false;
+                        for (const segment of segments) {
+                            const groups = recordOf(segment.h3CharacterGroups);
+                            let nextGroups: Record<string, unknown> | undefined;
+                            for (const [groupId, rawGroup] of Object.entries(groups)) {
+                                const group = recordOf(rawGroup);
+                                if (group.characterNodeId !== source.characterNodeId) continue;
+                                const nextGroup = syncH3CharacterGroupSource(group as Parameters<typeof syncH3CharacterGroupSource>[0], source);
+                                if (nextGroup === group) continue;
+                                nextGroups ||= { ...groups };
+                                if (nextGroup) nextGroups[groupId] = nextGroup;
+                                else delete nextGroups[groupId];
+                            }
+                            if (!nextGroups) continue;
+                            segment.h3CharacterGroups = nextGroups;
+                            changed = true;
+                            derived.push({ type: "update_h3_segment", nodeId: String(target.id), segmentId: String(segment.id), patch: { h3CharacterGroups: nextGroups } });
+                        }
+                        if (changed) target.metadata = { ...recordOf(target.metadata), segments };
+                    }
+                }
+                options.derivedOperations?.push(...derived);
             }
         } else if (operation.type === "update_h3_segment") {
             const nodeId = String(operation.nodeId || "");
@@ -340,11 +391,162 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             throw new Error(`未知画布操作：${operation.type}`);
         }
         results.push(result);
+        results.push(...derived.map((operation) => ({ type: operation.type, ok: true })));
     }
 
+    // 绑定是用户意图；仅在素材第一次进入项目时登记媒体，不把 Clip 职责反写到共享资产。
+    const referenceNodes = new Set<string>();
+    for (const operation of operations) {
+        if (operation.type === "update_h3_segment" && Object.hasOwn(recordOf(operation.patch), "referenceBindings")) referenceNodes.add(String(operation.nodeId || ""));
+        if (["add_h3_segment", "replace_h3_segments"].includes(operation.type)) referenceNodes.add(String(operation.nodeId || ""));
+        if (operation.type === "add_node") referenceNodes.add(String(operation.id || ""));
+        if (operation.type === "update_node" && Object.hasOwn(recordOf(operation.metadata), "segments")) referenceNodes.add(String(operation.id || ""));
+    }
+    for (const nodeId of referenceNodes) {
+        const node = nodes.find((item) => String(item.id) === nodeId);
+        if (isH3CanvasNode(node)) {
+            canonicalizeH3References(node!, undefined, previousH3Segments.get(nodeId), options.committedReplay === true);
+            registerH3ReferenceAssets(project, node!);
+        }
+    }
     project.nodes = nodes;
     project.connections = connections;
     return results;
+}
+
+function legacyMirrorsBindings(refs: Array<Record<string, unknown>>, bindings: Array<Record<string, unknown>>) {
+    if (refs.length !== bindings.length) return false;
+    const remaining = [...bindings];
+    for (const ref of refs) {
+        const refId = String(ref.bindingId || "");
+        const refMedia = [ref.storageKey, ref.url].filter(Boolean).map(String);
+        const match = remaining.findIndex((binding) => {
+            if (refId && refId !== String(binding.id || "")) return false;
+            const bindingMedia = [binding.storageKey, binding.url].filter(Boolean).map(String);
+            return refMedia.some((media) => bindingMedia.includes(media)) || Boolean(refId && !refMedia.length && !bindingMedia.length);
+        });
+        if (match < 0) return false;
+        remaining.splice(match, 1);
+    }
+    return true;
+}
+
+export function canonicalizeH3References(node: Record<string, unknown>, archiveLegacy?: (segment: Record<string, unknown>, index: number) => void, previousSegments?: Map<string, Record<string, unknown>>, committedReplay = false) {
+    const metadata = recordOf(node.metadata);
+    const segments = segmentsOf(node);
+    for (const [index, segment] of segments.entries()) {
+        const buckets = recordOf(segment.refs);
+        const legacyRefs = Array.isArray(segment.refItems) && segment.refItems.length
+            ? segment.refItems.map(recordOf)
+            : ["image", "video", "audio"].flatMap((type) => Array.isArray(buckets[type]) ? (buckets[type] as unknown[]).map(recordOf) : buckets[type] ? [recordOf(buckets[type])] : []);
+        const hasBindings = Array.isArray(segment.referenceBindings);
+        const currentBindings = hasBindings ? segment.referenceBindings as Array<Record<string, unknown>> : [];
+        const previous = previousSegments?.get(String(segment.id || ""));
+        if (legacyRefs.length) archiveLegacy?.(segment, index);
+        if (hasBindings && legacyRefs.length && !archiveLegacy && !committedReplay && (currentBindings.length || previous)) {
+            const previousBindings = Array.isArray(previous?.referenceBindings) ? previous.referenceBindings.map(recordOf) : [];
+            const previousBuckets = recordOf(previous?.refs);
+            const previousHadLegacy = Boolean((Array.isArray(previous?.refItems) && previous.refItems.length)
+                || ["image", "video", "audio"].some((type) => Array.isArray(previousBuckets[type]) ? previousBuckets[type].length : previousBuckets[type]));
+            const bucketRefs = ["image", "video", "audio"].flatMap((type) => Array.isArray(buckets[type]) ? (buckets[type] as unknown[]).map(recordOf) : buckets[type] ? [recordOf(buckets[type])] : []);
+            const mirrorsPrevious = previous && !previousHadLegacy && previousBindings.length > 0
+                && legacyMirrorsBindings(legacyRefs, previousBindings)
+                && (!bucketRefs.length || legacyMirrorsBindings(bucketRefs, previousBindings));
+            const mirrorsCurrent = currentBindings.length > 0 && legacyMirrorsBindings(legacyRefs, currentBindings)
+                && (!bucketRefs.length || legacyMirrorsBindings(bucketRefs, currentBindings));
+            const unchangedExisting = previousHadLegacy && JSON.stringify(previousBindings) === JSON.stringify(currentBindings)
+                && currentBindings.length === legacyRefs.length
+                && legacyRefs.every((ref) => !ref.bindingId || currentBindings.some((binding) => String(binding.id || "") === String(ref.bindingId)));
+            // 旧字段是绑定的历史镜像，不是一次独立意图。只有在「上一版本来就是干净的绑定」
+            // 时，本批夹带的旧字段才必然是过期残留（关掉服装/声线后前端仍会重发它）：
+            // 此时按当前绑定放行。上一版仍带旧字段说明真在迁移或扩充，继续按原有规则校验。
+            //
+            // 可放行的旧字段可以引用「上一版或当前版绑定里存在过」的 binding：用户在 UI 关闭
+            // 服装/声线后，前端内存里的旧字段仍夹带着刚被移除的那条 bindingId，而它的真值
+            // （当前绑定）已经完整表达了用户意图。只有旧字段引用了两版绑定都没有的 binding，
+            // 才可能丢掉唯一一份原数据，那种情况仍然拒绝。
+            const knownBindingIds = new Set([
+                ...previousBindings.map((binding) => String(binding.id || "")),
+                ...currentBindings.map((binding) => String(binding.id || "")),
+            ]);
+            const mirrorsKnownBinding = (ref: Record<string, unknown>) => !ref.bindingId || knownBindingIds.has(String(ref.bindingId));
+            const legacyIsStaleSubset = !previousHadLegacy
+                && legacyRefs.every(mirrorsKnownBinding)
+                && bucketRefs.every(mirrorsKnownBinding);
+            if (!mirrorsPrevious && !mirrorsCurrent && !unchangedExisting && !legacyIsStaleSubset) {
+                throw new Error(`H3 Clip ${String(segment.id || "")} 的绑定与旧参考不一致，拒绝丢弃原数据`);
+            }
+        }
+        if (!hasBindings || !currentBindings.length && (archiveLegacy || !previous || committedReplay)) {
+            const legacy = { ...segment };
+            delete legacy.referenceBindings;
+            const converted = referenceBindingsOf(legacy).bindings;
+            if (legacyRefs.length && converted.length !== legacyRefs.length) throw new Error(`H3 Clip ${String(segment.id || "")} 的旧参考无法完整迁移，原数据已保留`);
+            if (converted.length) segment.referenceBindings = converted;
+        }
+        delete segment.refItems;
+        delete segment.refs;
+    }
+    metadata.segments = segments;
+    metadata.h3DataVersion = 2;
+    node.metadata = metadata;
+}
+
+export function registerH3ReferenceAssets(project: Record<string, unknown>, node: Record<string, unknown>) {
+    const catalog = Array.isArray(project.referenceCatalog) ? project.referenceCatalog as Array<Record<string, unknown>> : [];
+    const byId = new Map(catalog.map((asset) => [String(asset.id || ""), asset]));
+    const conflicts = (asset: Record<string, unknown>, binding: Record<string, unknown>) => {
+        const assetSource = String(asset.sourceNodeId || "");
+        const bindingSource = String(binding.sourceNodeId || "");
+        if (assetSource && !bindingSource) return false; // 旧绑定可只有媒体快照；项目资产仍保有动态来源。
+        if (assetSource && bindingSource) return assetSource !== bindingSource;
+        const assetMedia = String(asset.storageKey || asset.url || "");
+        const bindingMedia = String(binding.storageKey || binding.url || "");
+        return Boolean(assetMedia && bindingMedia && assetMedia !== bindingMedia);
+    };
+    const segments = segmentsOf(node);
+    let changed = false;
+    for (const segment of segments) {
+        const bindings = Array.isArray(segment.referenceBindings) ? segment.referenceBindings as Array<Record<string, unknown>> : [];
+        for (const binding of bindings) {
+            const originalId = String(binding.assetId || "");
+            if (!originalId) continue;
+            const identity = String(binding.sourceNodeId ? `node:${binding.sourceNodeId}` : binding.storageKey || binding.url || "");
+            let id = originalId;
+            const existing = byId.get(id);
+            if (existing && conflicts(existing, binding)) {
+                id = `${originalId}-${crypto.createHash("sha256").update(identity).digest("hex").slice(0, 10)}`;
+                binding.assetId = id;
+                changed = true;
+            }
+            const resolved = byId.get(id);
+            if (resolved) {
+                if (conflicts(resolved, binding)) throw new Error(`参考资产 ID 冲突：${id}`);
+                for (const field of ["storageKey", "url", "mimeType", "sourceNodeId", "mediaType"]) {
+                    if (!resolved[field] && binding[field]) { resolved[field] = binding[field]; changed = true; }
+                }
+                continue;
+            }
+            const asset = {
+                id,
+                label: String(binding.label || id),
+                mediaType: String(binding.mediaType || "image"),
+                role: "other",
+                tags: [],
+                ...(binding.url ? { url: binding.url } : {}),
+                ...(binding.storageKey ? { storageKey: binding.storageKey } : {}),
+                ...(binding.mimeType ? { mimeType: binding.mimeType } : {}),
+                ...(binding.sourceNodeId ? { sourceNodeId: binding.sourceNodeId } : {}),
+            };
+            catalog.push(asset);
+            byId.set(id, asset);
+            changed = true;
+        }
+    }
+    if (changed) {
+        project.referenceCatalog = catalog;
+        recordOf(node.metadata).segments = segments;
+    }
 }
 
 function nodesOf(project: Record<string, unknown>) {
@@ -381,9 +583,11 @@ function syncOrderedGroupMembership(nodes: Array<Record<string, unknown>>, nodeI
         const rawSlots = Array.isArray(metadata.groupSlots) ? metadata.groupSlots.map(String) : [];
         const slots = rawSlots.length ? rawSlots.filter((id, index, all) => knownIds.has(id) && all.indexOf(id) === index) : legacyMemberIds;
         const nextSlots = nextGroupId === groupId ? (slots.includes(nodeId) ? slots : [...slots, nodeId]) : slots.filter((id) => id !== nodeId);
+        // 明确的槽位顺序已随本批操作提交时，成员归属更新不能再重排整组并覆盖显式布局。
+        if (rawSlots.length && nextSlots.length === rawSlots.length && nextSlots.every((id, index) => id === rawSlots[index])) return;
         metadata.groupSlots = nextSlots;
         group.metadata = metadata;
-        if (nextGroupId !== groupId || preservePosition) return;
+        if (!nextSlots.length) return;
 
         const columns = Math.max(1, Math.min(12, Math.round(Number(metadata.orderedGroupColumns)) || 4));
         const displayCount = nextSlots.length % columns === 0 ? nextSlots.length + columns : nextSlots.length + (columns - nextSlots.length % columns);
@@ -393,13 +597,28 @@ function syncOrderedGroupMembership(nodes: Array<Record<string, unknown>>, nodeI
         const gap = 14;
         const padding = { left: 24, right: 24, top: 52, bottom: 24 };
         const rows = Math.ceil(Math.max(displayCount, 1) / columns);
-        const cellWidth = Math.max(80, (groupWidth - padding.left - padding.right - gap * (columns - 1)) / columns);
-        const cellHeight = Math.max(80, (groupHeight - padding.top - padding.bottom - gap * (rows - 1)) / rows);
-        const slotIndex = nextSlots.indexOf(nodeId);
-        member.position = {
-            x: Number(groupPosition.x || 0) + padding.left + (slotIndex % columns) * (cellWidth + gap) + (cellWidth - Number(member.width || 0)) / 2,
-            y: Number(groupPosition.y || 0) + padding.top + Math.floor(slotIndex / columns) * (cellHeight + gap) + (cellHeight - Number(member.height || 0)) / 2,
-        };
+        const availableWidth = Math.max(0, groupWidth - padding.left - padding.right);
+        const availableHeight = Math.max(0, groupHeight - padding.top - padding.bottom);
+        const gapX = columns > 1 ? Math.min(gap, Math.max(0, (availableWidth - columns) / (columns - 1))) : 0;
+        const gapY = rows > 1 ? Math.min(gap, Math.max(0, (availableHeight - rows) / (rows - 1))) : 0;
+        const cellWidth = Math.max(0, (availableWidth - gapX * (columns - 1)) / columns);
+        const cellHeight = Math.max(0, (availableHeight - gapY * (rows - 1)) / rows);
+        nextSlots.forEach((memberId, slotIndex) => {
+            if (preservePosition && memberId === nodeId) return;
+            const slotMember = nodes.find((node) => String(node.id) === memberId);
+            if (!slotMember) return;
+            const originalWidth = Number(slotMember.width || 0);
+            const originalHeight = Number(slotMember.height || 0);
+            const scale = Math.min(1, cellWidth / Math.max(originalWidth, 1), cellHeight / Math.max(originalHeight, 1));
+            const width = originalWidth * scale;
+            const height = originalHeight * scale;
+            slotMember.position = {
+                x: Number(groupPosition.x || 0) + padding.left + (slotIndex % columns) * (cellWidth + gapX) + (cellWidth - width) / 2,
+                y: Number(groupPosition.y || 0) + padding.top + Math.floor(slotIndex / columns) * (cellHeight + gapY) + (cellHeight - height) / 2,
+            };
+            slotMember.width = width;
+            slotMember.height = height;
+        });
     });
 }
 

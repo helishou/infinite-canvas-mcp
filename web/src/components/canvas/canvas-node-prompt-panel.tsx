@@ -6,16 +6,14 @@ import { ArrowUp, Image as ImageIcon, LoaderCircle, Maximize2, MessageSquare, Mu
 import { Button, Modal, Segmented, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
-import { ModelPicker } from "@/components/model-picker";
-import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, resolveModelForCapability, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
+import { CanvasGenerationControls } from "./canvas-generation-controls";
+import { getNodeImageReferenceCount } from "./canvas-node-image-reference-count";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
-import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasCollaborativeText } from "./canvas-collaborative-text";
-import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
-import { CanvasTextSettingsPopover } from "./canvas-text-settings-popover";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
@@ -32,22 +30,24 @@ type CanvasNodePromptPanelProps = {
     mentionReferences?: CanvasResourceReference[];
     nodes: CanvasNodeData[];
     connectedNodes?: CanvasNodeData[];
+    loopInputCount?: number;
     onDisconnectReference?: (fromNodeId: string, toNodeId: string) => void;
+    onReorderReference?: (fromNodeId: string, overNodeId: string) => void;
+    reorderableSourceNodeIds?: ReadonlySet<string>;
     onStartReferenceSelection?: (nodeId: string) => void;
     onImageSettingsOpenChange?: (open: boolean) => void;
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], onDisconnectReference, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], loopInputCount = 0, onDisconnectReference, onReorderReference, reorderableSourceNodeIds, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const globalConfig = useEffectiveConfig();
-    const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const isSmartGenerationNode = node.type === CanvasNodeType.Config && node.metadata?.smart === true;
+    const isSmartGenerationNode = node.type === CanvasNodeType.Loop || node.type === CanvasNodeType.Config && node.metadata?.smart === true;
     const mode = modeOverride ?? (isSmartGenerationNode ? node.metadata?.generationMode || "image" : defaultMode(node.type));
     const config = buildNodeConfig(globalConfig, node, mode);
     const hasTextContent = (node.type === CanvasNodeType.Text || (isSmartGenerationNode && mode === "text")) && Boolean(node.metadata?.content?.trim());
-    const hasImageContent = (node.type === CanvasNodeType.Image || (isSmartGenerationNode && mode === "image")) && Boolean(node.metadata?.content);
+    const hasImageContent = mode === "image" && Boolean(canvasNodeImage(node) || (node.type === CanvasNodeType.Loop && node.metadata?.content));
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const { id: projectId = "" } = useParams();
     const field = node.type === CanvasNodeType.Config || isEditingExistingContent ? "composerContent" : "prompt";
@@ -63,10 +63,17 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
         ? node.metadata.images?.find((image) => image.id === node.metadata?.activeImageHistoryId)
         : undefined;
     const historyReferences = activeHistoryImage?.generationSnapshot?.references;
-    // 当前版本已恢复时按该版本的图片数路由工作流，否则按实时连接和 @ 引用计算。
-    const referenceCount = historyReferences !== undefined
-        ? historyReferences.length
-        : connectedNodes.filter((item) => item.type === CanvasNodeType.Image).length + mentionReferences.filter((item) => item.kind === "image").length;
+    const visibleHistoryReferences = loopInputCount > 0 ? undefined : historyReferences;
+    // 已恢复版本使用快照；实时场景与生成器共用输入解析，@ 候选不是已使用参考。
+    const referenceCount = useMemo(() => getNodeImageReferenceCount(
+        node, nodes, connectedNodes, prompt, loopInputCount, visibleHistoryReferences?.length,
+    ), [node, nodes, connectedNodes, prompt, loopInputCount, visibleHistoryReferences]);
+    // 音频场景要按「带了几段参考音频」路由工作流（0 = 纯文本，≥1 = 参考音色克隆），
+    // 与图片引用数是两套计数，不能复用 referenceCount。
+    const audioReferenceCount = new Set([
+        ...connectedNodes.filter((item) => item.type === CanvasNodeType.Audio).map((item) => item.id),
+        ...mentionReferences.filter((item) => item.kind === "audio").map((item) => item.nodeId),
+    ]).size;
     const clearHistoryReferences = () => onConfigChange(node.id, { activeImageHistoryId: null, activeImageHistoryExplicit: false });
 
     const updatePrompt = (value: string) => editorRef.current?.replace(value);
@@ -91,7 +98,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
             onDoubleClick={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
         >
-            <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={historyReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={onStartReferenceSelection} />
+            <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={visibleHistoryReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onReorder={onReorderReference} reorderableSourceNodeIds={reorderableSourceNodeIds} onStartSelection={onStartReferenceSelection} />
             {isSmartGenerationNode ? (
                 <Segmented
                     className="mb-2 w-full"
@@ -124,38 +131,18 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                         <Button type="text" className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0" style={{ color: theme.node.text }} icon={<Maximize2 className="size-3.5" />} onClick={openExpandedEditor} aria-label={t("canvas.promptPanel.expandEditor")} />
                     </Tooltip>
                     <CanvasPromptLibrary onSelect={updatePrompt} />
-                    {mode === "image" ? (
-                        <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasImageSettingsPopover
-                                config={config}
-                                placement="topLeft"
-                                buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3"
-                                onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
-                                onMissingConfig={() => openConfigDialog(true)}
-                                onOpenChange={onImageSettingsOpenChange}
-                                comfyParams={node.metadata?.comfyParams}
-                                onComfyParamsChange={(value) => onConfigChange(node.id, { comfyParams: value })}
-                                onPromptRequiredChange={setImagePromptRequired}
-                                referenceCount={referenceCount}
-                            />
-                        </>
-                    ) : mode === "video" ? (
-                        <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
-                        </>
-                    ) : mode === "audio" ? (
-                        <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="audio" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
-                        </>
-                    ) : (
-                        <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="text" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasTextSettingsPopover config={config} count={node.metadata?.textCount || 1} onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })} onCountChange={(textCount) => onConfigChange(node.id, { textCount })} />
-                        </>
-                    )}
+                    <CanvasGenerationControls
+                        node={node}
+                        mode={mode}
+                        config={config}
+                        onConfigChange={onConfigChange}
+                        referenceCounts={{ image: referenceCount, audio: audioReferenceCount }}
+                        imageReferenceCount={referenceCount}
+                        textCount={node.metadata?.textCount || 1}
+                        onTextCountChange={(next: number) => onConfigChange(node.id, { textCount: next })}
+                        onImageSettingsOpenChange={onImageSettingsOpenChange}
+                        onImagePromptRequiredChange={setImagePromptRequired}
+                    />
                 </div>
                 <Button
                     type="primary"
@@ -180,7 +167,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
             </div>
             <Modal title={t("canvas.promptPanel.editorTitle")} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
-                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={historyReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
+                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={visibleHistoryReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onReorder={onReorderReference} reorderableSourceNodeIds={reorderableSourceNodeIds} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
                     <CanvasCollaborativeText
                         projectId={projectId} target={target} chips dialogue
                         references={mentionReferences}
@@ -218,16 +205,3 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
     };
 }
 
-function videoConfigPatch(key: keyof AiConfig, value: string) {
-    if (key === "videoSeconds") return { seconds: value };
-    if (key === "videoGenerateAudio") return { generateAudio: value };
-    if (key === "videoWatermark") return { watermark: value };
-    return { [key]: value };
-}
-
-function audioConfigPatch(key: CanvasAudioSettingKey, value: string) {
-    if (key === "audioVoice") return { audioVoice: value };
-    if (key === "audioFormat") return { audioFormat: value };
-    if (key === "audioSpeed") return { audioSpeed: value };
-    return { audioInstructions: value };
-}

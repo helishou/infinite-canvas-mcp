@@ -3,7 +3,7 @@ import { create } from "zustand";
 import { nanoid } from "nanoid";
 import { cleanupUnusedImages } from "@/services/image-storage";
 import { cleanupUnusedMedia } from "@/services/file-storage";
-import { deleteBackendAsset, deleteBackendAssetFolder, fetchBackendAssets, upsertBackendAsset, upsertBackendAssetFolder } from "@/services/backend-api";
+import { deleteBackendAsset, deleteBackendAssetFolder, fetchBackendAssets, upsertBackendAsset, upsertBackendAssetFolder, BackendApiError } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
 export type AssetKind = "text" | "image" | "video" | "audio" | "character" | "scene";
@@ -81,6 +81,9 @@ export type AssetFolder = { id: string; name: string; parentId: string | null; c
 
 type AssetStore = {
     hydrated: boolean;
+    /** 已尝试过后台读取且失败的真实原因；非空表示列表为空是"读不到"而不是"确实没有"。
+     *  素材页据此把空状态换成读取失败提示，避免连错后台时给出误导性的"没有找到资产"。 */
+    hydrateError: string;
     assets: Asset[];
     folders: AssetFolder[];
     addAsset: (asset: Omit<Asset, "id" | "createdAt" | "updatedAt"> & { id?: string }) => string;
@@ -269,7 +272,10 @@ function migrateAssetsInPlace(assets: Asset[]): Asset[] {
 }
 
 async function hydrateAssetsFromBackend() {
-    if (!useBackendStore.getState().connected) return false;
+    if (!useBackendStore.getState().connected) {
+        useAssetStore.setState({ hydrateError: "总后台未连接，素材列表读不到" });
+        return false;
+    }
     try {
         const response = await fetchBackendAssets();
         const remoteAssets = Array.isArray(response.assets) ? response.assets as unknown as Asset[] : [];
@@ -278,13 +284,17 @@ async function hydrateAssetsFromBackend() {
         const migrated = migrateAssetsInPlace(remoteAssets);
         knownAssetIds = new Set(migrated.map((asset) => asset.id));
         knownFolderIds = new Set(remoteFolders.map((folder) => folder.id));
-        useAssetStore.setState({ assets: migrated, folders: remoteFolders });
+        useAssetStore.setState({ assets: migrated, folders: remoteFolders, hydrateError: "" });
         // 如果发生了迁移，立即把清洗结果写回后端，避免老数据反复出现
         if (migrated.length !== remoteAssets.length || remoteAssets.some((a) => (a as { kind?: string }).kind === "composite")) {
             void syncAssetsToBackend(migrated, remoteFolders);
         }
         return true;
-    } catch {
+    } catch (error) {
+        // 之前这里静默吞错，把"连错后台/接口 404"伪装成"素材库是空的"。保留真实原因，
+        // 由 BackendBanner 与素材页空状态显示；不写回任何数据，避免用空列表覆盖后台。
+        const reason = error instanceof BackendApiError ? error.message : (error instanceof Error ? error.message : String(error));
+        useAssetStore.setState({ hydrateError: `读取素材失败：${reason}` });
         return false;
     }
 }
@@ -296,6 +306,7 @@ export async function hydrateAssets() {
 
 export const useAssetStore = create<AssetStore>()((set, get) => ({
             hydrated: false,
+            hydrateError: "",
             assets: [],
             folders: [],
             addAsset: (asset) => {

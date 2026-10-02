@@ -13,11 +13,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Configure isolated test directories
+        run: |
+          echo "INFINITE_CANVAS_DATA_DIR=$RUNNER_TEMP/canvas-unit-data" >> "$GITHUB_ENV"
+          echo "INFINITE_CANVAS_MEDIA_DIR=$RUNNER_TEMP/canvas-unit-media" >> "$GITHUB_ENV"
+          echo "INFINITE_CANVAS_AGENT_CONFIG_DIR=$RUNNER_TEMP/canvas-unit-agent" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm ci --prefix plugins/canvas/minimax-h3
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm run build --workspace canvas-agent
-      - run: npm test
+      - run: npm run typecheck --workspace web
+      - run: npm run build --workspace backend
+      - name: Build Web
+        run: bash .github/scripts/check-with-diagnostics.sh npm run build --workspace web
+      - run: npm run typecheck --prefix plugins/canvas/minimax-h3
+      - run: npm test --prefix plugins/canvas/minimax-h3
+      - name: Test Backend
+        run: bash .github/scripts/check-with-diagnostics.sh npm test --workspace backend
+      - name: Test Canvas Agent
+        run: bash .github/scripts/check-with-diagnostics.sh npm test --workspace canvas-agent
+      - name: Test Web
+        run: bash .github/scripts/check-with-diagnostics.sh npm test --workspace web
+      - run: npx --no-install playwright install --with-deps chromium
+      - run: node scripts/run-canvas-browser-tests.mjs collaboration
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-test-evidence
+          path: artifacts/browser-tests

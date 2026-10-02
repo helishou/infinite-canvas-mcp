@@ -4,6 +4,7 @@ import { saveAs } from "file-saver";
 import type { H3Segment } from "../types";
 import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
+import { applyH3GlobalSettings } from "../services/h3-global-settings";
 import { resultUrl } from "../services/h3-data";
 import { H3Icon } from "./H3Icon";
 
@@ -23,7 +24,7 @@ type Props = {
 export function H3WorkbenchToolbar({ ctx, metadata, segments, selected, selectedIndex, outputs, playhead, total, fmt }: Props) {
     const [timelineDownloading, setTimelineDownloading] = useState(false);
     const addSegment = () => {
-        const next = compactSegmentStarts([...segments, { id: `segment-${Date.now()}`, prompt: String(metadata.prompt || defaultPrompt), duration: 5, status: "idle" }]);
+        const next = compactSegmentStarts([...segments, applyH3GlobalSettings({ id: `segment-${Date.now()}`, prompt: String(metadata.prompt || defaultPrompt), duration: 5, status: "idle" }, ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata)]);
         ctx.updateMetadata({ segments: next, selectedSegmentId: next[next.length - 1].id });
     };
     const timelineVideos: Array<{ name: string; url: string; storageKey?: string }> = segments.flatMap((segment, index) => {

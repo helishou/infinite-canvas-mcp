@@ -1,57 +1,127 @@
 import { promptDetails, validateDefinitionCoverage } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
-import type { H3SubjectDefinition } from "../types";
-
-export type StoryboardPromptSubject = {
-    id: string;
-    name: string;
-    englishName?: string;
-    aliases: string[];
-    shotMarkers: string[];
-    profile: string;
-    outfits: string[];
-    pictures: string[];
-    role?: string;
-};
+import type { H3CharacterGroup, H3SubjectDefinition } from "../types";
+import { subjectVisualSourceDetails } from "../../../../../canvas-agent/src/plugins/minimax-h3/subject-definitions";
+import type { StoryboardPromptSubject } from "../../../../../canvas-agent/src/plugins/minimax-h3/subject-definitions";
+export { mergeSubjectDefinitions, toSubjectDefinitions } from "../../../../../canvas-agent/src/plugins/minimax-h3/subject-definitions";
+export type { StoryboardPromptSubject } from "../../../../../canvas-agent/src/plugins/minimax-h3/subject-definitions";
 
 /**
- * 用户自定义的实体定义覆盖规则生成的 subjects。
- * 覆盖存在时它是**权威清单**：未列出的主体即视为已删除，顺序决定 `<Subject N>` 编号。
- * 名称/描述/服装/视觉来源可按实体逐项覆写，未填写的项回落到规则生成值。
+ * 官方 H3 提示词的六段（ref2va）/ 三段（其他模式）固定字段名。
+ * 这些段落可能是上一轮模型的生成产物，也可能由用户修改。
  */
-export function mergeSubjectDefinitions(ruleSubjects: StoryboardPromptSubject[], override?: H3SubjectDefinition[] | null): StoryboardPromptSubject[] {
-    if (!override?.length) return ruleSubjects;
-    const byId = new Map(ruleSubjects.map((subject) => [subject.id, subject]));
-    const merged = override.map((definition): StoryboardPromptSubject => {
-        const base = byId.get(definition.id);
-        return {
-            id: definition.id,
-            name: definition.name?.trim() || base?.name || definition.id,
-            englishName: definition.englishName?.trim() || base?.englishName,
-            aliases: base?.aliases || [],
-            shotMarkers: base?.shotMarkers || [],
-            profile: definition.profile ?? base?.profile ?? "",
-            outfits: definition.outfits?.length ? definition.outfits : base?.outfits || [],
-            pictures: definition.pictures?.length ? definition.pictures : base?.pictures || [],
-            role: definition.role || base?.role,
-        };
-    });
-    // 覆盖清单里出现的 ID 但规则侧没有对应主体（用户手工新增）时，保留其自身描述。
-    return merged.map((subject) => subject.profile || subject.pictures.length
-        ? subject
-        : { ...subject, profile: subject.profile || "visual features follow the linked reference" });
+const GENERATED_PROMPT_SECTIONS = [
+    "subject_definitions",
+    "summary",
+    "retention_analysis",
+    "detailed_description",
+    "overall_soundscape",
+    "non_diegetic_music",
+    "integrated_multimodal_description",
+    "storyboard_timeline",
+] as const;
+
+const GENERATED_SECTION_HEAD = new RegExp(
+    `^[ \\t]*(?:${GENERATED_PROMPT_SECTIONS.join("|")})[ \\t]*:`,
+    "mi",
+);
+
+/**
+ * 从结构化稿前提取自由文本，作为增强时更高优先级的明确意图。
+ * 增强请求仍包含编辑器的完整原文；旧稿中的主体与参考关系要按当前 manifest 核对。
+ */
+export function stripGeneratedPromptSections(prompt: string | null | undefined): string {
+    const text = String(prompt || "");
+    if (!text.trim()) return "";
+    const first = GENERATED_SECTION_HEAD.exec(text);
+    // 第一个生成段落之前的内容就是用户的自由文本。
+    if (!first) return text.trim();
+    return text.slice(0, first.index).replace(/(?:\r?\n)+$/, "").trim();
 }
 
-/** 把规则生成的主体清单转成可编辑的实体定义（分镜编辑表单打开时的默认值）。 */
-export function toSubjectDefinitions(subjects: StoryboardPromptSubject[]): H3SubjectDefinition[] {
-    return subjects.map((subject) => ({
-        id: subject.id,
-        name: subject.name,
-        englishName: subject.englishName,
-        pictures: [...subject.pictures],
-        profile: subject.profile,
-        outfits: [...subject.outfits],
-        role: subject.role,
-    }));
+/** 增强提示词必须收到编辑器中的完整原文；自由文本用于区分用户明确意图与旧生成稿。 */
+export function buildPromptEnhancementInput(input: { currentPrompt: string; globalPrompt?: string; manifest: string; transitionPlan?: string }): string {
+    const original = input.currentPrompt.trim();
+    const userText = stripGeneratedPromptSections(original);
+    return [
+        userText && userText !== original ? `User-authored free text (higher priority than the existing draft):\n${userText}` : "",
+        `Original prompt from the editor (rewrite this complete draft):\n${original}`,
+        input.globalPrompt?.trim() ? `Global project instructions:\n${input.globalPrompt.trim()}` : "",
+        `Reference manifest (fixed numbering; do not reorder):\n${input.manifest}`,
+        input.transitionPlan ? `Transition plan (fixed image order; do not reorder):\n${input.transitionPlan}` : "",
+    ].filter(Boolean).join("\n\n");
+}
+
+/**
+ * 规则实体不仅来自媒体 ref：服装关闭但声线开启的角色组也必须保留人物身份。
+ * 角色组是人物语义权威，媒体槽只是可选的服装/声线投影。
+ */
+export function ensureCharacterGroupSubjects(
+    subjects: StoryboardPromptSubject[],
+    groups: Record<string, H3CharacterGroup> | undefined,
+): StoryboardPromptSubject[] {
+    const next = [...subjects];
+    const byId = new Map(next.map((subject) => [subject.id, subject]));
+    const byAlias = new Map<string, StoryboardPromptSubject>();
+    for (const subject of next) {
+        const aliases = [subject.id, subject.name, subject.englishName || "", ...(Array.isArray(subject.aliases) ? subject.aliases : [])];
+        for (const alias of aliases) {
+            if (typeof alias !== "string") continue;
+            const normalized = alias.trim();
+            if (normalized) byAlias.set(normalized.toLocaleLowerCase(), subject);
+        }
+    }
+    for (const group of Object.values(groups || {})) {
+        const outfitEnabled = group.outfitEnabled ?? group.outfits.some((outfit) => outfit.enabled);
+        if (!group.voiceEnabled && !outfitEnabled) continue;
+        const id = group.subjectId || group.characterNodeId || group.id;
+        if (!id) continue;
+        const existing = byId.get(id) || [group.id, group.characterName].map((alias) => byAlias.get(alias.toLocaleLowerCase())).find(Boolean);
+        if (existing) {
+            if (existing.role !== "storyboard" && existing.role !== "blocking") existing.role ||= "character_identity";
+            continue;
+        }
+        const subject: StoryboardPromptSubject = {
+            id,
+            name: group.characterName || id,
+            aliases: [group.id, group.characterNodeId || ""].filter((alias) => alias && alias !== id),
+            shotMarkers: [],
+            profile: group.voice?.description || "identity and voice follow the linked character definition",
+            outfits: group.outfits.filter((outfit) => outfit.enabled).map((outfit) => outfit.name).filter(Boolean),
+            pictures: [],
+            role: "character_identity",
+        };
+        next.push(subject);
+        byId.set(id, subject);
+        for (const alias of [subject.id, subject.name, ...subject.aliases]) byAlias.set(alias.toLocaleLowerCase(), subject);
+    }
+    return next;
+}
+
+/** 已保存的实体清单是用户删除语义的权威，但启用中的纯声线角色不能因旧清单未记录而消失。 */
+export function ensureCharacterGroupSubjectDefinitions(
+    definitions: H3SubjectDefinition[],
+    groups: Record<string, H3CharacterGroup> | undefined,
+): H3SubjectDefinition[] {
+    const next = [...definitions];
+    const byId = new Set(next.map((definition) => definition.id));
+    const byName = new Set(next.map((definition) => String(definition.name || "").trim().toLocaleLowerCase()).filter(Boolean));
+    for (const group of Object.values(groups || {})) {
+        const outfitEnabled = group.outfitEnabled ?? group.outfits.some((outfit) => outfit.enabled);
+        if (!group.voiceEnabled && !outfitEnabled) continue;
+        const id = group.subjectId || group.characterNodeId || group.id;
+        if (!id || byId.has(id) || byName.has(String(group.characterName || "").trim().toLocaleLowerCase())) continue;
+        next.push({
+            id,
+            name: group.characterName,
+            pictures: [],
+            profile: group.voice?.description || "identity and voice follow the linked character definition",
+            outfits: group.outfits.filter((outfit) => outfit.enabled).map((outfit) => outfit.name).filter(Boolean),
+            role: "character_identity",
+        });
+        byId.add(id);
+        byName.add(String(group.characterName || "").trim().toLocaleLowerCase());
+    }
+    return next;
 }
 
 export type StoryboardPromptReference = {
@@ -110,31 +180,44 @@ function shotText(reference: StoryboardPromptReference, shots: StoryboardPromptS
 function pictureFrameScope(reference: StoryboardPromptReference, shotsForReference: string[], shotCount: number) {
     if (reference.usage === "first_frame") return `${shotsForReference[0] || "[Shot 1]"} first frame`;
     if (reference.usage === "last_frame") return `${shotsForReference[shotsForReference.length - 1] || `[Shot ${Math.max(1, shotCount)}]`} last frame`;
-    return shotsForReference.join(", ") || (reference.role === "storyboard" ? "target shot sequence" : "");
+    return shotsForReference.join(", ") || (["storyboard", "blocking"].includes(reference.role) ? "target shot sequence" : "");
 }
 
 function isPictureAnchor(reference: StoryboardPromptReference) {
     if (reference.type !== "image") return false;
     return reference.usage === "first_frame" || reference.usage === "last_frame" ||
-        reference.role === "storyboard" || (reference.role === "keyframe" && reference.shotNumbers.length > 0);
+        reference.role === "storyboard" || reference.role === "blocking" || (reference.role === "keyframe" && reference.shotNumbers.length > 0);
 }
 
-function trackedReferences(references: StoryboardPromptReference[]) {
-    return references.filter((reference) => reference.type !== "image" || isPictureAnchor(reference));
+function trackedReferences(references: StoryboardPromptReference[], subjects: StoryboardPromptSubject[]) {
+    const subjectSources = new Set(subjects.flatMap((subject) => subject.pictures));
+    return references.filter((reference) => reference.type !== "image" || isPictureAnchor(reference) || !subjectSources.has(reference.tag));
 }
 
 export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[], references: StoryboardPromptReference[], shots: StoryboardPromptShot[]) {
+    const blockingTags = new Set(references.filter((reference) => reference.type === "image" && reference.role === "blocking").map((reference) => reference.tag));
+    // 实体清单里保存的「视觉来源」可能已经失效：关掉角色服装后，之前记下的 <Picture N>
+    // 不再是本 Clip 的参考素材。写进提示词前必须按当前 references 过滤，否则
+    // validateDefinitionCoverage 会判定「参考素材与主体来源不一致」让分镜编辑点完成失败。
+    const liveTags = new Set(references.map((reference) => reference.tag));
+    const subjectPictures = (subject: StoryboardPromptSubject) => subject.pictures.filter((tag) => liveTags.has(tag));
+    const currentSubjects = subjects.map((subject) => ({ ...subject, pictures: subjectPictures(subject) }));
+    const standaloneReferences = trackedReferences(references, currentSubjects);
     const subjectOrdinalById = new Map(subjects.map((subject, index) => [subject.id, index + 1]));
     const subjectMarker = (subject: StoryboardPromptSubject) => `<Subject ${subjectOrdinalById.get(subject.id) || 1}>`;
     const subjectDefinitions = subjects.map((subject) => {
         const identity = [subject.name, subject.englishName && subject.englishName !== subject.name ? subject.englishName : ""].filter(Boolean).join(" / ");
-        const details = promptDetails([subject.profile, ...subject.outfits]);
-        if (subject.pictures.length) details.unshift(`visual identity defined by reference(s) ${subject.pictures.join(", ")}`);
+        const details = [...promptDetails([subject.profile, ...subject.outfits]), ...subjectVisualSourceDetails(subject, references)];
+        const livePictures = subjectPictures(subject);
+        const identityPictures = livePictures.filter((tag) => !blockingTags.has(tag));
+        const blockingPictures = livePictures.filter((tag) => blockingTags.has(tag));
+        if (identityPictures.length) details.unshift(`visual identity defined by reference(s) ${identityPictures.join(", ")}`);
+        if (blockingPictures.length) details.push(`spatial blocking guided by ${blockingPictures.join(", ")}`);
         if (!details.length) details.push("visual features follow the linked reference");
         return `${subjectMarker(subject)} is ${identity || subject.id}. ${details.join("; ")}.`;
     }).join("\n");
 
-    const referenceDefinitions = trackedReferences(references).map((reference) => {
+    const referenceDefinitions = standaloneReferences.map((reference) => {
         const referenceMarker = reference.tag;
         const mappedSubjects = ((reference.subjectIds?.length ? reference.subjectIds : reference.subjectId ? [reference.subjectId] : []))
             .flatMap((id) => subjects.filter((subject) => subject.id === id));
@@ -142,6 +225,14 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
         const subjectToken = subjectTokens.join(", ");
         const shotsForReference = shotText(reference, shots);
         if (reference.type === "image") {
+            if (!isPictureAnchor(reference)) {
+                const detail = reference.description ? `: ${reference.description}` : "";
+                return `${referenceMarker} is a ${reference.role} visual reference${detail}. It supplies appearance only, not the target frame or camera composition.`;
+            }
+            if (reference.role === "blocking") {
+                const scope = shotsForReference.join(", ") || "the target shot sequence";
+                return `${referenceMarker} is the blocking and 180-degree action-axis map for ${scope}, defining relative subject positions, orientation, sightlines, entrances, and movement paths${reference.description ? `: ${reference.description}` : ""}. It is a spatial plan, not a rendered frame or character identity source.`;
+            }
             if (reference.role === "storyboard" && reference.compositePanels?.length) {
                 const panelMap = reference.compositePanels.map((panel) => `Panel ${panel.index} (row ${panel.row}, column ${panel.column}) corresponds to ${panel.shotNumbers.map((number) => `[Shot ${number}]`).join(", ") || "no assigned shot"}`).join("; ");
                 return `${referenceMarker} is one composite storyboard image arranged as a grid, not a single storyboard frame. Read each panel independently: ${panelMap}. The sheet defines viewpoint, subject placement, and shot order${reference.description ? `: ${reference.description}` : ""}.`;
@@ -175,7 +266,8 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
     }).join("\n");
 
     const retentionAnalysis = subjects.map((subject, subjectIndex) => {
-        const appearances = shots.flatMap((shot, index) => subjectAppearsInShot(subject, shot, subjectIndex + 1) ? [`[Shot ${index + 1}]`] : []);
+        const appearanceSubject = { ...subject, pictures: subjectPictures(subject).filter((tag) => !blockingTags.has(tag)) };
+        const appearances = shots.flatMap((shot, index) => subjectAppearsInShot(appearanceSubject, shot, subjectIndex + 1) ? [`[Shot ${index + 1}]`] : []);
         const scope = appearances.length ? `appears in ${appearances.join(", ")}` : "no shot appearance is explicitly assigned";
         const relationship = appearances.length ? "fully_preserved" : "weak_reference";
         const details = appearances.length
@@ -184,7 +276,7 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
         return `${subjectMarker(subject)} (${scope}): ${relationship} - ${details}.`;
     }).join("\n");
 
-    const referenceRetention = trackedReferences(references).map((reference) => {
+    const referenceRetention = standaloneReferences.map((reference) => {
         const referenceMarker = reference.tag;
         const shotsForReference = shotText(reference, shots);
         if (reference.type === "audio") {
@@ -194,6 +286,20 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
             const scope = reference.role === "motion_reference" ? "camera movement and motion pacing" : "scene structure and pacing";
             const use = reference.role === "motion_reference" ? "use its motion characteristics as guidance" : "use its visual structure as guidance";
             return `${reference.tag} (${scope}): weak_reference - ${use} without reproducing the source video frame by frame.`;
+        }
+        if (reference.type === "image" && !isPictureAnchor(reference)) {
+            return `${reference.tag}: ${reference.retentionLevel || "attribute_transfer"} - use its visual attributes without reproducing the source image's layout.`;
+        }
+        if (reference.role === "blocking") {
+            const scope = pictureFrameScope(reference, shotsForReference, shots.length);
+            const level = reference.retentionLevel || "fully_preserved";
+            const details: Record<NonNullable<StoryboardPromptReference["retentionLevel"]>, string> = {
+                fully_preserved: "preserve the defined relative positions, movement paths, screen direction, and 180-degree action axis across shots without copying the overhead diagram into a rendered frame",
+                partially_preserved: "retain the selected spatial relationships and action axis while following shot-specific blocking changes",
+                attribute_transfer: "transfer the defined spatial relationships and action axis into the target shots without reproducing the diagram",
+                weak_reference: "use the spatial arrangement and action axis only as broad guidance",
+            };
+            return `${referenceMarker} (${scope}): ${level} - ${details[level]}.`;
         }
         const frame = reference.usage === "first_frame" ? "first-frame" : reference.usage === "last_frame" ? "last-frame" : reference.role === "storyboard" ? "storyboard composition" : "keyframe composition";
         const frameScope = pictureFrameScope(reference, shotsForReference, shots.length);
@@ -214,6 +320,9 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
     }).join("\n");
 
     const result = { subjectDefinitions: [subjectDefinitions, referenceDefinitions].filter(Boolean).join("\n"), retentionAnalysis: [retentionAnalysis, referenceRetention].filter(Boolean).join("\n") };
-    validateDefinitionCoverage(subjects, references, result.subjectDefinitions, result.retentionAnalysis);
+    // 校验也必须用过滤后的来源：失效的 <Picture N> 早已不在 references 里，
+    // 拿未过滤的清单去比对必然报「参考素材与主体来源不一致」。
+    const liveSubjects = currentSubjects.map((subject) => ({ pictures: subject.pictures }));
+    validateDefinitionCoverage(liveSubjects, references, result.subjectDefinitions, result.retentionAnalysis);
     return result;
 }

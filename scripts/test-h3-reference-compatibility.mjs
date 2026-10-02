@@ -1,0 +1,36 @@
+import assert from 'node:assert/strict';
+import { chromium } from 'playwright';
+const browser = await chromium.launch({ headless: true });
+try {
+  const page = await browser.newPage();
+  const errors = [];
+  page.on('pageerror', error => { errors.push(error.message); console.error(error.stack); });
+  const web = process.env.CANVAS_TEST_WEB || 'http://127.0.0.1:3001';
+  await page.goto(`${web.replace(/\/$/, '')}/tests/h3-reference-compatibility.html`);
+  const evidence = page.getByLabel('验证结果');
+  await evidence.waitFor();
+  const read = async () => JSON.parse(await evidence.textContent());
+  const initial = await read();
+  assert.deepEqual(initial.cards, ['image:hero', 'audio:voice', 'image:scene']);
+  assert.deepEqual(initial.submitted, initial.cards);
+  assert.equal(initial.compiledPrompt, initial.prompt);
+  await page.getByRole('button', { name: '编辑角色参考', exact: true }).click();
+  await page.getByRole('switch').first().click();
+  await page.getByRole('button', { name: '应用到当前 Clip', exact: true }).click();
+  await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  const off = await read();
+  assert.deepEqual(off.cards, ['audio:voice', 'image:scene']);
+  assert.deepEqual(off.submitted, off.cards);
+  assert.deepEqual(off.selected, [true]);
+  await page.getByRole('button', { name: '编辑角色参考', exact: true }).click();
+  await page.getByRole('switch').first().click();
+  await page.getByRole('button', { name: '应用到当前 Clip', exact: true }).click();
+  await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  const restored = await read();
+  assert.deepEqual(restored.cards, initial.cards);
+  assert.deepEqual(restored.submitted, initial.submitted);
+  assert.equal(restored.prompt, initial.prompt);
+  assert.equal(restored.compiledPrompt, initial.compiledPrompt);
+  assert.deepEqual(errors, []);
+  console.log(JSON.stringify({ passed: true, initial, off, restored }, null, 2));
+} finally { await browser.close(); }

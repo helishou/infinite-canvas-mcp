@@ -1,17 +1,21 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
+import { applyH3StyleTemplate, isH3StyleTemplateId, styleTemplateFromPrompt } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 
-import type { RuntimeTask } from "../db.js";
+import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { RunningHubBackend } from "../runtime/runninghub.js";
 import type { Stores } from "../stores/types.js";
 import { writeBackH3Task } from "./h3-task-writeback.js";
-import { h3ClipCacheFingerprint, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, stableH3Fingerprint } from "./h3-cache.js";
+import { createLogger } from "../logger.js";
+import { h3ClipCacheFingerprint, h3ClipCacheFingerprintV1, h3ConfirmationKind, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, pickH3PostpassParams, stableH3Fingerprint } from "./h3-cache.js";
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCompositePrompt, storyboardCompositeDirective, storyboardCompositePlan } from "./storyboard-composite.js";
-import { normalizeH3Params } from "./h3-params.js";
+import { normalizeH3Params, randomH3Seed } from "./h3-params.js";
+import type { CanvasOperation } from "./project-ops.js";
 
 type H3RunInput = {
     projectId: string;
@@ -21,17 +25,44 @@ type H3RunInput = {
     segmentIndex?: number;
     runFromCurrent?: boolean;
     skipCompleted?: boolean;
+    forceRegenerate?: boolean;
     params?: Record<string, unknown>;
+    runPlan?: H3RunPlan;
 };
 
 type H3Ref = Record<string, unknown> & { url?: string; storageKey?: string; name?: string; label?: string; type?: string; mediaType?: string; role?: string; order?: number };
 type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; referenceBindings?: Record<string, unknown>[]; continuationGroupId?: string; motionContextEnabled?: boolean; storyboardCompositeEnabled?: boolean };
 type H3Plan = { nodeId: string; segmentId: string; segmentIndex: number; continuation?: { group: string; index: number } };
+type H3ResumeSeed = { nodeId: string; sourceNodeId: string; group: string; previousIndex: number; sourceParentTaskId: string; sourceChildTaskId: string; sourceSegmentId: string; sourceStorageKey: string; contextParams: Record<string, unknown> };
+type H3RunPlan = { version: 1; plans: H3Plan[]; project: { nodes: Array<Record<string, unknown>>; referenceCatalog: Array<Record<string, unknown>> }; defaults: Record<string, unknown>; resumeSeed?: H3ResumeSeed };
 type PendingH3 = { nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string; firstPassStorageKey?: string; firstPassChildTaskId: string; previousOutput: { result?: string; resultStorageKey?: string; cacheFingerprint?: string } };
 type H3Confirmation = { cursor: number; pending: PendingH3[]; inFlight?: { nodeId: string; segmentId: string; action: "confirm"; attempt: number; childTaskId: string; postpassParams: Record<string, unknown> }; revision: number; prepared?: PendingH3["previousOutput"] };
-export type H3ConfirmationAction = { action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean };
+export type H3ConfirmationAction = { action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> };
 
 const H3_DEFAULTS_KEY = "plugin:minimax-h3:defaults:v1";
+const logger = createLogger("h3-runner");
+
+/** 只重放仍被画布节点或 Clip 绑定的父任务；已收口的历史任务不会再改变画布。 */
+export function boundH3ParentTaskIds(projects: CanvasProject[]): Set<string> {
+    const ids = new Set<string>();
+    for (const project of projects) {
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+        for (const node of nodes) {
+            const metadata = recordOf(node.metadata);
+            const nodeTaskId = String(metadata.runtimeTaskId || "");
+            if (nodeTaskId) ids.add(nodeTaskId);
+            const segments = Array.isArray(metadata.segments) ? metadata.segments : [];
+            for (const segment of segments) {
+                const clip = recordOf(segment);
+                const parentTaskId = String(clip.parentTaskId || "");
+                const status = String(clip.status || "");
+                if (parentTaskId && (clip.runtimeTaskId || ["queued", "loading", "awaiting_confirmation"].includes(status))) ids.add(parentTaskId);
+            }
+        }
+    }
+    return ids;
+}
+
 const H3_PARAM_KEYS = [
     "mode", "taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "steps", "denoise", "noiseSeedMode", "noiseSeed", "seed",
     "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sizeMultiple", "sampler", "scheduler",
@@ -40,27 +71,37 @@ const H3_PARAM_KEYS = [
     "t8Enabled", "t8ResidualThreshold", "t8StartPercent", "t8EndPercent", "t8MaxConsecutiveHits", "t8CacheDevice", "t8MetricStride", "t8Verbose",
     "sigmaEnabled", "videoSigmaShift", "audioSigmaShift", "sigmaMode", "lowSigmaStart", "lowSigmaEnd", "sigmaRefineSteps", "sigmaCurve", "manualSigma", "dualSampling", "dualSamplingRatio", "dualSampler",
     "secondPassEnabled", "firstPassSteps", "secondPassSteps", "secondPassMegapixels", "secondPassUpscaleMethod", "secondPassDenoise", "secondPassSampler", "secondPassScheduler", "secondPassModel", "secondPassSigma",
-    "dedicatedAttention", "startupMode", "faceRepairSingle", "faceRepairMulti", "globalRepair", "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "confirmationMode", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs", "lowMemoryAttentionHeads", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "keepModelCache",
-    "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
+    "dedicatedAttention", "startupMode", "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "confirmationMode", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs", "lowMemoryAttentionHeads", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "keepModelCache",
+    "latentUpscaleEnabled", "latentUpscaleConfirmationMode", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
     "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality",
     "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
     "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion",
-    "emptyFiveMinuteTimeline", "taeh3Enabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise",
+    "emptyFiveMinuteTimeline", "taeh3Enabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationSeamNoiseEnabled", "continuationSeamNoiseMode", "continuationSeamNoise", "continuationSeamNoiseSeed", "continuationSeamNoiseRamp", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise",
     "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "teAccel", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
     "referenceVideoPolicy", "trimIn", "trimOut", "motionContextEnabled", "tailFrameContinuation", "previousVideoAsReference", "motionContextNoiseEnabled", "motionContextNoiseAlpha", "motionContextNoiseAlphaEnd", "motionContextNoiseRampFrames", "combatLoraWeight", "cinematicLoraWeight",
 ] as const;
+const H3_OUTGOING_CONTEXT_KEYS = ["contextLength", "audioContextLength", "continuationSeamNoiseEnabled", "continuationSeamNoiseMode", "continuationSeamNoise", "continuationSeamNoiseSeed", "continuationSeamNoiseRamp", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler"] as const;
 
 function compileH3Submission(project: Record<string, unknown>, segment: H3Segment, taskMode: string) {
     const original = compileReferenceSubmission(project, { ...segment, taskMode });
     const composite = storyboardCompositePlan({ ...segment, taskMode });
-    if (!composite) return { compilation: original, composite: null };
+    if (!composite) return { compilation: original, composite: null, editableReferences: original.references };
     const effectiveSegment = { ...segment, taskMode, referenceBindings: composite.bindings };
     const collapsed = compileReferenceSubmission(project, effectiveSegment);
     const mappedPrompt = remapCompositePrompt(String(segment.prompt || ""), composite, original.references, collapsed.references);
     const prompt = mappedPrompt.includes("A single submitted image is a composite storyboard sheet")
         ? mappedPrompt
         : appendToSection(mappedPrompt, "detailed_description", storyboardCompositeDirective(composite));
-    return { compilation: compileReferenceSubmission(project, { ...effectiveSegment, prompt }), composite };
+    return { compilation: compileReferenceSubmission(project, { ...effectiveSegment, prompt }), composite, editableReferences: original.references };
+}
+
+export class H3IdempotencyConflictError extends Error {
+    readonly code = "IDEMPOTENCY_CONFLICT";
+
+    constructor(readonly taskId: string) {
+        super(`H3 幂等键 ${taskId} 已用于其他任务或不同运行请求`);
+        this.name = "H3IdempotencyConflictError";
+    }
 }
 
 export class CanvasH3Runner {
@@ -77,27 +118,40 @@ export class CanvasH3Runner {
 
     start(input: H3RunInput, clientTaskId?: string) {
         const normalized = normalizeInput(input);
+        // Replay immutable caller intent before consulting today's draft/defaults.
+        // The persisted runPlan is execution history, not part of that intent.
+        const existing = clientTaskId ? this.stores.tasks.get(clientTaskId) : null;
+        if (existing) {
+            if (existing.kind !== "canvas-h3-run" || h3RunIntentFingerprint(normalized) !== h3RunIntentFingerprint(existing.input as H3RunInput)) {
+                throw new H3IdempotencyConflictError(existing.id);
+            }
+            return existing;
+        }
         if (normalized.params?.confirmSecondPass === true) throw new Error("请通过 H3 确认接口继续原任务，不能另建二采任务");
         const project = this.stores.projects.get(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
-        this.validatePlannedReferences(project, normalized);
-        const existing = clientTaskId ? this.stores.tasks.get(clientTaskId) : null;
-        if (existing) return existing;
+        // 单个 Clip 的参考素材不完整只跳过它自己；其余 Clip 必须照常入队，不能整批卡死。
+        const blockedPlans = this.validatePlannedReferences(project, normalized);
         const duplicate = this.findActiveDuplicate(normalized);
         if (duplicate) {
+            // 旧投影可能因同节点另一 Clip 占据顶层 taskId 而丢失；即使拒绝新提交，
+            // 也恢复原任务的确认入口，不能让用户只看见重新生成按钮。
+            if (duplicate.status === "awaiting_confirmation") this.projectAwaiting(duplicate);
             const pending = confirmationOf(duplicate).pending[0];
-            const sameInput = stableH3Fingerprint(normalized) === stableH3Fingerprint(duplicate.input);
+            const { runPlan: _frozen, ...originalInput } = duplicate.input as H3RunInput;
+            const sameInput = stableH3Fingerprint(normalized) === stableH3Fingerprint(originalInput);
             const plan = pending && this.plansForTask(duplicate).find((item) => item.nodeId === pending.nodeId && item.segmentId === pending.segmentId);
-            const sameClip = plan && this.clipCacheState(normalized.projectId, plan, normalized.params || {}, new Map()).fingerprint === pending.firstPassFingerprint;
-            if (duplicate.status !== "awaiting_confirmation" || !sameInput || !sameClip) throw new Error(`H3 Clip 正被任务 ${duplicate.id} 占用；请先完成或放弃该任务`);
+            const sameClip = plan && this.clipCacheState(normalized, plan, normalized.params || {}, new Map()).fingerprint === pending.firstPassFingerprint;
+            if (!sameInput || (duplicate.status === "awaiting_confirmation" && !sameClip)) throw new Error(`H3 Clip 正被任务 ${duplicate.id} 占用；请先完成或放弃该任务`);
             return duplicate;
         }
+        const runPlan = this.buildRunPlan(normalized, blockedPlans);
+        if (blockedPlans.length) logger.warn("H3 批量运行跳过参考素材不完整的 Clip", { projectId: normalized.projectId, blocked: blockedPlans.map((item) => `${item.segmentId}: ${item.reason}`) });
+        const frozenInput = { ...normalized, runPlan };
         const created = clientTaskId
-            ? this.stores.tasks.create(clientTaskId, "canvas-h3-run", normalized, {})
-            : this.stores.tasks.create("canvas-h3-run", normalized, {});
-        // Freeze the original targets: skipCompleted cannot re-evaluate after
-        // first-pass writeback makes a still-pending Clip look completed.
-        const task = this.stores.tasks.update(created.id, { result: { plans: this.plansFor(normalized) } });
+            ? this.stores.tasks.create(clientTaskId, "canvas-h3-run", frozenInput, {})
+            : this.stores.tasks.create("canvas-h3-run", frozenInput, {});
+        const task = this.stores.tasks.update(created.id, { result: { plans: runPlan.plans } });
         this.publish(task, "task.created");
         this.bindParent(task);
         void this.execute(task).catch((error) => this.fail(task.id, error));
@@ -107,16 +161,22 @@ export class CanvasH3Runner {
     private validatePlannedReferences(project: Record<string, unknown>, input: H3RunInput) {
         const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
         const wanted = input.nodeIds?.length ? new Set(input.nodeIds) : input.nodeId ? new Set([input.nodeId]) : null;
+        // 逐 Clip 收集：坏 Clip 只影响自己，不能因为一个 Clip 而否掉整批计划。
+        const blocked: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }> = [];
         for (const node of nodes.filter((item) => String(item.type || "").includes("minimax") && (!wanted || wanted.has(String(item.id || ""))))) {
             const segments = Array.isArray(recordOf(node.metadata).segments) ? recordOf(node.metadata).segments as H3Segment[] : [];
             for (const plan of this.planNode(node, input)) {
                 const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
-                if (segment) {
-                    const taskMode = normalizeTaskMode(input.params?.mode || input.params?.taskMode || segment.mode || segment.taskMode);
+                if (!segment) continue;
+                const taskMode = normalizeTaskMode(input.params?.mode || input.params?.taskMode || segment.mode || segment.taskMode);
+                try {
                     assertReferenceCompilation(compileH3Submission(project, segment, taskMode).compilation);
+                } catch (error) {
+                    blocked.push({ nodeId: String(node.id || ""), segmentId: String(plan.segmentId || ""), clipNumber: plan.segmentIndex + 1, reason: (error as Error).message });
                 }
             }
         }
+        return blocked;
     }
 
     /**
@@ -130,9 +190,15 @@ export class CanvasH3Runner {
         const requested = new Set(this.targetKeys(project, input));
         if (!requested.size) for (const key of this.targetKeys(project, { ...input, skipCompleted: false })) requested.add(key);
         if (!requested.size) return null;
-        return this.stores.tasks.list({ kind: "canvas-h3-run", projectId: input.projectId, limit: 500 })
-            .filter((task) => ["queued", "running", "awaiting_confirmation"].includes(task.status))
-            .find((task) => {
+        const active: RuntimeTask[] = [];
+        for (const status of ["queued", "running", "awaiting_confirmation"] as const) {
+            for (let offset = 0; ; offset += 500) {
+                const page = this.stores.tasks.list({ kind: "canvas-h3-run", projectId: input.projectId, status, limit: 500, offset });
+                active.push(...page);
+                if (page.length < 500) break;
+            }
+        }
+        return active.find((task) => {
                 const targets = task.result?.plans;
                 const original = normalizeInput(task.input as H3RunInput);
                 const keys = Array.isArray(targets) ? targets.map((plan) => `${String(recordOf(plan).nodeId || "")}:${String(recordOf(plan).segmentId || "")}`) : this.targetKeys(project, { ...original, skipCompleted: false });
@@ -149,6 +215,10 @@ export class CanvasH3Runner {
     }
 
     resume(task: RuntimeTask) {
+        if (task.kind === "canvas-h3-run" && task.status === "awaiting_confirmation") {
+            this.projectAwaiting(task);
+            return task;
+        }
         if (task.kind !== "canvas-h3-run" || !["queued", "running"].includes(task.status)) return task;
         void this.execute(task).catch((error) => this.fail(task.id, error));
         return task;
@@ -160,38 +230,50 @@ export class CanvasH3Runner {
         if (!current || current.kind !== "canvas-h3-run") throw new Error("找不到 H3 父任务");
         const confirmation = confirmationOf(current);
         const pending = confirmation.pending[0];
-        const previousDecision = [...this.stores.tasks.events(id)].reverse().find((item) => item.type === "h3_decision" && String(item.payload.segmentId) === request.segmentIds?.[0] && item.payload.firstPassFingerprint === request.firstPassFingerprint);
+        const previousDecision = [...this.stores.tasks.events(id)].reverse().find((item) => item.type === "h3_decision" && String(item.payload.segmentId) === request.segmentId && Number(item.payload.expectedRevision) === request.expectedRevision);
         if (previousDecision) {
-            if (request.retry === true && request.action === "confirm" && current.status === "awaiting_confirmation" && current.error && pending?.segmentId === request.segmentIds?.[0]) {
-                // 明确重试二采才允许新 attempt；普通重复请求仍返回原决议。
-            } else if (previousDecision.payload.action === request.action) return current;
-            else if (!(previousDecision.payload.action === "confirm" && current.status === "awaiting_confirmation" && current.error && ["keep_first_pass", "discard"].includes(request.action))) throw new Error("H3 决议冲突，请刷新任务");
+            if (previousDecision.payload.action === request.action) return current;
+            throw new Error("H3 决议冲突，请刷新任务");
         }
         if (current.status !== "awaiting_confirmation" || !pending) {
             throw new Error("H3 任务不是待确认状态或决议冲突");
         }
-        if (request.segmentIds?.length !== 1 || request.segmentIds[0] !== pending.segmentId || request.firstPassFingerprint !== pending.firstPassFingerprint) throw new Error("H3 确认快照已变化，请刷新后重试");
+        if (request.segmentId !== pending.segmentId || request.expectedRevision !== confirmation.revision) throw new Error("H3 确认快照已变化，请刷新后重试");
         const input = normalizeInput(current.input as H3RunInput);
         const project = this.stores.projects.get(input.projectId);
         const node = project && (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === pending.nodeId);
         const segment = Array.isArray(recordOf(node?.metadata).segments) ? (recordOf(node?.metadata).segments as H3Segment[]).find((item) => item.id === pending.segmentId) : undefined;
-        if (!segment || segment.firstPassReady !== true || String(segment.firstPassFingerprint || "") !== pending.firstPassFingerprint || String(segment.firstPassResult || "") !== pending.firstPassResult || String(recordOf(node?.metadata).runtimeTaskId || "") !== id) throw new Error("H3 一采或节点绑定已变化，请刷新后重试");
+        if (!segment || segment.firstPassReady !== true || String(segment.firstPassFingerprint || "") !== pending.firstPassFingerprint || String(segment.firstPassResult || "") !== pending.firstPassResult || String(segment.runtimeTaskId || "") !== id || (segment.parentTaskId && segment.parentTaskId !== id)) throw new Error("H3 一采或节点绑定已变化，请刷新后重试");
         const plans = this.plansForTask(current);
         const plan = plans.find((item) => item.nodeId === pending.nodeId && item.segmentId === pending.segmentId);
         if (!plan) throw new Error("H3 目标 Clip 已从执行计划中移除");
+        const frozenProject = this.projectFor(input);
+        const frozenNodes = Array.isArray(frozenProject.nodes) ? frozenProject.nodes as Array<Record<string, unknown>> : [];
+        const frozenNode = frozenNodes.find((item) => String(item.id) === pending.nodeId);
+        const frozenMetadata = recordOf(frozenNode?.metadata);
+        const frozenSegment = (Array.isArray(frozenMetadata.segments) ? frozenMetadata.segments as H3Segment[] : []).find((item) => item.id === pending.segmentId);
+        if (!frozenSegment) throw new Error("H3 运行快照缺少目标 Clip");
         let inFlight: H3Confirmation["inFlight"];
         if (request.action === "confirm") {
-            const cache = this.clipCacheState(input.projectId, plan, { ...input.params, confirmSecondPass: true }, new Map());
+            const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+            const frozenOverride = this.withPlannedSeed(input, plan, input.params || {});
+            const frozenParams = extractParams(frozenSegment, frozenOverride, frozenMetadata, defaults);
+            const kind = h3ConfirmationKind(frozenSegment, frozenParams);
+            const firstChild = this.stores.tasks.get(pending.firstPassChildTaskId);
+            if (!kind || (kind === "latent") !== (firstChild?.params.latentConfirmationPhase === "first")) throw new Error("待确认一采与生成模式不匹配，不能转为另一种二采；请保留一采或放弃后重新生成");
+            const completedFingerprints = new Map(this.stores.tasks.events(id)
+                .filter((event) => (event.type === "clip_completed" || event.type === "clip_reused") && event.payload.fingerprint)
+                .map((event) => [`${event.payload.nodeId}:${event.payload.segmentId}`, String(event.payload.fingerprint)]));
+            const cache = this.clipCacheState(input, plan, { ...input.params, confirmSecondPass: true }, completedFingerprints);
             if (![cache.fingerprint, cache.legacyFingerprint, cache.loggedLegacyFingerprint].includes(pending.firstPassFingerprint)) throw new Error("H3 参数或上游已变化，请重新生成一采");
             const attempt = this.stores.tasks.events(id).filter((item) => item.type === "h3_decision" && item.payload.action === "confirm" && item.payload.segmentId === pending.segmentId).length + 1;
-            const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
-            inFlight = { nodeId: pending.nodeId, segmentId: pending.segmentId, action: "confirm", attempt, childTaskId: h3ChildId(id, pending.nodeId, pending.segmentId, "second_pass", attempt), postpassParams: extractParams(segment, { ...input.params, confirmSecondPass: true }, recordOf(node?.metadata), defaults) };
+            inFlight = { nodeId: pending.nodeId, segmentId: pending.segmentId, action: "confirm", attempt, childTaskId: h3ChildId(id, pending.nodeId, pending.segmentId, "second_pass", attempt), postpassParams: extractParams(frozenSegment, { ...frozenOverride, ...pickH3PostpassParams(recordOf(request.postpassParams), frozenParams.latentUpscaleEnabled === true), confirmSecondPass: true }, frozenMetadata, defaults) };
         }
         const nextConfirmation: H3Confirmation = { ...confirmation, revision: confirmation.revision + 1, ...(inFlight ? { inFlight } : {}) };
         if (!inFlight) delete nextConfirmation.inFlight;
         const status = request.action === "discard" ? "cancelled" : "running";
         const result = { ...recordOf(current.result), phase: request.action === "discard" ? "complete" : inFlight ? "second_pass" : "remaining", confirmation: nextConfirmation };
-        const updated = this.stores.tasks.transitionH3(id, "awaiting_confirmation", confirmation.revision, { status, result, error: null }, { type: "h3_decision", payload: { action: request.action, nodeId: pending.nodeId, segmentId: pending.segmentId, firstPassFingerprint: pending.firstPassFingerprint, ...(inFlight ? { childTaskId: inFlight.childTaskId } : {}) } });
+        const updated = this.stores.tasks.transitionH3(id, "awaiting_confirmation", confirmation.revision, { status, result, error: null }, { type: "h3_decision", payload: { action: request.action, nodeId: pending.nodeId, segmentId: pending.segmentId, firstPassFingerprint: pending.firstPassFingerprint, expectedRevision: request.expectedRevision, ...(inFlight ? { childTaskId: inFlight.childTaskId } : {}) } });
         if (!updated) throw new Error("H3 决议已被其他请求处理，请刷新任务");
         this.publish(updated, "task.updated");
         if (request.action === "discard") {
@@ -202,6 +284,8 @@ export class CanvasH3Runner {
     }
 
     private plansForTask(task: RuntimeTask): H3Plan[] {
+        const frozen = (task.input as H3RunInput).runPlan;
+        if (frozen?.version === 1) return frozen.plans;
         const plans = task.result?.plans;
         if (Array.isArray(plans)) return plans as H3Plan[];
         return this.plansFor(normalizeInput(task.input as H3RunInput));
@@ -215,11 +299,156 @@ export class CanvasH3Runner {
         return nodes.filter((node) => String(node.type || "").includes("minimax") && (!wanted || wanted.has(String(node.id || "")))).flatMap((node) => this.planNode(node, input));
     }
 
+    /** Resolve only the task that produced the predecessor currently bound to this canvas Clip. */
+    private resolveResumeSeed(input: H3RunInput, plan: H3Plan, project: Record<string, unknown>, defaults: Record<string, unknown>): H3ResumeSeed {
+        const continuation = plan.continuation;
+        if (!continuation || continuation.index < 2 || plan.segmentIndex < 1) throw new Error("H3 续跑缺少上一段身份");
+        const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId);
+        const metadata = recordOf(node?.metadata);
+        const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+        const previous = segments[plan.segmentIndex - 1];
+        const selected = segments[plan.segmentIndex];
+        const storageKey = String(previous?.resultStorageKey || "");
+        if (!previous?.id || !selected || !storageKey) throw new Error(`Clip ${plan.segmentIndex + 1} 缺少上一段已绑定的生成结果，需从组首运行`);
+        const selectedParams = extractParams(selected, input.params || {}, metadata, defaults);
+        for (const status of ["succeeded", "cancelled"] as const) {
+            for (let offset = 0; ; offset += 500) {
+                const parents = this.stores.tasks.list({ kind: "canvas-h3-run", projectId: input.projectId, status, limit: 500, offset });
+                for (const parent of parents) {
+                    const completed = [...this.stores.tasks.events(parent.id)].reverse().find((event) => event.type === "clip_completed"
+                        && event.payload.segmentId === previous.id
+                        && String(recordOf(event.payload.output).storageKey || "") === storageKey);
+                    if (!completed) continue;
+                    const sourceNodeId = String(completed.payload.nodeId || "");
+                    const sourcePlan = (parent.input as H3RunInput).runPlan?.plans.find((item) => item.nodeId === sourceNodeId && item.segmentId === previous.id);
+                    if (sourcePlan?.continuation?.group !== continuation.group || sourcePlan?.continuation?.index !== continuation.index - 1) continue;
+                    const child = this.stores.tasks.get(String(completed.payload.childTaskId || ""));
+                    const binding = recordOf(child?.params.canvasBinding);
+                    if (child?.status !== "succeeded" || child.parentTaskId !== parent.id || binding.projectId !== input.projectId
+                        || binding.nodeId !== sourceNodeId || binding.segmentId !== previous.id) continue;
+                    let descriptor: Record<string, unknown>;
+                    try { descriptor = JSON.parse(String(child.params.continuationTask || "")) as Record<string, unknown>; } catch { continue; }
+                    if (descriptor.workflow !== input.projectId || descriptor.node !== "nf_v15" || descriptor.group !== continuation.group
+                        || descriptor.run !== parent.id || descriptor.index !== continuation.index - 1) continue;
+                    for (const key of ["aspectRatio", "megapixels", "sizeMultiple", "latentUpscaleAlign", "modelName", "videoVae", "audioVae"] as const) {
+                        if (JSON.stringify(child.params[key]) !== JSON.stringify(selectedParams[key])) {
+                            throw new Error(`Clip ${plan.segmentIndex + 1} 的 ${key} 与上一段潜变量不匹配，请恢复参数或从组首运行`);
+                        }
+                    }
+                    return {
+                        nodeId: plan.nodeId, sourceNodeId, group: continuation.group, previousIndex: continuation.index - 1,
+                        sourceParentTaskId: parent.id, sourceChildTaskId: child.id, sourceSegmentId: String(previous.id), sourceStorageKey: storageKey,
+                        contextParams: Object.fromEntries(H3_OUTGOING_CONTEXT_KEYS.filter((key) => child.params[key] !== undefined).map((key) => [key, child.params[key]])),
+                    };
+                }
+                if (parents.length < 500) break;
+            }
+        }
+        throw new Error(`Clip ${plan.segmentIndex + 1} 找不到与上一段当前成片匹配的潜空间续写任务，请从组首运行`);
+    }
+
+    private buildRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }> = []): H3RunPlan {
+        const blockedKeys = new Set(blockedPlans.map((item) => `${item.nodeId}:${item.segmentId}`));
+        const allPlans = this.plansFor(input);
+        if (allPlans.some((plan) => plan.continuation && blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`))) {
+            throw new Error("潜空间续写不能跳过连续组中的 Clip；请修复参考素材后从组首重新运行");
+        }
+        const plans = allPlans.filter((plan) => !blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`));
+        if (!plans.length) throw new Error(blockedPlans.length
+            ? `没有可运行的 H3 Clip：${blockedPlans.slice(0, 3).map((item) => `Clip ${item.clipNumber}：${item.reason}`).join("；")}`
+            : "没有符合条件的 H3 Clip");
+        const before = this.stores.projects.get(input.projectId)!;
+        const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        if (plans[0].continuation?.index && plans[0].continuation.index > 1 && new Set(plans.map((plan) => plan.nodeId)).size !== 1) {
+            throw new Error("从组中间接入潜变量时只能选择一个 H3 节点");
+        }
+        const resumeSeed = plans[0].continuation && plans[0].continuation.index > 1
+            ? this.resolveResumeSeed(input, plans[0], before, defaults)
+            : undefined;
+        const sizeOps = (before.nodes as Array<Record<string, unknown>>).flatMap((node) => {
+            const groups = new Map<string, H3Plan[]>();
+            for (const plan of plans.filter((item) => item.nodeId === node.id && item.continuation)) {
+                const group = plan.continuation!.group;
+                groups.set(group, [...(groups.get(group) || []), plan]);
+            }
+            if (!groups.size) return [];
+            // A latent chain cannot skip its head or any middle clip, even if that clip's references are invalid.
+            const metadata = recordOf(node.metadata);
+            const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+            return [...groups.values()].flatMap((nodePlans) => {
+                const firstIndex = resumeSeed && nodePlans[0].nodeId === resumeSeed.nodeId && nodePlans[0].continuation?.group === resumeSeed.group ? resumeSeed.previousIndex + 1 : 1;
+                if (nodePlans[0].continuation?.index !== firstIndex || nodePlans.some((plan, index) => plan.continuation?.index !== firstIndex + index)) {
+                    throw new Error("潜空间续写不能跳过连续组中的 Clip；请修复参考素材后从组首重新运行");
+                }
+                const head = segments.find((segment) => segment.id === nodePlans[0].segmentId);
+                if (!head) throw new Error("潜空间续写组首 Clip 已不存在");
+                const headParams = extractParams(head, input.params || {}, metadata, defaults);
+                const aspectRatio = String(headParams.aspectRatio || "");
+                const megapixels = Number(headParams.megapixels);
+                const sizeMultiple = Number(headParams.sizeMultiple || 32);
+                const latentUpscaleAlign = Number(headParams.latentUpscaleAlign || 2);
+                if (!aspectRatio || aspectRatio === "原图比例" || !Number.isFinite(megapixels) || megapixels <= 0 || !Number.isFinite(sizeMultiple) || sizeMultiple <= 0 || !Number.isFinite(latentUpscaleAlign) || latentUpscaleAlign <= 0) {
+                    throw new Error("潜空间续写需要组首 Clip 使用固定画幅和有效分辨率，才能让后续 Clip 继承同一潜变量尺寸");
+                }
+                if (nodePlans.some((plan) => {
+                    const segment = segments.find((item) => item.id === plan.segmentId);
+                    return segment && extractParams(segment, input.params || {}, metadata, defaults).latentUpscaleEnabled === true;
+                })) throw new Error("潜空间续写当前不能与 H3 潜空间放大二采混用；二采会改变保存的潜变量尺寸");
+                const inherited = { aspectRatio, megapixels, sizeMultiple, latentUpscaleAlign };
+                return nodePlans.slice(1).flatMap((plan) => {
+                    const segment = segments.find((item) => item.id === plan.segmentId);
+                    if (!segment) throw new Error(`潜空间续写 Clip ${plan.segmentId} 已不存在`);
+                    const patch = Object.fromEntries(Object.entries(inherited).filter(([key, value]) => segment[key] !== value));
+                    return Object.keys(patch).length ? [{ type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch }] : [];
+                });
+            });
+        });
+        const canonicalOps = plans.flatMap((plan) => {
+            const patch = this.canonicalSegmentPatch(before, plan, input.params || {}, true);
+            return Object.keys(patch).length ? [{ type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch }] : [];
+        });
+        if (canonicalOps.length || sizeOps.length) this.stores.projects.applyOperations(input.projectId, Number(before.revision || 0), [...canonicalOps, ...sizeOps], { runtimeWrite: true, source: { clientId: "task:h3", kind: "task", label: "H3 参数规范化" } });
+        const project = this.stores.projects.get(input.projectId)!;
+        const nodes = project.nodes as Array<Record<string, unknown>>;
+        const selectedNodeIds = new Set(plans.map((plan) => plan.nodeId));
+        const sourceNodeIds = new Set<string>();
+        const assetIds = new Set<string>();
+        for (const node of nodes.filter((item) => selectedNodeIds.has(String(item.id)))) {
+            const segments = recordOf(node.metadata).segments as H3Segment[];
+            for (const plan of plans.filter((item) => item.nodeId === node.id)) {
+                const segment = segments.find((item) => item.id === plan.segmentId);
+                for (const binding of segment?.referenceBindings || []) {
+                    if (binding.sourceNodeId) sourceNodeIds.add(String(binding.sourceNodeId));
+                    if (binding.assetId) assetIds.add(String(binding.assetId));
+                }
+                for (const group of Object.values(recordOf(segment?.h3CharacterGroups))) {
+                    const characterNodeId = recordOf(group).characterNodeId;
+                    if (characterNodeId) sourceNodeIds.add(String(characterNodeId));
+                }
+            }
+        }
+        const catalog = Array.isArray(project.referenceCatalog) ? project.referenceCatalog as Array<Record<string, unknown>> : [];
+        for (const asset of catalog) if (assetIds.has(String(asset.id)) && asset.sourceNodeId) sourceNodeIds.add(String(asset.sourceNodeId));
+        return structuredClone({
+            version: 1, plans,
+            project: {
+                nodes: nodes.filter((node) => selectedNodeIds.has(String(node.id)) || sourceNodeIds.has(String(node.id))),
+                referenceCatalog: catalog.filter((asset) => assetIds.has(String(asset.id))),
+            },
+            defaults,
+            ...(resumeSeed ? { resumeSeed } : {}),
+        });
+    }
+
+    private projectFor(input: H3RunInput) {
+        return input.runPlan?.version === 1 ? input.runPlan.project : this.stores.projects.get(input.projectId)!;
+    }
+
     private restorePrevious(projectId: string, pending: PendingH3, discard: boolean) {
         const previous = pending.previousOutput;
         this.patchSegment(projectId, pending.nodeId, pending.segmentId, {
             result: previous.result || "", resultStorageKey: previous.resultStorageKey || "", cacheFingerprint: previous.cacheFingerprint || "",
-            firstPassReady: false, firstPassResult: "", firstPassStorageKey: "", firstPassFingerprint: "", runtimeTaskId: "", status: discard ? "cancelled" : "awaiting_confirmation",
+            firstPassReady: false, firstPassResult: "", firstPassStorageKey: "", firstPassFingerprint: "", runtimeTaskId: "", parentTaskId: "", status: discard ? "cancelled" : "awaiting_confirmation",
         });
     }
 
@@ -283,15 +512,43 @@ export class CanvasH3Runner {
             const plans = this.plansForTask(task);
             if (!plans.length) throw new Error("没有符合条件的 H3 Clip");
             const effectiveFingerprints = new Map<string, string>();
+            const completedByKey = new Map(this.stores.tasks.events(task.id)
+                .filter((event) => event.type === "clip_completed" || event.type === "clip_reused")
+                .map((event) => [`${event.payload.nodeId}:${event.payload.segmentId}`, event.payload]));
+            const completedOutput = () => plans.flatMap((item) => {
+                const output = recordOf(completedByKey.get(`${item.nodeId}:${item.segmentId}`)?.output);
+                return output.url ? [output] : [];
+            });
+            const resumeSeed = input.runPlan?.resumeSeed;
+            if (resumeSeed) {
+                const first = plans[0];
+                if (first.nodeId !== resumeSeed.nodeId || first.continuation?.group !== resumeSeed.group
+                    || first.continuation.index !== resumeSeed.previousIndex + 1) throw new Error("H3 续跑计划与潜变量种子不匹配");
+                const live = this.stores.projects.get(input.projectId);
+                const liveNode = (live?.nodes as Array<Record<string, unknown>> | undefined)?.find((node) => String(node.id || "") === first.nodeId);
+                const liveSegments = recordOf(liveNode?.metadata).segments as H3Segment[] | undefined;
+                const predecessor = liveSegments?.[first.segmentIndex - 1];
+                if (predecessor?.id !== resumeSeed.sourceSegmentId || predecessor.resultStorageKey !== resumeSeed.sourceStorageKey) {
+                    throw new Error("Clip 续跑前上一段活动成片已改变，请重新提交本次任务");
+                }
+                await this.comfy.prepareH3ContinuationSeed(
+                    { workflow: input.projectId, group: resumeSeed.group, run: resumeSeed.sourceParentTaskId },
+                    { workflow: input.projectId, group: resumeSeed.group, run: task.id }, resumeSeed.previousIndex,
+                );
+                this.stores.tasks.addEvent(task.id, "continuation_seed_ready", {
+                    sourceTaskId: resumeSeed.sourceParentTaskId, sourceChildTaskId: resumeSeed.sourceChildTaskId, sourceNodeId: resumeSeed.sourceNodeId,
+                    sourceSegmentId: resumeSeed.sourceSegmentId, targetSegmentId: first.segmentId,
+                });
+            }
             for (let planIndex = 0; planIndex < plans.length; planIndex++) {
                 this.assertActive(task.id);
                 const plan = plans[planIndex];
                 const key = `${plan.nodeId}:${plan.segmentId}`;
-                const completedEvents = this.stores.tasks.events(task.id).filter((event) => event.type === "clip_completed" || event.type === "clip_reused");
-                const completed = completedEvents.find((event) => `${event.payload.nodeId}:${event.payload.segmentId}` === key);
+                const completed = completedByKey.get(key);
                 if (completed) {
                     const segment = this.segmentFor(input.projectId, plan);
-                    if (segment.cacheFingerprint) effectiveFingerprints.set(key, String(segment.cacheFingerprint));
+                    const fingerprint = String(completed.fingerprint || segment.cacheFingerprint || "");
+                    if (fingerprint) effectiveFingerprints.set(key, fingerprint);
                     continue;
                 }
                 let confirmation = confirmationOf(task);
@@ -300,24 +557,27 @@ export class CanvasH3Runner {
                 const secondPass = Boolean(pending && inFlight?.nodeId === plan.nodeId && inFlight?.segmentId === plan.segmentId);
                 if (pending && !secondPass) {
                     // keep_first_pass 决议已持久化，节点投影与 completed 事件可安全重放。
-                    this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { result: pending.firstPassResult, resultStorageKey: pending.firstPassStorageKey || "", cacheFingerprint: pending.firstPassFingerprint, firstPassReady: false, status: "success", runtimeTaskId: "" });
+                    this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { result: pending.firstPassResult, resultStorageKey: pending.firstPassStorageKey || "", cacheFingerprint: pending.firstPassFingerprint, firstPassReady: false, status: "success", runtimeTaskId: "", parentTaskId: "" });
                     const output = { url: pending.firstPassResult, storageKey: pending.firstPassStorageKey, mimeType: "video/mp4" };
-                    task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), phase: "remaining", confirmation: { ...confirmation, cursor: planIndex + 1, pending: [], revision: confirmation.revision + 1 }, media: [...completedEvents.map((event) => recordOf(event.payload.output)).filter((item) => item.url), output] } }, { type: "clip_completed", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: pending.firstPassChildTaskId, output } })!;
+                    task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), phase: "remaining", confirmation: { ...confirmation, cursor: planIndex + 1, pending: [], revision: confirmation.revision + 1 }, media: [...completedOutput(), output] } }, { type: "clip_completed", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: pending.firstPassChildTaskId, output, fingerprint: pending.firstPassFingerprint } })!;
                     if (!task) throw new Error("H3 保留一采决议冲突");
+                    completedByKey.set(key, { output, fingerprint: pending.firstPassFingerprint });
                     this.publish(task, "task.updated");
                     continue;
                 }
-                const override = secondPass ? inFlight!.postpassParams : input.params || {};
-                if (!secondPass) this.ensureCanonicalSegmentSubmission(input.projectId, plan, override);
-                const cache = this.clipCacheState(input.projectId, plan, override, effectiveFingerprints);
+                const override = secondPass ? inFlight!.postpassParams : this.withPlannedSeed(input, plan, this.continuationOverride(input, plan, input.params || {}));
+                if (!secondPass && !input.runPlan) this.ensureCanonicalSegmentSubmission(input.projectId, plan, override);
+                const cache = this.clipCacheState(input, plan, override, effectiveFingerprints);
                 effectiveFingerprints.set(key, cache.fingerprint);
-                if (!secondPass && !confirmation.prepared && !confirmation.pending.length && cache.output) {
+                // Cached MP4 files do not carry the latent context saved under this new run id.
+                if (!plan.continuation && !input.forceRegenerate && !secondPass && !confirmation.prepared && !confirmation.pending.length && cache.output) {
                     const output = cache.output;
-                    task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), confirmation: { ...confirmation, cursor: planIndex + 1, revision: confirmation.revision + 1 }, media: [...completedEvents.map((event) => recordOf(event.payload.output)).filter((item) => item.url), output] } }, { type: "clip_reused", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, output, fingerprint: cache.fingerprint } })!;
+                    task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), confirmation: { ...confirmation, cursor: planIndex + 1, revision: confirmation.revision + 1 }, media: [...completedOutput(), output] } }, { type: "clip_reused", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, output, fingerprint: cache.fingerprint } })!;
                     if (!task) throw new Error("H3 缓存复用冲突");
+                    completedByKey.set(key, { output, fingerprint: cache.fingerprint });
                     continue;
                 }
-                if (!secondPass && cache.segment.confirmationMode === true && !confirmation.prepared) {
+                if (!secondPass && h3ConfirmationKind(cache.segment, cache.params) && !confirmation.prepared) {
                     const previousOutput = { result: cache.segment.result, resultStorageKey: cache.segment.resultStorageKey, cacheFingerprint: String(cache.segment.cacheFingerprint || "") };
                     task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", result: { ...recordOf(task.result), phase: "first_pass", confirmation: { ...confirmation, cursor: planIndex, prepared: previousOutput, revision: confirmation.revision + 1 } } }, { type: "h3_first_pass_prepared", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId } })!;
                     if (!task) throw new Error("H3 一采快照持久化冲突");
@@ -327,7 +587,7 @@ export class CanvasH3Runner {
                 let child = this.stores.tasks.get(childId);
                 if (!child) {
                     this.stores.tasks.addEvent(task.id, "child_intent", { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: childId, phase: secondPass ? "second_pass" : "first_pass" });
-                    child = await this.startChild(task, plan, override, childId);
+                    child = await this.startChild(task, plan, override, childId, completedByKey);
                 } else if (["queued", "running"].includes(child.status)) {
                     const submitted = this.stores.tasks.events(child.id).some((event) => event.type === "submitted");
                     if (!submitted) child = this.stores.tasks.update(child.id, { status: "failed", error: "子任务创建后未记录远端提交，拒绝重复提交" });
@@ -336,7 +596,17 @@ export class CanvasH3Runner {
                 }
                 this.currentChildren.set(task.id, child.id);
                 task = this.update(task.id, { result: { ...recordOf(task.result), currentChildTaskId: child.id, currentChildKind: child.kind } });
-                child = await this.waitForTerminal(task.id, child.id);
+                // Equal Clip weights; only confirmation workflows split a Clip
+                // into two orchestration phases (generation / confirmed postpass).
+                // A native automatic two-pass workflow remains one child: its own
+                // reported progress already covers both passes.
+                const phaseWeight = h3ConfirmationKind(cache.segment, cache.params) ? 0.5 : 1;
+                child = await this.waitForTerminal(task.id, child.id,
+                    (planIndex + (secondPass ? 0.5 : 0)) / plans.length,
+                    phaseWeight / plans.length);
+                // Polling persists progress; never overwrite it with the pre-wait
+                // snapshot on pause, failure, retry or Clip completion.
+                task = this.stores.tasks.get(task.id)!;
                 this.currentChildren.delete(task.id);
                 await cleanupStoryboardCompositeDirectory(recordOf(child.params).storyboardCompositeTempDir);
                 if (secondPass && child.status !== "succeeded") {
@@ -351,19 +621,20 @@ export class CanvasH3Runner {
                 const segment = this.segmentFor(input.projectId, plan);
                 const alreadyWritten = String(segment.resultStorageKey || "") === String(output.storageKey || "") && segment.status === "success";
                 if (!alreadyWritten && !await writeBackH3Task(this.stores, this.events, child)) throw new Error(`Clip ${plan.segmentIndex + 1} 终态回写失败`);
-                const media = [...completedEvents.map((event) => recordOf(event.payload.output)).filter((item) => item.url), output];
-                if (cache.segment.confirmationMode === true && !secondPass) {
+                const media = [...completedOutput(), output];
+                if (h3ConfirmationKind(cache.segment, cache.params) && !secondPass) {
                     const snapshot = confirmation.prepared || {};
                     const waiting: PendingH3 = { nodeId: plan.nodeId, segmentId: plan.segmentId, firstPassFingerprint: cache.fingerprint, firstPassResult: String(output.url || ""), firstPassStorageKey: String(output.storageKey || ""), firstPassChildTaskId: child.id, previousOutput: snapshot };
-                    task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "awaiting_confirmation", progress: Math.min(0.99, (planIndex + 0.5) / plans.length), result: { ...recordOf(task.result), phase: "awaiting_confirmation", confirmation: { ...confirmation, pending: [waiting], cursor: planIndex, prepared: undefined, revision: confirmation.revision + 1 }, media: completedEvents.map((event) => recordOf(event.payload.output)).filter((item) => item.url) } }, { type: "first_pass_ready", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, fingerprint: cache.fingerprint, output } })!;
+                    task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "awaiting_confirmation", progress: Math.min(0.99, (planIndex + 0.5) / plans.length), result: { ...recordOf(task.result), phase: "awaiting_confirmation", confirmation: { ...confirmation, pending: [waiting], cursor: planIndex, prepared: undefined, revision: confirmation.revision + 1 }, media: completedOutput() } }, { type: "first_pass_ready", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, fingerprint: cache.fingerprint, output } })!;
                     if (!task) throw new Error("H3 一采暂停状态冲突");
                     this.projectAwaiting(task);
                     this.publish(task, "task.updated");
                     return;
                 }
-                this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { cacheFingerprint: cache.fingerprint, firstPassReady: false, status: "success", runtimeTaskId: "" });
-                task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), phase: "remaining", confirmation: { ...confirmation, pending: [], inFlight: undefined, cursor: planIndex + 1, revision: confirmation.revision + 1 }, media, ...output } }, { type: "clip_completed", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, output } })!;
+                this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { cacheFingerprint: cache.fingerprint, firstPassReady: false, status: "success", runtimeTaskId: "", parentTaskId: "" });
+                task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), phase: "remaining", confirmation: { ...confirmation, pending: [], inFlight: undefined, cursor: planIndex + 1, revision: confirmation.revision + 1 }, media, ...output } }, { type: "clip_completed", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, output, fingerprint: cache.fingerprint } })!;
                 if (!task) throw new Error("H3 Clip 收口状态冲突");
+                completedByKey.set(key, { output, fingerprint: cache.fingerprint });
             }
             const finished = this.stores.tasks.get(initial.id)!;
             if (finished.status !== "running" || confirmationOf(finished).pending.length) return;
@@ -384,13 +655,15 @@ export class CanvasH3Runner {
         }
     }
 
-    private clipCacheState(projectId: string, plan: H3Plan, override: Record<string, unknown>, fingerprints: Map<string, string>) {
-        const project = this.stores.projects.get(projectId)!;
+    private clipCacheState(input: H3RunInput, plan: H3Plan, override: Record<string, unknown>, fingerprints: Map<string, string>) {
+        override = this.withPlannedSeed(input, plan, override);
+        const projectId = input.projectId;
+        const project = this.projectFor(input);
         const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId)!;
         const metadata = recordOf(node.metadata);
         const segments = metadata.segments as H3Segment[];
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
-        const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const params = extractParams(segment, override, metadata, defaults);
         const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
         const { compilation } = compileH3Submission(project, segment, taskMode);
@@ -410,15 +683,43 @@ export class CanvasH3Runner {
         // CompiledReference objects. Keep both exact historical inputs and the
         // log-backed reference snapshot so settings/timestamp normalization updates
         // do not invalidate an otherwise unchanged first pass.
-        const legacyFingerprint = confirming ? h3ClipCacheFingerprint({ segment: segmentFingerprintInput, params, references: compilation.references, compiledPrompt: scenePrompt, previousFingerprint }) : undefined;
-        const loggedLegacyFingerprint = confirming && useFirstPassReferences ? h3ClipCacheFingerprint({ segment: segmentFingerprintInput, params, references: firstPassReferences, compiledPrompt: scenePrompt, previousFingerprint }) : undefined;
+        const legacyFingerprint = confirming ? h3ClipCacheFingerprintV1({ segment: segmentFingerprintInput, params, references: compilation.references, compiledPrompt: scenePrompt, previousFingerprint }) : undefined;
+        const loggedLegacyFingerprint = confirming && useFirstPassReferences ? h3ClipCacheFingerprintV1({ segment: segmentFingerprintInput, params, references: firstPassReferences, compiledPrompt: scenePrompt, previousFingerprint }) : undefined;
         const output = !confirming && segment.result && segment.cacheFingerprint === fingerprint ? {
             url: String(segment.result),
             ...(segment.resultStorageKey ? { storageKey: String(segment.resultStorageKey) } : {}),
             mimeType: "video/mp4",
             cacheFingerprint: fingerprint,
         } : null;
-        return { fingerprint, legacyFingerprint, loggedLegacyFingerprint, output, segment };
+        return { fingerprint, legacyFingerprint, loggedLegacyFingerprint, output, segment, params };
+    }
+
+    /** The switch and its context controls live on the source clip; the next clip consumes them. */
+    private continuationOverride(input: H3RunInput, plan: H3Plan, override: Record<string, unknown>): Record<string, unknown> {
+        if (!plan.continuation || plan.continuation.index === 1) return override;
+        const resumeSeed = input.runPlan?.resumeSeed;
+        if (resumeSeed && plan.nodeId === resumeSeed.nodeId && plan.continuation.group === resumeSeed.group
+            && plan.continuation.index === resumeSeed.previousIndex + 1) return { ...override, ...resumeSeed.contextParams };
+        const project = this.projectFor(input);
+        const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId);
+        const metadata = recordOf(node?.metadata);
+        const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+        const source = segments[plan.segmentIndex - 1];
+        if (!source || source.motionContextEnabled !== true) throw new Error(`Clip ${plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
+        const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const sourceParams = extractParams(source, override, metadata, defaults);
+        return { ...override, ...Object.fromEntries(H3_OUTGOING_CONTEXT_KEYS.filter((key) => sourceParams[key] !== undefined).map((key) => [key, sourceParams[key]])) };
+    }
+
+    private withPlannedSeed(input: H3RunInput, plan: H3Plan, override: Record<string, unknown>) {
+        if (!input.runPlan) return override;
+        // New runs resolve seeds per Clip. Preserve those exact values through
+        // shared request overrides, second-pass confirmation and recovery.
+        const node = input.runPlan.project.nodes.find((item) => item.id === plan.nodeId);
+        const segments = recordOf(node?.metadata).segments as H3Segment[] | undefined;
+        const segment = segments?.find((item) => item.id === plan.segmentId);
+        if (!segment) throw new Error("H3 运行快照缺少目标 Clip");
+        return { ...override, seed: segment.seed, noiseSeed: segment.noiseSeed, noiseSeedMode: segment.noiseSeedMode };
     }
 
     private patchSegment(projectId: string, nodeId: string, segmentId: string, patch: Record<string, unknown>) {
@@ -435,18 +736,37 @@ export class CanvasH3Runner {
         const selected = input.segmentId
             ? segments.findIndex((segment) => String(segment.id || "") === input.segmentId)
             : input.segmentIndex ?? Math.max(0, segments.findIndex((segment) => !segment.result));
-        if (selected < 0) throw new Error(`找不到 H3 片段: ${input.segmentId}`);
-        const selectedSegment = segments[selected];
-        const continuationMode = selectedSegment.motionContextEnabled === true;
-        if (continuationMode && !input.runFromCurrent) throw new Error("V15 潜空间续写必须使用「运行当前及后续分镜」，不能单独运行一个 Clip。");
-        if (continuationMode && input.skipCompleted) throw new Error("V15 潜空间续写不能跳过已完成 Clip，请从连续组首段重新运行。");
+        if (selected < 0) throw new Error("找不到所选 Clip，请刷新画布后重试");
+        const resumesGroup = selected > 0 && segments[selected - 1].motionContextEnabled === true;
         const indices = input.runFromCurrent ? segments.map((_, index) => index).filter((index) => index >= selected) : [selected];
+        if (input.runFromCurrent && input.skipCompleted && indices.some((index) => index + 1 < segments.length && segments[index].motionContextEnabled === true)) {
+            throw new Error("V15 潜空间续写不能跳过已完成 Clip，请从连续组首段重新运行。");
+        }
+        let groupHead = -1;
         let continuationIndex = 0;
-        const continuationGroup = String(selectedSegment.continuationGroupId || selectedSegment.id || `segment-${selected}`);
+        if (resumesGroup) {
+            groupHead = selected;
+            while (groupHead > 0 && segments[groupHead - 1].motionContextEnabled === true) groupHead--;
+            continuationIndex = selected - groupHead;
+        }
         return indices.filter((index) => segments[index]).filter((index) => !input.skipCompleted || !segments[index].result).map((segmentIndex) => {
             const segment = segments[segmentIndex];
             if (!segment.id) throw new Error(`H3 Clip ${segmentIndex + 1} 缺少身份标识`);
-            return { nodeId: String(node.id || ""), segmentId: String(segment.id), segmentIndex, ...(continuationMode ? { continuation: { group: continuationGroup, index: ++continuationIndex } } : {}) };
+            const incoming = (segmentIndex === selected && resumesGroup) || (input.runFromCurrent === true && segmentIndex > selected && segments[segmentIndex - 1].motionContextEnabled === true);
+            const outgoing = input.runFromCurrent === true && segmentIndex + 1 < segments.length && segment.motionContextEnabled === true;
+            if (!incoming && !outgoing) {
+                groupHead = -1;
+                continuationIndex = 0;
+                return { nodeId: String(node.id || ""), segmentId: String(segment.id), segmentIndex };
+            }
+            if (!incoming) {
+                groupHead = segmentIndex;
+                continuationIndex = 0;
+            }
+            if (groupHead < 0) throw new Error("潜空间续写缺少连续组首段，请从组首重新运行");
+            const head = segments[groupHead];
+            const group = `${String(head.continuationGroupId || "h3-chain")}:${String(head.id)}`;
+            return { nodeId: String(node.id || ""), segmentId: String(segment.id), segmentIndex, continuation: { group, index: ++continuationIndex } };
         });
     }
 
@@ -457,51 +777,67 @@ export class CanvasH3Runner {
      */
     private ensureCanonicalSegmentSubmission(projectId: string, plan: H3Plan, override: Record<string, unknown>) {
         const project = this.stores.projects.get(projectId);
+        if (!project) return;
+        const patch = this.canonicalSegmentPatch(project, plan, override);
+        if (Object.keys(patch).length) this.patchSegment(projectId, plan.nodeId, plan.segmentId, patch);
+    }
+
+    private canonicalSegmentPatch(project: Record<string, unknown>, plan: H3Plan, override: Record<string, unknown>, newRun = false) {
         const node = project && (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId);
         const metadata = node ? recordOf(node.metadata) : {};
         const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
-        if (!segment) return;
-        const normalized = normalizeH3Params({
-            ...recordOf(metadata.comfyParams),
-            ...metadata,
-            ...segment,
-            ...override,
-            mode: override.mode ?? segment.mode ?? segment.taskMode ?? metadata.mode ?? metadata.taskMode,
-        }, true);
-        const mode = normalizeTaskMode(override.mode ?? override.taskMode ?? segment.mode ?? segment.taskMode ?? metadata.mode ?? metadata.taskMode);
-        normalized.mode = mode;
-        normalized.taskMode = mode;
+        if (!segment) return {};
+        const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const normalized = normalizeH3Params(extractParams(segment, override, metadata, defaults), true);
+        if (newRun && normalized.noiseSeedMode === "random") {
+            normalized.seed = randomH3Seed();
+            normalized.noiseSeed = normalized.seed;
+        }
         const patch: Record<string, unknown> = {};
         for (const key of ["mode", "taskMode", "noiseSeedMode", "seed", "noiseSeed", "loraSlots"] as const) {
             if (JSON.stringify(segment[key]) !== JSON.stringify(normalized[key])) patch[key] = normalized[key];
         }
-        if (Object.keys(patch).length) this.patchSegment(projectId, plan.nodeId, plan.segmentId, patch);
+        return patch;
     }
 
-    private async startChild(parent: RuntimeTask, plan: H3Plan, override: Record<string, unknown>, childId: string) {
+    private async startChild(parent: RuntimeTask, plan: H3Plan, override: Record<string, unknown>, childId: string, completedByKey: Map<string, Record<string, unknown>>) {
         let compositeTempDir: string | undefined;
         try {
-        const project = this.stores.projects.get(String(parent.input.projectId))!;
+        const input = parent.input as H3RunInput;
+        const project = this.projectFor(input);
         const node = (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId)!;
         const metadata = recordOf(node.metadata);
         const segments = metadata.segments as H3Segment[];
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
-        const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         let params = extractParams(segment, override, metadata, defaults);
         const confirmingSecondPass = override.confirmSecondPass === true;
         let cachedFirstPassPath = "";
         if (confirmingSecondPass) {
-            if (segment.confirmationMode !== true || segment.firstPassReady !== true || !segment.firstPassResult) throw new Error("当前 Clip 没有可确认的一采缓存");
-            cachedFirstPassPath = await this.resolveRef({ url: String(segment.firstPassResult), storageKey: segment.firstPassStorageKey ? String(segment.firstPassStorageKey) : undefined, name: `first-pass-${plan.segmentId}.mp4`, type: "video" });
+            const pending = confirmationOf(parent).pending.find((item) => item.nodeId === plan.nodeId && item.segmentId === plan.segmentId);
+            if (!h3ConfirmationKind(segment, params) || !pending?.firstPassResult) throw new Error("当前 Clip 没有匹配生成模式的待确认一采缓存");
+            cachedFirstPassPath = await this.resolveRef({ url: pending.firstPassResult, storageKey: pending.firstPassStorageKey, name: `first-pass-${plan.segmentId}.mp4`, type: "video" });
         }
         params = h3ConfirmationPhaseParams(segment, params, confirmingSecondPass);
+        if (params.latentConfirmationPhase) {
+            params.latentCheckpointId = createHash("sha256").update(JSON.stringify([parent.id, plan.nodeId, plan.segmentId])).digest("hex");
+        }
         const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
-        const { compilation, composite } = compileH3Submission(project, segment, taskMode);
+        const { compilation, composite, editableReferences } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
         const scenePrompt = appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
+        const styleTemplateId = segment.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode) : segment.styleTemplateId;
+        if (styleTemplateId && !isH3StyleTemplateId(styleTemplateId)) throw new Error(`无效的 H3 视觉风格模板：${styleTemplateId}`);
+        params.styleTemplateId = styleTemplateId || null;
+        // 实时预览节点靠 target_node_id 把帧推回画布上的 H3 节点；不传就是空串，
+        // 帧无处可去，预览功能等于没开。节点 id 在这里才确定，必须在提交前注入。
+        params.targetNodeId = plan.nodeId;
         const refs = compilation.references.map((reference) => ({ ...reference, type: reference.mediaType, name: reference.label } as H3Ref));
-        if (params.motionContextEnabled === true && !plan.continuation) throw new Error("Motion Context（V15 潜空间续写）必须使用「运行当前及后续分镜」，不能单独运行一个 Clip。");
+        // The segment switch controls its outgoing edge. A group head saves latent at index 1;
+        // only index > 1 consumes the previous clip's latent. Standalone runs have no cross-task context.
+        params.motionContextEnabled = Boolean(plan.continuation);
+        if (plan.continuation?.index === 1) params.continuationAudioRefineEnabled = false;
         if (plan.continuation) {
             params.motionContextEnabled = true;
             params.continuationTask = buildH3ContinuationTask(String(parent.input.projectId), plan.continuation.group, parent.id, plan.continuation.index);
@@ -529,50 +865,64 @@ export class CanvasH3Runner {
             compositeTempDir = created.directory;
             compositeImagePath = created.filePath;
         }
-        const images = await Promise.all(imageRefs.map((ref) => composite && ref.bindingId === composite.representativeBindingId && compositeImagePath
-            ? compositeImagePath
+        const compositeMedia = compositeImagePath
+            ? this.stores.media.store(await readFile(compositeImagePath), { name: "storyboard-composite.png", mimeType: "image/png", category: "input" })
+            : null;
+        const isCompositeRef = (ref: H3Ref) => composite && String(ref.id || ref.bindingId || "") === composite.representativeBindingId;
+        const images = await Promise.all(imageRefs.map((ref) => isCompositeRef(ref) && compositeMedia
+            ? compositeMedia.filePath
             : this.resolveRef(ref)));
         const audios = await Promise.all(audioRefs.map((ref) => this.resolveRef(ref)));
         const videos = await Promise.all(videoRefs.map((ref) => this.resolveRef(ref)));
-        const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
+        const previousSnapshot = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
+        const previousOutput = previousSnapshot && recordOf(completedByKey.get(`${plan.nodeId}:${String(previousSnapshot.id || "")}`)?.output);
+        const previous = previousSnapshot && previousOutput?.url
+            ? { ...previousSnapshot, result: String(previousOutput.url), resultStorageKey: String(previousOutput.storageKey || "") }
+            : previousSnapshot;
         // 上一段成品视频有两种显式用途（规则见 resolveClipContinuation）：
-        //   1) tailFrameContinuation（标在【上一段】上）= 抓上一段尾帧，当本段首帧参考图（写出提示词，UI 可见）；
+        //   1) tailFrameContinuation（标在【上一段】上）= 追加尾帧图片，参考动作、场景与连续性；
         //   2) previousVideoAsReference（标在【本段】上）= 把上一段成品整体当「参考视频」喂进本段（默认关）。
         // Motion Context 本身走 V15 continuationTask 的 AV latent 链，不消费上一段成品视频，
         // 更不能隐式触发 2)；完整视频参考仍由 previousVideoAsReference 单独控制。
         const chained = parent.input.runFromCurrent === true && plan.segmentIndex > 0;
         const { usePreviousAsReference, useTailFrame, needsPreviousVideo } = resolveClipContinuation(segment, previous, chained, params);
         const seamNeedsPrevious = params.faceRefineEnabled === true && (Number(params.seamFaceFadeFrames || 0) > 0 || Number(params.seamColourMatch || 0) > 0 || Number(params.seamAudioCrossfadeMs || 0) > 0);
-        if (useTailFrame && !previous?.result) throw new Error(`Clip ${plan.segmentIndex} 已开启尾帧接续，但上一段没有可用成品视频`);
+        if (useTailFrame && !previous?.result) throw new Error(`Clip ${plan.segmentIndex} 已开启尾帧参考，但上一段没有可用成品视频`);
         const previousPath = (needsPreviousVideo || seamNeedsPrevious) && previous?.result
             ? await this.resolveRef({ url: previous.result, storageKey: previous.resultStorageKey, name: `clip-${plan.segmentIndex}.mp4`, type: "video" })
             : "";
         let prompt = scenePrompt;
-        const submittedImageReferences = imageRefs.map((ref) => composite && ref.bindingId === composite.representativeBindingId
-            ? { ...ref }
+        const submittedImageReferences = imageRefs.map((ref) => isCompositeRef(ref) && compositeMedia
+            ? { ...ref, url: this.stores.media.url(compositeMedia), storageKey: compositeMedia.storageKey }
             : ref);
-        const actualReferences: Array<Record<string, unknown>> = [
+        let actualReferences: Array<Record<string, unknown>> = [
             ...submittedImageReferences,
             ...videoRefs,
             ...audioRefs,
         ];
+        let runtimeTaskMode = taskMode;
         if (previousPath && useTailFrame) {
             const tail = await this.captureTailFrame(previousPath, `h3-tail-${parent.id}-${plan.segmentIndex}.png`);
-            if (!isT2v && !isI2v && !isFl2v) {
-                images.unshift(tail);
-                actualReferences.unshift({ id: `runtime-tail-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 尾帧`, type: "image", role: "keyframe", usage: "first_frame", runtime: true, sourceSegmentId: previous?.id, resolved: tail });
-            }
-            if (images.length > 9) throw new Error("尾帧续接后参考图片超过 MiniMax H3 的 9 张上限");
-            prompt = appendTailFramePrompt(prompt, `Clip ${plan.segmentIndex}`);
+            const routed = routeTailFrameInput(taskMode, images, actualReferences, {
+                id: `runtime-tail-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 尾帧参考`, type: "image", role: "motion_reference", usage: "continuity_reference",
+                runtime: true, sourceSegmentId: previous?.id, resolved: tail.filePath, url: this.stores.media.url(tail), storageKey: tail.storageKey,
+            });
+            images.splice(0, images.length, ...routed.images);
+            actualReferences = routed.actualReferences;
+            runtimeTaskMode = routed.taskMode;
+            prompt = appendTailFramePrompt(prompt, `Clip ${plan.segmentIndex}`, routed.tailImageOrdinal);
         }
+        prompt = applyH3StyleTemplate(prompt, taskMode, styleTemplateId as string | null);
         // 组装最终送入工作流的参考视频列表：本段自有参考视频（最多 3 段）+ 显式开启时才追加的上一段成品。
         const referenceVideos = appendPreviousReference(videos, usePreviousAsReference && !isT2v && !isI2v && !isFl2v ? previousPath : "");
         if (usePreviousAsReference && previousPath && !isT2v && !isI2v && !isFl2v) {
             actualReferences.push({ id: `runtime-previous-video-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 成品视频`, type: "video", role: "motion_reference", runtime: true, sourceSegmentId: previous?.id, url: previous?.result, storageKey: previous?.resultStorageKey, resolved: previousPath });
         }
         const engine = String(params.minimaxEngine || params.engine || metadata.minimaxEngine || "").toLowerCase();
+        if (engine === "runninghub" && params.latentConfirmationPhase) throw new Error("潜空间二采确认模式需要本地 ComfyUI；当前 RunningHub 工作流不支持保存与恢复一采潜变量。未提交一采任务。");
         Object.assign(params, {
-            taskMode,
+            taskMode: runtimeTaskMode,
+            mode: runtimeTaskMode,
             // V15 Motion Context 由 motionContextEnabled + continuationTask 驱动；这里关闭的
             // 是旧版预处理图标记，避免再把上一段视频走旧 motion/context 图。
             motionContext: false,
@@ -587,13 +937,15 @@ export class CanvasH3Runner {
             useWallet: metadata.minimaxRunningHubUseWallet === true,
         });
         const submission = {
+            authoredPrompt: String(segment.prompt || ""),
+            editableReferences,
             semanticPrompt: compilation.semanticPrompt,
             compiledPrompt: prompt,
             bindingMap: compilation.references.map((reference) => ({ id: reference.id, assetId: reference.assetId, label: reference.label, role: reference.role, mediaType: reference.mediaType, ordinal: reference.ordinal, token: reference.token, usage: reference.usage })),
             actualReferences,
             ...(composite ? { storyboardComposite: { rows: composite.rows, columns: composite.columns, sourceBindingIds: composite.sourceBindingIds, panels: composite.panels } } : {}),
             warnings: compilation.issues.filter((issue) => issue.severity === "warning"),
-            continuation: { tailFrame: useTailFrame, previousVideo: usePreviousAsReference, motionContext: Boolean(plan.continuation) },
+            continuation: { tailFrame: useTailFrame, previousVideo: usePreviousAsReference, motionContext: Boolean(plan.continuation), requestedMode: taskMode, runtimeMode: runtimeTaskMode },
         };
         const log = this.stores.logs.create({
             projectId: String(parent.input.projectId), nodeId: plan.nodeId, segmentId: plan.segmentId,
@@ -602,7 +954,7 @@ export class CanvasH3Runner {
         });
         this.events.publish({ type: "generation-log.created", entityId: log.id, payload: log });
         const childParams = { ...params, ...(compositeTempDir ? { storyboardCompositeTempDir: compositeTempDir } : {}), parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id, bindOnStart: false } };
-        const childInput = confirmingSecondPass ? {
+        const childInput = confirmingSecondPass && !params.latentConfirmationPhase ? {
             prompt,
             video: cachedFirstPassPath,
             ...(images.length ? { references: images } : {}),
@@ -660,7 +1012,7 @@ export class CanvasH3Runner {
         if (!node) throw new Error(`找不到 H3 节点: ${plan.nodeId}`);
         this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [
             { type: "update_node", id: plan.nodeId, metadata: { runtimeTaskId: parentId, status: "loading" } },
-            { type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch: { runtimeTaskId: childId, status: "loading", progress: 0 }, patchDelete: ["errorDetails"] },
+            { type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch: { parentTaskId: parentId, runtimeTaskId: childId, status: "loading", progress: 0 }, patchDelete: ["errorDetails"] },
         ], { runtimeWrite: true, source: { clientId: `task:${childId}`, kind: "task", label: "H3 任务" } });
         const log = this.stores.logs.update(generationLogId, { status: "running", runtimeTaskId: childId });
         this.events.publish({ type: "generation-log.updated", entityId: log.id, payload: log });
@@ -671,7 +1023,7 @@ export class CanvasH3Runner {
         const node = project && (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId);
         const segment = Array.isArray(recordOf(node?.metadata).segments)
             ? (recordOf(node?.metadata).segments as H3Segment[]).find((item) => item.id === plan.segmentId) : undefined;
-        if (!segment) throw new Error(`找不到 H3 Clip: ${plan.segmentId}`);
+        if (!segment) throw new Error(`Clip ${plan.segmentIndex + 1} 已不存在，请刷新画布后重试`);
         return segment;
     }
 
@@ -680,15 +1032,25 @@ export class CanvasH3Runner {
         const pending = confirmationOf(task).pending[0];
         if (!pending) return;
         const node = (this.stores.projects.get(input.projectId)?.nodes as Array<Record<string, unknown>> | undefined)?.find((item) => item.id === pending.nodeId);
-        if (node && String(recordOf(node.metadata).runtimeTaskId || "") !== task.id && String(recordOf(node.metadata).runtimeTaskId || "")) return;
         const segment = this.segmentFor(input.projectId, { ...pending, segmentIndex: 0 });
-        if (String(segment.runtimeTaskId || "") && ![task.id, pending.firstPassChildTaskId, confirmationOf(task).inFlight?.childTaskId].includes(String(segment.runtimeTaskId))) return;
+        if (segment.parentTaskId && segment.parentTaskId !== task.id) return;
+        const boundTaskId = String(segment.runtimeTaskId || "");
+        const boundTask = boundTaskId ? this.stores.tasks.get(boundTaskId) : null;
+        const binding = recordOf(boundTask?.params?.canvasBinding);
+        const ownedChild = String(boundTask?.params?.parentTaskId || "") === task.id
+            && String(binding.projectId || "") === input.projectId
+            && String(binding.nodeId || "") === pending.nodeId
+            && String(binding.segmentId || "") === pending.segmentId;
+        if (boundTaskId && ![task.id, pending.firstPassChildTaskId, confirmationOf(task).inFlight?.childTaskId].includes(boundTaskId) && !ownedChild) return;
         this.patchSegment(input.projectId, pending.nodeId, pending.segmentId, {
-            status: "awaiting_confirmation", runtimeTaskId: task.id, firstPassReady: true,
+            status: "awaiting_confirmation", parentTaskId: task.id, runtimeTaskId: task.id, firstPassReady: true,
             firstPassResult: pending.firstPassResult, firstPassStorageKey: pending.firstPassStorageKey || "", firstPassFingerprint: pending.firstPassFingerprint,
             result: pending.firstPassResult, resultStorageKey: pending.firstPassStorageKey || "",
         });
-        this.updateNode(input.projectId, pending.nodeId, { runtimeTaskId: task.id, status: "awaiting_confirmation", runProgress: Math.min(0.99, task.progress), errorDetails: task.error || "" });
+        // 顶层由 Clip 状态聚合，不能作为单段确认归属；另一任务占据顶层时，
+        // 只恢复本段投影，不额外写入该任务的进度与错误。
+        const nodeTaskId = String(recordOf(node?.metadata).runtimeTaskId || "");
+        if (!nodeTaskId || nodeTaskId === task.id) this.updateNode(input.projectId, pending.nodeId, { runtimeTaskId: task.id, status: "awaiting_confirmation", runProgress: Math.min(0.99, task.progress), errorDetails: task.error || "" });
     }
 
     private finishParentNode(task: RuntimeTask, status: string, error = "") {
@@ -698,8 +1060,31 @@ export class CanvasH3Runner {
         const ids = new Set(input.nodeIds?.length ? input.nodeIds : input.nodeId ? [input.nodeId] : []);
         for (const node of project.nodes as Array<Record<string, unknown>>) {
             if (ids.size && !ids.has(String(node.id || ""))) continue;
-            if (String(recordOf(node.metadata).runtimeTaskId || "") !== task.id) continue;
-            this.updateNode(input.projectId, String(node.id), { runtimeTaskId: "", runtimeRunId: "", runRequestId: "", runRequestConsumedId: "", status, runProgress: task.progress, errorDetails: error, cancelRequested: false });
+            const metadata = recordOf(node.metadata);
+            const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+            const owned = status === "error" || status === "cancelled"
+                ? segments.filter((segment) => segment.id && String(segment.parentTaskId || "") === task.id && ["queued", "loading"].includes(String(segment.status || "")))
+                : [];
+            const otherActive = segments.find((segment) => String(segment.parentTaskId || "") !== task.id
+                && ["queued", "loading", "awaiting_confirmation"].includes(String(segment.status || ""))
+                && (segment.parentTaskId || segment.status === "awaiting_confirmation" && segment.runtimeTaskId));
+            const operations: CanvasOperation[] = owned.map((segment) => ({
+                type: "update_h3_segment", nodeId: String(node.id), segmentId: String(segment.id),
+                patch: { status, progress: task.progress, runtimeTaskId: "", parentTaskId: "", ...(status === "error" ? { errorDetails: error } : {}) },
+                ...(status === "cancelled" ? { patchDelete: ["errorDetails"] } : {}),
+                expectedFields: { parentTaskId: task.id },
+            }));
+            if (String(metadata.runtimeTaskId || "") === task.id) operations.push({
+                type: "update_node", id: String(node.id), metadata: {
+                    runtimeTaskId: String(otherActive?.parentTaskId || (otherActive?.status === "awaiting_confirmation" ? otherActive.runtimeTaskId : "") || ""),
+                    runtimeRunId: "", runRequestId: "", runRequestConsumedId: "",
+                    status: String(otherActive?.status || status), runProgress: Number(otherActive?.progress ?? task.progress),
+                    errorDetails: otherActive ? "" : error, cancelRequested: false,
+                },
+            });
+            if (!operations.length) continue;
+            const current = this.stores.projects.get(input.projectId)!;
+            this.stores.projects.applyOperations(input.projectId, Number(current.revision || 0), operations, { runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "H3 任务收口" } });
         }
     }
 
@@ -708,11 +1093,20 @@ export class CanvasH3Runner {
         this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [{ type: "update_node", id: nodeId, metadata }], { runtimeWrite: true, source: { clientId: "task:h3", kind: "task", label: "H3 任务" } });
     }
 
-    private async waitForTerminal(parentId: string, childId: string) {
+    private async waitForTerminal(parentId: string, childId: string, base: number, weight: number) {
         while (true) {
             this.assertActive(parentId);
             const child = this.stores.tasks.get(childId);
             if (!child) throw new Error(`H3 子任务不存在: ${childId}`);
+            const parent = this.stores.tasks.get(parentId);
+            // Read only this execution's selected child, never sum historical
+            // children/retry attempts. Failure/cancellation is not completion.
+            if (parent?.status === "running" && parent.result?.currentChildTaskId === childId) {
+                const raw = Number(child.progress);
+                const fraction = child.status === "succeeded" ? 1 : Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0;
+                const progress = Math.max(parent.progress, Math.min(0.99, base + weight * fraction));
+                if (progress > parent.progress) this.update(parentId, { progress });
+            }
             if (["succeeded", "failed", "cancelled"].includes(child.status)) return child;
             await new Promise((resolve) => setTimeout(resolve, 500));
         }
@@ -764,7 +1158,7 @@ export class CanvasH3Runner {
     }
 
     private captureTailFrame(videoPath: string, name: string) {
-        return new Promise<string>((resolve, reject) => {
+        return new Promise<ReturnType<Stores["media"]["store"]>>((resolve, reject) => {
             const chunks: Buffer[] = [];
             const errors: Buffer[] = [];
             const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-sseof", "-0.05", "-i", videoPath, "-frames:v", "1", "-vf", "scale='if(gt(iw,ih),min(768,iw),-2)':'if(gt(iw,ih),-2,min(768,ih))'", "-f", "image2pipe", "-vcodec", "png", "pipe:1"], { stdio: ["ignore", "pipe", "pipe"] });
@@ -773,15 +1167,40 @@ export class CanvasH3Runner {
             child.once("error", reject);
             child.once("exit", (code) => {
                 if (code !== 0 || !chunks.length) return reject(new Error(`截取上一段尾帧失败: ${Buffer.concat(errors).toString("utf8").trim()}`));
-                resolve(this.stores.media.store(Buffer.concat(chunks), { name, mimeType: "image/png", category: "input" }).filePath);
+                resolve(this.stores.media.store(Buffer.concat(chunks), { name, mimeType: "image/png", category: "input" }));
             });
         });
     }
 }
 
+/** Append a soft continuity reference without replacing saved keyframes or renumbering images. */
+export function routeTailFrameInput(
+    taskMode: string,
+    images: readonly string[],
+    actualReferences: readonly Record<string, unknown>[],
+    tailReference: Record<string, unknown>,
+) {
+    const tailPath = String(tailReference.resolved || "");
+    if (!tailPath) throw new Error("尾帧参考缺少截取后的图片路径");
+    const routedImages = [...images, tailPath];
+    if (routedImages.length > 9) throw new Error("追加尾帧参考后图片超过 MiniMax H3 的 9 张上限，请减少下一段的其他图片参考");
+    const routedTail: Record<string, unknown> = {
+        ...tailReference,
+        role: "motion_reference", usage: "continuity_reference",
+    };
+    return {
+        images: routedImages,
+        actualReferences: [...actualReferences.slice(0, images.length), routedTail, ...actualReferences.slice(images.length)],
+        // A reference image is not a forced first/last keyframe. Persisted mode
+        // remains unchanged; the effective runtime mode is logged by the caller.
+        taskMode: "ref2va",
+        tailImageOrdinal: routedImages.length,
+    };
+}
+
 /**
- * 决定本段是否消费上一段成品视频。尾帧接续可用于单独生成下一段；整段参考视频仍只在链式续跑中生效。
- *  - tailFrameContinuation 标在【上一段】上：生成本段时抓该段尾帧作为首帧参考图；
+ * 决定本段是否消费上一段成品视频。尾帧参考可用于单独生成下一段；整段参考视频仍只在链式续跑中生效。
+ *  - tailFrameContinuation 标在【上一段】上：生成本段时追加该段尾帧作为连续性参考；
  *  - previousVideoAsReference 标在【本段】上：链式续跑时把上一段成品整体作为参考视频喂进本段（默认关）。
  * motionContextEnabled 只控制 V15 AV latent 续写，不属于这里的成品视频消费逻辑；
  * 不得用它隐式触发 previousVideoAsReference。
@@ -814,13 +1233,19 @@ export function buildH3ContinuationTask(workflow: string, group: string, run: st
     return JSON.stringify({ workflow, node: "nf_v15", group, run, index });
 }
 
+function h3RunIntentFingerprint(input: H3RunInput): string {
+    const { runPlan: _frozen, ...intent } = normalizeInput(input);
+    return stableH3Fingerprint(intent);
+}
+
 function normalizeInput(input: H3RunInput): H3RunInput {
     const projectId = String(input.projectId || "");
     if (!projectId) throw new Error("projectId 必填");
     if (!input.nodeId && !input.nodeIds?.length) throw new Error("nodeId 或 nodeIds 必填");
     const rawParams = recordOf(input.params);
-    const hasCanonicalizableOverride = ["mode", "taskMode", "noiseSeedMode", "noiseSeed", "seed", "loraSlots", "loraName", "loraStrength"].some((key) => Object.prototype.hasOwnProperty.call(rawParams, key));
-    return { ...input, projectId, nodeId: input.nodeId ? String(input.nodeId) : undefined, nodeIds: input.nodeIds?.map(String), segmentId: input.segmentId ? String(input.segmentId) : undefined, params: hasCanonicalizableOverride ? normalizeH3Params(rawParams, true) : rawParams };
+    // Normalize after merging each Clip's settings. Resolving defaults here
+    // would give the whole batch one seed and override unrelated fixed seeds.
+    return { ...input, projectId, nodeId: input.nodeId ? String(input.nodeId) : undefined, nodeIds: input.nodeIds?.map(String), segmentId: input.segmentId ? String(input.segmentId) : undefined, params: rawParams };
 }
 
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
@@ -910,15 +1335,15 @@ function firstPassReferencesFromLog(logs: ReturnType<Stores["logs"]["list"]>, se
     return references.every(Boolean) ? references as Array<Record<string, unknown>> : null;
 }
 
-function appendTailFramePrompt(prompt: string, fromClip: string) {
-    let shifted = prompt;
-    let max = 0;
-    for (const match of shifted.matchAll(/<Picture\s+(\d+)>/gi)) max = Math.max(max, Number(match[1]));
-    for (let index = max; index >= 1; index--) shifted = shifted.replace(new RegExp(`<Picture\\s+${index}>`, "gi"), `<Picture ${index + 1}>`);
-    const definition = `<Picture 1> is the opening frame of this segment, hard-cut from the ending frame of ${fromClip} to anchor character and scene continuity.`;
-    const retention = `<Picture 1> ([Shot 1] first frame): partially_preserved - the ending frame of ${fromClip} is hard-cut into this segment as the opening frame; preserve the character's identity, pose, and ongoing action across the cut, but treat it as a new shot/scene (not a seamless match-cut continuation).`;
-    const withDefinition = /^subject_definitions\s*[:：]/m.test(shifted) ? appendToSection(shifted, "subject_definitions", definition) : shifted;
-    return appendToSection(withDefinition, "retention_analysis", retention);
+export function appendTailFramePrompt(prompt: string, fromClip: string, tailImageOrdinal = 1) {
+    if (!Number.isInteger(tailImageOrdinal) || tailImageOrdinal < 1 || tailImageOrdinal > 9) throw new Error("无效的尾帧参考图片编号");
+    const picture = `<Picture ${tailImageOrdinal}>`;
+    const definition = `${picture} is the ending frame from ${fromClip} and defines the required opening state of this segment.`;
+    const retention = `${picture}: partially_preserved - the first frame must inherit the character pose, movement direction, scene layout, lighting and ongoing action state, including who holds each prop and the stage of any ongoing interaction. The next shot may change camera position or framing while preserving this physical state.`;
+    const cue = `Start this segment from the physical state shown in ${picture} from ${fromClip}, then continue the planned action. If the current storyboard shows a conflicting opening pose, prop ownership or action phase, the tail frame takes priority for the first-frame state; adapt the planned camera and composition to that state. Do not reset or repeat an action already completed in the preceding segment.`;
+    const withDefinition = appendToSection(prompt, "subject_definitions", definition);
+    const withRetention = appendToSection(withDefinition, "retention_analysis", retention);
+    return appendToSection(withRetention, "detailed_description", cue);
 }
 
 function appendToSection(prompt: string, section: string, line: string) {

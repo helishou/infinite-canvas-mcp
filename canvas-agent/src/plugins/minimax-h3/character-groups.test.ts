@@ -49,3 +49,9 @@ test("未知角色节点、非 character 节点和未知服装选择都拒绝", 
     assert.throws(() => buildCharacterGroupFromExistingNode(node, { selectedOutfitStorageKeys: ["image:not-from-source"] }), /不属于源角色节点/);
     assert.throws(() => buildCharacterGroupFromExistingNode(node, { selectedOutfitStorageKeys: [] }), /至少选择一套/);
 });
+
+test("角色绑定在写入前指出缺失的正式资产和服装媒体", () => {
+    const selectedOutfitStorageKeys = ["image:shen-zhao-1"];
+    assert.throws(() => buildCharacterGroupFromExistingNode({ ...node, metadata: { ...node.metadata, characterAssetId: "" } }, { selectedOutfitStorageKeys }), /缺少正式 characterAssetId.*assets_upsert_batch/);
+    assert.throws(() => buildCharacterGroupFromExistingNode({ ...node, metadata: { ...node.metadata, characterImages: [{ outfit: "空目录项" }] } }, { selectedOutfitStorageKeys }), /characterImages\[0\].*storageKey\/url/);
+});

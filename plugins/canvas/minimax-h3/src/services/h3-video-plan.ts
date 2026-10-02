@@ -1,4 +1,5 @@
 import type { H3Ref, H3Segment } from "../types";
+import { segmentRefsPatch } from "./h3-data";
 
 export type H3PlanDraft = {
   id: string;
@@ -146,8 +147,7 @@ export function materializePlanSegment(draft: H3PlanDraft, refs: H3Ref[], taskMo
     music: draft.music,
     constraints: draft.constraints || [],
     prompt: promptFor(draft, ordered),
-    refItems: ordered,
-    refs: { image: ordered.filter((ref) => ref.type === "image"), video: ordered.filter((ref) => ref.type === "video"), audio: ordered.filter((ref) => ref.type === "audio") },
+    ...segmentRefsPatch(ordered),
     status: "idle",
     result: "",
     results: [],

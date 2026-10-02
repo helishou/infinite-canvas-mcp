@@ -21,12 +21,12 @@ test("H3 确认 HTTP 入口校验快照，普通取消不能取消暂停任务",
   try {
     const unauthenticated = await fetch(`${url}/tasks/parent/h3-confirmation`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     assert.equal(unauthenticated.status, 401);
-    const invalid = await fetch(`${url}/tasks/parent/h3-confirmation`, { method: "POST", headers, body: JSON.stringify({ action: "confirm", segmentIds: [] }) });
+    const invalid = await fetch(`${url}/tasks/parent/h3-confirmation`, { method: "POST", headers, body: JSON.stringify({ action: "confirm", segmentId: "" }) });
     assert.equal(invalid.status, 400);
     const cancelled = await fetch(`${url}/tasks/parent/cancel`, { method: "POST", headers });
     assert.equal(cancelled.status, 409);
     assert.equal(db.getTask("parent")!.status, "awaiting_confirmation");
-    const input = { action: "keep_first_pass", segmentIds: ["clip-1"], firstPassFingerprint: "fingerprint" };
+    const input = { action: "keep_first_pass", segmentId: "clip-1", expectedRevision: 0 };
     const response = await fetch(`${url}/tasks/parent/h3-confirmation`, { method: "POST", headers, body: JSON.stringify(input) });
     assert.equal(response.status, 200);
     assert.equal((await response.json() as { task: { id: string } }).task.id, "parent");

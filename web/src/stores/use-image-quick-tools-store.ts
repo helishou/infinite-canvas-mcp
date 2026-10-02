@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import { fetchSettings, saveSettings } from "@/services/settings-api";
-import { defaultImageQuickToolIds, type ImageQuickToolId } from "@/components/canvas/canvas-image-toolbar-tools";
+import { defaultImageQuickToolIds, normalizeImageQuickToolIds, type ImageQuickToolId } from "@/components/canvas/canvas-image-toolbar-tools";
 
 export type ImageQuickToolsConfig = {
     ids: ImageQuickToolId[];
@@ -22,17 +22,20 @@ export const useImageQuickToolsStore = create<ImageQuickToolsStore>((set) => ({
     setConfig: (config) => {
         set({ ids: config.ids, showLabels: config.showLabels });
         if (saveTimer) clearTimeout(saveTimer);
-        saveTimer = setTimeout(() => { saveTimer = null; void saveSettings({ imageQuickTools: config }); }, 500);
+        saveTimer = setTimeout(() => { saveTimer = null; void saveSettings({ imageQuickTools: { ...config, version: 2 } }); }, 500);
     },
 }));
 
 async function hydrate() {
     const settings = await fetchSettings();
     if (settings.imageQuickTools) {
-        const data = settings.imageQuickTools as Partial<ImageQuickToolsConfig>;
-        const ids = Array.isArray(data.ids) ? (data.ids as ImageQuickToolId[]) : defaultImageQuickToolIds;
+        const data = settings.imageQuickTools as Partial<ImageQuickToolsConfig> & { version?: number };
+        const savedIds = Array.isArray(data.ids) ? normalizeImageQuickToolIds(data.ids) : defaultImageQuickToolIds;
+        const version = Number(data.version) || 1;
+        const ids = version < 2 ? normalizeImageQuickToolIds([...savedIds, "autoLevels"]) : savedIds;
         const showLabels = data.showLabels === true;
         useImageQuickToolsStore.setState({ ids, showLabels });
+        if (version < 2) void saveSettings({ imageQuickTools: { ids, showLabels, version: 2 } });
     }
 }
 

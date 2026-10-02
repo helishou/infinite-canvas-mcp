@@ -17,11 +17,37 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { applyBackendCanvasDelta, diffCanvasProject, detectCanvasConflicts, isLocalProjectNewer, type CanvasProject } from "./use-canvas-store";
+import { reorderCanvasReferenceConnections } from "@/lib/canvas/canvas-resource-references";
+
+test("角色主图差量更新下游选择且不改旧基线或历史参考", () => {
+    const base = makeProject([
+        { id: "char", type: "character", metadata: { characterPrimaryIndex: 0, characterImages: [{ storageKey: "image:a" }, { storageKey: "image:b" }] } } as any,
+        { id: "target", type: "config", metadata: { characterReferences: { char: { imageKeys: ["image:a"], voiceEnabled: false } }, images: [{ id: "old", generationSnapshot: { references: [{ storageKey: "image:a" }] } }] } } as any,
+    ]);
+    const next = applyBackendCanvasDelta(base, [{ type: "update_node", id: "char", metadata: { characterPrimaryIndex: 1 } }], 2);
+    assert.deepEqual(next.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:b"]);
+    assert.deepEqual(base.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:a"]);
+    assert.deepEqual(next.nodes[1].metadata?.images, base.nodes[1].metadata?.images);
+});
 
 test("列表摘要只提交列表字段，不把未加载的空节点解释成删除", () => {
     const base = makeProject([makeH3Node("h", [])]);
     const summary = { ...base, summary: { nodeCount: 1, connectionCount: 0 }, nodes: [], title: "新名称" };
     assert.deepEqual(diffCanvasProject(base, summary), [{ type: "update_project", patch: { title: "新名称" } }]);
+});
+
+test("参考连线改序通过细粒度 ops 回放，保留连线 ID 与其它目标", () => {
+    const base = makeProject([], { connections: [
+        { id: "a", fromNodeId: "image-a", toNodeId: "target" },
+        { id: "b", fromNodeId: "image-b", toNodeId: "target" },
+        { id: "other", fromNodeId: "image-a", toNodeId: "other", order: 9 },
+    ] });
+    const next = { ...base, connections: reorderCanvasReferenceConnections(base.connections, "target", "image-a", "image-b") };
+    const operations = diffCanvasProject(base, next);
+    assert.deepEqual(operations.map((operation) => operation.type), ["delete_connections", "connect_nodes", "delete_connections", "connect_nodes"]);
+    const replayed = applyBackendCanvasDelta(base, operations, 2);
+    assert.deepEqual(replayed.connections.filter((connection) => connection.toNodeId === "target").map((connection) => [connection.id, connection.order]).sort(), [["a", 1], ["b", 0]]);
+    assert.deepEqual(replayed.connections.find((connection) => connection.id === "other"), base.connections[2]);
 });
 
 test("增量回放保留无关节点对象，不修改原始基线", () => {
@@ -42,6 +68,42 @@ test("Backend 增量回放 MCP 有序组成员时同步槽位和位置", () => {
     const added = next.nodes.find((node) => node.id === "new")!;
     assert.deepEqual(group.metadata?.groupSlots, ["old", "new"]);
     assert.ok(added.position.x < 760 && added.position.y < 480, "远端新增节点应立即落在有序组框内");
+});
+
+test("有序组撤销和重做精确恢复槽位顺序及成员位置尺寸", () => {
+    const before = makeProject([
+        { id: "g", type: "group", title: "有序组", position: { x: 10, y: 20 }, width: 760, height: 480, metadata: { orderedGroup: true, groupSlots: ["a", "b"] } },
+        { id: "a", type: "image", title: "A", position: { x: 58, y: 100 }, width: 180, height: 120, metadata: { groupId: "g" } },
+        { id: "b", type: "image", title: "B", position: { x: 410, y: 100 }, width: 180, height: 120, metadata: { groupId: "g" } },
+    ]);
+    const after = makeProject([
+        { ...before.nodes[0], metadata: { ...before.nodes[0].metadata, groupSlots: ["b", "a"] } },
+        { ...before.nodes[1], position: { x: 410, y: 135 }, width: 160, height: 96 },
+        { ...before.nodes[2], position: { x: 58, y: 135 }, width: 160, height: 96 },
+    ]);
+    const undone = applyBackendCanvasDelta(after, diffCanvasProject(after, before), 2);
+    assert.deepEqual(undone.nodes, before.nodes);
+    const redone = applyBackendCanvasDelta(undone, diffCanvasProject(before, after), 3);
+    assert.deepEqual(redone.nodes, after.nodes);
+});
+
+test("拖出有序组后撤销和重做不覆盖同批次恢复的其他成员布局", () => {
+    const before = makeProject([
+        { id: "g", type: "group", title: "有序组", position: { x: 10, y: 20 }, width: 760, height: 480, metadata: { orderedGroup: true, groupSlots: ["a", "b", "c"] } },
+        { id: "a", type: "image", title: "A", position: { x: 58, y: 100 }, width: 180, height: 120, metadata: { groupId: "g" } },
+        { id: "b", type: "image", title: "B", position: { x: 220, y: 100 }, width: 180, height: 120, metadata: { groupId: "g" } },
+        { id: "c", type: "image", title: "C", position: { x: 410, y: 100 }, width: 180, height: 120, metadata: { groupId: "g" } },
+    ]);
+    const after = makeProject([
+        { ...before.nodes[0], metadata: { ...before.nodes[0].metadata, groupSlots: ["a", "c"] } },
+        { ...before.nodes[1], position: { x: 80, y: 145 }, width: 160, height: 96 },
+        { ...before.nodes[2], position: { x: 900, y: 80 }, metadata: {} },
+        { ...before.nodes[3], position: { x: 415, y: 145 }, width: 160, height: 96 },
+    ]);
+    const undone = applyBackendCanvasDelta(after, diffCanvasProject(after, before), 2);
+    assert.deepEqual(undone.nodes, before.nodes);
+    const redone = applyBackendCanvasDelta(undone, diffCanvasProject(before, after), 3);
+    assert.deepEqual(redone.nodes, after.nodes);
 });
 
 const VIEWPORT = { x: 0, y: 0, k: 1 };

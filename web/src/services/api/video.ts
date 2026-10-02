@@ -5,6 +5,8 @@ import i18n from "@/i18n";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
+import { readImageMeta } from "@/lib/image-utils";
+import { resolveH3VideoSettings } from "@/lib/h3-video-settings";
 import { boolConfig, buildApiUrl, modelOptionName, modelWorkflowMissingMessage, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, resolveModelWorkflow, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
 import { runModelPlugin } from "./model-plugin";
 import { runComfyTask, resolveComfyEndpoint, type LocalReference } from "./comfyui";
@@ -18,7 +20,7 @@ type RequestOptions = { signal?: AbortSignal; videoReferences?: LocalReference[]
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
-export type VideoGenerationTask = { id: string; provider: "openai" | "plugin"; model: string };
+export type VideoGenerationTask = { id: string; provider: "openai" | "plugin" | "comfyui"; model: string; parameters?: { size: string; resolution: string; seconds: string } };
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
 /** Results for scripted (plugin) video models, which run their own create+poll in one shot at task creation. */
@@ -70,12 +72,38 @@ async function runComfyVideoGeneration(config: AiConfig, selectedModel: string, 
         const result = await runComfyTask(comfyEndpoint.endpoint, comfyEndpoint.token, comfy.url, "flashvsr-1.1", prompt, [video], { longEdge: config.size }, options?.signal, options?.onTaskId);
         return { url: result.url, mimeType: result.mimeType || "video/mp4" };
     }
+    const task = await createComfyVideoWorkflowTask(config, selectedModel, workflowName, prompt, references);
+    const run = await pollWorkflowTask(task.id, { signal: options?.signal });
+    const first = run.media?.[0];
+    if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");
+    return { url: first.url, mimeType: first.mimeType || "video/mp4" };
+}
+
+async function createComfyVideoWorkflowTask(config: AiConfig, selectedModel: string, workflowName: string, prompt: string, references: ReferenceImage[]): Promise<VideoGenerationTask> {
     const detail = await fetchWorkflowDetail(workflowName);
     const workflowFields: Record<string, unknown> = { prompt };
     for (const field of detail.config?.fields || []) {
         if (field.type === "text" && field.isPrompt) workflowFields[field.id] = prompt;
     }
     const imageFields = (detail.config?.fields || []).filter((field) => isWorkflowImageField(field, detail.workflow));
+    if (references.length > imageFields.length) throw new Error(`工作流只配置了 ${imageFields.length} 个图片输入，当前提供了 ${references.length} 张参考图`);
+    const native = Object.entries(detail.workflow).find(([, value]) => (value as { class_type?: string })?.class_type === "NanFengH3MultiReferenceGeneratorV15");
+    let parameters: VideoGenerationTask["parameters"];
+    if (native) {
+        const inputs = (native[1] as { inputs: Record<string, unknown> }).inputs;
+        const originalRatio = Boolean(inputs["图生视频"] || inputs["首尾帧"]);
+        const referenceDimensions = config.size === "auto" && originalRatio && references[0] ? await readImageMeta(await imageToDataUrl(references[0])) : undefined;
+        let adapted;
+        try { adapted = resolveH3VideoSettings(config, { originalRatio, referenceDimensions, aspectRatio: String(inputs["画面比例"]), latentAlign: Number(inputs["H3潜空间对齐"] || 2) }); }
+        catch { throw new Error(i18n.t("h3Video.durationError")); }
+        const values: Record<string, unknown> = { 时长秒: adapted.fields.duration, 画面比例: adapted.fields.aspect_ratio, 百万像素: adapted.fields.megapixels };
+        for (const [input, value] of Object.entries(values)) {
+            const field = detail.config?.fields.find((item) => item.input === input && item.node.split(",").includes(native[0]));
+            if (!field) throw new Error(i18n.t("h3Video.missingField", { field: input }));
+            workflowFields[field.id] = value;
+        }
+        parameters = adapted.parameters;
+    }
     for (let index = 0; index < imageFields.length; index += 1) {
         const reference = references[index];
         if (!reference) continue;
@@ -83,14 +111,25 @@ async function runComfyVideoGeneration(config: AiConfig, selectedModel: string, 
         if (dataUrl) workflowFields[imageFields[index].id] = dataUrl;
     }
     const { taskId } = await runWorkflow(workflowName, workflowFields, detail.config);
-    const run = await pollWorkflowTask(taskId);
-    const first = run.media?.[0];
-    if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");
-    return { url: first.url, mimeType: first.mimeType || "video/mp4" };
+    return { id: taskId, provider: "comfyui", model: selectedModel, ...(parameters ? { parameters } : {}) };
 }
 
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationTask> {
     const selectedModel = (config.model || config.videoModel).trim();
+    if (resolveModelChannel(config, selectedModel).kind === "comfyui") {
+        const workflowName = resolveModelWorkflow(config, selectedModel, references.length);
+        if (!workflowName) throw new Error(modelWorkflowMissingMessage(config, selectedModel, references.length));
+        if (/flashvsr/i.test(workflowName)) {
+            // 源视频修复保留已有 preset 执行入口，不能交给只注入参考图片的通用执行器。
+            const result = await runComfyVideoGeneration(config, selectedModel, prompt, references, options);
+            const id = nanoid();
+            pluginVideoResults.set(id, result);
+            return { id, provider: "plugin", model: selectedModel };
+        }
+        const task = await createComfyVideoWorkflowTask(config, selectedModel, workflowName, prompt, references);
+        options?.onTaskId?.(task.id);
+        return task;
+    }
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
     const script = resolveModelScript(config, selectedModel);
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
@@ -99,6 +138,13 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
 }
 
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    if (task.provider === "comfyui") {
+        // 使用已有本地工作流轮询，避免本地生成误走视频 API 的轮询窗口。
+        const run = await pollWorkflowTask(task.id, { signal: options?.signal });
+        const first = run.media?.[0];
+        if (!first?.url) return { status: "failed", error: "ComfyUI 工作流完成但没有返回媒体" };
+        return { status: "completed", result: { url: first.url, mimeType: first.mimeType || "video/mp4" } };
+    }
     if (task.provider === "plugin") {
         const result = pluginVideoResults.get(task.id);
         return result ? { status: "completed", result } : { status: "failed", error: apiText("pluginVideoExpired") };

@@ -9,8 +9,10 @@
     "./http": "./dist/server/http.js",
     "./plugin-mcp": "./dist/server/plugin-mcp.js",
     "./schemas": "./dist/canvas/schemas.js",
+    "./state-summary": "./dist/canvas/state-summary.js",
     "./collaboration-tools": "./dist/canvas/collaboration-tools.js",
     "./runtime-fields": "./dist/canvas/runtime-fields.js",
+    "./drama/production-contract": "./dist/drama/production-contract.js",
     "./operations": "./dist/canvas/operations.js",
     "./generation-contract": "./dist/canvas/generation-contract.js",
     "./generation-api": "./dist/canvas/generation-api.js",
@@ -18,7 +20,9 @@
     "./model-workflow": "./dist/canvas/model-workflow.js",
     "./runtime/comfy-client": "./dist/runtime/comfy-client.js",
     "./runtime/agent-runtime": "./dist/runtime/agent-runtime.js",
-    "./plugins/minimax-h3/node-factory": "./dist/plugins/minimax-h3/node-factory.js"
+    "./plugins/minimax-h3/node-factory": "./dist/plugins/minimax-h3/node-factory.js",
+    "./plugins/minimax-h3/prompt-sections": "./dist/plugins/minimax-h3/prompt-sections.js",
+    "./plugins/minimax-h3/style-templates": "./dist/plugins/minimax-h3/style-templates.js"
   },
   "types": "./dist/index.d.ts",
   "bin": {
@@ -33,20 +37,29 @@
     "dev": "tsx src/index.ts",
     "debug": "tsx src/index.ts --debug",
     "test": "node ../scripts/test.mjs",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/bundle-production-sop.mjs",
     "start": "node dist/index.js",
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "@openai/codex": "0.146.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "express": "^5.1.0",
     "gray-matter": "^4.0.3",
     "strip-ansi": "7.2.0",
     "winston": "^3.19.0",
     "yaml": "^2.9.0",
     "yjs": "^13.6.32",
-    "zod": "^3.25.0"
+    "zod": "^3.25.76"
+  },
+  "peerDependencies": {
+    "@openai/codex": "0.160.0"
+  },
+  "peerDependenciesMeta": {
+    "@openai/codex": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

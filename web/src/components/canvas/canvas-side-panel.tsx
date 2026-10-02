@@ -14,9 +14,9 @@ import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
 import { CustomPromptDialog } from "@/components/prompts/custom-prompt-dialog";
 import { fetchBackendCanvasDrama } from "@/services/backend-api";
-import { fetchSourcePrompts, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
+import { fetchSourcePrompts, isCustomPrompt, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
-import { ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, getImagePreviewRevision, isImageFile, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
@@ -120,7 +120,7 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab projectId={projectId} onInsert={onInsertAsset} theme={theme} />
                     ) : (
-                        <CanvasPromptsTab onInsert={onInsertAsset} theme={theme} />
+                        <CanvasPromptsTab onInsert={onInsertAsset} nodes={nodes} theme={theme} />
                     )}
                 </div>
                 <button type="button" className="absolute inset-y-0 right-0 z-40 w-4 translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label={t("canvas.sidePanel.resize")} />
@@ -489,7 +489,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
         const dramaId = dramaFilter !== ALL_ASSET_DRAMAS && dramaFilter !== UNASSIGNED_ASSET_DRAMA ? dramaFilter : null;
         try {
             for (const file of files) {
-                if (file.type.startsWith("image/")) {
+                if (isImageFile(file)) {
                     const image = await uploadImage(file);
                     addAsset({ kind: "image", title: file.name || t("assets.kinds.image"), coverUrl: image.url, tags: [], dramaId, data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
                     added += 1;
@@ -525,7 +525,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
                     <Plus className="size-3.5" />
                     {t("canvas.sidePanel.add")}
                 </button>
-                <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple className="hidden" onChange={(e) => void handleFiles(e.target.files)} />
+                <input ref={fileInputRef} type="file" accept="image/*,.svg,video/*" multiple className="hidden" onChange={(e) => void handleFiles(e.target.files)} />
             </div>
             <div className="flex items-center gap-2 px-3 pb-2">
                 <Clapperboard className="size-3.5 shrink-0 opacity-45" />
@@ -730,7 +730,7 @@ function ImageAssetCover({ asset }: { asset: ImageAsset }) {
 // Prompt library tab: collapsible source groups, lazy loading, and copy or text-node insertion actions.
 // ---------------------------------------------------------------------------
 
-const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { onInsert: (payload: InsertAssetPayload) => void; theme: CanvasTheme }) {
+const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, nodes, theme }: { onInsert: (payload: InsertAssetPayload) => void; nodes: CanvasNodeData[]; theme: CanvasTheme }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const sources = usePromptSourceStore((state) => state.sources);
@@ -744,6 +744,7 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
     const [customOpen, setCustomOpen] = useState(true);
     const [detail, setDetail] = useState<Prompt | null>(null);
     const [addDialogOpen, setAddDialogOpen] = useState(false);
+    const [editPrompt, setEditPrompt] = useState<Prompt | null>(null);
     const addPromptAction = (
         <button
             type="button"
@@ -796,8 +797,17 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
                     {!enabledSources.length && customPrompts.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("canvas.sidePanel.noPrompts")} className="pt-12" /> : null}
                 </div>
             </div>
-            <PromptDetailDialog prompt={detail} onClose={() => setDetail(null)} onCopy={(prompt) => void copyPrompt(prompt)} />
-            <CustomPromptDialog open={addDialogOpen} mode="add" onClose={() => setAddDialogOpen(false)} />
+            <PromptDetailDialog
+                prompt={detail}
+                onClose={() => setDetail(null)}
+                onCopy={(prompt) => void copyPrompt(prompt)}
+                onEdit={detail && isCustomPrompt(detail) ? (prompt) => {
+                    setDetail(null);
+                    setEditPrompt(prompt);
+                } : undefined}
+            />
+            <CustomPromptDialog open={addDialogOpen} mode="add" canvasNodes={nodes} onClose={() => setAddDialogOpen(false)} />
+            <CustomPromptDialog open={Boolean(editPrompt)} mode="edit" initial={editPrompt} canvasNodes={nodes} onClose={() => setEditPrompt(null)} />
         </div>
     );
 });

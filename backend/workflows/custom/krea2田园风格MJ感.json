@@ -1,0 +1,235 @@
+{
+  "49": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "97",
+        0
+      ],
+      "vae": [
+        "16",
+        0
+      ]
+    }
+  },
+  "9": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+      "conditioning": [
+        "3",
+        0
+      ]
+    }
+  },
+  "96": {
+    "class_type": "ConditioningKrea2Rebalance",
+    "inputs": {
+      "conditioning": [
+        "3",
+        0
+      ],
+      "preset": "balanced",
+      "per_layer_weights": "1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.5, 5.0, 1.1, 4.0, 1.0",
+      "multiplier": 1,
+      "renormalize": true
+    }
+  },
+  "7": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+      "type": "krea2",
+      "device": "default"
+    }
+  },
+  "10": {
+    "class_type": "TTResolutionSelector",
+    "inputs": {
+      "use_custom_resolution": false,
+      "resolution": "1920x1080 (16:9) (横屏)",
+      "custom_width": 2016,
+      "custom_height": 864
+    }
+  },
+  "108": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "105",
+        0
+      ],
+      "lora_name": "krea2-Cc-MJ-风格滤镜.safetensors",
+      "strength_model": 0.4
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "7",
+        0
+      ],
+      "text": [
+        "113",
+        0
+      ]
+    }
+  },
+  "103": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "49",
+        0
+      ],
+      "filename_prefix": "ComfyUI"
+    }
+  },
+  "112": {
+    "class_type": "llama_cpp_parameters",
+    "inputs": {
+      "max_tokens": 2048,
+      "top_k": 30,
+      "top_p": 0.9,
+      "min_p": 0.05,
+      "typical_p": 1,
+      "temperature": 0.8,
+      "repeat_penalty": 1,
+      "frequency_penalty": 0,
+      "presence_penalty": 1,
+      "mirostat_mode": 0,
+      "mirostat_eta": 0.1,
+      "mirostat_tau": 5,
+      "image_min_tokens": 0,
+      "image_max_tokens": 0
+    }
+  },
+  "113": {
+    "class_type": "llama_cpp_instruct_adv",
+    "inputs": {
+      "llamamodel": [
+        "111",
+        0
+      ],
+      "parameters": [
+        "112",
+        0
+      ],
+      "preset_prompt": "Normal - Describe",
+      "custom_prompt": [
+        "102",
+        0
+      ],
+      "system_prompt": "# Krea 2 万物复刻模板 3.1 \n\n用途：上传图片后，严格反推原图，或在保留原图风格、构图、光影、镜头、质感的前提下按文字要求修改，输出一段可直接复制到 Krea 2 的英文 Prompt。\n\n## 1. 适用模式\n\n1. 图像反推：只有图片，没有额外修改要求时，严格还原原图。\n2. 图文融合：有图片，也有修改要求时，只修改用户指定部分，其他尽量保留。\n3. 多图参考：多张图片时，按用户指定分配主体、动作、风格、构图、光影、场景；未指定时默认第一张为主参考。\n4. 没有图片时，不使用本模板，改用《Krea2 万能生图模板》。\n\n## 2. 最终输出规则\n\n最终只输出一段英文 Prompt。\n不要输出标题、解释、拆解、参数、表格、Markdown、中文分析。\n不要出现 uploaded image、reference image、based on the image、AI-generated、AI style。\nPrompt 建议 250–500 英文词；用户要求更短时可压缩，但必须保留主体、构图、光影、风格、材质、限制词。\n\n## 3. 内部识别维度\n\n反推图片时必须观察，但不输出分析过程：\n\n主体：主体类别、数量、形态、比例、结构、姿态、动作、摆放、与环境关系。\n风格：真人摄影、电影剧照、商业摄影、产品摄影、动漫、厚涂、CG、国风、卡牌、海报、工业渲染等，不得误判。\n构图：画幅、景别、视角、主体位置、主体占比、裁切、留白、前景、中景、背景、视觉重心。\n镜头：镜头距离、焦段感、景深、透视压缩、虚化、运动感、边缘畸变。\n光影：主光方向、辅光、轮廓光、环境光、反射光、阴影软硬、色温、明暗对比、高光位置。\n色彩：主色、辅助色、冷暖关系、饱和度、对比度、局部强调色、整体色彩气质。\n材质：皮肤、毛发、布料、金属、玻璃、木材、石材、水面、雾气、纸张、塑料、陶瓷、植物、食物等质感。\n氛围：安静、梦幻、压迫、温暖、清冷、复古、未来感、商业感、故事感、电影感。\n成像：高清、柔焦、锐利、胶片颗粒、噪点、光晕、雾化、真实瑕疵、商业完成度。\n限制：避免文字、水印、logo、错误结构、风格漂移、材质漂移、构图漂移、过度美化。\n\n## 4. 人物锁定规则\n\n图片有人物时必须优先锁定：\n\n可见年龄印象、肤色明度与冷暖、可见族裔呈现、脸型骨相、额头比例、颧骨、下颌线、眼形、眼距、眉眼关系、鼻梁、鼻翼、唇形、嘴角状态、发际线、发型轮廓、发质、表情强度、视线方向、头部角度、肩颈姿态、身体朝向、手臂位置、手指状态、身体重心、服装结构、皮肤纹理、毛孔、妆容浓淡、真实瑕疵。\n\n注意：可见族裔呈现只能写画面中可见的视觉特征，不能断言真实国籍、血统、民族、宗教或身份。\n\n推荐英文表达：preserve the visible ethnic appearance, skin tone temperature, facial bone structure, facial proportions, eye shape, nose bridge, lip shape, jawline, cheekbone structure, hairstyle silhouette, age impression, gaze direction, mouth expression, head angle, shoulder posture, hand placement, and emotional intensity.\n\n## 5. 非人物还原重点\n\n动物：物种、毛发/羽毛/鳞片、眼神、姿态、毛色花纹。\n植物：花瓣、叶片、枝干、生长方向、透光感、成熟状态。\n产品：形状比例、材质、表面工艺、按键接口、反光、包装留白。\n美食：食材层次、色泽、油亮/水汽、摆盘、热气、质感。\n建筑室内：空间结构、透视线、材质、窗光、墙线、纵深。\n服饰鞋包：版型、面料、缝线、垂坠、配色、五金件。\n珠宝文玩：金属、宝石、切割面、镶嵌、包浆、微距反光。\n车辆机械：结构比例、车身线条、反光、部件、环境映射。\nUI/平面：布局、色彩系统、图标风格、留白、视觉层级。\n玩具手办：头身比、PVC/树脂/搪胶/毛绒质感、涂装、关节结构。\n未分类主体：按最接近类别处理，补充独有结构和材质。\n\n## 6. 必须保留与禁止修改\n\n必须保留：主体类别、数量、结构比例、姿态动作、主体占比、景别、构图裁切、镜头距离、视角、光源方向、明暗关系、色温、色彩气质、背景层次、风格媒介、材质、成像质感。\n\n禁止擅自：真人变动漫、动漫变真人、插画变摄影、摄影变 CG、产品摄影变 3D 渲染、近景变全身、全身变特写、冷光变暖光、柔光变硬光、哑光变高光、改变主体比例、添加不存在的重要道具、生成文字/logo/水印、过度磨皮、改变人物年龄感、脸型、五官比例、肤色冷暖、神态、动作和眼神方向。\n\n## 7. 图文融合优先级\n\n用户明确要求 > 原图主体 > 原图风格 > 原图构图 > 原图光影 > 原图材质。\n\n只换主体：保留原图风格、构图、镜头、光影、背景结构。\n只换服装/材质/包装：保留姿态、结构、镜头、光影、背景。\n只换背景：保留主体、动作、表情、镜头和光影逻辑。\n只要风格迁移：保留参考图风格、色彩、光影、质感，允许重新组织主体和场景。\n严格反推：不得增加原图没有的动作、情绪、道具、背景和风格。\n\n## 8. 英文 Prompt 基础结构\n\nCreate a highly detailed image featuring {main subject} with the same visual structure, pose or arrangement, framing, lighting logic, color mood, material treatment, and image finish. The subject is positioned {位置与占比}. The camera uses {景别、视角、焦段、景深}. The composition keeps {裁切、留白、前中后景、视觉重心}. The lighting comes from {光源方向、软硬、色温、阴影、高光}. The visual style remains {摄影/插画/CG/产品/电影等准确风格}. Materials and textures include {材质、纹理、真实瑕疵}. Preserve {最关键的脸、动作、结构、风格、光影}. Avoid text, logo, watermark, distorted anatomy, wrong proportions, extra objects, style drift, material drift, lighting drift, over-smoothing, and over-beautification.\n",
+      "input_mode": "one by one",
+      "max_frames": 24,
+      "video_size": 256,
+      "seed": 4614028313345
+    }
+  },
+  "97": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "107",
+        0
+      ],
+      "positive": [
+        "96",
+        0
+      ],
+      "negative": [
+        "9",
+        0
+      ],
+      "latent_image": [
+        "2",
+        0
+      ],
+      "seed": 213576804468045,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "er_sde",
+      "scheduler": "simple",
+      "denoise": 1
+    }
+  },
+  "2": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": [
+        "10",
+        0
+      ],
+      "height": [
+        "10",
+        1
+      ],
+      "batch_size": 1
+    }
+  },
+  "102": {
+    "class_type": "CR Prompt Text",
+    "inputs": {
+      "prompt": "鸣潮菲比的coser图"
+    }
+  },
+  "111": {
+    "class_type": "llama_cpp_model_loader",
+    "inputs": {
+      "model": "Qwen3-VL-8B-Instruct-abliterated-v2.0.Q4_K_M.gguf",
+      "mmproj_model": "Qwen3-VL-8B-Instruct-abliterated-v2.0.mmproj-Q8_0.gguf",
+      "chat_handler": "Qwen3-VL",
+      "think_mode": false,
+      "n_ctx": 8192,
+      "n_gpu_layers": -1,
+      "keep_model_loaded": false
+    }
+  },
+  "13": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "moodyKrea2Mix_v50.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "105": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "13",
+        0
+      ],
+      "lora_name": "krea2\\krea2小志_xm_k20_texture.safetensors",
+      "strength_model": 0.6000000000000001
+    }
+  },
+  "106": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "108",
+        0
+      ],
+      "lora_name": "krea2\\K2-MJ美学增强Afterlight_v1.safetensors",
+      "strength_model": 0.4
+    }
+  },
+  "107": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "106",
+        0
+      ],
+      "lora_name": "krea2\\krea2-Cc-MJ-影视柔光.safetensors",
+      "strength_model": 1
+    }
+  },
+  "16": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    }
+  }
+}

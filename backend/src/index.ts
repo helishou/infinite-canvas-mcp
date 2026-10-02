@@ -25,7 +25,7 @@ import { DirectImageBackend } from "./runtime/chatgpt-image.js";
 import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
 import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
-import { CanvasH3Runner } from "./canvas/h3-runner.js";
+import { boundH3ParentTaskIds, CanvasH3Runner } from "./canvas/h3-runner.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
 import { CanvasTextDispatcher } from "./canvas/text-dispatcher.js";
 import { CanvasVideoDispatcher } from "./canvas/video-dispatcher.js";
@@ -37,6 +37,9 @@ import { registerCanvasBrowserScriptRoutes } from "./server/browser-script-route
 import { acquireBackendInstanceLock } from "./instance-lock.js";
 import { CanvasReferenceService } from "./canvas/reference-service.js";
 import { registerCanvasReferenceRoutes } from "./server/canvas-reference-routes.js";
+import { EpisodeProductionService } from "./drama/production.js";
+import { EpisodeProductionRunner } from "./drama/production-runner.js";
+import { registerDramaProductionRoutes } from "./server/drama-production-routes.js";
 import { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
 import {
   applyNetworkSettings,
@@ -55,7 +58,7 @@ async function startBackendHttpServer() {
   const config = loadConfig(true);
   saveConfig(config);
   ensureDataDirs();
-  const releaseInstanceLock = acquireBackendInstanceLock(DATA_DIR);
+  const releaseInstanceLock = await acquireBackendInstanceLock(DATA_DIR);
 
   const db = new BackendDatabase();
   const stores = createStores(db);
@@ -162,7 +165,7 @@ async function startBackendHttpServer() {
         return runtime.comfy.cancel(task.id);
       if (task.kind === "runninghub:minimax-h3")
         return runningHub.cancel(task.id);
-      if (task.kind === "video-concat") return videoConcat.cancel(task.id);
+      if (task.kind === "video-concat" || task.kind === "video-trim") return videoConcat.cancel(task.id);
       if (task.kind === "direct-video") return directVideo.cancel(task.id);
       if (task.kind === "direct-audio") return directAudio.cancel(task.id);
       if (task.kind === "workflow") return workflowExecutor.cancel(task.id);
@@ -223,6 +226,9 @@ async function startBackendHttpServer() {
     },
   );
   registerCanvasGenerationRoutes(app, canvasGeneration);
+  const episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
+  const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
+  registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner);
   registerCanvasBrowserScriptRoutes(app, canvasBrowserScriptDispatcher);
   registerCanvasReferenceRoutes(app, canvasReferences);
   registerAgentRuntimeRoutes(
@@ -255,14 +261,32 @@ async function startBackendHttpServer() {
     stores.mcpObservability,
     () => canvasRealtime.focusedProjectId(),
   );
-  // Backend 重启后继续观察已提交但尚未结束的 ComfyUI 任务；绑定信息在 SQLite 中。
-  // 注意：stores.tasks.list() 默认按 created_at DESC LIMIT 500，仅含最近任务；
-  // 老任务（含孤儿）会被截断，必须用 status 过滤才能覆盖全部 running/queued。
-  for (const task of [
-    ...stores.tasks.list({ status: "running" }),
-    ...stores.tasks.list({ status: "queued" }),
-    ...stores.tasks.list({ status: "awaiting_confirmation", kind: "canvas-h3-run" }),
-  ]) {
+  // 启动时只读取最新 10 条需要恢复的生成任务；超出范围的记录保持原状，
+  // 不因未入选而标记失败。终态只考虑仍绑定的 H3 父任务和未收口的生成日志。
+  const recoveryTasks = db.listStartupRecoveryTasks([...boundH3ParentTaskIds(stores.projects.list())], 10);
+  for (const task of recoveryTasks) {
+    if (task.kind === "canvas-h3-run" && ["succeeded", "failed", "cancelled"].includes(task.status)) {
+      void canvasH3Runner.reconcileTerminal(task).catch((error) =>
+        logger.warn("H3 终态节点回写修复失败", {
+          taskId: task.id,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      continue;
+    }
+    const binding = task.params?.canvasBinding as { generationLogId?: string } | undefined;
+    const pendingLog = binding?.generationLogId ? stores.logs.get(binding.generationLogId) : null;
+    if (["comfyui:minimax-h3", "runninghub:minimax-h3"].includes(task.kind)
+      && ["succeeded", "failed", "cancelled"].includes(task.status)
+      && pendingLog && ["queued", "running"].includes(pendingLog.status)) {
+      void writeBackH3Task(stores, runtime.events, task).catch((error) =>
+        logger.warn("H3 子任务终态日志修复失败", {
+          taskId: task.id,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      continue;
+    }
     if (
       ["queued", "running"].includes(task.status) &&
       task.kind === "canvas-image"
@@ -295,65 +319,26 @@ async function startBackendHttpServer() {
       task.kind === "direct-audio"
     )
       directAudio.resume(task.id);
-    if (
-      ["queued", "running"].includes(task.status) &&
-      task.kind === "canvas-h3-run"
-    )
+    if (task.kind === "canvas-h3-run")
       canvasH3Runner.resume(task);
-    if (
-      ["succeeded", "failed", "cancelled", "awaiting_confirmation"].includes(task.status) &&
-      task.kind === "canvas-h3-run"
-    ) {
-      void canvasH3Runner
-        .reconcileTerminal(task)
-        .catch((error) =>
-          logger.warn("H3 终态节点回写修复失败", {
-            taskId: task.id,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-    }
-    if (
-      ["succeeded", "failed", "cancelled"].includes(task.status) &&
-      (task.kind === "comfyui:minimax-h3" ||
-        task.kind === "runninghub:minimax-h3")
-    ) {
-      const binding = task.params?.canvasBinding as
-        | { generationLogId?: string }
-        | undefined;
-      const log = binding?.generationLogId
-        ? stores.logs.get(binding.generationLogId)
-        : null;
-      if (log && (log.status === "queued" || log.status === "running")) {
-        void writeBackH3Task(stores, runtime.events, task).catch((error) =>
-          logger.warn("H3 子任务终态日志修复失败", {
-            taskId: task.id,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-      }
-    }
     if (
       ["queued", "running"].includes(task.status) &&
       task.kind.startsWith("comfyui:")
     )
       runtime.comfy.resume(task.id);
-      if (
-        ["queued", "running"].includes(task.status) &&
-        task.kind === "runninghub:minimax-h3"
-      )
-        runningHub.resume(task.id);
+    if (["queued", "running"].includes(task.status) && task.kind === "runninghub:minimax-h3")
+      runningHub.resume(task.id);
   }
   // ── 孤儿任务回收（防僵尸堆积）───────────────────────────────────
   // backend 重启（tsx --watch 源码热更、崩溃等）会杀掉内存中的执行循环，遗留
   // status=running/queued 的任务永远无人跟踪。上面的 resume 循环只恢复了
   // 特定类型、且确实提交到 ComfyUI（有 promptId）的任务；其余（如 workflow 类型、
   // 有处理器但从未提交的 comfyui 任务、无恢复处理器的画布任务）是僵尸任务，
-  // 会在列表里无限堆积。此处（尚未监听端口、不会有新任务）统一置为 failed。
-  for (const task of [
-    ...stores.tasks.list({ status: "running" }),
-    ...stores.tasks.list({ status: "queued" }),
-  ]) {
+  // 会在列表里无限堆积。此处仅检查本次入选任务（尚未监听端口、不会有新任务），
+  // 确认无法恢复时置为 failed；未入选的旧任务保持原状。
+  for (const selected of recoveryTasks) {
+    const task = stores.tasks.get(selected.id);
+    if (!task) continue;
     if (task.status !== "queued" && task.status !== "running") continue;
     const hasHandler =
       task.kind === "canvas-image" ||
@@ -399,6 +384,7 @@ async function startBackendHttpServer() {
     }
     // canvas-*/direct-* 类型：上面的 resume 循环已尝试恢复，此处不再处理
   }
+  void episodeProductionRunner.resumePending();
   app.get("/canvas/projects/:id/collaboration", (req, res) => {
     const project = db.getCanvasProject(req.params.id);
     if (!project)

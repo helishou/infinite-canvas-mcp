@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import sharp from "sharp";
+import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import { imageSlotStatus, imageSourceStatus } from "./image-result-slots.js";
 
 import type { ResolvedConfig } from "../config.js";
@@ -46,12 +48,14 @@ export type CanvasImageGenerationInput = {
   model: string;
   prompt: string;
   references?: CanvasImageReference[];
+  loopInputImages?: CanvasImageReference[];
   size?: string;
   width?: number;
   height?: number;
   quality?: string;
   count?: number;
   imageIds?: string[];
+  loopOutput?: CanvasGenerationCommand["loopOutput"];
   params?: Record<string, unknown>;
   clientTaskId?: string;
   resultPolicy?: "replace-active" | "append";
@@ -161,7 +165,7 @@ export class CanvasImageDispatcher {
         metadata: { runtimeTaskId: task.id, status: "loading", runProgress: 0,
           ...(prepared.createOperations.length ? {} : imageSlotStatus(project, normalized.nodeId!, normalized.imageIds, "loading")) },
         metadataDelete: ["errorDetails"],
-      }, ...imageSourceStatus(project, normalized.nodeId!, normalized.sourceNodeId, task.id, "loading", true)], { operationId: `image-task-bind:${task.id}`, runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
+      }, ...(normalized.loopOutput ? [] : imageSourceStatus(project, normalized.nodeId!, normalized.sourceNodeId, task.id, "loading", true))], { operationId: `image-task-bind:${task.id}`, runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
     } catch (error) {
       this.stores.tasks.update(task.id, { status: "failed", error: error instanceof Error ? error.message : String(error) });
       throw error;
@@ -175,7 +179,7 @@ export class CanvasImageDispatcher {
           platform: "canvas-image",
           workflow: plan.workflow || "",
           model: normalized.model,
-          taskMode: normalized.references?.length ? "i2i" : "t2i",
+          taskMode: executionImageInputs(normalized).length ? "i2i" : "t2i",
           prompt: normalized.prompt,
           references:
             normalized.references?.map((reference) => ({
@@ -185,6 +189,7 @@ export class CanvasImageDispatcher {
             })) || [],
           inputCounts: {
             references: normalized.references?.length || 0,
+            loopInputs: normalized.loopInputImages?.length || 0,
             count: Math.max(1, Math.min(4, Math.floor(normalized.count || 1))),
           },
           runtimeTaskId: task.id,
@@ -196,6 +201,7 @@ export class CanvasImageDispatcher {
               normalized.size ||
               `${normalized.width || 1024}x${normalized.height || 1024}`,
             quality: normalized.quality || "auto",
+            ...(normalized.loopInputImages?.length ? { loopInputImages: normalized.loopInputImages.map((image) => ({ name: image.name, mimeType: image.mimeType, storageKey: image.storageKey, url: image.url })) } : {}),
           },
         }).id
       : null;
@@ -244,8 +250,8 @@ export class CanvasImageDispatcher {
   private prepareReferences(
     input: CanvasImageGenerationInput,
   ): CanvasImageGenerationInput {
-    if (!input.references?.length) return input;
-    const references = input.references.map((reference) => {
+    if (!input.references?.length && !input.loopInputImages?.length) return input;
+    const prepare = (reference: CanvasImageReference) => {
       if (
         reference.storageKey &&
         this.stores.media.meta(reference.storageKey)
@@ -273,8 +279,12 @@ export class CanvasImageDispatcher {
         url: this.stores.media.url(stored),
         mimeType: reference.mimeType || stored.mimeType,
       });
-    });
-    return { ...input, references };
+    };
+    return {
+      ...input,
+      ...(input.references ? { references: input.references.map(prepare) } : {}),
+      ...(input.loopInputImages ? { loopInputImages: input.loopInputImages.map(prepare) } : {}),
+    };
   }
 
   private findActiveTask(input: CanvasImageGenerationInput) {
@@ -290,7 +300,9 @@ export class CanvasImageDispatcher {
       quality: input.quality,
       count: input.count,
       imageIds: input.imageIds,
+      loopOutput: input.loopOutput,
       references: input.references,
+      loopInputImages: input.loopInputImages,
       params: input.params,
       referenceNodeIds: input.referenceNodeIds,
       maskEdit: input.maskEdit,
@@ -310,7 +322,9 @@ export class CanvasImageDispatcher {
           quality: current.quality,
           count: current.count,
           imageIds: current.imageIds,
+          loopOutput: current.loopOutput,
           references: current.references,
+          loopInputImages: current.loopInputImages,
           params: current.params,
           referenceNodeIds: current.referenceNodeIds,
           maskEdit: current.maskEdit,
@@ -324,8 +338,10 @@ export class CanvasImageDispatcher {
   async retry(task: RuntimeTask) {
     if (task.kind !== "canvas-image")
       throw new Error(`任务类型 ${task.kind} 不是画布图片任务`);
+    const previous = task.input as CanvasImageGenerationInput;
     const input = {
-      ...(task.input as CanvasImageGenerationInput),
+      ...previous,
+      ...(previous.loopOutput ? { nodeId: previous.sourceNodeId, imageIds: undefined } : {}),
       clientTaskId: `canvas-retry-${crypto.randomUUID()}`,
     };
     const result = this.start(input);
@@ -396,6 +412,33 @@ export class CanvasImageDispatcher {
     this.stores.tasks.update(task.id, { status: "running", progress: 0.02 });
     const result = await this.dispatch(plan, task.id);
     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
+    let aspectFailure: Error | undefined;
+    if (plan.executor === "comfy-workflow") {
+      const expectedRatio = requestedImageRatio(plan.input);
+      for (const media of result.media) {
+        try {
+          if (!media.storageKey) throw new Error("结果缺少归档 storageKey");
+          const actual = await sharp(await this.stores.media.read(media.storageKey)).metadata();
+          media.width = actual.width ?? null;
+          media.height = actual.height ?? null;
+          if (expectedRatio !== null && (!actual.width || !actual.height || Math.abs(actual.width / actual.height - expectedRatio) >= 0.01)) {
+            throw new Error(`目标 ${plan.input.width && plan.input.height ? `${plan.input.width}×${plan.input.height}` : plan.input.size}，实际 ${actual.width || "?"}×${actual.height || "?"}`);
+          }
+        } catch (error) {
+          aspectFailure = new Error(`工作流输出画幅未通过验收：${error instanceof Error ? error.message : String(error)}；已归档媒体未绑定为正式结果`);
+          break;
+        }
+      }
+    }
+    if (aspectFailure) {
+      this.stores.tasks.update(task.id, { status: "failed", error: aspectFailure.message, result: { media: result.media } });
+      this.stores.tasks.addEvent(task.id, "result", { media: result.media, partial: true, error: aspectFailure.message });
+      if (logId) this.logs.update(logId, { status: "failed", error: aspectFailure.message,
+        outputs: result.media.map((media) => ({ url: media.url, storageKey: media.storageKey, mimeType: media.mimeType, width: media.width, height: media.height })),
+        finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAt });
+      await hooks?.onFailed?.(aspectFailure, this.stores.tasks.get(task.id) || task);
+      return;
+    }
     await hooks?.onCompleted?.(result, { ...task, status: "succeeded", progress: 1, result: { media: result.media } });
     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
     if (result.failure) {
@@ -421,6 +464,8 @@ export class CanvasImageDispatcher {
           url: media.url,
           storageKey: media.storageKey,
           mimeType: media.mimeType,
+          width: media.width,
+          height: media.height,
         })),
         finishedAt: new Date().toISOString(),
         durationMs: Date.now() - startedAt,
@@ -464,7 +509,7 @@ export class CanvasImageDispatcher {
       const resolved = resolveWorkflowForModel(
         aiConfig,
         selectedModel,
-        (input.references || []).length,
+        executionImageInputs(input).length,
       );
       if (!resolved.ok)
         throw new Error(
@@ -485,7 +530,7 @@ export class CanvasImageDispatcher {
 
     const preset = builtinPreset(model);
     if (executor === "builtin-comfy" && preset) {
-      if (preset === "flux2-klein" && !input.references?.length)
+      if (preset === "flux2-klein" && !executionImageInputs(input).length)
         throw new Error("Flux2-Klein 至少需要一张参考图");
       return { executor, input: normalized, preset };
     }
@@ -527,8 +572,8 @@ export class CanvasImageDispatcher {
     taskId: string,
   ) {
     const references = await Promise.all(
-      (input.references || []).map((reference) =>
-        this.readReference(reference),
+      executionImageInputs(input).map(async (reference) =>
+        this.readReference(await this.modelReference(reference, taskId)),
       ),
     );
     const childTaskId = `image-child-${taskId}`;
@@ -606,8 +651,8 @@ export class CanvasImageDispatcher {
     suffix = "",
   ) {
     const references = await Promise.all(
-      (input.references || []).map((reference) =>
-        this.materializeReference(reference),
+      executionImageInputs(input).map(async (reference) =>
+        this.materializeReference(await this.modelReference(reference, taskId)),
       ),
     );
     const childTaskId = `comfy-child-${taskId}${suffix}`;
@@ -649,30 +694,62 @@ export class CanvasImageDispatcher {
     const detail = await this.workflows.get(workflowName);
     const fields = detail.config?.fields || [];
     const fieldValues: Record<string, unknown> = { ...(input.params || {}) };
+    const dimensions = requestedImageDimensions(input);
+    const expectedRatio = requestedImageRatio(input);
     for (const field of fields) {
       if (
         field.type === "text" &&
         (field.isPrompt || field.id.toLowerCase() === "prompt")
       )
         fieldValues[field.id] = input.prompt;
-      if (
-        (field.id === "width" || field.id === "height") &&
-        fieldValues[field.id] === undefined
-      ) {
-        const value = field.id === "width" ? input.width : input.height;
-        if (value) fieldValues[field.id] = value;
+      if (field.input === "width" || field.input === "height") {
+        const value = field.input === "width" ? dimensions?.width : dimensions?.height;
+        if (value && fieldValues[field.id] !== undefined && Number(fieldValues[field.id]) !== value) throw new Error(`工作流字段「${field.name || field.input}」与目标尺寸冲突：已保存 ${fieldValues[field.id]}，目标 ${value}；请先修改工作流参数`);
+        if (value && fieldValues[field.id] === undefined) fieldValues[field.id] = value;
+      }
+      if (field.input === "aspect_ratio" && field.type === "dropdown" && expectedRatio !== null) {
+        const explicit = fieldValues[field.id];
+        if (explicit !== undefined) {
+          const selected = imageRatioFromText(String(explicit));
+          if (selected === null || Math.abs(selected - expectedRatio) >= 0.01) throw new Error(`工作流画幅与目标冲突：已保存「${explicit}」，目标「${input.size || `${input.width}x${input.height}`}」；请先修改工作流参数`);
+          if (!field.options?.includes(String(explicit))) {
+            const mapped = field.options?.find((option) => {
+              const ratio = imageRatioFromText(option);
+              return ratio !== null && Math.abs(ratio - expectedRatio) < 0.01;
+            });
+            if (!mapped) throw new Error(`工作流画幅字段「${field.name || field.input}」没有合法的目标选项；不能回退到默认比例`);
+            fieldValues[field.id] = mapped;
+          }
+        } else {
+          const option = field.options?.find((value) => {
+            const match = /^(\d+)\s*:\s*(\d+)/.exec(value);
+            return match && Math.abs(Number(match[1]) / Number(match[2]) - expectedRatio) < 0.01;
+          });
+          if (!option) throw new Error(`工作流画幅选项不支持目标「${input.size || `${input.width}x${input.height}`}」；请配置对应 aspect_ratio 选项`);
+          fieldValues[field.id] = option;
+        }
+      }
+    }
+    for (const field of fields.filter((field) => ["aspect_ratio", "width", "height"].includes(field.input))) {
+      if (fieldValues[field.id] === undefined) continue;
+      for (const nodeId of field.node.split(",")) {
+        const node = detail.workflow[nodeId.trim()] as { inputs?: Record<string, unknown> } | undefined;
+        if (!node?.inputs || !(field.input in node.inputs)) throw new Error(`工作流尺寸字段「${field.name || field.input}」未连接到真实节点输入 ${nodeId}.${field.input}`);
       }
     }
 
     const imageFields = fields.filter((field) =>
       isImageField(field, detail.workflow),
     );
-    const references = input.references || [];
+    const references = executionImageInputs(input);
+    if (references.length > imageFields.length) {
+      throw new Error(`工作流「${workflowName}」只有 ${imageFields.length} 个图片输入槽，本轮需要 ${references.length} 张（${input.loopInputImages?.length || 0} 张循环图 + ${input.references?.length || 0} 张固定参考图）；请配置支持三图的工作流或调整参考输入`);
+    }
     for (let index = 0; index < imageFields.length; index++) {
       const field = imageFields[index];
       const reference = references[index];
       fieldValues[field.id] = reference
-        ? await this.referenceDataUrl(reference)
+        ? await this.referenceDataUrl(await this.modelReference(reference, taskId))
         : null;
     }
 
@@ -680,13 +757,14 @@ export class CanvasImageDispatcher {
       input.maskEdit && references.length >= 2
         ? maskReferenceWorkflow(detail.workflow, imageFields[1]?.node) || detail.workflow
         : detail.workflow;
+    const executableWorkflow = adaptFlux2KleinWorkflow(workflow, input.model);
 
     const childTaskId = `workflow-child-${taskId}${suffix}`;
     this.assertNotCancelled(taskId);
     this.trackChild(taskId, childTaskId);
     try {
       const result = await this.workflowExecutor.run(
-        workflow,
+        executableWorkflow,
         detail.config || emptyWorkflowConfig(workflowName),
         fieldValues,
         crypto.randomUUID(),
@@ -707,6 +785,20 @@ export class CanvasImageDispatcher {
     if (reference.dataUrl) return reference.dataUrl;
     const { data, mimeType } = await this.readReference(reference);
     return `data:${mimeType};base64,${data.toString("base64")}`;
+  }
+
+  private async modelReference(reference: CanvasImageReference, taskId: string): Promise<CanvasImageReference> {
+    const mimeType = this.stores.media.meta(reference.storageKey || "")?.mimeType || reference.mimeType || mimeFromName(reference.name);
+    if (mimeType !== "image/svg+xml") return reference;
+    const source = await this.readReferenceBuffer(reference);
+    const storageKey = `image:svg-png-${crypto.createHash("sha256").update(source).digest("hex")}`;
+    let media = this.stores.media.meta(storageKey);
+    if (!media) {
+      const data = await sharp(source).png().toBuffer();
+      media = this.stores.media.store(data, { name: `${reference.name || "reference"}.png`, mimeType: "image/png", category: "input", storageKey });
+    }
+    this.stores.tasks.addEvent(taskId, "reference_rasterized", { sourceStorageKey: reference.storageKey, sourceName: reference.name, submittedStorageKey: storageKey, mimeType: "image/png" });
+    return { ...reference, name: `${reference.name || "reference"}.png`, storageKey, url: this.stores.media.url(media), mimeType: "image/png", dataUrl: undefined };
   }
 
   private assertNotCancelled(taskId: string) {
@@ -930,8 +1022,32 @@ function sizeFromDimensions(width?: number, height?: number) {
   return width && height ? `${width}x${height}` : "1024x1024";
 }
 
+function requestedImageDimensions(input: Pick<CanvasImageGenerationInput, "width" | "height" | "size">) {
+  if (Number.isFinite(input.width) && Number.isFinite(input.height) && input.width! > 0 && input.height! > 0) return { width: input.width!, height: input.height! };
+  const match = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(String(input.size || "").trim());
+  if (!match) return null;
+  const width = Number(match[1]), height = Number(match[2]);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+function imageRatioFromText(value: string) {
+  const match = /^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)(?:\b|\s|$)/.exec(value.trim());
+  return match && Number(match[2]) > 0 ? Number(match[1]) / Number(match[2]) : null;
+}
+
+function requestedImageRatio(input: Pick<CanvasImageGenerationInput, "width" | "height" | "size">) {
+  const dimensions = requestedImageDimensions(input);
+  const sizeDimensions = requestedImageDimensions({ size: input.size });
+  const sizeRatio = sizeDimensions ? sizeDimensions.width / sizeDimensions.height : imageRatioFromText(String(input.size || ""));
+  if (input.width && input.height && sizeRatio !== null && Math.abs(input.width / input.height - sizeRatio) >= 0.01) {
+    throw new Error(`本轮图片尺寸参数冲突：width/height=${input.width}×${input.height}，size=${input.size}`);
+  }
+  return dimensions ? dimensions.width / dimensions.height : sizeRatio;
+}
+
 function mimeFromName(name?: string) {
   const value = String(name || "").toLowerCase();
+  if (value.endsWith(".svg")) return "image/svg+xml";
   if (value.endsWith(".jpg") || value.endsWith(".jpeg")) return "image/jpeg";
   if (value.endsWith(".webp")) return "image/webp";
   return "image/png";
@@ -952,6 +1068,32 @@ function stripReferencePayload(
 ): CanvasImageReference {
   const { dataUrl: _dataUrl, ...handle } = reference;
   return handle;
+}
+
+/** The provider sees one current loop input followed by the generator's fixed references. */
+export function executionImageInputs(input: Pick<CanvasImageGenerationInput, "loopInputImages" | "references">): CanvasImageReference[] {
+  return [...(input.loopInputImages || []), ...(input.references || [])];
+}
+
+/** This bundled Flux2 workflow used Inspire's shared loaders solely as ordinary single-model loaders. */
+export function adaptFlux2KleinWorkflow(workflow: Record<string, unknown>, model: string): Record<string, unknown> {
+  if (modelOptionName(model) !== "Flux2-Klein") return workflow;
+  const result = { ...workflow };
+  for (const [id, value] of Object.entries(workflow)) {
+    if (!value || typeof value !== "object") continue;
+    const node = value as { class_type?: string; inputs?: Record<string, unknown> };
+    const inputs = node.inputs || {};
+    if (node.class_type === "LoadTextEncoderShared //Inspire") {
+      const name = String(inputs.model_name1 || "");
+      if (!name || [inputs.model_name2, inputs.model_name3].some((item) => item && item !== "None")) throw new Error("Flux2-Klein 的文本编码器不是单模型配置，无法替换缺失的 Inspire 加载节点");
+      result[id] = { ...node, class_type: "CLIPLoader", inputs: { clip_name: name, type: "flux2" } };
+    } else if (node.class_type === "LoadDiffusionModelShared //Inspire") {
+      const name = String(inputs.model_name || "");
+      if (!name) throw new Error("Flux2-Klein 的扩散模型配置缺少模型文件名");
+      result[id] = { ...node, class_type: "UNETLoader", inputs: { unet_name: name, weight_dtype: String(inputs.weight_dtype || "default") } };
+    }
+  }
+  return result;
 }
 
 async function waitForTask(

@@ -1,4 +1,5 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { resolveCharacterImageKeys } from "@basketikun/canvas-agent/reference-contract";
 import { FileText, Image as ImageIcon, Music2, Plus, Puzzle, Video, X } from "lucide-react";
 import { Popover } from "antd";
 import { useTranslation } from "react-i18next";
@@ -15,15 +16,20 @@ import { useBackendStore } from "@/stores/use-backend-store";
 
 type ReferenceEntry = { node: CanvasNodeData; sourceNodeId: string; resource?: CanvasNodeResource; index: number; character?: boolean };
 
-export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyReferences, onClearHistoryReferences, onDisconnect, onStartSelection }: { nodeId: string; nodes: CanvasNodeData[]; connectedNodes: CanvasNodeData[]; historyReferences?: CanvasImageReferenceSnapshot[]; onClearHistoryReferences?: () => void; onDisconnect?: (fromNodeId: string, toNodeId: string) => void; onStartSelection?: (nodeId: string) => void }) {
+export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyReferences, onClearHistoryReferences, onDisconnect, onReorder, reorderableSourceNodeIds, onStartSelection }: { nodeId: string; nodes: CanvasNodeData[]; connectedNodes: CanvasNodeData[]; historyReferences?: CanvasImageReferenceSnapshot[]; onClearHistoryReferences?: () => void; onDisconnect?: (fromNodeId: string, toNodeId: string) => void; onReorder?: (fromNodeId: string, overNodeId: string) => void; reorderableSourceNodeIds?: ReadonlySet<string>; onStartSelection?: (nodeId: string) => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const draggedSourceId = useRef<string | null>(null);
+    const [dragging, setDragging] = useState(false);
+    const [overSourceId, setOverSourceId] = useState<string | null>(null);
     const targetNode = nodes.find((node) => node.id === nodeId);
     const characterSelections = targetNode?.metadata?.characterReferences || {};
     const references: ReferenceEntry[] = connectedNodes.flatMap((sourceNode) => (sourceNode.type === CanvasNodeType.Group ? getGroupResourceNodes(sourceNode.id, nodes) : [sourceNode]).flatMap((node): ReferenceEntry[] => {
         if (node.type === CanvasNodeType.Character) return [{ node, sourceNodeId: sourceNode.id, index: 0, character: true }];
         return nodeResourceItems(node).map((resource, index) => ({ node, resource, index, sourceNodeId: sourceNode.id }));
     }));
+    const canReorder = historyReferences === undefined && Boolean(onReorder)
+        && new Set(references.filter((reference) => reorderableSourceNodeIds?.has(reference.sourceNodeId)).map((reference) => reference.sourceNodeId)).size > 1;
 
     return (
         <div className="mb-2">
@@ -31,18 +37,53 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyR
             <div className="thin-scrollbar flex min-h-12 gap-2 overflow-x-auto pb-1">
                 {historyReferences !== undefined ? historyReferences.map((reference, index) => (
                     <HistoryImageReference key={`${reference.id}:${index}`} reference={reference} onClear={onClearHistoryReferences} />
-                )) : references.map((reference) => reference.character ? (
-                    <CharacterReferenceItem
-                        key={`${reference.sourceNodeId}:${reference.node.id}:character`}
-                        node={reference.node}
-                        selection={characterSelections[reference.node.id]}
-                        sourceIsImageGeneration={isImageGenerationNode(targetNode)}
-                        sourceIsAudioGeneration={isAudioGenerationNode(targetNode)}
-                        sourceIsTextGeneration={isTextGenerationNode(targetNode)}
-                        onRemove={() => onDisconnect?.(reference.sourceNodeId, nodeId)}
-                    />
-                ) : (
-                    <ReferenceItem key={`${reference.sourceNodeId}:${reference.node.id}:${reference.index}`} node={reference.node} resource={reference.resource!} onRemove={() => onDisconnect?.(reference.sourceNodeId, nodeId)} />
+                )) : references.map((reference) => (
+                    <div
+                        key={`${reference.sourceNodeId}:${reference.node.id}:${reference.character ? "character" : reference.index}`}
+                        className="shrink-0"
+                        draggable={canReorder && reorderableSourceNodeIds?.has(reference.sourceNodeId)}
+                        title={canReorder && reorderableSourceNodeIds?.has(reference.sourceNodeId) ? t("canvas.references.reorder") : undefined}
+                        style={{ cursor: canReorder && reorderableSourceNodeIds?.has(reference.sourceNodeId) ? "grab" : undefined, outline: overSourceId === reference.sourceNodeId ? `2px solid ${theme.node.activeStroke}` : undefined, outlineOffset: 2, borderRadius: 12 }}
+                        onDragStart={(event) => {
+                            if (!canReorder || !reorderableSourceNodeIds?.has(reference.sourceNodeId) || (event.target as Element).closest("button,audio,video,input")) { event.preventDefault(); return; }
+                            draggedSourceId.current = reference.sourceNodeId;
+                            setDragging(true);
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData("application/x-infinite-canvas-reference-order", reference.sourceNodeId);
+                            event.stopPropagation();
+                        }}
+                        onDragOver={(event) => {
+                            if (!draggedSourceId.current || !reorderableSourceNodeIds?.has(reference.sourceNodeId) || draggedSourceId.current === reference.sourceNodeId) return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            event.dataTransfer.dropEffect = "move";
+                            setOverSourceId(reference.sourceNodeId);
+                        }}
+                        onDrop={(event) => {
+                            if (!draggedSourceId.current) return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            if (draggedSourceId.current !== reference.sourceNodeId) onReorder?.(draggedSourceId.current, reference.sourceNodeId);
+                            draggedSourceId.current = null;
+                            setDragging(false);
+                            setOverSourceId(null);
+                        }}
+                        onDragEnd={() => { draggedSourceId.current = null; setDragging(false); setOverSourceId(null); }}
+                    >
+                        {reference.character ? (
+                            <CharacterReferenceItem
+                                node={reference.node}
+                                selection={characterSelections[reference.node.id]}
+                                sourceIsImageGeneration={isImageGenerationNode(targetNode)}
+                                sourceIsAudioGeneration={isAudioGenerationNode(targetNode)}
+                                sourceIsTextGeneration={isTextGenerationNode(targetNode)}
+                                suppressPreview={dragging}
+                                onRemove={() => onDisconnect?.(reference.sourceNodeId, nodeId)}
+                            />
+                        ) : (
+                            <ReferenceItem node={reference.node} resource={reference.resource!} suppressPreview={dragging} onRemove={() => onDisconnect?.(reference.sourceNodeId, nodeId)} />
+                        )}
+                    </div>
                 ))}
                 <button type="button" className="grid size-12 shrink-0 place-items-center rounded-xl border bg-transparent transition hover:opacity-70" style={{ borderColor: theme.toolbar.border, color: theme.node.muted }} title={t("canvas.references.select")} onClick={() => { if (historyReferences !== undefined) onClearHistoryReferences?.(); onStartSelection?.(nodeId); }}>
                     <Plus className="size-4" />
@@ -76,30 +117,28 @@ function HistoryImageReference({ reference, onClear }: { reference: CanvasImageR
     );
 }
 
-function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sourceIsAudioGeneration, sourceIsTextGeneration, onRemove }: { node: CanvasNodeData; selection?: CanvasCharacterReferenceSelection; sourceIsImageGeneration?: boolean; sourceIsAudioGeneration?: boolean; sourceIsTextGeneration?: boolean; onRemove: () => void }) {
+function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sourceIsAudioGeneration, sourceIsTextGeneration, suppressPreview, onRemove }: { node: CanvasNodeData; selection?: CanvasCharacterReferenceSelection; sourceIsImageGeneration?: boolean; sourceIsAudioGeneration?: boolean; sourceIsTextGeneration?: boolean; suppressPreview?: boolean; onRemove: () => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
     const images = node.metadata?.characterImages || [];
-    const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
-    const primaryImage = images[primaryIndex];
-    const keys = selection?.imageKeys
-        ? new Set(selection.imageKeys)
-        : new Set(primaryImage ? [characterReferenceKey(primaryImage, primaryIndex)] : []);
+    const keys = new Set(resolveCharacterImageKeys(node.metadata, selection));
     const selectedImages = images.filter((image, index) => keys.has(characterReferenceKey(image, index))).slice(0, 2);
-    const selectedImageCount = selection?.imageKeys ? selection.imageKeys.length : selectedImages.length;
+    const selectedImageCount = keys.size;
+    const imageSources = JSON.stringify(selectedImages.map((image) => [image.storageKey, image.url]));
     const voiceIncluded = !sourceIsImageGeneration && !sourceIsAudioGeneration && !sourceIsTextGeneration && selection?.voiceEnabled !== false && Boolean(node.metadata?.characterVoiceUrl || node.metadata?.characterVoiceStorageKey);
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
-    const [urls, setUrls] = useState<string[]>([]);
+    const [resolvedImages, setResolvedImages] = useState({ sources: "", urls: [] as string[] });
+    const urls = resolvedImages.sources === imageSources ? resolvedImages.urls : [];
     useEffect(() => {
         let cancelled = false;
         void Promise.all(selectedImages.map((image) => {
             void ensureImagePreview(image.storageKey);
             return resolveImageUrl(image.storageKey, image.url || "").catch(() => image.url || "");
-        })).then((resolved) => { if (!cancelled) setUrls(resolved); });
+        })).then((resolved) => { if (!cancelled) setResolvedImages({ sources: imageSources, urls: resolved }); });
         return () => { cancelled = true; };
-    }, [backendConnected, backendToken, node.id, selection?.imageKeys?.join(","), images.length]);
+    }, [backendConnected, backendToken, node.id, imageSources]);
     // 音频生成节点：角色引用以「声线音频」作为输入，渲染音频格。
     // 文本生成节点：角色引用以「角色文本设定」作为输入，渲染文本格。
     // 两个早返回都放在 hooks 之后，避免切换生成模式时 hook 数量变化导致 React 报错。
@@ -107,27 +146,39 @@ function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sour
     if (sourceIsTextGeneration) return <CharacterTextReferenceItem node={node} onRemove={onRemove} />;
     // 选 1 张图 → 占 1 格方形；选 2 张图 → 横向矩形占 2 格；多张时角标显示总数。
     const wide = selectedImages.length > 1;
+    const name = node.metadata?.characterName || node.title || "角色";
+    const hoverPreview = selectedImages.length ? (
+        <span className="flex gap-2">
+            {selectedImages.map((image, index) => {
+                const url = urls[index] || previewUrlFor(image.storageKey);
+                return url ? <img key={index} src={url} alt={image.outfit || image.name || ""} className="max-h-52 w-36 rounded-lg object-cover" draggable={false} /> : null;
+            })}
+        </span>
+    ) : (
+        <span className="block max-h-52 w-72 overflow-auto whitespace-pre-wrap text-sm">{name}</span>
+    );
     return (
-        <div
-            className={`group relative ${wide ? "h-12 w-[104px]" : "size-12"} shrink-0 overflow-hidden rounded-xl border transition hover:opacity-85`}
-            style={{ borderColor: theme.node.activeStroke || theme.toolbar.border, background: theme.toolbar.activeBg }}
-            title={t("canvas.references.empty")}
-        >
-            <span className="flex size-full">
-                {selectedImages.map((image, index) => {
-                    const url = urls[index] || previewUrlFor(image.storageKey);
-                    return (
-                        <span key={index} className="relative min-w-0 flex-1 overflow-hidden" style={{ background: theme.node.panel }}>
-                            {url ? <img src={url} alt={image.outfit || image.name || ""} className="absolute inset-0 size-full object-cover" draggable={false} /> : <span className="grid size-full place-items-center text-[10px]" style={{ color: theme.node.muted }}>{selectedImageCount} 图</span>}
-                        </span>
-                    );
-                })}
-                {!selectedImages.length ? <span className="grid size-full place-items-center px-1 text-center leading-tight"><span className="min-w-0 truncate text-[10px] font-medium">{node.metadata?.characterName || node.title || "角色"}</span></span> : null}
-            </span>
-            <span className="pointer-events-none absolute bottom-0 left-0 max-w-full truncate rounded-tr-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{node.metadata?.characterName || node.title || "角色"}{voiceIncluded ? " · 声线" : ""}</span>
-            <span className="pointer-events-none absolute right-0 top-0 rounded-bl-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{selectedImageCount}图</span>
-            <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
-        </div>
+        <Popover placement="topLeft" mouseEnterDelay={0.15} open={suppressPreview ? false : undefined} content={hoverPreview}>
+            <div
+                className={`group relative ${wide ? "h-12 w-[104px]" : "size-12"} shrink-0 overflow-hidden rounded-xl border transition hover:opacity-85`}
+                style={{ borderColor: theme.node.activeStroke || theme.toolbar.border, background: theme.toolbar.activeBg }}
+            >
+                <span className="flex size-full">
+                    {selectedImages.map((image, index) => {
+                        const url = urls[index] || previewUrlFor(image.storageKey);
+                        return (
+                            <span key={index} className="relative min-w-0 flex-1 overflow-hidden" style={{ background: theme.node.panel }}>
+                                {url ? <img src={url} alt={image.outfit || image.name || ""} className="absolute inset-0 size-full object-cover" draggable={false} /> : <span className="grid size-full place-items-center text-[10px]" style={{ color: theme.node.muted }}>{selectedImageCount} 图</span>}
+                            </span>
+                        );
+                    })}
+                    {!selectedImages.length ? <span className="grid size-full place-items-center px-1 text-center leading-tight"><span className="min-w-0 truncate text-[10px] font-medium">{name}</span></span> : null}
+                </span>
+                <span className="pointer-events-none absolute bottom-0 left-0 max-w-full truncate rounded-tr-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{name}{voiceIncluded ? " · 声线" : ""}</span>
+                <span className="pointer-events-none absolute right-0 top-0 rounded-bl-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{selectedImageCount}图</span>
+                <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
+            </div>
+        </Popover>
     );
 }
 
@@ -186,7 +237,7 @@ function CharacterTextReferenceItem({ node, onRemove }: { node: CanvasNodeData; 
     );
 }
 
-function ReferenceItem({ node, resource, onRemove }: { node: CanvasNodeData; resource: CanvasNodeResource; onRemove: () => void }) {
+function ReferenceItem({ node, resource, suppressPreview, onRemove }: { node: CanvasNodeData; resource: CanvasNodeResource; suppressPreview?: boolean; onRemove: () => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const rawContent = resource.url || node.metadata?.content;
@@ -212,10 +263,10 @@ function ReferenceItem({ node, resource, onRemove }: { node: CanvasNodeData; res
     const thumbnail = resource.kind === "image" ? previewUrlFor(storageKey) || content : content;
     const Icon = resource.kind === "image" ? ImageIcon : resource.kind === "video" ? Video : resource.kind === "audio" ? Music2 : resource.kind === "text" ? FileText : Puzzle;
     return (
-        <Popover placement="topLeft" mouseEnterDelay={0.15} content={<ReferencePreview node={node} resource={resource} content={content} />}>
+        <Popover placement="topLeft" mouseEnterDelay={0.15} open={suppressPreview ? false : undefined} content={<ReferencePreview node={node} resource={resource} content={content} />}>
             <div className="group relative grid size-12 shrink-0 place-items-center rounded-xl border" style={{ background: theme.toolbar.activeBg, borderColor: theme.toolbar.border }}>
                 <span className="grid size-full place-items-center overflow-hidden rounded-[inherit]">
-                    {(resource?.kind === "image" || node.type === CanvasNodeType.Image) && thumbnail ? <img src={thumbnail} alt="" className="size-full object-cover" /> : (resource?.kind === "video" || node.type === CanvasNodeType.Video) && content ? <video src={content} className="size-full object-cover" muted /> : <Icon className="size-4 opacity-65" />}
+                    {(resource?.kind === "image" || node.type === CanvasNodeType.Image) && thumbnail ? <img src={thumbnail} alt="" className="size-full object-cover" draggable={false} /> : (resource?.kind === "video" || node.type === CanvasNodeType.Video) && content ? <video src={content} className="size-full object-cover" muted draggable={false} /> : <Icon className="size-4 opacity-65" />}
                 </span>
                 <button type="button" className="absolute right-0 top-0 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} aria-label={t("canvas.references.disconnect")} title={t("canvas.references.disconnect")} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }}><X className="size-3" /></button>
             </div>

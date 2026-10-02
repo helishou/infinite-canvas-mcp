@@ -7,13 +7,13 @@ import { useTranslation } from "react-i18next";
 import { ImageSettingsPanel, imageQualityLabel, imageSizeLabel } from "@/components/image-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, type AiConfig } from "@/stores/use-config-store";
+import { modelScenarioUnsupported, resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, type AiConfig } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField, workflowRequiresPrompt, type WorkflowDetail } from "@/services/api/workflows";
-import { migrateWorkflowParams, reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
+import { migrateWorkflowParams, reconcileWorkflowParams, workflowAspectOption } from "@/lib/canvas/canvas-workflow-params";
 
 type CanvasImageSettingsPopoverProps = {
     config: AiConfig;
-    onConfigChange: (key: keyof AiConfig, value: string) => void;
+    onConfigChange: (key: "quality" | "size" | "count" | "background", value: string) => void;
     onMissingConfig?: () => void;
     onOpenChange?: (open: boolean) => void;
     buttonClassName?: string;
@@ -23,7 +23,7 @@ type CanvasImageSettingsPopoverProps = {
     // 选中本地 ComfyUI 工作流时，把工作流的非 image / 非 prompt 自定义字段渲染到面板顶部；
     // comfyParams 存在 node.metadata，运行时由 runLocalComfyImage 合并进 workflow fields。
     comfyParams?: Record<string, unknown>;
-    onComfyParamsChange?: (value: Record<string, unknown>) => void;
+    onComfyParamsChange?: (value: Record<string, unknown>, size?: string) => void;
     onPromptRequiredChange?: (required: boolean) => void;
     // 本次将带上的参考图数量：决定输入场景（0 = 文生 / 1 = 单图 / ≥2 = 多图），从而决定读哪个工作流的参数。
     referenceCount?: number;
@@ -31,6 +31,7 @@ type CanvasImageSettingsPopoverProps = {
 
 export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, onPromptRequiredChange, referenceCount = 0 }: CanvasImageSettingsPopoverProps) {
     const { t } = useTranslation();
+    const updateConfig = useConfigStore((state) => state.updateConfig);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
@@ -121,6 +122,22 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     }, [onPromptRequiredChange, workflowDetail, workflowName]);
 
     const customFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, workflowDetail?.workflow) && !field.isPrompt);
+    const aspectField = customFields.find((field) => field.input === "aspect_ratio" && field.type === "dropdown");
+    const routedParams = aspectField ? resolveModelWorkflowParams(config, config.model, referenceCount) : {};
+    const selectedAspect = aspectField ? workflowAspectOption(aspectField, comfyParams?.[aspectField.id], routedParams[aspectField.id], activeSize) : undefined;
+    const displayedSize = selectedAspect?.match(/^\s*(\d+\s*:\s*\d+)/)?.[1].replace(/\s/g, "") || imageSizeLabel(activeSize);
+    // 隐藏标准项的唯一依据是「本次真的要渲染工作流参数」。之前只判断渠道是不是 comfyui，
+    // 于是取不到工作流字段时标准项也被一起藏掉，面板只剩透明背景和张数。
+    const showsWorkflowParams = customFields.length > 0;
+    const hideStandardImageOptions = showsWorkflowParams;
+    // ComfyUI 模型但没解析出参数：明确说明原因，不再给一个看不出所以然的空面板。
+    const workflowParamsMissing = isLocalCustomWorkflow && !showsWorkflowParams;
+    // 缺参数有两种完全不同的原因：带参考图时该场景被配成「不支持」，以及真的读不到字段配置。
+    // 之前一律说「读取不到」，会把「模型不支持这种输入」误导成配置故障。
+    const workflowParamsBlockedByScenario = modelScenarioUnsupported(config, config.model, referenceCount);
+    // 把「本次参考图数量 → 命中的场景」直接显示出来：此前这个数字只存在于代码里，
+    // 参数不显示时无法判断到底是没配字段还是场景不支持，只能靠猜。
+    const scenario = referenceCount <= 0 ? "文生" : referenceCount === 1 ? "单图" : "多图";
 
     useEffect(() => {
         if (!workflowDetail || workflowDetail.name !== workflowName || !onComfyParamsChange) return;
@@ -132,7 +149,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
         // 模型设置里为当前输入场景配的参数优先于内部实现字段默认值。
         const routedParams = resolveModelWorkflowParams(config, config.model, referenceCount);
         const currentParams = comfyParamsRef.current;
-        const next = reconcileWorkflowParams(currentParams, customFields, routedParams, workflowChanged);
+        const next = reconcileWorkflowParams(currentParams, customFields, routedParams, workflowChanged, activeSize);
         if (next && next !== currentParams) {
             comfyParamsRef.current = next;
             onComfyParamsChange(next);
@@ -147,15 +164,23 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                 placement={placement}
                 theme={theme}
                 config={config}
-                onConfigChange={onConfigChange}
+                onConfigChange={(key, value) => {
+                    onConfigChange(key, value);
+                    updateConfig(key, value);
+                }}
                 customFields={customFields}
                 customFieldValues={comfyParams}
                 onCustomFieldChange={onComfyParamsChange ? (id, value) => {
                     const next = { ...(comfyParamsRef.current || {}), [id]: value };
                     comfyParamsRef.current = next;
-                    onComfyParamsChange(next);
+                    const ratio = id === aspectField?.id ? String(value).match(/^\s*(\d+\s*:\s*\d+)/)?.[1].replace(/\s/g, "") : undefined;
+                    onComfyParamsChange(next, ratio);
+                    if (ratio) updateConfig("size", ratio);
                 } : undefined}
-                hideStandardImageOptions={isLocalCustomWorkflow}
+                hideStandardImageOptions={hideStandardImageOptions}
+                workflowParamsMissing={workflowParamsMissing}
+                workflowParamsBlockedByScenario={workflowParamsBlockedByScenario}
+                debugScenario={`${scenario} · ${referenceCount} 张参考图`}
             />
         ) : null;
 
@@ -171,7 +196,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                     onClick={() => updateOpen(!open)}
                 >
                     <span className="truncate">
-                        {imageQualityLabel(quality)} · {imageSizeLabel(activeSize)} · {t("canvas.controls.images", { count })}
+                        {imageQualityLabel(quality)} · {displayedSize} · {t("canvas.controls.images", { count })}
                     </span>
                 </Button>
             </span>
@@ -191,17 +216,23 @@ function ImageSettingsPortal({
     customFieldValues,
     onCustomFieldChange,
     hideStandardImageOptions,
+    workflowParamsMissing,
+    workflowParamsBlockedByScenario,
+    debugScenario,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
     placement: CanvasImageSettingsPopoverProps["placement"];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
-    onConfigChange: (key: keyof AiConfig, value: string) => void;
+    onConfigChange: CanvasImageSettingsPopoverProps["onConfigChange"];
     customFields?: Parameters<typeof ImageSettingsPanel>[0]["customFields"];
     customFieldValues?: Parameters<typeof ImageSettingsPanel>[0]["customFieldValues"];
     onCustomFieldChange?: Parameters<typeof ImageSettingsPanel>[0]["onCustomFieldChange"];
     hideStandardImageOptions: boolean;
+    workflowParamsMissing: boolean;
+    workflowParamsBlockedByScenario: boolean;
+    debugScenario: string;
 }) {
     const width = 356;
     const gap = 8;
@@ -235,6 +266,9 @@ function ImageSettingsPortal({
                 customFieldValues={customFieldValues}
                 onCustomFieldChange={onCustomFieldChange}
                 hideStandardImageOptions={hideStandardImageOptions}
+                workflowParamsMissing={workflowParamsMissing}
+                workflowParamsBlockedByScenario={workflowParamsBlockedByScenario}
+                debugScenario={debugScenario}
             />
         </div>,
         document.body,

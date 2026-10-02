@@ -3,9 +3,10 @@
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { backendConnection } from "@/lib/backend-connection";
 import { nanoid } from "nanoid";
-import type { CanvasGenerationCommand, CanvasGenerationStartResult } from "@basketikun/canvas-agent/generation-contract";
-import { CANVAS_GENERATION_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
+import type { CanvasGenerationCommand, CanvasGenerationStartResult, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
+import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
 import { ensureCanvasDraftLease } from "@/lib/canvas/canvas-draft-session";
+import type { EpisodeProductionData, ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 
 export type BackendMediaResult = {
     storageKey: string;
@@ -16,6 +17,7 @@ export type BackendMediaResult = {
     width: number | null;
     height: number | null;
     durationMs: number | null;
+    compression?: { originalBytes: number; originalStorageKey: string; thresholdBytes: number };
 };
 
 export type BackendTokenResponse = { ok: boolean; token: string };
@@ -39,7 +41,7 @@ export class BackendApiError extends Error {
 }
 
 export async function request<T = unknown>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
-    if (method !== "GET" && /^\/canvas\/projects(?:\/|$)/.test(path)) await ensureCanvasDraftLease();
+    if (method !== "GET" && (/^\/canvas\/projects(?:\/|$)/.test(path) || path === CANVAS_LOOP_PREPARE_PATH)) await ensureCanvasDraftLease();
     const token = getBackendTokenShared();
     const backendUrl = getBackendUrl().replace(/\/$/, "");
     const url = `${backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
@@ -79,7 +81,7 @@ export type BackendRuntimeTask = {
     progress: number;
     input?: Record<string, unknown>;
     params?: Record<string, unknown>;
-    result?: { media?: BackendMediaResult[]; images?: BackendMediaResult[]; texts?: Array<{ index?: number; content: string }>; confirmation?: { pending: Array<{ nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string; firstPassStorageKey?: string }> } } | null;
+    result?: { media?: BackendMediaResult[]; images?: BackendMediaResult[]; texts?: Array<{ index?: number; content: string }>; confirmation?: { revision: number; pending: Array<{ nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string; firstPassStorageKey?: string }> } } | null;
     outputs?: Array<Record<string, unknown>>;
     error?: string | null;
     createdAt?: string;
@@ -89,6 +91,11 @@ export type BackendRuntimeTask = {
 /** 所有画布生成来源共用的任务提交客户端。 */
 export function startCanvasGeneration(input: CanvasGenerationCommand, signal?: AbortSignal) {
     return request<{ ok: boolean } & CanvasGenerationStartResult>("POST", CANVAS_GENERATION_PATH, input, { signal });
+}
+
+export type CanvasLoopPrepareResult = { runId: string; outputGroupId: string; slotNodeIds: string[]; totalRounds: number };
+export function prepareCanvasLoop(input: CanvasLoopPrepare) {
+    return request<{ ok: boolean } & CanvasLoopPrepareResult>("POST", CANVAS_LOOP_PREPARE_PATH, input);
 }
 
 export function syncBackendAiConfig(config: unknown) {
@@ -107,6 +114,27 @@ export async function backendHealth(): Promise<{ ok: boolean; protocolVersion?: 
         return await res.json();
     } catch {
         return { ok: false };
+    }
+}
+
+/**
+ * 业务接口探活：`/health` + `/config` 通过不代表这个地址就是总后台。
+ * 旧版 canvas-agent 兼容代理（17371）两者都返回 200，却对 /canvas/* 全部 404，
+ * 页面会因此显示「素材库是空的」。用一条最便宜的业务接口（kind=text，约 0.6KB）
+ * 验证地址真能提供数据；404 一律视为「连错后台」。
+ */
+export async function probeBackendBusinessApi(): Promise<{ ok: boolean; detail: string }> {
+    const base = getBackendUrl().replace(/\/$/, "");
+    const token = getBackendTokenShared();
+    try {
+        const res = await fetch(`${base}/canvas/assets?kind=text&token=${encodeURIComponent(token)}`, { signal: AbortSignal.timeout(5000) });
+        if (res.status === 404) return { ok: false, detail: `${base} 不是总后台：该地址对 /canvas/assets 返回 404（可能是旧版 canvas-agent 兼容代理，或反代路径不对）` };
+        if (res.status === 401) return { ok: false, detail: `${base} 拒绝了当前连接密钥（HTTP 401），请在连接设置里重新获取 Token` };
+        if (!res.ok) return { ok: false, detail: `${base} 业务接口异常：HTTP ${res.status}` };
+        return { ok: true, detail: "" };
+    } catch (error) {
+        const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        return { ok: false, detail: `${base} 业务接口不可达（${reason}）` };
     }
 }
 
@@ -131,6 +159,10 @@ export function fetchBackendProjects(summary = false) {
 
 export function fetchBackendProject(id: string, summary = false) {
     return request<{ ok: boolean; project: Record<string, unknown> }>("GET", `/canvas/projects/${encodeURIComponent(id)}${summary ? "?summary=true" : ""}`);
+}
+
+export function syncBackendCanvasCharacterAssets(id: string) {
+    return request<{ ok: boolean; projectId: string; revision: number; updatedAt: string; operations: Array<Record<string, unknown>>; updated: number }>("POST", `/canvas/projects/${encodeURIComponent(id)}/sync-character-assets`);
 }
 
 export function fetchBackendCanvasFolders() {
@@ -185,6 +217,19 @@ export function deleteBackendDramaEpisode(episodeId: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/episodes/${encodeURIComponent(episodeId)}`);
 }
 
+export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[] }; replayed?: boolean };
+const productionPath = (episodeId: string) => `/drama/episodes/${encodeURIComponent(episodeId)}/production`;
+export function fetchEpisodeProduction(episodeId: string) { return request<{ ok: boolean; production: EpisodeProduction }>("GET", productionPath(episodeId)); }
+export function fetchEpisodeProductionLegacy(episodeId: string) { return request<{ ok: boolean; sources: Array<{ source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string }> }>("GET", `${productionPath(episodeId)}/legacy`); }
+export function editEpisodeProduction(episodeId: string, expectedRevision: number, ops: ProductionOperation[], operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/ops`, { operationId, expectedRevision, ops }); }
+export function previewEpisodeProductionImpact(episodeId: string, stage: "script" | "shots") { return request<{ ok: boolean; impact: NonNullable<EpisodeProduction["impact"]> }>("GET", `${productionPath(episodeId)}/impact?stage=${stage}`); }
+export function publishEpisodeProduction(episodeId: string, expectedRevision: number, stage: "script" | "shots", operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/publish`, { operationId, expectedRevision, stage }); }
+export function fetchEpisodeProductionVersions(episodeId: string) { return request<{ ok: boolean; versions: Array<{ version: number; stage: "script" | "shots"; impact: NonNullable<EpisodeProduction["impact"]>; createdAt: string }> }>("GET", `${productionPath(episodeId)}/versions`); }
+export function restoreEpisodeProduction(episodeId: string, expectedRevision: number, version: number, operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/restore`, { operationId, expectedRevision, version }); }
+export function syncEpisodeProductionClips(episodeId: string) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/sync-clips`); }
+export function fetchEpisodeProductionRun(episodeId: string, version: number) { return request<{ ok: boolean; run: { status: string; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string }>; error: string | null } | null }>("GET", `${productionPath(episodeId)}/runs/${version}`); }
+export function exportEpisodeProductionMarkdown(episodeId: string, stage: "script" | "shots", version?: number) { return request<{ ok: boolean; fileName: string; markdown: string }>("GET", `${productionPath(episodeId)}/export?stage=${stage}${version ? `&version=${version}` : ""}`); }
+
 export type DramaCustomAsset = {
     id: string;
     title: string;
@@ -223,6 +268,12 @@ export function createBackendProject(project: Record<string, unknown>) {
 export function applyBackendCanvasOperations(projectId: string, operations: Array<Record<string, unknown>>, baseRevision?: number, operationId = nanoid(), source = getCanvasCollaborationClient()) {
     return request<{ ok: boolean; project: Record<string, unknown>; revision: number; operationId: string; operationResults?: unknown[] }>(
         "POST", `/canvas/projects/${encodeURIComponent(projectId)}/ops`, { baseRevision, operations, operationId, source },
+    );
+}
+
+export function fetchBackendCanvasOperationReceipt(projectId: string, operationId: string) {
+    return request<{ ok: boolean; committed: boolean; revision?: number; snapshotAvailable?: boolean }>(
+        "GET", `/canvas/projects/${encodeURIComponent(projectId)}/ops/${encodeURIComponent(operationId)}/receipt`,
     );
 }
 
@@ -339,7 +390,7 @@ export function saveBackendPromptCache(sourceId: string, cache: unknown) {
 
 // ── Media ────────────────────────────────────────────────────────────────
 
-export async function uploadBackendMedia(options: {
+type BackendMediaUploadOptions = {
     name: string;
     blob: Blob;
     storageKey?: string;
@@ -348,7 +399,17 @@ export async function uploadBackendMedia(options: {
     height?: number;
     durationMs?: number;
     category?: "input" | "output" | "library";
-}): Promise<BackendMediaResult> {
+};
+
+export function uploadBackendMedia(options: BackendMediaUploadOptions): Promise<BackendMediaResult> {
+    return postBackendMedia("/media/upload-binary", options);
+}
+
+export function uploadBackendCharacterVoice(options: BackendMediaUploadOptions): Promise<BackendMediaResult> {
+    return postBackendMedia("/media/character-voice", options);
+}
+
+async function postBackendMedia(endpoint: string, options: BackendMediaUploadOptions): Promise<BackendMediaResult> {
     const { useBackendStore } = await import("@/stores/use-backend-store");
     const token = useBackendStore.getState().token || "";
     const headers: Record<string, string> = {
@@ -360,10 +421,13 @@ export async function uploadBackendMedia(options: {
     if (options.durationMs !== undefined) headers["x-media-duration-ms"] = String(options.durationMs);
     if (options.category) headers["x-media-category"] = options.category;
     if (options.storageKey) headers["x-media-storage-key"] = options.storageKey;
-    const url = `${getBackendUrl().replace(/\/$/, "")}/media/upload-binary?token=${encodeURIComponent(token)}`;
+    const url = `${getBackendUrl().replace(/\/$/, "")}${endpoint}?token=${encodeURIComponent(token)}`;
     const res = await fetch(url, { method: "POST", headers, body: options.blob });
     const data = (await res.json().catch(() => ({}))) as { media?: BackendMediaResult; error?: string };
-    if (!res.ok || !data.media) throw new Error(`Backend POST /media/upload-binary failed: HTTP ${res.status} ${data.error || ""}`);
+    if (!res.ok || !data.media) {
+        if (endpoint === "/media/character-voice" && res.status === 404) throw new Error("CHARACTER_VOICE_COMPRESSION_UNAVAILABLE");
+        throw new Error(`Backend POST ${endpoint} failed: HTTP ${res.status} ${data.error || ""}`);
+    }
     return data.media;
 }
 
@@ -486,7 +550,7 @@ export function fetchBackendTask(id: string, signal?: AbortSignal) {
     return request<{ ok: boolean; task?: BackendRuntimeTask; events?: unknown[] }>("GET", canvasTaskPath(id), undefined, { signal });
 }
 
-export function resolveBackendH3Confirmation(id: string, input: { action: "confirm" | "keep_first_pass" | "discard"; segmentIds: string[]; firstPassFingerprint: string; retry?: boolean }) {
+export function resolveBackendH3Confirmation(id: string, input: { action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> }) {
     return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", h3ConfirmationPath(id), input);
 }
 

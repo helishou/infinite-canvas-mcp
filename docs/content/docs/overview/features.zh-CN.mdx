@@ -13,6 +13,7 @@ description: 当前项目已实现的主要功能
 - 支持项目重命名、删除、批量选择和批量删除。
 - 支持单个画布项目导出为 JSON，也支持从 JSON 导入画布。
 - 画布项目以本地 Backend SQLite 为权威存储，浏览器只保留用于快速首显和离线编辑的可丢弃快照。
+- 每个项目保留自己的视口、背景、节点、连线和助手会话。
 
 ## 无限画布
 
@@ -21,27 +22,33 @@ description: 当前项目已实现的主要功能
 - 支持点阵、网格线、空白三种背景。
 - 支持浅色和深色主题。
 - 支持框选、多选、全选、取消选择、删除选中。
-- 支持复制粘贴节点和节点之间的连线。
+- 支持复制粘贴节点和节点之间的连线；无媒体的节点复制画布 JSON 重建。
 - 支持撤销和重做节点、连线、视口、背景和助手会话变化。
 - 支持节点连线，并高亮当前节点相关的上下游节点和连线。
+- 支持有序组：把实际采用的图片按槽位编排进组，拖放整理时保留原槽位、位置和尺寸。
 - 支持快捷键帮助，覆盖缩放、框选、全选、复制粘贴、撤销重做、删除、退出选择和拖入图片。
 
 ## 节点
 
-目前画布中有三类节点：
+画布内置六种节点：文本、图片、视频、音频、生成配置、组。其余能力由节点插件提供。
 
 - 图片节点：展示上传图片、生成图片或我的素材图片。
-- 文本节点：保存提示词、说明文案、AI 文字回答等文本内容。
+- 文本节点：保存提示词、说明文案、AI 文字回答等文本内容，支持右键复制正文。
+- 视频节点：展示生成视频并使用原生播放器预览。
+- 音频节点：承载生成的语音或音频素材。
 - 生成配置节点：汇总上游文本和图片，统一配置模型、比例、数量后批量生成图片或文本。
+- 组节点：把相关节点收进可折叠的集合，支持有序组槽位编排。
 
 节点支持：
 
 - 拖拽移动。
 - 四角缩放。
 - 图片节点等比缩放或自由比例切换。
+- 缩到概览壳或紧凑壳时保留「生成中」标记（静态色点与进度百分比），缩略降级也能认出正在跑任务的节点。
 - 查看节点基础信息和 JSON。
 - 删除、复制、粘贴。
 - 通过左右连接点建立上下游关系。
+- 画布上右键复制文本节点正文到系统剪贴板。
 
 ## 图片工作流
 
@@ -51,9 +58,11 @@ description: 当前项目已实现的主要功能
 - 支持下载图片节点。
 - 支持把图片节点保存到“我的素材”。
 - 支持图片裁剪，并把裁剪结果生成为新的图片节点。
-- 支持本地多角度变换，并把结果生成为新的图片节点。
+- 支持把一张图片节点按 rows×columns 切分为多张新节点。
 - 支持生成失败后重试。
 - 批量生成多张图片时会先展示为图片组节点，支持叠卡预览、展开查看全部结果并设置主图。
+- 图片工具栏接入 moyou 自动色阶工作流，处理结果由 Backend 作为新图片节点回写。
+- 生图设置会记住最近选用的模型、质量、尺寸、张数、透明背景和 16 倍数对齐，新图片节点沿用这些默认值。
 
 ## AI 生成
 
@@ -69,6 +78,7 @@ OpenAI 兼容图像和文本能力继续复用现有接口：
 视频能力支持两类接口：
 
 - OpenAI 风格视频：`POST /v1/videos`、`GET /v1/videos/{id}`、`GET /v1/videos/{id}/content`。
+- 本地 ComfyUI（经 Canvas Agent）：H3 短片 Clip 生成，见下文「短片 Clip 生产」。
 
 Base URL 如果已经以 `/v1` 结尾，系统不会再追加 `/v1`。
 
@@ -92,6 +102,18 @@ Base URL 如果已经以 `/v1` 结尾，系统不会再追加 `/v1`。
 
 视频生成可从文本节点读取 prompt，从图片节点读取参考图。生成成功后会把视频插入画布为视频节点并使用原生播放器预览。
 
+## 短片 Clip 生产（MCP 扩展）
+
+本仓库在原画布能力之上增加了面向短片生产的扩展层。H3 视频节点以多 Clip 时间线组织短片，每个 Clip 独立配置并由用户确认后推进。
+
+- H3 视频节点：多 Clip 时间线。每个 Clip 可设置提示词、模型、采样、尺寸、LoRA、TRT 视频 VAE、Motion Context 续写、DLSS 超分等；高级设置按「模型与基础参数 / 采样设置 / 实时预览 / RTX 视频超分」分区组织。
+- 分镜轨：每个 Clip 可绑定多张分镜图，绑定顺序与提示词中的 `Picture N` 编号一致，不会因为拖动或插入而错位。
+- 参考绑定：角色节点按 `imageKeys` 选定时代服装；道具、场景与站位图各按职责绑定；站位/轴线图作为空间参考单列，不与人物身份图混同。
+- 一采 / 二采人工确认：一采完成后父任务持久进入待确认态，可确认二采、保留一采或放弃；多 Clip 串行暂停支持重启恢复。
+- 本地 ComfyUI：Canvas Agent 通过 `/comfy/tasks` 调用内置 `minimax-h3` 预设。开启 Motion Context 时需要本机 `ffmpeg`、`ffprobe` 与 Python Pillow，`PYTHON_PATH` 可指定 Python。
+- 剧目与分集：剧目下可建多集，每集绑定一个画布，剧情字段独立保存。
+- 生产 SOP：项目级约束 + 六个生产子 Skill（剧情设计、资产准备、站位与色彩基准、镜头设计、分镜关键帧、Clip 视频），每阶段自行验收产物。固定制作目录 `{dataDir}/productions/<canvasProjectId>/` 保存剧本、文字分镜表、资产索引、进度与返修日志。
+
 ## 画布助手
 
 画布右侧助手面板支持：
@@ -108,6 +130,17 @@ Base URL 如果已经以 `/v1` 结尾，系统不会再追加 `/v1`。
 - 把助手生成的图片插入画布。
 - 折叠和展开助手面板。
 
+## 本地 Agent 与 MCP 自动化
+
+- 本地 Canvas Agent 连接画布网页与本机 Codex / Claude Code，浏览器不直接暴露浏览器状态给 Agent。
+- 画布 MCP：Agent 通过 MCP 读写画布、提交生成、等待任务终态、编排生成流、替换参考与分镜槽位。
+- H3 MCP：视频节点时间线的结构化视频计划、Clip 顺序调整、参考与分镜绑定、运行时参数、模型与 LoRA 清单等。
+- Codex App 插件：安装后自动注册 MCP 并尝试拉起本地 Agent。
+- MCP 可观测性：脱敏诊断，包括调用成功率、耗时、错误分布、恢复建议采纳率与关联任务终态。
+- MCP 工具返回体有硬上限（`MCP_MAX_TOOL_OUTPUT_BYTES`，默认 0.5 MiB），超限返回 `OUTPUT_TOO_LARGE` 而不是把数 MB 内容交给模型。
+
+Codex App 插件的安装与使用见 [Codex App 插件](/zh-CN/docs/overview/codex-app-plugin)。
+
 ## 节点插件系统
 
 画布支持通过节点插件扩展新的节点类型，内置节点之外的能力都可以以插件形式加载：
@@ -117,8 +150,6 @@ Base URL 如果已经以 `/v1` 结尾，系统不会再追加 `/v1`。
 - 提供 TypeScript 插件开发 SDK，可自行开发画布节点插件，并使用 AI 生成、面板控制等扩展能力。
 - 内置 Markdown、SVG、HTML、3D 全景、便利贴等示例插件。
 - 插件面板会显示插件版本，并对可升级的插件给出提醒。
-
-Codex App 插件的安装与使用见 [Codex App 插件](/zh-CN/docs/overview/codex-app-plugin)。
 
 ## 提示词库
 
@@ -139,7 +170,7 @@ Codex App 插件的安装与使用见 [Codex App 插件](/zh-CN/docs/overview/co
 - 拉取失败时保留上一次成功缓存，并显示来源状态和最近成功时间。
 - 跨已启用来源搜索提示词，按标签筛选，查看详情、复制提示词或插入画布。
 
-7 个内置来源为 Banana Prompt Quicker、DavidWu GPT Image 2、Freestylefly GPT Image 2、Awesome GPT Image、Awesome GPT-4o、YouMind GPT Image 2 和 YouMind Nano Banana Pro。应用从 [Image Prompts](https://github.com/yukkcat/image-prompts) 统一仓库读取标准 JSON，由浏览器前端直连并使用内存缓存。完整来源见[第三方提示词来源](/zh-CN/docs/overview/third-party-prompt-repositories)。
+7 个内置来源为 Banana Prompt Quicker、DavidWu GPT Image 2、Freestylefly GPT Image 2、Awesome GPT Image、Awesome GPT-4o、YouMind GPT Image 2 和 YouMind Nano Banana Pro。应用从 [Image Prompts](https://github.com/yukkcat/image-prompts)统一仓库读取标准 JSON，由浏览器前端直连并使用内存缓存。完整来源见[第三方提示词来源](/zh-CN/docs/overview/third-party-prompt-repositories)。
 
 ## 素材
 
@@ -167,3 +198,4 @@ Codex App 插件的安装与使用见 [Codex App 插件](/zh-CN/docs/overview/co
 - 项目当前不提供账号云同步；Backend SQLite 与媒体目录需要自行备份，WebDAV 只作为可选同步副本。
 - AI API Key 保存在本地 Backend SQLite，并由浏览器直接请求配置的 OpenAI 兼容接口；只适合个人或可信环境使用。
 - 画布更适合桌面端使用，移动端触控体验还未系统完善。
+- H3 短片生产依赖本地 ComfyUI、ffmpeg/ffprobe 与 Python；Docker 前端镜像不包含这些组件。

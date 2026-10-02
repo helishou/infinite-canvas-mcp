@@ -12,6 +12,7 @@ import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin"
 export function buildNodeContext(host: CanvasPluginHost, node: CanvasNodeData, theme: CanvasTheme, scale: number, isSelected = false): CanvasNodeContext {
     const storage = createPluginStorage(getNodePluginId(node.type));
     return {
+        mediaUrl: host.mediaUrl,
         TextEditor: CanvasCollaborativeText,
         textDocument: (target) => getCanvasTextSession(host.projectId, target),
         textSuggestions: (target) => getCanvasTextSuggestions(host.projectId, target),
@@ -39,6 +40,7 @@ export function buildNodeContext(host: CanvasPluginHost, node: CanvasNodeData, t
         openPanel: () => host.openPanel(node.id),
         closePanel: () => host.closePanel(),
         openAssetPicker: (options) => host.openAssetPicker(options),
+        openMediaPreview: (item) => host.openMediaPreview(item),
         storage,
         generationLogs: host.generationLogs,
     };

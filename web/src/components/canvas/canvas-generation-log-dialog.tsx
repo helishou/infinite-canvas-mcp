@@ -130,8 +130,9 @@ function collectReferences(log: GenerationLog): Array<Record<string, unknown>> {
     const params = typeof log.params === "object" && log.params ? (log.params as Record<string, unknown>) : {};
     if (params.refs) pushRefs(params.refs);
     if (params.refItems) pushRefs(params.refItems);
-    // 如果顶层 references 已经全都有 url，保持原样；否则用 params 中补充到的完整 ref 替换
-    return refs.length && refs.every(hasUrl) ? refs : refs.filter(hasUrl).length ? refs.filter(hasUrl) : refs;
+    // 旧 H3 日志中的运行时尾帧只有本地 resolved 路径；媒体索引失效时也保留名称，不把已提交的输入隐藏。
+    const visible = refs.filter(hasUrl);
+    return visible.length ? refs.filter((ref) => hasUrl(ref) || (ref.runtime === true && String(ref.id || "").startsWith("runtime-tail-"))) : refs;
 }
 
 function actualSubmissionText(params: unknown) {
@@ -165,6 +166,8 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
     const copy = async (value: string) => { await navigator.clipboard?.writeText(value); message.success("已复制"); };
     const statusColor = log.status === "success" ? "green" : log.status === "failed" ? "red" : log.status === "running" ? "processing" : "default";
     const references = collectReferences(log);
+    const logParams = log.params && typeof log.params === "object" ? log.params as Record<string, unknown> : {};
+    const loopInputs = Array.isArray(logParams.loopInputImages) ? logParams.loopInputImages.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))) : [];
     const actualSubmission = actualSubmissionText(log.params);
     const kind = logKind(log);
     // 生文类日志（插件翻译/增强提示词等）把模型输出存进 outputs，这里渲染成可展开的文本段
@@ -178,6 +181,8 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
         <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={KIND_COLOR[kind]}>{typeLabel}</Tag><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
         <div className="mt-2 flex flex-wrap gap-3 text-xs text-stone-500"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span></div>
         {references.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">输入 refs：</span>{references.map((reference, index) => <ReferencePreview key={`${log.id}-ref-${index}`} reference={reference} index={index} onPreview={openPreview} />)}</div> : null}
+        {loopInputs.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">本轮组图：</span>{loopInputs.map((image, index) => <ReferencePreview key={`${log.id}-loop-${index}`} reference={image} index={index} onPreview={openPreview} />)}</div> : null}
+        {!loopInputs.length && Number(log.inputCounts?.loopInputs || 0) > 0 ? <div className="mt-2 text-xs text-stone-500">本轮组图：{log.inputCounts.loopInputs} 张（此历史日志未保存缩略图）</div> : null}
         {log.prompt ? <ExpandableText label="提示词" value={log.prompt} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.prompt || "")} /> : null}
         {textOutputs.map((output, index) => <ExpandableText key={`${log.id}-text-${index}`} label="输出文本" value={String(output.text || "")} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(String(output.text || ""))} />)}
         {actualSubmission ? <ExpandableText label="实际提交配置" value={actualSubmission} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(actualSubmission)} /> : null}
@@ -192,6 +197,7 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
 }
 
 function ReferencePreview({ reference, index, onPreview }: { reference: Record<string, unknown>; index: number; onPreview?: (url: string, video: boolean, name?: string) => void }) {
+    const isRuntimeTail = reference.runtime === true && String(reference.id || "").startsWith("runtime-tail-");
     const storageKey = typeof reference.storageKey === "string" && reference.storageKey ? reference.storageKey : "";
     const url = storageKey ? backendMediaUrl(storageKey) : String(reference.url || "");
     const rawType = String(reference.type || "").toLowerCase();
@@ -217,7 +223,7 @@ function ReferencePreview({ reference, index, onPreview }: { reference: Record<s
     ) : null;
     if (!url) return <Tag title={fallbackName || label}>{fallbackName || label}</Tag>;
     // 固定预览框尺寸，预留布局空间，避免缩略图陆续加载时反复触发重排/重绘
-    if (inferred.kind === "image") return <div className="group relative" style={{ width: 96, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "rgba(120,120,120,0.10)" }}><img src={url} alt={fallbackName || label} title={fallbackName || label} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />{previewButton}</div>;
+    if (inferred.kind === "image") return <div className="group relative" style={{ width: 96, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "rgba(120,120,120,0.10)" }}><img src={url} alt={fallbackName || label} title={fallbackName || label} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />{isRuntimeTail ? <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1 text-[10px] leading-4 text-white">接续尾帧</span> : null}{previewButton}</div>;
     if (inferred.kind === "video") return <div className="group relative" style={{ width: 112, height: 64, flex: "0 0 auto", borderRadius: 6, overflow: "hidden", background: "#000" }}><video src={url} title={fallbackName || label} controls muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} />{previewButton}</div>;
     if (inferred.kind === "audio") return <audio src={url} title={fallbackName || label} controls preload="metadata" className="h-8 w-52" />;
     return <Tag title={fallbackName || label}>{fallbackName || label}</Tag>;

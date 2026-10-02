@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from typing import Any
+import math
 
 import torch
+import torch.nn.functional as F
 
 from .inject import inject_video_latent
 from .stitch import stitch_faces
@@ -63,6 +65,49 @@ def _sample_h3(*, model, positive, latent, seed, cfg, steps, sampler_name, sched
     return _node_args(
         SamplerCustomAdvanced.execute(noise, guider, sampler, sigmas, latent)
     )[0]
+
+
+def apply_full_frame_refine(*, frames: torch.Tensor, model, vae, audio_vae, clip,
+                            prompt: str, seed: int, steps: int, denoise: float,
+                            sampler: str, scheduler: str, target_megapixels: float,
+                            cfg: float = 1.0, shift_video: float = 12.0,
+                            shift_audio: float = 3.0) -> torch.Tensor:
+    """Resample decoded first-pass frames in H3's joint AV latent; the caller keeps the original audio."""
+    if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or frames.shape[0] < 1:
+        raise ValueError("全画面二采需要一采视频帧 IMAGE。")
+    if audio_vae is None:
+        raise ValueError("H3 全画面二采需要 audio_vae。")
+    if not math.isfinite(target_megapixels) or target_megapixels <= 0:
+        raise ValueError("二采目标像素必须为正数。")
+    base = frames[..., :3].contiguous().float().cpu()
+    height, width = base.shape[1:3]
+    scale = math.sqrt(target_megapixels * 1_000_000 / (height * width))
+    target_width = max(32, round(width * scale / 32) * 32)
+    target_height = max(32, round(height * scale / 32) * 32)
+    if (target_height, target_width) != (height, width):
+        base = F.interpolate(base.permute(0, 3, 1, 2), size=(target_height, target_width), mode="bilinear", align_corners=False).permute(0, 2, 3, 1).contiguous()
+    sample_input = _pad_frames(base, _align_frame_count(base.shape[0]))
+    try:
+        from comfy_extras.nodes_minimax_h3 import MiniMaxH3ReferenceToVideo
+    except Exception as exc:
+        raise RuntimeError("当前 ComfyUI 未提供内置 MiniMax H3 Reference to Video 节点。") from exc
+    positive, latent = _node_args(MiniMaxH3ReferenceToVideo.execute(
+        clip=clip, prompt=str(prompt or ""), width=target_width, height=target_height,
+        length=int(sample_input.shape[0]), ref_image_size="match", vae=vae,
+        audio_vae=audio_vae, ref_images={"ref_image_0": sample_input[:1]},
+        ref_videos=None, ref_video_audios=None, ref_audios=None,
+    ))[:2]
+    sampled = _sample_h3(
+        model=model, positive=positive, latent=inject_video_latent(latent, sample_input, vae),
+        seed=int(seed), cfg=float(cfg), steps=int(steps), sampler_name=str(sampler),
+        scheduler=str(scheduler), denoise=float(denoise),
+        shift_video=float(shift_video), shift_audio=float(shift_audio),
+    )
+    from nodes import VAEDecode
+    refined, = VAEDecode().decode(vae, sampled)
+    if not isinstance(refined, torch.Tensor) or refined.ndim != 4:
+        raise RuntimeError("H3 全画面二采解码没有返回有效的视频帧。")
+    return refined[:frames.shape[0], ..., :3].contiguous().float().cpu()
 
 
 def apply_face_refine(

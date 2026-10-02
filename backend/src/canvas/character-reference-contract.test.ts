@@ -18,8 +18,8 @@ const characterProject = {
     }],
 };
 
-test("Backend 预检阻断只有 storageKey 的角色预览引用", () => {
-    const result = compileReferenceSubmission(characterProject, {
+function segment(outfits: Array<Record<string, unknown>>, referenceBindings: unknown[]) {
+    return {
         id: "clip-1",
         taskMode: "ref2va",
         h3CharacterGroups: {
@@ -29,15 +29,37 @@ test("Backend 预检阻断只有 storageKey 的角色预览引用", () => {
                 characterAssetId: "asset-1",
                 characterNodeId: "character-1",
                 subjectId: "character-1",
-                outfits: [
-                    { id: "outfit-a", name: "三年前", storageKey: "image:a", url: "https://media.test/a.png", enabled: true },
-                    { id: "outfit-b", name: "婚后", storageKey: "image:b", url: "https://media.test/b.png", enabled: false },
-                    { id: "outfit-c", name: "夜行", storageKey: "image:c", url: "https://media.test/c.png", enabled: false },
-                ],
+                outfits,
             },
         },
-        referenceBindings: [{ id: "binding-1", assetId: "asset-a", label: "沈昭宁 · 三年前", role: "character_turnaround", subjectId: "character-1", mediaType: "image", storageKey: "image:a", sourceNodeId: "character-1", groupId: "group-1", outfitId: "outfit-a", enabled: true, usage: "reference" }],
-    });
+        referenceBindings,
+    };
+}
+
+const fullOutfits = [
+    { id: "outfit-a", name: "三年前", storageKey: "image:a", url: "https://media.test/a.png", enabled: true },
+    { id: "outfit-b", name: "婚后", storageKey: "image:b", url: "https://media.test/b.png", enabled: false },
+    { id: "outfit-c", name: "夜行", storageKey: "image:c", url: "https://media.test/c.png", enabled: false },
+];
+
+// 角色组参考绑定是 h3CharacterGroups 的派生视图。存量快照缺 url 只是快照漂移，
+// 派生时从角色组本体补齐；真正该阻断的是角色组本体缺媒体。
+test("存量角色 binding 快照缺 url 时由角色组本体补齐，不再阻断预检", () => {
+    const result = compileReferenceSubmission(characterProject, segment(fullOutfits, [{
+        id: "binding-1", assetId: "asset-a", label: "沈昭宁 · 三年前", role: "character_turnaround",
+        subjectId: "character-1", mediaType: "image", storageKey: "image:a", sourceNodeId: "character-1",
+        groupId: "group-1", outfitId: "outfit-a", enabled: true, usage: "reference",
+    }]));
+    assert.equal(result.issues.some((issue) => issue.code === "character_group_preview_url_missing"), false);
+    assert.doesNotThrow(() => assertReferenceCompilation(result));
+    assert.equal(result.references[0].url, "https://media.test/a.png");
+});
+
+test("角色组本体缺少媒体时预检仍阻断", () => {
+    const result = compileReferenceSubmission(characterProject, segment(
+        fullOutfits.map((outfit) => (outfit.id === "outfit-a" ? { ...outfit, url: undefined } : outfit)),
+        [],
+    ));
     assert.ok(result.issues.some((issue) => issue.code === "character_group_preview_url_missing"));
     assert.throws(() => assertReferenceCompilation(result), /缺少预览 URL/);
 });

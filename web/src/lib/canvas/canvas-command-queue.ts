@@ -59,6 +59,16 @@ export class CanvasCommandQueue<T> {
         this.commands.set(operationId, command);
         await this.write(command);
     }
+    /** Backend 已确认原 operationId 提交成功后，原样取回回执；不换 ID 或修改请求。 */
+    async retryCommittedReceipt(operationId: string) {
+        const current = this.commands.get(operationId);
+        if (!current?.rejected) return;
+        const command = { ...current };
+        delete command.rejected;
+        this.commands.set(operationId, command);
+        try { await this.write(command); }
+        catch (error) { this.commands.set(operationId, current); throw error; }
+    }
     async acknowledge(operationId: string) {
         const current = this.commands.get(operationId);
         await this.writes.get(operationId)?.catch(async (error) => {

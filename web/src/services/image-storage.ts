@@ -33,6 +33,10 @@ let previewQueue: Promise<unknown> = Promise.resolve();
 type ImageReadOptions = { signal?: AbortSignal; category?: "input" | "output" | "library" };
 type StoredImagePreview = { version: number; blob?: Blob };
 
+export function isImageFile(file: File): boolean {
+    return file.type.startsWith("image/") || /\.svg$/i.test(file.name);
+}
+
 // 预览是浏览器本地的可丢弃缓存；同一个 storageKey 在不同 Backend 中不能共用。
 function previewCacheKey(storageKey: string) {
     return `${useBackendStore.getState().url || "local"}\u0000${storageKey}`;
@@ -55,15 +59,19 @@ export async function uploadImage(input: string | Blob, options?: ImageReadOptio
 
 async function storeImage(blob: Blob, options?: ImageReadOptions): Promise<UploadedImage> {
     const localKey = `image:${nanoid()}`;
-    const url = URL.createObjectURL(blob);
+    const isSvg = blob.type === "image/svg+xml" || (blob instanceof File && /\.svg$/i.test(blob.name));
+    const uploadBlob = isSvg && blob.type !== "image/svg+xml" ? new Blob([blob], { type: "image/svg+xml" }) : blob;
+    const url = URL.createObjectURL(uploadBlob);
     try {
         const meta = await loadImageMeta(url, options);
         if (!meta) throw new Error(i18n.t("common.imageReadFailed"));
         throwIfAborted(options?.signal);
         if (!useBackendStore.getState().connected) throw new Error("总后台未连接，无法上传图片");
         throwIfAborted(options?.signal);
-        const result = await uploadBackendMedia({ name: `${localKey}.png`, blob, mimeType: blob.type || "image/png", width: meta.width, height: meta.height, category: options?.category });
-        queueImagePreview(result.storageKey, blob);
+        const mimeType = uploadBlob.type || "image/png";
+        const name = blob instanceof File && blob.name && (!isSvg || /\.svg$/i.test(blob.name)) ? blob.name : `${localKey}.${isSvg ? "svg" : "png"}`;
+        const result = await uploadBackendMedia({ name, blob: uploadBlob, mimeType, width: meta.width, height: meta.height, category: options?.category });
+        if (!isSvg) queueImagePreview(result.storageKey, uploadBlob);
         return { url: backendMediaUrl(result.storageKey), storageKey: result.storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: result.mimeType };
     } finally {
         URL.revokeObjectURL(url);
@@ -220,7 +228,7 @@ function scheduleIdle(callback: () => void) {
 }
 
 async function storeImagePreview(storageKey: string, original: Blob, cacheKey = previewCacheKey(storageKey)) {
-    const preview = await createImageThumbnail(original).catch(() => undefined);
+    const preview = original.type === "image/svg+xml" ? undefined : await createImageThumbnail(original).catch(() => undefined);
     await previewStore.setItem<StoredImagePreview>(cacheKey, { version: IMAGE_PREVIEW_VERSION, blob: preview }).catch(() => undefined);
     return preview ? cacheImagePreview(storageKey, preview, cacheKey) : undefined;
 }

@@ -1,6 +1,6 @@
 import { Check, Clapperboard, Copy, Download, FolderPlus, PencilLine, Search, Trash2, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { App, Button, Card, Drawer, Dropdown, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
+import { App, Alert, Button, Card, Drawer, Dropdown, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -52,6 +52,7 @@ export default function AssetsPage() {
     const assetInputRef = useRef<HTMLInputElement>(null);
     const dramas = useCanvasStore((state) => state.folders);
     const assets = useAssetStore((state) => state.assets);
+    const hydrateError = useAssetStore((state) => state.hydrateError);
     const folders = useAssetStore((state) => state.folders);
     const addAsset = useAssetStore((state) => state.addAsset);
     const updateAsset = useAssetStore((state) => state.updateAsset);
@@ -79,6 +80,7 @@ export default function AssetsPage() {
     const [characterImages, setCharacterImages] = useState<CharacterImage[]>([]);
     const [characterPrimaryIndex, setCharacterPrimaryIndex] = useState(0);
     const [characterVoice, setCharacterVoice] = useState<{ url: string; name: string; description: string; storageKey?: string; assetId: string }>({ url: "", name: "", description: "", assetId: "" });
+    const [uploadingCharacterVoice, setUploadingCharacterVoice] = useState(false);
     const [sceneImageDraft, setSceneImageDraft] = useState<SceneImage | null>(null);
     const [sceneColorCardDraft, setSceneColorCardDraft] = useState<SceneImage | null>(null);
     const [sceneColorPaletteDraft, setSceneColorPaletteDraft] = useState<string[]>([]);
@@ -339,6 +341,7 @@ export default function AssetsPage() {
     };
 
     const saveAsset = async () => {
+        if (uploadingCharacterVoice) return;
         const values = await form.validateFields();
         const base = {
             title: values.title.trim(),
@@ -362,8 +365,13 @@ export default function AssetsPage() {
             const asset = { ...base, kind: "video" as const, data: videoDraft };
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         } else if (values.kind === "character") {
-            if (!characterImages.length) { message.error(t("assets.characterRequireOneImage")); return; }
-            const primaryIndex = Math.min(Math.max(characterPrimaryIndex, 0), characterImages.length - 1);
+            const primaryIndex = characterImages.length
+                ? Math.min(Math.max(characterPrimaryIndex, 0), characterImages.length - 1)
+                : 0;
+            if (!characterImages.length && !characterVoice.url && !characterVoice.storageKey && !characterVoice.assetId) {
+                message.error(t("assets.characterRequireReference"));
+                return;
+            }
             const characterData: CharacterAsset["data"] = {
                 name: values.title.trim(),
                 englishName: "",
@@ -439,9 +447,21 @@ export default function AssetsPage() {
     };
 
     const readCharacterVoiceFile = async (file?: File) => {
-        if (!file || !file.type.startsWith("audio/")) return;
-        const result = await uploadMediaFile(file, "audio", "library");
-        setCharacterVoice((current) => ({ url: result.url, name: file.name, description: current.description, storageKey: result.storageKey, assetId: "" }));
+        if (!file || (!file.type.startsWith("audio/") && !/\.(wav|mp3|m4a|flac|ogg|opus)$/i.test(file.name))) return;
+        setUploadingCharacterVoice(true);
+        try {
+            const result = await uploadMediaFile(file, "audio", "library", { characterVoiceCompression: true });
+            const name = result.compression ? `${file.name.replace(/\.[^.]+$/, "")}-24k-64kbps.mp3` : file.name;
+            setCharacterVoice((current) => ({ url: result.url, name, description: current.description, storageKey: result.storageKey, assetId: "" }));
+            if (result.compression) message.success(t("canvas.character.voiceCompressed", { before: Math.round(file.size / 1024), after: Math.round(result.bytes / 1024) }));
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            message.error(reason === "CHARACTER_VOICE_COMPRESSION_UNAVAILABLE"
+                ? t("canvas.character.voiceBackendRestartRequired")
+                : t("canvas.character.voiceUploadFailed", { reason }));
+        } finally {
+            setUploadingCharacterVoice(false);
+        }
     };
 
     const readVideoFile = async (file?: File) => {
@@ -787,7 +807,19 @@ export default function AssetsPage() {
                         ))}
                     </div>
 
-                    {!visibleAssets.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("assets.empty")} className="py-20" /> : null}
+                    {!visibleAssets.length ? (
+                        hydrateError ? (
+                            <Alert
+                                type="warning"
+                                showIcon
+                                className="my-8"
+                                message={t("assets.readFailed")}
+                                description={<span className="break-all">{hydrateError}</span>}
+                            />
+                        ) : (
+                            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("assets.empty")} className="py-20" />
+                        )
+                    ) : null}
 
                     <div className="flex justify-center">
                         <Pagination
@@ -805,7 +837,7 @@ export default function AssetsPage() {
                 </div>
             </main>
 
-            <Modal title={editingAsset ? t("assets.edit") : t("assets.add")} open={isAssetOpen} width={980} onCancel={() => setIsAssetOpen(false)} onOk={() => void saveAsset()} okText={t("common.save")} cancelText={t("common.cancel")} destroyOnHidden>
+            <Modal title={editingAsset ? t("assets.edit") : t("assets.add")} open={isAssetOpen} width={980} onCancel={() => setIsAssetOpen(false)} onOk={() => void saveAsset()} okText={t("common.save")} okButtonProps={{ loading: uploadingCharacterVoice }} cancelText={t("common.cancel")} destroyOnHidden>
                 <div className="grid gap-6 pt-1 lg:grid-cols-[minmax(0,1fr)_320px]">
                     <Form form={form} layout="vertical" requiredMark={false} initialValues={{ kind: "text", tags: [] }}>
                         <Form.Item name="kind" label={t("assets.type")}>

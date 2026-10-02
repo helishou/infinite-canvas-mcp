@@ -7,10 +7,12 @@ import { ModelWorkflowEditorModal } from "@/components/layout/model-workflow-edi
 import { backendMediaUrl, fetchBackendGenerationLogs, request, type BackendGenerationLog } from "@/services/backend-api";
 import { createModelPackage, parseModelPackage, restoreModelPackage } from "@/services/api/model-packages";
 import { importWorkflowPackage, type WorkflowPackage } from "@/services/api/workflows";
-import { createModelChannel, hydrateConfigFromBackend, modelOptionName, normalizeChannelModels, useConfigStore, type ChannelModel, type ModelChannel } from "@/stores/use-config-store";
+import { createModelChannel, hydrateConfigFromBackend, modelOptionName, normalizeChannelModels, useConfigStore, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 import { InstancesModal } from "./instances-modal";
 
 const CAPABILITY_LABELS = { image: "图片", video: "视频", text: "文本", audio: "音频" } as const;
+const CAPABILITY_ICON = { image: ImageIcon, video: Video, text: Type, audio: Music } as const;
+const CAPABILITY_ORDER: ModelCapability[] = ["image", "video", "text", "audio"];
 
 export function ComfyChannelsPanel() {
     const { message } = App.useApp();
@@ -22,6 +24,7 @@ export function ComfyChannelsPanel() {
     const [selectedNames, setSelectedNames] = useState<Set<string>>(new Set());
     const [generationLogs, setGenerationLogs] = useState<BackendGenerationLog[]>([]);
     const [modelTarget, setModelTarget] = useState<{ channelId: string; model: ChannelModel | null } | null>(null);
+    const [capabilityFilter, setCapabilityFilter] = useState<ModelCapability | "all">("all");
     const channel = config.channels.find((item) => item.kind === "comfyui") || null;
     const covers = useMemo(() => {
         const entries = (channel?.models || []).map((model) => [model.name, findModelCover(generationLogs, channel?.id || "", model)] as const);
@@ -137,8 +140,16 @@ export function ComfyChannelsPanel() {
         }
     };
     const models = channel?.models || [];
+    const channelId = channel?.id || "";
+    const capabilityCounts = useMemo(() => {
+        const counts = new Map<ModelCapability, number>();
+        for (const model of models) counts.set(model.capability, (counts.get(model.capability) || 0) + 1);
+        return counts;
+    }, [models]);
+    const visibleModels = useMemo(() => (capabilityFilter === "all" ? models : models.filter((model) => model.capability === capabilityFilter)), [models, capabilityFilter]);
     const selectedModels = models.filter((model) => selectedNames.has(model.name));
-    const allSelected = Boolean(models.length) && selectedNames.size === models.length;
+    const visibleSelected = visibleModels.filter((model) => selectedNames.has(model.name));
+    const allSelected = Boolean(visibleModels.length) && visibleSelected.length === visibleModels.length;
 
     return (
         <div className="mt-5">
@@ -160,11 +171,20 @@ export function ComfyChannelsPanel() {
                             if (files.length) await importModels(files);
                         }}
                     />
-                    {models.length ? (
+                    {visibleModels.length ? (
                         <Checkbox
                             checked={allSelected}
-                            indeterminate={selectedNames.size > 0 && !allSelected}
-                            onChange={(event) => setSelectedNames(event.target.checked ? new Set(models.map((model) => model.name)) : new Set())}
+                            indeterminate={visibleSelected.length > 0 && !allSelected}
+                            onChange={(event) =>
+                                setSelectedNames((current) => {
+                                    const next = new Set(current);
+                                    for (const model of visibleModels) {
+                                        if (event.target.checked) next.add(model.name);
+                                        else next.delete(model.name);
+                                    }
+                                    return next;
+                                })
+                            }
                         >
                             全选
                         </Checkbox>
@@ -184,9 +204,25 @@ export function ComfyChannelsPanel() {
                 </div>
             </div>
 
-            {channel?.models.length ? (
+            {models.length ? (
+                <div className="mb-4 flex flex-wrap items-center gap-2">
+                    <Button size="small" type={capabilityFilter === "all" ? "primary" : "default"} onClick={() => setCapabilityFilter("all")}>
+                        全部 ({models.length})
+                    </Button>
+                    {CAPABILITY_ORDER.filter((capability) => capabilityCounts.get(capability)).map((capability) => {
+                        const FilterIcon = CAPABILITY_ICON[capability];
+                        return (
+                            <Button key={capability} size="small" type={capabilityFilter === capability ? "primary" : "default"} icon={<FilterIcon className="size-3.5" />} onClick={() => setCapabilityFilter(capability)}>
+                                {CAPABILITY_LABELS[capability]} ({capabilityCounts.get(capability)})
+                            </Button>
+                        );
+                    })}
+                </div>
+            ) : null}
+
+            {visibleModels.length ? (
                 <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                    {channel.models.map((model) => (
+                    {visibleModels.map((model) => (
                         <ModelCard
                             key={model.name}
                             model={model}
@@ -198,14 +234,23 @@ export function ComfyChannelsPanel() {
                                 else next.delete(model.name);
                                 return next;
                             })}
-                            onConfigure={() => setModelTarget({ channelId: channel.id, model })}
-                            onDelete={() => deleteModel(channel.id, model.name)}
+                            onConfigure={() => setModelTarget({ channelId, model })}
+                            onDelete={() => deleteModel(channelId, model.name)}
                         />
                     ))}
                 </section>
             ) : (
                 <div className="rounded-lg border border-dashed border-stone-300 py-12 dark:border-stone-700">
-                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有模型" />
+                    {models.length ? (
+                        <div className="flex flex-col items-center gap-3">
+                            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`没有${CAPABILITY_LABELS[capabilityFilter as Exclude<ModelCapability, "all">] || ""}类型的模型`} />
+                            <Button size="small" onClick={() => setCapabilityFilter("all")}>
+                                查看全部模型
+                            </Button>
+                        </div>
+                    ) : (
+                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有模型" />
+                    )}
                 </div>
             )}
 

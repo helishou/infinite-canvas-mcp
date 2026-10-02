@@ -1,9 +1,15 @@
 import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3CharacterOutfit, H3CharacterVoice, H3Ref, H3ReferenceBinding, H3ReferenceRole, H3Segment } from "../types";
 import { sameRef } from "./h3-compatibility";
+import { characterGroupBindings, resolveCharacterGroupBindings, syncH3CharacterGroupSource } from "../../../../../canvas-agent/src/canvas/reference-contract";
 
-export function refsForSegment(segment: H3Segment) {
+function sameReferenceEntry(left: H3Ref, right: H3Ref) {
+    if (left.bindingId && right.bindingId) return left.bindingId === right.bindingId;
+    return sameRef(left, right);
+}
+
+function storedRefsForSegment(segment: H3Segment): H3Ref[] {
     if (segment.referenceBindings?.length) {
-        return segment.referenceBindings.filter((binding) => binding.enabled !== false && (binding.url || binding.storageKey)).map((binding) => ({
+        return segment.referenceBindings.filter((binding) => (binding.url || binding.storageKey)).map((binding) => ({
             url: binding.url || "", type: inferH3ReferenceMediaType(binding), name: binding.label,
             storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId, role: binding.role,
             subjectId: binding.subjectId, storyboardSubjectIds: binding.storyboardSubjectIds, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, description: binding.description, enabled: binding.enabled, usage: binding.usage, retentionLevel: binding.retentionLevel,
@@ -17,19 +23,39 @@ export function refsForSegment(segment: H3Segment) {
     // once refItems contains entries it is the canonical ordered list.
     const items = segment.refItems?.length ? segment.refItems : bucketItems;
     const refs = items.filter((item) => item?.url || item?.storageKey).map((item) => ({ ...item, type: inferH3ReferenceMediaType(item as H3Ref & { kind?: H3Ref["type"] }) }));
-    return refs.filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
+    return refs.filter((item, index, all) => all.findIndex((other) => sameReferenceEntry(other, item)) === index);
 }
 
-export function segmentRefsPatch(refs: H3Ref[]): Pick<H3Segment, "referenceBindings" | "refItems" | "refs"> {
-    const normalized = refs.map((ref, index) => ensureReferenceIdentity(ref, index));
+export function refsForSegment(segment: H3Segment): H3Ref[] {
+    const stored = storedRefsForSegment(segment).map(ensureReferenceIdentity);
+    const derived = Object.values(segment.h3CharacterGroups || {}).flatMap(refsFromCharacterGroup).map((ref) => {
+        const snapshot = stored.find((old) => old.groupId === ref.groupId && old.type === ref.type && old.outfitId === ref.outfitId);
+        // Historical slot IDs/Clip metadata remain compatible; current group owns media and enabled state.
+        return snapshot ? { ...snapshot, ...ref, bindingId: snapshot.bindingId || ref.bindingId, assetId: sameRef(snapshot, ref) ? snapshot.assetId || ref.assetId : ref.assetId,
+            tags: snapshot.tags || ref.tags, retentionLevel: snapshot.retentionLevel } : ref;
+    });
+    const ordered = resolveCharacterGroupBindings(stored.map(refToBinding), { ...segment });
+    const refs = ordered.filter((binding) => binding.enabled).flatMap((binding) => {
+        const ref = binding.groupId
+            ? derived.find((item) => item.groupId === binding.groupId && item.outfitId === binding.outfitId && item.type === binding.mediaType)
+            : stored.find((item) => item.bindingId === binding.id);
+        return ref ? [ref] : [];
+    });
+    return refs.filter((ref, index) => refs.findIndex((other) => sameReferenceEntry(other, ref)) === index);
+}
+
+export function segmentRefsPatch(refs: H3Ref[], previous?: H3Segment): Pick<H3Segment, "referenceBindings" | "refItems" | "refs"> {
+    const normalized = refs.filter((ref) => !ref.groupId).map((ref, index) => ensureReferenceIdentity(ref, index));
     return {
-        referenceBindings: normalized.map(refToBinding),
-        refItems: normalized,
-        refs: {
-            image: normalized.filter((item) => item.type === "image"),
-            video: normalized.filter((item) => item.type === "video"),
-            audio: normalized.filter((item) => item.type === "audio"),
-        },
+        referenceBindings: [
+            ...normalized.map(refToBinding),
+            ...storedRefsForSegment(previous || { id: "" }).filter((ref) => !ref.groupId && ref.enabled === false
+                && !normalized.some((other) => other.bindingId ? other.bindingId === ref.bindingId : sameRef(other, ref)))
+                .map((ref, index) => previous?.referenceBindings?.find((binding) => binding.id === ref.bindingId)
+                    || refToBinding(ensureReferenceIdentity(ref, normalized.length + index))),
+        ],
+        refItems: undefined,
+        refs: undefined,
     };
 }
 
@@ -76,7 +102,7 @@ function inferRefType(value: string): H3Ref["type"] {
 }
 
 export function withSegmentRefs(segment: H3Segment, refs: H3Ref[]): H3Segment {
-    const next = { ...segment, ...segmentRefsPatch(refs) };
+    const next = { ...segment, ...segmentRefsPatch(refs, segment) };
     return reconcileStoryboardTrack(segment, next);
 }
 
@@ -149,6 +175,38 @@ function reconcileStoryboardTrack(previous: H3Segment, next: H3Segment): H3Segme
 
 // ---- 角色组：拖入角色资产/角色节点时建组，ref 槽里 image/audio ref 都标 groupId ----
 
+/**
+ * 用候选素材替换某个引用（画布替换 / 拖入替换）。
+ * 沿用被替换引用的 bindingId：引用槽身份不变，分镜轨卡片、时长分配和提示词里的
+ * <Picture N> 都留在原位，只换素材本身；候选多于 1 张时其余顺序插在原槽之后。
+ * 无可用候选（例如选了已经在本 Clip 里的素材）返回原 segment，由调用方提示。
+ */
+export function replaceSegmentReference(segment: H3Segment, reference: H3Ref, candidates: H3Ref[]): H3Segment {
+    const current = refsForSegment(segment);
+    const oldIndex = current.findIndex((ref) => reference.bindingId ? ref.bindingId === reference.bindingId : sameRef(ref, reference));
+    if (oldIndex < 0) return segment;
+    const old = current[oldIndex];
+    const base = old.groupId
+        ? applyCharacterGroupEdits(segment, old.groupId, reference.type === "audio" ? { voiceEnabled: false } : { outfitEnabledById: old.outfitId ? { [old.outfitId]: false } : undefined })
+        : segment;
+    const baseRefs = refsForSegment(base).filter((ref) => !(old.bindingId ? ref.bindingId === old.bindingId : sameRef(ref, old)));
+    const replacements = candidates
+        .filter((candidate) => !baseRefs.some((ref) => sameRef(ref, candidate)))
+        .map((candidate, index) => ({
+            ...candidate,
+            ...(index === 0 && old.bindingId ? { bindingId: old.bindingId } : {}),
+            role: old.role || candidate.role,
+            usage: old.usage || candidate.usage,
+            retentionLevel: old.retentionLevel,
+            storyboardSubjectIds: old.storyboardSubjectIds || candidate.storyboardSubjectIds,
+            enabled: true,
+        }))
+        .filter((ref, index, all) => all.findIndex((other) => sameRef(other, ref)) === index);
+    if (!replacements.length) return segment;
+    const at = Math.min(oldIndex, baseRefs.length);
+    return withSegmentRefs(base, [...baseRefs.slice(0, at), ...replacements, ...baseRefs.slice(at)]);
+}
+
 function genGroupId(): string {
     return `cg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -185,11 +243,13 @@ function characterGroupCapacity(segment: H3Segment, groupId?: string) {
     let otherAudios = 0;
     for (const [id, grp] of Object.entries(groups)) {
         if (groupId && id === groupId) continue;
-        otherImages += grp.outfits.filter((outfit) => outfit.enabled).length;
+        otherImages += normalizeCharacterGroup(grp).outfitEnabled
+            ? grp.outfits.filter((outfit) => outfit.enabled).length
+            : 0;
         if (grp.voiceEnabled) otherAudios += 1;
     }
     // 当前 group 之外的 standalone ref（用户手动拖入的非角色 ref）也参与计数
-    const standaloneRefs = (segment.refItems || []).filter((ref) => !ref.groupId);
+    const standaloneRefs = refsForSegment(segment).filter((ref) => !ref.groupId);
     otherImages += standaloneRefs.filter((ref) => ref.type === "image").length;
     otherAudios += standaloneRefs.filter((ref) => ref.type === "audio").length;
     return {
@@ -198,91 +258,43 @@ function characterGroupCapacity(segment: H3Segment, groupId?: string) {
     };
 }
 
+function normalizeCharacterGroup(group: H3CharacterGroup): H3CharacterGroup {
+    return { ...group, outfitEnabled: group.outfitEnabled ?? group.outfits.some((outfit) => outfit.enabled) };
+}
+
 function fitCharacterGroupToCapacity(segment: H3Segment, group: H3CharacterGroup): H3CharacterGroup {
-    const capacity = characterGroupCapacity(segment, group.id);
+    const normalized = normalizeCharacterGroup(group);
+    const capacity = characterGroupCapacity(segment, normalized.id);
     let imagesLeft = capacity.images;
     return {
-        ...group,
-        outfits: group.outfits.map((outfit) => {
-            if (!outfit.enabled) return outfit;
+        ...normalized,
+        outfitEnabled: normalized.outfitEnabled && normalized.outfits.length > 0 && capacity.images > 0,
+        outfits: normalized.outfits.map((outfit) => {
+            if (!normalized.outfitEnabled || !outfit.enabled) return outfit;
             if (imagesLeft <= 0) return { ...outfit, enabled: false };
             imagesLeft -= 1;
             return outfit;
         }),
-        voiceEnabled: Boolean(group.voice) && group.voiceEnabled && capacity.voice,
+        voiceEnabled: Boolean(normalized.voice) && normalized.voiceEnabled && capacity.voice,
     };
 }
 
 /** 从一个角色组派生当前应在 ref 槽里的 refs：每张 enabled outfit 拆为 image ref，voiceEnabled 时 voice 拆为 audio ref。 */
 export function refsFromCharacterGroup(group: H3CharacterGroup): H3Ref[] {
-    const refs: H3Ref[] = [];
-    const subjectId = group.subjectId || group.characterNodeId;
-    for (const outfit of group.outfits) {
-        if (!outfit.enabled) continue;
-        refs.push({
-            url: outfit.url,
-            type: "image",
-            name: `${group.characterName} · ${outfit.name}`,
-            storageKey: outfit.storageKey,
-            mimeType: outfit.mimeType,
-            nodeId: group.characterNodeId,
-            role: outfit.role || "character_turnaround",
-            subjectId,
-            groupId: group.id,
-            outfitId: outfit.id,
-        });
-    }
-    if (group.voiceEnabled && group.voice?.url) {
-        refs.push({
-            url: group.voice.url,
-            type: "audio",
-            name: group.voice.name || `${group.characterName} · 声线`,
-            storageKey: group.voice.storageKey,
-            role: "character_voice",
-            nodeId: group.characterNodeId,
-            subjectId,
-            groupId: group.id,
-        });
-    }
-    return refs;
-}
-
-/** 把 segment 上的 refs 重写：原 refs 拆成 "group 派生 refs + 非 group refs"。character group 的 ref 必须由当前 group.outfits 的 enabled 状态决定 —— 用户在 modal 取消勾选后，旧 ref 应该从 fromGroups 里丢掉，让 ref 槽只显示仍 enabled 的 outfit。 */
-function rewriteRefsWithGroups(segment: H3Segment, groups: Record<string, H3CharacterGroup>): H3Ref[] {
-    const previous = refsForSegment(segment);
-    const fromGroups: H3Ref[] = [];
-    const standalone: H3Ref[] = [];
-    for (const ref of previous) {
-        if (ref.groupId && groups[ref.groupId]) {
-            // 仅当 ref 对应的 outfit 当前 enabled 时才保留 —— 否则当作 disabled，丢弃
-            const group = groups[ref.groupId];
-            const matchingOutfit = group?.outfits.find((outfit) => outfit.id === ref.outfitId);
-            // audio ref 没有 outfitId：用 group.voiceEnabled 决定是否保留
-            const isAudioRef = ref.type === "audio";
-            const stillEnabled = isAudioRef ? Boolean(group?.voiceEnabled) && Boolean(group?.voice?.url) : Boolean(matchingOutfit?.enabled);
-            const sourceRef = refsFromCharacterGroup(group).find((item) => isAudioRef
-                ? item.type === "audio"
-                : item.type === ref.type && item.outfitId === ref.outfitId);
-            if (stillEnabled && sourceRef) fromGroups.push({ ...ref, ...sourceRef, bindingId: ref.bindingId, assetId: ref.assetId, order: ref.order, retentionLevel: ref.retentionLevel });
-        } else if (ref.groupId) {
-            // group 已被删，对应的 ref 一并丢弃
-        } else {
-            standalone.push(ref);
-        }
-    }
-    const derived: H3Ref[] = [];
-    for (const group of Object.values(groups)) {
-        for (const ref of refsFromCharacterGroup(group)) {
-            // derived 只补 fromGroups 没有的 ref（比如新增的 outfit / 之前没出现过的 audio ref）。
-            if (!fromGroups.some((item) => sameRef(item, ref) && item.groupId === ref.groupId)) derived.push(ref);
-        }
-    }
-    return [...standalone, ...fromGroups, ...derived].filter((item, index, all) => all.findIndex((other) => sameRef(other, item)) === index);
+    const normalized = normalizeCharacterGroup(group);
+    const bindings = characterGroupBindings({ ...normalized,
+        outfits: normalized.outfitEnabled ? normalized.outfits.map((outfit) => ({ ...outfit, role: outfit.role || "character_turnaround" })) : [],
+    });
+    return bindings.map((binding) => ({
+        url: binding.url || "", type: binding.mediaType || "image", name: binding.label,
+        storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId,
+        role: binding.role, subjectId: binding.subjectId, groupId: binding.groupId, outfitId: binding.outfitId,
+        bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, enabled: binding.enabled, usage: binding.usage,
+    }));
 }
 
 export function setSegmentCharacterGroups(segment: H3Segment, groups: Record<string, H3CharacterGroup>): H3Segment {
-    const next = { ...segment, h3CharacterGroups: groups };
-    return withSegmentRefs(next, rewriteRefsWithGroups(next, groups));
+    return reconcileStoryboardTrack(segment, { ...segment, h3CharacterGroups: groups });
 }
 
 type CharacterOutfitInput = { url: string; name: string; storageKey?: string; mimeType?: string; role?: H3ReferenceRole };
@@ -337,7 +349,7 @@ function mergeOutfitCatalog(existing: H3CharacterOutfit[], incoming: CharacterOu
  * 否则保持原行为：所有 outfit 都 enabled（存量选过的都传 selectedOutfitKeys）。 */
 export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterGroupInput): H3Segment {
     if (!input.characterNodeId) throw new Error("角色组必须绑定已有 characterNodeId");
-    if (!input.outfits.length) throw new Error(`角色 ${input.characterName || input.characterNodeId} 缺少完整服装目录`);
+    if (!input.outfits.length && !input.voice) throw new Error(`角色 ${input.characterName || input.characterNodeId} 缺少服装目录和声线`);
     const existing = findCharacterGroupBySource(segment, input);
     const groups = { ...(segment.h3CharacterGroups || {}) };
     // 新建路径：未传 selectedOutfitKeys 时按主图默认只勾一套服装（characterPrimaryIndex）。
@@ -364,9 +376,9 @@ export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterG
             subjectId: input.subjectId || existing.subjectId || input.characterNodeId,
             voice: nextVoice,
             outfits: nextOutfits,
+            outfitEnabled: nextOutfits.length > 0 && (existing.outfitEnabled ?? nextOutfits.some((outfit) => outfit.enabled)),
             voiceEnabled: nextVoice ? (existing.voice ? existing.voiceEnabled : (input.defaultVoiceEnabled ?? true)) : false,
         });
-        if (!nextGroup.outfits.some((outfit) => outfit.enabled)) return segment;
         groups[existing.id] = nextGroup;
         return setSegmentCharacterGroups(segment, groups);
     }
@@ -379,9 +391,13 @@ export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterG
         subjectId: input.subjectId || input.characterNodeId,
         voice: input.voice,
         outfits: mergeOutfitCatalog([], input.outfits, nextSelectedOutfitKeys),
+        outfitEnabled: input.outfits.length > 0 && (nextSelectedOutfitKeys
+            ? nextSelectedOutfitKeys.some((key) => input.outfits.some((outfit) => outfitKey(outfit) === key))
+            : Number.isFinite(input.characterPrimaryIndex)
+                ? input.outfits.some((_, index) => index === Math.floor(input.characterPrimaryIndex!))
+                : true),
         voiceEnabled: input.voice ? (input.defaultVoiceEnabled ?? true) : false,
     });
-    if (!nextGroup.outfits.some((outfit) => outfit.enabled)) return segment;
     groups[id] = nextGroup;
     return setSegmentCharacterGroups(segment, groups);
 }
@@ -390,46 +406,54 @@ export function upsertCharacterGroup(segment: H3Segment, input: UpsertCharacterG
 export function syncCharacterGroupFromSource(
     segment: H3Segment,
     groupId: string,
-    source: { characterName: string; characterAssetId?: string; characterNodeId: string; outfits: CharacterOutfitInput[]; voice?: H3CharacterVoice },
+    source: { characterName: string; characterAssetId?: string; characterNodeId: string; characterPrimaryIndex?: number; outfits: CharacterOutfitInput[]; voice?: H3CharacterVoice },
 ): H3Segment {
     const existing = segment.h3CharacterGroups?.[groupId];
     if (!existing || existing.characterNodeId !== source.characterNodeId) return segment;
-    if (!source.outfits.length) return removeCharacterGroup(segment, groupId);
-
-    const previousByKey = new Map(existing.outfits.map((outfit) => [outfitKey(outfit), outfit]));
-    const outfits = source.outfits.map((outfit) => {
-        const previous = previousByKey.get(outfitKey(outfit));
-        return {
-            id: previous?.id || genOutfitId(),
-            ...outfit,
-            enabled: previous?.enabled ?? true,
-        };
-    });
-    const voice = source.voice;
-    const nextGroup = fitCharacterGroupToCapacity(segment, {
-        ...existing,
-        characterName: source.characterName || existing.characterName,
-        characterAssetId: source.characterAssetId || existing.characterAssetId,
-        characterNodeId: source.characterNodeId,
-        subjectId: existing.subjectId || source.characterNodeId,
-        voice,
-        outfits,
-        voiceEnabled: voice ? (existing.voice ? existing.voiceEnabled : true) : false,
-    });
-    const sameOutfits = existing.outfits.length === nextGroup.outfits.length && existing.outfits.every((outfit, index) => {
-        const next = nextGroup.outfits[index];
-        return outfit.id === next.id && outfit.url === next.url && outfit.name === next.name
-            && outfit.storageKey === next.storageKey && outfit.mimeType === next.mimeType && outfit.role === next.role && outfit.enabled === next.enabled;
-    });
-    if (existing.characterName === nextGroup.characterName
-        && existing.characterAssetId === nextGroup.characterAssetId
-        && existing.characterNodeId === nextGroup.characterNodeId
-        && existing.subjectId === nextGroup.subjectId
-        && JSON.stringify(existing.voice) === JSON.stringify(nextGroup.voice)
-        && existing.voiceEnabled === nextGroup.voiceEnabled
-        && sameOutfits) return segment;
-
+    const nextGroup = syncH3CharacterGroupSource(existing, source);
+    if (!nextGroup) return removeCharacterGroup(segment, groupId);
+    if (nextGroup === existing) return segment;
     return setSegmentCharacterGroups(segment, { ...(segment.h3CharacterGroups || {}), [groupId]: nextGroup });
+}
+
+/** 原图片就地转为角色后，把同源图片引用接入角色组，保留 Clip 的绑定与顺序。 */
+export function promoteCharacterSourceReferences(segment: H3Segment, source: UpsertCharacterGroupInput): H3Segment {
+    if (!source.characterNodeId) return segment;
+    const refs = refsForSegment(segment);
+    const matches = refs.flatMap((ref, index) => {
+        if (ref.groupId || ref.nodeId !== source.characterNodeId || ref.type !== "image") return [];
+        // 已明确指定的分镜、场景等职责仍属于当前 Clip，不能因源节点类型变化而覆盖。
+        if (!["other", "character_identity", "character_turnaround"].includes(inferReferenceRole(ref))) return [];
+        const outfitIndex = source.outfits.findIndex((outfit) => sameRef(ref, { ...outfit, type: "image", name: outfit.name }));
+        return outfitIndex < 0 ? [] : [{ ref, index, outfitIndex }];
+    });
+    if (!matches.length) return segment;
+    const existing = findCharacterGroupBySource(segment, source);
+    const groupId = existing?.id || genGroupId();
+    const outfits = source.outfits.map((outfit, index) => {
+        const previous = existing?.outfits.find((item) => outfitKey(item) === outfitKey(outfit));
+        return { ...outfit, id: previous?.id || genOutfitId(), enabled: previous?.enabled || matches.some((match) => match.outfitIndex === index) };
+    });
+    const group: H3CharacterGroup = {
+        ...existing, id: groupId, characterName: source.characterName,
+        characterNodeId: source.characterNodeId, characterAssetId: source.characterAssetId,
+        subjectId: existing?.subjectId || source.characterNodeId, outfits, outfitEnabled: true,
+        voice: source.voice, voiceEnabled: existing?.voiceEnabled ?? false,
+    };
+    const nextRefs = refs.map((ref, index) => {
+        const match = matches.find((item) => item.index === index);
+        if (!match) return ref;
+        const outfit = outfits[match.outfitIndex];
+        return { ...ref, name: `${source.characterName} · ${outfit.name}`, groupId, outfitId: outfit.id,
+            subjectId: group.subjectId, role: inferReferenceRole(ref) === "other" ? outfit.role || "character_turnaround" : ref.role };
+    });
+    const next = withSegmentRefs({ ...segment, h3CharacterGroups: { ...segment.h3CharacterGroups, [groupId]: group } }, nextRefs);
+    // refsForSegment 是启用引用的视图；转换不能丢掉用户保留但禁用的绑定。
+    if (segment.referenceBindings?.length) {
+        const updated = new Map(nextRefs.map((ref, index) => [ref.bindingId, refToBinding(ensureReferenceIdentity(ref, index))]));
+        next.referenceBindings = segment.referenceBindings.map((binding) => updated.get(binding.id) || binding);
+    }
+    return next;
 }
 
 export function removeCharacterGroup(segment: H3Segment, groupId: string): H3Segment {
@@ -443,18 +467,19 @@ export function removeCharacterGroup(segment: H3Segment, groupId: string): H3Seg
 export function applyCharacterGroupEdits(segment: H3Segment, groupId: string, patch: H3CharacterGroupEditPatch): H3Segment {
     const group = segment.h3CharacterGroups?.[groupId];
     if (!group) return segment;
+    const outfitEnabled = patch.outfitEnabled ?? (patch.outfitEnabledById
+        ? group.outfits.some((outfit) => patch.outfitEnabledById?.[outfit.id] ?? outfit.enabled)
+        : group.outfitEnabled);
     const nextGroup = fitCharacterGroupToCapacity(segment, {
         ...group,
-        outfits: patch.outfitEnabled ? group.outfits.map((outfit) => ({
+        outfits: patch.outfitEnabledById ? group.outfits.map((outfit) => ({
             ...outfit,
-            enabled: patch.outfitEnabled?.[outfit.id] ?? outfit.enabled,
+            enabled: patch.outfitEnabledById?.[outfit.id] ?? outfit.enabled,
         })) : group.outfits,
+        outfitEnabled: group.outfits.length > 0 && outfitEnabled,
         voiceEnabled: patch.voiceEnabled ?? group.voiceEnabled,
     });
-    // 全部 outfit 都关了 → 直接删组
-    if (!nextGroup.outfits.some((outfit) => outfit.enabled)) {
-        return removeCharacterGroup(segment, groupId);
-    }
+    // Disabled groups retain their catalog so both switches can be re-enabled.
     return setSegmentCharacterGroups(segment, { ...(segment.h3CharacterGroups || {}), [groupId]: nextGroup });
 }
 

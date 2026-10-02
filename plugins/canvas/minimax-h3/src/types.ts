@@ -1,3 +1,4 @@
+import type { H3SubjectDefinition } from "../../../../canvas-agent/src/plugins/minimax-h3/subject-definitions";
 export type H3ReferenceRole = "character_identity" | "character_turnaround" | "storyboard" | "scene" | "blocking" | "keyframe" | "motion_reference" | "audio_reference" | "character_voice" | "style" | "palette" | "prop" | "other";
 export type H3ReferenceUsage = "reference" | "first_frame" | "last_frame";
 export type H3ReferenceRetention = "fully_preserved" | "partially_preserved" | "attribute_transfer" | "weak_reference";
@@ -30,15 +31,20 @@ export type H3CharacterGroup = {
     subjectId?: string;
     voice?: H3CharacterVoice;
     outfits: H3CharacterOutfit[];
+    /** 是否启用当前 Clip 的服装参考；缺省兼容旧数据时按是否已有 enabled 服装推导。 */
+    outfitEnabled?: boolean;
     voiceEnabled: boolean;
 };
 
 export type H3CharacterGroupEditPatch = {
-    outfitEnabled?: Record<string, boolean>;
+    /** undefined 表示不改；true/false 统一控制整个角色组的服装参考。 */
+    outfitEnabled?: boolean;
+    /** 兼容旧的逐套 enabled 编辑入口。 */
+    outfitEnabledById?: Record<string, boolean>;
     voiceEnabled?: boolean;
 };
 
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; description?: string; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown> };
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; description?: string; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown>; runtime?: boolean };
 export type H3StoryboardShot = { id: string; duration?: number; referenceBindingId?: string };
 
 /**
@@ -46,20 +52,7 @@ export type H3StoryboardShot = { id: string; duration?: number; referenceBinding
  * 打开分镜编辑表单时按当前 Clip 引用规则生成一份默认值，用户可手动增删改。
  * 未自定义（缺省）时按下述规则即时生成，保证旧数据行为不变。
  */
-export type H3SubjectDefinition = {
-    /** 稳定主体 ID（对应 subjects manifest 的 id / groupId / subjectId）。 */
-    id: string;
-    /** 展示名，写入 `<Subject N> is <name>.`。 */
-    name: string;
-    englishName?: string;
-    /** 视觉来源的参考标签，如 `<Picture 2>`。 */
-    pictures?: string[];
-    /** 补充描述（profile / 服装 / 视觉特征）。 */
-    profile?: string;
-    outfits?: string[];
-    /** 主体类别，仅用于 UI 分组与配色。 */
-    role?: string;
-};
+export type { H3SubjectDefinition } from "../../../../canvas-agent/src/plugins/minimax-h3/subject-definitions";
 
 export type H3TaskStatus = "idle" | "queued" | "loading" | "success" | "error" | "cancelled";
 export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number; error?: string; output?: H3Ref };
@@ -76,11 +69,15 @@ export type H3Segment = {
     status?: string;
     progress?: number;
     runtimeTaskId?: string;
+    /** H3 父运行任务 ID；runtimeTaskId 在生成阶段是当前 Clip 的子任务 ID。 */
+    parentTaskId?: string;
     // H3Runner catch 块写 segment.status: "error" 时把 errorDetails 也写到 segment 上，
     // H3ClipCard 用它显示 hover 提示，避免前端"卡片不更新"的视觉假象。
     errorDetails?: string;
     taskMode?: string;
     storyboardCompositeEnabled?: boolean;
+    /** 设置中选择的视觉风格模板 id；仅运行时注入提示词，null = 不加模板。 */
+    styleTemplateId?: string | null;
     seed?: number | string;
     noiseSeedMode?: "random" | "fixed";
     noiseSeed?: number | string;
@@ -127,9 +124,6 @@ export type H3Segment = {
     secondPassSigma?: number;
     dedicatedAttention?: string;
     startupMode?: string;
-    faceRepairSingle?: boolean;
-    faceRepairMulti?: boolean;
-    globalRepair?: boolean;
     /** Director track -> crop -> H3 r2v resample -> stitch post-pass. */
     faceRefineEnabled?: boolean;
     faceRefineDetector?: string;
@@ -151,7 +145,7 @@ export type H3Segment = {
     firstPassStorageKey?: string;
     firstPassFingerprint?: string;
     firstPassReady?: boolean;
-    storyboardPromptCache?: { version: 12; fingerprint: string; subjectDefinitions: string; retentionAnalysis: string };
+    storyboardPromptCache?: { version: 13; fingerprint: string; subjectDefinitions: string; retentionAnalysis: string };
     seamFaceFadeFrames?: number;
     seamColourMatch?: number;
     seamAudioCrossfadeMs?: number;
@@ -163,6 +157,8 @@ export type H3Segment = {
     /** 连续生成模式：保留跨 Clip 的 H3 模型缓存，减少下一段冷启动。默认关闭。 */
     keepModelCache?: boolean;
     latentUpscaleEnabled?: boolean;
+    /** Only applies while latent upscaling is enabled; independent of face refinement confirmation. */
+    latentUpscaleConfirmationMode?: boolean;
     h3FirstSteps?: number;
     h3SecondSteps?: number;
     h3FullSigma?: string;
@@ -199,6 +195,16 @@ export type H3Segment = {
     audioContextLength?: number;
     continuationTask?: string;
     continuationGroupId?: string;
+    /** 接缝加噪开关：复刻旧版动噪（36×64 六色块噪），让下一段重画接缝。强度等参数由前端按校准值写入。 */
+    continuationSeamNoiseEnabled?: boolean;
+    /** 接缝加噪：叠加在钉住的视频潜变量上的噪声强度，0=硬接缝，音频永不加噪。 */
+    continuationSeamNoise?: number;
+    /** 接缝加噪模式：block=复刻旧版 36×64 调色板块噪（默认）；gaussian=普通高斯。 */
+    continuationSeamNoiseMode?: "block" | "gaussian";
+    /** 接缝加噪种子；0=自动取本 Clip 随机种子，同段重跑可复现。 */
+    continuationSeamNoiseSeed?: number;
+    /** 接缝加噪斜坡：末尾若干块递减到旧版 alphaEnd 比例（0.10/0.45），默认 3。 */
+    continuationSeamNoiseRamp?: number;
     continuationAudioRefineEnabled?: boolean;
     continuationAudioDenoise?: number;
     continuationAudioSteps?: number;
@@ -277,13 +283,13 @@ export type H3Segment = {
     denoise?: number;
     trimIn?: number;
     trimOut?: number;
-    // Motion Context 是南风 V15 的 AV latent 潜空间续写开关；后端负责生成连续组任务描述符。
+    // 本段的 outgoing 开关：将本段的 AV latent 传给紧邻下一段；后端负责连续组任务描述符。
     motionContextEnabled?: boolean;
     // 上一段成品视频作为「参考视频」喂进本段：必须显式开启，默认关闭。
     // 只有链式续跑（runFromCurrent）时生效；标在本段上（index > 0 才有意义）。
     // 注意：唯一有效键名是 previousVideoAsReference，不要再引入别名。
     previousVideoAsReference?: boolean;
-    // 尾帧接续：本段运行结束后，下一段运行自动抓取本段尾帧作为首帧参考并拼接到提示词
+    // 尾帧参考：下一段运行时追加本段尾帧，参考动作、场景与连续性；独立于潜空间续写。
     // （仅运行时拼接，不写回 prompt 编辑区）。该开关标在本段上，表示「把我的尾帧传给下一段」。
     // 注意：唯一有效键名是 tailFrameContinuation；不要再引入 tailFrameEnabled 之类的别名。
     tailFrameContinuation?: boolean;

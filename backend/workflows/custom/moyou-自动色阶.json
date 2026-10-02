@@ -1,0 +1,42 @@
+{
+  "1": {
+    "inputs": {
+      "image": [
+        "2",
+        0
+      ],
+      "clip_percent": 0.1,
+      "mode": "enhance_bc",
+      "snap_midtones": false
+    },
+    "class_type": "MoYouAutoLevelsAnalyze"
+  },
+  "2": {
+    "inputs": {
+      "image": ""
+    },
+    "class_type": "LoadImage"
+  },
+  "3": {
+    "inputs": {
+      "image": [
+        "2",
+        0
+      ],
+      "levels": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "MoYouAutoLevelsApply"
+  },
+  "16": {
+    "inputs": {
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "PreviewImage"
+  }
+}

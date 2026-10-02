@@ -11,7 +11,7 @@ const CUSTOM_SUBDIR = "custom";
 const NAME_RE = /^[^\x00-\x1f\\/:*?"<>|]+\.json$/;
 const MEDIA_INPUT_KEYS = ["image", "video", "audio", "mask", "filename", "file"];
 const MEDIA_EXT_RE = /\.(png|jpe?g|webp|gif|bmp|tiff?|mp4|webm|mov|m4v|avi|mkv|mp3|wav|m4a|aac|ogg|flac)(?:\?|$)/i;
-const BUNDLED_WORKFLOWS = ["IndexTTS-2.5.json", "MiniMax_H3.json", "custom/视频修复FlashVSR1.1.json"];
+const BUNDLED_WORKFLOWS = ["IndexTTS-2.5.json", "MiniMax_H3.json", "custom/视频修复FlashVSR1.1.json", "custom/moyou-自动色阶.json"];
 const BUILTIN_CONFIGS: Record<string, WorkflowConfig> = {
     "IndexTTS-2.5.json": {
         title: "IndexTTS 2.5 配音",
@@ -50,6 +50,15 @@ const BUILTIN_CONFIGS: Record<string, WorkflowConfig> = {
             { id: "video", node: "10", input: "video", name: "输入视频", type: "video", required: true },
             { id: "scale", node: "2", input: "value", name: "放大倍数", type: "number", default: 4 },
             { id: "longer_edge", node: "40", input: "longer_edge", name: "预处理长边", type: "number", default: 960 },
+        ],
+    },
+    "custom/moyou-自动色阶.json": {
+        title: "moyou 自动色阶",
+        backend: "comfyui",
+        operation: "image-adjust",
+        description: "分析输入图片的色阶并生成自动校正结果。",
+        fields: [
+            { id: "source_image", node: "2", input: "image", name: "输入图片", type: "image", required: true },
         ],
     },
 };

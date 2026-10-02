@@ -6,6 +6,7 @@ import { logger } from "../utils/logger.js";
 import { buildCanvasToolRequest, fitAttachmentNodeSize } from "./operations.js";
 import type { ToolName } from "./schemas.js";
 import { compactCanvasState, compactNode, isToolName, nextCanvasX, parseToolInput } from "./tools.js";
+import { summarizeCanvasState } from "./state-summary.js";
 import type { CanvasSnapshot } from "./types.js";
 
 type PendingRequest = { clientId: string; resolve: (value: unknown) => void; reject: (error: Error) => void };
@@ -447,7 +448,13 @@ export class CanvasSession {
         }
         const readTool = ["canvas_get_state", "canvas_get_selection", "canvas_export_snapshot"].includes(name);
         if (readTool && (!this.clients.size || !this.canvasState)) throw new Error("当前没有已连接画布");
-        if (name === "canvas_get_state" || name === "canvas_export_snapshot") return compactCanvasState(this.canvasState);
+        if (name === "canvas_get_state") {
+            const canvas = this.canvasState!;
+            if (input.projectId && input.projectId !== canvas.projectId) throw new Error(`当前未连接画布：${input.projectId}`);
+            // 网页内存快照没有可信持久 revision；条件读取在此入口总返回新鲜目录。
+            return summarizeCanvasState(canvas as unknown as Record<string, unknown>, input, 512 * 1024);
+        }
+        if (name === "canvas_export_snapshot") return compactCanvasState(this.canvasState);
         if (name === "canvas_get_selection") {
             const ids = new Set(this.canvasState?.selectedNodeIds || []);
             return { nodes: (this.canvasState?.nodes || []).filter((node) => ids.has(node.id)).map(compactNode) };

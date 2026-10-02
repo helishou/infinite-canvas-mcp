@@ -38,6 +38,7 @@ import type {
 import { BackendEventBus, type CanvasEventSource } from "./events.js";
 import type { CanvasOperation } from "./canvas/project-ops.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
+import { syncCharacterAssetsForProject } from "./canvas/character-asset-on-open.js";
 import {
   detectLineInset,
   type DetectLineInsetParams,
@@ -54,6 +55,7 @@ import {
 } from "./server/connection-routes.js";
 import { CanvasDraftSessionLeases } from "./canvas/draft-session-leases.js";
 import { registerMcpObservabilityRoutes } from "./server/mcp-observability-routes.js";
+import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
 
 const logger = createLogger("backend");
 
@@ -478,6 +480,15 @@ export function startServer(
     res.json({ ok: true, projects });
   });
   app.get("/canvas/projects/:id", (req, res) => {
+    if (req.query.view === "index") {
+      const rawRevision = req.query.ifRevision;
+      const ifRevision = typeof rawRevision === "string" && /^\d+$/.test(rawRevision) ? Number(rawRevision) : undefined;
+      if (rawRevision !== undefined && (ifRevision === undefined || !Number.isSafeInteger(ifRevision)))
+        return void res.status(400).json({ ok: false, error: "ifRevision 必须是非负整数" });
+      const project = db.getCanvasProjectIndex(req.params.id, ifRevision);
+      if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
+      return void res.json({ ok: true, project });
+    }
     const project =
       req.query.summary === "true"
         ? db.listCanvasProjectSummaries({ id: req.params.id })[0]
@@ -485,6 +496,14 @@ export function startServer(
     if (!project)
       return void res.status(404).json({ ok: false, error: "画布不存在" });
     res.json({ ok: true, project });
+  });
+  app.post("/canvas/projects/:id/sync-character-assets", (req, res) => {
+    try {
+      res.json({ ok: true, ...syncCharacterAssetsForProject(stores, req.params.id) });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      res.status(detail.startsWith("画布不存在:") ? 404 : 400).json({ ok: false, error: detail });
+    }
   });
   app.get("/canvas/projects/:id/drama", (req, res) => {
     if (!db.getCanvasProject(req.params.id))
@@ -593,6 +612,11 @@ export function startServer(
         });
     }
   });
+  app.get("/canvas/projects/:id/ops/:operationId/receipt", (req, res) => {
+    if (db.getCanvasProjectRevision(req.params.id) === null)
+      return void res.status(404).json({ ok: false, error: "画布不存在" });
+    res.json({ ok: true, ...db.getCanvasOperationReceipt(req.params.id, req.params.operationId) });
+  });
   app.post("/canvas/projects/:id/ops", (req, res) => {
     const expectedRevision =
       req.body?.expectedRevision === undefined
@@ -638,6 +662,8 @@ export function startServer(
         project?: CanvasProject;
         revision?: number;
         conflictTargets?: string[];
+        committed?: boolean;
+        snapshotAvailable?: boolean;
       };
       if (
         [
@@ -660,6 +686,8 @@ export function startServer(
             revision: value.revision,
             project: value.project,
             conflictTargets: value.conflictTargets,
+            committed: value.committed,
+            snapshotAvailable: value.snapshotAvailable,
           });
       if (value.message.startsWith("画布不存在:"))
         return void res.status(404).json({ ok: false, error: value.message });
@@ -673,6 +701,17 @@ export function startServer(
             operation?.id || operation?.nodeId || operation?.assetId || "",
           ),
           segmentId: String(operation?.segmentId || ""),
+          // 排查 H3 参考绑定冲突：必须能看到真正提交的 patch/refs 形状。
+          patchKeys: operation?.patch ? Object.keys(operation.patch as object) : undefined,
+          segmentIdsInMetadata: Array.isArray((operation?.metadata as { segments?: Array<{ id?: unknown }> } | undefined)?.segments)
+            ? ((operation?.metadata as { segments?: Array<{ id?: unknown }> }).segments || []).map((segment) => String(segment.id || ""))
+            : undefined,
+          legacyRefsInPatch: ["refItems", "refs"].filter((key) => key in ((operation?.patch as object) || {})),
+          legacyRefsInMetadataSegments: Array.isArray((operation?.metadata as { segments?: Array<Record<string, unknown>> } | undefined)?.segments)
+            ? ((operation?.metadata as { segments?: Array<Record<string, unknown>> }).segments || [])
+                .flatMap((segment) => ["refItems", "refs"].filter((key) => key in segment).map((key) => `${String(segment.id || "?")}.${key}`))
+            : undefined,
+          targetNodeIdForText: operation?.target ? { nodeId: String((operation.target as { nodeId?: unknown }).nodeId || ""), segmentId: String((operation.target as { segmentId?: unknown }).segmentId || ""), field: String((operation.target as { field?: unknown }).field || "") } : undefined,
         })),
       });
       res
@@ -1230,6 +1269,40 @@ export function startServer(
     },
   );
 
+  /** 角色声线上传独立入口：超过 0.5 MB 才压缩，原文件保留在媒体库。 */
+  app.post(
+    "/media/character-voice",
+    express.raw({ type: "*/*", limit: "100mb" }),
+    async (req, res) => {
+      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const name = decodeURIComponent(String(req.headers["x-media-name"] || "voice.wav"));
+      const mimeType = String(req.headers["content-type"] || "application/octet-stream").split(";", 1)[0];
+      const durationMs = Number(req.headers["x-media-duration-ms"]) || null;
+      if (!body.length) return void res.status(400).json({ ok: false, error: "声线文件为空" });
+      try {
+        const voice = await prepareCharacterVoiceUpload(body, name, mimeType);
+        const original = voice.compressed ? stores.media.store(body, { name, mimeType, category: "library", durationMs }) : null;
+        const media = stores.media.store(voice.body, { name: voice.name, mimeType: voice.mimeType, category: "library", durationMs });
+        res.status(201).json({ ok: true, media: {
+          storageKey: media.storageKey,
+          url: stores.media.url(media),
+          mimeType: media.mimeType,
+          bytes: media.bytes,
+          width: media.width,
+          height: media.height,
+          durationMs: media.durationMs,
+          ...(original ? { compression: {
+            originalBytes: voice.originalBytes,
+            originalStorageKey: original.storageKey,
+            thresholdBytes: CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES,
+          } } : {}),
+        } });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+    },
+  );
+
   /** 代理读取媒体文件。视频必须支持 Range，浏览器才能按需缓冲和 seek，避免整段读入内存后播放卡顿。 */
   app.get("/media/:storageKey", async (req, res) => {
     const storageKey = decodeURIComponent(req.params.storageKey);
@@ -1239,6 +1312,10 @@ export function startServer(
     try {
       res.setHeader("Cache-Control", "private, max-age=3600");
       res.setHeader("Content-Type", media.mimeType);
+      if (media.mimeType === "image/svg+xml") {
+        res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+      }
       res.setHeader("Accept-Ranges", "bytes");
       const bytes = fs.statSync(media.filePath).size;
       const range = req.headers.range;
@@ -1598,8 +1675,8 @@ export function startServer(
   app.post(`${CANVAS_TASKS_PATH}/:id/h3-confirmation`, (req, res) => {
     if (!deps.resolveH3Confirmation) return void res.status(501).json({ ok: false, error: "H3 confirmation unavailable" });
     const body = req.body as Partial<H3ConfirmationAction> | undefined;
-    if (!body || !["confirm", "keep_first_pass", "discard"].includes(String(body.action)) || !Array.isArray(body.segmentIds) || body.segmentIds.length !== 1 || typeof body.segmentIds[0] !== "string" || typeof body.firstPassFingerprint !== "string")
-      return void res.status(400).json({ ok: false, error: "H3 确认需要 action、单个 segmentId 及 firstPassFingerprint" });
+    if (!body || !["confirm", "keep_first_pass", "discard"].includes(String(body.action)) || typeof body.segmentId !== "string" || !Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0 || (body.postpassParams !== undefined && (!body.postpassParams || typeof body.postpassParams !== "object" || Array.isArray(body.postpassParams))))
+      return void res.status(400).json({ ok: false, error: "H3 确认需要 action、segmentId 和 expectedRevision" });
     try {
       const task = deps.resolveH3Confirmation(String(req.params.id), body as H3ConfirmationAction);
       res.json({ ok: true, task });

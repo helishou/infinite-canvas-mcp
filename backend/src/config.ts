@@ -34,6 +34,7 @@ export const WORKERS_DIR = path.join(DATA_DIR, "workers");
 export const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 export type FrontendSettings = {
+    [key: `homePinnedProject:${string}`]: boolean | undefined;
     agentModel?: string;
     agentReasoningEffort?: string;
     agentPermissionMode?: string;

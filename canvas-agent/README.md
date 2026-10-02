@@ -1,6 +1,8 @@
 # Infinite Canvas Agent
 
-本地 Canvas Agent 用来连接画布网页和用户电脑上的 Codex / Claude Code。本地开发时优先连接 `http://localhost:3000`，不需要先使用线上站点。
+本地 Canvas Agent 用来连接画布网页和用户电脑上的 Codex / Claude Code。本地开发网页地址为 `http://localhost:3001`；Backend 已集成 `/agent` 与 `/mcp`，独立 17371 服务用于旧客户端兼容。
+
+Codex CLI 是可选依赖。画布、Backend MCP 与 ComfyUI 不依赖它；使用 Codex 对话前安装并登录 `npm install -g @openai/codex@0.146.0`。运行时优先使用项目中显式安装的 `@openai/codex`，再从 PATH 查找全局安装或独立可执行文件。未安装时仅对话入口提示安装，不阻止 HTTP 服务启动。
 
 ## 启动
 

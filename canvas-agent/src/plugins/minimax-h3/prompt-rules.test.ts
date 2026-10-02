@@ -34,7 +34,9 @@ test("删除重复切镜前缀时保留目标画面、正文和原台词", () =>
 test("校验实际引用而不误报台词中的字面标签", () => {
     const refs = [{ type: "image", bindingId: "picture" }, { type: "audio", bindingId: "voice" }];
     assert.doesNotThrow(() => validatePromptReferences('<Subject 1> <Picture 1> <Audio 1> {{ref:voice}} <d>[English] <Picture 9></d>', refs, 1));
-    for (const text of ["<Subject 2>", "<Picture 0>", "<Picture 2>", "<Video 1>", "{{ref:missing}}", "<Audio 2>"]) {
+    // Subject labels are semantic entities, not positions in the media array.
+    assert.doesNotThrow(() => validatePromptReferences("<Subject 2> holds a prop beside <Subject 9>", refs, 1));
+    for (const text of ["<Picture 0>", "<Picture 2>", "<Video 1>", "{{ref:missing}}", "<Audio 2>"]) {
         assert.throws(() => validatePromptReferences(text, refs, 1));
     }
 });

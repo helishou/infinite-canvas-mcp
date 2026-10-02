@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
+import { loadCanvasProjectPage } from "@/lib/canvas-project-loader";
 import { cn } from "@/lib/utils";
 import { backendMediaUrl, createBackendDramaEpisode, createBackendProject, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, type DramaCustomAsset, type DramaEpisode } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
@@ -81,6 +82,9 @@ export default function DramaPage() {
             setEpisodesByDrama({});
             return;
         }
+        // The project page is by far the heaviest route chunk. Warm it while
+        // users browse episode cards, making the first click navigation cheap.
+        void loadCanvasProjectPage();
         let disposed = false;
         void Promise.all(dramaFolders.map(async (folder) => {
             try {
@@ -291,7 +295,12 @@ export default function DramaPage() {
             },
         });
     };
-    const openProject = (project: CanvasProject) => navigate(`/canvas/${project.id}`);
+    const openProject = (project: CanvasProject) => {
+        // The canvas route owns a very large lazy chunk. Start loading it before
+        // navigation so React Router can render the target page immediately.
+        void loadCanvasProjectPage();
+        navigate(`/canvas/${project.id}`);
+    };
 
     return (
         <main className="h-full overflow-y-auto bg-background text-stone-950 dark:text-stone-100">
@@ -360,7 +369,7 @@ export default function DramaPage() {
                             </div>
                             {visibleEpisodes.length ? (
                                 <div className="grid gap-4 sm:grid-cols-2">
-                                    {visibleEpisodes.map((episode, index) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} index={index} onOpen={openProject} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
+                                    {visibleEpisodes.map((episode, index) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} index={index} onOpen={openProject} onProduce={() => navigate(`/drama/episodes/${episode.id}/production`)} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
                                 </div>
                             ) : (
                                 <div className="flex min-h-60 flex-col items-center justify-center rounded-2xl border border-dashed border-stone-300 px-6 text-center dark:border-stone-700">
@@ -472,13 +481,14 @@ function DramaCard({ folder, episodes, transitioning, onOpen, t }: { folder: Can
     </button>;
 }
 
-function EpisodeCard({ episode, project, index, onOpen, onEdit, onDelete, t }: { episode: DramaEpisode; project?: CanvasProject; index: number; onOpen: (project: CanvasProject) => void; onEdit: () => void; onDelete: () => void; t: TFunction }) {
+function EpisodeCard({ episode, project, index, onOpen, onProduce, onEdit, onDelete, t }: { episode: DramaEpisode; project?: CanvasProject; index: number; onOpen: (project: CanvasProject) => void; onProduce: () => void; onEdit: () => void; onDelete: () => void; t: TFunction }) {
     const canOpen = Boolean(project);
     return <article className={cn("group relative flex min-h-48 flex-col justify-between overflow-hidden rounded-2xl border border-stone-200 bg-background p-5 text-left transition dark:border-stone-800", canOpen ? "hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:hover:border-orange-900" : "opacity-70")}>
         <div className="absolute right-0 top-0 h-24 w-24 translate-x-8 -translate-y-8 rounded-full border border-orange-200/70 transition group-hover:scale-125 dark:border-orange-950/60" />
         <div className="relative flex items-start justify-between gap-3">
             <button type="button" className="text-left text-xs font-medium uppercase tracking-[0.14em] text-orange-600 dark:text-orange-400" onClick={() => { if (project) onOpen(project); }} disabled={!canOpen}>{t("drama.scene")} {String(index + 1).padStart(2, "0")} · {t("drama.episodeLabel", { number: episode.episodeNumber })}</button>
             <div className="flex items-center gap-1">
+                <Button size="small" onClick={onProduce}>{t("drama.production.open")}</Button>
                 <Button type="text" size="small" className="!px-1.5 !text-stone-400 hover:!text-stone-900 dark:hover:!text-stone-100" onClick={onEdit} aria-label={t("drama.editEpisode")}><PencilLine className="size-4" /></Button>
                 <Button type="text" size="small" danger className="!px-1.5" onClick={onDelete} aria-label={t("drama.deleteEpisodeTitle")}><Trash2 className="size-4" /></Button>
             </div>
