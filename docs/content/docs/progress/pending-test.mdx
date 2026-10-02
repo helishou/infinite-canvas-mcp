@@ -5,6 +5,10 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Cross-platform local image import
+
+- On Linux, import two image files whose names differ only by case; both should remain in the result. Repeating the same normalized path should import it once. On Windows, case differences and forward/backslash variants should still deduplicate.
+
 ## H3 reference compatibility and migration recovery
 
 - With the development Web server running, `node scripts/test-h3-reference-compatibility.mjs` checks the real reference dialog and cards on an independent in-memory page. Set `CANVAS_TEST_WEB` for a non-default Web URL; no model requests or project writes are made.

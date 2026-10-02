@@ -113,15 +113,26 @@ test("readImportableImage 拒绝超过上限", async () => {
 });
 
 test("normalizeImportSources 接受字符串与对象，去重保序", () => {
+  const first = path.resolve("a", "1.png");
+  const second = path.resolve("a", "2.png");
   const out = normalizeImportSources([
-    "C:/a/1.png",
-    { filePath: "C:/a/2.png", title: "镜02" },
-    "C:/a/1.png",
-    "C:\\a\\1.png",
+    first,
+    { filePath: second, title: "镜02" },
+    first,
+    `${path.dirname(first)}${path.sep}.${path.sep}1.png`,
   ]);
   assert.equal(out.length, 2);
-  assert.equal(out[0].filePath, "C:/a/1.png");
+  assert.equal(out[0].filePath, first);
   assert.equal(out[1].title, "镜02");
+});
+
+test("normalizeImportSources 按本机文件名大小写语义去重", () => {
+  const out = normalizeImportSources([path.resolve("a", "Image.png"), path.resolve("a", "image.png")]);
+  assert.equal(out.length, process.platform === "win32" ? 1 : 2);
+});
+
+test("normalizeImportSources 在 Windows 上统一两种目录分隔符", { skip: process.platform !== "win32" }, () => {
+  assert.equal(normalizeImportSources(["C:/a/1.png", "C:\\a\\1.png"]).length, 1);
 });
 
 test("normalizeImportSources 拒绝空与超量与缺字段", () => {
