@@ -7,9 +7,9 @@ if "$@" 2>&1 | tee "$log"; then
 fi
 
 # Keep the failure visible in check annotations as well as authenticated job logs.
-while IFS= read -r line; do
-  line="${line//'%'/'%25'}"
-  line="${line//$'\r'/'%0D'}"
-  printf '::error title=Check failed::%s\n' "$line"
-done < <(tail -n 80 "$log")
+details="$(tail -n 80 "$log")"
+details="${details//'%'/'%25'}"
+details="${details//$'\r'/'%0D'}"
+details="${details//$'\n'/'%0A'}"
+printf '::error title=Check failed::%s\n' "$details"
 exit 1
