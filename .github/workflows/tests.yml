@@ -29,22 +29,15 @@ jobs:
       - run: npm run typecheck --workspace web
       - run: npm run build --workspace backend
       - name: Build Web
-        shell: bash
-        run: |
-          if npm run build --workspace web > "$RUNNER_TEMP/web-build.log" 2>&1; then
-            cat "$RUNNER_TEMP/web-build.log"
-          else
-            cat "$RUNNER_TEMP/web-build.log"
-            while IFS= read -r line; do
-              line="${line//'%'/'%25'}"
-              line="${line//$'\r'/'%0D'}"
-              printf '::error title=Web build::%s\n' "$line"
-            done < <(tail -n 30 "$RUNNER_TEMP/web-build.log")
-            exit 1
-          fi
+        run: bash .github/scripts/check-with-diagnostics.sh npm run build --workspace web
       - run: npm run typecheck --prefix plugins/canvas/minimax-h3
       - run: npm test --prefix plugins/canvas/minimax-h3
-      - run: npm test
+      - name: Test Backend
+        run: bash .github/scripts/check-with-diagnostics.sh npm test --workspace backend
+      - name: Test Canvas Agent
+        run: bash .github/scripts/check-with-diagnostics.sh npm test --workspace canvas-agent
+      - name: Test Web
+        run: bash .github/scripts/check-with-diagnostics.sh npm test --workspace web
       - run: npx --no-install playwright install --with-deps chromium
       - run: node scripts/run-canvas-browser-tests.mjs collaboration
       - uses: actions/upload-artifact@v4
