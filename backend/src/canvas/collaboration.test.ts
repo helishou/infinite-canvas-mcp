@@ -313,3 +313,18 @@ test("智能文字配置节点可编辑生成结果，且不改输入提示词",
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "image-config", nodeType: "config", metadata: { smart: true, generationMode: "image", content: "非文字结果" } }]);
     assert.throws(() => db.getCanvasText("canvas", { nodeId: "image-config", field: "content" }), /不是可协作文本/);
 });
+
+test("SVG 扩展节点源码使用协作文本，图片节点仍拒绝正文编辑", (t) => {
+    const db = fixture(t);
+    const source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>';
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "vector", nodeType: "svg:vector", metadata: { content: source } }]);
+    const target = { nodeId: "vector", field: "content" as const };
+    const initial = db.getCanvasText("canvas", target);
+    assert.equal(initial.text, source);
+    const updated = source.replace("10 10", "20 20");
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "text_replace", target, documentId: initial.documentId, expectedText: source, text: updated }]);
+    assert.equal(db.getCanvasText("canvas", target).text, updated);
+    assert.equal((db.getCanvasProject("canvas")!.nodes as Array<{ id: string; metadata: { content: string } }>).find((node) => node.id === "vector")?.metadata.content, updated);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "bitmap", nodeType: "image", metadata: { content: "/media/image" } }]);
+    assert.throws(() => db.getCanvasText("canvas", { nodeId: "bitmap", field: "content" }), /不是可协作文本/);
+});

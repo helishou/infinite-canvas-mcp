@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Modal } from "antd";
-import { BetweenHorizontalStart, GalleryHorizontal, GalleryHorizontalEnd, Video } from "lucide-react";
+import { Button, Modal } from "antd";
+import { BetweenHorizontalStart, ChevronLeft, ChevronRight, GalleryHorizontal, GalleryHorizontalEnd, Video } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { captureVideoFrame } from "@/lib/canvas/canvas-video-frame";
 import type { CanvasMediaPreview } from "@/types/canvas-plugin";
 import { CanvasVideoTrimPreview } from "./canvas-video-trim-preview";
+import { mediaPreviewSources, mediaPreviewStartIndex } from "@/lib/canvas/media-preview-gallery";
 
 /**
  * 画布里唯一的媒体预览弹窗：图片节点双击、插件素材库 / 参考弹窗的放大预览都走这里，
@@ -37,7 +39,13 @@ function MenuButton({ icon, label, onClick }: { icon: ReactNode; label: string; 
     </button>;
 }
 
-export function MediaPreviewModal({ item, onClose, projectId }: { item: MediaPreviewItem | null; onClose: () => void; projectId?: string }) {
+export function MediaPreviewModal({ item: request, onClose, projectId }: { item: MediaPreviewItem | null; onClose: () => void; projectId?: string }) {
+    const { t } = useTranslation();
+    const sources = useMemo(() => mediaPreviewSources(request), [request]);
+    const startIndex = mediaPreviewStartIndex(request, sources);
+    const [cursor, setCursor] = useState<{ request: MediaPreviewItem | null; index: number } | null>(null);
+    const index = Math.min(Math.max(0, cursor?.request === request ? cursor.index : startIndex), Math.max(0, sources.length - 1));
+    const item = sources[index];
     const url = item?.url || "";
     const beforeUrl = item?.beforeUrl || "";
     const type = item?.type || "image";
@@ -50,8 +58,36 @@ export function MediaPreviewModal({ item, onClose, projectId }: { item: MediaPre
     const draggingRef = useRef(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const audioRef = useRef<HTMLAudioElement>(null);
+    const previewRef = useRef<HTMLDivElement>(null);
     const [videoMenu, setVideoMenu] = useState<{ x: number; y: number } | null>(null);
     const [copying, setCopying] = useState<string | null>(null);
+    const movePreview = useCallback((direction: -1 | 1) => {
+        if (index + direction < 0 || index + direction >= sources.length) return;
+        videoRef.current?.pause();
+        audioRef.current?.pause();
+        setVideoMenu(null);
+        setCursor((current) => {
+            const at = current?.request === request ? current.index : startIndex;
+            return { request, index: Math.max(0, Math.min(sources.length - 1, at + direction)) };
+        });
+    }, [index, sources.length, request, startIndex]);
+    useEffect(() => { if (!request) setCursor(null); }, [request]);
+    useEffect(() => {
+        if (!open || sources.length < 2) return;
+        const navigate = (event: KeyboardEvent) => {
+            if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing || videoMenu) return;
+            const target = event.target;
+            const dialog = previewRef.current?.closest('[role="dialog"]');
+            if (!(target instanceof Element) || !dialog?.contains(target)) return;
+            if (target.closest("input,textarea,select,[contenteditable='true'],[role='slider'],video,audio")) return;
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+                event.preventDefault();
+                movePreview(event.key === "ArrowLeft" ? -1 : 1);
+            }
+        };
+        window.addEventListener("keydown", navigate);
+        return () => window.removeEventListener("keydown", navigate);
+    }, [open, sources.length, movePreview, videoMenu]);
 
     const closeVideoMenu = useCallback(() => setVideoMenu(null), []);
     const copyVideo = useCallback(async () => {
@@ -99,6 +135,7 @@ export function MediaPreviewModal({ item, onClose, projectId }: { item: MediaPre
         setResolution(null);
         setCompareSize(null);
         setSliderPos(0);
+        setVideoMenu(null);
     }, [url, beforeUrl, type]);
 
     // 弹窗里 `<audio autoPlay>` / `<video autoPlay>` 在节点被关闭、url 切空、
@@ -204,11 +241,16 @@ export function MediaPreviewModal({ item, onClose, projectId }: { item: MediaPre
     return (
         <Modal
             title={
-                <span style={{ display: "inline-flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", paddingRight: 24 }}>
                     <span>{item?.name || (type === "video" ? "视频" : type === "audio" ? "音频" : "图片")}</span>
                     {sizeText ? (
                         <span style={{ fontSize: 12, fontWeight: 400, color: "#94a3b8", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{sizeText}</span>
                     ) : null}
+                    {sources.length > 1 ? <span className="inline-flex items-center gap-1" style={{ marginLeft: "auto" }}>
+                        <Button type="text" size="small" icon={<ChevronLeft size={18} />} aria-label={t("canvas.mediaPreview.previous")} title={t("canvas.mediaPreview.previous")} disabled={index === 0} onClick={() => movePreview(-1)} />
+                        <span role="status" aria-label={t("canvas.mediaPreview.position", { current: index + 1, total: sources.length })} className="text-xs tabular-nums">{index + 1} / {sources.length}</span>
+                        <Button type="text" size="small" icon={<ChevronRight size={18} />} aria-label={t("canvas.mediaPreview.next")} title={t("canvas.mediaPreview.next")} disabled={index === sources.length - 1} onClick={() => movePreview(1)} />
+                    </span> : null}
                 </span>
             }
             open={open}
@@ -216,11 +258,12 @@ export function MediaPreviewModal({ item, onClose, projectId }: { item: MediaPre
             onCancel={onClose}
             footer={null}
             destroyOnHidden
+            modalRender={(content) => <div ref={previewRef} data-canvas-shortcuts-ignore>{content}</div>}
             width="auto"
             styles={{ body: { padding: 0, display: "flex", justifyContent: "center", alignItems: type === "video" ? "flex-start" : "center", maxHeight: "80vh", overflowY: "auto" } }}
         >
             {type === "audio" ? (
-                <audio ref={audioRef} src={url} controls autoPlay style={{ width: "min(640px, 92vw)", margin: 24 }} />
+                <audio key={url} ref={audioRef} src={url} controls autoPlay style={{ width: "min(640px, 92vw)", margin: 24 }} />
             ) : type === "video" ? (
                 <CanvasVideoTrimPreview
                     key={`${projectId}:${url}`}

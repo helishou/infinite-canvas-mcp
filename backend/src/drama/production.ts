@@ -12,6 +12,7 @@ import {
 } from "@basketikun/canvas-agent/drama/production-contract";
 import { BASE_H3_NODE_METADATA, isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 
+import { projectDirector, validateDirectorMedia, assertDirectorEngine } from "./director.js";
 import { DATA_DIR } from "../config.js";
 import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
@@ -28,34 +29,82 @@ export class ProductionConflictError extends Error {
 }
 
 export class EpisodeProductionService {
-    constructor(private readonly db: BackendDatabase, private readonly events?: BackendEventBus, private readonly legacyDataDir = DATA_DIR) {}
+    constructor(private readonly db: BackendDatabase, private readonly events?: BackendEventBus, private readonly legacyDataDir = DATA_DIR, private readonly projectScope = false, private readonly checkEngine = assertDirectorEngine) {}
 
-    episodeInfo(episodeId: string) { return this.episode(episodeId); }
+    private linked(projectId: string): { service: EpisodeProductionService; id: string } | null {
+        if (!this.projectScope) return null;
+        const row = this.db.db.prepare("SELECT id FROM drama_episodes WHERE canvas_id=?").get(projectId) as { id: string } | undefined;
+        if (!row) return null;
+        const standalone = this.db.db.prepare("SELECT 1 FROM canvas_productions WHERE project_id=?").get(projectId);
+        if (standalone) throw new Error("画布已有独立制作记录，请先显式处理分集绑定冲突，不能覆盖任何一份制作稿");
+        return { service: new EpisodeProductionService(this.db, this.events, this.legacyDataDir, false, this.checkEngine), id: row.id };
+    }
+
+    private prepare(sql: string) {
+        return this.db.db.prepare(this.projectScope ? sql.replaceAll("episode_production", "canvas_production").replaceAll("episode_id", "project_id") : sql);
+    }
+
+    episodeInfo(episodeId: string): { id: string; canvasId?: string | null; fullPlot?: string | null } { const linked = this.linked(episodeId); return linked ? linked.service.episodeInfo(linked.id) : this.episode(episodeId); }
+
+    validateExecution(episodeId: string, version: number): void {
+        const record = this.get(episodeId);
+        if (record.publishedVersion !== version || !record.published?.director) throw new Error("Acheng 发布版本已变化");
+        this.checkEngine(record.published.director.engine);
+        const canvasId = this.episodeInfo(episodeId).canvasId;
+        if (!canvasId) throw new Error("制作稿未绑定画布");
+        validateDirectorMedia(this.db, canvasId, record.published.director);
+    }
+
+    bindDirectorAsset(episodeId: string, version: number, assetId: string, storageKey: string): void {
+        const linked = this.linked(episodeId); if (linked) return linked.service.bindDirectorAsset(linked.id, version, assetId, storageKey);
+        this.db.db.exec("BEGIN IMMEDIATE");
+        try {
+            const current = this.get(episodeId);
+            const asset = current.published?.director?.assets[assetId];
+            if (!asset || current.publishedVersion !== version) throw new Error("资产不属于当前发布版本");
+            const media = this.db.getMediaFile(storageKey);
+            if (!media || !fs.existsSync(media.filePath)) throw new Error("资产媒体未归档");
+            const node = this.canvasNode(episodeId, asset.nodeId);
+            if (!JSON.stringify(node).includes(storageKey)) throw new Error("资产本轮结果未回写目标节点");
+            const updated = { ...asset, storageKey, sha256: crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex"), status: "generated" as const };
+            current.published!.director!.assets[assetId] = updated;
+            if (current.draft.director?.sourceHash === current.published!.director!.sourceHash) current.draft.director.assets[assetId] = updated;
+            const updatedAt = new Date().toISOString();
+            this.prepare("UPDATE episode_productions SET revision=?, draft_json=?, published_json=?, updated_at=? WHERE episode_id=?").run(current.revision + 1, JSON.stringify(current.draft), JSON.stringify(current.published), updatedAt, episodeId);
+            this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(current.published), episodeId, version);
+            this.db.db.exec("COMMIT");
+            this.events?.publish({ type: "drama-production.updated", entityId: episodeId, payload: { revision: current.revision + 1, publishedVersion: version } });
+        } catch (error) { this.db.db.exec("ROLLBACK"); throw error; }
+    }
 
     get(episodeId: string): ProductionRecord {
+        const linked = this.linked(episodeId); if (linked) return linked.service.get(linked.id);
         this.episode(episodeId);
-        const row = this.db.db.prepare("SELECT * FROM episode_productions WHERE episode_id = ?").get(episodeId) as Row | undefined;
+        const row = this.prepare("SELECT * FROM episode_productions WHERE episode_id = ?").get(episodeId) as Row | undefined;
         return row ? this.fromRow(episodeId, row) : { episodeId, revision: 0, draft: emptyEpisodeProduction(), published: null, publishedVersion: 0, updatedAt: "" };
     }
 
-    versions(episodeId: string) {
+    versions(episodeId: string): Array<{ version: number; stage: string; impact: ProductionImpact; createdAt: string }> {
+        const linked = this.linked(episodeId); if (linked) return linked.service.versions(linked.id);
         this.episode(episodeId);
-        return this.db.db.prepare("SELECT version, stage, impact_json, created_at FROM episode_production_versions WHERE episode_id = ? ORDER BY version DESC").all(episodeId)
+        return this.prepare("SELECT version, stage, impact_json, created_at FROM episode_production_versions WHERE episode_id = ? ORDER BY version DESC").all(episodeId)
             .map((row) => { const item = row as { version: number; stage: string; impact_json: string; created_at: string }; return { version: item.version, stage: item.stage, impact: JSON.parse(item.impact_json) as ProductionImpact, createdAt: item.created_at }; });
     }
 
-    version(episodeId: string, version: number) {
+    version(episodeId: string, version: number): { version: number; stage: string; snapshot: EpisodeProductionData; impact: ProductionImpact; createdAt: string } {
+        const linked = this.linked(episodeId); if (linked) return linked.service.version(linked.id, version);
         this.episode(episodeId);
-        const row = this.db.db.prepare("SELECT * FROM episode_production_versions WHERE episode_id = ? AND version = ?").get(episodeId, version) as { version: number; stage: string; snapshot_json: string; impact_json: string; created_at: string } | undefined;
+        const row = this.prepare("SELECT * FROM episode_production_versions WHERE episode_id = ? AND version = ?").get(episodeId, version) as { version: number; stage: string; snapshot_json: string; impact_json: string; created_at: string } | undefined;
         if (!row) throw new Error("找不到制作稿版本");
         return { version: row.version, stage: row.stage, snapshot: episodeProductionDataSchema.parse(JSON.parse(row.snapshot_json)), impact: JSON.parse(row.impact_json) as ProductionImpact, createdAt: row.created_at };
     }
 
-    exportMarkdown(episodeId: string, stage: "script" | "shots", version?: number) {
+    exportMarkdown(episodeId: string, stage: "script" | "shots" | "director", version?: number) {
         const current = this.get(episodeId);
         const targetVersion = version ?? current.publishedVersion;
         if (!targetVersion) throw new Error("尚无可导出的发布版本");
         const snapshot = this.version(episodeId, targetVersion).snapshot;
+        if (stage === "director") return { fileName: `${episodeId}-director-v${targetVersion}.json`, markdown: JSON.stringify(snapshot.director, null, 2) };
         const lines = [`# ${stage === "script" ? "分场剧本" : "镜头表"}`, ``, `分集：${episodeId} · 制作稿 v${targetVersion}`, ``];
         if (stage === "script") snapshot.scenes.forEach((scene, index) => {
             lines.push(`## 场 ${index + 1} · ${scene.heading || scene.id}`, ``, `场次 ID：${scene.id} · ${scene.location} · ${scene.timeOfDay}`, ``);
@@ -76,7 +125,8 @@ export class EpisodeProductionService {
         });
     }
 
-    edit(episodeId: string, raw: unknown) {
+    edit(episodeId: string, raw: unknown): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
+        const linked = this.linked(episodeId); if (linked) return linked.service.edit(linked.id, raw);
         const input = productionEditSchema.parse(raw);
         return this.commit(episodeId, input.operationId, input.expectedRevision, fingerprint(input), (record) => {
             const draft = structuredClone(record.draft);
@@ -88,37 +138,40 @@ export class EpisodeProductionService {
                 if (!link || link.sourceVersion !== record.publishedVersion || fingerprint(link) !== fingerprint(draft.keyframes[operation.shotId])) throw new Error("关键帧已不是当前发布版本的媒体，不能自动通过");
                 published!.keyframeReviews[operation.shotId] = draft.keyframeReviews[operation.shotId];
             }
-            if (published && input.ops.some((operation) => operation.type === "review_keyframe")) this.db.db.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(published), episodeId, record.publishedVersion);
+            if (published && input.ops.some((operation) => operation.type === "review_keyframe")) this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(published), episodeId, record.publishedVersion);
             return { ...record, revision: record.revision + 1, draft, published, updatedAt: new Date().toISOString() };
         });
     }
 
-    previewImpact(episodeId: string, stage: "script" | "shots") {
+    previewImpact(episodeId: string, stage: "script" | "shots" | "director"): ProductionImpact {
+        const linked = this.linked(episodeId); if (linked) return linked.service.previewImpact(linked.id, stage);
         const current = this.get(episodeId);
         return this.publicationImpact(current, this.publishedCandidate(current, stage), episodeId, stage);
     }
 
-    publish(episodeId: string, raw: unknown) {
+    publish(episodeId: string, raw: unknown): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
+        const linked = this.linked(episodeId); if (linked) return linked.service.publish(linked.id, raw);
         const input = productionPublishSchema.parse(raw);
         return this.commit(episodeId, input.operationId, input.expectedRevision, fingerprint(input), (record) => {
             const candidate = this.publishedCandidate(record, input.stage);
             const impact = this.publicationImpact(record, candidate, episodeId, input.stage);
             const publishedVersion = record.publishedVersion + 1;
             const updatedAt = new Date().toISOString();
-            this.db.db.prepare("INSERT INTO episode_production_versions (episode_id, version, stage, snapshot_json, impact_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+            this.prepare("INSERT INTO episode_production_versions (episode_id, version, stage, snapshot_json, impact_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
                 .run(episodeId, publishedVersion, input.stage, JSON.stringify(candidate), JSON.stringify(impact), updatedAt);
-            if (candidate.settings.mode === "auto" && input.stage === "shots") {
-                this.db.db.prepare("INSERT INTO episode_production_runs (episode_id, version, status, plan_json, submitted_json, updated_at) VALUES (?, ?, 'pending', ?, '[]', ?)")
+            if (candidate.settings.mode === "auto" && input.stage === "director" && candidate.director?.executionAuthorized && !candidate.director.unresolved.length) {
+                this.prepare("INSERT INTO episode_production_runs (episode_id, version, status, plan_json, submitted_json, updated_at) VALUES (?, ?, 'pending', ?, '[]', ?)")
                     .run(episodeId, publishedVersion, JSON.stringify(impact), updatedAt);
             }
             const draft = structuredClone(record.draft);
-            if (input.stage === "shots") draft.clipGroups = candidate.clipGroups;
+            if (input.stage !== "script") draft.clipGroups = candidate.clipGroups;
             return { ...record, revision: record.revision + 1, draft, published: candidate, publishedVersion, updatedAt, impact };
         });
     }
 
     /** Runtime outcome binding; source content stays at the published version. */
-    bindRuntime(episodeId: string, version: number, input: { shotId?: string; groupId?: string; nodeId: string; segmentId?: string; storageKey?: string }) {
+    bindRuntime(episodeId: string, version: number, input: { shotId?: string; groupId?: string; nodeId: string; segmentId?: string; storageKey?: string }): ProductionRecord {
+        const linked = this.linked(episodeId); if (linked) return linked.service.bindRuntime(linked.id, version, input);
         this.db.db.exec("BEGIN IMMEDIATE");
         try {
             const current = this.get(episodeId);
@@ -147,9 +200,9 @@ export class EpisodeProductionService {
             if (fingerprint(snapshot) === fingerprint(current.published) && fingerprint(draft) === fingerprint(current.draft)) { this.db.db.exec("COMMIT"); return current; }
             const revision = current.revision + 1;
             const updatedAt = new Date().toISOString();
-            this.db.db.prepare("UPDATE episode_productions SET revision=?, draft_json=?, published_json=?, updated_at=? WHERE episode_id=?")
+            this.prepare("UPDATE episode_productions SET revision=?, draft_json=?, published_json=?, updated_at=? WHERE episode_id=?")
                 .run(revision, JSON.stringify(draft), JSON.stringify(snapshot), updatedAt, episodeId);
-            this.db.db.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?")
+            this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?")
                 .run(JSON.stringify(snapshot), episodeId, version);
             this.db.db.exec("COMMIT");
             this.events?.publish({ type: "drama-production.updated", entityId: episodeId, payload: { revision, publishedVersion: version } });
@@ -157,42 +210,45 @@ export class EpisodeProductionService {
         } catch (error) { this.db.db.exec("ROLLBACK"); throw error; }
     }
 
-    restore(episodeId: string, version: number, operationId: string, expectedRevision: number) {
+    restore(episodeId: string, version: number, operationId: string, expectedRevision: number): ProductionRecord & { replayed?: boolean } {
+        const linked = this.linked(episodeId); if (linked) return linked.service.restore(linked.id, version, operationId, expectedRevision);
         return this.commit(episodeId, operationId, expectedRevision, fingerprint({ version, operationId, expectedRevision }), (record) => ({
             ...record, revision: record.revision + 1, draft: structuredClone(this.version(episodeId, version).snapshot), updatedAt: new Date().toISOString(),
         }));
     }
 
     run(episodeId: string, version: number): ProductionRun | null {
-        const row = this.db.db.prepare("SELECT * FROM episode_production_runs WHERE episode_id = ? AND version = ?").get(episodeId, version) as { status: string; plan_json: string; submitted_json: string; error: string | null; updated_at: string } | undefined;
+        const linked = this.linked(episodeId); if (linked) return linked.service.run(linked.id, version);
+        const row = this.prepare("SELECT * FROM episode_production_runs WHERE episode_id = ? AND version = ?").get(episodeId, version) as { status: string; plan_json: string; submitted_json: string; error: string | null; updated_at: string } | undefined;
         return row ? { episodeId, version, status: row.status, plan: JSON.parse(row.plan_json) as ProductionImpact, submitted: JSON.parse(row.submitted_json) as ProductionRun["submitted"], error: row.error, updatedAt: row.updated_at } : null;
     }
 
-    updateRun(run: ProductionRun) {
-        this.db.db.prepare("UPDATE episode_production_runs SET status = ?, submitted_json = ?, error = ?, updated_at = ? WHERE episode_id = ? AND version = ?")
+    updateRun(run: ProductionRun): void {
+        if (this.projectScope && this.db.getDramaEpisode(run.episodeId)) return new EpisodeProductionService(this.db, this.events, this.legacyDataDir, false, this.checkEngine).updateRun(run);
+        this.prepare("UPDATE episode_production_runs SET status = ?, submitted_json = ?, error = ?, updated_at = ? WHERE episode_id = ? AND version = ?")
             .run(run.status, JSON.stringify(run.submitted), run.error, new Date().toISOString(), run.episodeId, run.version);
     }
 
     pendingRuns() {
-        return this.db.db.prepare("SELECT episode_id, version FROM episode_production_runs WHERE status IN ('pending','running','awaiting_review') ORDER BY updated_at").all()
-            .flatMap((row) => { const item = row as { episode_id: string; version: number }; const run = this.run(item.episode_id, item.version); return run ? [run] : []; });
+        return this.prepare("SELECT episode_id AS owner_id, version FROM episode_production_runs WHERE status IN ('pending','running','awaiting_review') ORDER BY updated_at").all()
+            .flatMap((row) => { const item = row as { owner_id: string; version: number }; const run = this.run(item.owner_id, item.version); return run ? [run] : []; });
     }
 
     private commit(episodeId: string, operationId: string, expectedRevision: number, requestHash: string, mutate: (record: ProductionRecord) => ProductionRecord & { impact?: ProductionImpact }) {
         this.db.db.exec("BEGIN IMMEDIATE");
         try {
-            const prior = this.db.db.prepare("SELECT episode_id, request_hash, receipt_json FROM episode_production_operations WHERE operation_id = ?").get(operationId) as { episode_id: string; request_hash: string; receipt_json: string } | undefined;
+            const prior = this.prepare("SELECT episode_id AS owner_id, request_hash, receipt_json FROM episode_production_operations WHERE operation_id = ?").get(operationId) as { owner_id: string; request_hash: string; receipt_json: string } | undefined;
             if (prior) {
-                if (prior.episode_id !== episodeId || prior.request_hash !== requestHash) throw new Error("operationId 已用于不同制作稿操作");
+                if (prior.owner_id !== episodeId || prior.request_hash !== requestHash) throw new Error("operationId 已用于不同制作稿操作");
                 this.db.db.exec("COMMIT");
                 return { ...JSON.parse(prior.receipt_json) as ProductionRecord & { impact?: ProductionImpact }, replayed: true };
             }
             const current = this.get(episodeId);
             if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
             const next = mutate(current);
-            this.db.db.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET revision = excluded.revision, draft_json = excluded.draft_json, published_json = excluded.published_json, published_version = excluded.published_version, updated_at = excluded.updated_at")
+            this.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET revision = excluded.revision, draft_json = excluded.draft_json, published_json = excluded.published_json, published_version = excluded.published_version, updated_at = excluded.updated_at")
                 .run(episodeId, next.revision, JSON.stringify(next.draft), next.published ? JSON.stringify(next.published) : null, next.publishedVersion, next.updatedAt);
-            this.db.db.prepare("INSERT INTO episode_production_operations (operation_id, episode_id, request_hash, receipt_json, created_at) VALUES (?, ?, ?, ?, ?)")
+            this.prepare("INSERT INTO episode_production_operations (operation_id, episode_id, request_hash, receipt_json, created_at) VALUES (?, ?, ?, ?, ?)")
                 .run(operationId, episodeId, requestHash, JSON.stringify(next), next.updatedAt);
             this.db.db.exec("COMMIT");
             this.events?.publish({ type: "drama-production.updated", entityId: episodeId, payload: { revision: next.revision, publishedVersion: next.publishedVersion } });
@@ -205,12 +261,14 @@ export class EpisodeProductionService {
     }
 
     private episode(episodeId: string) {
-        const episode = this.db.getDramaEpisode(episodeId);
+        const episode = this.projectScope
+            ? (this.db.getCanvasProject(episodeId) ? { id: episodeId, canvasId: episodeId, fullPlot: "", title: "", dramaId: "", episodeNumber: 0, synopsis: "" } : null)
+            : this.db.getDramaEpisode(episodeId);
         if (!episode) throw new Error("分集不存在");
         return episode;
     }
 
-    private legacyText(episode: NonNullable<ReturnType<BackendDatabase["getDramaEpisode"]>>, source: "fullPlot" | "script.md" | "storyboard.md") {
+    private legacyText(episode: { canvasId?: string | null; fullPlot?: string | null }, source: "fullPlot" | "script.md" | "storyboard.md") {
         if (source === "fullPlot") return episode.fullPlot || "";
         if (!episode.canvasId) return "";
         const base = path.resolve(this.legacyDataDir, "productions");
@@ -221,6 +279,14 @@ export class EpisodeProductionService {
     }
 
     private apply(episodeId: string, draft: EpisodeProductionData, op: ProductionOperation, sourceVersion: number) {
+        if (op.type === "set_director_production") {
+            draft.director = op.director;
+            projectDirector(draft);
+            return;
+        }
+        if (draft.director && !["set_settings", "set_keyframe", "review_keyframe"].includes(op.type)) {
+            throw new Error("Acheng 制作稿是正式源；请通过 set_director_production 修改对应源字段并重新编译，不能单独修改投影");
+        }
         const shot = (id: string) => { const value = draft.shots.find((item) => item.id === id); if (!value) throw new Error(`镜头不存在：${id}`); return value; };
         if (op.type === "upsert_scene") {
             const index = draft.scenes.findIndex((item) => item.id === op.scene.id);
@@ -272,7 +338,6 @@ export class EpisodeProductionService {
             }
         } else if (op.type === "set_clip_group") {
             for (const id of op.group.shotIds) shot(id);
-            if (op.group.shotIds.length > 1 && !op.group.continuityReason?.trim()) throw new Error("合并相邻镜头须说明动作承接关系");
             const indices = op.group.shotIds.map((id) => draft.shots.findIndex((item) => item.id === id));
             if (indices.some((index, i) => i && index !== indices[i - 1] + 1)) throw new Error("合并 Clip 只能选择相邻镜头");
             if (op.group.nodeId && op.group.segmentId) {
@@ -321,8 +386,21 @@ export class EpisodeProductionService {
         }
     }
 
-    private publishedCandidate(record: ProductionRecord, stage: "script" | "shots") {
+    private publishedCandidate(record: ProductionRecord, stage: "script" | "shots" | "director") {
         const candidate = structuredClone(record.published || emptyEpisodeProduction());
+        if (stage === "director") {
+            if (!record.draft.director) throw new Error("缺少 Acheng 制作稿");
+            const directorCandidate = structuredClone(record.draft);
+            projectDirector(directorCandidate);
+            this.checkEngine(directorCandidate.director!.engine);
+            this.validateGraph(directorCandidate);
+            const canvasId = this.episode(record.episodeId).canvasId;
+            if (!canvasId) throw new Error("分集未绑定画布");
+            validateDirectorMedia(this.db, canvasId, directorCandidate.director!);
+            this.lockModels(record.episodeId, directorCandidate);
+            return directorCandidate;
+        }
+        if (record.draft.director) throw new Error("Acheng 制作稿请使用 director 发布阶段");
         if (stage === "script") {
             if (!record.draft.scenes.length || record.draft.scenes.some((scene) => !scene.blocks.length)) throw new Error("剧本至少需要一个含内容的场次");
             candidate.scenes = structuredClone(record.draft.scenes);
@@ -340,8 +418,6 @@ export class EpisodeProductionService {
             candidate.keyframes = structuredClone(record.draft.keyframes);
             candidate.keyframeReviews = structuredClone(record.draft.keyframeReviews);
             candidate.clipGroups = structuredClone(record.draft.clipGroups);
-            const claimed = new Set(candidate.clipGroups.flatMap((group) => group.shotIds));
-            for (const shot of candidate.shots) if (!claimed.has(shot.id)) candidate.clipGroups.push({ id: `clip:${shot.id}`, shotIds: [shot.id], nodeId: null, segmentId: null, sourceVersion: record.publishedVersion + 1 });
         }
         candidate.settings = structuredClone(record.draft.settings);
         if (stage === "shots") this.lockModels(record.episodeId, candidate);
@@ -370,11 +446,19 @@ export class EpisodeProductionService {
         }));
     }
 
-    private publicationImpact(record: ProductionRecord, candidate: EpisodeProductionData, episodeId: string, stage: "script" | "shots") {
+    private publicationImpact(record: ProductionRecord, candidate: EpisodeProductionData, episodeId: string, stage: "script" | "shots" | "director") {
         const impact = this.impact(record.published, candidate, episodeId);
+        if (stage === "director") {
+            if (fingerprint(record.published?.director) !== fingerprint(candidate.director)) {
+                impact.affectedShotIds = candidate.shots.map(s => s.id);
+                impact.imageShotIds = candidate.shots.filter(s => s.keyframePolicy === "new" && !candidate.keyframes[s.id]?.storageKey).map(s => s.id);
+                impact.clipGroupIds = candidate.clipGroups.map(g => g.id);
+            }
+            return impact;
+        }
         if (stage !== "shots") return impact;
-        const lastShots = this.db.db.prepare("SELECT COALESCE(MAX(version), 0) AS version FROM episode_production_versions WHERE episode_id=? AND stage='shots'").get(episodeId) as { version: number };
-        const scriptImpacts = this.db.db.prepare("SELECT impact_json FROM episode_production_versions WHERE episode_id=? AND stage='script' AND version>?").all(episodeId, lastShots.version) as Array<{ impact_json: string }>;
+        const lastShots = this.prepare("SELECT COALESCE(MAX(version), 0) AS version FROM episode_production_versions WHERE episode_id=? AND stage='shots'").get(episodeId) as { version: number };
+        const scriptImpacts = this.prepare("SELECT impact_json FROM episode_production_versions WHERE episode_id=? AND stage='script' AND version>?").all(episodeId, lastShots.version) as Array<{ impact_json: string }>;
         const scriptScenes = new Set(scriptImpacts.flatMap((item) => (JSON.parse(item.impact_json) as ProductionImpact).changedSceneIds));
         for (const shot of candidate.shots) if (scriptScenes.has(shot.sceneId) && !impact.affectedShotIds.includes(shot.id)) impact.affectedShotIds.push(shot.id);
         impact.imageShotIds = [...new Set([...impact.imageShotIds, ...candidate.shots.filter((shot) => scriptScenes.has(shot.sceneId) && shot.keyframePolicy === "new").map((shot) => shot.id)])];

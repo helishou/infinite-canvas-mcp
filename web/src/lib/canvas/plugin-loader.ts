@@ -94,9 +94,7 @@ export async function setPluginEnabled(record: InstalledPlugin, enabled: boolean
         void syncPluginMcpToBackend();
         return;
     }
-    // Reload local plugins from their URL when enabled because the cached source may be stale.
-    const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;
-    const plugin = await evaluatePluginSource(source);
+    const plugin = await evaluatePluginSource(record.source);
     activatePlugin(plugin);
     void syncPluginMcpToBackend();
 }
@@ -152,15 +150,12 @@ export async function ensurePluginsLoaded() {
                 usePluginStore.getState().setPlugins(((await fetchBackendInstalledPlugins()).plugins || []).filter((record) => !HOST_SYSTEM_PLUGIN_IDS.has(record.id)));
                 backendLoadSucceeded = true;
             } catch (error) { console.warn("[plugin] Failed to load installed plugins", error); }
-            await loadLocalPlugins(); // Discover disabled local plugins first, then activate all enabled records.
             const records = usePluginStore.getState().plugins.filter((record) => record.enabled);
             await Promise.all(
                 records.map(async (record) => {
                     if (HOST_SYSTEM_PLUGIN_IDS.has(record.id)) return;
                     try {
-                        // Local plugins use the latest output; other plugins use their cached source.
-                        const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;
-                        activatePlugin(await evaluatePluginSource(source));
+                        activatePlugin(await evaluatePluginSource(record.source));
                     } catch (error) {
                         console.warn(`[plugin] Failed to load: ${record.id}`, error);
                     }
@@ -179,44 +174,6 @@ export async function ensurePluginsLoaded() {
 
 async function persistInstalledPlugins() {
     try { await saveBackendInstalledPlugins(usePluginStore.getState().plugins); } catch (error) { console.warn("[plugin] Failed to persist installed plugins", error); }
-}
-
-// Discover local plugins from web/public/plugins, add them disabled, and expose them in the manager without a URL.
-// Refresh metadata and source for existing records while preserving the enabled flag so persisted versions stay current.
-async function loadLocalPlugins() {
-    let urls: unknown;
-    try {
-        const response = await fetch("/plugins/index.json");
-        if (!response.ok) return;
-        urls = await response.json();
-    } catch {
-        return; // Skip when no local manifest exists, such as production builds without plugins.
-    }
-    if (!Array.isArray(urls) || !urls.length) return;
-    const store = usePluginStore.getState();
-    await Promise.all(
-        urls.map(async (url: string) => {
-            try {
-                const localId = url.split("/").pop()?.replace(/\.js(?:\?.*)?$/, "") || "";
-                if (HOST_SYSTEM_PLUGIN_IDS.has(localId)) return;
-                const source = await fetchPluginSource(withCacheBust(url));
-                const plugin = await evaluatePluginSource(source);
-                const existing = store.plugins.find((item) => item.id === plugin.id);
-                store.upsert({
-                    id: plugin.id,
-                    name: plugin.name || plugin.id,
-                    version: plugin.version || "0.0.0",
-                    description: plugin.description,
-                    url,
-                    source,
-                    enabled: existing?.enabled ?? false,
-                    local: true,
-                });
-            } catch (error) {
-                console.warn(`[plugin] Failed to discover local plugin: ${url}`, error);
-            }
-        }),
-    );
 }
 
 // During local development, refetch VITE_DEV_PLUGINS URLs without caching or persistence on every startup.

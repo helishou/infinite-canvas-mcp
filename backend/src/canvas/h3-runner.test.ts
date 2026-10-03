@@ -42,16 +42,16 @@ test("V15 潜空间续写描述符使用 ComfyUI 主节点 ID，而不是画布�
     });
 });
 
-test("只有本段显式开启 previousVideoAsReference 才注入参考视频", () => {
+test("旧 previousVideoAsReference 字段不再注入参考视频", () => {
     const decision = resolveClipContinuation({ id: "s2", previousVideoAsReference: true }, previousReady, true, {});
-    assert.equal(decision.usePreviousAsReference, true);
+    assert.equal(decision.usePreviousAsReference, false);
     assert.equal(decision.useTailFrame, false);
-    assert.equal(decision.needsPreviousVideo, true);
-    assert.deepEqual(appendPreviousReference(["own.mp4"], "prev.mp4"), ["own.mp4", "prev.mp4"]);
+    assert.equal(decision.needsPreviousVideo, false);
+    assert.deepEqual(appendPreviousReference(["own.mp4"], "prev.mp4"), ["own.mp4"]);
 });
 
-test("运行参数（override）也能开启，但单段运行（非续跑）一律不注入", () => {
-    assert.equal(resolveClipContinuation({ id: "s2" }, previousReady, true, { previousVideoAsReference: true }).needsPreviousVideo, true);
+test("运行 override 与单段调用都不能重新开启旧视频输入", () => {
+    assert.equal(resolveClipContinuation({ id: "s2" }, previousReady, true, { previousVideoAsReference: true }).needsPreviousVideo, false);
     assert.equal(resolveClipContinuation({ id: "s2", previousVideoAsReference: true }, previousReady, false, {}).needsPreviousVideo, false);
 });
 
@@ -121,9 +121,8 @@ test("尾帧插入图片组末尾，音视频引用顺序保持且不静默丢�
     assert.throws(() => routeTailFrameInput("ref2va", Array(9).fill("image.png"), [], { resolved: "tail.png" }), /9 张上限/);
 });
 
-test("参考视频已达 3 段上限时报错而不是静默丢弃", () => {
-    assert.throws(() => appendPreviousReference(["a.mp4", "b.mp4", "c.mp4"], "prev.mp4"), /3 段上限/);
-    assert.deepEqual(appendPreviousReference([], "prev.mp4"), ["prev.mp4"]);
+test("旧追加入口保持显式视频参考原样", () => {
+    assert.deepEqual(appendPreviousReference(["a", "b", "c"], "previous"), ["a", "b", "c"]);
 });
 
 test("H3 参考图保持画布 refs 槽位顺序，不按旧 order 字段重排", () => {

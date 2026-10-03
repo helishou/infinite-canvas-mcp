@@ -10,19 +10,23 @@
     "scripts": {
         "test": "npm run test --workspaces --if-present",
         "postinstall": "node scripts/patch-rc-portal.mjs",
-        "predev": "npm run build --workspace canvas-agent",
+        "predev": "npm run build:plugins && npm run build --workspace canvas-agent",
         "dev": "concurrently -n backend,web \"npm run dev --workspace backend\" \"npm run dev --workspace web\"",
         "predev:backend": "npm run build --workspace canvas-agent",
         "dev:backend": "npm run dev --workspace backend",
         "dev:agent": "node scripts/dev-agent.mjs",
-        "predev:web": "npm run build --workspace canvas-agent",
+        "predev:web": "npm run build:plugins && npm run build --workspace canvas-agent",
         "dev:web": "npm run dev --workspace web",
-        "predev:services": "npm run build --workspace canvas-agent",
+        "predev:services": "npm run build:plugins && npm run build --workspace canvas-agent",
         "dev:services": "concurrently -n backend,agent,web \"npm run dev --workspace backend\" \"npm run dev:agent\" \"npm run dev --workspace web\"",
         "dev:local": "scripts\\dev-local.bat",
         "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-local-stop.ps1",
         "build": "npm run build --workspaces --if-present",
-        "typecheck": "npm run typecheck --workspaces --if-present"
+        "build:plugins": "node scripts/build-official-plugins.mjs",
+        "typecheck": "npm run typecheck --workspaces --if-present",
+        "acheng:status": "node scripts/acheng-engine.mjs status",
+        "acheng:update": "node scripts/acheng-engine.mjs update",
+        "acheng:rollback": "node scripts/acheng-engine.mjs rollback"
     },
     "devDependencies": {
         "@infinite-canvas/plugin-sdk": "file:plugins/canvas/sdk",

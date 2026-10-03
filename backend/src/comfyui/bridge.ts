@@ -23,6 +23,7 @@ export type ComfyUiDeps = {
     media: MediaStore;
     events?: BackendEventBus;
     onTaskTerminal?: (task: RuntimeTask) => void | Promise<void>;
+    h3Queue?: import("../runtime/h3-queue.js").H3ExecutionQueue;
 };
 
 export type ComfyPreset = { id: string; name: string; kind: "image" | "video" | "audio"; inputs: string[]; params: string[] };
@@ -166,6 +167,7 @@ export class ComfyUiBackend {
     private url: string;
     private readonly deps: ComfyUiDeps;
     private readonly controllers = new Map<string, AbortController>();
+    private readonly cancellations = new Map<string, Promise<void>>();
     private readonly comfyExecutions = new Map<string, { url: string; promptId?: string }>();
     private readonly livePreviews = new Map<string, H3LivePreview>();
     private readonly pendingPreviews = new Map<string, Omit<H3LivePreview, "promptId">>();
@@ -311,14 +313,17 @@ export class ComfyUiBackend {
             ? this.deps.tasks.create(clientTaskId, `comfyui:${preset}`, input, params)
             : this.deps.tasks.create(`comfyui:${preset}`, input, params);
         await onCreated?.(task);
-        void this.execute(task, definition, taskUrl).catch((error) => this.fail(task.id, error));
+        const work = () => this.execute(task, definition, taskUrl).catch((error) => this.fail(task.id, error));
+        if (preset === "minimax-h3" && this.deps.h3Queue) this.deps.h3Queue.enqueue(task, "local", work, { comfyUrl: taskUrl });
+        else void work();
         return task;
     }
 
     cancel(id: string) {
         this.controllers.get(id)?.abort();
-        void this.cancelComfyExecution(id);
+        this.cancellations.set(id, this.cancelComfyExecution(id));
         const task = this.deps.tasks.cancel(id);
+        this.deps.h3Queue?.cancel(id);
         this.deps.events?.publish({ type: "task.updated", entityId: id, payload: task });
         void this.deps.onTaskTerminal?.(task);
         return task;
@@ -335,15 +340,26 @@ export class ComfyUiBackend {
     resume(id: string) {
         const task = this.deps.tasks.get(id);
         if (!task || !["queued", "running"].includes(task.status) || this.comfyExecutions.has(id) || this.resuming.has(id)) return;
-        const promptId = this.deps.tasks.events(id).find((event) => event.type === "submitted")?.payload?.promptId;
-        if (typeof promptId !== "string" || !promptId) return; // 从未提交到 ComfyUI，无法恢复
+        const taskEvents = this.deps.tasks.events(id);
+        const promptId = taskEvents.find((event) => event.type === "submitted")?.payload?.promptId;
+        const queued = taskEvents.find((event) => event.type === "h3_queued");
+        if (typeof promptId !== "string" || !promptId) {
+            if (task.kind === "comfyui:minimax-h3" && task.status === "queued" && queued && !taskEvents.some((event) => event.type === "h3_dispatching")) {
+                const definition = PRESETS.find((item) => item.id === "minimax-h3")!;
+                this.deps.h3Queue?.enqueue(task, "local", () => this.execute(task, definition, String(queued.payload.comfyUrl || this.url)).catch((error) => this.fail(id, error)));
+            }
+            return;
+        }
         this.resuming.add(id);
-        this.comfyExecutions.set(id, { url: this.url, promptId });
+        const comfyUrl = String(queued?.payload.comfyUrl || this.url);
+        this.comfyExecutions.set(id, { url: comfyUrl, promptId });
         const controller = new AbortController();
         this.controllers.set(id, controller);
-        void this.watchRecovered(id, this.url, promptId, controller)
+        const work = () => this.watchRecovered(id, comfyUrl, promptId, controller)
             .catch((error) => this.fail(id, error))
-            .finally(() => { this.controllers.delete(id); this.comfyExecutions.delete(id); this.resuming.delete(id); });
+            .finally(async () => { await this.cancellations.get(id); this.cancellations.delete(id); this.controllers.delete(id); this.comfyExecutions.delete(id); this.resuming.delete(id); });
+        if (task.kind === "comfyui:minimax-h3" && this.deps.h3Queue) this.deps.h3Queue.recover(task, "local", work);
+        else void work();
     }
 
     /** 重启恢复专用的观察循环：只依赖 /history（无 WS 通道），ComfyUI 自身没重启就能等到结果。 */
@@ -403,6 +419,8 @@ export class ComfyUiBackend {
             if (preset.id === "minimax-h3" && !executionCacheCleared && (!keepModelCache || !executionCompleted)) {
                 try { await this.clearComfyExecutionCache(comfyUrl); } catch (error) { console.warn("[comfyui] H3 执行缓存清理失败:", error instanceof Error ? error.message : String(error)); }
             }
+            await this.cancellations.get(task.id);
+            this.cancellations.delete(task.id);
             this.controllers.delete(task.id); this.comfyExecutions.delete(task.id);
         }
     }
@@ -1039,19 +1057,8 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
                 source[loadId] = { class_type: "LoadAudio", inputs: { audio: audioName }, _meta: { title: `MiniMax H3 audio ${index + 1}` } };
                 if (source["136"]?.inputs) source["136"].inputs[source["136"]?.class_type === "JZL_MiniMaxH3ReferenceToVideo2" ? `ref_audio_${index}` : `ref_audios.ref_audio_${index}`] = [loadId, 0];
             }
-            const previousVideo = String(input.previousVideo || "");
-            // 只有显式开启「上一段作为参考视频」才注入 motion context；旧条件 params.motionContext !== false
-            // 会让任何带了 previousVideo 的调用（含链式续跑）静默改图，故收紧为显式白名单。
-            if (previousVideo && params.previousVideoAsReference === true) {
-                const previousName = await upload(previousVideo);
-                source["9106"] = { class_type: "LoadVideo", inputs: { file: previousName }, _meta: { title: "MiniMax Motion Context previous clip" } };
-                source["9107"] = { class_type: "GetVideoComponents", inputs: { video: ["9106", 0] }, _meta: { title: "MiniMax Motion Context frames" } };
-                source["9108"] = { class_type: "MiniMaxH3MotionContext", inputs: { conditioning: ["136", 0], vae: ["119", 0], latent: ["136", 1], context_frames: ["9107", 0], context_audio: ["9107", 1], audio_vae: ["120", 0], context_length: String(params.motionContextLength || "22"), audio_context_length: Number(params.motionContextAudioLength || 24) }, _meta: { title: "MiniMax H3 Motion Context" } };
-                source["9109"] = { class_type: "MiniMaxH3MotionContextTrim", inputs: { images: ["122", 0], trim_frames: ["9108", 1], audio: ["121", 0], fps: 24, match_tail: true }, _meta: { title: "MiniMax H3 Motion Context Trim" } };
-                source["126"].inputs.conditioning = ["9108", 0];
-                source["130"].inputs.images = ["9109", 0];
-                source["130"].inputs.audio = ["9109", 1];
-            }
+            // Previous finished clips are never injected. Motion Context uses AV latent.
+
         }
     }
     return source;

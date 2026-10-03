@@ -1,91 +1,126 @@
 ---
 title: Docker 部署
-description: 使用 Docker Compose 部署无限画布
+description: 自托管前端、Backend、持久数据与可选制作能力
 ---
 
 # Docker 部署
 
-如果你希望在自己的机器或服务器上运行项目，可以直接使用 Docker Compose。
+根 Compose 从当前源码构建前端网关与 Backend。它不依赖维护者的本地数据、账号、安装目录或上游镜像；ComfyUI 和模型服务由部署者另行提供。
 
-## 使用发布镜像
+## 启动完整服务
+
+需要 Docker Engine/Desktop 与 Docker Compose v2；旧兼容入口的 include 需要 Compose 2.20+。
 
 ```bash
-git clone git@github.com:helishou/infinite-canvas-mcp.git
+git clone --depth 1 https://github.com/helishou/infinite-canvas-mcp.git
 cd infinite-canvas-mcp
-docker compose up -d
+cp .env.example .env
+docker compose up -d --build
 ```
 
-启动后访问：
+PowerShell 使用 `Copy-Item .env.example .env`。默认访问 `http://localhost:3000`。在「连接与协作」填写 `http://localhost:3000/api` 和 Backend 密钥，验证后连接。
 
-```text
-http://localhost:3000
-```
-
-## 本地构建镜像
-
-如果需要基于当前源码构建镜像：
+留空 `INFINITE_CANVAS_BACKEND_TOKEN` 会在首次启动生成并保存密钥。请在自己的终端读取，不将它写入网页运行期配置或分享日志：
 
 ```bash
-docker compose -f docker-compose.local.yml up -d --build
+docker compose exec backend node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync("/data/backend/backend.json","utf8")).token)'
 ```
 
-## 文档站镜像
+此前在同一浏览器连接过其他 Backend 时，窗口会保留旧地址以保护草稿；在连接设置显式切换到新的 `/api` 地址。网页和 API 共用一个来源，媒体、SSE、WebSocket 和 MCP 都经过网关，后台无需单独暴露 17370 端口。MCP 地址为 `http://localhost:3000/api/mcp`，使用 Bearer 密钥鉴权。
 
-文档站位于 `docs/` 目录，按带服务端能力的 Next.js standalone 应用单独构建，不打进主应用镜像。
+`docker-compose.local.yml` 是同一部署的兼容入口：`docker compose -f docker-compose.local.yml up -d --build`。
 
-使用发布镜像：
+## 配置入口
 
-```bash
-cd docs
-docker compose up -d
-```
+Compose 自动读取根 `.env`；原生 Node 启动不会自动读取它，需在 Shell 或服务管理器里导出环境变量。
 
-基于当前源码本地构建：
-
-```bash
-cd docs
-docker compose -f docker-compose.local.yml up -d --build
-```
-
-## 数据说明
-
-主应用镜像只构建静态前端并由 nginx 提供，不包含本地 Backend、Canvas Agent、MCP 与 H3 短片生产栈。该方式只适合界面预览；完整运行需要在本机启动 Backend 并持久化其 SQLite 数据库与媒体目录，可用[快速开始](/zh-CN/docs/overview/quick-start)里的三进程本地模式。
-
-## 统计分析（可选）
-
-项目**默认不接入任何统计**：不设置下列环境变量时，页面不会加载任何统计脚本，也不会发送任何外部请求。你在自己的部署上想查看流量时，设置对应环境变量即可，无需修改代码或重新构建镜像——镜像启动时会据此生成运行期配置。
-
-统计按「每家一个独立变量」配置：**填了谁就启用谁，可同时启用多家**（例如 GA4 + 百度一起开）。仅支持 GA4 与百度，两者都只接受 ID，脚本地址由代码固定拼接，不接受任意脚本地址或内联 JS。
-
-| 变量 | 说明 |
+| 变量 | 默认值 / 用途 |
 | --- | --- |
-| `ANALYTICS_GA4_ID` | Google Analytics 4 衡量 ID（`G-XXXX`） |
-| `ANALYTICS_BAIDU_ID` | 百度统计站点 ID（`hm.js?` 后面那串 hash） |
+| APP_BIND_ADDRESS | 127.0.0.1；向可信网络开放时显式设为 0.0.0.0 |
+| APP_PORT | 3000；宿主机网页端口 |
+| APP_ORIGIN | http://localhost:3000；浏览器实际访问的完整来源，不含路径 |
+| INFINITE_CANVAS_BACKEND_TOKEN | 留空自动生成持久密钥，也可由部署者提供 |
+| BACKEND_IMAGE_TARGET | backend；可选 backend-codex 安装侧边栏所需 CLI |
+| COMFYUI_URL | http://host.docker.internal:8188；Backend 可访问的 ComfyUI 地址 |
+| CHATGPT_IMAGE_API_URL / CHATGPT_IMAGE_AUTH_KEY | 可选 GPT Image provider 的服务地址与认证配置 |
+| ANALYTICS_GA4_ID / ANALYTICS_BAIDU_ID | 留空关闭统计；配置后启动时生成公开的统计 ID |
+| VITE_BACKEND_URL | 静态 Vercel/Render 构建可设公开的 Backend 地址；密钥在网页填写 |
 
-在 `docker-compose.yml` 的 `environment` 中配置（文件内已附注释示例），下例同时启用 GA4 与百度：
+局域网示例：`APP_BIND_ADDRESS=0.0.0.0`、`APP_PORT=3000`、`APP_ORIGIN=http://192.168.1.10:3000`，修改后重新运行 `docker compose up -d`。域名代理使用实际 HTTPS origin，例如 `https://canvas.example.com`，并转发到本机 3000，保留 Origin、WebSocket Upgrade 与流式响应。来源名单不接受通配符。
 
-```yaml
-services:
-  app:
-    image: ghcr.io/basketikun/infinite-canvas:latest
-    ports:
-      - "3000:3000"
-    environment:
-      ANALYTICS_GA4_ID: G-XXXXXXXXXX
-      ANALYTICS_BAIDU_ID: e8263761cc5c32f5f7a855b8203b965a
-```
+这是一个共享密钥的可信工作台，尚无账号、租户或项目权限隔离。持有密钥可以访问整个 Backend，包括模型配置；远程部署需由部署者提供 HTTPS 与访问控制。代理不会向匿名访问者自动发送密钥。
 
-或使用 `docker run`：
+## 持久化与升级
+
+命名卷 `canvas-data` 挂载到 `/data`，实际卷名包含 Compose 项目名：
+
+| 容器目录 | 内容 |
+| --- | --- |
+| /data/backend | runtime.sqlite、backend.json、日志、自定义工作流与生产数据 |
+| /data/backend/runtime-media | 归档的原始图片、视频、音频与文件 |
+| /data/agent | Agent 配置、站点工作空间与对话素材 |
+| /data/codex | 可选 Codex 登录/会话、Acheng 固定版本与激活记录 |
+
+`stop`、普通 `down`、容器重建都保留卷。`down --volumes` 会删除数据，不用于升级。升级前停止 Backend 并备份整个卷；SQLite 迁移快照仅覆盖数据库，不能替代媒体和工作空间备份。浏览器未确认编辑与冲突草稿也须保留。继续使用相同 Compose 项目名与卷，避免误连一套空数据。
 
 ```bash
-docker run -d -p 3000:3000 \
-  -e ANALYTICS_GA4_ID=G-XXXXXXXXXX \
-  -e ANALYTICS_BAIDU_ID=e8263761cc5c32f5f7a855b8203b965a \
-  ghcr.io/basketikun/infinite-canvas:latest
+git pull
+docker compose up -d --build
 ```
 
-单页应用的路由切换会自动向所有已启用的统计上报 pageview。
+显式设置原生 `INFINITE_CANVAS_DATA_DIR` 时，媒体默认跟随其 runtime-media 子目录；只有显式 `INFINITE_CANVAS_MEDIA_DIR` 才使用其他媒体目录。切换目录不执行搬迁，旧数据需先备份、复制并校验。
 
-<Callout type="warn">
-请只在你自己的站点上配置统计 ID，不要把 ID 提交进仓库；fork 或自托管本项目的用户默认不会产生任何统计。
-</Callout>
+## 可选模型、H3 和导演引擎
+
+Backend 镜像包含 Node、FFmpeg/FFprobe、Python 3、Pillow 与 Git，不包含 GPU 模型或 ComfyUI。基础画布、素材保存、任务 API 与外部 MCP 无需 Codex 登录。
+
+- API 渠道在网页设置中配置自己的地址、Key 和模型；Key 保存于 Backend SQLite，实际调用位置依执行器而定。自定义浏览器脚本需要网页在线。
+- 宿主 ComfyUI 可使用 host.docker.internal；Compose 为 Linux 也配置了 host-gateway。ComfyUI 需监听容器能访问的接口并允许该连接；宿主的 loopback 服务不保证能从容器访问。另一台机器用实际 IP/域名，同网络容器可使用服务名。
+- H3 模型、LoRA、TRT、DLSS 和自定义节点必须自行安装。通常输入通过 HTTP 上传；本地缓存复制和已有潜变量续跑还需要共享文件系统。仓库提供可选的 `docker-compose.comfyui.yml`：将 `COMFYUI_HOST_PATH` 设为宿主安装目录后，与主 Compose 文件一起启动。Backend 容器会在 `/opt/ComfyUI` 看到同一目录，在设置中填写此容器路径。输入/输出缓存需要可写，画布媒体库必须独立于 ComfyUI。单纯填写 URL 不会获得远端文件系统能力。
+
+```bash
+COMFYUI_HOST_PATH=/srv/ComfyUI docker compose -f docker-compose.yml -f docker-compose.comfyui.yml up -d --build
+```
+
+PowerShell：`$env:COMFYUI_HOST_PATH = 'C:/ComfyUI'`，然后运行相同的 `docker compose` 命令。
+
+- 安装 Acheng 导演引擎：`docker compose exec backend node scripts/acheng-engine.mjs update`。用 status 检查、rollback 回退；版本存入持久卷。基础 Backend 启动不自动下载引擎，缺少时会提示，其他功能可继续使用。
+- 需要侧边栏 Codex 对话时设置 BACKEND_IMAGE_TARGET=backend-codex，再构建并运行 `docker compose exec backend codex login --device-auth`。登录与本机不同，容器使用 /data/codex 保存自身状态。Claude Code 等外部 CLI 同样需部署者另行安装配置。
+
+## 原生部署与静态前端
+
+无需 Docker 时，在仓库根目录安装并构建项目、启动 Backend，再由自己的静态服务器提供 web/dist：
+
+```bash
+npm ci
+npm run build --workspace canvas-agent
+npm run build:plugins
+npm run build --workspace backend
+npm run build --workspace web
+npm run start --workspace backend
+```
+
+构建会包含本地官方插件清单。若连接独立 Backend，在 Web 构建环境设置 `VITE_BACKEND_URL`，并在 Backend 来源名单中加入网页 origin。
+
+| 原生 Backend 变量 | 行为 |
+| --- | --- |
+| PORT | 覆盖后台端口，并同步内部 Agent 回连地址 |
+| INFINITE_CANVAS_LISTEN_HOST | 127.0.0.1 或 0.0.0.0；默认仅本机 |
+| INFINITE_CANVAS_ORIGINS | 逗号分隔的完整 HTTP(S) origins，覆盖文件/SQLite 来源配置 |
+| INFINITE_CANVAS_BACKEND_TOKEN | 覆盖连接密钥；否则使用持久配置或首次生成 |
+| INFINITE_CANVAS_DATA_DIR / INFINITE_CANVAS_MEDIA_DIR | 自行选择的数据/媒体位置 |
+| INFINITE_CANVAS_AGENT_CONFIG_DIR / CODEX_HOME | Agent 工作空间与可选 Codex/Acheng 状态位置 |
+| FFMPEG_PATH / FFPROBE_PATH / ACHENG_PYTHON | 可选执行程序路径；否则从 PATH 查找 |
+
+环境变量中的网络设置优先于本地网络设置，容器需通过部署配置调整。静态网页可在 config.js 中设置公开的 `window.__RUNTIME_CONFIG__ = { BACKEND_URL: "/api" };`，由自己的代理将该前缀转发到 Backend。密钥在连接设置填写。
+
+只需要静态前端时：`docker build --target frontend -t infinite-canvas-frontend .`。此 target、Vercel 与 Render 静态部署仍需另外连接 Backend；不包含业务持久化。文档站在 docs/ 中单独部署。
+
+## 验证与排障
+
+- /api/health 返回 JSON 才说明网关到后台连通；返回网页 HTML 通常是代理路径错误。
+- 401 检查密钥；403 检查 APP_ORIGIN 与网页实际 origin；502 检查 Backend 日志和容器状态。
+- 重建后素材和项目应仍存在；换 Compose 项目名会选择其他卷，不代表旧资料被删除。
+- 容器没有维护者账号或模型缓存；生成失败需按实际 provider、节点及模型检查，避免重复提交收费任务。
+
+CI 的 Deployment smoke 在隔离 Compose 上检查匿名拒绝、来源校验、真实浏览器的代理连接、SSE/WebSocket、MCP、项目/媒体和幂等回执，并重建 Backend 后再次检查持久化。手动运行 scripts/test-deployment.mjs 只针对可写的测试部署；它会创建测试项目和媒体，不用于真实用户数据库。

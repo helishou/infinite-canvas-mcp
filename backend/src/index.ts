@@ -13,6 +13,7 @@ import { registerComfyRoutes } from "./server/comfy-routes.js";
 import { BackendEventBus } from "./events.js";
 import { createBackendRuntimeContext } from "./runtime/context.js";
 import { RunningHubBackend } from "./runtime/runninghub.js";
+import { H3ExecutionQueue, h3CanResumeQueued } from "./runtime/h3-queue.js";
 import { VideoConcatBackend } from "./runtime/video-concat.js";
 import { registerAgentRuntimeRoutes } from "./server/agent-runtime-routes.js";
 import { createAgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";
@@ -70,12 +71,14 @@ async function startBackendHttpServer() {
     if (task.params?.parentTaskId) return;
     await writeBackH3Task(stores, events, task);
   };
+  const h3Queue = new H3ExecutionQueue(stores.tasks, stores.settings, true);
   const comfy = new ComfyUiBackend({
     tasks: stores.tasks,
     settings: stores.settings,
     media: stores.media,
     events,
     onTaskTerminal: writeBackStandaloneH3Task,
+    h3Queue,
   });
   const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
   const runningHub = new RunningHubBackend(
@@ -84,6 +87,7 @@ async function startBackendHttpServer() {
     runtime.events,
     runtime.media,
     writeBackStandaloneH3Task,
+    h3Queue,
   );
   const canvasH3Runner = new CanvasH3Runner(
     runtime.stores,
@@ -229,6 +233,9 @@ async function startBackendHttpServer() {
   const episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
   const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
   registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner);
+  const canvasProduction = new EpisodeProductionService(runtime.db, runtime.events, undefined, true);
+  const canvasProductionRunner = new EpisodeProductionRunner(canvasProduction, runtime.stores, canvasGeneration);
+  registerDramaProductionRoutes(app, canvasProduction, canvasProductionRunner, "/canvas/projects/:episodeId/production");
   registerCanvasBrowserScriptRoutes(app, canvasBrowserScriptDispatcher);
   registerCanvasReferenceRoutes(app, canvasReferences);
   registerAgentRuntimeRoutes(
@@ -361,30 +368,36 @@ async function startBackendHttpServer() {
       stores.tasks.addEvent(task.id, "status", { status: "failed" });
       continue;
     }
-    // comfyui / runninghub 类型必须依赖 ComfyUI promptId 才能恢复；没有则说明从未提交，
-    // 重启后无法恢复 → 置失败。有 promptId 的已由上面的 resume 循环挂上观察循环，跳过。
+    // 已提交的 ComfyUI/RunningHub 子任务按各自远端 ID 恢复观察；只把未提交且没有
+    // 可安全重放的本地队列意图标记失败，避免猜测任务是否已计费。
     if (task.kind.startsWith("comfyui:") || task.kind === "runninghub:minimax-h3") {
-      const promptId = stores.tasks
+      const submitted = stores.tasks
         .events(task.id)
-        .find((e) => e.type === "submitted")?.payload?.promptId;
+        .find((e) => e.type === "submitted")?.payload;
+      const promptId = task.kind === "runninghub:minimax-h3" ? submitted?.taskId : submitted?.promptId;
+      if (h3CanResumeQueued(stores.tasks, task.id)) continue;
       const createdTs = task.createdAt ? new Date(task.createdAt).getTime() : 0;
       // 超过 24 小时的 ComfyUI 任务，其 history 早被 ComfyUI 清理，resume 观察必然超时失败，
       // 与其让其挂在 running 里最多 1 小时，不如直接置失败（孤儿任务回收）。
-      const tooOld = createdTs > 0 && Date.now() - createdTs > 24 * 60 * 60 * 1000;
+      const tooOld = task.kind.startsWith("comfyui:") && createdTs > 0 && Date.now() - createdTs > 24 * 60 * 60 * 1000;
       if (typeof promptId !== "string" || !promptId || tooOld) {
         stores.tasks.update(task.id, {
           status: "failed",
           error:
             tooOld && promptId
               ? "backend 重启后该 ComfyUI 任务已超过 24 小时，history 已不可恢复，已自动置为失败（孤儿任务回收）"
-              : "backend 重启后该 ComfyUI 任务从未提交到 ComfyUI（无 promptId），已自动置为失败（孤儿任务回收）",
+              : task.kind === "runninghub:minimax-h3"
+                ? "backend 重启后该 RunningHub 任务没有远端 taskId，无法安全恢复，已自动置为失败（孤儿任务回收）"
+                : "backend 重启后该 ComfyUI 任务没有 promptId，无法安全恢复，已自动置为失败（孤儿任务回收）",
         });
         stores.tasks.addEvent(task.id, "status", { status: "failed" });
       }
     }
     // canvas-*/direct-* 类型：上面的 resume 循环已尝试恢复，此处不再处理
   }
+  h3Queue.activate();
   void episodeProductionRunner.resumePending();
+  void canvasProductionRunner.resumePending();
   app.get("/canvas/projects/:id/collaboration", (req, res) => {
     const project = db.getCanvasProject(req.params.id);
     if (!project)

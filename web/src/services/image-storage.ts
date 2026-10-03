@@ -34,7 +34,11 @@ type ImageReadOptions = { signal?: AbortSignal; category?: "input" | "output" | 
 type StoredImagePreview = { version: number; blob?: Blob };
 
 export function isImageFile(file: File): boolean {
-    return file.type.startsWith("image/") || /\.svg$/i.test(file.name);
+    return file.type.startsWith("image/") || isSvgFile(file);
+}
+
+export function isSvgFile(file: File): boolean {
+    return file.type === "image/svg+xml" || /\.svg$/i.test(file.name);
 }
 
 // 预览是浏览器本地的可丢弃缓存；同一个 storageKey 在不同 Backend 中不能共用。

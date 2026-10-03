@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { resolveAchengEngine } from "./acheng.js";
 
 const SKILL_NAME = "canvas-video-production-sop";
 const MANIFEST_NAME = "bundled-production-sop.json";
@@ -108,7 +109,10 @@ export function installBundledProductionSkill(workspacePath: string, bundledPath
 }
 
 export function syncBundledProductionSkill(workspacePath: string, bundledPath: string) {
-    warningsByWorkspace.set(workspacePath, installBundledProductionSkill(workspacePath, bundledPath));
+    const warnings = installBundledProductionSkill(workspacePath, bundledPath);
+    try { resolveAchengEngine(); }
+    catch (error) { warnings.push(`Acheng 引擎不可用，制作不得退回旧流程：${error instanceof Error ? error.message : String(error)}`); }
+    warningsByWorkspace.set(workspacePath, warnings);
 }
 
 export function bundledProductionSkillWarnings(workspacePath: string) {

@@ -79,6 +79,7 @@ export class CanvasGenerationService {
             projectId: command.projectId,
             ...(command.nodeId ? { nodeId: command.nodeId } : {}),
             ...(command.nodeIds?.length ? { nodeIds: command.nodeIds } : {}),
+            ...(command.endSegmentId ? { endSegmentId: command.endSegmentId } : {}),
             ...(command.segmentId ? { segmentId: command.segmentId } : {}),
             ...(command.segmentIndex !== undefined ? { segmentIndex: command.segmentIndex } : {}),
             ...(command.runFromCurrent !== undefined ? { runFromCurrent: command.runFromCurrent } : {}),

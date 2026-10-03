@@ -369,7 +369,7 @@ export default function DramaPage() {
                             </div>
                             {visibleEpisodes.length ? (
                                 <div className="grid gap-4 sm:grid-cols-2">
-                                    {visibleEpisodes.map((episode, index) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} index={index} onOpen={openProject} onProduce={() => navigate(`/drama/episodes/${episode.id}/production`)} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
+                                    {visibleEpisodes.map((episode, index) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} index={index} onOpen={openProject} onProduce={() => navigate(episode.canvasId ? `/director/${encodeURIComponent(episode.canvasId)}` : `/drama/episodes/${encodeURIComponent(episode.id)}/production`)} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
                                 </div>
                             ) : (
                                 <div className="flex min-h-60 flex-col items-center justify-center rounded-2xl border border-dashed border-stone-300 px-6 text-center dark:border-stone-700">

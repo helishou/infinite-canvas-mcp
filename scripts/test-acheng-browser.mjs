@@ -1,0 +1,55 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { chromium } from 'playwright';
+
+const root = path.resolve(import.meta.dirname, '..');
+const requireWeb = createRequire(path.join(root, 'web/package.json'));
+const { createServer } = await import(pathToFileURL(requireWeb.resolve('vite')).href);
+const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'acheng-browser-'));
+process.env.CANVAS_TEST_VITE_CACHE = cache;
+const server = await createServer({ root: path.join(root, 'web'), configFile: path.join(root, 'web/vite.config.ts'), server: { port: 0, host: '127.0.0.1', open: false }, cacheDir: cache });
+let browser;
+try {
+  await server.listen(); const address = server.httpServer.address();
+  browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage(); const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto(`http://127.0.0.1:${address.port}/tests/acheng-production.html`);
+  const evidence = page.getByLabel('evidence'); await evidence.waitFor();
+  const read = async () => JSON.parse(await evidence.textContent());
+  assert.equal((await read()).saves, 0);
+  await page.getByText('SEG1 · h3 · ready').click();
+  await page.getByText('Complete original prompt — never summarized', { exact: true }).waitFor();
+  await page.getByRole('switch').first().click();
+  assert.equal((await read()).director.boundaries[0].tailFrame, true);
+  assert.equal((await read()).director.boundaries[0].motionContext, false);
+  await page.getByRole('switch').nth(1).click();
+  assert.equal((await read()).director.boundaries[0].motionContext, true);
+  await page.getByText('高级：制作稿导入与编辑', { exact: true }).click();
+  await page.getByRole('button', { name: '导入 / 编辑导演制作稿', exact: true }).click();
+  await page.getByRole('dialog').getByRole('textbox').fill('{invalid');
+  await page.getByRole('dialog').getByRole('button', { name: /OK|确.*定/ }).click();
+  assert.equal((await read()).saves, 2);
+  await page.getByRole('dialog').getByRole('button', { name: /Cancel|取.*消/ }).click();
+  await page.getByRole('combobox').click();
+  await page.locator('.ant-select-item-option-content').filter({ hasText: /^s1$/ }).click();
+  await page.locator('.ant-select-item-option-content').filter({ hasText: /^s2$/ }).click();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '组成 Segment', exact: true }).click();
+  await page.waitForFunction(() => JSON.parse(document.querySelector('output').textContent).director.source.segments.length === 1);
+  assert.equal((await read()).director.artifacts[0].status, 'stale');
+  await page.getByRole('button', { name: 'theme', exact: true }).click();
+  await page.getByRole('button', { name: 'language', exact: true }).click();
+  await page.getByRole('button', { name: 'Publish director production', exact: true }).click();
+  assert.equal((await read()).published, 1);
+  assert.deepEqual(errors, []);
+  console.log(JSON.stringify({ passed: true, scope: 'real DirectorPanel, independent switches, regroup invalidation, rejected input, cancel, language/theme, publication intent' }));
+} finally {
+  await browser?.close(); await server.close();
+  if (path.dirname(cache) !== os.tmpdir() || !path.basename(cache).startsWith('acheng-browser-')) throw new Error('Unexpected cleanup path');
+  fs.rmSync(cache, { recursive: true, force: true });
+}

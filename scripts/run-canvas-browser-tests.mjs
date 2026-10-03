@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const mode = process.argv[2] || "collaboration";
-if (!["collaboration", "performance"].includes(mode)) throw new Error("Expected collaboration or performance");
+if (!["collaboration", "performance", "usability", "svg", "h3-output-preview"].includes(mode)) throw new Error("Expected collaboration, performance, usability, svg or h3-output-preview");
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "canvas-browser-"));
 const artifacts = path.resolve(root, "artifacts/browser-tests", `${mode}-${Date.now()}`);
 fs.mkdirSync(artifacts, { recursive: true });
@@ -67,7 +67,7 @@ try {
     const viteCli = path.join(path.dirname(webRequire.resolve("vite/package.json")), "bin/vite.js");
     const vite = launch("vite", [viteCli, "--host", "127.0.0.1", "--port", String(webPort), "--strictPort"], path.join(root, "web"));
     await Promise.all([ready(backend + "/health", api), ready(web, vite)]);
-    const script = mode === "performance" ? "benchmark-canvas-browser.mjs" : "test-canvas-text-browser.mjs";
+    const script = mode === "performance" ? "benchmark-canvas-browser.mjs" : mode === "usability" ? "test-canvas-usability.mjs" : mode === "svg" ? "test-canvas-svg-import.mjs" : mode === "h3-output-preview" ? "test-h3-output-preview.mjs" : "test-canvas-text-browser.mjs";
     const test = launch("test", [path.join(root, "scripts", script), ...process.argv.slice(3)]);
     test.stdout.on("data", (chunk) => process.stdout.write(chunk));
     test.stderr.on("data", (chunk) => process.stderr.write(chunk));

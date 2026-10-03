@@ -1,5 +1,32 @@
 import { z } from "zod";
 
+export const h3ExecutionModeSchema = z.enum(["auto", "local", "runninghub"]);
+export const runningHubFieldSchema = z.object({
+  id: z.string().optional(), nodeId: z.string().min(1), fieldName: z.string().min(1),
+  fieldValue: z.unknown().optional(), fieldType: z.string().optional(), label: z.string().optional(),
+  enabled: z.boolean().optional(), required: z.boolean().optional(),
+  source: z.enum(["constant", "prompt", "image", "video", "audio", "param"]).optional(),
+  paramKey: z.string().optional(), index: z.number().int().positive().optional(),
+});
+export type RunningHubField = z.infer<typeof runningHubFieldSchema>;
+export const runningHubConfigPatchSchema = z.object({
+  baseUrl: z.string().optional(), apiKey: z.string().optional(), walletApiKey: z.string().optional(),
+  mode: z.enum(["workflow", "app"]).optional(), workflowId: z.string().optional(), appId: z.string().optional(),
+  fields: z.array(runningHubFieldSchema).optional(), workflowJson: z.unknown().optional(),
+  useWallet: z.boolean().optional(), instanceType: z.enum(["default", "plus", "ultra"]).optional(),
+  concurrency: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+});
+export type RunningHubConfig = z.infer<typeof runningHubConfigPatchSchema> & {
+  baseUrl: string; apiKey: string; mode: "workflow" | "app"; concurrency: number;
+  workflowId: string; appId: string; fields: RunningHubField[]; useWallet: boolean; instanceType: "default" | "plus" | "ultra";
+};
+export const runningHubWorkflowProfileSchema = z.object({
+  id: z.string().min(1), name: z.string().min(1).max(120), workflowId: z.string().min(1),
+  instanceType: z.enum(["default", "plus", "ultra"]).optional(), fields: z.array(runningHubFieldSchema),
+  createdAt: z.string().optional(), updatedAt: z.string().optional(),
+});
+export type RunningHubWorkflowProfile = z.infer<typeof runningHubWorkflowProfileSchema>;
+
 /**
  * 画布生成的跨进程协议。
  *
@@ -16,6 +43,7 @@ export const canvasGenerationCommandSchema = z
     sourceNodeId: z.string().optional(),
     nodeIds: z.array(z.string()).optional(),
     segmentId: z.string().optional(),
+    endSegmentId: z.string().optional(),
     segmentIndex: z.number().optional(),
     runFromCurrent: z.boolean().optional(),
     skipCompleted: z.boolean().optional(),

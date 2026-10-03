@@ -513,6 +513,18 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 17) {
+            if (currentVersion > 0) this.backupBeforeH3Migration("v17-director-production");
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                for (const suffix of ["productions", "production_operations", "production_versions", "production_runs"]) {
+                    const row = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(`episode_${suffix}`) as { sql: string };
+                    this.db.exec(row.sql.replace(`episode_${suffix}`, `canvas_${suffix}`).replaceAll("episode_id", "project_id").replaceAll("drama_episodes", "canvas_projects"));
+                }
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (17, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     private backupBeforeH3Migration(version = "v13") {

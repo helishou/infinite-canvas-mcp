@@ -362,16 +362,27 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "drama_update_episode",
   "drama_delete_episode",
   "drama_get_production",
+  "canvas_get_production",
   "drama_edit_production",
+  "canvas_edit_production",
   "drama_preview_production_impact",
+  "canvas_preview_production_impact",
   "drama_publish_production",
+  "canvas_publish_production",
   "drama_list_production_versions",
+  "canvas_list_production_versions",
   "drama_get_production_version",
+  "canvas_get_production_version",
   "drama_list_production_legacy",
+  "canvas_list_production_legacy",
   "drama_restore_production",
+  "canvas_restore_production",
   "drama_sync_production_clips",
+  "canvas_sync_production_clips",
   "drama_get_production_run",
+  "canvas_get_production_run",
   "drama_export_production_markdown",
+  "canvas_export_production_markdown",
   "drama_delete_project",
   "comfyui_status",
   "comfyui_get_task",
@@ -1740,9 +1751,9 @@ function registerBackendCanvasTools(
   });
   server.registerTool("drama_preview_production_impact", {
     description: "发布前预览受影响场次、镜头、图片、Clip 和缺失资产。",
-    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots"]) }),
+    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]) }),
   }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots"]) }).parse(rawInput);
+    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]) }).parse(rawInput);
     return textResult(await backendApi.get(`${productionPath(input.episodeId)}/impact?stage=${input.stage}`));
   });
   server.registerTool("drama_edit_production", {
@@ -1753,8 +1764,8 @@ function registerBackendCanvasTools(
     return textResult(await backendApi.post(`${productionPath(String(episodeId))}/ops`, input));
   });
   server.registerTool("drama_publish_production", {
-    description: "发布单集剧本或镜头表新版本。自动模式仅在本次额度已配置时尝试媒体任务。",
-    inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots"]) }),
+    description: "发布单集剧本或镜头表新版本。只有 director 阶段、自动模式且明确 executionAuthorized 才推进已就绪媒体任务。",
+    inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }),
   }, async (rawInput: Record<string, unknown>) => {
     const { episodeId, ...input } = rawInput;
     return textResult(await backendApi.post(`${productionPath(String(episodeId))}/publish`, input));
@@ -1782,11 +1793,92 @@ function registerBackendCanvasTools(
   });
   server.registerTool("drama_export_production_markdown", {
     description: "导出已发布剧本或镜头表 Markdown，不覆盖旧制作文件。",
-    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots"]), version: z.number().int().min(1).optional() }),
+    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]), version: z.number().int().min(1).optional() }),
   }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots"]), version: z.number().int().min(1).optional() }).parse(rawInput);
+    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]), version: z.number().int().min(1).optional() }).parse(rawInput);
     return textResult(await backendApi.get(`${productionPath(input.episodeId)}/export?stage=${input.stage}${input.version ? `&version=${input.version}` : ""}`));
   });
+  {
+  const productionPath = (projectId: string) => `/canvas/projects/${encodeURIComponent(projectId)}/production`;
+  const productionIdSchema = z.object({ projectId: z.string().trim().min(1) });
+  server.registerTool("canvas_get_production", {
+    description: "读取单集结构化剧本、镜头表、关键帧与 H3 映射。fullPlot 仅为剧情概述。",
+    inputSchema: productionIdSchema,
+  }, async (rawInput: Record<string, unknown>) => {
+    const { projectId } = productionIdSchema.parse(rawInput);
+    return textResult(await backendApi.get(productionPath(projectId)));
+  });
+  server.registerTool("canvas_list_production_versions", {
+    description: "读取单集制作稿的历史发布版本。",
+    inputSchema: productionIdSchema,
+  }, async (rawInput: Record<string, unknown>) => {
+    const { projectId } = productionIdSchema.parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(projectId)}/versions`));
+  });
+  server.registerTool("canvas_get_production_version", {
+    description: "读取指定已发布版本的剧本、镜头与映射。",
+    inputSchema: productionIdSchema.extend({ version: z.number().int().min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ version: z.number().int().min(1) }).parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(input.projectId)}/versions/${input.version}`));
+  });
+  server.registerTool("canvas_list_production_legacy", {
+    description: "读取 fullPlot、script.md 与 storyboard.md 原文及哈希，供用户选择导入。",
+    inputSchema: productionIdSchema,
+  }, async (rawInput: Record<string, unknown>) => {
+    const { projectId } = productionIdSchema.parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(projectId)}/legacy`));
+  });
+  server.registerTool("canvas_preview_production_impact", {
+    description: "发布前预览受影响场次、镜头、图片、Clip 和缺失资产。",
+    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]) }).parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(input.projectId)}/impact?stage=${input.stage}`));
+  });
+  server.registerTool("canvas_edit_production", {
+    description: "编辑制作草稿。每次请求提供新 operationId 与读取时的 expectedRevision；冲突返回当前版本，不能直接覆盖。",
+    inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), ops: z.array(z.record(z.string(), z.unknown())).min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const { projectId, ...input } = rawInput;
+    return textResult(await backendApi.post(`${productionPath(String(projectId))}/ops`, input));
+  });
+  server.registerTool("canvas_publish_production", {
+    description: "发布单集剧本或镜头表新版本。只有 director 阶段、自动模式且明确 executionAuthorized 才推进已就绪媒体任务。",
+    inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const { projectId, ...input } = rawInput;
+    return textResult(await backendApi.post(`${productionPath(String(projectId))}/publish`, input));
+  });
+  server.registerTool("canvas_restore_production", {
+    description: "将历史发布版本恢复到草稿；不删除现有发布历史或媒体。",
+    inputSchema: productionIdSchema.extend({ version: z.number().int().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const { projectId, ...input } = rawInput;
+    return textResult(await backendApi.post(`${productionPath(String(projectId))}/restore`, input));
+  });
+  server.registerTool("canvas_sync_production_clips", {
+    description: "同步当前已发布镜头的 H3 Clip 草稿，不发起视频生成。",
+    inputSchema: productionIdSchema,
+  }, async (rawInput: Record<string, unknown>) => {
+    const { projectId } = productionIdSchema.parse(rawInput);
+    return textResult(await backendApi.post(`${productionPath(projectId)}/sync-clips`, {}));
+  });
+  server.registerTool("canvas_get_production_run", {
+    description: "读取发布版本自动生产状态、暂停原因和已提交的精确任务 ID。",
+    inputSchema: productionIdSchema.extend({ version: z.number().int().min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ version: z.number().int().min(1) }).parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(input.projectId)}/runs/${input.version}`));
+  });
+  server.registerTool("canvas_export_production_markdown", {
+    description: "导出已发布剧本或镜头表 Markdown，不覆盖旧制作文件。",
+    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]), version: z.number().int().min(1).optional() }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]), version: z.number().int().min(1).optional() }).parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(input.projectId)}/export?stage=${input.stage}${input.version ? `&version=${input.version}` : ""}`));
+  });
+  }
   server.registerTool(
     "drama_delete_project",
     {

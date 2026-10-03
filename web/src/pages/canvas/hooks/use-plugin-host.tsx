@@ -19,6 +19,8 @@ import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationL
 import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 import { flushCanvasProjectBeforeGeneration, useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import type { CanvasGraphIndex } from "@/lib/canvas/canvas-graph-index";
+import { createPluginGraphAccess } from "./plugin-graph-access";
 
 type CanvasTheme = (typeof canvasThemes)[keyof typeof canvasThemes];
 
@@ -30,6 +32,7 @@ type PluginHostParams = {
     theme: CanvasTheme;
     nodesRef: MutableRefObject<CanvasNodeData[]>;
     connectionsRef: MutableRefObject<CanvasConnection[]>;
+    selectGraphIndex: (nodes: CanvasNodeData[], connections: CanvasConnection[]) => CanvasGraphIndex;
     viewportRef: MutableRefObject<ViewportTransform>;
     setNodes: Dispatch<SetStateAction<CanvasNodeData[]>>;
     setDialogNodeId: Dispatch<SetStateAction<string | null>>;
@@ -62,6 +65,7 @@ export function usePluginHost(params: PluginHostParams) {
     const { t } = useTranslation();
     const { projectId, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, openMediaPreview, applyAgentOps } = params;
     const getProject = useCallback(() => useCanvasStore.getState().projects.find((item) => item.id === projectId), [projectId]);
+    const graphAccess = useMemo(() => createPluginGraphAccess(getProject, () => ({ nodes: nodesRef.current, connections: connectionsRef.current }), params.selectGraphIndex), [getProject, nodesRef, connectionsRef, params.selectGraphIndex]);
     const generationLogs = useMemo<CanvasGenerationLogs>(() => {
         return {
             list: async (options: Parameters<CanvasGenerationLogs["list"]>[0] = {}) => { const result = await fetchBackendGenerationLogs({ ...options, projectId: options.projectId || projectId }); return result.logs || []; },
@@ -208,19 +212,7 @@ export function usePluginHost(params: PluginHostParams) {
         () => ({
             projectId,
             mediaUrl: backendMediaUrl,
-            getNode: (id) => getProject()?.nodes.find((node) => node.id === id) || null,
-            getNodes: () => getProject()?.nodes || [],
-            getConnections: () => getProject()?.connections || [],
-            getUpstream: (nodeId) =>
-                connectionsRef.current
-                    .filter((conn) => conn.toNodeId === nodeId)
-                    .map((conn) => nodesRef.current.find((node) => node.id === conn.fromNodeId))
-                    .filter((node): node is CanvasNodeData => Boolean(node)),
-            getDownstream: (nodeId) =>
-                connectionsRef.current
-                    .filter((conn) => conn.fromNodeId === nodeId)
-                    .map((conn) => nodesRef.current.find((node) => node.id === conn.toNodeId))
-                    .filter((node): node is CanvasNodeData => Boolean(node)),
+            ...graphAccess,
             updateNode: (nodeId, patch) => {
                 setNodes((nodes) => {
                     const next = nodes.map((node) => (node.id === nodeId ? { ...node, ...patch } : node));
@@ -246,7 +238,7 @@ export function usePluginHost(params: PluginHostParams) {
             openMediaPreview,
             generationLogs,
         }),
-        [applyAgentOps, generationLogs, getProject, h3Defaults, openAssetPicker, openMediaPreview, pluginAi, projectId, references, setNodes],
+        [applyAgentOps, generationLogs, graphAccess, h3Defaults, openAssetPicker, openMediaPreview, pluginAi, projectId, references, setNodes],
     );
 
     const renderPluginPanel = useCallback(

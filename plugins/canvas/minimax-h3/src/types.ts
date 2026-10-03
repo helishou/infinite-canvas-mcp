@@ -60,6 +60,7 @@ export type H3Pane = "library" | "preview" | "video" | "refs";
 
 export type H3Segment = {
     id: string;
+    minimaxEngine?: "auto" | "local" | "runninghub";
     start?: number;
     prompt?: string;
     duration?: number;
@@ -287,7 +288,7 @@ export type H3Segment = {
     motionContextEnabled?: boolean;
     // 上一段成品视频作为「参考视频」喂进本段：必须显式开启，默认关闭。
     // 只有链式续跑（runFromCurrent）时生效；标在本段上（index > 0 才有意义）。
-    // 注意：唯一有效键名是 previousVideoAsReference，不要再引入别名。
+    // 仅保留历史记录兼容；新配置和执行器不再消费该字段。
     previousVideoAsReference?: boolean;
     // 尾帧参考：下一段运行时追加本段尾帧，参考动作、场景与连续性；独立于潜空间续写。
     // （仅运行时拼接，不写回 prompt 编辑区）。该开关标在本段上，表示「把我的尾帧传给下一段」。

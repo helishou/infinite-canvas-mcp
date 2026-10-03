@@ -1,66 +1,126 @@
 ---
 title: Docker Deployment
-description: Deploy Infinite Canvas with Docker Compose
+description: Self-host the frontend, Backend, persistent data, and optional production tools
 ---
 
 # Docker Deployment
 
-## Use the published image
+The root Compose configuration builds a Web gateway and Backend from this repository. It does not require the maintainer's paths, data, accounts, or upstream images. Supply your own ComfyUI and model services.
+
+## Start the full stack
+
+Use Docker Engine/Desktop and Compose v2. The legacy include entrypoint requires Compose 2.20+.
 
 ```bash
-git clone git@github.com:helishou/infinite-canvas-mcp.git
+git clone --depth 1 https://github.com/helishou/infinite-canvas-mcp.git
 cd infinite-canvas-mcp
-docker compose up -d
+cp .env.example .env
+docker compose up -d --build
 ```
 
-Open `http://localhost:3000`.
+In PowerShell use Copy-Item .env.example .env. Open http://localhost:3000. In connection settings, enter http://localhost:3000/api and the Backend connection key, test, and connect.
 
-## Build locally
+An empty INFINITE_CANVAS_BACKEND_TOKEN generates a persistent key on first startup. Read it in your own terminal; it is never injected into the public runtime configuration:
 
 ```bash
-docker compose -f docker-compose.local.yml up -d --build
+docker compose exec backend node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync("/data/backend/backend.json","utf8")).token)'
 ```
 
-## What the image includes
+A browser that previously connected to another Backend retains its existing connection to protect drafts. Switch explicitly to the new /api URL in connection settings. API, media, SSE, WebSocket and MCP share the frontend origin. Port 17370 does not need a separate host mapping. The MCP URL is http://localhost:3000/api/mcp and requires a Bearer key.
 
-The main application image builds only the static frontend and serves it with nginx. AI requests are sent directly from the browser to your own OpenAI-compatible endpoints.
+The legacy docker-compose.local.yml uses the same deployment: docker compose -f docker-compose.local.yml up -d --build.
 
-The Backend, Canvas Agent, MCP layer, and the H3 short-film production stack live at the source level and are **not** included in the Docker image. This deployment is suitable for a frontend preview; running the complete application requires starting the Backend locally and persisting its SQLite database and media directory. Use the three-process local mode from [Quick Start](/docs/overview/quick-start) for the full stack.
+## Configuration
 
-## Documentation image
+Compose reads the root .env automatically. Native Node processes require exported variables in the shell or service manager.
 
-The documentation in `docs/` is a separate Next.js standalone application with server capabilities.
-
-```bash
-cd docs
-docker compose up -d
-```
-
-To build it from the current source:
-
-```bash
-cd docs
-docker compose -f docker-compose.local.yml up -d --build
-```
-
-## Optional analytics
-
-No analytics are enabled by default. A deployment can enable GA4, Baidu Analytics, or both at runtime:
-
-| Variable | Description |
+| Variable | Default / purpose |
 | --- | --- |
-| `ANALYTICS_GA4_ID` | Google Analytics 4 measurement ID (`G-XXXX`) |
-| `ANALYTICS_BAIDU_ID` | Baidu site ID, the hash after `hm.js?` |
+| APP_BIND_ADDRESS | 127.0.0.1; explicitly use 0.0.0.0 to allow trusted network access |
+| APP_PORT | 3000; host frontend port |
+| APP_ORIGIN | http://localhost:3000; actual browser origin without a path |
+| INFINITE_CANVAS_BACKEND_TOKEN | Empty generates a persistent key; optionally supply your own |
+| BACKEND_IMAGE_TARGET | backend; backend-codex adds the optional sidebar CLI |
+| COMFYUI_URL | http://host.docker.internal:8188; reachable from the Backend container |
+| CHATGPT_IMAGE_API_URL / CHATGPT_IMAGE_AUTH_KEY | Optional GPT Image provider URL and authentication |
+| ANALYTICS_GA4_ID / ANALYTICS_BAIDU_ID | Empty disables analytics; configured public IDs are generated at startup |
+| VITE_BACKEND_URL | Optional public Backend URL for static Vercel/Render builds; enter the key in the UI |
 
-```yaml
-services:
-  app:
-    image: ghcr.io/basketikun/infinite-canvas:latest
-    ports:
-      - "3000:3000"
-    environment:
-      ANALYTICS_GA4_ID: G-XXXXXXXXXX
-      ANALYTICS_BAIDU_ID: e8263761cc5c32f5f7a855b8203b965a
+For LAN access, set APP_BIND_ADDRESS=0.0.0.0, APP_PORT=3000, and APP_ORIGIN=http://192.168.1.10:3000, then run docker compose up -d. For a domain proxy, use its actual HTTPS origin, such as https://canvas.example.com, and proxy to local port 3000 while preserving Origin, WebSocket Upgrade and streamed responses. Wildcard origins are rejected.
+
+This is a shared-key workspace without accounts, tenant isolation or per-project permissions. Key holders can access the entire Backend, including model configuration. Supply HTTPS and access controls for remote hosting. The proxy does not disclose keys to anonymous visitors.
+
+## Persistence and upgrades
+
+The canvas-data named volume mounts at /data; its actual name includes the Compose project name.
+
+| Container directory | Contents |
+| --- | --- |
+| /data/backend | runtime.sqlite, backend.json, logs, custom workflows and production data |
+| /data/backend/runtime-media | Original archived images, videos, audio and files |
+| /data/agent | Agent configuration, site workspace and conversation assets |
+| /data/codex | Optional Codex authentication/sessions and pinned Acheng runtime state |
+
+Stopping, normal down and container recreation preserve this volume. down --volumes deletes data and is not an upgrade command. Stop the Backend and back up the entire volume before upgrading. SQLite migration snapshots exclude media and workspaces. Preserve browser pending edits and conflict drafts too. Keep the same Compose project name and volume to avoid selecting a new empty dataset.
+
+```bash
+git pull
+docker compose up -d --build
 ```
 
-SPA route changes automatically report page views to enabled providers. Only configure analytics IDs on sites you control, and do not commit them to the repository.
+With an explicit native INFINITE_CANVAS_DATA_DIR, media defaults to its runtime-media directory unless INFINITE_CANVAS_MEDIA_DIR is also set. Selecting directories does not migrate existing data: back up, copy and verify first.
+
+## Optional models, H3 and the director engine
+
+The Backend image includes Node, FFmpeg/FFprobe, Python 3, Pillow, Git and no GPU models or ComfyUI. Basic canvas, assets, task APIs and external MCP do not require Codex login.
+
+- Configure API channels with your own URL, key and model in the Web settings. Keys live in Backend SQLite; the executor determines where calls run. Browser scripts require an open page.
+- Host ComfyUI may use host.docker.internal; Compose also sets host-gateway for Linux. ComfyUI must listen on an interface reachable from the container and allow that connection. A host loopback service is not guaranteed reachable. Use an actual IP/domain for another machine or a service name for containers on the same network.
+- Install H3 models, LoRAs, TRT/DLSS and custom nodes yourself. Normal inputs use HTTP uploads; local cache copies and saved-latent continuation require shared files. The optional docker-compose.comfyui.yml mounts the same ComfyUI directory used by COMFYUI_URL. Set an absolute COMFYUI_HOST_PATH, then start both Compose files:
+
+```bash
+COMFYUI_HOST_PATH=/srv/ComfyUI docker compose -f docker-compose.yml -f docker-compose.comfyui.yml up -d --build
+```
+
+In PowerShell set `$env:COMFYUI_HOST_PATH = 'C:/ComfyUI'` and run the same docker compose command. Backend sees the installation at /opt/ComfyUI; configure that container path in the UI. Input/output caches need write access and canvas media must remain separate. A URL alone does not provide remote filesystem access.
+
+- Install and validate Acheng with docker compose exec backend node scripts/acheng-engine.mjs update; use status and rollback to inspect or revert. Versions persist in the volume. Startup does not download an engine automatically. Missing-engine warnings do not prevent other Backend functions.
+- For sidebar Codex chat set BACKEND_IMAGE_TARGET=backend-codex, rebuild, and run docker compose exec backend codex login --device-auth. The container uses its own /data/codex state. External CLIs such as Claude Code need their own installation and configuration.
+
+## Native hosting and frontend-only images
+
+Without Docker, install and build from the repository root, run the Backend, and serve web/dist with your own static server:
+
+```bash
+npm ci
+npm run build --workspace canvas-agent
+npm run build:plugins
+npm run build --workspace backend
+npm run build --workspace web
+npm run start --workspace backend
+```
+
+The build includes the local official-plugin registry. For another Backend, set VITE_BACKEND_URL in the Web build environment and allow the site's origin in Backend configuration.
+
+| Native Backend variable | Behavior |
+| --- | --- |
+| PORT | Override the port and internal Agent connection URL |
+| INFINITE_CANVAS_LISTEN_HOST | 127.0.0.1 or 0.0.0.0; local only by default |
+| INFINITE_CANVAS_ORIGINS | Comma-separated HTTP(S) origins overriding file/SQLite settings |
+| INFINITE_CANVAS_BACKEND_TOKEN | Override the key; otherwise use persistent configuration or generate once |
+| INFINITE_CANVAS_DATA_DIR / INFINITE_CANVAS_MEDIA_DIR | Data and media locations |
+| INFINITE_CANVAS_AGENT_CONFIG_DIR / CODEX_HOME | Agent workspace and optional Codex/Acheng state |
+| FFMPEG_PATH / FFPROBE_PATH / ACHENG_PYTHON | Optional executable paths; otherwise resolve from PATH |
+
+Deployment network variables override local network settings. Configure containers through deployment settings. A static frontend can set public config.js to `window.__RUNTIME_CONFIG__ = { BACKEND_URL: "/api" };` and proxy that prefix to Backend. Enter the key in connection settings.
+
+For a static frontend image use docker build --target frontend -t infinite-canvas-frontend . This target, Vercel and Render static hosting still require a reachable Backend for business persistence. Set the public VITE_BACKEND_URL build variable for those deployments; enter the key in the UI. Deploy the docs application separately from docs/.
+
+## Verification and troubleshooting
+
+- /api/health should return JSON. HTML generally indicates an incorrect proxy route.
+- 401: check the key. 403: compare APP_ORIGIN with the browser origin. 502: check Backend logs and container state.
+- Projects and media should survive recreation. A different Compose project name selects another volume rather than deleting the old one.
+- The container contains no maintainer account or model cache. Inspect the actual provider, nodes and models for generation failures; avoid repeating paid tasks.
+
+The Deployment smoke CI uses isolated Compose to test anonymous rejection, origins, real browser proxy connections, SSE/WebSocket, MCP, projects/media and idempotent receipts, then recreates Backend and verifies persistence. Run scripts/test-deployment.mjs only on writable test deployments; it creates fixture projects and media and must not target a real user database.

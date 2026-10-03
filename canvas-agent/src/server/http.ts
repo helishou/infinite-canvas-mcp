@@ -726,6 +726,21 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           : await backend.post(`${path}/publish`, { operationId: input.operationId, expectedRevision: input.expectedRevision, stage: input.stage });
         return void res.json({ ok: true, result });
       }
+      if (["canvas_get_production", "canvas_edit_production", "canvas_preview_production_impact", "canvas_publish_production", "canvas_list_production_versions", "canvas_get_production_version", "canvas_list_production_legacy", "canvas_restore_production", "canvas_sync_production_clips", "canvas_get_production_run", "canvas_export_production_markdown"].includes(name)) {
+        const path = `/canvas/projects/${encodeURIComponent(String(input.projectId || ""))}/production`;
+        const result = name === "canvas_get_production" ? await backend.get(path)
+          : name === "canvas_list_production_versions" ? await backend.get(`${path}/versions`)
+          : name === "canvas_get_production_version" ? await backend.get(`${path}/versions/${encodeURIComponent(String(input.version || ""))}`)
+          : name === "canvas_list_production_legacy" ? await backend.get(`${path}/legacy`)
+          : name === "canvas_get_production_run" ? await backend.get(`${path}/runs/${encodeURIComponent(String(input.version || ""))}`)
+          : name === "canvas_export_production_markdown" ? await backend.get(`${path}/export?stage=${encodeURIComponent(String(input.stage || ""))}${input.version ? `&version=${encodeURIComponent(String(input.version))}` : ""}`)
+          : name === "canvas_preview_production_impact" ? await backend.get(`${path}/impact?stage=${encodeURIComponent(String(input.stage || ""))}`)
+          : name === "canvas_edit_production" ? await backend.post(`${path}/ops`, { operationId: input.operationId, expectedRevision: input.expectedRevision, ops: input.ops })
+          : name === "canvas_restore_production" ? await backend.post(`${path}/restore`, { version: input.version, operationId: input.operationId, expectedRevision: input.expectedRevision })
+          : name === "canvas_sync_production_clips" ? await backend.post(`${path}/sync-clips`, {})
+          : await backend.post(`${path}/publish`, { operationId: input.operationId, expectedRevision: input.expectedRevision, stage: input.stage });
+        return void res.json({ ok: true, result });
+      }
       return void res.json({
         ok: true,
         result: await session.callTool(name, input),

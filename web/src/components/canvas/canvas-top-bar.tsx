@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Bot, Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
+import { BookOpen, Bot, Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Search, Sparkles, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
 import { Button, Dropdown, Modal, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -15,6 +16,7 @@ import { CanvasTaskCenterButton } from "./canvas-task-center";
 import { CanvasTextSuggestionsButton } from "./canvas-text-suggestions-button";
 
 export function CanvasTopBar({
+    onFindNode,
     projectId,
     title,
     titleDraft,
@@ -43,6 +45,7 @@ export function CanvasTopBar({
     onOpenGenerationLogs,
     collaborators,
 }: {
+    onFindNode: () => void;
     projectId: string;
     title: string;
     titleDraft: string;
@@ -103,6 +106,8 @@ export function CanvasTopBar({
                             {sidePanelOpen ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
                         </button>
                     </Tooltip>
+                    <Tooltip title={t("canvas.navigation.findShortcut")}><button type="button" aria-label={t("canvas.navigation.find")} onClick={onFindNode} className="flex items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }}><Search className="size-4" />{t("canvas.navigation.findShort")}</button></Tooltip>
+                    <Link to={`/director/${encodeURIComponent(projectId)}`} className="flex items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }}><Sparkles className="size-4" />{t("director.open")}</Link>
                     <Dropdown
                         trigger={["click"]}
                         menu={{
@@ -188,6 +193,9 @@ export function CanvasTopBar({
             </div>
             <Modal title={t("canvas.shortcuts")} open={shortcutsOpen} onCancel={() => setShortcutsOpen(false)} footer={null} centered>
                 <div className="space-y-2 border-t pt-4 text-sm" style={{ borderColor: theme.node.stroke }}>
+                    <Shortcut keys={["Ctrl / Cmd", "K"]} value={t("canvas.navigation.find")} />
+                    <Shortcut keys={["F"]} value={t("canvas.navigation.focusSelection")} />
+                    <Shortcut keys={["Shift", "F"]} value={t("canvas.navigation.fitAll")} />
                     <Shortcut keys={["Ctrl / Space", t("canvas.shortcut.drag")]} value={t("canvas.shortcut.toggleTool")} />
                     <Shortcut keys={[t("canvas.shortcut.wheel")]} value={t("canvas.shortcut.zoom")} />
                     <Shortcut keys={[t("canvas.shortcut.zoomSlider")]} value={t("canvas.shortcut.preciseZoom")} />

@@ -9,6 +9,7 @@ import { normalizeViewportTransform } from "@/lib/canvas/canvas-viewport";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, createBackendProject, deleteBackendCanvasFolder, deleteBackendDramaProject, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendCanvasOperationReceipt, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder } from "@/services/backend-api";
 import { recoverCompactedCanvasReceipt } from "@/lib/canvas/canvas-compacted-receipt";
+import { hasCanvasPatchChanges } from "@/lib/canvas/canvas-patch-equality";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId } from "@/services/backend-api";
 import { CanvasCommandQueue, type CanvasCommand } from "@/lib/canvas/canvas-command-queue";
@@ -710,16 +711,8 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
             }
             normalizedPatch = { ...normalizedPatch, nodes };
         }
-        // patch 实际未改变 project 时跳过 setState：节点 / 连线 / 会话字段
-        // 是 map/filter/concat 之类函数式 action，每次都生成新数组引用，Object.is
-        // 浅比较挡不住；React 18 StrictMode dev 模式或 zustand 通知顺序中反复
-        // setState 会直接报 Maximum update depth exceeded。这里用 JSON 浅比对，
-        // 跳过无变化写入；差异检查成本只在画布编辑路径上跑一次字符串序列化。
-        let hasRealChange = false;
-        for (const key of Object.keys(normalizedPatch)) {
-            if (JSON.stringify((before as Record<string, unknown>)[key]) !== JSON.stringify((normalizedPatch as Record<string, unknown>)[key])) { hasRealChange = true; break; }
-        }
-        if (!hasRealChange) return;
+        // Preserve no-op protection for equivalent fresh arrays without serializing unchanged nodes.
+        if (!hasCanvasPatchChanges(before as unknown as Record<string, unknown>, normalizedPatch)) return;
         captureCanvasAction(before, { ...before, ...normalizedPatch });
         set((state) => ({
             projects: state.projects.map((project) => (project.id === id ? { ...project, ...normalizedPatch, updatedAt: new Date().toISOString() } : project)),

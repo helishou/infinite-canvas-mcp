@@ -8,6 +8,7 @@ import { useH3DropdownOpen } from "../hooks/useH3DropdownOpen";
 import { H3_STYLE_TEMPLATES, styleTemplateFromPrompt } from "../../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
 import { H3_VIDEO_MEGAPIXELS as megapixels } from "../../../../../canvas-agent/src/plugins/minimax-h3/video-settings";
 import type { H3Segment } from "../types";
+import { h3Label, useH3Locale } from "../h3-locale";
 
 type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; segment?: H3Segment; patch: (value: Partial<H3Segment>) => void };
 type SectionKey = "mode" | "model" | "sampling" | "lora" | "sla" | "runtime" | "latentUpscale" | "preview" | "rtx" | "faceRefine" | "audio" | "continuation";
@@ -58,6 +59,7 @@ function H3LoraPicker({ values, value, onChange }: { values: string[]; value: st
 }
 
 export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
+    const locale = useH3Locale();
     const [catalog, setCatalog] = useState<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng: Record<string, unknown[]> }>({ models: [], loras: [], textEncoders: [], videoVaes: [], audioVaes: [], latentUpscaleModels: [], nanfeng: {} });
     const [refreshingLoras, setRefreshingLoras] = useState(false);
     const [loraSearch, setLoraSearch] = useState("");
@@ -199,6 +201,10 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         patch(next);
     };
     return <div className="nfh3-settings">
+        <div className="nfh3-control-grid">
+            {control(h3Label(locale, "executionMode"), <H3Dropdown values={["auto", "local", "runninghub"]} value={segment.minimaxEngine || String(metadata.minimaxEngine || "local")} format={(value) => h3Label(locale, value === "auto" ? "executionAuto" : value === "local" ? "executionLocal" : "executionRunningHub")} onChange={(value) => patch({ minimaxEngine: value as H3Segment["minimaxEngine"] })} />, true)}
+            <div className="nfh3-hint">{h3Label(locale, "executionHint")}</div>
+        </div>
         <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" data-mode={key} className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b></button>)}</div>
         {section("model", "模型与基础参数", String(segment.modelName || "未选择模型").replace(/^.*[\\/]/, ""), <div className="nfh3-control-grid">
             {control("模型", <H3Dropdown values={modelOptions.map((item) => item.value)} value={segment.modelName || modelOptions[0]?.value} onChange={(value) => patch({ modelName: String(value) })} placeholder="选择模型" />, true)}

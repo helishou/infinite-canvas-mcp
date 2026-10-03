@@ -1,0 +1,6 @@
+# Optional: mount the same host ComfyUI installation used by COMFYUI_URL.
+# Set COMFYUI_HOST_PATH to an absolute host path before using this override.
+services:
+  backend:
+    volumes:
+      - ${COMFYUI_HOST_PATH:?Set COMFYUI_HOST_PATH to the host ComfyUI directory}:/opt/ComfyUI

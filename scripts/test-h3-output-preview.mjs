@@ -1,0 +1,75 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { chromium } from "playwright";
+
+if (!process.env.CANVAS_TEST_WEB || !process.env.CANVAS_TEST_ARTIFACTS) throw new Error("Use the isolated browser launcher");
+const fixture = path.join(process.env.CANVAS_TEST_ARTIFACTS, "fixture.mp4");
+execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=teal:s=480x270:r=24", "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", fixture], { windowsHide: true });
+const browser = await chromium.launch({ headless: true });
+const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+const unexpectedRequests = [];
+await page.route("**/*", (route) => {
+    const url = new URL(route.request().url());
+    if (url.origin === new URL(process.env.CANVAS_TEST_WEB).origin) return route.continue();
+    unexpectedRequests.push(url.origin + url.pathname);
+    return route.abort();
+});
+await page.route("**/__h3_output_fixture__.mp4*", (route) => route.fulfill({ path: fixture, contentType: "video/mp4" }));
+const errors = [];
+page.on("pageerror", (error) => errors.push(error.message));
+const evidence = async () => JSON.parse(await page.getByTestId("evidence").innerText());
+const dialog = page.getByRole("dialog");
+const current = (name) => page.waitForFunction((name) => document.querySelector('[role="dialog"] video')?.getAttribute("src")?.endsWith(`output=${name}`), name);
+const ready = () => page.waitForFunction(() => {
+    const element = document.querySelector('[role="dialog"]');
+    return element && getComputedStyle(element).opacity === "1" && !element.getAnimations().some((item) => item.playState === "running");
+});
+try {
+    await page.goto(`${process.env.CANVAS_TEST_WEB}/tests/h3-output-preview.html`);
+    const cards = page.locator(".minimax-output-item");
+    await cards.nth(2).waitFor();
+    const before = await evidence();
+    await cards.nth(1).dblclick({ position: { x: 25, y: 65 } });
+    await ready(); await current("b");
+    await dialog.getByRole("status", { name: "第 2 项，共 3 项" }).waitFor();
+    await dialog.locator("video").evaluate(async (video) => { video.muted = true; await video.play(); window.__previousOutputVideo = video; });
+    await dialog.getByRole("button", { name: "下一个输出", exact: true }).click();
+    await current("c");
+    assert.equal(await page.evaluate(() => window.__previousOutputVideo.paused), true);
+    assert.equal(await dialog.locator("video").evaluate((video) => video.paused), true);
+    assert.equal(await dialog.getByRole("button", { name: "下一个输出", exact: true }).isDisabled(), true);
+    await dialog.focus(); await page.keyboard.press("ArrowLeft"); await current("b");
+    await page.keyboard.press("ArrowLeft"); await current("a");
+    assert.equal(await dialog.getByRole("button", { name: "上一个输出", exact: true }).isDisabled(), true);
+    await dialog.getByRole("spinbutton").first().click(); await page.keyboard.press("ArrowRight"); await current("a");
+    await dialog.locator("video").focus(); await page.keyboard.press("ArrowRight"); await current("a");
+    assert.deepEqual(await evidence(), before);
+    console.log("PASS: Double-click opens the clicked Output; arrows and keyboard navigate, boundaries disable, previous playback stops, and trim inputs retain their keys");
+    await page.keyboard.press("Escape"); await dialog.waitFor({ state: "hidden" });
+    await cards.nth(1).dblclick({ position: { x: 25, y: 65 } }); await ready(); await current("b");
+    await page.keyboard.press("Escape"); await dialog.waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: "切换输出筛选", exact: true }).click();
+    assert.equal(await cards.count(), 2);
+    const filtered = await evidence();
+    await cards.nth(0).dblclick({ position: { x: 25, y: 65 } }); await ready(); await current("a");
+    await dialog.getByRole("button", { name: "下一个输出", exact: true }).click(); await current("c");
+    await dialog.getByRole("status", { name: "第 2 项，共 2 项" }).waitFor();
+    assert.deepEqual(await evidence(), filtered);
+    await page.screenshot({ path: path.join(process.env.CANVAS_TEST_ARTIFACTS, "h3-output-gallery.png"), animations: "disabled" });
+    await page.keyboard.press("Escape"); await dialog.waitFor({ state: "hidden" });
+    console.log("PASS: Reopening starts at the clicked card; Current Clip filtering limits navigation and browsing never restores or writes Clip state");
+    await page.getByRole("button", { name: "Single preview", exact: true }).click(); await ready();
+    assert.equal(await dialog.getByRole("button", { name: "下一个输出", exact: true }).count(), 0);
+    await page.keyboard.press("Escape"); await dialog.waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: "English dark", exact: true }).click();
+    await cards.nth(0).dblclick({ position: { x: 25, y: 65 } }); await ready();
+    await dialog.getByRole("button", { name: "Next output", exact: true }).click(); await current("c");
+    await page.screenshot({ path: path.join(process.env.CANVAS_TEST_ARTIFACTS, "h3-output-gallery-dark.png"), animations: "disabled" });
+    assert.deepEqual(errors, []);
+    assert.deepEqual(unexpectedRequests, []);
+    console.log("PASS: Single-media previews remain unchanged; dark theme and English gallery controls work");
+} catch (error) {
+    await page.screenshot({ path: path.join(process.env.CANVAS_TEST_ARTIFACTS, "failure.png") }).catch(() => {});
+    throw error;
+} finally { await browser.close(); }

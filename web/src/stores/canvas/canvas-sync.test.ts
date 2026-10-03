@@ -46,6 +46,31 @@ test("未保存项目的首个命令保存初始种子，后续命令继续使�
     useCanvasStore.getState().deleteProjects([id]);
 });
 
+test("等价节点数组不会通知 Store 或新增命令，单节点编辑仍只提交该节点", async () => {
+    useBackendStore.setState({ connected: false });
+    const id = useCanvasStore.getState().createProject("no-op guard");
+    useCanvasStore.getState().updateProject(id, { nodes: [
+        { id: "a", type: "text", title: "A", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "原文" } },
+        { id: "b", type: "text", title: "B", position: { x: 120, y: 0 }, width: 100, height: 100 },
+    ] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const before = useCanvasStore.getState();
+    const project = before.projects.find((item) => item.id === id)!;
+    const outbox = buckets.get("infinite-canvas-command-outbox")!;
+    const count = outbox.size;
+    before.updateProject(id, { nodes: [...project.nodes] });
+    before.updateProject(id, { nodes: structuredClone(project.nodes) });
+    assert.equal(useCanvasStore.getState(), before);
+    assert.equal(outbox.size, count);
+    before.updateProject(id, { nodes: project.nodes.map((node) => node.id === "a" ? { ...node, title: "新标题" } : node) });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const commands = [...outbox.values()].filter((value: any) => value.projectId === id).sort((a: any, b: any) => a.order - b.order) as any[];
+    assert.equal(commands.length, 2);
+    assert.deepEqual(commands[1].operations, [{ type: "update_node", id: "a", patch: { title: "新标题" } }]);
+    assert.equal(useCanvasStore.getState().projects.find((item) => item.id === id)!.nodes[1], project.nodes[1]);
+    useCanvasStore.getState().deleteProjects([id]);
+});
+
 test("向既有画布批量导入新实体时生成细粒度节点和连线操作", () => {
     const base = { id: "bulk-import", title: "既有画布", createdAt: "", updatedAt: "", revision: 4, nodes: [{ id: "origin", type: "text", title: "原节点", position: { x: 0, y: 0 }, width: 240, height: 120, metadata: { content: "保留" } }], connections: [], chatSessions: [], activeChatId: null, backgroundMode: "lines", showImageInfo: false, globalPrompt: "", viewport: { x: 0, y: 0, k: 1 } } as any;
     const image = { id: "image-a", type: "image", title: "导入图片", position: { x: 320, y: 0 }, width: 320, height: 180, metadata: { storageKey: "media/image-a.png" } };

@@ -218,11 +218,15 @@ export type CanvasPluginHost = {
 };
 
 /** 宿主统一媒体预览的入参：给 `beforeUrl` 时进入 Before / After 对比模式。 */
-export type CanvasMediaPreview = {
+export type CanvasMediaPreviewSource = {
     url: string;
     name?: string;
     type?: "image" | "video" | "audio";
     beforeUrl?: string;
+};
+export type CanvasMediaPreview = CanvasMediaPreviewSource & {
+    gallery?: CanvasMediaPreviewSource[];
+    galleryIndex?: number;
 };
 
 // Configuration for reusing the host's built-in generation panel; see SDK CanvasBuiltinPanelConfig.
@@ -290,7 +294,7 @@ export type CanvasPlugin = {
 // 插件 MCP 能力:让插件在 Agent(canvas-agent)侧动态暴露 MCP 工具
 //
 // 安全边界:MCP 不能运行在浏览器插件代码里,它由 Node.js stdio 服务(Agent)执行。
-// 第三方远程插件的 MCP 执行需经用户显式安装 + Agent 授权;官方/本地插件自动加载。
+// 第三方插件的 MCP 执行需经用户显式安装 + Agent 授权;宿主内置 MCP 模块自动加载。
 // Agent 侧从本地已安装包或受信插件目录加载 MCP 模块,绝不执行任意网页脚本。
 // ---------------------------------------------------------------------------
 
@@ -333,6 +337,6 @@ export type CanvasPluginMcp = {
     version: string;
     tools: readonly McpToolDefinition[];
     // 返回「工具 id -> 处理函数」映射,Agent 据此为每个工具调用 registerTool。
-    // 官方/本地插件由 Agent 侧打包的 MCP 模块提供,浏览器声明可省略。
+    // 宿主内置插件由 Agent 侧打包的 MCP 模块提供,浏览器声明可省略。
     createHandler?: (context: PluginMcpContext) => Record<string, McpToolHandler>;
 };

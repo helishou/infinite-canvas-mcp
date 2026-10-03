@@ -28,23 +28,28 @@ export function orderedGroupColumnCount(group: CanvasNodeData) {
     return Number.isFinite(configured) && configured > 0 ? Math.min(configured, 12) : COLUMNS;
 }
 
-export function orderedGroupSlots(group: CanvasNodeData, nodes: CanvasNodeData[]): string[] {
+export function orderedGroupSlots(group: CanvasNodeData, nodes: CanvasNodeData[], index?: {
+    nodeById: ReadonlyMap<string, CanvasNodeData>;
+    groupChildrenById: ReadonlyMap<string, CanvasNodeData[]>;
+}): string[] {
     const raw = group.metadata?.groupSlots;
     if (group.metadata?.orderedGroup) {
-        const legacyMemberIds = nodes.filter((node) => node.metadata?.groupId === group.id && node.id !== group.id && node.type !== CanvasNodeType.Group).map((node) => node.id);
         // MCP/旧数据可能已经标记为有序组，但还没写入 groupSlots；空数组也按这个旧格式处理，
         // 这样已有 groupId 成员不会在拖动时丢失。只要 slots 里有真实成员，就不再从组框几何范围补成员。
-        if (!Array.isArray(raw) || raw.length === 0) return legacyMemberIds;
-        const known = new Map(nodes.filter((node) => node.id !== group.id && node.type !== CanvasNodeType.Group).map((node) => [node.id, node]));
+        if (!Array.isArray(raw) || raw.length === 0) return (index ? index.groupChildrenById.get(group.id) || [] : nodes)
+            .filter((node) => node.metadata?.groupId === group.id && node.id !== group.id && node.type !== CanvasNodeType.Group).map((node) => node.id);
+        const known = index?.nodeById || new Map(nodes.map((node) => [node.id, node]));
         const placed = new Set<string>();
         return raw.filter((value): value is string => {
-            if (typeof value !== "string" || !known.has(value) || placed.has(value)) return false;
+            if (typeof value !== "string" || placed.has(value)) return false;
+            const node = known.get(value);
+            if (!node || node.id === group.id || node.type === CanvasNodeType.Group) return false;
             placed.add(value);
             return true;
         });
     }
     // 普通组转为有序组前，仍按普通组的 groupId 收集初始成员；转成有序组后会固化为 groupSlots。
-    return nodes.filter((node) => node.metadata?.groupId === group.id && node.id !== group.id).map((node) => node.id);
+    return (index ? index.groupChildrenById.get(group.id) || [] : nodes).filter((node) => node.metadata?.groupId === group.id && node.id !== group.id).map((node) => node.id);
 }
 
 export function orderedGroupDisplaySlots(slots: OrderedGroupSlot[], columns = COLUMNS): OrderedGroupSlot[] {

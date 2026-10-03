@@ -45,7 +45,7 @@ test("Clips without a selected style retain the existing cache identity", () => 
 test("only explicit continuation modes depend on the previous clip", () => {
     assert.equal(h3ClipDependsOnPrevious({}), false);
     assert.equal(h3ClipDependsOnPrevious({ motionContextEnabled: true }), true);
-    assert.equal(h3ClipDependsOnPrevious({ previousVideoAsReference: true }), true);
+    assert.equal(h3ClipDependsOnPrevious({ previousVideoAsReference: true }), false);
     assert.equal(h3ClipDependsOnPrevious({ tailFrameContinuation: true }), true);
 });
 

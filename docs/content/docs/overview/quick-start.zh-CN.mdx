@@ -22,18 +22,18 @@ npm run dev
 http://localhost:3001
 ```
 
-`npm run dev` 先构建 `canvas-agent/dist`，成功后启动两个进程，不清理旧服务。根目录的 `dev:backend`、`dev:web` 和 `dev:services` 也会先构建共享包；直接调用 workspace 的 `dev` 不经过这个准备步骤。Backend `dev` 不自动重启，需要时显式使用 `dev:watch`。
+`npm run dev` 先构建官方插件清单和 `canvas-agent/dist`，成功后启动两个进程，不清理旧服务。根目录的 `dev:backend`、`dev:web` 和 `dev:services` 也会先构建共享产物；直接调用 workspace 的 `dev` 不经过这个准备步骤。Backend `dev` 不自动重启，需要时显式使用 `dev:watch`。
 
 | 地址 | 用途 |
 | --- | --- |
 | `http://localhost:3001` | 本地开发网页 |
 | `http://127.0.0.1:17370` | Backend、`/agent`、`/mcp` |
 | `http://127.0.0.1:17371` | 可选旧客户端兼容代理 |
-| `http://localhost:3000` | Docker 静态前端，不是开发服务器 |
+| `http://localhost:3000` | Docker 网关，包含同源 Backend 代理 |
 
 需要旧代理时使用 `npm run dev:services`。Windows 专用 `dev:local` 会清理这些端口上的旧服务，再启动三进程，不作为检查服务状态的命令。
 
-完整短片生产栈使用本地 Backend 模式；Docker 镜像只包含前端。
+基础业务栈可用源码或完整 Compose 部署；模型、ComfyUI 和导演引擎按需另行配置。
 
 ## 安装与启动排障
 
@@ -59,18 +59,11 @@ Backend 默认使用 `~/.infinite-canvas/`，但数据和媒体目录可通过�
 
 ## Docker 启动
 
-如果你只需要界面预览，可以基于当前源码构建前端镜像：
-
-```bash
-docker build -t infinite-canvas .
-docker run --rm -p 3000:3000 infinite-canvas
-```
-
-仓库 Dockerfile 只构建静态前端并由 nginx 提供，AI 请求由浏览器前台直连你自己的接口。Backend、Canvas Agent、MCP 与 H3 短片生产栈位于源码层面，Docker 前端镜像不包含它们。详见[Docker 部署](/zh-CN/docs/overview/docker)。
+使用 `docker compose up -d --build` 启动前端网关和 Backend。默认访问 `http://localhost:3000`，后台地址为 `http://localhost:3000/api`；在连接设置填写持久 Backend 密钥。模型和可选 CLI 按需安装，命名卷保存业务数据。变量、首次连接、备份与边界见[Docker 部署](/zh-CN/docs/overview/docker)。
 
 ## Vercel 部署
 
-根目录 `vercel.json` 只构建 `web/`。该方式适合预览前端；画布、素材和结构化配置的完整持久化仍需连接可访问的 Backend。
+根目录 `vercel.json` 会从源码构建 Web 静态站点及其共享插件，不部署 Backend。要连接独立后台，在 Vercel/Render 设置公开的 `VITE_BACKEND_URL`（例如 `https://canvas.example.com/api`），并在 Backend 的允许来源中加入网页来源；连接密钥由用户在网页填写。画布、素材和结构化配置仍保存在 Backend。
 
 ## 首次使用建议
 

@@ -18,18 +18,18 @@ npm run dev
 
 Open `http://localhost:3001`.
 
-`npm run dev` builds `canvas-agent/dist` before starting either service and does not clear existing services. Root-level `dev:backend`, `dev:web`, and `dev:services` also build the shared package first; direct workspace `dev` commands do not. Backend `dev` does not restart on edits; use `dev:watch` explicitly when needed.
+`npm run dev` builds the official plugin registry and `canvas-agent/dist` before starting either service and does not clear existing services. Root-level `dev:backend`, `dev:web`, and `dev:services` also build those shared assets first; direct workspace `dev` commands do not. Backend `dev` does not restart on edits; use `dev:watch` explicitly when needed.
 
 | Address | Purpose |
 | --- | --- |
 | `http://localhost:3001` | Local development frontend |
 | `http://127.0.0.1:17370` | Backend, `/agent`, and `/mcp` |
 | `http://127.0.0.1:17371` | Optional legacy compatibility proxy |
-| `http://localhost:3000` | Docker static frontend, not the development server |
+| `http://localhost:3000` | Docker gateway with a same-origin Backend proxy |
 
 Use `dev:services` when the compatibility proxy is needed. Windows-only `dev:local` clears old services on those ports before starting three processes; it is not a liveness probe.
 
-Use local Backend mode for the complete short-film production stack. The Docker image contains only the frontend.
+Use source mode or the full Compose deployment for the base stack; configure model services, ComfyUI and the director engine separately.
 
 ## Installation and startup troubleshooting
 
@@ -55,18 +55,11 @@ In development, Vite proxies `/media`, `/events`, and `/agent` on the frontend o
 
 ## Run with Docker
 
-For a frontend preview built from the current source:
-
-```bash
-docker build -t infinite-canvas .
-docker run --rm -p 3000:3000 infinite-canvas
-```
-
-The repository Dockerfile builds only the static frontend and serves it with nginx; AI requests go directly from the browser to your own endpoints. The Backend, Canvas Agent, MCP, and the H3 short-film production stack live at the source level and are not included in the Docker frontend image. See [Docker Deployment](/docs/overview/docker).
+Run `docker compose up -d --build` to start the Web gateway and Backend. Open `http://localhost:3000`, use `http://localhost:3000/api` as the Backend URL, and enter the persistent Backend key in connection settings. Install optional models and CLIs separately; a named volume stores business data. See [Docker Deployment](/docs/overview/docker) for configuration, first connection, backups and limitations.
 
 ## Deploy with Vercel
 
-The root `vercel.json` builds only `web/`, which is suitable for a frontend preview. Complete persistence for canvases, assets, and structured settings still requires a reachable Backend.
+The root `vercel.json` builds the static Web app and its shared plugins, not a Backend. To connect a separate Backend on Vercel/Render, set the public `VITE_BACKEND_URL` build variable (for example, `https://canvas.example.com/api`) and add the page origin to the Backend allowlist. Users enter their connection key in the UI. Canvases, assets, and structured settings remain stored in the Backend.
 
 ## First-time setup
 

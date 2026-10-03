@@ -5,6 +5,70 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Canvas plugin manager cleanup
+
+- Verify the manager shows only the Official and Third-party tabs and startup no longer requests `/plugins/index.json`.
+- Install an official plugin from the bundled registry and a third-party plugin from a URL; confirm enable, update, uninstall, and H3 host-plugin behavior remain available. Previously saved plugin records must load with their cached source and stay manageable.
+- Plugin authors should still be able to use `VITE_DEV_PLUGINS` for unpersisted hot reload while removing or rebuilding the old index manifest.
+
+
+## H3 RunningHub workflow routing
+
+- Configure a RunningHub API Key and workflow under ComfyUI → Runtime, inspect the workflow inputs, map the full H3 prompt and each referenced image/video/audio, and save. Confirm unmapped fields retain workflow defaults and missing mappings fail before remote submission.
+- Run H3 in Local, RunningHub and Automatic modes. Automatic routing prefers an available local slot, uses RunningHub when local ComfyUI is unavailable or its single H3 slot is occupied, and queues when the selected capacity is full. Verify local H3 concurrency stays at one and RunningHub respects its configured limit across canvas and MCP callers.
+- Verify Motion Context and staged confirmation stay on local ComfyUI; cancel queued and submitted tasks, restart Backend while each provider is queued/running, and confirm there is no duplicate RunningHub submission.
+- Verify a completed cloud task downloads and archives its video into Backend media and writes it to the original Clip. A RunningHub account queue rejection must remain a visible failure and must not be retried automatically.
+
+
+## Self-hosted deployment and portability
+
+- Build Compose on clean Linux/Windows Docker environments. Verify same-origin connections, media, canvas SSE/WebSocket and external MCP. Anonymous requests must not obtain the key; unlisted origins must be rejected.
+- Recreate Backend and verify projects, original media, Agent workspace and idempotent receipts persist. Use new test volumes without real user databases.
+- On native deployments override listen host, origins, port and key; verify precedence over file/SQLite and retain existing window connections. Explicit data directories default to their own media subdirectory.
+- Install optional Codex/Acheng and check persisted login/runtime state. Remote ComfyUI inputs use HTTP; saved-latent continuation requires a shared filesystem. Docker build checks do not establish model-generation quality.
+
+## Director Studio entry points
+
+- Desktop and mobile navigation open Director Studio directly. Search existing canvases or create an independent production without a series or episode.
+- The canvas toolbar shortcut, linked episode action and legacy episode URL share the Backend production. Switching projects must isolate drafts; episode and linked-canvas entry points must restore the same window-local draft.
+- The creative brief prepares a request in the chat input without sending or generating. Existing Agent drafts, attachments and active tasks remain intact. JSON import is available under Advanced.
+- Check creation/read failure recovery, both languages and mobile navigation. `node scripts/test-director-navigation.mjs` covers entry points, draft ownership and absence of generation through isolated pages and API fixtures.
+
+## Legacy receipt migration and startup
+
+- Upgrade an isolated copy of a v15 backup. Existing foreign-key violations unrelated to canvas receipts should remain unchanged; canvases, task events and operation history must be retained. Receipts should be backfilled according to the migration, and Backend should start and answer its health check.
+- Introduce a new receipt foreign-key violation in a temporary database. Migration must reject and roll back while leaving the old table, data and backup retryable. The Web media proxy should resume reading after Backend starts.
+
+## H3 Output preview navigation
+
+- Double-click an Output video card or use its preview button to open that item. The dialog header shows previous/next controls and the current position, following the visible **All outputs / Current Clip** filter and card order. End controls are disabled; single-item previews hide navigation.
+- Switching pauses the old video and leaves the next video ready for manual playback. Trim inputs, sliders and native media controls retain their arrow keys; elsewhere inside the dialog, Left/Right also navigate outputs. Reopening starts at the newly clicked card.
+- Browsing must not restore parameters, replace active outputs or write Clip state. Existing single-image comparisons and single-video previews retain their behavior. Run `node scripts/run-canvas-browser-tests.mjs h3-output-preview` for an isolated check with an automatically generated local video fixture.
+
+
+## Acheng production and upstream updates
+
+- Use `npm run acheng:status`, `acheng:update -- --check`, `acheng:update`, and `acheng:rollback` to inspect, validate, activate, and revert engine versions. Dirty sources, contract changes and patch conflicts must leave the active version intact.
+- The episode Acheng tab shows seven modules, asset states, complete prompts and continuity boundaries. Import through native production tools and publish the director stage; Clips follow authored Segments, with no implicit one-shot grouping. Only authorized automatic production advances ready tasks.
+- Independent asset canvases use the same production contract through canvas production tools. Keep legacy drafts/media recoverable and require recompilation after source changes.
+- Tail-frame references and Motion Context remain independent. Bounded groups must stop at the specified last Clip. Legacy previousVideoAsReference no longer injects the preceding MP4; explicit ordinary video references remain supported.
+- Video completion defaults to technical checks. Tests use temporary databases, task doubles and isolated UI; they do not establish real model visual or audio quality.
+
+## Canvas search, multi-selection and batch rename
+
+- Click **Find** or press Ctrl/Cmd+K to search names, node IDs, types, text and prompts, including H3 Clip prompts. Arrow keys select a result, Enter focuses it and Escape closes the dialog. Results are virtualized; navigation does not modify project data.
+- Press F to focus selected nodes or Shift+F to fit all nodes. Equivalent buttons are available in the selection toolbar and zoom controls. Keys inside inputs, editors and dialogs must not trigger canvas navigation.
+- Sidebar multi-selection now mirrors canvas selection. Ctrl/Cmd+click toggles a node; selecting or clearing filtered results preserves selections outside the filter. Leaving selection mode preserves the selection and selected items remain exportable.
+- With two or more nodes selected, open **Batch rename** from the bottom toolbar, set a prefix and starting number, and review the preview before applying. Numbering follows canvas node order. IDs, content, references and runtime state remain intact; one undo/redo handles the batch and other windows should receive the same titles.
+- Run `node scripts/run-canvas-browser-tests.mjs usability` for isolated interaction checks, including Chinese/English, dark/light themes, distant-node navigation, clearing the numbering field, dialog cancellation and shortcut focus isolation.
+
+## Canvas local editing and reference caching
+
+- Editing one node should compare changed entities only. An equivalent fresh node array must remain a no-op, without Store notifications or additional commands. Check undo, refresh recovery and preservation of pending edits.
+- Unrelated node edits should not invoke reference resource providers again. Replacing reference images, restoring missing ordered slots, changing ordering or membership, and editing loop inputs must update references. Language changes and plugin updates/removal must also invalidate the relevant cache.
+- H3 and other plugins should query the shared canvas index while preserving original connection-array order, repeated sources and self-loops. Local references changed before the next render must remain immediately readable.
+- From `web`, run `node --import ../backend/node_modules/tsx/dist/loader.mjs ../scripts/benchmark-canvas-editing.mjs <pre-optimization-commit>` for the CPU comparison. Results are saved to `artifacts/canvas-editing-performance.json`; React, network and persistence costs are excluded, so these measurements do not establish a page frame-rate improvement.
+
 ## H3 reference compatibility and migration recovery
 
 - With the development Web server running, `node scripts/test-h3-reference-compatibility.mjs` checks the real reference dialog and cards on an independent in-memory page. Set `CANVAS_TEST_WEB` for a non-default Web URL; no model requests or project writes are made.
@@ -35,11 +99,12 @@ description: Implemented changes that still need manual verification
 
 - Set a canvas image node to 16:9 and choose the `qwen_image_2_1` workflow. Confirm the final ComfyUI graph receives the 16:9 option on its actual aspect-ratio input. If a saved workflow field remains 1:1, submission must stop before ComfyUI runs and explain the conflict. Check that archived output dimensions come from the file: a square output stays in task history but cannot become the active keyframe. An output with the requested ratio records its actual pixel dimensions. No paid generation is needed for automated checks.
 
-## Import SVG images into the canvas
+## Import SVG files into the canvas
 
-- Import an `.svg` with the file picker, canvas drop, and asset sidebar. It should appear as an image node or asset, stay sharp when scaled, and still load from the original SVG after refresh. Replacing an image node should also accept SVG.
+- With the SVG node plugin enabled, import an `.svg` through the file picker, canvas drop, or paste. It should create an SVG extension node whose source remains editable after refresh. Invalid SVG must not leave an empty node. With the plugin disabled, the file should fall back to a regular image with a notice.
+- Explicitly replacing an image node or uploading through the asset sidebar should keep the original SVG as image media. It should stay sharp when scaled and load after refresh.
 - Import a local SVG with a `viewBox` through `canvas_import_local_images`. The original file, MIME type, and dimensions should be preserved; a non-SVG file renamed to `.svg` should be rejected. Opening the media URL directly must not execute scripts in the SVG.
-- SVG files remain editable canvas images. When selected as model references, Backend should submit a deterministic PNG derivative and record both the source and submitted storage keys on the task; no manual browser conversion is needed.
+- When SVG image assets are used as model references, Backend should submit a deterministic PNG derivative and record both the source and submitted storage keys on the task; no manual browser conversion is needed.
 
 ## H3 plan, references, and task waiting
 

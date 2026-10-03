@@ -1,3 +1,6 @@
+import { CanvasNodeFinder } from "@/components/canvas/canvas-node-finder";
+import { CanvasBatchRename } from "@/components/canvas/canvas-batch-rename";
+import { viewportForCanvasNodes } from "@/lib/canvas/canvas-navigation";
 import { createCanvasGraphIndexSelector } from "@/lib/canvas/canvas-graph-index";
 import { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
@@ -11,7 +14,7 @@ import { useTranslation } from "react-i18next";
 import { defaultConfig, resolveModelChannel, resolveModelWorkflow, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workflows";
 import { resolveComfyImageSize } from "@/services/api/comfyui";
-import { uploadImage, resolveImageUrl, isImageFile, type UploadedImage } from "@/services/image-storage";
+import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
@@ -481,6 +484,9 @@ function InfiniteCanvasPage() {
         undo: undoDocument,
         redo: redoDocument,
     } = useCanvasDocument(projectId);
+    const [nodeFinderOpen, setNodeFinderOpen] = useState(false);
+    const [renameTargetIds, setRenameTargetIds] = useState<string[] | null>(null);
+    useEffect(() => { setNodeFinderOpen(false); setRenameTargetIds(null); }, [projectId]);
     const browserTaskIds = useMemo(() => Array.from(new Set(nodes.map((node) => String(node.metadata?.runtimeTaskId || "")).filter(Boolean))), [nodes]);
     useEffect(() => {
         browserTaskIds.forEach(kickCanvasBrowserTask);
@@ -1282,7 +1288,7 @@ function InfiniteCanvasPage() {
         return map;
     }, [connections, detailVisibleNodes, graphIndex, nodes]);
     const selectMentionReferences = useMemo(() => createMentionReferenceSelector(), []);
-    const mentionReferencesByNodeId = useMemo(() => selectMentionReferences(detailVisibleNodes, nodes, connections, graphIndex), [selectMentionReferences, connections, detailVisibleNodes, graphIndex, nodes]);
+    const mentionReferencesByNodeId = useMemo(() => selectMentionReferences(detailVisibleNodes, nodes, connections, graphIndex), [selectMentionReferences, connections, detailVisibleNodes, graphIndex, nodes, nodeRegistryVersion, t]);
     // 图索引已经按目标节点维护上游节点，避免再次遍历全部连线构造同一份 Map。
     const connectedNodesByNodeId = graphIndex.incomingByNodeId;
     const referenceConnectedNodeIds = useMemo(
@@ -1326,6 +1332,7 @@ function InfiniteCanvasPage() {
     // 插件预览统一交给宿主的 MediaPreviewModal：插件不再自带灯箱，避免画布里出现多套预览弹窗。
     const openMediaPreview = useCallback((item: CanvasMediaPreview) => setHostMediaPreview(item), []);
     const { pluginHost, renderPluginPanel, buildNodeToolbarItems } = usePluginHost({
+        selectGraphIndex,
         projectId,
         effectiveConfig,
         isAiConfigReady,
@@ -1823,39 +1830,54 @@ function InfiniteCanvasPage() {
     }, [commitViewport, size.height, size.width]);
 
     const deepLinkFocusRef = useRef("");
-    const focusNode = useCallback(
-        (nodeId: string) => {
-            const node = nodesRef.current.find((item) => item.id === nodeId);
-            if (!node) return;
-            const worldX = node.position.x + node.width / 2;
-            const worldY = node.position.y + node.height / 2;
-            const k = Math.min(Math.max(Math.min((size.width * 0.6) / node.width, (size.height * 0.6) / node.height), 0.05), 1);
-            const target = { x: size.width / 2 - worldX * k, y: size.height / 2 - worldY * k, k };
-            setSelectedNodeIds(new Set([nodeId]));
-            setSelectedConnectionId(null);
-            setContextMenu(null);
-
-            if (focusAnimRef.current) cancelAnimationFrame(focusAnimRef.current);
-            const start = normalizeViewportTransform(viewportRef.current);
-            const duration = 450;
-            const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
-            let startTime: number | null = null;
-            // 先把 state 推到目标视口，让目标区域的节点进入渲染范围；
-            // 动画过程本身只写 DOM，不再每帧重渲染整棵画布树。
-            setViewport(target);
-            const step = (now: number) => {
-                if (startTime === null) startTime = now;
-                const progress = Math.min((now - startTime) / duration, 1);
-                const t = easeOutCubic(progress);
-                const next = { x: start.x + (target.x - start.x) * t, y: start.y + (target.y - start.y) * t, k: start.k + (target.k - start.k) * t };
-                if (progress < 1) applyViewportLive(next);
-                else commitViewport(next);
-                focusAnimRef.current = progress < 1 ? requestAnimationFrame(step) : null;
-            };
-            focusAnimRef.current = requestAnimationFrame(step);
-        },
-        [applyViewportLive, commitViewport, size.height, size.width],
-    );
+    const animateFocus = useCallback((target: ViewportTransform) => {
+        if (focusAnimRef.current) cancelAnimationFrame(focusAnimRef.current);
+        const start = normalizeViewportTransform(viewportRef.current);
+        const duration = 450;
+        const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
+        let startTime: number | null = null;
+        // 先把 state 推到目标视口，让目标区域的节点进入渲染范围；
+        // 动画过程本身只写 DOM，不再每帧重渲染整棵画布树。
+        setViewport(target);
+        const step = (now: number) => {
+            if (startTime === null) startTime = now;
+            const progress = Math.min((now - startTime) / duration, 1);
+            const t = easeOutCubic(progress);
+            const next = { x: start.x + (target.x - start.x) * t, y: start.y + (target.y - start.y) * t, k: start.k + (target.k - start.k) * t };
+            if (progress < 1) applyViewportLive(next);
+            else commitViewport(next);
+            focusAnimRef.current = progress < 1 ? requestAnimationFrame(step) : null;
+        };
+        focusAnimRef.current = requestAnimationFrame(step);
+    }, [applyViewportLive, commitViewport]);
+    const selectCanvasNodes = useCallback((ids: Set<string>) => {
+        setSelectedNodeIds(new Set(nodesRef.current.filter((node) => ids.has(node.id)).map((node) => node.id)));
+        setSelectedConnectionId(null);
+        setContextMenu(null);
+    }, []);
+    const focusNode = useCallback((nodeId: string) => {
+        const node = nodesRef.current.find((item) => item.id === nodeId);
+        if (!node) return;
+        const target = viewportForCanvasNodes([node], size);
+        if (!target) return;
+        selectCanvasNodes(new Set([nodeId]));
+        animateFocus(target);
+    }, [animateFocus, selectCanvasNodes, size.height, size.width]);
+    const focusSelection = useCallback(() => {
+        const target = viewportForCanvasNodes(nodesRef.current.filter((node) => selectedNodeIdsRef.current.has(node.id)), size);
+        if (target) animateFocus(target);
+    }, [animateFocus, size.height, size.width]);
+    const fitAllNodes = useCallback(() => {
+        const target = viewportForCanvasNodes(nodesRef.current, size);
+        if (target) animateFocus(target);
+    }, [animateFocus, size.height, size.width]);
+    const openBatchRename = useCallback(() => {
+        setRenameTargetIds(nodesRef.current.filter((node) => selectedNodeIdsRef.current.has(node.id)).map((node) => node.id));
+    }, []);
+    const applyBatchRename = useCallback((renames: Array<{ id: string; title: string }>) => {
+        const titles = new Map(renames.map((item) => [item.id, item.title]));
+        setNodes((previous) => previous.map((node) => titles.has(node.id) && titles.get(node.id) !== node.title ? { ...node, title: titles.get(node.id)! } : node));
+    }, [setNodes]);
 
     useEffect(() => {
         const nodeId = searchParams.get("nodeId") || "";
@@ -2556,6 +2578,26 @@ function InfiniteCanvasPage() {
     }, [finishCtrlGroupMarquee, finishNodeDrag, finishSelectionBox, handleGlobalMouseMove, handleGlobalPointerMove, handleGlobalMouseUp]);
 
     const createImageFileNode = useCallback(async (file: File, position: Position) => {
+        if (isSvgFile(file) && getNodeDefinition("svg:vector")) {
+            try {
+                const source = await file.text();
+                const document = new DOMParser().parseFromString(source, "image/svg+xml");
+                if (document.querySelector("parsererror") || document.documentElement.localName !== "svg" || document.documentElement.namespaceURI !== "http://www.w3.org/2000/svg") {
+                    throw new Error("invalid SVG");
+                }
+                const node = createCanvasNode("svg:vector", position, { content: source });
+                node.title = file.name;
+                setNodes((prev) => [...prev, node]);
+                setSelectedNodeIds(new Set([node.id]));
+                setSelectedConnectionId(null);
+                setDialogNodeId(null);
+                return true;
+            } catch {
+                void message.error(t("canvas.projectPage.svgFileInvalid"));
+                return false;
+            }
+        }
+        if (isSvgFile(file)) void message.warning(t("canvas.projectPage.svgPluginUnavailable"));
         const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const previewUrl = URL.createObjectURL(file);
         const initialSize = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
@@ -2578,11 +2620,13 @@ function InfiniteCanvasPage() {
             const size = fitNodeSize(image.width, image.height);
             setNodes((prev) => prev.map((node) => (node.id === id ? { ...node, width: size.width, height: size.height, metadata: { ...node.metadata, ...imageMetadata(image) } } : node)));
             URL.revokeObjectURL(previewUrl);
+            return true;
         } catch (error) {
             const errorDetails = error instanceof Error ? error.message : "图片上传失败";
             setNodes((prev) => prev.map((node) => (node.id === id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
+            return false;
         }
-    }, []);
+    }, [message, t]);
 
     const createVideoFileNode = useCallback(async (file: File, position: Position) => {
         const video = await uploadMediaFile(file, "video");
@@ -2817,7 +2861,7 @@ function InfiniteCanvasPage() {
                 const mimeType = imageType.replace(/^web /, "");
                 const extension = mimeType.split("/")[1] || "png";
                 const file = new File([blob], `clipboard-image.${extension}`, { type: mimeType });
-                await createImageFileNode(file, getCanvasCenter());
+                if (!await createImageFileNode(file, getCanvasCenter())) return false;
                 message.success(t("canvas.projectPage.clipboardImageAdded"));
                 return true;
             }
@@ -2875,7 +2919,7 @@ function InfiniteCanvasPage() {
             const position = getCanvasCenter();
             try {
                 if (isImageFile(file)) {
-                    await createImageFileNode(file, position);
+                    if (!await createImageFileNode(file, position)) return false;
                     message.success(t("canvas.projectPage.clipboardImageAdded"));
                 } else if (file.type.startsWith("video/")) {
                     await createVideoFileNode(file, position);
@@ -2950,10 +2994,25 @@ function InfiniteCanvasPage() {
             // 但未选中任何文本时，Ctrl/Cmd+C 放行为「复制节点」：否则点完节点（焦点落进编辑器）
             // 再按 Ctrl+C 会毫无反应。有选中文本时仍走浏览器默认复制文本；输入框内永不回落。
             const editorCopyFallback = isModifierShortcut && !event.altKey && key === "c" && !window.getSelection()?.toString() && Boolean(target?.closest("[contenteditable='true'],[data-canvas-shortcuts-ignore]"));
+            const navigationAllowed = !event.defaultPrevented && !event.isComposing && event.keyCode !== 229
+                && !(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)
+                && !target?.closest("[contenteditable='true'],[data-canvas-shortcuts-ignore],.ant-modal,[role='combobox'],video,audio");
+            if (navigationAllowed && isModifierShortcut && !event.altKey && !event.shiftKey && key === "k") {
+                event.preventDefault();
+                if (!event.repeat) setNodeFinderOpen(true);
+                return;
+            }
+            if (navigationAllowed && !isModifierShortcut && !event.altKey && key === "f") {
+                event.preventDefault();
+                if (!event.repeat) { if (event.shiftKey) fitAllNodes(); else focusSelection(); }
+                return;
+            }
+
             if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || (target?.closest("[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-shortcuts-ignore]") && !editorCopyFallback))
                 return;
 
             if (isModifierShortcut && key === "c" && window.getSelection()?.toString()) return;
+
 
             if (isModifierShortcut && !event.altKey && key === "z") {
                 event.preventDefault();
@@ -3028,7 +3087,7 @@ function InfiniteCanvasPage() {
             window.removeEventListener("keydown", handleKeyDown);
             window.removeEventListener("blur", handleWindowBlur);
         };
-    }, [copySelectedNodes, deleteConnection, deleteNodes, pasteCopiedNodes, pasteEventClipboard, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, undoCanvas]);
+    }, [copySelectedNodes, deleteConnection, deleteNodes, pasteCopiedNodes, pasteEventClipboard, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, undoCanvas, fitAllNodes, focusSelection]);
 
     const handleConnectStart = useCallback(
         (event: ReactMouseEvent, nodeId: string, handleType: "source" | "target") => {
@@ -5744,9 +5803,10 @@ function InfiniteCanvasPage() {
 
     return (
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
-            <CanvasSidePanel projectId={projectId} nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
+            <CanvasSidePanel onSelectionChange={selectCanvasNodes} projectId={projectId} nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
             <section className="relative min-w-0 flex-1 overflow-hidden">
                 <CanvasTopBar
+                    onFindNode={() => setNodeFinderOpen(true)}
                     title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}
                     titleDraft={titleDraft}
                     isTitleEditing={titleEditing}
@@ -6061,7 +6121,12 @@ function InfiniteCanvasPage() {
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                 />
 
+                {nodeFinderOpen ? <CanvasNodeFinder nodes={nodes} onClose={() => setNodeFinderOpen(false)} onFocusNode={focusNode} /> : null}
+                {renameTargetIds ? <CanvasBatchRename nodes={renameTargetIds.flatMap((id) => { const node = nodeById.get(id); return node ? [node] : []; })} onClose={() => setRenameTargetIds(null)} onApply={applyBatchRename} /> : null}
+
                 <CanvasToolbar
+                    onFocusSelection={focusSelection}
+                    onBatchRename={openBatchRename}
                     selectedCount={selectedNodeIds.size}
                     canvasTool={canvasTool}
                     canUndo={historyState.canUndo}
@@ -6093,7 +6158,7 @@ function InfiniteCanvasPage() {
 
                 {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={commitViewport} /> : null}
 
-                <CanvasZoomControls scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
+                <CanvasZoomControls onFitAll={fitAllNodes} scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
                 <CanvasGenerationLogDialog open={generationLogsOpen} projectId={projectId} onClose={() => setGenerationLogsOpen(false)} />
 
                 {contextMenu ? (

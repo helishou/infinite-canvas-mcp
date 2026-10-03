@@ -13,6 +13,7 @@
     "./collaboration-tools": "./dist/canvas/collaboration-tools.js",
     "./runtime-fields": "./dist/canvas/runtime-fields.js",
     "./drama/production-contract": "./dist/drama/production-contract.js",
+    "./skills/acheng": "./dist/skills/acheng.js",
     "./operations": "./dist/canvas/operations.js",
     "./generation-contract": "./dist/canvas/generation-contract.js",
     "./generation-api": "./dist/canvas/generation-api.js",
@@ -21,6 +22,7 @@
     "./runtime/comfy-client": "./dist/runtime/comfy-client.js",
     "./runtime/agent-runtime": "./dist/runtime/agent-runtime.js",
     "./plugins/minimax-h3/node-factory": "./dist/plugins/minimax-h3/node-factory.js",
+    "./plugins/minimax-h3/character-groups": "./dist/plugins/minimax-h3/character-groups.js",
     "./plugins/minimax-h3/prompt-sections": "./dist/plugins/minimax-h3/prompt-sections.js",
     "./plugins/minimax-h3/style-templates": "./dist/plugins/minimax-h3/style-templates.js"
   },

@@ -3,6 +3,11 @@ import { useSyncExternalStore } from "@infinite-canvas/plugin-sdk";
 export type H3Locale = "zh-CN" | "en-US";
 
 const labels = {
+    executionMode: ["运行方式", "Execution mode"],
+    executionAuto: ["自动分流", "Automatic routing"],
+    executionLocal: ["本地", "Local"],
+    executionRunningHub: ["RunningHub", "RunningHub"],
+    executionHint: ["本地同时运行 1 个任务；RunningHub 工作流与并发数在 ComfyUI → 运行环境中设置。Motion Context 与分阶段确认使用本地。云端参数以已启用的工作流映射为准。", "Local runs one task at a time. Configure the RunningHub workflow and concurrency under ComfyUI → Runtime. Motion Context and staged confirmation use Local. Cloud parameters follow the enabled workflow mappings."],
     prompt: ["提示词", "Prompt"],
     settings: ["参数设置", "Settings"],
     settingsScope: ["设置范围", "Settings scope"],

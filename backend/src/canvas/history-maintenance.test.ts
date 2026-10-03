@@ -5,6 +5,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { BackendDatabase } from "../db.js";
+import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
 import { applyCanvasHistoryPrune, migrateCanvasReceipts, previewCanvasHistoryPrune } from "./history-maintenance.js";
 
 const cutoff = "2026-09-01T00:00:00.000Z";
@@ -133,7 +134,38 @@ test("unowned legacy receipts abort migration and leave the old schema intact", 
     } finally { db.close(); }
 });
 
-test("opening a v15 database backs it up and preserves original request receipts through v16 migration", () => {
+test("receipt migration preserves unrelated pre-existing foreign-key violations", () => {
+    const db = legacyDatabase();
+    try {
+        db.exec(`CREATE TABLE tasks (id TEXT PRIMARY KEY);
+            CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT REFERENCES tasks(id));
+            PRAGMA foreign_keys=OFF;
+            INSERT INTO task_events VALUES (1, 'missing-task');
+            PRAGMA foreign_keys=ON;`);
+        const before = db.prepare("PRAGMA foreign_key_check").all();
+        assert.equal(before.length, 1);
+        db.exec("BEGIN"); migrateCanvasReceipts(db); db.exec("COMMIT");
+        assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), before);
+        assert.equal(db.prepare("SELECT task_id FROM task_events WHERE id=1").get()?.task_id, "missing-task");
+        assert.equal(db.prepare("SELECT COUNT(*) AS n FROM canvas_command_receipts").get()?.n, 2);
+    } finally { db.close(); }
+});
+
+test("receipt migration rejects newly introduced foreign-key violations without losing the old schema", () => {
+    const db = legacyDatabase();
+    try {
+        db.exec("PRAGMA foreign_keys=OFF; INSERT INTO canvas_operation_batches VALUES ('bad-project', 'missing-project', 3); BEGIN");
+        const before = db.prepare("PRAGMA foreign_key_check").all();
+        assert.equal(before.length, 1);
+        assert.throws(() => migrateCanvasReceipts(db), /introduced a foreign-key violation/);
+        db.exec("ROLLBACK");
+        db.exec("PRAGMA foreign_keys=ON");
+        assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), before);
+        assert.equal(db.prepare("PRAGMA table_info(canvas_command_receipts)").all().length, 2);
+    } finally { db.close(); }
+});
+
+test("opening a v15 database backs it up and preserves original request receipts through the latest migration", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "canvas-receipt-upgrade-"));
     const file = path.join(directory, "runtime.sqlite");
     let db: BackendDatabase | undefined;
@@ -147,13 +179,17 @@ test("opening a v15 database backs it up and preserves original request receipts
             INSERT INTO legacy_receipts SELECT operation_id, request_hash FROM canvas_command_receipts;
             DROP TABLE canvas_command_receipts;
             ALTER TABLE legacy_receipts RENAME TO canvas_command_receipts;
-            DELETE FROM schema_migrations WHERE version = 16;
+            DROP TABLE canvas_production_runs;
+            DROP TABLE canvas_production_versions;
+            DROP TABLE canvas_production_operations;
+            DROP TABLE canvas_productions;
+            DELETE FROM schema_migrations WHERE version >= 16;
             COMMIT;`);
         db.close(); db = undefined;
         db = new BackendDatabase(file);
-        assert.equal(db.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 16);
+        assert.equal(db.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
         assert.deepEqual(db.applyCanvasProjectOperations("p", undefined, operations, { operationId: "preserved" }).project, original.project);
-        const backups = fs.readdirSync(directory).filter((name) => name.includes("pre-schema-v15-to-v16"));
+        const backups = fs.readdirSync(directory).filter((name) => name.includes(`pre-schema-v15-to-v${DATABASE_SCHEMA_VERSION}`));
         assert.equal(backups.length, 1);
         const backup = new DatabaseSync(path.join(directory, backups[0]), { readOnly: true });
         try {

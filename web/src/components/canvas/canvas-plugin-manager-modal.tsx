@@ -23,8 +23,7 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
     const [officialError, setOfficialError] = useState<string | null>(null);
 
     const recordById = useMemo(() => new Map(plugins.map((item) => [item.id, item])), [plugins]);
-    const localPlugins = useMemo(() => plugins.filter((item) => item.local), [plugins]);
-    const thirdPartyPlugins = useMemo(() => plugins.filter((item) => !item.local && !item.official), [plugins]);
+    const thirdPartyPlugins = useMemo(() => plugins.filter((item) => !item.official), [plugins]);
 
     const loadOfficial = useCallback(async () => {
         setLoadingOfficial(true);
@@ -82,26 +81,22 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
         }
     };
 
-    // Installed plugin actions: enable toggle plus update/uninstall for non-local plugins.
+    // Installed plugin actions: enable, update, or uninstall.
     // Highlight the update action when a newer remote version is available.
     const installedControls = (record: InstalledPlugin, upgradable = false) => (
         <>
             <Switch size="small" checked={record.enabled} loading={busyId === record.id} onChange={(checked) => runOnPlugin(record, () => setPluginEnabled(record, checked), t(checked ? "canvas.plugins.enabled" : "canvas.plugins.disabled"))} />
-            {!record.local && (
-                <>
-                    <Button
-                        type={upgradable ? "primary" : "text"}
-                        size="small"
-                        icon={<RefreshCw className="size-4" />}
-                        loading={busyId === record.id}
-                        title={t(upgradable ? "canvas.plugins.upgradeAvailable" : "canvas.plugins.updateFromSource")}
-                        onClick={() => runOnPlugin(record, async () => void (await updatePlugin(record)), t("canvas.plugins.updated"))}
-                    />
-                    <Popconfirm title={t("canvas.plugins.uninstallTitle")} okText={t("canvas.plugins.uninstall")} cancelText={t("canvas.editors.cancel")} onConfirm={() => uninstallPlugin(record.id)}>
-                        <Button type="text" size="small" danger icon={<Trash2 className="size-4" />} title={t("canvas.plugins.uninstall")} />
-                    </Popconfirm>
-                </>
-            )}
+            <Button
+                type={upgradable ? "primary" : "text"}
+                size="small"
+                icon={<RefreshCw className="size-4" />}
+                loading={busyId === record.id}
+                title={t(upgradable ? "canvas.plugins.upgradeAvailable" : "canvas.plugins.updateFromSource")}
+                onClick={() => runOnPlugin(record, async () => void (await updatePlugin(record)), t("canvas.plugins.updated"))}
+            />
+            <Popconfirm title={t("canvas.plugins.uninstallTitle")} okText={t("canvas.plugins.uninstall")} cancelText={t("canvas.editors.cancel")} onConfirm={() => uninstallPlugin(record.id)}>
+                <Button type="text" size="small" danger icon={<Trash2 className="size-4" />} title={t("canvas.plugins.uninstall")} />
+            </Popconfirm>
         </>
     );
 
@@ -193,8 +188,6 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
         </div>
     );
 
-    const localTab = <div className="thin-scrollbar max-h-[52vh] space-y-2 overflow-auto">{localPlugins.map((record) => row(record.id, <Puzzle className="size-4" />, record.name, record.version, record.description || record.url, installedControls(record)))}</div>;
-
     const thirdPartyTab = (
         <div className="space-y-3">
             <div className="flex gap-2">
@@ -209,7 +202,6 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
 
     const tabs = [
         { key: "official", label: t("canvas.plugins.official"), children: officialTab },
-        ...(localPlugins.length > 0 ? [{ key: "local", label: t("canvas.plugins.local"), children: localTab }] : []),
         { key: "third", label: t("canvas.plugins.thirdParty"), children: thirdPartyTab },
     ];
 

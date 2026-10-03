@@ -84,7 +84,7 @@ export function connectCanvasRealtime(projectId: string, onPeers: (peers: Canvas
         if (disposed) return;
         const backend = new URL(getBackendUrl());
         const local = import.meta.env.DEV && ["127.0.0.1", "localhost"].includes(backend.hostname) && backend.port === "17370";
-        const endpoint = new URL("/canvas/realtime", local ? location.origin : backend.origin);
+        const endpoint = new URL(`${local ? location.origin : backend.href.replace(/\/$/, "")}/canvas/realtime`);
         endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
         endpoint.searchParams.set("token", getBackendTokenShared());
         endpoint.searchParams.set("projectId", projectId);

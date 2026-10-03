@@ -7,6 +7,7 @@ import { H3Icon } from "./H3Icon";
 import { H3MaterialCard } from "./H3MaterialCard";
 import { message } from "antd";
 import { h3Label, useH3Locale } from "../h3-locale";
+import { buildH3OutputPreview } from "../services/h3-output-preview";
 
 type Props = { ctx: CanvasNodeContext; outputs: H3Ref[]; segments: H3Segment[]; selected?: H3Segment; patchSelected: (patch: Partial<H3Segment>) => void };
 
@@ -122,6 +123,6 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
     };
     return <aside className="minimax-library">
         <div key="library-head" className="minimax-library-head"><H3Icon name="output" /> <span>{h3Label(locale, "output")}</span><span className="minimax-output-actions"><button type="button" aria-label="切换输出筛选" aria-pressed={outputFilter === "current"} title={outputFilter === "all" ? "当前显示全部输出，点击只显示当前 Clip" : "当前只显示当前 Clip，点击显示全部输出"} onClick={() => changeOutputFilter(outputFilter === "all" ? "current" : "all")} className={`minimax-output-filter${outputFilter === "current" ? " active" : ""}`}><H3Icon name={outputFilter === "all" ? "filter-all" : "filter-current"} /></button></span></div>
-        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.generationLogId || ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} locale={locale} compact removable onRestore={() => void restoreOutput(ref)} onOpenPreview={() => ctx.openMediaPreview({ url: ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url, name: ref.name, type: ref.type })} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>{h3Label(locale, "output")}</span></div> : null}</div>
+        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.generationLogId || ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} locale={locale} compact removable onRestore={() => void restoreOutput(ref)} onOpenPreview={() => { const preview = buildH3OutputPreview(visibleOutputs, index, ctx.mediaUrl); if (preview) ctx.openMediaPreview(preview); }} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>{h3Label(locale, "output")}</span></div> : null}</div>
     </aside>;
 }

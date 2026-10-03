@@ -2,6 +2,10 @@ import { Clapperboard, FileText, ImagePlus, Images, Maximize2, Settings2, Video,
 
 export const navigationTools = [
     {
+        slug: "director",
+        icon: Clapperboard,
+    },
+    {
         slug: "canvas",
         icon: Maximize2,
     },

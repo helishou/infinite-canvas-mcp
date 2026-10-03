@@ -8,6 +8,7 @@ import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { RunningHubBackend } from "../runtime/runninghub.js";
+import { h3ExecutionMode, h3CanResumeQueued, h3LocalOnlyReason } from "../runtime/h3-queue.js";
 import type { Stores } from "../stores/types.js";
 import { writeBackH3Task } from "./h3-task-writeback.js";
 import { createLogger } from "../logger.js";
@@ -22,6 +23,7 @@ type H3RunInput = {
     nodeId?: string;
     nodeIds?: string[];
     segmentId?: string;
+    endSegmentId?: string;
     segmentIndex?: number;
     runFromCurrent?: boolean;
     skipCompleted?: boolean;
@@ -64,6 +66,7 @@ export function boundH3ParentTaskIds(projects: CanvasProject[]): Set<string> {
 }
 
 const H3_PARAM_KEYS = [
+    "minimaxEngine",
     "mode", "taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "steps", "denoise", "noiseSeedMode", "noiseSeed", "seed",
     "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sizeMultiple", "sampler", "scheduler",
     "loraSlots", "constantTriggerWord", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd",
@@ -78,7 +81,7 @@ const H3_PARAM_KEYS = [
     "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion",
     "emptyFiveMinuteTimeline", "taeh3Enabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationSeamNoiseEnabled", "continuationSeamNoiseMode", "continuationSeamNoise", "continuationSeamNoiseSeed", "continuationSeamNoiseRamp", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise",
     "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "teAccel", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
-    "referenceVideoPolicy", "trimIn", "trimOut", "motionContextEnabled", "tailFrameContinuation", "previousVideoAsReference", "motionContextNoiseEnabled", "motionContextNoiseAlpha", "motionContextNoiseAlphaEnd", "motionContextNoiseRampFrames", "combatLoraWeight", "cinematicLoraWeight",
+    "referenceVideoPolicy", "trimIn", "trimOut", "motionContextEnabled", "tailFrameContinuation", "motionContextNoiseEnabled", "motionContextNoiseAlpha", "motionContextNoiseAlphaEnd", "motionContextNoiseRampFrames", "combatLoraWeight", "cinematicLoraWeight",
 ] as const;
 const H3_OUTGOING_CONTEXT_KEYS = ["contextLength", "audioContextLength", "continuationSeamNoiseEnabled", "continuationSeamNoiseMode", "continuationSeamNoise", "continuationSeamNoiseSeed", "continuationSeamNoiseRamp", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler"] as const;
 
@@ -590,7 +593,7 @@ export class CanvasH3Runner {
                     child = await this.startChild(task, plan, override, childId, completedByKey);
                 } else if (["queued", "running"].includes(child.status)) {
                     const submitted = this.stores.tasks.events(child.id).some((event) => event.type === "submitted");
-                    if (!submitted) child = this.stores.tasks.update(child.id, { status: "failed", error: "子任务创建后未记录远端提交，拒绝重复提交" });
+                    if (!submitted && !h3CanResumeQueued(this.stores.tasks, child.id)) child = this.stores.tasks.update(child.id, { status: "failed", error: "子任务创建后未记录远端提交，拒绝重复提交" });
                     else if (child.kind === "runninghub:minimax-h3") this.runningHub.resume(child.id);
                     else this.comfy.resume(child.id);
                 }
@@ -667,7 +670,7 @@ export class CanvasH3Runner {
         const params = extractParams(segment, override, metadata, defaults);
         const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
         const { compilation } = compileH3Submission(project, segment, taskMode);
-        const scenePrompt = appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
+        const scenePrompt = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
         const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
         const previousFingerprint = previous ? fingerprints.get(`${plan.nodeId}:${String(previous.id || "")}`) || String(previous.cacheFingerprint || "") : "";
         const confirming = override.confirmSecondPass === true;
@@ -737,8 +740,10 @@ export class CanvasH3Runner {
             ? segments.findIndex((segment) => String(segment.id || "") === input.segmentId)
             : input.segmentIndex ?? Math.max(0, segments.findIndex((segment) => !segment.result));
         if (selected < 0) throw new Error("找不到所选 Clip，请刷新画布后重试");
+        const end = input.endSegmentId ? segments.findIndex(segment => segment.id === input.endSegmentId) : segments.length - 1;
+        if (end < selected) throw new Error("连续组结束 Clip 不存在或早于起点");
         const resumesGroup = selected > 0 && segments[selected - 1].motionContextEnabled === true;
-        const indices = input.runFromCurrent ? segments.map((_, index) => index).filter((index) => index >= selected) : [selected];
+        const indices = input.runFromCurrent ? segments.map((_, index) => index).filter((index) => index >= selected && index <= end) : [selected];
         if (input.runFromCurrent && input.skipCompleted && indices.some((index) => index + 1 < segments.length && segments[index].motionContextEnabled === true)) {
             throw new Error("V15 潜空间续写不能跳过已完成 Clip，请从连续组首段重新运行。");
         }
@@ -753,7 +758,7 @@ export class CanvasH3Runner {
             const segment = segments[segmentIndex];
             if (!segment.id) throw new Error(`H3 Clip ${segmentIndex + 1} 缺少身份标识`);
             const incoming = (segmentIndex === selected && resumesGroup) || (input.runFromCurrent === true && segmentIndex > selected && segments[segmentIndex - 1].motionContextEnabled === true);
-            const outgoing = input.runFromCurrent === true && segmentIndex + 1 < segments.length && segment.motionContextEnabled === true;
+            const outgoing = input.runFromCurrent === true && segmentIndex < end && segment.motionContextEnabled === true;
             if (!incoming && !outgoing) {
                 groupHead = -1;
                 continuationIndex = 0;
@@ -826,7 +831,7 @@ export class CanvasH3Runner {
         const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
         const { compilation, composite, editableReferences } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
-        const scenePrompt = appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
+        const scenePrompt = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
         const styleTemplateId = segment.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode) : segment.styleTemplateId;
         if (styleTemplateId && !isH3StyleTemplateId(styleTemplateId)) throw new Error(`无效的 H3 视觉风格模板：${styleTemplateId}`);
         params.styleTemplateId = styleTemplateId || null;
@@ -879,11 +884,7 @@ export class CanvasH3Runner {
         const previous = previousSnapshot && previousOutput?.url
             ? { ...previousSnapshot, result: String(previousOutput.url), resultStorageKey: String(previousOutput.storageKey || "") }
             : previousSnapshot;
-        // 上一段成品视频有两种显式用途（规则见 resolveClipContinuation）：
-        //   1) tailFrameContinuation（标在【上一段】上）= 追加尾帧图片，参考动作、场景与连续性；
-        //   2) previousVideoAsReference（标在【本段】上）= 把上一段成品整体当「参考视频」喂进本段（默认关）。
-        // Motion Context 本身走 V15 continuationTask 的 AV latent 链，不消费上一段成品视频，
-        // 更不能隐式触发 2)；完整视频参考仍由 previousVideoAsReference 单独控制。
+        // Previous output is read only for tail extraction or post-processing; AV latent carries Motion Context.
         const chained = parent.input.runFromCurrent === true && plan.segmentIndex > 0;
         const { usePreviousAsReference, useTailFrame, needsPreviousVideo } = resolveClipContinuation(segment, previous, chained, params);
         const seamNeedsPrevious = params.faceRefineEnabled === true && (Number(params.seamFaceFadeFrames || 0) > 0 || Number(params.seamColourMatch || 0) > 0 || Number(params.seamAudioCrossfadeMs || 0) > 0);
@@ -913,13 +914,9 @@ export class CanvasH3Runner {
             prompt = appendTailFramePrompt(prompt, `Clip ${plan.segmentIndex}`, routed.tailImageOrdinal);
         }
         prompt = applyH3StyleTemplate(prompt, taskMode, styleTemplateId as string | null);
-        // 组装最终送入工作流的参考视频列表：本段自有参考视频（最多 3 段）+ 显式开启时才追加的上一段成品。
-        const referenceVideos = appendPreviousReference(videos, usePreviousAsReference && !isT2v && !isI2v && !isFl2v ? previousPath : "");
-        if (usePreviousAsReference && previousPath && !isT2v && !isI2v && !isFl2v) {
-            actualReferences.push({ id: `runtime-previous-video-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 成品视频`, type: "video", role: "motion_reference", runtime: true, sourceSegmentId: previous?.id, url: previous?.result, storageKey: previous?.resultStorageKey, resolved: previousPath });
-        }
-        const engine = String(params.minimaxEngine || params.engine || metadata.minimaxEngine || "").toLowerCase();
-        if (engine === "runninghub" && params.latentConfirmationPhase) throw new Error("潜空间二采确认模式需要本地 ComfyUI；当前 RunningHub 工作流不支持保存与恢复一采潜变量。未提交一采任务。");
+        // Only explicitly bound video references enter model conditioning.
+        const referenceVideos = [...videos];
+        const requestedEngine = h3ExecutionMode(params.minimaxEngine || params.engine || metadata.minimaxEngine);
         Object.assign(params, {
             taskMode: runtimeTaskMode,
             mode: runtimeTaskMode,
@@ -927,15 +924,24 @@ export class CanvasH3Runner {
             // 是旧版预处理图标记，避免再把上一段视频走旧 motion/context 图。
             motionContext: false,
             motionContextNoise: false,
-            previousVideoAsReference: usePreviousAsReference,
+            previousVideoAsReference: false,
             runninghubMode: metadata.minimaxRunningHubMode,
             runninghubWorkflowId: metadata.minimaxRunningHubWorkflowId,
             runninghubAppId: metadata.minimaxRunningHubAppId,
             runninghubFields: metadata.minimaxRunningHubFields,
             runninghubParams: metadata.minimaxRunningHubParams,
             runninghubWorkflowJson: metadata.minimaxRunningHubWorkflowJson,
-            useWallet: metadata.minimaxRunningHubUseWallet === true,
+            useWallet: metadata.minimaxRunningHubUseWallet,
         });
+        const localOnlyReason = h3LocalOnlyReason(params);
+        const runningHubReady = this.runningHub.ready(params);
+        const localReady = requestedEngine !== "auto" || localOnlyReason || !runningHubReady
+            ? true
+            : (await this.comfy.status()).connected;
+        const engine = requestedEngine === "local" ? "local" : this.runningHub.queue.select(requestedEngine, runningHubReady, localOnlyReason, childId, localReady);
+        params.requestedEngine = requestedEngine;
+        params.resolvedEngine = engine;
+        if (localOnlyReason && requestedEngine === "auto") params.routingReason = localOnlyReason;
         const submission = {
             authoredPrompt: String(segment.prompt || ""),
             editableReferences,
@@ -967,9 +973,12 @@ export class CanvasH3Runner {
             ...(previousPath && (usePreviousAsReference || seamNeedsPrevious) ? { previousVideo: previousPath } : {}),
         };
         const bind = (created: RuntimeTask) => this.bindChild(parent.id, plan, created.id, log.id);
-        const child = engine === "runninghub"
-            ? await this.runningHub.run(childInput, childParams, childId, bind)
-            : await this.comfy.run("minimax-h3", childInput, childParams, undefined, childId, bind);
+        let child: RuntimeTask;
+        try {
+            child = engine === "runninghub"
+                ? await this.runningHub.run(childInput, childParams, childId, bind)
+                : await this.comfy.run("minimax-h3", childInput, childParams, undefined, childId, bind);
+        } finally { this.runningHub.queue?.unreserve(childId); }
         if (compositeTempDir) {
             void this.cleanupStoryboardCompositeWhenTerminal(child.id, compositeTempDir);
             compositeTempDir = undefined;
@@ -1198,21 +1207,15 @@ export function routeTailFrameInput(
     };
 }
 
-/**
- * 决定本段是否消费上一段成品视频。尾帧参考可用于单独生成下一段；整段参考视频仍只在链式续跑中生效。
- *  - tailFrameContinuation 标在【上一段】上：生成本段时追加该段尾帧作为连续性参考；
- *  - previousVideoAsReference 标在【本段】上：链式续跑时把上一段成品整体作为参考视频喂进本段（默认关）。
- * motionContextEnabled 只控制 V15 AV latent 续写，不属于这里的成品视频消费逻辑；
- * 不得用它隐式触发 previousVideoAsReference。
- */
+/** Tail-frame extraction is independent of latent continuation; legacy video flags are inert. */
 export function resolveClipContinuation(
     segment: Record<string, unknown>,
     previous: Record<string, unknown> | undefined,
     chained: boolean,
     override: Record<string, unknown>,
 ) {
-    const usePreviousAsReference = chained && (segment.previousVideoAsReference === true || override.previousVideoAsReference === true);
-    // 尾帧是上一段到下一段的首帧锚点，生成当前 Clip 时也应生效；整段参考视频仍要求链式续跑。
+    const usePreviousAsReference = false; // Legacy flags are preserved in history but never consumed.
+    // 尾帧是上一段到下一段的首状态锚点，单独运行当前 Clip 时仍可生效。
     const useTailFrame = previous?.tailFrameContinuation === true;
     return {
         usePreviousAsReference,
@@ -1222,10 +1225,9 @@ export function resolveClipContinuation(
 }
 
 /** 把上一段成品追加到参考视频列表尾部；不注入时原样返回。超过 3 段上限直接报错，不静默丢弃。 */
-export function appendPreviousReference(videos: readonly string[], previousPath: string): string[] {
-    if (!previousPath) return [...videos];
-    if (videos.length >= 3) throw new Error("参考视频已达 3 段上限，无法再追加上一段成品；请关闭「上一段作为参考视频」或先移除一段参考视频");
-    return [...videos, previousPath];
+/** Historical helper retained for callers; automatic previous-video input is disabled. */
+export function appendPreviousReference(videos: readonly string[], _previousPath: string): string[] {
+    return [...videos];
 }
 
 /** V15 会用 ComfyUI unique_id 校验 node；原生提交图中的主节点 ID 固定为 nf_v15。 */

@@ -9,8 +9,9 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, running
     app.get("/agent/runninghub/status", (_req, res) => res.json({ ok: true, ...runningHub.status() }));
     app.get("/agent/runninghub/config", (_req, res) => res.json({ ok: true, config: mask(runningHub.getConfig()) }));
     app.put("/agent/runninghub/config", (req, res) => res.json({ ok: true, config: mask(runningHub.setConfig(req.body || {})) }));
+    app.post("/agent/runninghub/workflow/inspect", async (req, res) => res.json({ ok: true, ...(await runningHub.inspectWorkflow(typeof req.body?.workflowId === "string" ? req.body.workflowId : undefined)) }));
     app.post("/agent/runninghub/tasks", async (req, res) => { const task = await runningHub.run(objectBody(req.body?.input), objectBody(req.body?.params)); events?.publish({ type: "task.created", entityId: task.id, payload: task }); res.status(202).json({ ok: true, task }); });
-    app.get("/agent/runninghub/tasks/:id", (req, res) => taskResponse(req.params.id, "runninghub:", stores, req, res));
+    app.get("/agent/runninghub/tasks/:id", (req, res) => { runningHub.resume(req.params.id); return taskResponse(req.params.id, "runninghub:", stores, req, res); });
     app.post("/agent/runninghub/tasks/:id/cancel", (req, res) => { const task = runningHub.cancel(req.params.id); events?.publish({ type: "task.updated", entityId: task.id, payload: task }); res.json({ ok: true, task }); });
     app.get("/agent/ffmpeg/status", async (_req, res) => res.json({ ok: true, ...(await videoConcat.status()) }));
     app.post("/agent/video-concat/tasks", async (req, res) => { const task = await videoConcat.run(Array.isArray(req.body?.videos) ? req.body.videos.map(String) : [], String(req.body?.output || ""), req.body?.longEdge === "auto" || req.body?.longEdge === undefined ? "auto" : Number(req.body.longEdge), undefined, undefined, req.body?.layout); events?.publish({ type: "task.created", entityId: task.id, payload: task }); res.status(202).json({ ok: true, task }); });

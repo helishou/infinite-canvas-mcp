@@ -21,6 +21,8 @@ function resolveDataDir(): string {
 }
 function resolveMediaDir(): string {
     if (process.env.INFINITE_CANVAS_MEDIA_DIR) return path.resolve(process.env.INFINITE_CANVAS_MEDIA_DIR);
+    // An explicitly selected deployment must not inherit another installation's media directory.
+    if (process.env.INFINITE_CANVAS_DATA_DIR) return path.join(DATA_DIR, "runtime-media");
     const root = readRootConfig();
     return root.mediaDir ? path.resolve(root.mediaDir) : path.join(DATA_DIR, "runtime-media");
 }
@@ -62,6 +64,25 @@ export type BackendConfig = {
 
 export type ResolvedConfig = Required<Pick<BackendConfig, "url" | "token">> & { port: number; origins: string[]; listenHost?: BackendConfig["listenHost"] };
 
+/** Deployment overrides take precedence over file and SQLite network settings. */
+export function applyNetworkEnvironment(config: ResolvedConfig, env: NodeJS.ProcessEnv = process.env) {
+    const host = env.INFINITE_CANVAS_LISTEN_HOST?.trim();
+    if (host) {
+        if (host !== "127.0.0.1" && host !== "0.0.0.0") throw new Error("INFINITE_CANVAS_LISTEN_HOST must be 127.0.0.1 or 0.0.0.0");
+        config.listenHost = host;
+    }
+    const origins = env.INFINITE_CANVAS_ORIGINS?.trim();
+    if (origins) {
+        config.origins = [...new Set(origins.split(",").map((value) => {
+            const url = new URL(value.trim());
+            if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+                throw new Error("INFINITE_CANVAS_ORIGINS must contain comma-separated HTTP(S) origins without paths or credentials");
+            }
+            return url.origin;
+        }))];
+    }
+}
+
 /** 读取 backend.json，不存在时生成默认配置。 */
 export function loadConfig(create = false): ResolvedConfig {
     let raw: Partial<BackendConfig> = {};
@@ -69,10 +90,11 @@ export function loadConfig(create = false): ResolvedConfig {
         raw = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as Partial<BackendConfig>;
     } catch { /* first run */ }
     const port = Number(process.env.PORT) || raw.port || DEFAULT_PORT;
-    const url = raw.url || `http://127.0.0.1:${port}`;
-    const token = raw.token || crypto.randomBytes(18).toString("hex");
+    const url = process.env.PORT ? `http://127.0.0.1:${port}` : raw.url || `http://127.0.0.1:${port}`;
+    const token = process.env.INFINITE_CANVAS_BACKEND_TOKEN || raw.token || crypto.randomBytes(18).toString("hex");
     const configuredOrigins = Array.isArray(raw.origins) ? raw.origins.filter((origin) => origin && origin !== "*") : [];
     const config: ResolvedConfig = { url, token, port, listenHost: raw.listenHost === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1", origins: configuredOrigins.length ? configuredOrigins : DEFAULT_ORIGINS };
+    applyNetworkEnvironment(config);
     if (create) saveConfig(config);
     return config;
 }

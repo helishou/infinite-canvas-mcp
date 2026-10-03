@@ -15,7 +15,8 @@ type RawManifest = { plugins?: RawEntry[] };
 
 // Fetch the official registry and resolve relative entries against its URL for the existing URL installation flow.
 export async function fetchOfficialPlugins(registryUrl: string = PLUGIN_REGISTRY_URL): Promise<OfficialPluginEntry[]> {
-    const response = await fetch(registryUrl, { headers: { accept: "application/json" } });
+    const resolvedRegistryUrl = new URL(registryUrl, typeof window === "undefined" ? undefined : window.location.href).href;
+    const response = await fetch(resolvedRegistryUrl, { headers: { accept: "application/json" } });
     if (!response.ok) throw new Error(i18n.t("canvas.pluginErrors.registryFailed", { status: response.status }));
     const data = (await response.json()) as RawManifest;
     const list = Array.isArray(data?.plugins) ? data.plugins : [];
@@ -27,7 +28,7 @@ export async function fetchOfficialPlugins(registryUrl: string = PLUGIN_REGISTRY
             version: item.version || "0.0.0",
             description: item.description,
             icon: item.icon,
-            url: item.url ? item.url : new URL(item.entry as string, registryUrl).toString(),
+            url: new URL(item.url || item.entry as string, resolvedRegistryUrl).toString(),
         }));
 }
 
