@@ -93,13 +93,13 @@ export class RunningHubBackend {
         if (!this.ready(params)) throw new Error("RunningHub 未配置 API Key、工作流 ID 或输入映射");
         return this.startTask("runninghub:minimax-h3", input, params, clientTaskId, true, onCreated);
     }
-    async runWorkflow(profileId: string, input: Record<string, unknown>, values: Record<string, unknown>, clientTaskId?: string) {
+    async runWorkflow(profileId: string, input: Record<string, unknown>, values: Record<string, unknown>, overrides: Record<string, unknown> = {}, clientTaskId?: string) {
         const profile = this.listWorkflowProfiles().find((item) => item.id === profileId);
         if (!profile) throw new Error("RunningHub 工作流配置不存在，请重新添加");
         if (!keyFor(this.getConfig())) throw new Error("请先在 ComfyUI → 运行环境配置 RunningHub API Key");
         const params = {
             runninghubMode: "workflow", runninghubWorkflowId: profile.workflowId, runninghubFields: profile.fields,
-            runninghubParams: values, runninghubInstanceType: profile.instanceType || "default",
+            ...overrides, runninghubParams: values, runninghubInstanceType: profile.instanceType || "default",
             runninghubProfileId: profile.id, model: `runninghub-workflow:${profile.id}`,
         };
         return this.startTask("runninghub:workflow", input, params, clientTaskId, false);
@@ -273,10 +273,11 @@ export class RunningHubBackend {
             if (data.status !== lastStatus) { this.tasks.addEvent(task.id, "remote_status", { taskId: config.remoteId, status: data.status }); lastStatus = data.status; }
             if (["SUCCESS", "SUCCEEDED", "SUCCEED", "COMPLETED", "FINISHED"].includes(data.status)) {
                 const media = await this.materialize(data.results, signal);
+                const texts = data.results.flatMap((item) => typeof item.text === "string" ? [{ nodeId: String(item.nodeId || ""), content: item.text }] : []);
                 if (task.kind === "runninghub:minimax-h3" && !media.some((item) => item.mimeType.startsWith("video/"))) throw new Error("RunningHub H3 任务完成但没有可归档的视频");
-                if (task.kind === "runninghub:workflow" && !media.length) throw new Error("RunningHub 工作流完成但没有可归档的媒体结果");
+                if (task.kind === "runninghub:workflow" && !media.length && !texts.length) throw new Error("RunningHub 工作流完成但没有可归档的媒体或文本结果");
                 if (signal.aborted || this.tasks.get(task.id)?.status === "cancelled") return;
-                const result = { media, taskId: config.remoteId, backend: "runninghub", mode: config.mode };
+                const result = { media, ...(texts.length ? { texts } : {}), taskId: config.remoteId, backend: "runninghub", mode: config.mode };
                 this.tasks.addEvent(task.id, "result", result);
                 this.update(task.id, { status: "succeeded", progress: 1, result });
                 return;
@@ -393,7 +394,15 @@ function validateFields(fields: RunningHubField[]) {
     }
 }
 export function discoverRunningHubFields(graph: Json): RunningHubField[] {
-    return Object.entries(graph).flatMap(([nodeId, raw]) => Object.entries(record(raw).inputs || {}).map(([fieldName, fieldValue]) => ({ id: `${nodeId}::${fieldName}`, nodeId, fieldName, fieldValue, label: `${record(raw)._meta?.title || record(raw).class_type || nodeId} · ${fieldName}`, enabled: false, source: "constant" as const })));
+    return Object.entries(graph).flatMap(([nodeId, raw]) => Object.entries(record(raw).inputs || {}).map(([fieldName, fieldValue]) => {
+        const node = record(raw);
+        const kind = String(node.class_type || "");
+        const fieldType = /LoadImage/i.test(kind) && fieldName === "image" ? "image"
+            : /LoadVideo/i.test(kind) && /video|file/i.test(fieldName) ? "video"
+                : /LoadAudio/i.test(kind) && /audio|file/i.test(fieldName) ? "audio"
+                    : typeof fieldValue === "number" ? "number" : typeof fieldValue === "boolean" ? "boolean" : "text";
+        return { id: `${nodeId}::${fieldName}`, nodeId, fieldName, fieldValue, fieldType, label: `${record(node._meta).title || kind || nodeId} · ${fieldName}`, enabled: false, source: "constant" as const };
+    }));
 }
 export function patchRunningHubWorkflow(graph: Json, fields: Array<{ nodeId: string; fieldName: string; fieldValue: unknown }>) {
     const next = structuredClone(graph);
@@ -410,15 +419,17 @@ export function normalizeRunningHubQuery(response: Json) {
 }
 export function runningHubMediaType(bytes: Buffer, header: string, name: string) {
     const prefix = bytes.subarray(0, 64).toString().trimStart();
-    if (!bytes.length || /^(?:<!doctype|<html|<\?xml|\{)/i.test(prefix) || /text\/html|application\/json/i.test(header)) throw new Error("RunningHub 返回了空文件或错误页面，未作为媒体归档");
+    if (!bytes.length || /^(?:<!doctype|<html)/i.test(prefix) || /text\/html/i.test(header) || /application\/json/i.test(header) && !/\.json$/i.test(name)) throw new Error("RunningHub 返回了空文件或错误页面，未作为媒体归档");
     if (bytes.length > 12 && ["ftyp", "moov", "mdat", "wide"].includes(bytes.subarray(4, 8).toString())) return "video/mp4";
     if (bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "video/webm";
     if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "image/png";
     if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
     if (bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP") return "image/webp";
     if (bytes.subarray(0, 3).toString() === "GIF") return "image/gif";
+    if (bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WAVE") return "audio/wav";
+    if (bytes.subarray(0, 3).toString() === "ID3" || bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return "audio/mpeg";
     if (/^audio\//.test(header)) return header.split(";")[0];
-    throw new Error(`RunningHub 结果不是可识别的媒体：${name}`);
+    return header.split(";", 1)[0] || "application/octet-stream";
 }
 function delay(ms: number, signal: AbortSignal) {
     return new Promise<void>((resolve, reject) => {

@@ -78,6 +78,7 @@ export type WorkflowRunResult = {
     promptId?: string;
     outputs?: Record<string, unknown>;
     media: Array<{ url: string; storageKey?: string; mimeType: string; filename?: string }>;
+    texts?: Array<{ nodeId?: string; content: string }>;
     status: { status_str?: string; completed?: boolean };
     error?: string;
 };
@@ -162,7 +163,7 @@ export async function pollWorkflowTask(
                 mimeType: m.mimeType,
                 filename: m.filename,
             }));
-            return { taskId, media: media as WorkflowRunResult["media"], status: { status_str: "success", completed: true } };
+            return { taskId, media: media as WorkflowRunResult["media"], texts: task.result?.texts, status: { status_str: "success", completed: true } };
         }
         if (task.status === "failed") throw new Error(task.error || "工作流执行失败");
         if (task.status === "cancelled") throw new Error("任务已取消");

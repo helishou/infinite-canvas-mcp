@@ -1,12 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Button, Empty, Input, Spin, Tabs, Tag, message, Select, Switch } from "antd";
+import { Alert, Button, Checkbox, Empty, Input, Spin, Table, Tabs, Tag, message, Select, Switch } from "antd";
 import { Upload as UploadIcon, Upload, Download, Play, Trash2, Settings2, Workflow, Code, History } from "lucide-react";
-import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs, uploadBackendMedia, backendMediaUrl } from "@/services/backend-api";
-import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, pollWorkflowTask, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
+import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs, uploadBackendMedia, backendMediaUrl, type BackendRuntimeTask } from "@/services/backend-api";
+import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, pollWorkflowTask, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
 import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
 import "../../styles/workflow-graph.css";
-import type { WorkflowConfig, WorkflowField } from "@/types/workflow";
+import { cancelRunningHubTask, deleteRunningHubWorkflow, fetchRunningHubStatus, fetchRunningHubWorkflowTasks, fetchRunningHubWorkflows, inspectRunningHubWorkflow, runRunningHubWorkflow, saveRunningHubWorkflow, type RunningHubField, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
 
 type WorkflowItem = {
     name: string;
@@ -211,6 +211,7 @@ export default function WorkflowsPage() {
                 onChange={setSection}
                 items={[
                     { key: "workflows", label: "工作流库" },
+                    { key: "runninghub", label: "RunningHub 工作流" },
                     { key: "models", label: "模型" },
                     { key: "runtime", label: "运行环境" },
                 ]}
@@ -428,7 +429,7 @@ export default function WorkflowsPage() {
                         )}
                     </div>
                 </div>
-            </div> : section === "models" ? <ComfyChannelsPanel /> : <ComfyRuntimePanel />}
+            </div> : section === "runninghub" ? <RunningHubWorkflowsPanel onOpenRuntime={() => setSection("runtime")} /> : section === "models" ? <ComfyChannelsPanel /> : <ComfyRuntimePanel />}
             </div>
         </div>
     );
@@ -512,7 +513,7 @@ function MediaFieldUpload({ fieldId, value, kind, onChange }: MediaFieldUploadPr
     );
 }
 
-function RunPanel({ config, onRun, running, result }: RunPanelProps) {
+export function RunPanel({ config, onRun, running, result }: RunPanelProps) {
     const [fields, setFields] = useState<Record<string, string>>({});
 
     useEffect(() => {
@@ -570,7 +571,7 @@ function RunPanel({ config, onRun, running, result }: RunPanelProps) {
                     <div className="grid grid-cols-2 gap-3">
                         {result.media.map((item, i) => (
                             <div key={i} className="overflow-hidden rounded border border-stone-200 dark:border-stone-700">
-                                {item.mimeType?.startsWith("video/") ? <video src={item.url} controls className="w-full" /> : item.mimeType?.startsWith("audio/") ? <audio src={item.url} controls className="w-full p-2" /> : <img src={item.url} alt={item.filename} className="w-full" />}
+                                {item.mimeType?.startsWith("video/") ? <video src={item.url} controls className="w-full" /> : item.mimeType?.startsWith("audio/") ? <audio src={item.url} controls className="w-full p-2" /> : item.mimeType?.startsWith("image/") ? <img src={item.url} alt={item.filename} className="w-full" /> : <a href={item.url} download={item.filename} className="block break-all p-3 text-blue-600">下载 {item.filename || "输出文件"}</a>}
                                 <p className="truncate px-2 py-1 text-xs text-stone-500">{item.filename}</p>
                             </div>
                         ))}
@@ -578,7 +579,180 @@ function RunPanel({ config, onRun, running, result }: RunPanelProps) {
                 </div>
             )}
 
+            {result?.texts?.length ? <div className="space-y-2"><h4 className="text-sm font-medium">文本输出</h4>{result.texts.map((item, index) => <pre key={`${item.nodeId}-${index}`} className="whitespace-pre-wrap rounded border border-stone-200 bg-stone-50 p-3 text-xs dark:border-stone-700 dark:bg-stone-800">{item.content}</pre>)}</div> : null}
+
             {result && result.error && <div className="rounded bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/20">错误: {result.error}</div>}
         </div>
     );
+}
+
+function runningHubFieldId(field: RunningHubField) { return field.id || `${field.nodeId}::${field.fieldName}`; }
+
+function workflowFieldType(field: RunningHubField): WorkflowField["type"] {
+    if (field.source === "image" || field.source === "video" || field.source === "audio" || field.source === "prompt") return field.source === "prompt" ? "text" : field.source;
+    if (field.fieldType === "number") return "number";
+    if (field.fieldType === "boolean") return "boolean";
+    return "text";
+}
+
+function workflowFormField(field: RunningHubField): WorkflowField {
+    return { id: runningHubFieldId(field), node: field.nodeId, input: field.fieldName, name: field.label || `${field.nodeId}.${field.fieldName}`, type: workflowFieldType(field), required: field.required, default: field.fieldValue };
+}
+
+function numericValue(value: unknown) {
+    if (typeof value !== "string" || !value.trim()) return value;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : value;
+}
+
+function RunningHubWorkflowsPanel({ onOpenRuntime }: { onOpenRuntime: () => void }) {
+    const [profiles, setProfiles] = useState<RunningHubWorkflowProfile[]>([]);
+    const [selectedId, setSelectedId] = useState("");
+    const [workflowId, setWorkflowId] = useState("");
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [running, setRunning] = useState(false);
+    const [hasApiKey, setHasApiKey] = useState(false);
+    const [error, setError] = useState("");
+    const [taskResult, setTaskResult] = useState<TaskResult | null>(null);
+    const [history, setHistory] = useState<BackendRuntimeTask[]>([]);
+    const [taskId, setTaskId] = useState("");
+    const selected = profiles.find((item) => item.id === selectedId) || null;
+    const mappedFields = (selected?.fields || []).filter((field) => field.enabled !== false);
+    const formConfig: WorkflowConfig = { title: selected?.name || "RunningHub", backend: "runninghub", operation: "workflow", description: "", fields: mappedFields.map(workflowFormField) };
+
+    const refresh = async () => {
+        setLoading(true); setError("");
+        try {
+            const [data, status] = await Promise.all([fetchRunningHubWorkflows(), fetchRunningHubStatus()]);
+            setProfiles(data.workflows);
+            setHasApiKey(status.hasApiKey);
+            setSelectedId((current) => data.workflows.some((item) => item.id === current) ? current : data.workflows[0]?.id || "");
+        } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+        finally { setLoading(false); }
+    };
+    useEffect(() => { void refresh(); }, []);
+    useEffect(() => {
+        if (!selected) { setHistory([]); return; }
+        let active = true;
+        fetchRunningHubWorkflowTasks(selected.id).then(({ tasks }) => { if (active) setHistory(tasks); }).catch((err) => { if (active) setError(err instanceof Error ? err.message : String(err)); });
+        return () => { active = false; };
+    }, [selectedId]);
+
+    const addWorkflow = async () => {
+        const id = workflowId.trim();
+        if (!id) return;
+        setLoading(true); setError("");
+        try {
+            const inspected = await inspectRunningHubWorkflow(id);
+            const profile: RunningHubWorkflowProfile = { id: crypto.randomUUID(), name: `Workflow ${id.slice(-6)}`, workflowId: id, fields: inspected.fields, instanceType: "default" };
+            const { workflow } = await saveRunningHubWorkflow(profile);
+            setProfiles((current) => [workflow, ...current]);
+            setSelectedId(workflow.id); setWorkflowId(""); setTaskResult(null);
+        } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+        finally { setLoading(false); }
+    };
+    const updateField = (index: number, patch: Partial<RunningHubField>) => {
+        if (!selected) return;
+        setProfiles((current) => current.map((profile) => profile.id === selected.id ? { ...profile, fields: profile.fields.map((field, fieldIndex) => fieldIndex === index ? { ...field, ...patch } : field) } : profile));
+    };
+    const saveProfile = async () => {
+        if (!selected) return;
+        setSaving(true); setError("");
+        try {
+            const { workflow } = await saveRunningHubWorkflow(selected);
+            setProfiles((current) => current.map((profile) => profile.id === workflow.id ? workflow : profile));
+            message.success("RunningHub 工作流映射已保存");
+        } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+        finally { setSaving(false); }
+    };
+    const deleteProfile = async () => {
+        if (!selected) return;
+        try {
+            await deleteRunningHubWorkflow(selected.id);
+            const next = profiles.filter((item) => item.id !== selected.id);
+            setProfiles(next); setSelectedId(next[0]?.id || ""); setTaskResult(null);
+        } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    };
+    const run = async (fields: Record<string, string>) => {
+        if (!selected) return;
+        setRunning(true); setTaskResult(null); setError("");
+        try {
+            const input: Record<string, unknown> = {};
+            const values: Record<string, unknown> = {};
+            const params: Record<string, unknown> = {};
+            const pushMedia = (key: "references" | "videos" | "audios", value: string) => {
+                const current = Array.isArray(input[key]) ? input[key] as string[] : [];
+                current.push(value);
+                input[key] = current;
+            };
+            for (const field of mappedFields) {
+                const key = runningHubFieldId(field);
+                const value = fields[key];
+                if (value === undefined || value === "") continue;
+                if (field.source === "prompt") input.prompt = value;
+                else if (field.source === "image") pushMedia("references", value);
+                else if (field.source === "video") pushMedia("videos", value);
+                else if (field.source === "audio") pushMedia("audios", value);
+                else if (field.source === "param" && field.paramKey) params[field.paramKey] = numericValue(value);
+                else values[key] = field.fieldType === "boolean" ? value === "true" : numericValue(value);
+            }
+            const result = await runRunningHubWorkflow(selected.id, input, values, params);
+            setTaskId(result.taskId);
+            const output = await pollWorkflowTask(result.taskId);
+            setTaskResult(output);
+            const refreshed = await fetchRunningHubWorkflowTasks(selected.id);
+            setHistory(refreshed.tasks);
+            message.success("RunningHub 工作流执行完成");
+        } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+        finally { setRunning(false); }
+    };
+    const runDefaults = () => void run({});
+    const cancel = async () => {
+        if (!taskId) return;
+        try { await cancelRunningHubTask(taskId); message.success("已发送取消请求"); }
+        catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    };
+
+    const sourceOptions = ["constant", "prompt", "image", "video", "audio", "param"] as const;
+    return <div className="grid h-full min-h-0 grid-cols-12 gap-4">
+        <section className="col-span-4 flex min-h-0 flex-col rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
+            <div className="border-b border-stone-200 p-3 dark:border-stone-700">
+                <div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-medium">RunningHub 工作流</h2><Button size="small" onClick={() => void refresh()} loading={loading}>刷新</Button></div>
+                <Input.Search aria-label="RunningHub workflow ID" placeholder="输入 RunningHub workflowId" value={workflowId} onChange={(event) => setWorkflowId(event.target.value)} onSearch={() => void addWorkflow()} enterButton="读取并添加" loading={loading} />
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto divide-y divide-stone-200 dark:divide-stone-700">
+                {profiles.map((profile) => <button key={profile.id} type="button" onClick={() => { setSelectedId(profile.id); setTaskResult(null); }} className={`w-full px-3 py-3 text-left hover:bg-stone-50 dark:hover:bg-stone-800 ${selectedId === profile.id ? "bg-stone-100 dark:bg-stone-800" : ""}`}>
+                    <span className="block truncate text-sm font-medium">{profile.name}</span><span className="mt-1 block truncate text-xs text-stone-500">{profile.workflowId} · {profile.fields.filter((field) => field.enabled !== false).length} 个映射</span>
+                </button>)}
+                {!loading && profiles.length === 0 && <Empty className="py-8" description="添加一个 RunningHub workflowId" />}
+            </div>
+        </section>
+        <section className="col-span-8 min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-stone-900">
+            {!hasApiKey ? <Alert type="warning" showIcon message="请先到运行环境配置 RunningHub API Key" action={<Button size="small" onClick={onOpenRuntime}>打开运行环境</Button>} className="mb-4" /> : null}
+            {error ? <Alert type="error" showIcon message={error} className="mb-4" /> : null}
+            {!selected ? <Empty description="先添加一个 RunningHub 工作流" /> : <>
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex min-w-0 flex-1 gap-2"><Input aria-label="工作流名称" value={selected.name} onChange={(event) => setProfiles((current) => current.map((item) => item.id === selected.id ? { ...item, name: event.target.value } : item))} /><Input aria-label="workflowId" value={selected.workflowId} disabled /><Select aria-label="RunningHub 运行实例" style={{ width: 130 }} value={selected.instanceType || "default"} options={[{ value: "default", label: "default" }, { value: "plus", label: "plus" }, { value: "ultra", label: "ultra" }]} onChange={(instanceType) => setProfiles((current) => current.map((item) => item.id === selected.id ? { ...item, instanceType } : item))} /></div>
+                    <div className="flex gap-2"><Button onClick={() => void saveProfile()} loading={saving}>保存映射</Button><Button danger onClick={() => void deleteProfile()}>移除</Button></div>
+                </div>
+                <p className="mb-3 text-xs text-stone-500">在 RunningHub 节点编辑器安装好工作流依赖后，用 API 格式字段配置要覆写的输入。未启用的字段沿用工作流默认值。</p>
+                <Table size="small" rowKey={(field) => runningHubFieldId(field)} dataSource={selected.fields.map((field, index) => ({ ...field, index }))} pagination={{ pageSize: 8, showSizeChanger: false }} scroll={{ x: 780 }} columns={[
+                    { title: "启用", width: 64, render: (_value, field) => <Checkbox checked={field.enabled !== false} onChange={(event) => updateField(field.index, { enabled: event.target.checked })} /> },
+                    { title: "节点输入", width: 250, render: (_value, field) => <div><div>{field.nodeId} · {field.fieldName}</div><div className="text-xs text-stone-500">{field.label}</div></div> },
+                    { title: "值来源", width: 150, render: (_value, field) => <Select value={field.source || "constant"} className="w-full" options={sourceOptions.map((source) => ({ value: source, label: ({ constant: "运行时填写", prompt: "工作流提示词", image: "图片上传", video: "视频上传", audio: "音频上传", param: "H3 参数" })[source] }))} onChange={(source) => updateField(field.index, { source, enabled: true, ...(source === "image" || source === "video" || source === "audio" ? { required: true } : {}) })} /> },
+                    { title: "来源参数", width: 190, render: (_value, field) => field.source === "param" ? <Input aria-label={`H3 参数 ${field.fieldName}`} value={field.paramKey || ""} onChange={(event) => updateField(field.index, { paramKey: event.target.value })} /> : ["image", "video", "audio"].includes(field.source || "") ? <span className="text-xs text-stone-500">按已启用的同类型字段顺序</span> : <span className="text-xs text-stone-400">运行时输入</span> },
+                    { title: "必填", width: 64, render: (_value, field) => <Checkbox checked={field.required === true} onChange={(event) => updateField(field.index, { required: event.target.checked })} /> },
+                ]} />
+                <div className="my-5 border-t border-stone-200 dark:border-stone-700" />
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">运行输入</h3><Button onClick={runDefaults} loading={running} disabled={!hasApiKey}>使用工作流默认值运行</Button></div>
+                {mappedFields.length ? <RunPanel config={formConfig} onRun={(fields) => void run(fields)} running={running} result={taskResult} /> : <p className="text-xs text-stone-500">如需填写提示词或素材，启用对应字段并保存映射；也可直接运行工作流默认值。</p>}
+                {running ? <Button danger size="small" onClick={() => void cancel()} className="mt-2">取消当前任务</Button> : null}
+                {taskResult?.texts?.length ? <div className="mt-3 space-y-2">{taskResult.texts.map((item, index) => <pre key={index} className="whitespace-pre-wrap rounded bg-stone-50 p-3 text-xs dark:bg-stone-800">{item.content}</pre>)}</div> : null}
+                <div className="mt-6 border-t border-stone-200 pt-4 dark:border-stone-700"><div className="mb-2 flex items-center justify-between"><h3 className="text-sm font-medium">运行历史</h3><Button size="small" onClick={() => void fetchRunningHubWorkflowTasks(selected.id).then(({ tasks }) => setHistory(tasks))}>刷新</Button></div>
+                    <div className="space-y-2">{history.map((task) => <div key={task.id} className="rounded border border-stone-200 p-2 text-xs dark:border-stone-700"><div className="flex items-center justify-between"><Tag color={task.status === "succeeded" ? "green" : task.status === "failed" ? "red" : "blue"}>{task.status}</Tag><span>{task.createdAt || ""}</span></div>{task.error ? <div className="mt-1 text-red-500">{task.error}</div> : null}</div>)}</div>
+                </div>
+            </>}
+        </section>
+    </div>;
 }

@@ -167,7 +167,7 @@ async function startBackendHttpServer() {
       if (task.kind === "canvas-h3-run") return canvasH3Runner.cancel(task.id);
       if (task.kind.startsWith("comfyui:"))
         return runtime.comfy.cancel(task.id);
-      if (task.kind === "runninghub:minimax-h3")
+      if (task.kind.startsWith("runninghub:"))
         return runningHub.cancel(task.id);
       if (task.kind === "video-concat" || task.kind === "video-trim") return videoConcat.cancel(task.id);
       if (task.kind === "direct-video") return directVideo.cancel(task.id);
@@ -193,6 +193,8 @@ async function startBackendHttpServer() {
           undefined,
           clientTaskId,
         );
+      if (task.kind === "runninghub:workflow")
+        return runningHub.runWorkflow(String(task.params.runninghubProfileId || ""), task.input, task.params.runninghubParams && typeof task.params.runninghubParams === "object" ? task.params.runninghubParams as Record<string, unknown> : {}, params, clientTaskId);
       if (task.kind === "runninghub:minimax-h3")
         return runningHub.run(task.input, params, clientTaskId);
       if (task.kind === "direct-video") return directVideo.retry(task);
@@ -333,7 +335,7 @@ async function startBackendHttpServer() {
       task.kind.startsWith("comfyui:")
     )
       runtime.comfy.resume(task.id);
-    if (["queued", "running"].includes(task.status) && task.kind === "runninghub:minimax-h3")
+    if (["queued", "running"].includes(task.status) && task.kind.startsWith("runninghub:"))
       runningHub.resume(task.id);
   }
   // ── 孤儿任务回收（防僵尸堆积）───────────────────────────────────
@@ -357,7 +359,7 @@ async function startBackendHttpServer() {
       task.kind === "direct-audio" ||
       task.kind === "canvas-h3-run" ||
       task.kind.startsWith("comfyui:") ||
-      task.kind === "runninghub:minimax-h3";
+      task.kind.startsWith("runninghub:");
     if (!hasHandler) {
       // 无恢复处理器（例如 workflow 类型，启动循环未为其调用 resume）→ 必然僵尸
       stores.tasks.update(task.id, {
@@ -370,11 +372,11 @@ async function startBackendHttpServer() {
     }
     // 已提交的 ComfyUI/RunningHub 子任务按各自远端 ID 恢复观察；只把未提交且没有
     // 可安全重放的本地队列意图标记失败，避免猜测任务是否已计费。
-    if (task.kind.startsWith("comfyui:") || task.kind === "runninghub:minimax-h3") {
+    if (task.kind.startsWith("comfyui:") || task.kind.startsWith("runninghub:")) {
       const submitted = stores.tasks
         .events(task.id)
         .find((e) => e.type === "submitted")?.payload;
-      const promptId = task.kind === "runninghub:minimax-h3" ? submitted?.taskId : submitted?.promptId;
+      const promptId = task.kind.startsWith("runninghub:") ? submitted?.taskId : submitted?.promptId;
       if (h3CanResumeQueued(stores.tasks, task.id)) continue;
       const createdTs = task.createdAt ? new Date(task.createdAt).getTime() : 0;
       // 超过 24 小时的 ComfyUI 任务，其 history 早被 ComfyUI 清理，resume 观察必然超时失败，
@@ -386,7 +388,7 @@ async function startBackendHttpServer() {
           error:
             tooOld && promptId
               ? "backend 重启后该 ComfyUI 任务已超过 24 小时，history 已不可恢复，已自动置为失败（孤儿任务回收）"
-              : task.kind === "runninghub:minimax-h3"
+              : task.kind.startsWith("runninghub:")
                 ? "backend 重启后该 RunningHub 任务没有远端 taskId，无法安全恢复，已自动置为失败（孤儿任务回收）"
                 : "backend 重启后该 ComfyUI 任务没有 promptId，无法安全恢复，已自动置为失败（孤儿任务回收）",
         });

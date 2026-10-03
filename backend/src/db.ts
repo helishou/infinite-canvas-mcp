@@ -2610,7 +2610,7 @@ export class BackendDatabase {
                OR (t.kind = 'canvas-h3-run'
                    AND t.status IN ('succeeded', 'failed', 'cancelled')
                    AND t.id IN (SELECT value FROM json_each(?)))
-               OR (t.kind IN ('comfyui:minimax-h3', 'runninghub:minimax-h3')
+               OR (t.kind IN ('comfyui:minimax-h3', 'runninghub:minimax-h3', 'runninghub:workflow')
                    AND t.status IN ('succeeded', 'failed', 'cancelled')
                    AND EXISTS (
                        SELECT 1 FROM generation_logs l
