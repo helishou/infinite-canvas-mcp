@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Alert, Button, Checkbox, Empty, Input, Spin, Table, Tabs, Tag, message, Select, Switch } from "antd";
+import { Alert, Button, Checkbox, Empty, Input, InputNumber, Spin, Table, Tabs, Tag, message, Select, Switch } from "antd";
 import { Upload as UploadIcon, Upload, Download, Play, Trash2, Settings2, Workflow, Code, History } from "lucide-react";
 import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs, uploadBackendMedia, backendMediaUrl, type BackendRuntimeTask } from "@/services/backend-api";
 import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, pollWorkflowTask, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
@@ -683,21 +683,31 @@ function RunningHubWorkflowsPanel({ onOpenRuntime }: { onOpenRuntime: () => void
             const input: Record<string, unknown> = {};
             const values: Record<string, unknown> = {};
             const params: Record<string, unknown> = {};
-            const pushMedia = (key: "references" | "videos" | "audios", value: string) => {
+            const pushMedia = (key: "references" | "videos" | "audios", value: string, index?: number) => {
                 const current = Array.isArray(input[key]) ? input[key] as string[] : [];
-                current.push(value);
+                if (index === undefined) current.push(value);
+                else { while (current.length < index) current.push(""); current[index - 1] = value; }
                 input[key] = current;
             };
+            const cursors = { image: 0, video: 0, audio: 0 };
+            const mediaIndices = new Map<string, number>();
+            for (const field of mappedFields) {
+                const source = field.source;
+                if (source !== "image" && source !== "video" && source !== "audio") continue;
+                const index = field.index ?? cursors[source] + 1;
+                cursors[source] = Math.max(cursors[source], index);
+                mediaIndices.set(runningHubFieldId(field), index);
+            }
             for (const field of mappedFields) {
                 const key = runningHubFieldId(field);
                 const value = fields[key];
-                if (value === undefined || value === "") continue;
-                if (field.source === "prompt") input.prompt = value;
-                else if (field.source === "image") pushMedia("references", value);
-                else if (field.source === "video") pushMedia("videos", value);
-                else if (field.source === "audio") pushMedia("audios", value);
-                else if (field.source === "param" && field.paramKey) params[field.paramKey] = numericValue(value);
-                else values[key] = field.fieldType === "boolean" ? value === "true" : numericValue(value);
+                if (field.source === "image") { pushMedia("references", value || "", mediaIndices.get(key)); continue; }
+                if (field.source === "video") { pushMedia("videos", value || "", mediaIndices.get(key)); continue; }
+                if (field.source === "audio") { pushMedia("audios", value || "", mediaIndices.get(key)); continue; }
+                if (field.source === "prompt") { input.prompt = value ?? ""; continue; }
+                if (field.source === "param" && field.paramKey) { if (value !== undefined && value !== "") params[field.paramKey] = numericValue(value); continue; }
+                if (value === undefined) continue;
+                values[key] = field.fieldType === "boolean" ? value === "true" : numericValue(value);
             }
             const result = await runRunningHubWorkflow(selected.id, input, values, params);
             setTaskId(result.taskId);
@@ -743,14 +753,15 @@ function RunningHubWorkflowsPanel({ onOpenRuntime }: { onOpenRuntime: () => void
                     { title: "启用", width: 64, render: (_value, field) => <Checkbox checked={field.enabled !== false} onChange={(event) => updateField(field.index, { enabled: event.target.checked })} /> },
                     { title: "节点输入", width: 250, render: (_value, field) => <div><div>{field.nodeId} · {field.fieldName}</div><div className="text-xs text-stone-500">{field.label}</div></div> },
                     { title: "值来源", width: 150, render: (_value, field) => <Select value={field.source || "constant"} className="w-full" options={sourceOptions.map((source) => ({ value: source, label: ({ constant: "运行时填写", prompt: "工作流提示词", image: "图片上传", video: "视频上传", audio: "音频上传", param: "H3 参数" })[source] }))} onChange={(source) => updateField(field.index, { source, enabled: true, ...(source === "image" || source === "video" || source === "audio" ? { required: true } : {}) })} /> },
-                    { title: "来源参数", width: 190, render: (_value, field) => field.source === "param" ? <Input aria-label={`H3 参数 ${field.fieldName}`} value={field.paramKey || ""} onChange={(event) => updateField(field.index, { paramKey: event.target.value })} /> : ["image", "video", "audio"].includes(field.source || "") ? <span className="text-xs text-stone-500">按已启用的同类型字段顺序</span> : <span className="text-xs text-stone-400">运行时输入</span> },
+                    { title: "来源参数 / 序号", width: 190, render: (_value, field) => field.source === "param" ? <Input aria-label={`H3 参数 ${field.fieldName}`} value={field.paramKey || ""} onChange={(event) => updateField(field.index, { paramKey: event.target.value })} /> : ["image", "video", "audio"].includes(field.source || "") ? <InputNumber aria-label={`素材序号 ${field.fieldName}`} min={1} precision={0} value={field.index} placeholder="按字段顺序" onChange={(index) => updateField(field.index, { index: index ?? undefined })} /> : <span className="text-xs text-stone-400">运行时输入</span> },
                     { title: "必填", width: 64, render: (_value, field) => <Checkbox checked={field.required === true} onChange={(event) => updateField(field.index, { required: event.target.checked })} /> },
                 ]} />
                 <div className="my-5 border-t border-stone-200 dark:border-stone-700" />
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">运行输入</h3><Button onClick={runDefaults} loading={running} disabled={!hasApiKey}>使用工作流默认值运行</Button></div>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">运行输入</h3><Button onClick={runDefaults} loading={running} disabled={!hasApiKey || mappedFields.some((field) => field.source && field.source !== "constant")}>使用工作流默认值运行</Button></div>
                 {mappedFields.length ? <RunPanel config={formConfig} onRun={(fields) => void run(fields)} running={running} result={taskResult} /> : <p className="text-xs text-stone-500">如需填写提示词或素材，启用对应字段并保存映射；也可直接运行工作流默认值。</p>}
-                {running ? <Button danger size="small" onClick={() => void cancel()} className="mt-2">取消当前任务</Button> : null}
-                {taskResult?.texts?.length ? <div className="mt-3 space-y-2">{taskResult.texts.map((item, index) => <pre key={index} className="whitespace-pre-wrap rounded bg-stone-50 p-3 text-xs dark:bg-stone-800">{item.content}</pre>)}</div> : null}
+                {running ? <Button danger size="small" disabled={!taskId} onClick={() => void cancel()} className="mt-2">取消当前任务</Button> : null}
+                {!mappedFields.length && taskResult?.media.length ? <div className="mt-3 grid grid-cols-2 gap-3">{taskResult.media.map((item, index) => <div key={`${item.storageKey}-${index}`} className="overflow-hidden rounded border border-stone-200 dark:border-stone-700">{item.mimeType.startsWith("video/") ? <video src={item.url} controls className="w-full" /> : item.mimeType.startsWith("audio/") ? <audio src={item.url} controls className="w-full p-2" /> : item.mimeType.startsWith("image/") ? <img src={item.url} alt={item.filename} className="w-full" /> : <a href={item.url} download={item.filename} className="block break-all p-3 text-blue-600">下载 {item.filename || "输出文件"}</a>}</div>)}</div> : null}
+                {!mappedFields.length && taskResult?.texts?.length ? <div className="mt-3 space-y-2">{taskResult.texts.map((item, index) => <pre key={index} className="whitespace-pre-wrap rounded bg-stone-50 p-3 text-xs dark:bg-stone-800">{item.content}</pre>)}</div> : null}
                 <div className="mt-6 border-t border-stone-200 pt-4 dark:border-stone-700"><div className="mb-2 flex items-center justify-between"><h3 className="text-sm font-medium">运行历史</h3><Button size="small" onClick={() => void fetchRunningHubWorkflowTasks(selected.id).then(({ tasks }) => setHistory(tasks))}>刷新</Button></div>
                     <div className="space-y-2">{history.map((task) => <div key={task.id} className="rounded border border-stone-200 p-2 text-xs dark:border-stone-700"><div className="flex items-center justify-between"><Tag color={task.status === "succeeded" ? "green" : task.status === "failed" ? "red" : "blue"}>{task.status}</Tag><span>{task.createdAt || ""}</span></div>{task.error ? <div className="mt-1 text-red-500">{task.error}</div> : null}</div>)}</div>
                 </div>

@@ -12,7 +12,7 @@ const api = async (method, route, body) => {
     const response = await fetch(backend + route, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body && JSON.stringify(body) });
     const result = await response.json(); assert.ok(response.ok, JSON.stringify(result)); return result;
 };
-const node = (id, title, x, y = 150) => ({ id, title, type: "text", position: { x, y }, width: 240, height: 180, metadata: { content: `${title} original content` } });
+const node = (id, title, x, y = 150) => ({ id, title, type: "text", position: { x, y }, width: 240, height: 180, metadata: { content: `${title} source text` } });
 const nodes = [node("a", "镜头 A", 120), node("b", "镜头 B", 650), node("far", "远方的猫", 4600), { ...node("h3", "H3 Clip", -1800), type: "minimax-h3:video", width: 620, height: 700, metadata: { segments: [{ id: "clip-one", prompt: "夜晚追逐", duration: 4, status: "idle", referenceBindings: [] }] } }];
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
@@ -47,27 +47,21 @@ try {
     await flush();
     const initial = await project();
     await page.keyboard.press("Control+k");
-    const finder = page.getByRole("dialog", { name: "查找节点", exact: true });
-    await finder.waitFor();
-    await readyDialog("查找节点");
-    const search = finder.getByRole("textbox", { name: "搜索节点", exact: true });
-    await search.fill("镜头");
-    await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter");
-    await finder.waitFor({ state: "hidden" }); await visible("b");
-    console.log("PASS: Ctrl+K searches nodes and ArrowDown/Enter focuses the chosen result");
+    const search = page.getByRole("textbox", { name: "搜索并筛选节点列表", exact: true });
+    await search.waitFor();
+    assert.equal(await page.getByRole("textbox", { name: "搜索并筛选节点列表", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("button", { name: "搜索并筛选节点列表", exact: true }).count(), 0);
+    await search.fill("镜头 B"); await page.keyboard.press("Enter");
+    await visible("b");
+    console.log("PASS: Ctrl+K opens the single node search and Enter focuses the first matching result");
 
-    await page.getByRole("button", { name: "查找节点", exact: true }).click();
-    await readyDialog("查找节点");
     await search.fill("far"); await page.keyboard.press("Enter");
-    await finder.waitFor({ state: "hidden" }); await visible("far");
+    await visible("far");
     assert.equal((await project()).revision, initial.revision);
     console.log("PASS: ID lookup reaches a distant node without modifying the project");
 
-    await page.keyboard.press("Control+k");
-    await readyDialog("查找节点");
     await search.fill("夜晚追逐");
-    await finder.getByRole("option").first().waitFor();
-    assert.match(await finder.getByRole("option").first().innerText(), /H3 Clip/);
+    await page.locator('[data-canvas-node-row="h3"]').waitFor();
     // Finish the preceding focus animation before checking that typing does not start another.
     await page.evaluate(() => new Promise((resolve) => {
         let previous = "", stable = 0;
@@ -82,20 +76,21 @@ try {
     await search.fill(""); await search.press("f");
     assert.equal(await search.inputValue(), "f");
     assert.equal(await page.locator(".origin-top-left").first().getAttribute("style"), beforeTyping);
-    await page.keyboard.press("Escape");
-    await finder.waitFor({ state: "hidden" });
-    console.log("PASS: Clip prompts are searchable; typing F in an input does not move the canvas");
+    await search.fill("");
+    console.log("PASS: H3 Clip prompts share the node-list search; typing F in the input does not move the canvas");
 
-    await page.keyboard.press("Escape");
     const labels = await page.evaluate(async () => { const { default: i18n } = await import("/src/i18n/index.ts"); return { expand: i18n.t("canvas.expandPanel"), select: i18n.t("canvas.sidePanel.select") }; });
-    await page.getByRole("button", { name: labels.expand, exact: true }).click();
+    if (await page.getByRole("button", { name: labels.expand, exact: true }).count()) await page.getByRole("button", { name: labels.expand, exact: true }).click();
     await page.getByRole("button", { name: labels.select, exact: true }).click();
+    const sidebarSearch = page.getByPlaceholder("名称、类型、提示词或节点 ID", { exact: true });
+    const clearFiltered = await page.evaluate(async () => (await import("/src/i18n/index.ts")).default.t("canvas.sidePanel.clearAll"));
+    await sidebarSearch.fill("far");
+    await page.getByRole("button", { name: clearFiltered, exact: true }).click();
+    await sidebarSearch.fill("");
     await page.locator('[data-canvas-node-row="a"]').click();
     await page.locator('[data-canvas-node-row="b"]').click();
     assert.equal(await page.locator('[data-canvas-node-row="a"]').getAttribute("aria-pressed"), "true");
-    const sidebarSearch = page.getByPlaceholder("搜索节点", { exact: true });
     await sidebarSearch.fill("镜头 A");
-    const clearFiltered = await page.evaluate(async () => (await import("/src/i18n/index.ts")).default.t("canvas.sidePanel.clearAll"));
     await page.getByRole("button", { name: clearFiltered, exact: true }).click();
     await sidebarSearch.fill("");
     assert.equal(await page.locator('[data-canvas-node-row="a"]').getAttribute("aria-pressed"), "false");
@@ -154,15 +149,12 @@ try {
         (await import("/src/stores/use-theme-store.ts")).useThemeStore.getState().setTheme("light");
         await (await import("/src/i18n/index.ts")).default.changeLanguage("en-US");
     });
-    await page.getByRole("button", { name: "Find nodes", exact: true }).click();
-    const english = page.getByRole("dialog", { name: "Find nodes", exact: true });
-    await readyDialog("Find nodes");
-    await english.getByRole("textbox", { name: "Search nodes", exact: true }).fill("far");
-    await english.getByRole("option").first().waitFor();
-    await page.screenshot({ path: path.join(artifacts, "finder-light-en.png"), animations: "disabled" });
-    await page.keyboard.press("Escape");
+    const englishSearch = page.getByRole("textbox", { name: "Search and filter node list", exact: true });
+    await englishSearch.fill("far");
+    await page.locator('[data-canvas-node-row="far"]').waitFor();
+    await page.screenshot({ path: path.join(artifacts, "node-search-light-en.png"), animations: "disabled" });
     assert.deepEqual(errors, []);
-    console.log("PASS: Finder remains usable in the light theme and English locale");
+    console.log("PASS: The shared node-list search remains usable in the light theme and English locale");
 } catch (error) {
     await page.screenshot({ path: path.join(artifacts, "failure.png") }).catch(() => {});
     throw error;

@@ -16,9 +16,22 @@ function fixture(count = 10) {
         })) },
     }] };
     const calls: any[] = [];
+    const commands = new Map<string, any>();
     const context: any = {
         getCanvasProject: async () => structuredClone(project),
-        backend: { applyCanvasOperations: async (_id: string, operations: any[], revision: number, _opId?: string, strict?: boolean) => {
+        backend: {
+        checkMcpCommandReceipt: async (operationId: string, identity: any) => {
+            const command = commands.get(operationId);
+            if (command && JSON.stringify(command.request) !== JSON.stringify(identity.request)) throw Object.assign(new Error("operationId 已用于不同请求"), { code: "OPERATION_ID_REUSED" });
+            return { ok: true, command: command ? structuredClone(command) : null };
+        },
+        prepareMcpCommand: async (input: any) => {
+            const command = { operationId: input.operationId, tool: input.tool, targetId: input.targetId, status: "prepared", payload: structuredClone(input.payload), receipt: structuredClone(input.receipt), request: structuredClone(input.request) };
+            commands.set(input.operationId, command);
+            return structuredClone(command);
+        },
+        getMcpCommandReceipt: async (operationId: string) => ({ ok: true, command: structuredClone(commands.get(operationId) || null) }),
+        applyCanvasOperations: async (_id: string, operations: any[], revision: number, opId?: string, strict?: boolean, mcpCommand?: any) => {
             assert.equal(strict, true);
             assert.equal(revision, project.revision);
             calls.push(structuredClone(operations));
@@ -28,13 +41,20 @@ function fixture(count = 10) {
                 else if (operation.type === "update_node") Object.assign(metadata, operation.metadata);
             }
             project.revision++;
+            if (mcpCommand) {
+                const command = commands.get(opId!);
+                command.status = "committed";
+                command.committedRevision = project.revision;
+                command.receipt = { ...command.receipt, ok: true, committed: true, operationId: opId, revision: project.revision, changesHash: "fixture-hash", replayed: false };
+            }
             return { project: structuredClone(project), revision: project.revision, operationResults: [] };
         } },
     };
     const handlers = pluginMcp.createHandler(context);
-    const run = (updates: unknown, extra: Record<string, unknown> = {}) => handlers.h3_update_clips!({ projectId: project.id, nodeId: "delta-h3", updates, ...extra }, context);
+    let operationNumber = 0;
+    const run = (updates: unknown, extra: Record<string, unknown> = {}) => handlers.h3_update_clips!({ projectId: project.id, nodeId: "delta-h3", updates, operationId: String(extra.operationId || `narrative-unit-${++operationNumber}`), expectedRevision: project.revision, ...extra }, context);
     const read = (fields: unknown) => handlers.h3_get_clip!({ projectId: project.id, nodeId: "delta-h3", segmentId: "s1", fields }, context);
-    return { project, calls, run, read };
+    return { project, calls, handlers, run, read };
 }
 
 const edit = (field = "prompt", expectedMatches = 1, find = "golden bell", replace = "thin jade pendant") => ({ field, find, replace, expectedMatches });
@@ -162,6 +182,19 @@ test("field projection reports absent fields without inventing an empty value", 
     const result: any = await f.read(["music"]);
     assert.deepEqual(result.fields, {});
     assert.deepEqual(result.missingFields, ["music"]);
+});
+
+test("saved Clip summary and runtime reads skip reference compilation; explicit include compiles once", async () => {
+    const f = fixture();
+    const light: any = await f.handlers.h3_get_clip!({ projectId: f.project.id, nodeId: "delta-h3", segmentId: "s1" }, f.context);
+    assert.equal(light.validationDeferred, true);
+    assert.equal("compileMs" in light.timings, false);
+    const compiled: any = await f.handlers.h3_get_clip!({ projectId: f.project.id, nodeId: "delta-h3", segmentId: "s1", include: ["prompt", "references"] }, f.context);
+    assert.equal(typeof compiled.prompt.compiled, "string");
+    assert.ok(Array.isArray(compiled.references));
+    assert.equal(typeof compiled.timings.compileMs, "number");
+    const runtime: any = await f.handlers.h3_get_clip_runtime!({ projectId: f.project.id, nodeId: "delta-h3", segmentId: "s1" }, f.context);
+    assert.equal("compileMs" in runtime.timings, false);
 });
 
 test("preview flags literal remnants in unrequested continuity and timeline fields without rewriting them", async () => {

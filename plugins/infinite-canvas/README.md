@@ -1,6 +1,8 @@
-# Infinite Canvas Codex Plugin
+# Infinite Canvas Plugin
 
-让 Codex 可以打开并操作 Infinite Canvas。
+让 Codex / ZCode 可以打开并操作 Infinite Canvas。
+
+插件直连本机 Backend 的 Streamable HTTP MCP（`http://127.0.0.1:17370/mcp`）。使用前先启动本地 Backend。
 
 ## 安装
 
@@ -24,7 +26,13 @@ codex plugin add infinite-canvas@infinite-canvas-local
 
 Windows CMD 将 `$PWD` 替换为 `%cd%`。
 
-安装后新建一个 Codex 任务，然后输入：
+### ZCode
+
+- 打开 **Settings → Plugin Management → Discover**，点击右上角 **`+`** 添加 marketplace。
+- 选择 **本仓库目录**（`plugins/infinite-canvas`）或本仓库根目录，即可发现 `infinite-canvas` 插件并安装。
+- 或在 ZCode 界面直接以本地目录方式加载该插件目录。
+
+安装后新建一个任务，然后输入：
 
 ```text
 帮我打开并连接到 Infinite Canvas

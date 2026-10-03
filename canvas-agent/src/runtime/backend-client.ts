@@ -19,6 +19,7 @@ export type BackendClientErrorKind =
   | "http"
   | "network"
   | "timeout"
+  | "cancelled"
   | "invalid_response";
 
 export class BackendClientError extends Error {
@@ -27,6 +28,12 @@ export class BackendClientError extends Error {
   readonly path: string;
   readonly status?: number;
   readonly code?: string;
+  readonly expectedRevision?: number;
+  readonly actualRevision?: number;
+  readonly revision?: number;
+  readonly conflictTargets?: string[];
+  readonly committed?: boolean;
+  readonly snapshotAvailable?: boolean;
 
   constructor(
     message: string,
@@ -36,6 +43,12 @@ export class BackendClientError extends Error {
       path: string;
       status?: number;
       code?: string;
+      expectedRevision?: number;
+      actualRevision?: number;
+      revision?: number;
+      conflictTargets?: string[];
+      committed?: boolean;
+      snapshotAvailable?: boolean;
       cause?: unknown;
     },
   ) {
@@ -46,6 +59,12 @@ export class BackendClientError extends Error {
     this.path = details.path;
     this.status = details.status;
     this.code = details.code;
+    this.expectedRevision = details.expectedRevision;
+    this.actualRevision = details.actualRevision;
+    this.revision = details.revision;
+    this.conflictTargets = details.conflictTargets;
+    this.committed = details.committed;
+    this.snapshotAvailable = details.snapshotAvailable;
   }
 }
 
@@ -68,7 +87,16 @@ function errorPayload(value: unknown) {
     : typeof body.code === "string"
       ? body.code
       : undefined;
-  return { message, code };
+  return {
+    message,
+    code,
+    expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+    actualRevision: typeof body.actualRevision === "number" ? body.actualRevision : typeof body.revision === "number" ? body.revision : undefined,
+    revision: typeof body.revision === "number" ? body.revision : undefined,
+    conflictTargets: Array.isArray(body.conflictTargets) ? body.conflictTargets.map(String) : undefined,
+    committed: typeof body.committed === "boolean" ? body.committed : undefined,
+    snapshotAvailable: typeof body.snapshotAvailable === "boolean" ? body.snapshotAvailable : undefined,
+  };
 }
 
 function isTimeoutError(error: unknown) {
@@ -110,15 +138,15 @@ export class BackendClient {
         method,
         headers: body ? { "content-type": "application/json" } : {},
         body: body ? JSON.stringify(body) : undefined,
-        signal: signal ?? AbortSignal.timeout(15_000),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
       });
     } catch (error) {
       const kind = isTimeoutError(error) ? "timeout" : "network";
       throw new BackendClientError(
-        kind === "timeout"
+        signal?.aborted ? "MCP call cancelled" : kind === "timeout"
           ? `Backend ${method} ${path} timed out`
           : `Backend ${method} ${path} network request failed`,
-        { kind, method, path, cause: error },
+        { kind: signal?.aborted ? "cancelled" : kind, method, path, ...(signal?.aborted ? { code: "MCP_CALL_CANCELLED" } : {}), cause: error },
       );
     }
     const data = (await res.json().catch(() => ({}))) as T;
@@ -132,6 +160,12 @@ export class BackendClient {
           path,
           status: res.status,
           code: details.code,
+          expectedRevision: details.expectedRevision,
+          actualRevision: details.actualRevision,
+          revision: details.revision,
+          conflictTargets: details.conflictTargets,
+          committed: details.committed,
+          snapshotAvailable: details.snapshotAvailable,
         },
       );
     }
@@ -209,6 +243,30 @@ export class BackendClient {
     return data.project;
   }
 
+  async getCanvasProjectNodes(projectId: string, nodeIds: string[] | null): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams({ view: nodeIds === null ? "selection" : "nodes", ...(nodeIds === null ? {} : { nodeIds: JSON.stringify(nodeIds) }) });
+    const path = `/canvas/projects/${encodeURIComponent(projectId)}?${params}`;
+    const data = await this.get<{ ok: boolean; project?: Record<string, unknown> }>(path);
+    if (!data.project) throw new BackendClientError(`Backend ${path} returned no project`, { kind: "invalid_response", method: "GET", path, code: "BACKEND_INVALID_RESPONSE" });
+    return data.project;
+  }
+
+  async getCanvasH3Context(projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[] }): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams({ nodeId, ...(segmentId ? { segmentId } : {}), ...(dependencies?.sourceNodeIds?.length ? { sourceNodeIds: JSON.stringify(dependencies.sourceNodeIds) } : {}), ...(dependencies?.assetIds?.length ? { assetIds: JSON.stringify(dependencies.assetIds) } : {}) });
+    const path = `/canvas/projects/${encodeURIComponent(projectId)}/h3-context?${params}`;
+    const data = await this.get<{ ok: boolean; project?: Record<string, unknown> }>(path, signal);
+    if (!data.project) throw new BackendClientError(`Backend ${path} returned no project`, { kind: "invalid_response", method: "GET", path, code: "BACKEND_INVALID_RESPONSE" });
+    return data.project;
+  }
+
+  async getCanvasH3NodeSummary(projectId: string, nodeId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams({ nodeId });
+    const path = `/canvas/projects/${encodeURIComponent(projectId)}/h3-node-summary?${params}`;
+    const data = await this.get<{ ok: boolean; project?: Record<string, unknown> }>(path, signal);
+    if (!data.project) throw new BackendClientError(`Backend ${path} returned no project`, { kind: "invalid_response", method: "GET", path, code: "BACKEND_INVALID_RESPONSE" });
+    return data.project;
+  }
+
   async listDramaEpisodes(dramaId: string) {
     const data = await this.get<{
       ok: boolean;
@@ -252,6 +310,8 @@ export class BackendClient {
     operations: Record<string, unknown>[],
     expectedRevision?: number,
     operationId = crypto.randomUUID(),
+    mcpCommand?: { tool: string; targetId: string; request: unknown },
+    signal?: AbortSignal,
   ) {
     const data = await this.post<{
       ok: boolean;
@@ -267,7 +327,8 @@ export class BackendClient {
         kind: "agent",
         label: "Canvas Agent",
       },
-    });
+      ...(mcpCommand ? { mcpCommand } : {}),
+    }, signal);
     if (!data.project)
       throw new Error(`Backend canvas ops returned no project: ${projectId}`);
     return {
@@ -275,6 +336,24 @@ export class BackendClient {
       revision: Number(data.revision ?? data.project.revision ?? 0),
       operationResults: data.operationResults || [],
     };
+  }
+
+  async prepareMcpCommand(input: { operationId: string; tool: string; targetId: string; projectId?: string; request: unknown; payload: Record<string, unknown>; receipt: Record<string, unknown> }, signal?: AbortSignal) {
+    const data = await this.post<{ ok: boolean; command: Record<string, unknown> }>(`/mcp/commands/${encodeURIComponent(input.operationId)}/prepare`, input, signal);
+    if (!data.command) throw new Error("Backend did not return the frozen MCP command");
+    return data.command;
+  }
+
+  getMcpCommandReceipt(operationId: string, signal?: AbortSignal) {
+    return this.get<{ ok: boolean; command: Record<string, unknown> | null }>(`/mcp/commands/${encodeURIComponent(operationId)}`, signal);
+  }
+
+  checkMcpCommandReceipt(operationId: string, identity: { tool: string; targetId: string; projectId?: string; request: unknown }, signal?: AbortSignal) {
+    return this.post<{ ok: boolean; command: Record<string, unknown> | null }>(`/mcp/commands/${encodeURIComponent(operationId)}/check`, identity, signal);
+  }
+
+  async commitMcpAssetCommand(input: { operationId: string; tool: string; request: unknown; assets: Array<Record<string, unknown>> }) {
+    return this.post<Record<string, unknown>>("/canvas/assets/mcp-upsert-batch", input);
   }
 
   async diagnoseCanvasProject(projectId: string) {
@@ -560,6 +639,7 @@ export class BackendClient {
       limit?: number;
       offset?: number;
     } = {},
+    signal?: AbortSignal,
   ) {
     const query = new URLSearchParams();
     if (options.status) query.set("status", options.status);
@@ -578,6 +658,7 @@ export class BackendClient {
     if (options.offset) query.set("offset", String(options.offset));
     const data = await this.get<{ tasks?: RuntimeTask[] }>(
       `${CANVAS_TASKS_PATH}${query.size ? `?${query.toString()}` : ""}`,
+      signal,
     );
     return data.tasks || [];
   }

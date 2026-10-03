@@ -39,7 +39,10 @@ test("MCP 脱敏事件按 trace 保存并生成累计诊断报告", async () => 
         assert.deepEqual(trace.events.map((event) => event.event), ["tool.started", "tool.failed"]);
         assert.deepEqual(trace.events[0].inputSummary, { hasProjectId: false, textLength: 0 });
 
-        const reportResponse = await request("/mcp/observability/report");
+        const summaryResponse = await request("/mcp/observability/report");
+        const summary = (await summaryResponse.json() as { report: Record<string, any> }).report;
+        assert.equal("daily" in summary, false);
+        const reportResponse = await request("/mcp/observability/report?view=full");
         assert.equal(reportResponse.status, 200);
         const report = (await reportResponse.json() as { report: Record<string, any> }).report;
         assert.equal(report.calls.completed, 3);
@@ -90,19 +93,19 @@ test("MCP 诊断支持本地日期范围并隔离恢复与调用路径边界", a
         record("day2-recovery", "tool.succeeded", "canvas_b", "2026-01-02T10:00:00.000Z", { outputSummary: { outputChars: 3000 } });
         record("day2-failed", "tool.failed", "canvas_c", "2026-01-02T10:01:00.000Z", { errorCode: "RANGE_FAIL_2", outputSummary: { outputChars: 4000 } });
 
-        const report = database.getMcpObservabilityReport({ from: "2026-01-02", to: "2026-01-02" });
+        const report = database.getMcpObservabilityReport({ from: "2026-01-02", to: "2026-01-02", view: "full" });
         assert.equal(report.calls.completed, 2);
         assert.equal(report.calls.succeeded, 1);
         assert.equal(report.calls.failed, 1);
-        assert.equal(report.daily.length, 1);
-        assert.equal(report.daily[0].calls, 2);
-        assert.equal(report.daily[0].averageOutputChars, 3500);
-        assert.deepEqual(report.dailyByTool.map((item) => item.tool), ["canvas_b", "canvas_c"]);
+        assert.equal(report.daily?.length, 1);
+        assert.equal(report.daily?.[0]?.calls, 2);
+        assert.equal(report.daily?.[0]?.averageOutputChars, 3500);
+        assert.deepEqual(report.dailyByTool?.map((item) => item.tool), ["canvas_b", "canvas_c"]);
         assert.deepEqual(report.errors, [{ code: "RANGE_FAIL_2", count: 1 }]);
         assert.equal(report.payload.averageOutputChars, 3500);
         assert.equal(report.recovery.suggested, 0);
         assert.deepEqual(report.transitions, [{ fromTool: "canvas_b", toTool: "canvas_c", count: 1 }]);
-        assert.deepEqual(report.filters, { from: "2026-01-02", to: "2026-01-02" });
+        assert.deepEqual(report.filters, { from: "2026-01-02", to: "2026-01-02", tool: null, view: "full" });
 
         const invalid = await startServer(database, { url: "http://127.0.0.1", token: "test-token", port: 0, origins: [] }, { stores });
         const server = invalid.app.listen(0, "127.0.0.1");

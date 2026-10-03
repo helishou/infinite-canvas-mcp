@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, App, Button, Empty, Input, Modal, Skeleton } from "antd";
-import { ArrowRight, Clapperboard, Plus, RefreshCw, Search } from "lucide-react";
+import { ArrowRight, Clapperboard, ExternalLink, Images, Plus, RefreshCw, Search } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { createBackendProject, fetchBackendProjects } from "@/services/backend-api";
@@ -50,7 +50,10 @@ export default function DirectorPage() {
                 <div><p className="mb-2 text-xs font-medium uppercase tracking-widest text-muted-foreground">Acheng Director</p>
                     <h1 className="text-3xl font-semibold tracking-tight">{t("director.title")}</h1>
                     <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{t("director.subtitle")}</p></div>
-                <Button type="primary" icon={<Plus className="size-4" />} onClick={begin}>{t("director.new")}</Button>
+                <div className="flex flex-wrap gap-2">
+                    <Link to="/canvas"><Button icon={<Images className="size-4" />}>{t("director.canvasLibrary")}</Button></Link>
+                    <Button type="primary" icon={<Plus className="size-4" />} onClick={begin}>{t("director.new")}</Button>
+                </div>
             </header>
             <div className="mb-8 grid gap-4 border-y border-border py-5 sm:grid-cols-3">
                 {["assets", "film", "episode"].map(kind => <div key={kind}><h2 className="text-sm font-semibold">{t(`director.${kind}`)}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">{t(`director.${kind}Hint`)}</p></div>)}
@@ -59,12 +62,17 @@ export default function DirectorPage() {
                 <div className="flex gap-2"><Input aria-label={t("director.search")} prefix={<Search className="size-4 text-muted-foreground" />} placeholder={t("director.search")} value={query} onChange={e => setQuery(e.target.value)} allowClear />
                     <Button aria-label={t("director.refresh")} icon={<RefreshCw className="size-4" />} onClick={() => setReload(n => n + 1)} disabled={loading} /></div></div>
             {error ? <Alert type="error" showIcon message={t("director.loadFailed")} description={error} /> : loading ? <Skeleton active /> : !visible.length ? <Empty description={query ? t("director.noMatch") : t("director.empty")} /> :
-                <div className="divide-y divide-border">{visible.map(project => <Link key={project.id} to={`/director/${encodeURIComponent(project.id)}`} className="group flex items-center gap-4 py-4 transition-colors hover:bg-muted/40">
-                    <Clapperboard className="size-5 shrink-0 text-muted-foreground" /><div className="min-w-0 flex-1"><h3 className="truncate font-medium">{project.title}</h3>
-                        <p className="mt-1 text-xs text-muted-foreground">{Number.isFinite(Date.parse(project.updatedAt)) ? new Date(project.updatedAt).toLocaleString(i18n.resolvedLanguage) : t("director.ready")}</p></div>
-                    <span className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground group-hover:text-foreground">{t("director.continue")}<ArrowRight className="size-4" /></span>
-                </Link>)}</div>}
-            <p className="mt-7 text-sm text-muted-foreground">{t("director.sharedData")} <Link className="underline underline-offset-4" to="/drama">{t("director.manageDrama")}</Link></p>
+                <div className="divide-y divide-border">{visible.map(project => <article key={project.id} className="flex min-w-0 items-center gap-3 py-3 sm:gap-4">
+                    <Link to={`/director/${encodeURIComponent(project.id)}`} className="group flex min-w-0 flex-1 items-center gap-4 py-1 transition-colors hover:text-foreground">
+                        <Clapperboard className="size-5 shrink-0 text-muted-foreground" /><div className="min-w-0 flex-1"><h3 className="truncate font-medium">{project.title}</h3>
+                            <p className="mt-1 text-xs text-muted-foreground">{Number.isFinite(Date.parse(project.updatedAt)) ? new Date(project.updatedAt).toLocaleString(i18n.resolvedLanguage) : t("director.ready")}</p></div>
+                        <span className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground group-hover:text-foreground">{t("director.continue")}<ArrowRight className="size-4" /></span>
+                    </Link>
+                    <Link to={`/canvas/${encodeURIComponent(project.id)}`} aria-label={`${t("director.openCanvas")}: ${project.title}`} title={t("director.openCanvas")} className="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground">
+                        <ExternalLink className="size-4" /><span className="hidden sm:inline">{t("director.openCanvas")}</span>
+                    </Link>
+                </article>)}</div>}
+            <p className="mt-7 text-sm text-muted-foreground">{t("director.sharedData")} <Link className="underline underline-offset-4" to="/production?view=dramas">{t("director.manageDrama")}</Link></p>
         </div>
         <Modal title={t("director.new")} open={createOpen} onCancel={() => { if (!creating) setCreateOpen(false); }} onOk={() => void create()} confirmLoading={creating} okButtonProps={{ disabled: !name.trim() }} okText={t("director.enter")}>
             <p className="mb-4 text-sm text-muted-foreground">{t("director.newHint")}</p>

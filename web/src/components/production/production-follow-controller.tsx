@@ -1,0 +1,128 @@
+import { useCallback, useEffect, useRef } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { Button } from "antd";
+import { useTranslation } from "react-i18next";
+
+import { productionPresentationPath, productionTarget, productionLocationKey } from "@/lib/production-navigation";
+import { fetchProductionReadiness } from "@/services/backend-api";
+import { useAgentStore } from "@/stores/use-agent-store";
+import { useBackendStore } from "@/stores/use-backend-store";
+import { useProductionFollowStore } from "@/stores/use-production-follow-store";
+
+export function ProductionFollowController() {
+    const { t } = useTranslation();
+    const navigate = useNavigate();
+    const location = useLocation();
+    const connected = useBackendStore(state => state.connected);
+    const panelOpen = useAgentStore(state => state.panelOpen);
+    const target = useProductionFollowStore(state => state.target);
+    const following = useProductionFollowStore(state => state.following);
+    const pending = useProductionFollowStore(state => state.pendingPresentation);
+    const currentPath = productionLocationKey(location.pathname, location.search);
+    const priorPath = useRef("");
+
+    const refreshPresentation = useCallback(async () => {
+        const follow = useProductionFollowStore.getState();
+        const active = follow.target;
+        if (!active || !active.kind || !active.id || !connected) return;
+        const owner = { kind: active.kind, id: active.id } as const;
+        try {
+            const { readiness } = await fetchProductionReadiness(productionTarget(owner), { runId: active.runId });
+            const presentation = readiness.presentation;
+            if (!presentation) return;
+            if (presentation.owner.kind !== owner.kind || presentation.owner.id !== owner.id || presentation.workId !== active.workId) {
+                useProductionFollowStore.getState().setPendingPresentation(presentation);
+                useProductionFollowStore.getState().pause("Backend 当前工作目标已变化；请确认后恢复跟随");
+                return;
+            }
+            useProductionFollowStore.getState().setPresentation(presentation);
+            const latest = useProductionFollowStore.getState();
+            if (!latest.following || latest.guardReason) {
+                latest.setPendingPresentation(presentation);
+                return;
+            }
+            const path = productionPresentationPath(presentation);
+            if (path !== productionLocationKey(location.pathname, location.search)) {
+                latest.expectPath(path);
+                navigate(path, { replace: true });
+            }
+            latest.setLastPath(path);
+            latest.setPendingPresentation(null);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : t("productionHub.follow.readFailed");
+            useProductionFollowStore.getState().setPendingPresentation(useProductionFollowStore.getState().presentation);
+            useProductionFollowStore.getState().setGuardReason("backend", message);
+        }
+    }, [connected, location.pathname, location.search, navigate, t]);
+
+    useEffect(() => {
+        const state = useProductionFollowStore.getState();
+        if (!priorPath.current) {
+            priorPath.current = currentPath;
+            if (state.lastPath && state.lastPath !== currentPath && state.following) state.pause("检测到手动切页；自动跟随已暂停");
+            state.setLastPath(currentPath);
+            return;
+        }
+        if (priorPath.current === currentPath) return;
+        priorPath.current = currentPath;
+        if (state.consumeExpectedPath(currentPath)) {
+            state.setLastPath(currentPath);
+            return;
+        }
+        if (state.following) state.pause("检测到手动切页；自动跟随已暂停");
+        useProductionFollowStore.getState().setLastPath(currentPath);
+    }, [currentPath]);
+
+    useEffect(() => {
+        if (!target || !connected) return;
+        void refreshPresentation();
+        const refresh = (event: Event) => {
+            const payload = (event as CustomEvent<{ type?: string; entityId?: string }>).detail;
+            const current = useProductionFollowStore.getState().target;
+            const latestPresentation = useProductionFollowStore.getState().presentation;
+            if (payload?.type === "drama-production.updated" && current && (payload.entityId === current.id || latestPresentation?.aliases?.includes(String(payload.entityId || "")) || latestPresentation?.canvasId === payload.entityId)) void refreshPresentation();
+        };
+        const resume = () => void refreshPresentation();
+        window.addEventListener("backend-event", refresh);
+        window.addEventListener("backend-connected", resume);
+        window.addEventListener("production-follow-resume", resume);
+        return () => {
+            window.removeEventListener("backend-event", refresh);
+            window.removeEventListener("backend-connected", resume);
+            window.removeEventListener("production-follow-resume", resume);
+        };
+    }, [target?.id, target?.kind, target?.workId, target?.runId, connected, refreshPresentation]);
+
+    useEffect(() => {
+        const observed = new WeakSet<Element>();
+        const isVisible = (element: Element) => !element.classList.contains("ant-modal-hidden") && getComputedStyle(element).display !== "none";
+        const sync = () => {
+            const modals = Array.from(document.querySelectorAll(".ant-modal-wrap"));
+            for (const modal of modals) if (!observed.has(modal)) {
+                observed.add(modal);
+                observer.observe(modal, { attributes: true, attributeFilter: ["class", "style", "aria-hidden"] });
+            }
+            const open = modals.some(isVisible);
+            useProductionFollowStore.getState().setGuardReason("modal", open ? t("productionHub.follow.modalOpen") : "");
+        };
+        const observer = new MutationObserver(sync);
+        observer.observe(document.body, { childList: true });
+        sync();
+        return () => observer.disconnect();
+    }, [t]);
+
+    useEffect(() => {
+        if (following && pending && !useProductionFollowStore.getState().guardReason) void refreshPresentation();
+    }, [following, pending?.key, refreshPresentation]);
+
+    const returnToWork = () => {
+        useProductionFollowStore.getState().resume();
+        useAgentStore.getState().openPanel();
+        void refreshPresentation();
+    };
+    return target?.kind && target.id && !panelOpen ? (
+        <Button className="fixed bottom-4 right-4 z-[80] shadow-lg" type="primary" onClick={returnToWork}>
+            {following && !pending ? t("productionHub.follow.openAgent") : t("productionHub.follow.return")}
+        </Button>
+    ) : null;
+}

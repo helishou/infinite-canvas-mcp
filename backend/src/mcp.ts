@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { productionEditSchema } from "@basketikun/canvas-agent/drama/production-contract";
 import crypto from "node:crypto";
 import {
   executeCollaborationTool,
@@ -36,6 +37,7 @@ import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generatio
 import type { CanvasImageGenerationInput } from "./canvas/image-dispatcher.js";
 import type { CanvasTextGenerationInput } from "./canvas/text-dispatcher.js";
 import { splitImageBuffer } from "./canvas/image-split.js";
+import { assetDataSchema, describeAssetIssues, normalizeSceneAsset } from "./canvas/asset-contract.js";
 import { cropImageBuffer, parseAspectRatio, type CropAnchor } from "./canvas/image-crop.js";
 import {
   normalizeImportSources,
@@ -62,10 +64,12 @@ type McpSessionState = {
   activeProjectId: string | null;
   activeProjectSource: McpProjectSource;
   clientId: string;
+  runtimeInfo?: () => Record<string, unknown>;
 };
 type BackendMcpInstance = { server: McpServer; registry: PluginMcpRegistry };
 type McpEventRecorder = (event: McpObservabilityEventInput) => void | Promise<void>;
 const logger = createLogger("mcp-http");
+const MCP_CONTRACT_VERSION = 2;
 
 /** Backend 进程外的 MCP stdio 入口：所有业务写入都经由常驻 Backend API。 */
 export async function startBackendMcpServer() {
@@ -100,9 +104,14 @@ async function createBackendMcpInstance(
   const directBackend: PluginMcpBackend = {
     backendUrl: config.url,
     preparedH3Updates,
+    prepareMcpCommand: (input, signal) => backendApi.prepareMcpCommand(input, signal),
+    getMcpCommandReceipt: (operationId, signal) => backendApi.getMcpCommandReceipt(operationId, signal),
+    checkMcpCommandReceipt: (operationId, identity, signal) => backendApi.checkMcpCommandReceipt(operationId, identity, signal),
     listCanvasProjects: () => backendApi.listCanvasProjects(),
     getCanvasProject: (projectId) => backendApi.getCanvasProject(projectId),
-    applyCanvasOperations: (projectId, operations, expectedRevision, operationId, strictRevision) =>
+    getCanvasH3Context: (projectId, nodeId, segmentId, signal, dependencies) => backendApi.getCanvasH3Context(projectId, nodeId, segmentId, signal, dependencies),
+    getCanvasH3NodeSummary: (projectId, nodeId, signal) => backendApi.getCanvasH3NodeSummary(projectId, nodeId, signal),
+    applyCanvasOperations: (projectId, operations, expectedRevision, operationId, strictRevision, mcpCommand, signal) =>
       applyBackendCanvasOperations(
         config,
         projectId,
@@ -111,6 +120,8 @@ async function createBackendMcpInstance(
         state.clientId,
         operationId,
         strictRevision,
+        mcpCommand,
+        signal,
       ),
     replacePluginDeclarations: (declarations) =>
       backendApi.replacePluginDeclarations(declarations),
@@ -123,16 +134,48 @@ async function createBackendMcpInstance(
   };
   const server = new McpServer({
     name: "infinite-canvas-backend",
-    version: "0.1.0",
+    version: "0.1.0+mcp2",
   });
+  const context = buildPluginMcpContext(directBackend, backendComfy);
+  const registry = new PluginMcpRegistry(server, context);
+  state.runtimeInfo = () => {
+    const pluginTools = registry.contractSnapshot();
+    const schemas = toolNames.map(name => ({ name, description: toolDescriptions[name], schema: zodToolContract(toolInputSchemas[name]) }));
+    const h3 = pluginTools.find(plugin => plugin.id === "minimax-h3");
+    const fingerprint = crypto.createHash("sha256").update(JSON.stringify({ schemas, plugins: pluginTools })).digest("hex");
+    return { serverInstanceId: `${process.pid}:${state.clientId}`, mcpContractVersion: MCP_CONTRACT_VERSION, h3PluginVersion: h3?.version || null, toolSchemaHash: fingerprint };
+  };
   installMcpToolObservability(server, state, recordEvent);
   registerBackendCanvasTools(server, config, backendApi, state, recordEvent, getBrowserActiveProjectId);
   registerDirectComfyTools(server, backendApi);
   registerAgentSessionCompatibilityTools(server, config);
-  const context = buildPluginMcpContext(directBackend, backendComfy);
-  const registry = new PluginMcpRegistry(server, context);
-  await registry.apply(await loadPluginMcpDeclarationsFromBackend(backendApi));
+  const declarations = await loadPluginMcpDeclarationsFromBackend(backendApi);
+  await registry.apply(declarations);
+  pluginDeclarationFingerprints.set(registry, crypto.createHash("sha256").update(JSON.stringify(declarations)).digest("hex"));
   return { server, registry };
+}
+
+function zodToolContract(value: unknown, seen = new Set<object>()): unknown {
+  if (!value || typeof value !== "object") return value;
+  if (seen.has(value)) return "[circular]";
+  seen.add(value);
+  const schema = value as { description?: string; _def?: Record<string, unknown> };
+  const definition = schema._def || {};
+  const shapeValue = definition.shape;
+  const shape = typeof shapeValue === "function" ? (shapeValue as () => Record<string, unknown>)() : recordOf(shapeValue);
+  const items = definition.type || definition.innerType;
+  const options = Array.isArray(definition.options) ? definition.options : undefined;
+  const properties = Object.keys(shape).sort().map(key => [key, zodToolContract(shape[key], seen)]);
+  return {
+    type: definition.typeName || "unknown",
+    ...(schema.description ? { description: schema.description } : {}),
+    ...(properties.length ? { properties } : {}),
+    ...(items && typeof items === "object" ? { item: zodToolContract(items, seen) } : {}),
+    ...(options ? { options: options.map(option => zodToolContract(option, seen)) } : {}),
+    ...(Array.isArray(definition.values) ? { values: definition.values } : {}),
+    ...(definition.unknownKeys ? { unknownKeys: definition.unknownKeys } : {}),
+    ...(Array.isArray(definition.checks) ? { checks: definition.checks.map(check => recordOf(check).kind) } : {}),
+  };
 }
 
 async function refreshPluginDeclarations(
@@ -140,10 +183,21 @@ async function refreshPluginDeclarations(
   registries: PluginMcpRegistry[],
 ) {
   if (!registries.length) return;
-  const backend = createBackendClient(config.url);
-  const declarations = await loadPluginMcpDeclarationsFromBackend(backend);
-  await Promise.all(registries.map((registry) => registry.apply(declarations)));
+  if (pluginDeclarationRefresh) return pluginDeclarationRefresh;
+  pluginDeclarationRefresh = (async () => {
+    const backend = createBackendClient(config.url);
+    const declarations = await loadPluginMcpDeclarationsFromBackend(backend);
+    const fingerprint = crypto.createHash("sha256").update(JSON.stringify(declarations)).digest("hex");
+    const stale = registries.filter(registry => pluginDeclarationFingerprints.get(registry) !== fingerprint);
+    await Promise.all(stale.map((registry) => registry.apply(declarations)));
+    for (const registry of stale) pluginDeclarationFingerprints.set(registry, fingerprint);
+  })();
+  try { await pluginDeclarationRefresh; }
+  finally { pluginDeclarationRefresh = null; }
 }
+
+let pluginDeclarationRefresh: Promise<void> | null = null;
+const pluginDeclarationFingerprints = new WeakMap<PluginMcpRegistry, string>();
 
 type HttpMcpSession = {
   instance: BackendMcpInstance;
@@ -343,12 +397,15 @@ const BACKEND_CANVAS_TOOLS = [
   "canvas_h3_confirmation",
   "generation_get_status",
   "mcp_observability_report",
+  "mcp_get_command_receipt",
   "models_list",
 ] as ToolName[];
 const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   ...BACKEND_CANVAS_TOOLS,
   "assets_list",
+  "assets_get",
   "assets_add",
+  "assets_upsert_batch",
   "canvas_split_image",
   "canvas_create_project",
   "canvas_delete_project",
@@ -363,6 +420,16 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "drama_delete_episode",
   "drama_get_production",
   "canvas_get_production",
+  "drama_get_workflow_readiness",
+  "canvas_get_workflow_readiness",
+  "drama_start_production_run",
+  "canvas_start_production_run",
+  "drama_get_production_batch",
+  "canvas_get_production_batch",
+  "drama_pause_production_run",
+  "canvas_pause_production_run",
+  "drama_resume_production_run",
+  "canvas_resume_production_run",
   "drama_edit_production",
   "canvas_edit_production",
   "drama_preview_production_impact",
@@ -414,6 +481,7 @@ function resolveMcpProjectId(
   state: McpSessionState,
   rawProjectId: unknown,
   getBrowserActiveProjectId?: BrowserActiveProjectResolver,
+  signal?: AbortSignal,
 ) {
   const explicit = String(rawProjectId || "").trim();
   if (explicit) return { projectId: explicit, source: "explicit-input" as const };
@@ -437,6 +505,7 @@ async function executeDirectCanvasTool(
   name: ToolName,
   input: Record<string, unknown>,
   getBrowserActiveProjectId?: BrowserActiveProjectResolver,
+  signal?: AbortSignal,
 ) {
   if (name === "canvas_list_projects") {
     // v7: 画布不再直接归属剧目；按分集过滤用 episodeId。
@@ -494,10 +563,20 @@ async function executeDirectCanvasTool(
     return summarizeCanvasTasks(result.tasks, query);
   }
   if (name === "mcp_observability_report")
+    if (input.traceId && (input.from || input.to || input.tool || input.view)) throw Object.assign(new Error("traceId 不能与聚合筛选同时使用"), { code: "INVALID_INPUT" });
+    else
     return fetchMcpObservabilityReport(
       config,
       typeof input.traceId === "string" ? input.traceId : undefined,
-    );
+      input,
+    ).then(value => ({ ...recordOf(value), runtime: state.runtimeInfo?.() || { mcpContractVersion: 2 } }));
+  if (name === "mcp_get_command_receipt") {
+    const result = await backendApi.getMcpCommandReceipt(String(input.operationId || ""));
+    const command = recordOf(result.command);
+    if (!result.command) return { found: false, operationId: String(input.operationId || "") };
+    const { requestHash: _requestHash, payload: _payload, ...visible } = command;
+    return { found: true, ...visible };
+  }
   if (name === "models_list") {
     const config = await backendApi.getAiConfig();
     const channels = Array.isArray(config.channels)
@@ -516,10 +595,10 @@ async function executeDirectCanvasTool(
           )
         : [];
       return entries
-        .filter(
-          (model) =>
-            !capability || String(model.capability || "") === capability,
-        )
+          .filter(
+            (model) =>
+              !capability || String(model.capability || "") === capability,
+          )
         .map((model) => ({
           id: `${channelId}::${String(model.name || "")}`,
           name: String(model.name || ""),
@@ -614,7 +693,7 @@ async function executeDirectCanvasTool(
     const uniqueTaskIds = [...new Set(taskIds)];
     const wait =
       input.waitForCompletion === true
-        ? await waitForCanvasTasks(backendApi, uniqueTaskIds, input)
+        ? await waitForCanvasTasks(backendApi, uniqueTaskIds, input, signal)
         : undefined;
     return {
       ok: true,
@@ -634,7 +713,7 @@ async function executeDirectCanvasTool(
     const taskIds = Array.isArray(input.taskIds) ? input.taskIds.map(String) : [];
     return {
       ok: true,
-      ...(await waitForCanvasTasks(backendApi, taskIds, input)),
+      ...(await waitForCanvasTasks(backendApi, taskIds, input, signal)),
     };
   }
   if (name === "canvas_h3_confirmation") {
@@ -649,12 +728,39 @@ async function executeDirectCanvasTool(
   if (name === "canvas_inspect")
     return inspectCanvasContext(config, backendApi, state, input, getBrowserActiveProjectId);
   const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
+  const mcpCommandIdentity = name === "canvas_apply_ops" ? {
+    tool: "canvas_apply_ops",
+    targetId: projectId,
+    projectId,
+    request: Object.fromEntries(Object.entries(input).filter(([key]) => key !== "operationId")),
+  } : undefined;
+  const mcpOperationId = name === "canvas_apply_ops" ? String(input.operationId || "") : "";
+  let existingMcpCommand: Record<string, unknown> | undefined;
+  if (mcpCommandIdentity) {
+    if (!projectId || !mcpOperationId) throw Object.assign(new Error("canvas_apply_ops 必须指定 projectId 和稳定 operationId"), { code: "INVALID_INPUT" });
+    const result = await backendApi.checkMcpCommandReceipt(mcpOperationId, mcpCommandIdentity);
+    existingMcpCommand = result.command || undefined;
+    if (existingMcpCommand?.status === "committed") return { ...recordOf(existingMcpCommand.receipt), replayed: true };
+    if (existingMcpCommand?.status === "rejected") throw Object.assign(new Error(String(recordOf(existingMcpCommand.error).message || "命令已拒绝")), { code: String(recordOf(existingMcpCommand.error).code || "MCP_COMMAND_REJECTED") });
+    const frozenOps = recordOf(existingMcpCommand?.payload).operations;
+    if (existingMcpCommand?.status === "prepared" && Array.isArray(frozenOps) && !frozenOps.some(op => recordOf(op).type === "run_generation")) {
+      const payload = recordOf(existingMcpCommand.payload);
+      const applied = await applyBackendCanvasOperations(config, projectId, Number(payload.baseRevision), frozenOps as Array<Record<string, unknown>>, state.clientId, mcpOperationId, false, mcpCommandIdentity);
+      const command = await backendApi.getMcpCommandReceipt(mcpOperationId);
+      return { ...recordOf(command.command?.receipt), replayed: applied.duplicated === true };
+    }
+  }
   if (name === "canvas_get_state") {
     validateCanvasStateInput(input);
-    const project = input.nodeIds || input.view === "graph"
-      ? await fetchCurrentCanvasProject(config, projectId)
+    const nodeIds = Array.isArray(input.nodeIds) ? input.nodeIds.map(String) : undefined;
+    const project = nodeIds || input.view === "graph"
+      ? nodeIds ? await fetchCanvasProjectNodes(config, projectId, nodeIds) : await fetchCurrentCanvasProject(config, projectId)
       : await fetchCanvasProjectIndex(config, projectId, input.ifRevision as number | undefined);
     return compactProjectSummary(project as Record<string, unknown>, input);
+  }
+  if (name === "canvas_get_selection") {
+    const project = await fetchCanvasProjectSelection(config, projectId);
+    return { nodes: nodesOf(project as Record<string, unknown>) };
   }
   const project = await fetchCurrentCanvasProject(config, projectId);
   const projectState = project as Record<string, unknown>;
@@ -662,16 +768,6 @@ async function executeDirectCanvasTool(
     return buildCanvasImageInputManifest(project, input);
   if (name === "canvas_export_snapshot")
     return compactProject(projectState);
-  if (name === "canvas_get_selection") {
-    const ids = new Set(
-      Array.isArray(projectState.selectedNodeIds)
-        ? projectState.selectedNodeIds.map(String)
-        : [],
-    );
-    return {
-      nodes: nodesOf(projectState).filter((node) => ids.has(String(node.id))),
-    };
-  }
   const generationInput = await applyGenerationDefaults(name, input, backendApi);
   const toolInput =
     name === "canvas_create_node"
@@ -695,20 +791,39 @@ async function executeDirectCanvasTool(
   const rawOps = Array.isArray(request.input.ops)
     ? (request.input.ops as Array<Record<string, unknown>>)
     : [];
-  const ops = await Promise.all(
+  let ops = await Promise.all(
     rawOps.map(async (op) =>
       op.type === "add_node" && isH3NodeType(op.nodeType)
         ? await applyNodeFactoryDefaults(op, backendApi)
         : op,
     ),
   );
-  const operationResponse = await applyBackendCanvasOperations(
-    config,
-    project.id,
-    Number(project.revision || 0),
-    ops,
-    state.clientId,
-  );
+  if (mcpCommandIdentity) {
+    ops = ops.map((op, index) => op.type === "run_generation" && !op.idempotencyKey
+      ? { ...op, idempotencyKey: `${mcpOperationId}:${index}` }
+      : op);
+  }
+  let operationResponse: Awaited<ReturnType<typeof applyBackendCanvasOperations>>;
+  if (mcpCommandIdentity) {
+    const command = existingMcpCommand?.status === "prepared"
+      ? existingMcpCommand
+      : await backendApi.prepareMcpCommand({
+          operationId: mcpOperationId,
+          ...mcpCommandIdentity,
+          payload: { operations: ops, baseRevision: Number(input.expectedRevision) },
+          receipt: { projectId, affectedNodeIds: affectedNodeIds(ops), taskIds: ops.filter(op => op.type === "run_generation").map(op => String(op.idempotencyKey || "")), operationTypes: [...new Set(ops.map(op => String(op.type || "unknown")))] },
+        });
+    const payload = recordOf(command.payload);
+    const frozenOps = Array.isArray(payload.operations) ? payload.operations as Array<Record<string, unknown>> : ops;
+    ops = frozenOps;
+    operationResponse = await applyBackendCanvasOperations(config, project.id, Number(payload.baseRevision ?? input.expectedRevision), frozenOps, state.clientId, mcpOperationId, false, mcpCommandIdentity);
+    if (!frozenOps.some(op => op.type === "run_generation")) {
+      const committed = await backendApi.getMcpCommandReceipt(mcpOperationId);
+      return { ...recordOf(committed.command?.receipt), replayed: operationResponse.duplicated === true };
+    }
+  } else {
+    operationResponse = await applyBackendCanvasOperations(config, project.id, Number(project.revision || 0), ops, state.clientId);
+  }
   const operationResults = operationResponse.operationResults;
   const saved = operationResponse.project;
   const directTasks: Array<{ taskId: string; nodeId: string; model: string }> =
@@ -854,6 +969,70 @@ function buildCanvasAudioRequest(source: Record<string, unknown>, _project: Reco
   };
 }
 
+async function executeMcpAssetCommand(
+  backendApi: ReturnType<typeof createBackendClient>,
+  name: "assets_add" | "assets_upsert_batch",
+  input: Record<string, unknown>,
+) {
+  const operationId = String(input.operationId || "");
+  const targetId = "asset-library";
+  if (!operationId) throw Object.assign(new Error("素材写入必须提供稳定 operationId"), { code: "INVALID_INPUT" });
+  const request = { ...input };
+  delete request.operationId;
+  const identity = { tool: name, targetId, request };
+  const existing = await backendApi.checkMcpCommandReceipt(operationId, identity);
+  if (existing.command?.status === "committed") return { ...recordOf(existing.command.receipt), replayed: true };
+  if (existing.command?.status === "rejected") throw Object.assign(new Error(String(recordOf(existing.command.error).message || "素材命令已拒绝")), { code: String(recordOf(existing.command.error).code || "MCP_COMMAND_REJECTED") });
+  let assets = Array.isArray(recordOf(existing.command?.payload).assets)
+      ? recordOf(existing.command?.payload).assets as Array<Record<string, unknown>>
+      : undefined;
+  if (!assets) {
+      const now = new Date().toISOString();
+      const items = name === "assets_add" ? [input] : Array.isArray(input.items) ? input.items as Array<Record<string, unknown>> : [];
+      assets = items.map((item, index) => ({
+          id: String(item.id || `asset-${crypto.randomUUID()}`),
+          kind: String(item.kind || (name === "assets_add" ? input.kind : "image")),
+          title: String(item.title || ""),
+          coverUrl: String(item.coverUrl || item.imageUrl || ""),
+          tags: Array.isArray(item.tags) ? item.tags.map(String) : [],
+          folderId: item.folderId == null ? null : String(item.folderId),
+          ...(item.dramaId == null ? {} : { dramaId: String(item.dramaId) }),
+          data: name === "assets_add" ? { content: input.content || "", imageUrl: input.imageUrl || "" } : recordOf(item.data),
+          note: item.note == null ? null : String(item.note),
+          source: item.source == null ? null : String(item.source),
+          metadata: name === "assets_add" ? {} : recordOf(item.metadata),
+          createdAt: now,
+          updatedAt: now,
+          _batchIndex: index,
+      }));
+      for (const asset of assets) delete asset._batchIndex;
+      // 归一化后再冻结：资产契约字段名由 Backend 定，不能依赖调用方写对画布节点字段名。
+      for (const asset of assets) {
+        if (String(asset.kind) !== "scene") continue;
+        asset.data = normalizeSceneAsset(asset).asset.data;
+      }
+      for (const asset of assets) assertAssetDataContract(asset);
+      const frozen = await backendApi.prepareMcpCommand({ operationId, ...identity, payload: { assets }, receipt: { count: assets.length, assetIds: assets.map(asset => String(asset.id)) } });
+      if (frozen.status === "committed") return { ...recordOf(frozen.receipt), replayed: true };
+      if (frozen.status === "rejected") throw Object.assign(new Error(String(recordOf(frozen.error).message || "素材命令已拒绝")), { code: String(recordOf(frozen.error).code || "MCP_COMMAND_REJECTED") });
+      const frozenAssets = recordOf(frozen.payload).assets;
+      if (Array.isArray(frozenAssets)) assets = frozenAssets as Array<Record<string, unknown>>;
+  }
+  return backendApi.commitMcpAssetCommand({ operationId, tool: name, request, assets });
+}
+
+/** 按 kind 校验资产 data 契约；不合法的资产直接拒绝写入，避免渲染期才崩。 */
+function assertAssetDataContract(asset: Record<string, unknown>) {
+  const schema = assetDataSchema(String(asset.kind || ""));
+  if (!schema) return;
+  const parsed = schema.safeParse(asset.data);
+    if (parsed.success) return;
+    throw Object.assign(
+        new Error(`资产 ${String(asset.id || "(无 id)")}（kind=${String(asset.kind || "?")}）的 data 不符合前端契约：${describeAssetIssues(parsed.error)}`),
+        { code: "INVALID_INPUT" },
+    );
+}
+
 function registerBackendCanvasTools(
   server: McpServer,
   config: ResolvedConfig,
@@ -891,7 +1070,7 @@ function registerBackendCanvasTools(
         description: toolDescriptions[name],
         inputSchema: schema,
       },
-      async (rawInput: Record<string, unknown>) => {
+      async (rawInput: Record<string, unknown>, extra: { signal: AbortSignal }) => {
         const traceId = crypto.randomUUID();
         const startedAt = Date.now();
         const inputSummary = summarizeMcpToolInput(rawInput);
@@ -913,6 +1092,7 @@ function registerBackendCanvasTools(
             name,
             input,
             getBrowserActiveProjectId,
+            extra.signal,
           );
           const context = mcpToolResultContext(value, input, state, name);
           // 画布类工具绕过上面的通用包装，因此在这里施加同一道输出上限。
@@ -986,108 +1166,27 @@ function registerBackendCanvasTools(
       return textResult(result);
     },
   );
+  server.registerTool("assets_get", { description: toolDescriptions.assets_get, inputSchema: toolInputSchemas.assets_get }, async (rawInput: Record<string, unknown>) => {
+    const input = toolInputSchemas.assets_get.parse(rawInput) as Record<string, unknown>;
+    const response = await backendApi.get<{ asset?: Record<string, unknown> }>(`/canvas/assets/${encodeURIComponent(String(input.id))}`);
+    if (!response.asset) throw Object.assign(new Error("素材不存在"), { code: "ASSET_NOT_FOUND" });
+    return textResult(response.asset);
+  });
   for (const name of ["assets_list", "assets_add", "assets_upsert_batch"] as ToolName[]) {
     const schema = toolInputSchemas[name];
     server.registerTool(
       name,
-      { description: toolDescriptions[name], inputSchema: schema.shape },
+      { description: toolDescriptions[name], inputSchema: schema },
       async (rawInput: Record<string, unknown>) => {
         const input = schema.parse(rawInput) as Record<string, unknown>;
         if (name === "assets_list") {
-          // 以前 kind 之外的参数（keyword/page/pageSize）被静默忽略、永远返回全量；
-          // 全量在资产多时可达 2 MB，会直接撞上输出上限，所以这里把参数真正落地。
-          const all = (
-            await backendApi.listAssets({
-              kind:
-                input.kind && input.kind !== "all"
-                  ? String(input.kind)
-                  : undefined,
-            })
-          ).assets;
-          // 与工具描述一致地剥离内联媒体：单个资产的 coverUrl/data 可能是 2MB 的
-          // base64（实测），不剥离时连 pageSize=1 都过不了输出上限，列表工具直接失效。
-          const redacted = all.map((asset) => redactInlineMedia(asset));
-          const keyword = String(input.keyword ?? "").trim().toLowerCase();
-          const filtered = keyword
-            ? redacted.filter((asset) => {
-                const record = recordOf(asset);
-                return [record.title, record.description, record.content]
-                  .map((field) => String(field ?? ""))
-                  .some((field) => field.toLowerCase().includes(keyword));
-              })
-            : redacted;
-          const pageSize = Math.max(0, Number(input.pageSize ?? 0) || 0);
-          const page = Math.max(1, Number(input.page ?? 1) || 1);
-          if (pageSize > 0) {
-            const start = (page - 1) * pageSize;
-            return textResult({
-              total: filtered.length,
-              page,
-              pageSize,
-              items: filtered.slice(start, start + pageSize),
-            });
-          }
-          return textResult(filtered);
+          const query = new URLSearchParams({ view: "summary", page: String(Math.max(1, Number(input.page || 1))), pageSize: String(Math.max(1, Number(input.pageSize || 20))) });
+          if (typeof input.kind === "string") query.set("kind", input.kind);
+          if (typeof input.keyword === "string") query.set("keyword", input.keyword);
+          return textResult(await backendApi.get(`/canvas/assets?${query}`));
         }
-        if (name === "assets_upsert_batch") {
-          const now = new Date().toISOString();
-          const items = Array.isArray(input.items)
-            ? (input.items as Array<Record<string, unknown>>)
-            : [];
-          const assets = await Promise.all(
-            items.map((item) =>
-              backendApi.upsertAsset({
-                id: String(item.id || `asset-${crypto.randomUUID()}`),
-                kind: String(item.kind || "image"),
-                title: String(item.title || ""),
-                coverUrl: String(item.coverUrl || ""),
-                tags: Array.isArray(item.tags) ? item.tags.map(String) : [],
-                folderId: item.folderId == null ? null : String(item.folderId),
-                ...(item.dramaId == null ? {} : { dramaId: String(item.dramaId) }),
-                data: recordOf(item.data),
-                note: item.note == null ? null : String(item.note),
-                source: item.source == null ? null : String(item.source),
-                metadata: recordOf(item.metadata),
-                createdAt: now,
-                updatedAt: now,
-              }),
-            ),
-          );
-          const listed = await backendApi.listAssets();
-          const savedIds = new Set(
-            listed.assets
-              .filter(
-                (asset): asset is Record<string, unknown> =>
-                  Boolean(asset) && typeof asset === "object" && !Array.isArray(asset),
-              )
-              .map((asset) => String(asset.id || "")),
-          );
-          return textResult({
-            ok: true,
-            count: assets.length,
-            verifiedCount: assets.filter((asset) => savedIds.has(String(asset.id || ""))).length,
-            assets,
-          });
-        }
-        const now = new Date().toISOString();
-        const asset = await backendApi.upsertAsset({
-          id: `asset-${crypto.randomUUID()}`,
-          kind: String(input.kind || "text"),
-          title: String(input.title || ""),
-          coverUrl: String(input.imageUrl || ""),
-          tags: Array.isArray(input.tags) ? input.tags.map(String) : [],
-          folderId: null,
-          data: {
-            content: input.content || "",
-            imageUrl: input.imageUrl || "",
-          },
-          note: input.note ? String(input.note) : null,
-          source: input.source ? String(input.source) : null,
-          metadata: {},
-          createdAt: now,
-          updatedAt: now,
-        });
-        return textResult(asset);
+        if (name === "assets_add" || name === "assets_upsert_batch") return textResult(await executeMcpAssetCommand(backendApi, name, input));
+        throw new Error(`不支持的素材工具：${name}`);
       },
     );
   }
@@ -1720,6 +1819,20 @@ function registerBackendCanvasTools(
     },
   );
   const productionPath = (episodeId: string) => `/drama/episodes/${encodeURIComponent(episodeId)}/production`;
+  server.registerTool("production_get_contract", { description: toolDescriptions.production_get_contract, inputSchema: toolInputSchemas.production_get_contract }, async rawInput => {
+    const input = toolInputSchemas.production_get_contract.parse(rawInput);
+    const query = new URLSearchParams();
+    if (input.runtimeId) query.set("runtimeId", input.runtimeId);
+    if (input.operationType) query.set("operationType", input.operationType);
+    return textResult(await backendApi.get(`/production/contract?${query}`));
+  });
+  for (const name of ["canvas_preflight_production", "drama_preflight_production"] as const) {
+    server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (rawInput: Record<string, unknown>) => {
+      const input = toolInputSchemas[name].parse(rawInput);
+      const base = "projectId" in input ? `/canvas/projects/${encodeURIComponent(input.projectId)}/production` : `/drama/episodes/${encodeURIComponent(input.episodeId)}/production`;
+      return textResult(await backendApi.post(`${base}/preflight`, { action: input.action, request: input.request }));
+    });
+  }
   const productionIdSchema = z.object({ episodeId: z.string().trim().min(1) });
   server.registerTool("drama_get_production", {
     description: "读取单集结构化剧本、镜头表、关键帧与 H3 映射。fullPlot 仅为剧情概述。",
@@ -1727,6 +1840,41 @@ function registerBackendCanvasTools(
   }, async (rawInput: Record<string, unknown>) => {
     const { episodeId } = productionIdSchema.parse(rawInput);
     return textResult(await backendApi.get(productionPath(episodeId)));
+  });
+  server.registerTool("drama_get_workflow_readiness", {
+    description: "按 Acheng 制作目标读取依赖就绪、缺项和下一步。",
+    inputSchema: productionIdSchema,
+  }, async (rawInput: Record<string, unknown>) => {
+    const { episodeId } = productionIdSchema.parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(episodeId)}/readiness`));
+  });
+  server.registerTool("drama_start_production_run", {
+    description: "以稳定 runId 对指定已发布目标启动媒体生产；此工具调用明确授权所选范围生成。",
+    inputSchema: productionIdSchema.extend({ runId: z.string().min(1), idempotencyKey: z.string().min(1), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional() }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const { episodeId, ...input } = rawInput;
+    return textResult(await backendApi.post(`${productionPath(String(episodeId))}/runs`, input));
+  });
+  server.registerTool("drama_get_production_batch", {
+    description: "读取指定 runId 的生产状态、固定范围、引擎和任务 ID。",
+    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(input.episodeId)}/batches/${encodeURIComponent(input.runId)}`));
+  });
+  server.registerTool("drama_pause_production_run", {
+    description: "暂停指定分集 runId；在途任务完成后停在边界，不重复提交已提交任务。",
+    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
+    return textResult(await backendApi.post(`${productionPath(input.episodeId)}/batches/${encodeURIComponent(input.runId)}/pause`, {}));
+  });
+  server.registerTool("drama_resume_production_run", {
+    description: "继续原 runId 的分集任务；失败任务不会自动重生成。",
+    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
+    return textResult(await backendApi.post(`${productionPath(input.episodeId)}/batches/${encodeURIComponent(input.runId)}/resume`, {}));
   });
   server.registerTool("drama_list_production_versions", {
     description: "读取单集制作稿的历史发布版本。",
@@ -1758,13 +1906,13 @@ function registerBackendCanvasTools(
   });
   server.registerTool("drama_edit_production", {
     description: "编辑制作草稿。每次请求提供新 operationId 与读取时的 expectedRevision；冲突返回当前版本，不能直接覆盖。",
-    inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), ops: z.array(z.record(z.string(), z.unknown())).min(1) }),
+    inputSchema: productionEditSchema.extend(productionIdSchema.shape),
   }, async (rawInput: Record<string, unknown>) => {
     const { episodeId, ...input } = rawInput;
     return textResult(await backendApi.post(`${productionPath(String(episodeId))}/ops`, input));
   });
   server.registerTool("drama_publish_production", {
-    description: "发布单集剧本或镜头表新版本。只有 director 阶段、自动模式且明确 executionAuthorized 才推进已就绪媒体任务。",
+    description: "发布 Acheng 导演稿的新正式版本并冻结回执；此操作不会生成媒体。用户授权后另调用 drama_start_production_run 指定范围。",
     inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }),
   }, async (rawInput: Record<string, unknown>) => {
     const { episodeId, ...input } = rawInput;
@@ -1808,6 +1956,41 @@ function registerBackendCanvasTools(
     const { projectId } = productionIdSchema.parse(rawInput);
     return textResult(await backendApi.get(productionPath(projectId)));
   });
+  server.registerTool("canvas_get_workflow_readiness", {
+    description: "按 Acheng 制作目标读取依赖就绪、缺项和下一步。",
+    inputSchema: productionIdSchema,
+  }, async (rawInput: Record<string, unknown>) => {
+    const { projectId } = productionIdSchema.parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(projectId)}/readiness`));
+  });
+  server.registerTool("canvas_start_production_run", {
+    description: "以稳定 runId 对指定已发布目标启动媒体生产；此工具调用明确授权所选范围生成。",
+    inputSchema: productionIdSchema.extend({ runId: z.string().min(1), idempotencyKey: z.string().min(1), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional() }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const { projectId, ...input } = rawInput;
+    return textResult(await backendApi.post(`${productionPath(String(projectId))}/runs`, input));
+  });
+  server.registerTool("canvas_get_production_batch", {
+    description: "读取指定 runId 的生产状态、固定范围、引擎和任务 ID。",
+    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
+    return textResult(await backendApi.get(`${productionPath(input.projectId)}/batches/${encodeURIComponent(input.runId)}`));
+  });
+  server.registerTool("canvas_pause_production_run", {
+    description: "暂停指定画布 runId；在途任务完成后停在边界，不重复提交已提交任务。",
+    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
+    return textResult(await backendApi.post(`${productionPath(input.projectId)}/batches/${encodeURIComponent(input.runId)}/pause`, {}));
+  });
+  server.registerTool("canvas_resume_production_run", {
+    description: "继续原 runId 的画布任务；失败任务不会自动重生成。",
+    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
+    return textResult(await backendApi.post(`${productionPath(input.projectId)}/batches/${encodeURIComponent(input.runId)}/resume`, {}));
+  });
   server.registerTool("canvas_list_production_versions", {
     description: "读取单集制作稿的历史发布版本。",
     inputSchema: productionIdSchema,
@@ -1838,13 +2021,13 @@ function registerBackendCanvasTools(
   });
   server.registerTool("canvas_edit_production", {
     description: "编辑制作草稿。每次请求提供新 operationId 与读取时的 expectedRevision；冲突返回当前版本，不能直接覆盖。",
-    inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), ops: z.array(z.record(z.string(), z.unknown())).min(1) }),
+    inputSchema: productionEditSchema.extend(productionIdSchema.shape),
   }, async (rawInput: Record<string, unknown>) => {
     const { projectId, ...input } = rawInput;
     return textResult(await backendApi.post(`${productionPath(String(projectId))}/ops`, input));
   });
   server.registerTool("canvas_publish_production", {
-    description: "发布单集剧本或镜头表新版本。只有 director 阶段、自动模式且明确 executionAuthorized 才推进已就绪媒体任务。",
+    description: "发布 Acheng 导演稿的新正式版本并冻结回执；此操作不会生成媒体。用户授权后另调用 canvas_start_production_run 指定范围。",
     inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }),
   }, async (rawInput: Record<string, unknown>) => {
     const { projectId, ...input } = rawInput;
@@ -2356,37 +2539,57 @@ async function waitForCanvasTasks(
   backend: ReturnType<typeof createBackendClient>,
   taskIds: string[],
   input: Record<string, unknown>,
+  signal?: AbortSignal,
 ) {
+  if (!taskIds.length) return { timedOut: false, pendingTaskIds: [], elapsedMs: 0, pollCount: 0, eventCount: 0, waitMode: "none", summary: { total: 0, complete: 0, needsAction: 0, workflowComplete: 0, byStatus: {} }, tasks: [] };
   const timeoutMs = Math.max(
     1000,
     Math.min(1_800_000, Number(input.timeoutMs || 900_000)),
   );
   const pollMs = Math.max(250, Math.min(10_000, Number(input.pollMs || 2_000)));
   const startedAt = Date.now();
+  const deadlineAt = startedAt + timeoutMs;
+  const deadlineController = new AbortController();
+  const deadlineTimer = setTimeout(() => deadlineController.abort(new Error("MCP 等待期限已到")), timeoutMs);
+  const waitSignal = signal ? AbortSignal.any([signal, deadlineController.signal]) : deadlineController.signal;
   const terminal = new Set(["succeeded", "failed", "cancelled", "completed", "missing", "awaiting_confirmation"]);
   let pollCount = 1;
   let eventCount = 0;
   let waitMode = "poll";
   let tasks: Array<Record<string, unknown>> = [];
-  const initial = (await listTasksFromBackend(backend, { taskIds, limit: taskIds.length })).tasks;
-  const initialById = new Map(initial.map((task) => [String(task.taskId || ""), task]));
-  tasks = taskIds.map((taskId) => initialById.get(taskId) || { taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" });
-  if (initial.length === taskIds.length && initial.length > 0 && initial.every((task) => String(task.kind || "").includes("h3"))) {
-    const eventResult = await waitForH3TaskEvents(backend, taskIds, initial, timeoutMs);
-    if (eventResult.connected) {
-      tasks = eventResult.tasks;
-      eventCount = eventResult.eventCount;
-      waitMode = eventResult.usedStream ? "sse" : "snapshot";
-    } else waitMode = "poll-fallback";
-  }
-  for (;;) {
-    if (!tasks.length || !tasks.every((task) => terminal.has(String(task.status)))) {
-      if (tasks.length) pollCount += 1;
-      const result = await listTasksFromBackend(backend, { taskIds, limit: taskIds.length });
-      const snapshots = new Map(result.tasks.map((task) => [String(task.taskId || ""), task]));
-      tasks = taskIds.map((taskId) => snapshots.get(taskId) || { taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" });
+  try {
+    throwIfMcpCancelled(signal);
+    const initial = (await listTasksFromBackend(backend, { taskIds, limit: taskIds.length }, waitSignal)).tasks;
+    const initialById = new Map(initial.map((task) => [String(task.taskId || ""), task]));
+    tasks = taskIds.map((taskId) => initialById.get(taskId) || { taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" });
+    if (initial.length === taskIds.length && initial.length > 0) {
+      const eventResult = await waitForH3TaskEvents(backend, taskIds, initial, deadlineAt, waitSignal);
+      if (eventResult.connected) {
+        tasks = eventResult.tasks;
+        eventCount = eventResult.eventCount;
+        waitMode = eventResult.usedStream ? "sse" : "snapshot";
+      } else waitMode = "poll-fallback";
     }
-    const complete = tasks.every((task) => terminal.has(String(task.status)));
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    if (!deadlineController.signal.aborted) throw error;
+    tasks = taskIds.map(taskId => ({ taskId, status: "running", progress: 0, outputs: [] }));
+  }
+  try {
+  for (;;) {
+    throwIfMcpCancelled(signal);
+    if ((!tasks.length || !tasks.every((task) => terminal.has(String(task.status)))) && Date.now() < deadlineAt) {
+      if (tasks.length) pollCount += 1;
+      const result = await listTasksFromBackend(backend, { taskIds, limit: taskIds.length }, waitSignal).catch(error => {
+        if (deadlineController.signal.aborted && !signal?.aborted) return null;
+        throw error;
+      });
+      if (result) {
+        const snapshots = new Map(result.tasks.map((task) => [String(task.taskId || ""), task]));
+        tasks = taskIds.map((taskId) => snapshots.get(taskId) || { taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" });
+      } else if (!tasks.length) tasks = taskIds.map(taskId => ({ taskId, status: "running", progress: 0, outputs: [] }));
+    }
+    const complete = taskIds.length > 0 && tasks.length === taskIds.length && tasks.every((task) => terminal.has(String(task.status)));
     const elapsedMs = Date.now() - startedAt;
     if (complete || elapsedMs >= timeoutMs) {
       const pendingTaskIds = tasks
@@ -2418,39 +2621,45 @@ async function waitForCanvasTasks(
       };
     }
     if (waitMode === "sse") waitMode = "poll-fallback";
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(1, timeoutMs - elapsedMs))));
+    await delayWithMcpSignal(Math.min(pollMs, Math.max(1, timeoutMs - elapsedMs)), waitSignal).catch(error => {
+      if (deadlineController.signal.aborted && !signal?.aborted) return;
+      throw error;
+    });
   }
+  } finally { clearTimeout(deadlineTimer); }
 }
 
 async function waitForH3TaskEvents(
-  backend: ReturnType<typeof createBackendClient>, taskIds: string[], initial: Array<Record<string, unknown>>, timeoutMs: number,
+  backend: ReturnType<typeof createBackendClient>, taskIds: string[], initial: Array<Record<string, unknown>>, deadlineAt: number, externalSignal?: AbortSignal,
 ) {
   const terminal = new Set(["succeeded", "failed", "cancelled", "completed", "missing", "awaiting_confirmation"]);
   const tasks = new Map(initial.map((task) => [String(task.taskId || ""), task]));
   if ([...tasks.values()].every((task) => terminal.has(String(task.status)))) return { tasks: taskIds.map((id) => tasks.get(id)!), connected: true, eventCount: 0, usedStream: false };
-  if (timeoutMs <= 0) return { tasks: [], connected: false, eventCount: 0 };
+  if (deadlineAt <= Date.now()) return { tasks: [], connected: false, eventCount: 0 };
   const controller = new AbortController();
+  const signal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
   let eventCount = 0;
   let cursor: string | undefined;
   let reconnects = 0;
   try {
-    let stream = backend.streamEvents(controller.signal);
-    const first = await withMcpTimeout(stream.next(), Math.min(timeoutMs, 10_000));
+    let stream = backend.streamEvents(signal);
+    const first = await withMcpTimeout(stream.next(), Math.min(Math.max(1, deadlineAt - Date.now()), 10_000));
     if (!first || first.done || first.value.type !== "events.sync") throw new Error("SSE sync missing");
     // Subscribe first, then re-read exact task IDs to close the completion race.
-    const fresh = (await listTasksFromBackend(backend, { taskIds })).tasks;
+    const fresh = (await listTasksFromBackend(backend, { taskIds }, signal)).tasks;
     for (const task of fresh) tasks.set(String(task.taskId || ""), task);
-    const deadline = Date.now() + timeoutMs;
-    while (![...tasks.values()].every((task) => terminal.has(String(task.status))) && Date.now() < deadline) {
-      const next = await withMcpTimeout(stream.next().catch(() => ({ done: true as const, value: {} as Record<string, unknown> })), Math.max(1, deadline - Date.now()));
+    while (![...tasks.values()].every((task) => terminal.has(String(task.status))) && Date.now() < deadlineAt) {
+      throwIfMcpCancelled(externalSignal);
+      const next = await withMcpTimeout(stream.next().catch(() => ({ done: true as const, value: {} as Record<string, unknown> })), Math.max(1, deadlineAt - Date.now()));
       if (next === null) break;
       if (next.done) {
         if (reconnects++ > 0 || !cursor) throw new Error("SSE disconnected");
-        stream = backend.streamEvents(controller.signal, cursor);
-        const resumed = await stream.next();
+        stream = backend.streamEvents(signal, cursor);
+        const resumed = await withMcpTimeout(stream.next(), Math.max(1, deadlineAt - Date.now()));
+        if (!resumed) throw new Error("SSE replay timed out");
         if (resumed.done || resumed.value.type !== "events.sync") throw new Error("SSE replay failed");
         cursor = String(resumed.value.id || cursor);
-        const recovered = (await listTasksFromBackend(backend, { taskIds })).tasks;
+        const recovered = (await listTasksFromBackend(backend, { taskIds }, signal)).tasks;
         for (const task of recovered) tasks.set(String(task.taskId || ""), task);
         continue;
       }
@@ -2461,13 +2670,14 @@ async function waitForH3TaskEvents(
       if (!taskIds.includes(String(event.entityId || ""))) continue;
       const payload = recordOf(event.payload);
       if (!terminal.has(String(payload.status || "")) && !["task.completed", "task.failed"].includes(String(event.type))) continue;
-      const snapshots = (await listTasksFromBackend(backend, { taskIds, limit: taskIds.length })).tasks;
+      const snapshots = (await listTasksFromBackend(backend, { taskIds, limit: taskIds.length }, signal)).tasks;
       for (const task of snapshots) tasks.set(String(task.taskId || ""), task);
     }
     controller.abort();
     return { tasks: taskIds.map((id) => tasks.get(id) || { taskId: id, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" }), connected: true, eventCount, usedStream: true };
-  } catch {
+  } catch (error) {
     controller.abort();
+    if (externalSignal?.aborted) throw externalSignal.reason || error;
     return { tasks: [], connected: false, eventCount };
   }
 }
@@ -2481,9 +2691,25 @@ async function withMcpTimeout<T>(promise: Promise<T>, timeoutMs: number): Promis
   }
 }
 
+function throwIfMcpCancelled(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  throw Object.assign(signal.reason instanceof Error ? signal.reason : new Error("MCP 调用已取消"), { code: "MCP_CALL_CANCELLED" });
+}
+
+function delayWithMcpSignal(timeoutMs: number, signal?: AbortSignal) {
+  if (!signal) return new Promise<void>(resolve => setTimeout(resolve, timeoutMs));
+  throwIfMcpCancelled(signal);
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, timeoutMs);
+    const onAbort = () => { clearTimeout(timer); signal.removeEventListener("abort", onAbort); reject(Object.assign(new Error("MCP 调用已取消"), { code: "MCP_CALL_CANCELLED" })); };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function listTasksFromBackend(
   backend: ReturnType<typeof createBackendClient>,
   input: Record<string, unknown>,
+  signal?: AbortSignal,
 ) {
   const taskId = typeof input.taskId === "string" ? input.taskId : "";
   const taskIds = Array.isArray(input.taskIds) ? input.taskIds.map(String).filter(Boolean) : [];
@@ -2509,7 +2735,7 @@ async function listTasksFromBackend(
           segmentIds: Array.isArray(input.segmentIds)
             ? input.segmentIds.map(String)
             : undefined,
-        })
+        }, signal)
   ) as Array<{
     id?: string;
     kind: string;
@@ -2913,6 +3139,14 @@ async function fetchCanvasProjectIndex(config: ReturnType<typeof loadConfig>, pr
   return fetchCanvasProjectById(config, id, `&view=index${ifRevision === undefined ? "" : `&ifRevision=${ifRevision}`}`);
 }
 
+async function fetchCanvasProjectNodes(config: ReturnType<typeof loadConfig>, projectId: string, nodeIds: string[]) {
+  return fetchCanvasProjectById(config, projectId, `&view=nodes&nodeIds=${encodeURIComponent(JSON.stringify(nodeIds))}`);
+}
+
+async function fetchCanvasProjectSelection(config: ReturnType<typeof loadConfig>, projectId: string) {
+  return fetchCanvasProjectById(config, projectId, "&view=selection");
+}
+
 /**
  * 用本次写操作已经读取到的最新项目快照做轻量预检。
  * 不再额外调用完整 canvas_get_state，也不阻断幂等删除竞态。
@@ -3199,6 +3433,7 @@ function toolErrorResult(
               ...(classified.retryPolicy ? { retryPolicy: classified.retryPolicy } : {}),
               ...(classified.handlerInvoked !== undefined ? { handlerInvoked: classified.handlerInvoked } : {}),
               ...(classified.issues.length ? { issues: classified.issues } : {}),
+              ...structuredErrorMetadata(error),
             },
             currentState: {
               tool,
@@ -3223,6 +3458,17 @@ function backendErrorInfo(error: unknown) {
   const kind = typeof value.kind === "string" ? value.kind : undefined;
   const code = typeof value.code === "string" ? value.code : undefined;
   return { status, kind, code };
+}
+
+function structuredErrorMetadata(error: unknown) {
+  const value = recordOf(error);
+  const result: Record<string, unknown> = {};
+  for (const key of ["expectedRevision", "actualRevision", "revision", "committed", "snapshotAvailable"] as const) {
+    const item = value[key];
+    if (typeof item === "number" || typeof item === "boolean") result[key] = item;
+  }
+  if (Array.isArray(value.conflictTargets)) result.conflictTargets = value.conflictTargets.map(String);
+  return result;
 }
 
 function inputTaskIds(input: Record<string, unknown>) {
@@ -3365,12 +3611,18 @@ function classifyToolError(
     backendError.code === "REVISION_CONFLICT" || /revision|冲突|基线/.test(message);
   const invalidInput = error instanceof z.ZodError || backendError.code === "INVALID_INPUT";
   const domainCode = ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT"].includes(backendError.code || "") ? backendError.code : undefined;
+  const commandCode = ["OPERATION_ID_REUSED", "MCP_COMMAND_MISMATCH", "MCP_COMMAND_REJECTED", "RECEIPT_UNAVAILABLE", "MCP_CALL_CANCELLED", "ASSET_NOT_FOUND", "EDIT_TARGET_MISMATCH"].includes(backendError.code || "") ? backendError.code : undefined;
   const authFailure = backendError.status === 401 || backendError.status === 403;
   const timeout = backendError.kind === "timeout";
+  const cancelled = backendError.code === "MCP_CALL_CANCELLED" || backendError.kind === "cancelled" || (error instanceof Error && error.name === "AbortError");
   const networkFailure = backendError.kind === "network";
   const invalidResponse = backendError.kind === "invalid_response";
   const payloadOverflow = error instanceof McpPayloadOverflowError;
-  const code = payloadOverflow
+  const code = cancelled
+    ? "MCP_CALL_CANCELLED"
+    : commandCode
+    ? commandCode
+    : payloadOverflow
     ? "OUTPUT_TOO_LARGE"
     : domainCode
       ? domainCode
@@ -3403,7 +3655,11 @@ function classifyToolError(
                           : "CANVAS_TOOL_FAILED";
   const taskIds = inputTaskIds(input);
   const projectId = String(input.projectId || state.activeProjectId || "");
-  const suggestedAction = domainCode === "REFERENCE_INVALID"
+  const suggestedAction = commandCode === "OPERATION_ID_REUSED" || commandCode === "MCP_COMMAND_MISMATCH" || commandCode === "RECEIPT_UNAVAILABLE"
+    ? { tool: "mcp_get_command_receipt", input: { operationId: String(input.operationId || "") } }
+    : cancelled
+    ? { action: "本次等待已停止，后台任务不会被取消；可用原 taskId/taskIds 继续查询。" }
+    : domainCode === "REFERENCE_INVALID"
     ? { tool: "h3_get_clip_references", input: { projectId: String(input.projectId || state.activeProjectId || ""), nodeId: String(input.nodeId || ""), segmentId: String(input.segmentId || "") } }
     : domainCode === "MEDIA_IDENTITY_MISMATCH"
       ? { action: "按精确 Clip 和原 taskId 核对归档媒体；不要使用目录最新文件，也不要重提生成" }
@@ -3438,13 +3694,13 @@ function classifyToolError(
           : authFailure
             ? { action: "检查 Backend 地址、Token 和权限后再重试" }
             : { action: "检查 errorContext 后修正输入或连接；不要重复提交完全相同的失败请求" };
-  const recoverable = selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingModel || conflict || timeout || payloadOverflow;
+  const recoverable = selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingModel || conflict || timeout || payloadOverflow || cancelled;
   const issueSource = error && typeof error === "object" ? (error as Record<string, unknown>).issues : undefined;
   const issues = Array.isArray(issueSource) ? issueSource.map((issue) => {
     const item = recordOf(issue);
     return { code: String(item.code || "validation_error"), message: safeErrorMessage(new Error(String(item.message || ""))), ...(Array.isArray(item.path) ? { path: item.path } : {}), ...(typeof item.bindingId === "string" ? { bindingId: item.bindingId } : {}), ...(Array.isArray(item.allowedFields) ? { allowedFields: item.allowedFields.filter((field) => typeof field === "string") } : {}) };
   }) : [];
-  const retryPolicy = domainCode || invalidInput ? "after_input_change" : undefined;
+  const retryPolicy = commandCode === "OPERATION_ID_REUSED" || commandCode === "RECEIPT_UNAVAILABLE" ? "never_with_same_id" : domainCode || invalidInput ? "after_input_change" : undefined;
   return {
     code,
     message,
@@ -3466,7 +3722,7 @@ function withTraceId(value: unknown, traceId: string) {
 type McpToolRegistration = (
   name: string,
   options: unknown,
-  handler: (input: Record<string, unknown>) => unknown | Promise<unknown>,
+  handler: (input: Record<string, unknown>, extra: { signal: AbortSignal }) => unknown | Promise<unknown>,
 ) => unknown;
 
 /**
@@ -3484,7 +3740,7 @@ function installMcpToolObservability(
   target.registerTool = (name, options, handler) => {
     if ((BACKEND_CANVAS_TOOLS as readonly string[]).includes(name))
       return registerTool(name, options, handler);
-    return registerTool(name, options, async (rawInput) => {
+    return registerTool(name, options, async (rawInput, extra) => {
       const input = recordOf(rawInput);
       const traceId = crypto.randomUUID();
       const startedAt = Date.now();
@@ -3499,7 +3755,7 @@ function installMcpToolObservability(
         inputSummary,
       });
       try {
-        const result = await handler(input);
+        const result = await handler(input, extra);
         const value = mcpToolResultValue(result);
         const resultRecord = recordOf(result);
         const valueRecord = recordOf(value);
@@ -3760,10 +4016,15 @@ async function postMcpObservabilityEvent(
 async function fetchMcpObservabilityReport(
   config: ResolvedConfig,
   traceId?: string,
+  input: Record<string, unknown> = {},
 ) {
-  const path = traceId
+  const basePath = traceId
     ? `/mcp/observability/traces/${encodeURIComponent(traceId)}`
     : "/mcp/observability/report";
+  const query = new URLSearchParams();
+  for (const key of ["from", "to", "tool"] as const) if (typeof input[key] === "string" && input[key]) query.set(key, String(input[key]));
+  if (input.view === "full") query.set("view", "full");
+  const path = `${basePath}${query.size && !traceId ? `?${query}` : ""}`;
   const response = await fetch(`${config.url.replace(/\/$/, "")}${path}`, {
     headers: { authorization: `Bearer ${config.token}` },
   });
@@ -3812,17 +4073,21 @@ async function applyBackendCanvasOperations(
   clientId = `mcp:${process.pid}`,
   operationId: string = crypto.randomUUID(),
   strictRevision = false,
+  mcpCommand?: { tool: string; targetId: string; projectId?: string; request: unknown },
+  signal?: AbortSignal,
 ) {
   const response = await fetch(
     `${config.url.replace(/\/$/, "")}/canvas/projects/${encodeURIComponent(projectId)}/ops?token=${encodeURIComponent(config.token)}`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
+      signal,
       body: JSON.stringify({
         ...(strictRevision ? { expectedRevision } : { baseRevision: expectedRevision }),
         operations,
         operationId,
         source: { clientId, kind: "mcp", label: "MCP" },
+        ...(mcpCommand ? { mcpCommand } : {}),
       }),
     },
   );
@@ -3832,9 +4097,13 @@ async function applyBackendCanvasOperations(
     revision?: number;
     error?: string;
     duplicated?: boolean;
+    code?: string;
+    conflictTargets?: string[];
+    committed?: boolean;
+    snapshotAvailable?: boolean;
   };
   if (!response.ok || !body.project)
-    throw new Error(body.error || `画布操作失败: HTTP ${response.status}`);
+    throw Object.assign(new Error(body.error || `画布操作失败: HTTP ${response.status}`), { code: body.code, status: response.status, expectedRevision, actualRevision: body.revision, revision: body.revision, conflictTargets: body.conflictTargets, committed: body.committed, snapshotAvailable: body.snapshotAvailable });
   return {
     project: body.project,
     operationResults: body.operationResults || [],

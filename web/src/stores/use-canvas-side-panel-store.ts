@@ -14,10 +14,13 @@ type CanvasSidePanelStore = {
     panelOpen: boolean;
     panelMounted: boolean;
     panelClosing: boolean;
+    nodeSearchFocusRequest: number;
     setWidth: (width: number) => void;
     openPanel: () => void;
     closePanel: () => void;
     togglePanel: () => void;
+    focusNodeSearch: () => void;
+    clearNodeSearchFocusRequest: (request: number) => void;
 };
 
 export const useCanvasSidePanelStore = create<CanvasSidePanelStore>((set, get) => ({
@@ -25,6 +28,7 @@ export const useCanvasSidePanelStore = create<CanvasSidePanelStore>((set, get) =
     panelOpen: false,
     panelMounted: false,
     panelClosing: false,
+    nodeSearchFocusRequest: 0,
     setWidth: (width) => {
         const clamped = Math.min(CANVAS_SIDE_PANEL_MAX_WIDTH, Math.max(CANVAS_SIDE_PANEL_MIN_WIDTH, width));
         set({ width: clamped });
@@ -45,6 +49,13 @@ export const useCanvasSidePanelStore = create<CanvasSidePanelStore>((set, get) =
         void saveSettings({ canvasSidePanelOpen: false });
     },
     togglePanel: () => (get().panelOpen ? get().closePanel() : get().openPanel()),
+    focusNodeSearch: () => {
+        set((state) => ({ nodeSearchFocusRequest: state.nodeSearchFocusRequest + 1 }));
+        get().openPanel();
+    },
+    clearNodeSearchFocusRequest: (request) => {
+        if (get().nodeSearchFocusRequest === request) set({ nodeSearchFocusRequest: 0 });
+    },
 }));
 
 async function hydrateCanvasSidePanelSettings() {

@@ -32,16 +32,16 @@ export function registerMcpObservabilityRoutes(app: Express, store: McpObservabi
         const from = optionalDate(req.query.from);
         const to = optionalDate(req.query.to);
         if ((req.query.from && !from) || (req.query.to && !to)) {
-            res.status(400).json({ ok: false, error: "from/to 必须是 YYYY-MM-DD" });
+            res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "from/to 必须是 YYYY-MM-DD" });
             return;
         }
         if (from && to && from > to) {
-            res.status(400).json({ ok: false, error: "from 不能晚于 to" });
+            res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "from 不能晚于 to" });
             return;
         }
         res.json({
             ok: true,
-            report: store.report({ from, to }),
+            report: store.report({ from, to, tool: optionalString(req.query.tool), view: req.query.view === "full" ? "full" : "summary" }),
             filters: { from: from || null, to: to || null },
         });
     });

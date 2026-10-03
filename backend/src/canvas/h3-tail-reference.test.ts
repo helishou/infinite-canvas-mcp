@@ -26,7 +26,7 @@ test("单独运行下一段追加尾帧参考，保留保存模式且不启用�
         },
         cancel() {},
     };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, { ready: () => false } as never);
     Object.assign(runner, { captureTailFrame: async (source: string) => { assert.equal(source, previous.filePath); return tail; } });
     const parent = runner.start({ projectId: "tail-project", nodeId: "h3", segmentId: "next" }, "tail-parent");
     for (let i = 0; i < 100 && !["succeeded", "failed"].includes(db.getTask(parent.id)?.status || ""); i++) await new Promise((resolve) => setTimeout(resolve, 5));

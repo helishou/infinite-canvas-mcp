@@ -3,15 +3,16 @@ import { H3_NARRATIVE_FIELDS, H3_TEXT_EDIT_FIELDS } from "./narrative-edits.js";
 /** Shared MCP declarations: server and browser manifest advertise identical contracts. */
 export const H3_UPDATE_CLIPS_TOOL = {
     id: "h3_update_clips",
-    version: "1.2.0",
+    version: "1.3.0",
     name: "H3 批量更新片段配置",
-    description: "一次原子事务更新同一 H3 节点的多个已有 Clip 保存稿。已有修改稿文件优先先 h3_prepare_clip_updates，再仅传 preparedId，不重新输出正文；preparedId 与内联 updates 互斥。内联 updates 兼容完整 patch/精确 edits+expectedMatches。整批失败或版本冲突不写入，dryRun=true 只预检。冻结方案不自动 rebase；同一句柄重复提交复用 operationId 取原回执（历史提交值，不代表之后没有新编辑），未知结果先按原句柄恢复并核对目标。只改保存稿不生成、不改角色组/运行字段/历史任务输入。返回实际短值和 JSON UTF-8 SHA-256，不返回整图。",
+    description: "一次原子事务更新同一 H3 节点的多个已有 Clip 保存稿。内联模式必填稳定 operationId 和 expectedRevision；响应未知时用相同 ID、基线和内容恢复回执，冲突不自动 rebase。已有修改稿文件继续用冻结 preparedId，不能覆盖其操作 ID。内联 updates 兼容完整 patch/精确 edits+expectedMatches；dryRun=true 不写入。只改保存稿，不生成或改运行历史。成功只返回目标 ID、变更字段和摘要。",
     inputJsonSchema: {
         type: "object",
         properties: {
             projectId: { type: "string", minLength: 1, description: "目标画布的精确 ID" },
             nodeId: { type: "string", minLength: 1, description: "目标 H3 节点的精确 ID" },
-            expectedRevision: { type: "integer", minimum: 0, description: "可选：调用方读取的 revision；与当前画布不符则拒绝整批" },
+            operationId: { type: "string", minLength: 1, description: "内联提交必填的稳定 ID；preparedId 模式使用冻结方案内的 ID" },
+            expectedRevision: { type: "integer", minimum: 0, description: "内联提交必填的读取 revision；与冻结方案内 revision 不符则拒绝" },
             dryRun: { type: "boolean", description: "true 只预检和预览，不落盘；省略/false 才提交" },
             preparedId: { type: "string", description: "h3_prepare_clip_updates 返回的冻结句柄；与 updates 互斥。句柄固定目标/revision/操作，不重传正文；重复提交同一句柄复用 operationId 取原事务回执，不自动 rebase" },
             updates: {
@@ -45,6 +46,10 @@ export const H3_UPDATE_CLIPS_TOOL = {
         },
         required: ["projectId", "nodeId"],
         oneOf: [{ required: ["updates"] }, { required: ["preparedId"] }],
+        allOf: [
+            { if: { required: ["updates"] }, then: { required: ["operationId", "expectedRevision"] } },
+            { if: { required: ["preparedId"] }, then: { not: { anyOf: [{ required: ["operationId"] }, { required: ["expectedRevision"] }] } } },
+        ],
         additionalProperties: false,
     },
     annotations: { title: "H3 批量更新片段配置", readOnlyHint: false },
@@ -69,8 +74,8 @@ export const H3_DISCARD_CLIP_UPDATES_TOOL = {
 } as const;
 
 export const H3_GET_CLIP_TOOL = {
-    id: "h3_get_clip", version: "1.4.0", name: "H3 读取片段总览",
-    description: "按稳定 segmentId 读取 H3 Clip 轻量状态。fields 只读指定叙事字段，缺失字段单列 missingFields，不伪造空值；避免全节点 metadata。include 可另外附带完整 semantic/compiled 提示词、参考、运行参数或 result（按精确任务核验媒体归属）；只核对少数字段时用 fields，不额外带 include:prompt。",
+    id: "h3_get_clip", version: "1.5.0", name: "H3 读取片段总览",
+    description: "按稳定 segmentId 和 revision 读取 H3 Clip 轻量状态。默认只读保存字段摘要，不编译提示词或参考；需要编译结果/引用校验时显式 include:prompt 或 include:references。fields 只读指定叙事字段；include 可合并读取提示词、参考、运行参数或结果。",
     inputJsonSchema: {
         type: "object",
         properties: {

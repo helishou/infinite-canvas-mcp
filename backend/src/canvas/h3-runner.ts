@@ -920,11 +920,10 @@ export class CanvasH3Runner {
         Object.assign(params, {
             taskMode: runtimeTaskMode,
             mode: runtimeTaskMode,
-            // V15 Motion Context 由 motionContextEnabled + continuationTask 驱动；这里关闭的
-            // 是旧版预处理图标记，避免再把上一段视频走旧 motion/context 图。
+            // V15 Motion Context 由 motionContextEnabled + continuationTask 驱动；
+            // 不再通过旧字段携带前段成片作为参考。
             motionContext: false,
             motionContextNoise: false,
-            previousVideoAsReference: false,
             runninghubMode: metadata.minimaxRunningHubMode,
             runninghubWorkflowId: metadata.minimaxRunningHubWorkflowId,
             runninghubAppId: metadata.minimaxRunningHubAppId,

@@ -3,15 +3,34 @@ import { ZodError } from "zod";
 
 import { EpisodeProductionService, ProductionConflictError } from "../drama/production.js";
 import type { EpisodeProductionRunner } from "../drama/production-runner.js";
+import { getProductionContract } from "@basketikun/canvas-agent/skills/acheng";
+import { productionContractQuerySchema } from "@basketikun/canvas-agent/drama/production-contract";
+import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 
 export function registerDramaProductionRoutes(router: Router, service: EpisodeProductionService, runner?: EpisodeProductionRunner, base = "/drama/episodes/:episodeId/production") {
     const handle = (res: { status: (code: number) => { json: (body: unknown) => void } }, error: unknown) => {
+        if (error instanceof ProductionValidationError) return res.status(400).json({ ok: false, error: error.message, diagnostics: error.diagnostics });
+        if (error instanceof ZodError) return res.status(400).json({ ok: false, error: error.message, diagnostics: error.issues.map(issue => ({ code: "INVALID_SCHEMA", path: issue.path.join("."), message: issue.message, severity: "error" })) });
         if (error instanceof ProductionConflictError) return res.status(409).json({ ok: false, error: error.message, current: error.current });
         return res.status(error instanceof ZodError ? 400 : /不存在|找不到/.test(String(error)) ? 404 : 400)
             .json({ ok: false, error: error instanceof Error ? error.message : String(error) });
     };
+    if (base === "/drama/episodes/:episodeId/production") router.get("/production/contract", (req, res) => {
+        try { const input = productionContractQuerySchema.parse(req.query); res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType) }); }
+        catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/preflight`, (req, res) => {
+        try { res.json({ ok: true, preflight: service.preflight(req.params.episodeId, req.body) }); }
+        catch (error) { handle(res, error); }
+    });
     router.get<Record<string, string>>(`${base}`, (req, res) => {
         try { res.json({ ok: true, production: service.get(req.params.episodeId) }); } catch (error) { handle(res, error); }
+    });
+    router.get<Record<string, string>>(`${base}/readiness`, (req, res) => {
+        try {
+            const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
+            res.json({ ok: true, readiness: service.workflowReadiness(req.params.episodeId, "draft", runId) });
+        } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/legacy`, (req, res) => {
         try { res.json({ ok: true, sources: service.legacy(req.params.episodeId) }); } catch (error) { handle(res, error); }
@@ -42,14 +61,12 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try {
             const production = service.edit(req.params.episodeId, req.body);
             res.json({ ok: true, production });
-            if (!production.replayed && Array.isArray(req.body?.ops) && req.body.ops.some((op: { type?: string }) => op.type === "review_keyframe")) void runner?.run(req.params.episodeId, production.publishedVersion);
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/publish`, (req, res) => {
         try {
             const production = service.publish(req.params.episodeId, req.body);
             res.json({ ok: true, production });
-            if (!production.replayed) void runner?.run(req.params.episodeId, production.publishedVersion);
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/restore`, (req, res) => {
@@ -61,6 +78,29 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     });
     router.get<Record<string, string>>(`${base}/runs/:version`, (req, res) => {
         try { res.json({ ok: true, run: service.run(req.params.episodeId, Number(req.params.version)) }); } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/runs`, (req, res) => {
+        try {
+            const run = service.startBatch(req.params.episodeId, req.body);
+            res.json({ ok: true, run });
+            if (run.status === "pending") void runner?.runBatch(req.params.episodeId, run.runId);
+        } catch (error) { handle(res, error); }
+    });
+    router.get<Record<string, string>>(`${base}/batches`, (req, res) => {
+        try { res.json({ ok: true, runs: service.listBatches(req.params.episodeId) }); } catch (error) { handle(res, error); }
+    });
+    router.get<Record<string, string>>(`${base}/batches/:runId`, (req, res) => {
+        try { res.json({ ok: true, run: service.getBatch(req.params.episodeId, req.params.runId) }); } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/batches/:runId/pause`, (req, res) => {
+        try { res.json({ ok: true, run: service.pauseBatch(req.params.episodeId, req.params.runId) }); } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/batches/:runId/resume`, (req, res) => {
+        try {
+            const run = service.resumeBatch(req.params.episodeId, req.params.runId);
+            res.json({ ok: true, run });
+            if (run.status === "pending") void runner?.runBatch(req.params.episodeId, run.runId);
+        } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/sync-clips`, async (req, res) => {
         try {

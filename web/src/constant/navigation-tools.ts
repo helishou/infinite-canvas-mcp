@@ -1,16 +1,8 @@
-import { Clapperboard, FileText, ImagePlus, Images, Maximize2, Settings2, Video, Workflow } from "lucide-react";
+import { Clapperboard, FileText, ImagePlus, Images, Settings2, Video, Workflow } from "lucide-react";
 
 export const navigationTools = [
     {
-        slug: "director",
-        icon: Clapperboard,
-    },
-    {
-        slug: "canvas",
-        icon: Maximize2,
-    },
-    {
-        slug: "drama",
+        slug: "production",
         icon: Clapperboard,
     },
     {

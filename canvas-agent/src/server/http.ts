@@ -711,9 +711,24 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             String(input.episodeId || ""),
           ),
         });
-      if (["drama_get_production", "drama_edit_production", "drama_preview_production_impact", "drama_publish_production", "drama_list_production_versions", "drama_get_production_version", "drama_list_production_legacy", "drama_restore_production", "drama_sync_production_clips", "drama_get_production_run", "drama_export_production_markdown"].includes(name)) {
+      if (name === "production_get_contract") {
+        const query = new URLSearchParams();
+        if (input.runtimeId) query.set("runtimeId", String(input.runtimeId));
+        if (input.operationType) query.set("operationType", String(input.operationType));
+        return void res.json({ ok: true, result: await backend.get(`/production/contract?${query}`) });
+      }
+      if (name === "canvas_preflight_production" || name === "drama_preflight_production") {
+        const base = name === "canvas_preflight_production" ? `/canvas/projects/${encodeURIComponent(String(input.projectId))}/production` : `/drama/episodes/${encodeURIComponent(String(input.episodeId))}/production`;
+        return void res.json({ ok: true, result: await backend.post(`${base}/preflight`, { action: input.action, request: input.request }) });
+      }
+      if (["drama_get_production", "drama_get_workflow_readiness", "drama_start_production_run", "drama_get_production_batch", "drama_pause_production_run", "drama_resume_production_run", "drama_edit_production", "drama_preview_production_impact", "drama_publish_production", "drama_list_production_versions", "drama_get_production_version", "drama_list_production_legacy", "drama_restore_production", "drama_sync_production_clips", "drama_get_production_run", "drama_export_production_markdown"].includes(name)) {
         const path = `/drama/episodes/${encodeURIComponent(String(input.episodeId || ""))}/production`;
         const result = name === "drama_get_production" ? await backend.get(path)
+          : name === "drama_get_workflow_readiness" ? await backend.get(`${path}/readiness`)
+          : name === "drama_start_production_run" ? await backend.post(`${path}/runs`, { runId: input.runId, idempotencyKey: input.idempotencyKey, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope })
+          : name === "drama_get_production_batch" ? await backend.get(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}`)
+          : name === "drama_pause_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/pause`, {})
+          : name === "drama_resume_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/resume`, {})
           : name === "drama_list_production_versions" ? await backend.get(`${path}/versions`)
           : name === "drama_get_production_version" ? await backend.get(`${path}/versions/${encodeURIComponent(String(input.version || ""))}`)
           : name === "drama_list_production_legacy" ? await backend.get(`${path}/legacy`)
@@ -726,9 +741,14 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           : await backend.post(`${path}/publish`, { operationId: input.operationId, expectedRevision: input.expectedRevision, stage: input.stage });
         return void res.json({ ok: true, result });
       }
-      if (["canvas_get_production", "canvas_edit_production", "canvas_preview_production_impact", "canvas_publish_production", "canvas_list_production_versions", "canvas_get_production_version", "canvas_list_production_legacy", "canvas_restore_production", "canvas_sync_production_clips", "canvas_get_production_run", "canvas_export_production_markdown"].includes(name)) {
+      if (["canvas_get_production", "canvas_get_workflow_readiness", "canvas_start_production_run", "canvas_get_production_batch", "canvas_pause_production_run", "canvas_resume_production_run", "canvas_edit_production", "canvas_preview_production_impact", "canvas_publish_production", "canvas_list_production_versions", "canvas_get_production_version", "canvas_list_production_legacy", "canvas_restore_production", "canvas_sync_production_clips", "canvas_get_production_run", "canvas_export_production_markdown"].includes(name)) {
         const path = `/canvas/projects/${encodeURIComponent(String(input.projectId || ""))}/production`;
         const result = name === "canvas_get_production" ? await backend.get(path)
+          : name === "canvas_get_workflow_readiness" ? await backend.get(`${path}/readiness`)
+          : name === "canvas_start_production_run" ? await backend.post(`${path}/runs`, { runId: input.runId, idempotencyKey: input.idempotencyKey, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope })
+          : name === "canvas_get_production_batch" ? await backend.get(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}`)
+          : name === "canvas_pause_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/pause`, {})
+          : name === "canvas_resume_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/resume`, {})
           : name === "canvas_list_production_versions" ? await backend.get(`${path}/versions`)
           : name === "canvas_get_production_version" ? await backend.get(`${path}/versions/${encodeURIComponent(String(input.version || ""))}`)
           : name === "canvas_list_production_legacy" ? await backend.get(`${path}/legacy`)

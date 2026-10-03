@@ -8,6 +8,8 @@ export type CanvasCommandContext = {
     source?: Record<string, unknown>;
     /** 与旧 expectedRevision 的整图 CAS 分离：新协议按写入字段检查并发。 */
     baseRevision?: number;
+    /** Backend-frozen external MCP intent bound to this ops transaction. */
+    mcpCommand?: { tool: string; targetId: string; request: unknown };
 };
 
 export type CanvasCommit = {

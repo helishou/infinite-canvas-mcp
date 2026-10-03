@@ -26,7 +26,8 @@ export function AppTopNav() {
     const localComfyuiEnabled = useConfigStore((state) => state.config.localComfyuiEnabled);
     const visibleNavigationTools = navigationTools.filter((tool) => tool.slug !== "workflows" || localComfyuiEnabled);
     const hideHeader = /^\/canvas\/[^/]+/.test(pathname);
-    const slug = /^\/drama\/episodes\/[^/]+\/production$/.test(pathname) ? "director" : pathname.split("/").filter(Boolean)[0];
+    const isProductionRoute = pathname === "/production" || pathname === "/director" || pathname.startsWith("/director/") || pathname === "/drama" || pathname.startsWith("/drama/") || pathname === "/canvas";
+    const slug = isProductionRoute ? "production" : pathname.split("/").filter(Boolean)[0];
     const activeToolSlug = navigationTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
 
     useEffect(() => {

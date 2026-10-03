@@ -136,6 +136,8 @@ export type McpObservabilityReportOptions = {
     /** `from`/`to` 是本地日历日（YYYY-MM-DD），包含边界当天。 */
     from?: string;
     to?: string;
+    tool?: string;
+    view?: "summary" | "full";
 };
 
 export type McpObservabilityStore = {

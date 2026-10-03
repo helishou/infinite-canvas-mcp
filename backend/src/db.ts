@@ -5,6 +5,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
+import { normalizeSceneAsset } from "./canvas/asset-contract.js";
 import { completedImageSlots, dropImageSlots, imageSourceStatus } from "./canvas/image-result-slots.js";
 import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation } from "./canvas/project-ops.js";
 import { prepareClientCanvasOperation, stripCanvasLocalViewState } from "./canvas/operation-authority.js";
@@ -85,6 +86,18 @@ export type Asset = {
     folderId: string | null; dramaId?: string | null; data: Record<string, unknown>; note: string | null;
     source: string | null; metadata: Record<string, unknown>;
     createdAt: string; updatedAt: string;
+};
+export type McpCommandReceipt = {
+    operationId: string;
+    tool: string;
+    targetId: string | null;
+    status: "prepared" | "committed" | "rejected";
+    requestHash: string;
+    committedRevision?: number;
+    snapshotAvailable?: boolean;
+    receipt?: Record<string, unknown>;
+    payload?: Record<string, unknown>;
+    error?: { code: string; message: string };
 };
 export type DramaEpisode = {
     id: string;
@@ -525,6 +538,88 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 20) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                const rewritten = this.normalizeStoredSceneAssets();
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (20, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+                if (rewritten) console.info(`[database] v20 归一化场景资产字段名: ${rewritten} 条`);
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 21) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE IF NOT EXISTS mcp_command_receipts (
+                    operation_id TEXT PRIMARY KEY,
+                    tool TEXT NOT NULL,
+                    target_id TEXT,
+                    project_id TEXT REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                    request_hash TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('prepared','committed','rejected')),
+                    payload_json TEXT,
+                    receipt_json TEXT,
+                    committed_revision INTEGER,
+                    error_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS mcp_command_receipts_project ON mcp_command_receipts(project_id, created_at);`);
+                const check = this.db.prepare("PRAGMA integrity_check").get() as { integrity_check?: string };
+                if (check.integrity_check !== "ok") throw new Error("MCP 命令迁移后数据库校验失败");
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (21, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 22) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`
+                    CREATE TABLE IF NOT EXISTS episode_production_batches (
+                        run_id TEXT PRIMARY KEY,
+                        episode_id TEXT NOT NULL REFERENCES drama_episodes(id) ON DELETE CASCADE,
+                        idempotency_key TEXT NOT NULL,
+                        request_hash TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        source_revision INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        targets_json TEXT NOT NULL,
+                        plan_json TEXT NOT NULL,
+                        engine_json TEXT,
+                        settings_json TEXT NOT NULL,
+                        submitted_json TEXT NOT NULL DEFAULT '[]',
+                        error TEXT,
+                        pause_requested INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE (episode_id, idempotency_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS episode_production_batches_status ON episode_production_batches(status, updated_at);
+                    CREATE TABLE IF NOT EXISTS canvas_production_batches (
+                        run_id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                        idempotency_key TEXT NOT NULL,
+                        request_hash TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        source_revision INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        targets_json TEXT NOT NULL,
+                        plan_json TEXT NOT NULL,
+                        engine_json TEXT,
+                        settings_json TEXT NOT NULL,
+                        submitted_json TEXT NOT NULL DEFAULT '[]',
+                        error TEXT,
+                        pause_requested INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE (project_id, idempotency_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS canvas_production_batches_status ON canvas_production_batches(status, updated_at);
+                `);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (22, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     private backupBeforeH3Migration(version = "v13") {
@@ -539,6 +634,28 @@ export class BackendDatabase {
             const check = copy.prepare("PRAGMA integrity_check").get() as { integrity_check?: string };
             if (check.integrity_check !== "ok") throw new Error("H3 数据库迁移备份完整性校验失败");
         } finally { copy.close(); }
+    }
+
+    /**
+     * v20：把用画布节点字段名（sceneImage/sceneDescription/…）写入的场景资产改回资产契约字段名。
+     * 前端 assetSummary 直接读 data.image.width，字段名错位会让整个素材页崩掉。
+     * 逐条 UPDATE，保留调用方传入的原始 data 键，不做破坏性删除。
+     */
+    private normalizeStoredSceneAssets() {
+        const rows = this.db.prepare("SELECT id, title, data_json, cover_url FROM assets WHERE kind = 'scene'").all() as Array<{ id: string; title: string; data_json: string; cover_url: string }>;
+        const update = this.db.prepare("UPDATE assets SET data_json = ?, cover_url = ?, updated_at = ? WHERE id = ?");
+        const now = new Date().toISOString();
+        let rewritten = 0;
+        for (const row of rows) {
+            let data: Record<string, unknown>;
+            try { data = JSON.parse(row.data_json || "{}") as Record<string, unknown>; }
+            catch { continue; }
+            const normalized = normalizeSceneAsset({ kind: "scene", title: row.title, coverUrl: row.cover_url, data });
+            if (!normalized.changed) continue;
+            update.run(JSON.stringify(normalized.asset.data ?? {}), String(normalized.asset.coverUrl ?? ""), now, row.id);
+            rewritten++;
+        }
+        return rewritten;
     }
 
     private migrateH3References() {
@@ -1081,6 +1198,78 @@ export class BackendDatabase {
         };
     }
 
+    getCanvasProjectNodeSnapshot(id: string, nodeIds?: string[], selection = false): Record<string, unknown> | null {
+        this.db.exec("BEGIN DEFERRED");
+        try {
+            const header = this.db.prepare("SELECT id, updated_at AS updatedAt, json_extract(data_json, '$.title') AS title, COALESCE(json_extract(data_json, '$.revision'),0) AS revision, json_extract(data_json, '$.selectedNodeIds') AS selectedNodeIds FROM canvas_projects WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+            if (!header) { this.db.exec("COMMIT"); return null; }
+            const ids = selection
+                ? (Array.isArray(JSON.parse(String(header.selectedNodeIds || "[]"))) ? JSON.parse(String(header.selectedNodeIds || "[]")) as unknown[] : []).map(String)
+                : [...new Set((nodeIds || []).map(String).filter(Boolean))];
+            const idJson = JSON.stringify(ids);
+            const nodes = ids.length ? this.db.prepare("SELECT n.value AS value FROM canvas_projects p, json_each(p.data_json, '$.nodes') n WHERE p.id = ? AND json_extract(n.value, '$.id') IN (SELECT value FROM json_each(?)) ORDER BY CAST(n.key AS INTEGER)").all(id, idJson) as Array<{ value: string }> : [];
+            const connections = ids.length ? this.db.prepare("SELECT c.value AS value FROM canvas_projects p, json_each(p.data_json, '$.connections') c WHERE p.id = ? AND (json_extract(c.value, '$.fromNodeId') IN (SELECT value FROM json_each(?)) OR json_extract(c.value, '$.toNodeId') IN (SELECT value FROM json_each(?))) ORDER BY CAST(c.key AS INTEGER)").all(id, idJson, idJson) as Array<{ value: string }> : [];
+            const nodeValues = nodes.map(row => JSON.parse(row.value));
+            const connectionValues = connections.map(row => JSON.parse(row.value));
+            this.db.exec("COMMIT");
+            return { id, title: String(header.title || ""), updatedAt: String(header.updatedAt || ""), revision: Number(header.revision || 0), nodes: nodeValues, connections: connectionValues };
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    }
+
+    getCanvasH3NodeSummary(id: string, nodeId: string): Record<string, unknown> | null {
+        const rows = this.db.prepare(`SELECT p.id, p.updated_at AS updatedAt, json_extract(p.data_json,'$.title') AS projectTitle, COALESCE(json_extract(p.data_json,'$.revision'),0) AS revision, json_extract(n.value,'$.id') AS nodeId, json_extract(n.value,'$.type') AS nodeType, json_extract(n.value,'$.title') AS nodeTitle, json_extract(s.value,'$.id') AS segmentId, json_extract(s.value,'$.sourceShotId') AS sourceShotId, json_extract(s.value,'$.title') AS segmentTitle, json_extract(s.value,'$.status') AS segmentStatus, (json_type(s.value,'$.result') IS NOT NULL OR json_extract(s.value,'$.resultStorageKey') IS NOT NULL) AS hasResult FROM canvas_projects p LEFT JOIN json_each(p.data_json,'$.nodes') n ON json_extract(n.value,'$.id') = ? LEFT JOIN json_each(n.value,'$.metadata.segments') s WHERE p.id = ? ORDER BY CAST(s.key AS INTEGER)`).all(nodeId, id) as Array<Record<string, unknown>>;
+        if (!rows.length) return null;
+        const first = rows[0];
+        const segments = rows.filter(row => row.segmentId != null).map(row => ({ id: row.segmentId, sourceShotId: row.sourceShotId || "", title: row.segmentTitle || "", status: row.segmentStatus || "idle", ...(Number(row.hasResult) === 1 ? { result: true } : {}) }));
+        const nodes = first.nodeId == null ? [] : [{ id: first.nodeId, type: first.nodeType, title: first.nodeTitle || "", metadata: { segments } }];
+        return { id: first.id, title: first.projectTitle || "", updatedAt: first.updatedAt, revision: Number(first.revision || 0), nodes };
+    }
+
+    getCanvasProjectH3Context(id: string, nodeId: string, segmentId?: string, requestedDependencies: { sourceNodeIds?: string[]; assetIds?: string[] } = {}): Record<string, unknown> | null {
+        this.db.exec("BEGIN DEFERRED");
+        try {
+            const header = this.db.prepare("SELECT id, updated_at AS updatedAt, json_extract(data_json, '$.title') AS title, COALESCE(json_extract(data_json, '$.revision'),0) AS revision FROM canvas_projects WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+            if (!header) { this.db.exec("COMMIT"); return null; }
+            const targetRow = this.db.prepare("SELECT n.value AS value FROM canvas_projects p, json_each(p.data_json, '$.nodes') n WHERE p.id = ? AND json_extract(n.value, '$.id') = ?").get(id, nodeId) as { value: string } | undefined;
+            if (!targetRow) { this.db.exec("COMMIT"); return { id, title: String(header.title || ""), revision: Number(header.revision || 0), updatedAt: String(header.updatedAt || ""), nodes: [], referenceCatalog: [] }; }
+            const target = JSON.parse(targetRow.value) as Record<string, unknown>;
+            const metadata = target.metadata && typeof target.metadata === "object" ? target.metadata as Record<string, unknown> : {};
+            const allSegments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
+            const segments = segmentId ? allSegments.filter(segment => String(segment.id || "") === segmentId) : allSegments;
+            const assetIds = new Set((requestedDependencies.assetIds || []).map(String).map(value => value.trim()).filter(Boolean));
+            const sourceNodeIds = new Set((requestedDependencies.sourceNodeIds || []).map(String).map(value => value.trim()).filter(Boolean));
+            for (const segment of segments) {
+                for (const binding of Array.isArray(segment.referenceBindings) ? segment.referenceBindings as Array<Record<string, unknown>> : []) {
+                    if (binding.assetId) assetIds.add(String(binding.assetId));
+                    if (binding.sourceNodeId) sourceNodeIds.add(String(binding.sourceNodeId));
+                    if (binding.nodeId) sourceNodeIds.add(String(binding.nodeId));
+                }
+                for (const group of Object.values(segment.h3CharacterGroups && typeof segment.h3CharacterGroups === "object" ? segment.h3CharacterGroups as Record<string, unknown> : {})) {
+                    if (group && typeof group === "object" && (group as Record<string, unknown>).characterNodeId) sourceNodeIds.add(String((group as Record<string, unknown>).characterNodeId));
+                }
+                for (const field of ["refItems", "refs"]) {
+                    const legacy = segment[field];
+                    const values = Array.isArray(legacy) ? legacy : legacy && typeof legacy === "object" ? Object.values(legacy as Record<string, unknown>).flatMap(value => Array.isArray(value) ? value : [value]) : [];
+                    for (const value of values) if (value && typeof value === "object") {
+                        const ref = value as Record<string, unknown>;
+                        if (ref.assetId) assetIds.add(String(ref.assetId));
+                        if (ref.nodeId || ref.sourceNodeId) sourceNodeIds.add(String(ref.nodeId || ref.sourceNodeId));
+                    }
+                }
+            }
+            const assetList = [...assetIds];
+            const assets = assetList.length ? this.db.prepare("SELECT r.value AS value FROM canvas_projects p, json_each(p.data_json, '$.referenceCatalog') r WHERE p.id = ? AND json_extract(r.value, '$.id') IN (SELECT value FROM json_each(?))").all(id, JSON.stringify(assetList)) as Array<{ value: string }> : [];
+            for (const row of assets) { const source = (JSON.parse(row.value) as Record<string, unknown>).sourceNodeId; if (source) sourceNodeIds.add(String(source)); }
+            const sourceIds = [...sourceNodeIds].filter(value => value !== nodeId);
+            const sources = sourceIds.length ? this.db.prepare("SELECT n.value AS value FROM canvas_projects p, json_each(p.data_json, '$.nodes') n WHERE p.id = ? AND json_extract(n.value, '$.id') IN (SELECT value FROM json_each(?)) ORDER BY CAST(n.key AS INTEGER)").all(id, JSON.stringify(sourceIds)) as Array<{ value: string }> : [];
+            const referenceAssets = assets.map(row => JSON.parse(row.value));
+            const referenceNodes = sources.map(row => JSON.parse(row.value));
+            if (segmentId) metadata.segments = segments;
+            this.db.exec("COMMIT");
+            return { id, title: String(header.title || ""), revision: Number(header.revision || 0), updatedAt: String(header.updatedAt || ""), nodes: [target, ...referenceNodes], referenceCatalog: referenceAssets };
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    }
+
     createCanvasProject(input: CanvasProject) {
         if (typeof input?.id !== "string" || !input.id.trim()) throw new Error("project.id 必填");
         const project = stripCanvasLocalViewState(input as unknown as Record<string, unknown>) as unknown as CanvasProject;
@@ -1259,6 +1448,121 @@ export class BackendDatabase {
         return row ? { committed: true, revision: Number(row.revision), snapshotAvailable: Boolean(row.batchId) } : { committed: false };
     }
 
+    prepareMcpCommand(input: { operationId: string; tool: string; targetId: string; projectId?: string; request: unknown; payload: Record<string, unknown>; receipt: Record<string, unknown> }): McpCommandReceipt {
+        const requestHash = commandFingerprint({ tool: input.tool, targetId: input.targetId, request: input.request });
+        const current = this.db.prepare("SELECT * FROM mcp_command_receipts WHERE operation_id = ?").get(input.operationId) as Record<string, unknown> | undefined;
+        if (current) {
+            if (current.tool !== input.tool || current.target_id !== input.targetId || current.request_hash !== requestHash || (current.project_id || null) !== (input.projectId || null)) throw collaborationError("OPERATION_ID_REUSED", "operationId 已用于不同工具、目标或请求");
+            return this.mapMcpCommandReceipt(current);
+        }
+        const now = new Date().toISOString();
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const raced = this.db.prepare("SELECT * FROM mcp_command_receipts WHERE operation_id = ?").get(input.operationId) as Record<string, unknown> | undefined;
+            if (raced) {
+                if (raced.tool !== input.tool || raced.target_id !== input.targetId || raced.request_hash !== requestHash || (raced.project_id || null) !== (input.projectId || null)) throw collaborationError("OPERATION_ID_REUSED", "operationId 已用于不同工具、目标或请求");
+                this.db.exec("COMMIT");
+                return this.mapMcpCommandReceipt(raced);
+            }
+            if (this.db.prepare("SELECT 1 FROM canvas_command_receipts WHERE operation_id = ? UNION SELECT 1 FROM canvas_operation_batches WHERE operation_id = ?").get(input.operationId, input.operationId))
+                throw collaborationError("OPERATION_ID_REUSED", "operationId 已被画布操作使用；请生成新的稳定 ID");
+            this.db.prepare("INSERT INTO mcp_command_receipts (operation_id, tool, target_id, project_id, request_hash, status, payload_json, receipt_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'prepared', ?, ?, ?, ?)")
+                .run(input.operationId, input.tool, input.targetId, input.projectId || null, requestHash, JSON.stringify(input.payload), JSON.stringify(input.receipt), now, now);
+            this.db.exec("COMMIT");
+            return { operationId: input.operationId, tool: input.tool, targetId: input.targetId, status: "prepared", requestHash, receipt: input.receipt, payload: input.payload };
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    }
+
+    getMcpCommandReceipt(operationId: string, identity?: { tool: string; targetId: string; request: unknown; projectId?: string }): McpCommandReceipt | null {
+        const row = this.db.prepare("SELECT * FROM mcp_command_receipts WHERE operation_id = ?").get(operationId) as Record<string, unknown> | undefined;
+        if (!row) {
+            const legacy = this.db.prepare("SELECT project_id, committed_revision, request_hash FROM canvas_command_receipts WHERE operation_id = ?").get(operationId) as { project_id: string; committed_revision: number; request_hash: string } | undefined;
+            if (!legacy) return null;
+            if (identity) throw collaborationError("OPERATION_ID_REUSED", "operationId 已用于非 v2 命令；请使用新的稳定 ID");
+            return { operationId, tool: "canvas_ops", targetId: legacy.project_id, status: "committed", requestHash: legacy.request_hash, committedRevision: Number(legacy.committed_revision), snapshotAvailable: this.getCanvasOperationReceipt(legacy.project_id, operationId).snapshotAvailable, receipt: { ok: true, committed: true, operationId, projectId: legacy.project_id, revision: Number(legacy.committed_revision), snapshotAvailable: this.getCanvasOperationReceipt(legacy.project_id, operationId).snapshotAvailable, replayed: true } };
+        }
+        if (identity) {
+            const requestHash = commandFingerprint({ tool: identity.tool, targetId: identity.targetId, request: identity.request });
+            if (row.tool !== identity.tool || row.target_id !== identity.targetId || row.request_hash !== requestHash || (row.project_id || null) !== (identity.projectId || null)) throw collaborationError("OPERATION_ID_REUSED", "operationId 已用于不同工具、目标或请求");
+        }
+        return this.mapMcpCommandReceipt(row);
+    }
+
+    rejectMcpCommand(operationId: string, code: string, message: string) {
+        this.db.prepare("UPDATE mcp_command_receipts SET status = 'rejected', payload_json = NULL, error_json = ?, updated_at = ? WHERE operation_id = ? AND status = 'prepared'")
+            .run(JSON.stringify({ code, message }), new Date().toISOString(), operationId);
+        return this.getMcpCommandReceipt(operationId);
+    }
+
+    private mapMcpCommandReceipt(row: Record<string, unknown>): McpCommandReceipt {
+        return {
+            operationId: String(row.operation_id), tool: String(row.tool), targetId: row.target_id == null ? null : String(row.target_id),
+            status: String(row.status) as McpCommandReceipt["status"], requestHash: String(row.request_hash),
+            ...(row.committed_revision == null ? {} : { committedRevision: Number(row.committed_revision), snapshotAvailable: this.getCanvasOperationReceipt(String(row.project_id || ""), String(row.operation_id)).snapshotAvailable }),
+            ...(typeof row.receipt_json === "string" ? { receipt: JSON.parse(row.receipt_json) as Record<string, unknown> } : {}),
+            ...(row.status === "prepared" && typeof row.payload_json === "string" ? { payload: JSON.parse(row.payload_json) as Record<string, unknown> } : {}),
+            ...(typeof row.error_json === "string" ? { error: JSON.parse(row.error_json) as { code: string; message: string } } : {}),
+        };
+    }
+
+    private completeMcpCommand(operationId: string, revision: number, operations: CanvasOperation[]) {
+        const row = this.db.prepare("SELECT tool, target_id, receipt_json FROM mcp_command_receipts WHERE operation_id = ? AND status = 'prepared'").get(operationId) as { tool: string; target_id: string | null; receipt_json: string | null } | undefined;
+        if (!row) return;
+        const preview = row.receipt_json ? JSON.parse(row.receipt_json) as Record<string, unknown> : {};
+        const taskIds = operations.filter(operation => operation.type === "run_generation" && operation.idempotencyKey).map(operation => String(operation.idempotencyKey));
+        const receipt = { ...preview, ok: true, committed: true, operationId, replayed: false, ...(row.target_id ? { targetId: row.target_id } : {}), revision, ...(taskIds.length ? { taskIds } : {}), changesHash: commandFingerprint(operations) };
+        this.db.prepare("UPDATE mcp_command_receipts SET status = 'committed', payload_json = NULL, receipt_json = ?, committed_revision = ?, updated_at = ? WHERE operation_id = ? AND status = 'prepared'")
+            .run(JSON.stringify(receipt), revision, new Date().toISOString(), operationId);
+    }
+
+    listAssetsPage(options: { kind?: string; keyword?: string; page?: number; pageSize?: number } = {}) {
+        const clauses: string[] = [];
+        const values: Array<string | number> = [];
+        if (options.kind && options.kind !== "all") { clauses.push("kind = ?"); values.push(options.kind); }
+        if (options.keyword?.trim()) {
+            clauses.push("instr(lower(title || ' ' || COALESCE(json_extract(data_json, '$.description'), '') || ' ' || COALESCE(json_extract(data_json, '$.content'), '') || ' ' || COALESCE(json_extract(data_json, '$.data.description'), '') || ' ' || COALESCE(json_extract(data_json, '$.data.content'), '')), lower(?)) > 0");
+            values.push(options.keyword.trim());
+        }
+        const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+        const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM assets ${where}`).get(...values) as { count: number }).count);
+        const page = Math.max(1, Math.floor(options.page || 1));
+        const pageSize = Math.max(1, Math.floor(options.pageSize || 20));
+        const offset = (page - 1) * pageSize;
+        const rows = this.db.prepare(`SELECT id, kind, title, tags_json, folder_id, drama_id, updated_at, length(COALESCE(json_extract(data_json, '$.content'), json_extract(data_json, '$.data.content'), '')) AS content_chars, (cover_url <> '') AS has_cover, COALESCE(json_extract(data_json, '$.storageKey'), json_extract(data_json, '$.assetRef.storageKey'), json_extract(data_json, '$.data.storageKey')) AS storage_key, COALESCE(json_extract(data_json, '$.mimeType'), json_extract(data_json, '$.assetRef.mimeType'), json_extract(data_json, '$.data.mimeType')) AS mime_type FROM assets ${where} ORDER BY updated_at DESC, id ASC LIMIT ? OFFSET ?`).all(...values, pageSize, offset) as Array<Record<string, unknown>>;
+        return { total, page, pageSize, items: rows.map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title), tags: JSON.parse(String(row.tags_json || "[]")), folderId: row.folder_id == null ? null : String(row.folder_id), dramaId: row.drama_id == null ? null : String(row.drama_id), updatedAt: String(row.updated_at), hasContent: Number(row.content_chars) > 0, contentChars: Number(row.content_chars), hasCover: Number(row.has_cover) === 1, ...(row.storage_key ? { storageKey: String(row.storage_key) } : {}), ...(row.mime_type ? { mimeType: String(row.mime_type) } : {}) })) };
+    }
+
+    commitMcpAssetCommand(input: { operationId: string; tool: string; request: unknown; assets: Asset[] }): Record<string, unknown> {
+        const targetId = "asset-library";
+        const requestHash = commandFingerprint({ tool: input.tool, targetId, request: input.request });
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const row = this.db.prepare("SELECT * FROM mcp_command_receipts WHERE operation_id = ?").get(input.operationId) as Record<string, unknown> | undefined;
+            if (!row || row.tool !== input.tool || row.target_id !== targetId || row.request_hash !== requestHash) throw collaborationError("OPERATION_ID_REUSED", "素材命令未预留或 operationId 属于其他请求");
+            if (row.status === "committed") {
+                const receipt = JSON.parse(String(row.receipt_json || "{}")) as Record<string, unknown>;
+                this.db.exec("COMMIT");
+                return { ...receipt, replayed: true };
+            }
+            if (row.status === "rejected") throw collaborationError(String((JSON.parse(String(row.error_json || "{}")) as Record<string, unknown>).code || "MCP_COMMAND_REJECTED"), String((JSON.parse(String(row.error_json || "{}")) as Record<string, unknown>).message || "素材命令已拒绝"));
+            const frozenAssets = JSON.parse(String(row.payload_json || "{}")).assets;
+            if (commandFingerprint(frozenAssets) !== commandFingerprint(input.assets)) throw collaborationError("OPERATION_ID_REUSED", "素材命令负载与 Backend 冻结内容不一致");
+            const duplicateIds = input.assets.map(asset => asset.id).filter((id, index, all) => all.indexOf(id) !== index);
+            if (duplicateIds.length) throw collaborationError("INVALID_INPUT", `批次内资产 ID 重复: ${[...new Set(duplicateIds)].join(", ")}`);
+            const saved = input.assets.map(asset => this.upsertAsset(asset));
+            const receipt = { ok: true, committed: true, operationId: input.operationId, replayed: false, count: saved.length, assetIds: saved.map(asset => asset.id), changesHash: commandFingerprint(saved.map(asset => ({ id: asset.id, kind: asset.kind, title: asset.title, tags: asset.tags, updatedAt: asset.updatedAt }))) };
+            this.db.prepare("UPDATE mcp_command_receipts SET status = 'committed', payload_json = NULL, receipt_json = ?, updated_at = ? WHERE operation_id = ?")
+                .run(JSON.stringify(receipt), new Date().toISOString(), input.operationId);
+            this.db.exec("COMMIT");
+            return receipt;
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            const current = this.getMcpCommandReceipt(input.operationId);
+            if (current?.status === "prepared" && current.tool === input.tool && current.targetId === targetId && current.requestHash === requestHash) this.rejectMcpCommand(input.operationId, "MCP_COMMAND_REJECTED", error instanceof Error ? error.message : String(error));
+            throw error;
+        }
+    }
+
     applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, inputOperations: CanvasOperation[], context?: CanvasCommandContext) {
         const operationId = context?.operationId || crypto.randomUUID();
         const fingerprint = commandFingerprint({ id, expectedRevision, baseRevision: context?.baseRevision, operations: inputOperations });
@@ -1266,12 +1570,30 @@ export class BackendDatabase {
         let commit: CanvasCommit;
         this.db.exec("BEGIN IMMEDIATE");
         try {
+            if (context?.mcpCommand) {
+                const identityHash = commandFingerprint({ tool: context.mcpCommand.tool, targetId: context.mcpCommand.targetId, request: context.mcpCommand.request });
+                const frozen = this.db.prepare("SELECT tool, target_id, project_id, request_hash, status, payload_json FROM mcp_command_receipts WHERE operation_id = ?").get(operationId) as { tool: string; target_id: string; project_id: string | null; request_hash: string; status: string; payload_json: string | null } | undefined;
+                if (!frozen || frozen.tool !== context.mcpCommand.tool || frozen.target_id !== context.mcpCommand.targetId || frozen.project_id !== id || frozen.request_hash !== identityHash || !["prepared", "committed"].includes(frozen.status)) throw collaborationError("MCP_COMMAND_MISMATCH", "MCP 冻结命令与画布提交不匹配");
+                if (frozen.status === "prepared") {
+                    const payload = JSON.parse(String(frozen.payload_json || "{}")) as Record<string, unknown>;
+                    const frozenOperations = Array.isArray(payload.operations) ? payload.operations : [];
+                    if (commandFingerprint(frozenOperations) !== commandFingerprint(inputOperations)) throw collaborationError("MCP_COMMAND_MISMATCH", "提交操作与 Backend 冻结操作不一致");
+                    const frozenRevision = payload.baseRevision ?? payload.revision;
+                    const submittedRevision = context.baseRevision ?? expectedRevision;
+                    if (typeof frozenRevision === "number" && typeof submittedRevision === "number" && frozenRevision !== submittedRevision) throw collaborationError("MCP_COMMAND_MISMATCH", "提交版本与 Backend 冻结版本不一致");
+                }
+            }
             const current = this.getCanvasProject(id);
             if (!current) throw new Error(`画布不存在: ${id}`);
             const currentRevision = Number(current.revision || 0);
             {
                 const existing = this.db.prepare("SELECT r.project_id AS projectId, r.committed_revision AS revision, b.operations_json AS operationsJson, b.results_json AS resultsJson, r.request_hash AS requestHash FROM canvas_command_receipts r LEFT JOIN canvas_operation_batches b ON b.operation_id = r.operation_id WHERE r.operation_id = ?").get(operationId) as { projectId: string; revision: number; operationsJson: string | null; resultsJson: string | null; requestHash?: string } | undefined;
                 if (existing) {
+                    if (context?.mcpCommand) {
+                        const commandHash = commandFingerprint({ tool: context.mcpCommand.tool, targetId: context.mcpCommand.targetId, request: context.mcpCommand.request });
+                        const v2 = this.db.prepare("SELECT request_hash, status FROM mcp_command_receipts WHERE operation_id = ?").get(operationId) as { request_hash: string; status: string } | undefined;
+                        if (!v2 || v2.status !== "committed" || v2.request_hash !== commandHash) throw collaborationError("OPERATION_ID_REUSED", "operationId 已由另一项画布事务提交，请不要复用");
+                    }
                     if (existing.projectId !== id || existing.requestHash !== fingerprint) throw collaborationError("OPERATION_ID_REUSED", "operationId 已用于不同请求，请勿修改重试请求内容");
                     if (existing.operationsJson === null || existing.resultsJson === null) throw Object.assign(collaborationError("RECEIPT_UNAVAILABLE", "操作已提交，历史快照已清理；请读取最新画布确认同步"), { committed: true, revision: Number(existing.revision), snapshotAvailable: false });
                     const project = this.canvasProjectAt(id, Number(existing.revision));
@@ -1349,6 +1671,12 @@ export class BackendDatabase {
             this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
                 .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(committedOperations), JSON.stringify(operationResults), String(project.updatedAt));
             this.db.prepare("INSERT INTO canvas_command_receipts (operation_id, project_id, request_hash, committed_revision) VALUES (?, ?, ?, ?)").run(operationId, id, fingerprint, revision);
+            if (context?.mcpCommand) {
+                const requestHash = commandFingerprint({ tool: context.mcpCommand.tool, targetId: context.mcpCommand.targetId, request: context.mcpCommand.request });
+                const command = this.db.prepare("SELECT tool, target_id, project_id FROM mcp_command_receipts WHERE operation_id = ? AND request_hash = ? AND status = 'prepared'").get(operationId, requestHash) as { tool: string; target_id: string; project_id: string | null } | undefined;
+                if (!command || command.tool !== context.mcpCommand.tool || command.target_id !== context.mcpCommand.targetId || command.project_id !== id) throw collaborationError("MCP_COMMAND_MISMATCH", "MCP 冻结命令与画布提交不匹配");
+                this.completeMcpCommand(operationId, revision, committedOperations);
+            }
             this.db.exec("COMMIT");
             commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations: committedOperations, operationResults, source, updatedAt: String(project.updatedAt) };
         } catch (error) {
@@ -2496,8 +2824,8 @@ export class BackendDatabase {
                 oversizedCalls,
                 note: "仅统计已记录 inputSummary/outputSummary 的调用；早期事件缺少尺寸字段时不参与均值计算。",
             },
-            transitions: transitions.map((row) => ({ fromTool: String(row.from_tool || ""), toTool: String(row.to_tool || ""), count: Number(row.count || 0) })),
-            daily: daily.map((row) => {
+            ...(options.view === "full" ? { transitions: transitions.map((row) => ({ fromTool: String(row.from_tool || ""), toTool: String(row.to_tool || ""), count: Number(row.count || 0) })) } : {}),
+            ...(options.view === "full" ? { daily: daily.map((row) => {
                 const calls = Number(row.calls || 0);
                 const dailySucceeded = Number(row.succeeded || 0);
                 return {
@@ -2509,11 +2837,13 @@ export class BackendDatabase {
                     averageDurationMs: row.average_duration_ms == null ? null : Math.round(Number(row.average_duration_ms)),
                     averageOutputChars: row.average_output_chars == null ? null : Math.round(Number(row.average_output_chars)),
                 };
-            }),
-            dailyByTool: dailyByToolMetrics,
+            }) } : {}),
+            ...(options.view === "full" ? { dailyByTool: dailyByToolMetrics } : {}),
             filters: {
                 from: options.from || null,
                 to: options.to || null,
+                tool: options.tool || null,
+                view: options.view || "summary",
             },
             diagnostics,
         };
@@ -2762,6 +3092,10 @@ function mcpObservabilityDateFilter(options: McpObservabilityReportOptions) {
     if (options.to) {
         clauses.push("date(created_at, 'localtime') <= ?");
         params.push(options.to);
+    }
+    if (options.tool) {
+        clauses.push("tool = ?");
+        params.push(options.tool);
     }
     return {
         where: clauses.length ? `AND ${clauses.join(" AND ")}` : "",

@@ -15,6 +15,11 @@ import { EpisodeProductionService, type ProductionRun } from "./production.js";
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const nodesOf = (project: Record<string, unknown>) => Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+const assetTitle = (source: Record<string, unknown>, id: string) => {
+    const items = Array.isArray(source.asset_plan) ? source.asset_plan.map(object) : [];
+    const item = items.find(value => String(value.asset_id || value.id || "") === id);
+    return String(item?.title || item?.name || item?.kind || id);
+};
 const mediaKey = (node: Record<string, unknown>) => {
     const meta = object(node.metadata);
     return String(resolveCanvasImageReferenceNode(node)[0]?.storageKey || meta.storageKey || "");
@@ -26,17 +31,21 @@ export class EpisodeProductionRunner {
     constructor(private readonly service: EpisodeProductionService, private readonly stores: Stores, private readonly generation: CanvasGenerationService) {}
 
     async resumePending() {
+        for (const batch of this.service.pendingBatches()) void this.runBatch(batch.episodeId, batch.runId);
         for (const run of this.service.pendingRuns()) void this.run(run.episodeId, run.version);
     }
 
-    async syncClips(episodeId: string, version: number, groupIds?: string[]) {
+    async syncClips(episodeId: string, version: number, groupIds?: string[], runSettings?: Record<string, unknown>) {
         const production = this.service.get(episodeId);
         if (production.publishedVersion !== version || !production.published?.shots.length) throw new Error("只能同步当前已发布镜头表");
-        this.service.validateExecution(episodeId, version);
-        const episode = this.storesEpisode(episodeId);
-        if (!episode.canvasId) throw new Error("分集尚未绑定画布");
         const published = production.published;
         const groups = published.clipGroups.filter((group) => !groupIds || groupIds.includes(group.id));
+        const readiness = this.service.workflowReadiness(episodeId, "published");
+        const blocked = groups.map(group => readiness.targets.find(item => item.id === `segment:${group.id}`)).filter(item => !item || item.status !== "ready");
+        if (blocked.length) throw new Error(blocked.flatMap(item => item?.blockers || ["Segment 缺少就绪视图"] ).join("；"));
+        this.service.validateExecution(episodeId, version, groups.map(group => group.id));
+        const episode = this.storesEpisode(episodeId);
+        if (!episode.canvasId) throw new Error("分集尚未绑定画布");
         for (const group of groups) {
             const project = this.stores.projects.get(episode.canvasId);
             if (!project) throw new Error("分集画布不存在");
@@ -44,7 +53,9 @@ export class EpisodeProductionRunner {
             const nodeId = group.nodeId || stableId("production-h3", episodeId);
             const segmentId = group.segmentId || stableId("clip", episodeId, group.id);
             const shots = group.shotIds.map((id) => published.shots.find((shot) => shot.id === id)).filter((shot): shot is NonNullable<typeof shot> => !!shot);
-            const h3Model = published.settings.h3Models[group.id] || published.settings.h3Model;
+            const settings = runSettings || published.settings as unknown as Record<string, unknown>;
+            const h3Models = object(settings.h3Models);
+            const h3Model = String(h3Models[group.id] || settings.h3Model || "");
             const authored = directorArtifact(published, "h3", group.id);
             const d = published.director!;
             const planned = (d.source.segments as Array<Record<string, any>>).find(s => s.id === group.id)!;
@@ -121,17 +132,45 @@ export class EpisodeProductionRunner {
         } finally { this.running.delete(key); }
     }
 
-    private async execute(episodeId: string, version: number) {
-        let run = this.service.run(episodeId, version);
-        if (!run || !["pending", "running", "awaiting_review"].includes(run.status)) return;
+    async runBatch(episodeId: string, runId: string) {
+        const key = `${episodeId}:run:${runId}`;
+        if (this.running.has(key)) return;
+        const run = this.service.batchForRun(episodeId, runId);
+        if (!run || !["pending", "running"].includes(run.status)) return;
+        this.running.add(key);
+        try { await this.execute(episodeId, run.version, run); }
+        catch (error) {
+            const latest = this.service.batchForRun(episodeId, runId);
+            if (latest) {
+                const paused = this.service.batchPauseRequested(episodeId, runId);
+                this.service.updateRun({ ...latest, status: paused ? "paused" : "failed", error: error instanceof Error ? error.message : String(error) });
+            }
+        } finally { this.running.delete(key); }
+    }
+
+    private async execute(episodeId: string, version: number, batchRun?: ProductionRun) {
+        let run = batchRun || this.service.run(episodeId, version);
+        if (!run || !["pending", "running", "awaiting_review", "paused"].includes(run.status)) return;
         const production = this.service.get(episodeId);
         if (production.publishedVersion !== version || !production.published) throw new Error("已有更新的发布版本");
         const snapshot = production.published;
-        if (!snapshot.director?.executionAuthorized) throw new Error("缺少 Acheng 生产执行授权");
-        if (snapshot.director.unresolved.length) throw new Error(snapshot.director.unresolved.join("；"));
-        this.service.validateExecution(episodeId, version);
-        const imageModelFor = (id: string) => snapshot.settings.imageModels[id] || snapshot.settings.imageModel;
-        const h3ModelFor = (id: string) => snapshot.settings.h3Models[id] || snapshot.settings.h3Model;
+        if (!snapshot.director) throw new Error("缺少 Acheng 制作稿");
+        if (!run.runId && !snapshot.director.executionAuthorized) throw new Error("缺少 Acheng 生产执行授权");
+        if (!run.runId && snapshot.director.unresolved.length) throw new Error(snapshot.director.unresolved.join("；"));
+        if (run.engine && JSON.stringify(run.engine) !== JSON.stringify(snapshot.director.engine)) throw new Error("运行批次固定引擎与已发布导演稿不一致");
+        const runSettings = run.settings || snapshot.settings as unknown as Record<string, unknown>;
+        const imageModels = object(runSettings.imageModels), h3Models = object(runSettings.h3Models);
+        const selectedAssetIds = new Set((run.targets || []).filter(id => id.startsWith("asset:")).map(id => id.slice("asset:".length)));
+        const artifactTargets = (run.targets || []).flatMap(id => {
+            if (id.startsWith("asset:")) return [id.slice("asset:".length)];
+            if (id.startsWith("frame:")) return snapshot.director!.shotInputs[id.slice("frame:".length)]?.keyframeAssetId ? [snapshot.director!.shotInputs[id.slice("frame:".length)].keyframeAssetId!] : [];
+            if (id.startsWith("segment:")) return [id.slice("segment:".length)];
+            return [];
+        });
+        this.service.validateExecution(episodeId, version, artifactTargets.length ? artifactTargets : undefined);
+        this.checkPause(run);
+        const imageModelFor = (id: string) => String(imageModels[id] || runSettings.imageModel || "");
+        const h3ModelFor = (id: string) => String(h3Models[id] || runSettings.h3Model || "");
         const episode = this.storesEpisode(episodeId);
         if (!episode.canvasId) throw new Error("分集未绑定画布");
         const projectBefore = this.stores.projects.get(episode.canvasId);
@@ -139,31 +178,44 @@ export class EpisodeProductionRunner {
         // Assets are authored by Acheng. Execute only ready dependency leaves;
         // review and recompilation of downstream prompts remain Agent work.
         const keyframeAssets = new Set(Object.values(snapshot.director.shotInputs).map(s => s.keyframeAssetId).filter(Boolean));
-        const assetTasks = snapshot.director.artifacts.filter(a => a.kind === "image" && a.status === "ready" && !keyframeAssets.has(a.targetId) && snapshot.director!.assets[a.targetId]?.status === "planned");
+        const assetTasks = snapshot.director.artifacts.filter(a => a.kind === "image" && a.status === "ready" && !keyframeAssets.has(a.targetId)
+            && (!run!.runId || selectedAssetIds.has(a.targetId)) && [undefined, "planned", "rejected"].includes(snapshot.director!.assets[a.targetId]?.status));
         for (const artifact of assetTasks) {
+            this.checkPause(run);
             const asset = snapshot.director.assets[artifact.targetId];
-            const node = nodesOf(projectBefore).find(n => n.id === asset.nodeId);
-            if (!node) throw new Error(`资产 ${artifact.targetId} 缺少已创建画布节点`);
-            const model = String(snapshot.settings.imageModel || object(node.metadata).model || "");
+            const nodeId = asset?.nodeId || stableId("production-asset", episodeId, artifact.targetId);
+            let assetProject = this.stores.projects.get(episode.canvasId);
+            if (!assetProject) throw new Error("分集画布不存在");
+            let node = nodesOf(assetProject).find(n => n.id === nodeId);
+            if (!node) {
+                this.stores.projects.applyOperations(episode.canvasId, Number(assetProject.revision || 0), [{ type: "add_node", id: nodeId, nodeType: "image", title: assetTitle(snapshot.director.source, artifact.targetId), position: { x: nodesOf(assetProject).length * 360, y: 0 }, width: 340, height: 260,
+                    metadata: { prompt: artifact.prompt, status: "idle", productionAssetId: artifact.targetId, productionVersion: version } }], { operationId: stableId("production-asset-node", episodeId, String(version), artifact.targetId), source: { clientId: "episode-production", kind: "system", label: "准备 Acheng 资产" } });
+                assetProject = this.stores.projects.get(episode.canvasId);
+                node = assetProject ? nodesOf(assetProject).find(n => n.id === nodeId) : undefined;
+            }
+            if (!node) throw new Error(`资产 ${artifact.targetId} 画布节点创建失败`);
+            const model = String(runSettings.imageModel || object(node.metadata).model || "");
             if (!model) throw new Error(`资产 ${artifact.targetId} 缺少图片模型`);
-            const taskId = stableId("production-asset-task", episodeId, String(version), artifact.targetId);
+            const taskId = stableId("production-asset-task", run.runId || `${episodeId}:${version}`, artifact.targetId);
             let task = this.stores.tasks.get(taskId);
             if (!task) {
-                const result = await this.generation.start({ mode: "image", projectId: episode.canvasId, nodeId: asset.nodeId, model, prompt: artifact.prompt,
+                const result = await this.generation.start({ mode: "image", projectId: episode.canvasId, nodeId, model, prompt: artifact.prompt,
                     references: artifact.references.map(r => ({ storageKey: r.storageKey, sourceNodeId: r.nodeId, role: r.role, type: "image" })),
                     params: { writeBackToTarget: true }, idempotencyKey: taskId });
                 task = this.stores.tasks.get(result.taskId);
                 if (!task) throw new Error("资产任务未记录");
             }
-            run = this.recordTask(run, "image", artifact.targetId, task.id);
+            run = this.recordTask(run, "image", artifact.targetId, task.id, { projectId: episode.canvasId, nodeId });
             await this.waitTask(task.id);
+            run = this.markTaskStatus(run, task.id, "succeeded");
+            this.checkPause(run);
             const actual = this.stores.projects.get(episode.canvasId);
-            const outputNode = actual && nodesOf(actual).find(n => n.id === asset.nodeId);
+            const outputNode = actual && nodesOf(actual).find(n => n.id === nodeId);
             const key = outputNode ? mediaKey(outputNode) : "";
             if (!key) throw new Error(`资产 ${artifact.targetId} 未回写媒体`);
             this.service.bindDirectorAsset(episodeId, version, artifact.targetId, key);
         }
-        if (assetTasks.length || Object.values(snapshot.director.assets).some(asset => asset.status === "generated")) {
+        if (assetTasks.length || (!run.runId && Object.values(snapshot.director.assets).some(asset => asset.status === "generated"))) {
             this.service.updateRun({ ...run, status: "awaiting_review", error: "资产已生成；请查看真实媒体，更新批准版本及依赖提示词后发布新导演稿" });
             return;
         }
@@ -189,10 +241,11 @@ export class EpisodeProductionRunner {
         }
         run = { ...run, status: "running", error: null }; this.service.updateRun(run);
         for (const shotId of run.plan.imageShotIds) {
+            this.checkPause(run);
             const imageModel = imageModelFor(shotId);
             const shot = snapshot.shots.find((item) => item.id === shotId);
             if (!shot) continue;
-            const taskId = stableId("production-image-task", episodeId, String(version), shotId);
+            const taskId = stableId("production-image-task", run.runId || `${episodeId}:${version}`, shotId);
             let task = this.stores.tasks.get(taskId);
             if (!task) {
                 const project = this.stores.projects.get(episode.canvasId);
@@ -213,9 +266,11 @@ export class EpisodeProductionRunner {
                 task = this.stores.tasks.get(started.taskId);
                 if (!task) throw new Error("图片任务未被 Backend 记录");
             }
-            run = this.recordTask(run, "image", shotId, task.id);
-            task = await this.waitTask(task.id);
             const nodeId = snapshot.keyframes[shotId]?.nodeId || stableId("production-frame", episodeId, shotId);
+            run = this.recordTask(run, "image", shotId, task.id, { projectId: episode.canvasId, nodeId });
+            task = await this.waitTask(task.id);
+            run = this.markTaskStatus(run, task.id, "succeeded");
+            this.checkPause(run);
             const project = this.stores.projects.get(episode.canvasId);
             const node = project && nodesOf(project).find((item) => item.id === nodeId);
             const taskMedia = object(task.result).media;
@@ -226,18 +281,18 @@ export class EpisodeProductionRunner {
             this.service.bindRuntime(episodeId, version, { shotId, nodeId, storageKey: key });
         }
         const latest = this.service.get(episodeId).published!;
-        const rejected = run.plan.imageShotIds.find((shotId) => latest.keyframeReviews[shotId]?.verdict === "needs-redo");
+        const rejected = run.plan.imageShotIds.find((shotId) => ["needs-redo", "rejected"].includes(latest.keyframeReviews[shotId]?.verdict || ""));
         if (rejected) throw new Error(`镜头 ${rejected} 的关键帧自检要求返修；未提交后续 H3`);
-        const unreviewed = run.plan.imageShotIds.filter((shotId) => latest.keyframeReviews[shotId]?.verdict !== "auto-accepted" || latest.keyframeReviews[shotId]?.sourceVersion !== version);
+        const unreviewed = run.plan.imageShotIds.filter((shotId) => !["auto-accepted", "approved"].includes(latest.keyframeReviews[shotId]?.verdict || "") || latest.keyframeReviews[shotId]?.sourceVersion !== version);
         if (unreviewed.length) {
             this.service.updateRun({ ...run, status: "awaiting_review", error: `等待 Agent 查看关键帧并记录视觉自检：${unreviewed.join(", ")}` });
             return;
         }
-        if (snapshot.clipGroups.some(g => !snapshot.director!.artifacts.some(a => a.kind === "h3" && a.targetId === g.id && a.status === "ready"))) {
+        if (!run.runId && snapshot.clipGroups.some(g => !snapshot.director!.artifacts.some(a => a.kind === "h3" && a.targetId === g.id && a.status === "ready"))) {
             this.service.updateRun({ ...run, status: "awaiting_review", error: "等待 Acheng 完成当前素材版本的 H3 编译" });
             return;
         }
-        if (snapshot.clipGroups.length) await this.syncClips(episodeId, version, run.plan.clipGroupIds);
+        if (snapshot.clipGroups.length) await this.syncClips(episodeId, version, run.plan.clipGroupIds, runSettings);
         const current = this.service.get(episodeId).published!;
         const groups = current.clipGroups;
         const required = new Set(run.plan.clipGroupIds);
@@ -249,6 +304,7 @@ export class EpisodeProductionRunner {
             if (chain.some(g => required.has(g.id))) chains.push(chain);
         }
         for (const chain of chains) {
+            this.checkPause(run);
             const head = chain[0], tail = chain[chain.length - 1];
             if (!head.nodeId || !head.segmentId || chain.some(g => g.nodeId !== head.nodeId || !g.segmentId)) throw new Error("连续组必须绑定同一个 H3 节点");
             for (const group of chain) {
@@ -258,7 +314,7 @@ export class EpisodeProductionRunner {
                     if (shot?.keyframePolicy !== "none" && !current.keyframes[shotId]?.storageKey) throw new Error(`镜头 ${shotId} 缺少可用关键帧参考`);
                 }
             }
-            const taskId = stableId("production-h3-task", episodeId, String(version), ...chain.map(g => g.id));
+            const taskId = stableId("production-h3-task", run.runId || `${episodeId}:${version}`, ...chain.map(g => g.id));
             let task = this.stores.tasks.get(taskId);
             if (!task) {
                 const started = await this.generation.start({ mode: "video", operation: "h3-run", projectId: episode.canvasId,
@@ -268,8 +324,10 @@ export class EpisodeProductionRunner {
                 task = this.stores.tasks.get(started.taskId);
                 if (!task) throw new Error("H3 父任务未被 Backend 记录");
             }
-            for (const group of chain) run = this.recordTask(run, "h3", group.id, task.id);
+            for (const group of chain) run = this.recordTask(run, "h3", group.id, task.id, { projectId: episode.canvasId, nodeId: head.nodeId, segmentId: group.segmentId || undefined });
             await this.waitTask(task.id);
+            run = this.markTaskStatus(run, task.id, "succeeded");
+            this.checkPause(run);
             const finished = this.stores.projects.get(episode.canvasId);
             const node = finished && nodesOf(finished).find(n => n.id === head.nodeId);
             for (const group of chain) {
@@ -280,11 +338,26 @@ export class EpisodeProductionRunner {
         this.service.updateRun({ ...run, status: "succeeded", error: null });
     }
 
-    private recordTask(run: ProductionRun, kind: "image" | "h3", id: string, taskId: string) {
-        if (run.submitted.some((item) => item.kind === kind && item.id === id)) return run;
-        const next = { ...run, submitted: [...run.submitted, { kind, id, taskId }] };
+    private recordTask(run: ProductionRun, kind: "image" | "h3", id: string, taskId: string, context: { projectId: string; nodeId: string; segmentId?: string }) {
+        const existing = run.submitted.findIndex(item => item.kind === kind && item.id === id);
+        const entry = { kind, id, taskId, ...context, status: "running" as const };
+        if (existing >= 0 && run.submitted[existing].taskId === taskId && run.submitted[existing].nodeId === context.nodeId && run.submitted[existing].segmentId === context.segmentId && run.submitted[existing].status === "running") return run;
+        const submitted = [...run.submitted];
+        if (existing >= 0) submitted[existing] = { ...submitted[existing], ...entry };
+        else submitted.push(entry);
+        const next = { ...run, submitted };
         this.service.updateRun(next);
         return next;
+    }
+    private markTaskStatus(run: ProductionRun, taskId: string, status: "succeeded" | "failed") {
+        const submitted = run.submitted.map(item => item.taskId === taskId ? { ...item, status } : item);
+        if (submitted.every((item, index) => item.status === run.submitted[index]?.status)) return run;
+        const next = { ...run, submitted };
+        this.service.updateRun(next);
+        return next;
+    }
+    private checkPause(run: ProductionRun) {
+        if (run.runId && this.service.batchPauseRequested(run.episodeId, run.runId)) throw new Error("生产运行已暂停；可从原 runId 恢复未提交工作");
     }
     private async waitTask(taskId: string): Promise<RuntimeTask> {
         for (;;) {

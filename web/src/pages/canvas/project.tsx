@@ -1,4 +1,3 @@
-import { CanvasNodeFinder } from "@/components/canvas/canvas-node-finder";
 import { CanvasBatchRename } from "@/components/canvas/canvas-batch-rename";
 import { viewportForCanvasNodes } from "@/lib/canvas/canvas-navigation";
 import { createCanvasGraphIndexSelector } from "@/lib/canvas/canvas-graph-index";
@@ -76,6 +75,7 @@ import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { emitCanvasEvent } from "@/lib/canvas/canvas-event-bus";
 import { setBackendCanvasPresence } from "@/stores/use-backend-store";
 import { useCanvasDocument } from "@/pages/canvas/hooks/use-canvas-document";
+import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { createMentionReferenceSelector, getFixedReferenceNodes, getGroupResourceNodes, isCanvasReferenceNode, nodeResourceItems, reorderCanvasReferenceConnections, type CanvasGraphIndex, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -484,9 +484,8 @@ function InfiniteCanvasPage() {
         undo: undoDocument,
         redo: redoDocument,
     } = useCanvasDocument(projectId);
-    const [nodeFinderOpen, setNodeFinderOpen] = useState(false);
     const [renameTargetIds, setRenameTargetIds] = useState<string[] | null>(null);
-    useEffect(() => { setNodeFinderOpen(false); setRenameTargetIds(null); }, [projectId]);
+    useEffect(() => { setRenameTargetIds(null); }, [projectId]);
     const browserTaskIds = useMemo(() => Array.from(new Set(nodes.map((node) => String(node.metadata?.runtimeTaskId || "")).filter(Boolean))), [nodes]);
     useEffect(() => {
         browserTaskIds.forEach(kickCanvasBrowserTask);
@@ -1881,10 +1880,18 @@ function InfiniteCanvasPage() {
 
     useEffect(() => {
         const nodeId = searchParams.get("nodeId") || "";
-        const key = `${projectId}:${nodeId}`;
-        if (!projectLoaded || !nodeId || deepLinkFocusRef.current === key || !nodes.some((node) => node.id === nodeId)) return;
+        const requestedSegmentId = searchParams.get("segmentId") || "";
+        const segmentNodeId = requestedSegmentId ? nodes.find(node => {
+            const metadata = node.metadata as Record<string, unknown> | undefined;
+            const segments = Array.isArray(metadata?.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
+            return node.type.includes("minimax-h3") && segments.some(item => String(item.id || "") === requestedSegmentId);
+        })?.id || "" : "";
+        const targetNodeId = nodeId || segmentNodeId;
+        const key = `${projectId}:${targetNodeId}:${requestedSegmentId}`;
+        if (!projectLoaded || !targetNodeId || deepLinkFocusRef.current === key || !nodes.some((node) => node.id === targetNodeId)) return;
         deepLinkFocusRef.current = key;
-        focusNode(nodeId);
+        focusNode(targetNodeId);
+        if (requestedSegmentId) getPluginNodeView(projectId, targetNodeId).update({ selectedSegmentId: requestedSegmentId });
     }, [focusNode, nodes, projectId, projectLoaded, searchParams]);
 
     useEffect(() => () => void (focusAnimRef.current && cancelAnimationFrame(focusAnimRef.current)), []);
@@ -2999,7 +3006,7 @@ function InfiniteCanvasPage() {
                 && !target?.closest("[contenteditable='true'],[data-canvas-shortcuts-ignore],.ant-modal,[role='combobox'],video,audio");
             if (navigationAllowed && isModifierShortcut && !event.altKey && !event.shiftKey && key === "k") {
                 event.preventDefault();
-                if (!event.repeat) setNodeFinderOpen(true);
+                if (!event.repeat) useCanvasSidePanelStore.getState().focusNodeSearch();
                 return;
             }
             if (navigationAllowed && !isModifierShortcut && !event.altKey && key === "f") {
@@ -5806,7 +5813,6 @@ function InfiniteCanvasPage() {
             <CanvasSidePanel onSelectionChange={selectCanvasNodes} projectId={projectId} nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
             <section className="relative min-w-0 flex-1 overflow-hidden">
                 <CanvasTopBar
-                    onFindNode={() => setNodeFinderOpen(true)}
                     title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}
                     titleDraft={titleDraft}
                     isTitleEditing={titleEditing}
@@ -6121,7 +6127,6 @@ function InfiniteCanvasPage() {
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                 />
 
-                {nodeFinderOpen ? <CanvasNodeFinder nodes={nodes} onClose={() => setNodeFinderOpen(false)} onFocusNode={focusNode} /> : null}
                 {renameTargetIds ? <CanvasBatchRename nodes={renameTargetIds.flatMap((id) => { const node = nodeById.get(id); return node ? [node] : []; })} onClose={() => setRenameTargetIds(null)} onApply={applyBatchRename} /> : null}
 
                 <CanvasToolbar

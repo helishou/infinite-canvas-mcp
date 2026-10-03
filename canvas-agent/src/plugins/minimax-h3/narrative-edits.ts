@@ -61,7 +61,7 @@ export function buildNarrativeEditPatch(
         }
         const replacements = cells.map((cell) => ({ cell, parts: cell.value.split(raw.find as string) }));
         const actual = replacements.reduce((count, item) => count + item.parts.length - 1, 0);
-        if (actual !== raw.expectedMatches) throw new Error(`字段 ${field} 精确匹配次数不符：expectedMatches=${String(raw.expectedMatches)}，实际命中=${actual}`);
+        if (actual !== raw.expectedMatches) throw Object.assign(new Error(`字段 ${field} 精确匹配次数不符：expectedMatches=${String(raw.expectedMatches)}，实际命中=${actual}`), { code: "EDIT_TARGET_MISMATCH", field, expectedMatches: raw.expectedMatches, actualMatches: actual });
         summary.matchCount += actual;
         summary.byField[field] = (summary.byField[field] || 0) + actual;
         for (const { cell, parts } of replacements) {

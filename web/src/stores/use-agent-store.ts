@@ -42,6 +42,8 @@ export type AgentConversationState = {
 };
 export type AgentPanelTab = "chat" | "setup" | "history" | "skills" | "log";
 export type AgentCreativeLaunch = { id: string; mode: "asset" | "drama"; text: string; phase: "reset" | "resetting" | "send" | "sending" };
+export type AgentScopedTask = { id: string; text: string; threadId?: string; productionId: string; revision: number; engineRuntimeId: string };
+export type AgentScopedTaskResult = { id: string; status: "sent" | "failed"; threadId?: string; error?: string };
 
 let agentSource: EventSource | null = null;
 
@@ -51,6 +53,8 @@ type AgentStore = {
     panelMounted: boolean;
     panelClosing: boolean;
     creativeLaunch: AgentCreativeLaunch | null;
+    scopedTask: AgentScopedTask | null;
+    scopedTaskResult: AgentScopedTaskResult | null;
     canvasContext: AgentCanvasContext | null;
     url: string;
     token: string;
@@ -119,6 +123,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     panelMounted: true,
     panelClosing: false,
     creativeLaunch: null,
+    scopedTask: null,
+    scopedTaskResult: null,
     canvasContext: null,
     url: getBackendUrl().replace(/\/$/, "") + "/agent",
     token: "",

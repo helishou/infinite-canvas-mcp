@@ -56,6 +56,7 @@ import {
 import { CanvasDraftSessionLeases } from "./canvas/draft-session-leases.js";
 import { registerMcpObservabilityRoutes } from "./server/mcp-observability-routes.js";
 import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
+import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 
 const logger = createLogger("backend");
 
@@ -480,6 +481,22 @@ export function startServer(
     res.json({ ok: true, projects });
   });
   app.get("/canvas/projects/:id", (req, res) => {
+    if (req.query.view === "nodes") {
+      let nodeIds: string[] = [];
+      try {
+        const parsed = JSON.parse(String(req.query.nodeIds || "[]"));
+        if (!Array.isArray(parsed) || parsed.some(value => typeof value !== "string")) return void res.status(400).json({ ok: false, error: "nodeIds 必须是字符串数组" });
+        nodeIds = parsed;
+      } catch { return void res.status(400).json({ ok: false, error: "nodeIds JSON 无效" }); }
+      const project = db.getCanvasProjectNodeSnapshot(req.params.id, nodeIds);
+      if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
+      return void res.json({ ok: true, project });
+    }
+    if (req.query.view === "selection") {
+      const project = db.getCanvasProjectNodeSnapshot(req.params.id, undefined, true);
+      if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
+      return void res.json({ ok: true, project });
+    }
     if (req.query.view === "index") {
       const rawRevision = req.query.ifRevision;
       const ifRevision = typeof rawRevision === "string" && /^\d+$/.test(rawRevision) ? Number(rawRevision) : undefined;
@@ -495,6 +512,30 @@ export function startServer(
         : db.getCanvasProject(req.params.id);
     if (!project)
       return void res.status(404).json({ ok: false, error: "画布不存在" });
+    res.json({ ok: true, project });
+  });
+  app.get("/canvas/projects/:id/h3-context", (req, res) => {
+    const nodeId = String(req.query.nodeId || "");
+    if (!nodeId) return void res.status(400).json({ ok: false, error: "nodeId 必填" });
+    let sourceNodeIds: string[] = [], assetIds: string[] = [];
+    try {
+      const parseIds = (value: unknown) => {
+        const parsed = JSON.parse(typeof value === "string" ? value : "[]");
+        if (!Array.isArray(parsed) || parsed.some(item => typeof item !== "string")) throw new Error("must be string array");
+        return parsed as string[];
+      };
+      sourceNodeIds = parseIds(req.query.sourceNodeIds);
+      assetIds = parseIds(req.query.assetIds);
+    } catch { return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "sourceNodeIds 和 assetIds 必须是字符串数组 JSON" }); }
+    const project = db.getCanvasProjectH3Context(req.params.id, nodeId, typeof req.query.segmentId === "string" ? req.query.segmentId : undefined, { sourceNodeIds, assetIds });
+    if (!project || !Array.isArray(project.nodes) || !project.nodes.length) return void res.status(404).json({ ok: false, error: "H3 节点不存在" });
+    res.json({ ok: true, project });
+  });
+  app.get("/canvas/projects/:id/h3-node-summary", (req, res) => {
+    const nodeId = String(req.query.nodeId || "");
+    if (!nodeId) return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "nodeId 必填" });
+    const project = db.getCanvasH3NodeSummary(req.params.id, nodeId);
+    if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
     res.json({ ok: true, project });
   });
   app.post("/canvas/projects/:id/sync-character-assets", (req, res) => {
@@ -612,6 +653,33 @@ export function startServer(
         });
     }
   });
+  app.post("/mcp/commands/:operationId/prepare", (req, res) => {
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : {};
+    const tool = String(body.tool || ""), targetId = String(body.targetId || "");
+    if (!["canvas_apply_ops", "h3_update_clips", "assets_add", "assets_upsert_batch"].includes(tool) || !targetId || !body.request || typeof body.request !== "object" || !body.payload || typeof body.payload !== "object")
+      return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "冻结命令参数不完整或工具不支持" });
+    try {
+      const command = db.prepareMcpCommand({ operationId: String(req.params.operationId), tool, targetId, projectId: typeof body.projectId === "string" ? body.projectId : undefined, request: body.request, payload: body.payload as Record<string, unknown>, receipt: body.receipt && typeof body.receipt === "object" ? body.receipt as Record<string, unknown> : {} });
+      res.json({ ok: true, command });
+    } catch (error) {
+      const value = error as Error & { code?: string };
+      res.status(value.code === "OPERATION_ID_REUSED" ? 409 : 400).json({ ok: false, code: value.code || "INVALID_INPUT", error: value.message });
+    }
+  });
+  app.get("/mcp/commands/:operationId", (req, res) => {
+    res.json({ ok: true, command: db.getMcpCommandReceipt(String(req.params.operationId)) });
+  });
+  app.post("/mcp/commands/:operationId/check", (req, res) => {
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : {};
+    if (typeof body.tool !== "string" || typeof body.targetId !== "string" || !body.request || typeof body.request !== "object") return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "命令身份参数不完整" });
+    try {
+      const command = db.getMcpCommandReceipt(String(req.params.operationId), { tool: body.tool, targetId: body.targetId, projectId: typeof body.projectId === "string" ? body.projectId : undefined, request: body.request });
+      res.json({ ok: true, command });
+    } catch (error) {
+      const value = error as Error & { code?: string };
+      res.status(value.code === "OPERATION_ID_REUSED" ? 409 : 400).json({ ok: false, code: value.code || "INVALID_INPUT", error: value.message });
+    }
+  });
   app.get("/canvas/projects/:id/ops/:operationId/receipt", (req, res) => {
     if (db.getCanvasProjectRevision(req.params.id) === null)
       return void res.status(404).json({ ok: false, error: "画布不存在" });
@@ -642,6 +710,9 @@ export function startServer(
           ...(req.body?.baseRevision !== undefined
             ? { baseRevision: Number(req.body.baseRevision) }
             : {}),
+          ...(req.body?.mcpCommand && typeof req.body.mcpCommand === "object"
+            ? { mcpCommand: req.body.mcpCommand as { tool: string; targetId: string; request: unknown } }
+            : {}),
         },
       );
       res.json({
@@ -665,11 +736,13 @@ export function startServer(
         committed?: boolean;
         snapshotAvailable?: boolean;
       };
+      if (req.body?.mcpCommand && typeof req.body.mcpCommand === "object") db.rejectMcpCommand(operationId, value.code || "MCP_COMMAND_REJECTED", value.message);
       if (
         [
           "REVISION_CONFLICT",
           "FIELD_CONFLICT",
           "OPERATION_ID_REUSED",
+          "MCP_COMMAND_MISMATCH",
           "RECEIPT_UNAVAILABLE",
           "TEXT_DOCUMENT_REPLACED",
           "TEXT_CONFLICT",
@@ -684,6 +757,8 @@ export function startServer(
             error: value.message,
             projectId: req.params.id,
             revision: value.revision,
+            expectedRevision,
+            actualRevision: value.revision,
             project: value.project,
             conflictTargets: value.conflictTargets,
             committed: value.committed,
@@ -1069,6 +1144,9 @@ export function startServer(
 
   // ── Assets ───────────────────────────────────────────────────────────
   app.get("/canvas/assets", (req, res) => {
+    if (req.query.view === "summary") {
+      return void res.json({ ok: true, ...db.listAssetsPage({ kind: req.query.kind as string | undefined, keyword: req.query.keyword as string | undefined, page: Number(req.query.page) || 1, pageSize: Number(req.query.pageSize) || 20 }) });
+    }
     const kind = req.query.kind as string | undefined;
     const folderId = req.query.folderId as string | undefined;
     const dramaId = req.query.dramaId as string | undefined;
@@ -1077,6 +1155,28 @@ export function startServer(
       assets: stores.assets.list({ kind, folderId, dramaId }),
       folders: stores.assets.folders(),
     });
+  });
+  app.get("/canvas/assets/:id", (req, res) => {
+    const asset = db.getAsset(String(req.params.id));
+    if (!asset) return void res.status(404).json({ ok: false, code: "ASSET_NOT_FOUND", error: "素材不存在" });
+    res.json({ ok: true, asset });
+  });
+  app.post("/canvas/assets/mcp-upsert-batch", (req, res) => {
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : {};
+    if (!Array.isArray(body.assets) || !body.request || typeof body.request !== "object" || typeof body.operationId !== "string" || typeof body.tool !== "string")
+      return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "素材命令参数不完整" });
+    try {
+      const receipt = db.commitMcpAssetCommand({ operationId: body.operationId, tool: body.tool, request: body.request, assets: body.assets as Asset[] });
+      const assetIds = Array.isArray(receipt.assetIds) ? receipt.assetIds.map(String) : [];
+      if (receipt.replayed === false) for (const id of assetIds) {
+        const asset = db.getAsset(id);
+        if (asset) events.publish({ type: "asset.updated", entityId: id, payload: redactInlineMedia(asset) });
+      }
+      res.json(receipt);
+    } catch (error) {
+      const value = error as Error & { code?: string };
+      res.status(value.code === "OPERATION_ID_REUSED" ? 409 : 400).json({ ok: false, code: value.code || "MCP_COMMAND_REJECTED", error: value.message });
+    }
   });
   app.put("/canvas/assets", (req, res) => {
     const body = req.body as { assets?: Asset[]; folders?: AssetFolder[] };

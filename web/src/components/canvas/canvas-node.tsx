@@ -20,7 +20,7 @@ import { useCanvasNodePreview } from "@/lib/canvas/canvas-drag-preview";
 import { ensureVideoPreview, getVideoPreviewRevision, subscribeVideoPreview, videoPreviewUrlFor } from "@/lib/canvas/canvas-video-frame";
 import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupLayout } from "@/lib/canvas/ordered-group";
-import { hasRenderableCanvasImage } from "@/lib/canvas/canvas-image-renderability";
+import { canvasNodeImage, hasRenderableCanvasImage } from "@/lib/canvas/canvas-image-renderability";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
@@ -145,10 +145,8 @@ function overviewImageForNode(node: CanvasNodeData): OverviewImage | undefined {
     const images = node.metadata?.images || [];
     const primary = images.find((image) => image.id === node.metadata?.primaryImageId) || images[0];
     if (primary) return primary;
-    if (node.type === CanvasNodeType.Image && (node.metadata?.content || node.metadata?.storageKey)) {
-        return { content: node.metadata?.content || "", storageKey: node.metadata?.storageKey, naturalWidth: node.metadata?.naturalWidth || 0, naturalHeight: node.metadata?.naturalHeight || 0 };
-    }
-    return undefined;
+    // Backend 单图结果可直接存于智能节点 metadata，概览与完整视图使用同一解析。
+    return canvasNodeImage(node) || undefined;
 }
 
 function overviewSummary(node: CanvasNodeData) {

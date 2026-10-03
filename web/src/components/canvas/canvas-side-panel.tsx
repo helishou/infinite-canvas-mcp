@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
+import { App, Empty, Input, Popconfirm, Select, Spin, Tag, type InputRef } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, ListChecks, ListRestart, MapPinned, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
@@ -9,7 +9,8 @@ import { useTranslation } from "react-i18next";
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { findCharacterVoiceAsset, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
-import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { canvasNodeSearchText } from "@/lib/canvas/canvas-navigation";
+import { getNodeDefinition, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
 import { CustomPromptDialog } from "@/components/prompts/custom-prompt-dialog";
@@ -70,8 +71,13 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
     const panelOpen = useCanvasSidePanelStore((state) => state.panelOpen);
     const panelMounted = useCanvasSidePanelStore((state) => state.panelMounted);
     const panelClosing = useCanvasSidePanelStore((state) => state.panelClosing);
+    const nodeSearchFocusRequest = useCanvasSidePanelStore((state) => state.nodeSearchFocusRequest);
     const setWidth = useCanvasSidePanelStore((state) => state.setWidth);
     const [resizing, setResizing] = useState(false);
+
+    useEffect(() => {
+        if (nodeSearchFocusRequest > 0) setTab("canvas");
+    }, [nodeSearchFocusRequest]);
 
     const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
         event.preventDefault();
@@ -117,7 +123,7 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onSelectionChange={onSelectionChange} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} theme={theme} />
+                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onSelectionChange={onSelectionChange} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} theme={theme} focusSearchRequest={nodeSearchFocusRequest} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab projectId={projectId} onInsert={onInsertAsset} theme={theme} />
                     ) : (
@@ -176,9 +182,10 @@ function imageCoverForNode(node: CanvasNodeData) {
     return undefined;
 }
 
-const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, onSelectionChange, onFocusNode, onPreviewNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onSelectionChange: (ids: Set<string>) => void; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme }) {
+const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, onSelectionChange, onFocusNode, onPreviewNode, theme, focusSearchRequest }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onSelectionChange: (ids: Set<string>) => void; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme; focusSearchRequest: number }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
+    const registryVersion = useNodeRegistryVersion((state) => state.version);
     const [keyword, setKeyword] = useState("");
     const [typeFilter, setTypeFilter] = useState<string>("all");
     const [selectMode, setSelectMode] = useState(false);
@@ -186,11 +193,17 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
     const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
     const [exporting, setExporting] = useState(false);
     const listRef = useRef<HTMLDivElement>(null);
+    const searchInputRef = useRef<InputRef>(null);
 
     const filtered = useMemo(() => {
-        const query = keyword.trim().toLowerCase();
-        return nodes.filter((node) => matchesNodeTypeFilter(node, typeFilter) && (!query || [node.title, node.metadata?.content, node.metadata?.prompt].filter(Boolean).join(" ").toLowerCase().includes(query)));
-    }, [nodes, keyword, typeFilter]);
+        const query = keyword.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+        return nodes.filter((node) => {
+            if (!matchesNodeTypeFilter(node, typeFilter)) return false;
+            const typeLabel = t(`canvas.sidePanel.filter.${node.type}`, { defaultValue: getNodeDefinition(node.type)?.title || node.type });
+            const searchText = canvasNodeSearchText(node, typeLabel);
+            return query.every((word) => searchText.includes(word));
+        });
+    }, [nodes, keyword, typeFilter, registryVersion, t]);
     const treeRows = useMemo(() => {
         const filteredIds = new Set(filtered.map((node) => node.id));
         const groups = new Set(nodes.filter((node) => node.type === CanvasNodeType.Group).map((node) => node.id));
@@ -213,6 +226,15 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
         estimateSize: () => 52,
         overscan: 8,
     });
+
+    useEffect(() => {
+        if (!focusSearchRequest) return;
+        const frame = requestAnimationFrame(() => {
+            searchInputRef.current?.focus({ cursor: "all" });
+            useCanvasSidePanelStore.getState().clearNodeSearchFocusRequest(focusSearchRequest);
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [focusSearchRequest]);
 
     const exitSelect = () => {
         setSelectMode(false);
@@ -264,7 +286,7 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                 {selectMode ? null : <Select size="small" variant="borderless" className="w-20" value={typeFilter} onChange={setTypeFilter} options={NODE_FILTER_VALUES.map((value) => ({ value, label: value === "all" ? t("common.all") : t(`canvas.sidePanel.filter.${value}`) }))} />}
             </div>
             <div className="px-3 pb-2.5">
-                <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+                <Input ref={searchInputRef} size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} aria-label={t("canvas.navigation.searchLabel")} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} onPressEnter={() => { if (filtered[0]) onFocusNode(filtered[0].id); }} />
             </div>
             <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 {treeRows.length ? (

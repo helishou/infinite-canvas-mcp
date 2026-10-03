@@ -14,6 +14,7 @@
     "./runtime-fields": "./dist/canvas/runtime-fields.js",
     "./drama/production-contract": "./dist/drama/production-contract.js",
     "./skills/acheng": "./dist/skills/acheng.js",
+    "./drama/production-validation": "./dist/drama/production-validation.js",
     "./operations": "./dist/canvas/operations.js",
     "./generation-contract": "./dist/canvas/generation-contract.js",
     "./generation-api": "./dist/canvas/generation-api.js",

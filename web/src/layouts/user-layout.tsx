@@ -4,6 +4,7 @@ import { BackendBanner } from "@/components/backend-banner";
 import { AgentPanel } from "@/components/agent/agent-panel";
 import { AppTopNav } from "@/components/layout/app-top-nav";
 import { CanvasStorageBanner } from "@/components/canvas/canvas-storage-banner";
+import { ProductionFollowController } from "@/components/production/production-follow-controller";
 
 export default function UserLayout({ children }: { children: ReactNode }) {
     return (
@@ -15,6 +16,7 @@ export default function UserLayout({ children }: { children: ReactNode }) {
                 <div className="min-h-0 flex-1 overflow-auto">{children}</div>
             </div>
             <AgentPanel />
+            <ProductionFollowController />
         </div>
     );
 }

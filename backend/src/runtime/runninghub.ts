@@ -224,6 +224,7 @@ export class RunningHubBackend {
                 if (value === undefined) throw new Error(`H3 参数 ${field.paramKey || "(未指定)"} 没有值，请调整 RunningHub 映射`);
             } else if (source === "image" || source === "video" || source === "audio") {
                 const index = field.index === undefined ? cursors[source]++ : field.index - 1;
+                cursors[source] = Math.max(cursors[source], index + 1);
                 const file = media[source][index];
                 if (!file) {
                     if (field.required) throw new Error(`RunningHub 参数「${field.label || field.fieldName}」缺少${source}素材 ${index + 1}`);
@@ -242,7 +243,10 @@ export class RunningHubBackend {
             values.push({ nodeId: String(field.nodeId), fieldName: field.fieldName, fieldValue: value });
         }
         if (task.input.prompt && !hasPrompt) throw new Error("RunningHub 工作流没有启用 H3 提示词映射");
-        for (const kind of ["image", "video", "audio"] as const) if (used[kind].size !== media[kind].length) throw new Error(`RunningHub ${kind}输入映射未覆盖本轮全部 ${media[kind].length} 个参考素材`);
+        for (const kind of ["image", "video", "audio"] as const) {
+            const supplied = media[kind].filter(Boolean).length;
+            if (used[kind].size !== supplied) throw new Error(`RunningHub ${kind}输入映射未覆盖本轮全部 ${supplied} 个参考素材`);
+        }
         return values;
     }
     private async upload(file: string, config: RunConfig, signal: AbortSignal) {

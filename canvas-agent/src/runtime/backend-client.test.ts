@@ -1,9 +1,22 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { BackendClient, BackendClientError } from "./backend-client.js";
+import { createBackendClient } from "./comfy-client.js";
 
 const client = new BackendClient("http://backend.test", "test-token");
+
+test("createBackendClient reads the Backend token from its configured data directory", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "canvas-backend-client-config-"));
+  try {
+    fs.writeFileSync(path.join(directory, "backend.json"), JSON.stringify({ token: "isolated-data-dir-token" }));
+    assert.equal(createBackendClient("http://backend.test", { INFINITE_CANVAS_DATA_DIR: directory }).backendToken, "isolated-data-dir-token");
+    assert.equal(createBackendClient("http://backend.test", { INFINITE_CANVAS_DATA_DIR: directory, INFINITE_CANVAS_BACKEND_TOKEN: "env-token" }).backendToken, "env-token");
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
 
 async function withFetch(
   implementation: typeof fetch,

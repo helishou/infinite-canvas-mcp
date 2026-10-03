@@ -40,6 +40,14 @@ export function RunningHubPanel() {
         <h2 className="mb-2 text-sm font-semibold">RunningHub · H3</h2>
         <p className="mb-4 text-xs text-stone-500">{t("runningHub.description")}</p>
         {error && <Alert type="error" showIcon message={error} className="mb-4" />}
+        <div className="mb-4 rounded-md border border-stone-200 bg-stone-50 p-3 dark:border-stone-800 dark:bg-stone-950/40">
+            <div className="mb-1 text-xs font-semibold">{t("runningHub.invite")}</div>
+            <p className="mb-2 text-xs text-stone-500">{t("runningHub.inviteHint")}</p>
+            <div className="flex flex-wrap gap-2">
+                <Button size="small" href="https://www.runninghub.cn?inviteCode=lm9odavp" target="_blank" rel="noopener noreferrer">{t("runningHub.inviteChina")}</Button>
+                <Button size="small" href="https://www.runninghub.ai?inviteCode=rxnab3lr" target="_blank" rel="noopener noreferrer">{t("runningHub.inviteGlobal")}</Button>
+            </div>
+        </div>
         <Form layout="vertical" requiredMark={false} disabled={busy || !loaded}>
             <div className="grid gap-x-4 md:grid-cols-2">
                 <Form.Item label={t("runningHub.site")}><Select aria-label={t("runningHub.site")} value={config.baseUrl} onChange={(baseUrl) => patch({ baseUrl })} options={[{ value: "https://www.runninghub.ai", label: t("runningHub.global") }, { value: "https://www.runninghub.cn", label: t("runningHub.china") }]} /></Form.Item>

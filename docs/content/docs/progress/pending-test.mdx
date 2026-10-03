@@ -5,6 +5,60 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Production contracts and read-only preflight
+
+- HTTP MCP `tools/list` should expose the complete production operation union. `production_get_contract` accepts a pinned runtimeId and an optional operationType and returns schemas, valid examples and source templates. Unknown runtimes must not fall back.
+- Call `canvas_preflight_production` or `drama_preflight_production` with action and the original formal request. Invalid brief types, missing entity, invalid module states, missing patch targets and malformed source fields should return diagnostic paths. Preflight must not change revision, receipts, tasks or execution authorization.
+- Incomplete planning drafts remain editable; publication and generation enforce their own requirements. A revision change after preflight must still reject the stale formal request. Formal request replay remains idempotent.
+- After building the shared package, run `node scripts/acheng/preflight.mjs director.json edit` for offline checks; publish/generate stages are also supported. Online ownership and model configuration remain unverified, so offline checks cannot establish generation readiness. Canvas exports retain preflight.json and compiler diagnostics.
+- Build and activate the new compatibility runtime through the runtime manager. Ref2VA prompts above 2900 words should retain all bytes and pass length checks when their minimum detail requirements are met. Existing productions retain their pinned runtime and receipts until an explicit upgrade and recompilation. No shot, Segment grouping or generated media is changed.
+
+
+## Smart image thumbnails in canvas overview
+
+- Zoom out a canvas with completed smart image nodes whose single result is stored directly on the node. Confirm overview shows their images alongside ordinary image and batch nodes, and zooming back in preserves the same result.
+
+## MCP v2 write receipts and query behavior
+
+- Through HTTP MCP `initialize` and `tools/list`, verify versioned schemas require stable `operationId` for `canvas_apply_ops`, inline `h3_update_clips`, `assets_add` and `assets_upsert_batch`; inline H3 edits also require `expectedRevision`. `preparedId` continues to own its frozen ID and rejects an override.
+- Submit each write twice with the same ID and request, then reuse the ID with changed content. Confirm one canvas revision/asset write, a compact replay receipt, and `OPERATION_ID_REUSED` for changed content. Interrupt and reopen Backend during a prepared/committed command; recover through `mcp_get_command_receipt` without resubmitting generation.
+- Confirm invalid asset batches roll back every row. Check that success responses omit full project snapshots, image data URLs and long prompts; use `assets_get` for one explicit full asset.
+- Confirm `assets_list` defaults to 20 metadata-only rows, supports complete filtered paging and stable ordering, and matches Chinese plus literal `%`/`_` searches. Canvas node selection and `nodeIds` should return only requested node data and touching connections.
+- Compare H3 summary/reference compilation from a full project with its scoped Clip context, including derived character outfits and missing assets. A summary/runtime read should skip compilation; adding `include:prompt` or `include:references` should compile once and include the project revision.
+- Cancel `canvas_wait_tasks` during initial read, SSE wait and polling; the call must stop promptly and leave the task running. Cover ordinary tasks, H3 tasks, SSE disconnect fallback, terminal events, exact task IDs and a deadline that spans reconnects. Verify overlapping plugin declaration polls never apply the same registry concurrently.
+- Check `mcp_observability_report` defaults to a compact summary, filters by date/tool, and only returns daily/transition detail for `view=full`. The report must show the process instance, MCP contract version, loaded H3 version and tool schema hash.
+- Run `node ../scripts/benchmark-mcp-v2.mjs` from `backend` on the same machine; the script runs three rounds per scenario and writes an `artifacts/mcp-v2-performance-*.json` before/after report for 200/500/1000 node projects and 100/1000/10000 assets. This measures local SQLite/projection work; it is not provider or model latency.
+
+Legacy MCP clients must generate an operation ID once before sending and retain the identical request for recovery. After a timeout, look up the receipt before retrying; never switch IDs for the same intent. Minimal request:
+
+```json
+{
+  "name": "canvas_apply_ops",
+  "arguments": {
+    "projectId": "project-id",
+    "operationId": "client-generated-stable-id",
+    "expectedRevision": 12,
+    "ops": [{ "type": "update_node", "id": "node-id", "patch": { "title": "New title" } }]
+  }
+}
+```
+
+Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` mode sends only its handle and cannot override its ID. Both `assets_add` and `assets_upsert_batch` require a stable `operationId`. If `mcp_get_command_receipt` returns `snapshotAvailable:false`, the original commit is still confirmed; reread the authoritative Backend project and do not replay the write.
+
+### Isolated verification record (2026-10-03)
+
+- Backend MCP/H3/assets/migration/cancellation tests passed 78/78; Agent/H3/BackendClient/declaration-registry tests passed 73/73. Two independent HTTP MCP sessions both discovered the v2 tools and read the same committed receipt. The isolated stdio MCP entrypoint also passed, reading asset summaries and receipts from its configured temporary Backend. Backend, canvas-agent, the H3 plugin distribution, Web typecheck and Web production build all passed. The isolated Backend/Vite/Chromium collaboration page passed, including a v2 H3 Clip write reaching the real canvas store through the Backend broadcast. No production database was migrated and no resident service was restarted.
+- The real-page benchmark used Chromium at 1600×1000 for three runs per node count, with 24 content updates, 5% zoom, continuous pan, zoom and the H3 panel mounted. The left value is a test-only control that rebuilds indexes on each content change; the right value is the current selector. Frame interval P95 is in milliseconds; all metrics are medians across the three runs.
+
+| Nodes | Frame interval P95 control→current | Long tasks control→current | Long-task time ms control→current | Backend ops P95 ms control→current |
+| ---: | ---: | ---: | ---: | ---: |
+| 200 | 16.8→16.8 | 8→8 | 659→676 | 25.0→20.1 |
+| 500 | 50.0→33.4 | 13→13 | 1574→1574 | 22.2→23.2 |
+| 1000 | 83.4→83.4 | 83→99 | 6818→7914 | 36.2→30.2 |
+
+- Across 24 content-only updates, the control rebuilt each spatial/topology index 48 times; the current selector rebuilt none. Frame P95 improved about 33% at 500 nodes and stayed level at 200; 1000-node frame P95 did not improve and long tasks increased. Index reuse does not resolve the large-canvas bottleneck by itself. These measurements use Vite development pages and fixed local data, not production-build frame rates.
+- Page results and screenshots are in `artifacts/browser-tests/performance-1791002071520/` (rebuild control) and `artifacts/browser-tests/performance-1791002189450/` (current selector). The Backend SQLite/projection comparison is in `artifacts/mcp-v2-performance-2026-10-03T04-03-08-528Z.json`; the stdio smoke run is in `artifacts/browser-tests/mcp-stdio-1791002623961/`.
+
 ## Canvas plugin manager cleanup
 
 - Verify the manager shows only the Official and Third-party tabs and startup no longer requests `/plugins/index.json`.
@@ -18,6 +72,12 @@ description: Implemented changes that still need manual verification
 - Run H3 in Local, RunningHub and Automatic modes. Automatic routing prefers an available local slot, uses RunningHub when local ComfyUI is unavailable or its single H3 slot is occupied, and queues when the selected capacity is full. Verify local H3 concurrency stays at one and RunningHub respects its configured limit across canvas and MCP callers.
 - Verify Motion Context and staged confirmation stay on local ComfyUI; cancel queued and submitted tasks, restart Backend while each provider is queued/running, and confirm there is no duplicate RunningHub submission.
 - Verify a completed cloud task downloads and archives its video into Backend media and writes it to the original Clip. A RunningHub account queue rejection must remain a visible failure and must not be retried automatically.
+
+## RunningHub workflows in ComfyUI page
+
+- Add more than one RunningHub workflow ID from the ComfyUI → RunningHub Workflows tab. Verify each saved profile retains its own node input mappings and instance type after switching tabs and reloading. The API Key remains shared with the H3 RunningHub settings in Runtime.
+- Map text, constant, and image/video/audio inputs; leave unrelated workflow links disabled. Run with mapped values and with the workflow's defaults, then verify each task is queued under the shared RunningHub limit, image/video/audio or text outputs are retained, and history remains scoped to its workflow profile.
+- Cancel a queued and a submitted workflow task. Restart Backend with a RunningHub workflow active and confirm it resumes by the saved remote task ID without running H3 Clip writeback.
 
 
 ## Self-hosted deployment and portability
@@ -2193,3 +2253,22 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - 在 ComfyUI 已启动且 moyou 自动色阶节点可用时，对画布图片点击「自动色阶」；确认 Backend 提交任务后，在原图右侧创建并连接一个结果图片节点，原图保持不变。
 - 确认结果节点只包含色阶校正后的图片，不额外创建直方图或前后对比图；刷新画布后结果仍可读取。
 - 使用已有图片工具栏自定义配置的用户刷新画布后，确认「自动色阶」已加入工具栏，之后仍可自行隐藏或显示。
+
+## Acheng object-oriented Director Workbench
+
+- Confirm the only production entry opens one object browser with Canvas Projects and Series & Episodes views, and the idea-first creative entry appears there rather than in the Canvas library. Legacy `/director` and `/drama` paths should open the matching view; opening an object's workbench and then its Canvas must retain the same project, and the workbench Back action should return to the originating object view.
+- After the creative conversation confirms and creates or selects an object, verify Agent navigates to `/director/<projectId>` for an independent asset project or `/drama/episodes/<episodeId>/production` for a drama episode. It must not default to `/canvas/:id`; a direct Canvas visit remains available when the user explicitly requests media operations.
+- Advance story, assets, shots, model and continuity targets and confirm `currentWork` and `pendingDecisions` bind the formal workId/sourceHash. Save a user's answer before continuing; readiness must direct the UI to the correct workspace, production node or Clip.
+- Edit STYLE_MOTHER, style policy, asset versions and dependencies and confirm only related outputs are blocked. Original image review must load successfully before approval actions appear; audio/video references use their respective media players, and upload-card labels match actual input ordering.
+- Review the frame-based Shot/Segment timeline and expanded dialogue, performance and effects facts. Navigate by Shot/Segment ID and confirm exact dialogue is preserved.
+- Preview archived H3 results and export prompts, real reference copies, target upload cards and receipts bound to a fixed revision/engine. Partial exports must list missing inputs and remain marked incomplete.
+- With Agent credentials saved but disconnected, submit an idea once. Confirm the same request waits through connection, thread initialization and creative-skill loading before sending once; a missing credential or failed connection preserves the idea and reports the reason. No image or video task should be submitted.
+- Open the same production from Director Studio, an independent canvas, and an episode. Confirm the Overview, Story, Style & Assets, Shots & Segments, Production & Delivery, and Advanced & History workspaces share one Backend record; Acheng's seven modules remain roles rather than sequential gates.
+- Save a brief and confirm `source.brief` is written to the formal revision before a scoped Agent request is sent. Save partial work before canvas binding or a complete shot plan; verify structured edits preserve unknown Acheng fields and readiness names the exact missing dependency.
+- Edit scene text and exact dialogue, asset descriptions, shot visuals/camera/timing, and adjacent Segment continuity. Verify a Segment can hold multiple adjacent Shots, stays within 4–15 seconds, and does not compress dialogue or action. Tail-frame reference and Motion Context must toggle independently.
+- Review the archived image itself and approve or return it with evidence. Verify a stale production version, wrong node, storage key, or SHA-256 is rejected, and related targets remain blocked until the current media version is approved.
+- Publish a Director version and confirm publishing does not start generation. Switch content delivery independently from media production; only the explicit per-item Generate or Start Automatic action creates a run. Check the batch fixes its runId, scope, settings, task IDs and engine version.
+- Pause and resume the same runId; confirm an idempotent start does not duplicate tasks and a failed task requires an explicit new runId to regenerate. Exercise all four tail-frame/Motion Context combinations and verify a Motion Context group runs as one bounded chain from its head when latent cannot be reused.
+- Confirm the next Segment may receive a tail-frame still, but never an automatically submitted previous MP4. An explicitly selected ordinary video reference remains available. Keep full prompts and actual references visible in Production & Delivery.
+- Type a chat message and retain an attachment/reference, then launch a scoped Director task. Verify the workbench sends a separate request without clearing composer content, associates the resulting conversation, and stops with a useful reason when Agent is disconnected or busy.
+- In Advanced & History, inspect legacy text read-only, ask the director to connect it to Acheng without regenerating historical media, import/edit JSON and restore a prior revision. Check Chinese and English on desktop and mobile.

@@ -42,6 +42,20 @@ async function fixture(t: TestContext) {
     api.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [{ id: "minimax-h3", enabled: true, version: KNOWN_FIRST_PARTY["minimax-h3"].version, tools: [] }] }));
     api.post("/mcp/observability/events", (req, res) => { events.push(req.body); res.json({ ok: true }); });
     api.get("/canvas/projects/:id", (req, res) => res.json({ ok: true, project: db.getCanvasProject(req.params.id) }));
+    api.get("/canvas/projects/:id/h3-context", (req, res) => {
+        const parseIds = (value: unknown) => {
+            try { const parsed = JSON.parse(typeof value === "string" ? value : "[]"); return Array.isArray(parsed) && parsed.every(item => typeof item === "string") ? parsed as string[] : []; }
+            catch { return []; }
+        };
+        const project = db.getCanvasProjectH3Context(req.params.id, String(req.query.nodeId || ""), typeof req.query.segmentId === "string" ? req.query.segmentId : undefined, { sourceNodeIds: parseIds(req.query.sourceNodeIds), assetIds: parseIds(req.query.assetIds) });
+        if (!project) return void res.status(404).json({ ok: false, code: "NODE_NOT_FOUND", error: "H3 节点不存在" });
+        res.json({ ok: true, project });
+    });
+    api.get("/canvas/projects/:id/h3-node-summary", (req, res) => {
+        const project = db.getCanvasH3NodeSummary(req.params.id, String(req.query.nodeId || ""));
+        if (!project) return void res.status(404).json({ ok: false, code: "NODE_NOT_FOUND", error: "H3 节点不存在" });
+        res.json({ ok: true, project });
+    });
     api.get("/tasks/:id", (req, res) => {
         const task = db.getTask(req.params.id);
         if (!task) { res.status(404).json({ ok: false, code: "TASK_NOT_FOUND", error: "task not found" }); return; }
@@ -52,7 +66,10 @@ async function fixture(t: TestContext) {
         writes.push(req.body);
         if (race) { race = false; db.applyCanvasProjectOperations("hardening", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "A", patch: { prompt: "Peer edit" } }]); }
         try { res.json({ ok: true, ...db.applyCanvasProjectOperations(req.params.id, req.body.expectedRevision, req.body.operations, { baseRevision: req.body.baseRevision, operationId: req.body.operationId }) }); }
-        catch (error) { res.status(409).json({ ok: false, code: "REVISION_CONFLICT", error: error instanceof Error ? error.message : String(error) }); }
+        catch (error) {
+            const detail = error as Error & { code?: string; revision?: number; expectedRevision?: number; conflictTargets?: string[] };
+            res.status(detail.code === "REVISION_CONFLICT" ? 409 : 400).json({ ok: false, code: detail.code || "REVISION_CONFLICT", error: detail.message || String(error), ...(detail.revision === undefined ? {} : { revision: detail.revision }), ...(detail.expectedRevision === undefined ? {} : { expectedRevision: detail.expectedRevision }), ...(detail.conflictTargets ? { conflictTargets: detail.conflictTargets } : {}) });
+        }
     });
     const apiServer = api.listen(0, "127.0.0.1"); await once(apiServer, "listening");
     const address = apiServer.address(); if (!address || typeof address === "string") throw new Error("API address missing");
@@ -78,7 +95,7 @@ test("real HTTP declares joint prepare and applies final prompt/character/refere
     const tool = catalog.tools.find((entry) => entry.name === "h3_prepare_clip");
     assert.ok(tool, "a source handler must be exposed through actual MCP registration");
     assert.equal(tool.annotations?.readOnlyHint, false);
-    const result = await f.prepare({ expectedRevision: 0 }); assert.notEqual(result.isError, true);
+    const result = await f.prepare({ expectedRevision: 0 }); assert.notEqual(result.isError, true, JSON.stringify(payload(result)));
     assert.equal(payload(result).revision, 1); assert.equal(f.writes.length, 1);
     assert.equal(f.segments()[0].prompt, "New <Subject 1>");
     assert.equal(Object.keys(f.segments()[0].h3CharacterGroups).length, 1);

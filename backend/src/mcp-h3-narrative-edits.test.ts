@@ -8,6 +8,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { KNOWN_FIRST_PARTY } from "@basketikun/canvas-agent/plugin-mcp";
 import { BackendDatabase } from "./db.js";
 import { registerBackendMcpHttpRoutes } from "./mcp.js";
+import { registerMcpCommandTestRoutes } from "./mcp-command-test-routes.js";
 
 async function fixture(t: TestContext) {
     const db = new BackendDatabase(":memory:");
@@ -33,6 +34,7 @@ async function fixture(t: TestContext) {
     db.onCanvasCommit((commit) => commits.push(commit));
     const api = express();
     api.use(express.json({ limit: "4mb" }));
+    registerMcpCommandTestRoutes(api, db);
     api.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [{ id: "minimax-h3", enabled: true, version: KNOWN_FIRST_PARTY["minimax-h3"].version, tools: [] }] }));
     api.post("/mcp/observability/events", (_req, res) => res.json({ ok: true }));
     api.get("/canvas/projects/:id", (req, res) => res.json({ ok: true, project: db.getCanvasProject(req.params.id) }));
@@ -45,9 +47,9 @@ async function fixture(t: TestContext) {
         const operations = structuredClone(req.body.operations);
         if (failLate) { failLate = false; operations.at(-1).patch.status = "queued"; }
         try {
-            const result = db.applyCanvasProjectOperations(req.params.id, req.body.expectedRevision, operations, { baseRevision: req.body.baseRevision, operationId: req.body.operationId });
+            const result = db.applyCanvasProjectOperations(req.params.id, req.body.expectedRevision, operations, { baseRevision: req.body.baseRevision, operationId: req.body.operationId, ...(req.body.mcpCommand ? { mcpCommand: req.body.mcpCommand } : {}) });
             res.json({ ok: true, ...result });
-        } catch (error) { res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+        } catch (error) { const value = error as Error & { code?: string }; if (req.body.mcpCommand) db.rejectMcpCommand(req.body.operationId, value.code || "MCP_COMMAND_REJECTED", value.message); res.status(409).json({ ok: false, code: value.code, error: value.message }); }
     });
     const apiServer = api.listen(0, "127.0.0.1");
     await once(apiServer, "listening");
@@ -71,7 +73,8 @@ async function fixture(t: TestContext) {
     });
     const edits = () => ["prompt", "openingState", "endingState", "continuityIn", "continuityOut", "timeline[].action"].map((field) => ({ field, find: "golden bell", replace: "thin jade pendant", expectedMatches: field.startsWith("timeline") ? 2 : 1 }));
     const updates = () => Array.from({ length: 10 }, (_, i) => ({ segmentId: `s${i + 1}`, edits: edits() }));
-    const invoke = (changes: unknown = updates(), extra: Record<string, unknown> = {}) => client.callTool({ name: "h3_update_clips", arguments: { projectId: "delta-http", nodeId: "h3", updates: changes, ...extra } });
+    let operationNumber = 0;
+    const invoke = (changes: unknown = updates(), extra: Record<string, unknown> = {}) => client.callTool({ name: "h3_update_clips", arguments: { projectId: "delta-http", nodeId: "h3", updates: changes, operationId: String(extra.operationId || `narrative-op-${++operationNumber}`), expectedRevision: db.getCanvasProject("delta-http")!.revision, ...extra } });
     const segments = () => (db.getCanvasProject("delta-http")!.nodes as any[])[0].metadata.segments;
     const documents = () => (db as any).db.prepare("SELECT target_key, document_id, state FROM canvas_text_documents WHERE project_id = ? ORDER BY target_key").all("delta-http") as Array<{ target_key: string; document_id: string; state: Uint8Array }>;
     return { db, original, commits, writeBodies, client, invoke, updates, segments, documents, race: () => { race = true; }, failLate: () => { failLate = true; } };

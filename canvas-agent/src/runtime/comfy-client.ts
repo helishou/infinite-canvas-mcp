@@ -8,12 +8,22 @@ import type { RuntimeTask, RuntimeTaskEvent } from "./types.js";
 
 export { BackendClientError } from "./backend-client.js";
 
+function configuredDataDirectory(env: Record<string, string | undefined>) {
+    const explicit = env.INFINITE_CANVAS_DATA_DIR?.trim();
+    if (explicit) return path.resolve(explicit);
+    try {
+        const root = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".infinite-canvas-root.json"), "utf8")) as { dataDir?: unknown };
+        if (typeof root.dataDir === "string" && root.dataDir.trim()) return path.resolve(root.dataDir);
+    } catch { /* use the default data directory */ }
+    return path.join(os.homedir(), ".infinite-canvas");
+}
+
 /** 构造 BackendClient（读 backend.json 或环境变量）。 */
 export function createBackendClient(backendUrl: string, env: Record<string, string | undefined> = process.env): BackendClient {
     const token = env.INFINITE_CANVAS_BACKEND_TOKEN
         || (() => {
             try {
-                const file = path.join(os.homedir(), ".infinite-canvas", "backend.json");
+                const file = path.join(configuredDataDirectory(env), "backend.json");
                 return String(JSON.parse(fs.readFileSync(file, "utf8")).token || "");
             } catch { return ""; }
         })();

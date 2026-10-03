@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { KNOWN_FIRST_PARTY } from "@basketikun/canvas-agent/plugin-mcp";
 import { BackendDatabase } from "./db.js";
 import { registerBackendMcpHttpRoutes } from "./mcp.js";
+import { registerMcpCommandTestRoutes } from "./mcp-command-test-routes.js";
 
 async function fixture(t: TestContext) {
     const db = new BackendDatabase(":memory:");
@@ -21,6 +22,7 @@ async function fixture(t: TestContext) {
     let failLast = false;
     const api = express();
     api.use(express.json());
+    registerMcpCommandTestRoutes(api, db);
     api.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [{ id: "minimax-h3", enabled: true, version: KNOWN_FIRST_PARTY["minimax-h3"].version, tools: [] }] }));
     api.post("/mcp/observability/events", (_req, res) => res.json({ ok: true }));
     api.get("/canvas/projects/:id", (req, res) => res.json({ ok: true, project: db.getCanvasProject(req.params.id) }));
@@ -37,10 +39,12 @@ async function fixture(t: TestContext) {
             operations[operations.length - 1].patch.status = "running";
         }
         try {
-            const result = db.applyCanvasProjectOperations(req.params.id, req.body.expectedRevision, operations, { baseRevision: req.body.baseRevision, operationId: req.body.operationId });
+            const result = db.applyCanvasProjectOperations(req.params.id, req.body.expectedRevision, operations, { baseRevision: req.body.baseRevision, operationId: req.body.operationId, ...(req.body.mcpCommand ? { mcpCommand: req.body.mcpCommand } : {}) });
             res.json({ ok: true, ...result });
         } catch (error) {
-            res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+            const value = error as Error & { code?: string };
+            if (req.body.mcpCommand) db.rejectMcpCommand(req.body.operationId, value.code || "MCP_COMMAND_REJECTED", value.message);
+            res.status(409).json({ ok: false, code: value.code, error: value.message });
         }
     });
     const apiServer = api.listen(0, "127.0.0.1");
@@ -65,7 +69,8 @@ async function fixture(t: TestContext) {
         db.close();
     });
     const updates = () => Array.from({ length: 6 }, (_, i) => ({ segmentId: `s${i + 1}`, patch: { title: `new-${i + 1}`, duration: 7 } }));
-    const invoke = (changes: unknown = updates()) => client.callTool({ name: "h3_update_clips", arguments: { projectId: "batch-http", nodeId: "h3", updates: changes } });
+    let operationNumber = 0;
+    const invoke = (changes: unknown = updates(), extra: Record<string, unknown> = {}) => client.callTool({ name: "h3_update_clips", arguments: { projectId: "batch-http", nodeId: "h3", updates: changes, operationId: String(extra.operationId || `batch-op-${++operationNumber}`), expectedRevision: db.getCanvasProject("batch-http")!.revision, ...extra } });
     const segments = () => (db.getCanvasProject("batch-http")!.nodes as any[])[0].metadata.segments;
     return { db, commits, writeBodies, client, invoke, updates, segments, race: () => { race = true; }, failLast: () => { failLast = true; } };
 }
@@ -92,6 +97,8 @@ test("actual MCP HTTP boundary commits six updates in one strict-revision transa
     assert.equal(f.commits.length, 1);
     assert.equal(f.db.getCanvasProject("batch-http")!.revision, 1);
     assert.deepEqual(f.segments().map((segment: any) => segment.duration), [7, 7, 7, 7, 7, 7]);
+    assert.deepEqual(data.segmentIds, f.segments().slice(0, 6).map((segment: any) => segment.id));
+    assert.deepEqual(data.updatedFields, ["title", "duration"]);
     for (let i = 0; i < 6; i++) assert.equal(data.items[i].values.title, f.segments()[i].title);
     assert.ok(Buffer.byteLength(JSON.stringify(data)) < 4096);
 });

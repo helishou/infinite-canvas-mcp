@@ -4,6 +4,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { resolveAchengPython } from '@basketikun/canvas-agent/skills/acheng';
 
 export const UPSTREAM = 'https://github.com/AharaOoO/acheng-director-skill.git';
 const scripts = path.dirname(fileURLToPath(import.meta.url));
@@ -55,12 +56,13 @@ export class AchengEngine {
     run('git', ['fetch', 'origin', 'main'], this.source);
     return run('git', ['rev-parse', 'origin/main'], this.source).trim();
   }
-  update(check = false) { return this.locked(() => {
+  update(check = false, local = false) { return this.locked(() => {
     const old = this.state();
     if (old) this.status();
-    const commit = this.fetch();
+    if (local && !old?.active) throw new Error('Local overlay update requires an activated runtime');
+    const commit = local ? old.active.commit : this.fetch();
     const changes = old ? run('git', ['diff', '--name-only', old.active.commit, commit], this.source).trim().split('\n').filter(Boolean) : ['initial managed installation'];
-    const overlayFiles = ['compat.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py'];
+    const overlayFiles = ['compat.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py'];
     const patchVersion = sha(Buffer.concat(overlayFiles.map(file => fs.readFileSync(path.join(scripts, 'acheng', file))))).slice(0, 16);
     const runtimeId = `${commit}-${patchVersion}`;
     const runtime = path.join(this.base, 'versions', runtimeId);
@@ -71,7 +73,7 @@ export class AchengEngine {
       const archive = path.join(candidate, 'upstream.tar');
       const directory = path.join(candidate, 'skill'); fs.mkdirSync(directory);
       run('git', ['archive', '--format=tar', `--output=${archive}`, commit], this.source);
-      const python = process.env.ACHENG_PYTHON || 'python';
+      const python = resolveAchengPython();
       run(python, ['-B', '-X', 'utf8', '-c', 'import tarfile,sys; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter="data")', archive, directory]);
       const contracts = read(path.join(scripts, 'acheng', 'contracts.json'));
       const changedContracts = [];
@@ -135,7 +137,7 @@ export class AchengEngine {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const engine = new AchengEngine(); const command = process.argv[2] || 'status';
-    const result = command === 'status' ? engine.status() : command === 'update' ? engine.update(process.argv.includes('--check')) : command === 'rollback' ? engine.rollback() : (() => { throw new Error('Use status, update [--check], or rollback'); })();
+    const result = command === 'status' ? engine.status() : command === 'update' ? engine.update(process.argv.includes('--check'), process.argv.includes('--local')) : command === 'rollback' ? engine.rollback() : (() => { throw new Error('Use status, update [--check] [--local], or rollback'); })();
     console.log(JSON.stringify(result, null, 2));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

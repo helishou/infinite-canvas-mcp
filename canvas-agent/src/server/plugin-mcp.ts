@@ -41,6 +41,8 @@ export type PluginMcpContext = {
     backend: PluginMcpBackend;
     /** Read one authoritative canvas snapshot by id. Concurrent H3 reads share only the in-flight fetch. */
     getCanvasProject: (projectId: string) => Promise<Record<string, unknown>>;
+    getCanvasH3Context?: (projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[] }) => Promise<Record<string, unknown>>;
+    getCanvasH3NodeSummary?: (projectId: string, nodeId: string, signal?: AbortSignal) => Promise<Record<string, unknown>>;
     /** ComfyUI 能力（Backend 唯一权威；见 comfy-client.ts）。 */
     comfyUi: ComfyUiClient;
     getCanvasNodes: () => Promise<AgentCanvasNode[]>;
@@ -66,7 +68,12 @@ export type PluginMcpBackend = {
     };
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
     getCanvasProject(projectId: string): Promise<Record<string, unknown>>;
-    applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number, operationId?: string, strictRevision?: boolean): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[]; duplicated?: boolean }>;
+    getCanvasH3Context?(projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[] }): Promise<Record<string, unknown>>;
+    getCanvasH3NodeSummary?(projectId: string, nodeId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
+    prepareMcpCommand(input: { operationId: string; tool: string; targetId: string; projectId?: string; request: unknown; payload: Record<string, unknown>; receipt: Record<string, unknown> }, signal?: AbortSignal): Promise<Record<string, unknown>>;
+    getMcpCommandReceipt(operationId: string, signal?: AbortSignal): Promise<{ ok: boolean; command: Record<string, unknown> | null }>;
+    checkMcpCommandReceipt(operationId: string, identity: { tool: string; targetId: string; projectId?: string; request: unknown }, signal?: AbortSignal): Promise<{ ok: boolean; command: Record<string, unknown> | null }>;
+    applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number, operationId?: string, strictRevision?: boolean, mcpCommand?: { tool: string; targetId: string; request: unknown }, signal?: AbortSignal): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[]; duplicated?: boolean }>;
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
     canvasRunGeneration(input: CanvasGenerationCommand): Promise<{ ok?: boolean } & CanvasGenerationStartResult>;
     getTask(id: string): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;
@@ -76,7 +83,8 @@ export type PluginMcpBackend = {
     resetH3Defaults(): Promise<void>;
 };
 
-export type McpToolHandler = (input: Record<string, unknown>, context: PluginMcpContext) => Promise<unknown>;
+export type McpToolRequest = { signal: AbortSignal };
+export type McpToolHandler = (input: Record<string, unknown>, context: PluginMcpContext, request?: McpToolRequest) => Promise<unknown>;
 
 // 插件 MCP 模块(Backend 侧经 allowlist 加载)
 export type PluginMcpModule = {
@@ -141,6 +149,8 @@ export function buildPluginMcpContext(backend: PluginMcpBackend, comfyUi: ComfyU
     return {
         backend,
         getCanvasProject: (projectId) => readCanvasProjectOnce(backend, projectId),
+        ...(backend.getCanvasH3Context ? { getCanvasH3Context: (projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[] }) => backend.getCanvasH3Context!(projectId, nodeId, segmentId, signal, dependencies) } : {}),
+        ...(backend.getCanvasH3NodeSummary ? { getCanvasH3NodeSummary: (projectId: string, nodeId: string, signal?: AbortSignal) => backend.getCanvasH3NodeSummary!(projectId, nodeId, signal) } : {}),
         comfyUi,
         getCanvasNodes: readNodes,
         getCanvasNode: async (id) => (await readNodes()).find((node) => node.id === id) ?? null,
@@ -298,9 +308,9 @@ export class PluginMcpRegistry {
                 description: tool.description,
                 inputSchema: compiled!.inputSchema,
                 ...(tool.annotations ? { annotations: tool.annotations as never } : {}),
-            }, async (input: Record<string, unknown>) => {
+            }, async (input: Record<string, unknown>, request) => {
                 current.validateInput(input);
-                const result = await current.handler(input, this.context);
+                const result = await current.handler(input, this.context, request);
                 return { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result) }] };
             });
             this.registeredTools.set(tool.id, current);
@@ -328,5 +338,9 @@ export class PluginMcpRegistry {
                 return { id: tool.id, name: tool.name, registered: Boolean(registered?.ownerId === plugin.id), enabled: Boolean(registered?.ownerId === plugin.id && registered.handle.enabled) };
             }),
         }));
+    }
+
+    contractSnapshot() {
+        return [...this.plugins.values()].map(plugin => ({ id: plugin.id, version: plugin.version, enabled: plugin.enabled, tools: plugin.enabled ? plugin.tools : [] }));
     }
 }

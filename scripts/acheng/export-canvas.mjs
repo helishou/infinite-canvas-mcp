@@ -3,6 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { AchengEngine, verifyRuntime } from '../acheng-engine.mjs';
+import { preflightDirector } from './preflight.mjs';
+import { validateAchengSource, resolveAchengPython } from '@basketikun/canvas-agent/skills/acheng';
 
 const [sourceArg, mappingArg, outputArg] = process.argv.slice(2);
 if (!sourceArg || !mappingArg || !outputArg) throw new Error('Usage: node scripts/acheng/export-canvas.mjs production.json canvas-mapping.json NEW_OUTPUT_DIRECTORY');
@@ -13,12 +15,14 @@ if (!active?.path) throw new Error('No activated/pinned Acheng runtime. Run npm 
 const engine = verifyRuntime(active.path);
 const source = JSON.parse(fs.readFileSync(sourceFile, 'utf8'));
 if (JSON.stringify(source).includes('"legacy_fixture"')) throw new Error('Historical fixtures cannot be submitted as new production');
+const sourceDiagnostics = validateAchengSource({ engine, source }, 'edit');
+if (sourceDiagnostics.some(item => item.severity === 'error')) throw new Error(JSON.stringify(sourceDiagnostics));
 if (fs.existsSync(out)) throw new Error('Output already exists; choose a new revision directory');
 fs.mkdirSync(out, { recursive: true });
 const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : value && typeof value === 'object' ? `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}` : JSON.stringify(value);
 const sha = data => crypto.createHash('sha256').update(data).digest('hex');
 const sourceHash = sha(canonical(source));
-const python = process.env.ACHENG_PYTHON || 'python';
+const python = resolveAchengPython();
 const artifactFolder = path.join(out, 'compiled');
 const onlyAssets = !(source.segments?.length);
 try {
@@ -50,11 +54,15 @@ for (const [kind, entries] of [['image', index.asset_prompts || index.assets || 
       return [{ ...binding, label, sha256: digest }];
     });
     artifacts.push({ id: `${kind}-${targetId}`, kind, targetId, prompt, sha256: sha(prompt), sourceHash, status: ready ? 'ready' : 'draft', references,
-      receipt: { sourceHash, promptHash: sha(prompt), engineRuntimeId: engine.runtimeId, validator: onlyAssets ? 'compile_assets/validate_asset_entries' : 'compile_h3/validate_package' } });
+      receipt: { sourceHash, promptHash: sha(prompt), engineRuntimeId: engine.runtimeId, validator: onlyAssets ? 'compile_assets/validate_asset_entries' : 'compile_h3/validate_package',
+        diagnostics: { englishWords: entry.detailed_description_english_words ?? null, detailPolicy: entry.h3_detail_policy ?? null, blockers: entry.blockers || [], formatPass: entry.format_pass || null, accepted: entry.accepted ?? ready } } });
   }
 }
 const director = { schemaVersion: 1, engine: { commit: engine.commit, patchVersion: engine.patchVersion, runtimeId: engine.runtimeId, version: engine.version },
   source, sourceHash, modules: mapping.modules || {}, artifacts, assets: mapping.assets || {}, shotInputs: mapping.shotInputs || {}, boundaries: mapping.boundaries || [],
   executionAuthorized: mapping.executionAuthorized === true, unresolved: mapping.unresolved || [], workflow: mapping.workflow || {} };
+const preflight = preflightDirector(director, 'edit');
+fs.writeFileSync(path.join(out, 'preflight.json'), JSON.stringify(preflight, null, 2));
+if (!preflight.valid) throw new Error(`Canvas export preflight failed; diagnostics retained at ${path.join(out, 'preflight.json')}`);
 fs.writeFileSync(path.join(out, 'director.json'), JSON.stringify(director, null, 2));
 console.log(path.join(out, 'director.json'));

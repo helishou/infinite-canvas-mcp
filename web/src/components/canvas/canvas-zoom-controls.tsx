@@ -63,7 +63,7 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, onFitAll, is
             </div>
             <Modal title={t("canvas.shortcuts")} open={shortcutsOpen} onCancel={() => setShortcutsOpen(false)} footer={null} centered>
                 <div className="space-y-3 border-t pt-4 text-sm" style={{ borderColor: theme.node.stroke }}>
-                    <Shortcut label="Ctrl / Cmd + K" value={t("canvas.navigation.find")} />
+                    <Shortcut label="Ctrl / Cmd + K" value={t("canvas.navigation.searchLabel")} />
                     <Shortcut label="F" value={t("canvas.navigation.focusSelection")} />
                     <Shortcut label="Shift + F" value={t("canvas.navigation.fitAll")} />
                     <Shortcut label={`Ctrl / Space + ${t("canvas.shortcut.drag")}`} value={t("canvas.shortcut.toggleTool")} />

@@ -73,7 +73,7 @@ function startBackendEvents(url: string, token: string) {
             window.dispatchEvent(new CustomEvent("backend-event", { detail: event }));
         } catch { /* SSE 单条消息损坏时交给下一次快照恢复 */ }
     };
-    for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "canvas-folder.updated", "asset.updated", "settings.updated"]) {
+    for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "canvas-folder.updated", "asset.updated", "settings.updated", "drama-production.updated"]) {
         source.addEventListener(eventType, handleMessage);
     }
     source.addEventListener("events.sync", (message) => {
