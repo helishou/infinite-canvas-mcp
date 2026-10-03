@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { syncBundledProductionSkill } from "./skills/bundled.js";
+import { syncBundledProductionSkills } from "./skills/bundled.js";
 
 export const DEFAULT_PORT = 17371;
 export const CONFIG_DIR = process.env.INFINITE_CANVAS_AGENT_CONFIG_DIR
@@ -49,16 +49,16 @@ export function writeConfigFile(dir: string, file: string, config: CanvasAgentCo
 }
 
 /** 确保站点级 Codex 工作空间存在并已初始化。 */
-export function ensureSiteWorkspace(config: CanvasAgentConfig) {
+export function ensureSiteWorkspace(config: CanvasAgentConfig, refreshSkills = false) {
     const current = config.workspace;
     if (current?.workspacePath) {
         const workspacePath = resolveWorkspacePath(current.workspacePath);
-        initializeWorkspace(workspacePath);
+        initializeWorkspace(workspacePath, refreshSkills);
         return { ...current, workspacePath };
     }
     const workspacePath = path.join(CONFIG_DIR, "codex-workspaces", "site");
     config.workspace = { workspacePath };
-    initializeWorkspace(workspacePath);
+    initializeWorkspace(workspacePath, refreshSkills);
     saveConfig(config);
     return { workspacePath };
 }
@@ -74,16 +74,19 @@ export function updateSiteWorkspace(config: CanvasAgentConfig, patch: Partial<Si
     return config.workspace;
 }
 
-/** 创建工作空间目录并写入默认 AGENTS.md。 */
-function initializeWorkspace(workspacePath: string) {
-    if (initializedWorkspaces.has(workspacePath)) return;
+/** Create the site workspace and synchronize the protected Skill bundles. */
+function initializeWorkspace(workspacePath: string, refreshSkills = false) {
+    const initialized = initializedWorkspaces.has(workspacePath);
+    if (initialized && !refreshSkills) return;
     fs.mkdirSync(workspacePath, { recursive: true });
-    const instructionsFile = path.join(workspacePath, "AGENTS.md");
-    const current = fs.existsSync(instructionsFile) ? fs.readFileSync(instructionsFile, "utf8") : "";
-    if (!current || current.startsWith("# Infinite Canvas Agent")) fs.writeFileSync(instructionsFile, AGENT_PROMPT);
+    if (!initialized) {
+        const instructionsFile = path.join(workspacePath, "AGENTS.md");
+        const current = fs.existsSync(instructionsFile) ? fs.readFileSync(instructionsFile, "utf8") : "";
+        if (!current || current.startsWith("# Infinite Canvas Agent")) fs.writeFileSync(instructionsFile, AGENT_PROMPT);
+    }
     const bundle = fileURLToPath(new URL("./bundled-skills/canvas-video-production-sop/", import.meta.url));
     const developmentSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", ".agents", "skills", "canvas-video-production-sop");
-    syncBundledProductionSkill(workspacePath, fs.existsSync(bundle) ? bundle : developmentSource);
+    syncBundledProductionSkills(workspacePath, fs.existsSync(bundle) ? bundle : developmentSource);
     initializedWorkspaces.add(workspacePath);
 }
 

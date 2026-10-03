@@ -89,12 +89,6 @@ async function startBackendHttpServer() {
     writeBackStandaloneH3Task,
     h3Queue,
   );
-  const canvasH3Runner = new CanvasH3Runner(
-    runtime.stores,
-    runtime.events,
-    runtime.comfy,
-    runningHub,
-  );
   const videoConcat = new VideoConcatBackend(
     runtime.tasks,
     undefined,
@@ -132,6 +126,13 @@ async function startBackendHttpServer() {
   const canvasTextDispatcher = new CanvasTextDispatcher(config, runtime.stores);
   const directVideo = new DirectVideoBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
   const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo);
+  const canvasH3Runner = new CanvasH3Runner(
+    runtime.stores,
+    runtime.events,
+    runtime.comfy,
+    runningHub,
+    canvasVideoDispatcher,
+  );
   const directAudio = new DirectAudioBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
   const canvasAudioDispatcher = new CanvasAudioDispatcher(runtime.stores, directAudio, runtime.comfy);
   const canvasBrowserScriptDispatcher = new CanvasBrowserScriptDispatcher(runtime.stores, runtime.events, canvasTextDispatcher);

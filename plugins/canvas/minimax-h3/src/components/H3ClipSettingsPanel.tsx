@@ -1,8 +1,10 @@
 import { useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
+import { Select, Switch } from "antd";
 import type { H3Segment } from "../types";
 import { exportH3Settings, importH3Settings } from "../services/h3-segment-utils";
-import { writeDefaultParams } from "../services/h3-defaults";
+import { readDefaultParams, writeDefaultParams } from "../services/h3-defaults";
+import { resolveH3Runtime } from "../../../../../canvas-agent/src/plugins/minimax-h3/runtime-params";
 import { clipRuntimeState } from "../services/h3-clip-runtime";
 import { cancelActiveH3Task } from "../services/h3-run-control";
 import type { H3DefaultLayout } from "../services/h3-defaults";
@@ -17,6 +19,11 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected, pa
     const globalScope = metadata.h3SettingsScope === "global";
     const patchSettings = globalScope ? patchAllSettings : patchSelected;
     const locale = useH3Locale();
+    const videoModels = ctx.ai.listModels("video");
+    const effectiveVideoModel = selected ? resolveH3Runtime(selected as unknown as Record<string, unknown>, {}, metadata, readDefaultParams()).params : {};
+    const selectedVideoModelEnabled = effectiveVideoModel.selectedVideoModelEnabled === true;
+    const selectedVideoModel = String(effectiveVideoModel.selectedVideoModel || "");
+    const patchVideoModelSettings = (patch: Partial<H3Segment>) => patchSettings({ ...patch, h3ParameterPolicy: "overrides" });
     // 按钮 busy 只反映 H3 生成（ComfyUI 任务）状态：必须同时满足
     // 「runtimeTaskId 存在」且「status 处于运行态(queued/loading)」。
     // 仅看 runtimeTaskId 不够：任务成功后 runtimeTaskId 若未及时清空（历史节点、
@@ -113,7 +120,7 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected, pa
         }
     };
     return <div className="minimax-clip-parameters">
-        <div key="settings-header" className="minimax-section-label"><H3Icon name="sliders" /> <span>{h3Label(locale, "settings")}</span><span className="nfh3-settings-transfer"><button type="button" title="导入参数设置" onClick={() => fileRef.current?.click()}><H3Icon name="restore" /></button><button type="button" title="导出参数设置" onClick={downloadSettings}><H3Icon name="download" /></button><button type="button" title="设为默认参数（新建 H3 节点将自动携带当前参数）" onClick={saveAsDefault}><H3Icon name="database" /></button><input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void readSettings(file); event.currentTarget.value = ""; }} /></span><small className="nfh3-transfer-message">{transferMessage}</small><small className="nfh3-panel-status">{status === "awaiting_confirmation" ? "待确认" : busy ? "运行中" : "就绪"}</small></div>
+        <div key="settings-header" className="minimax-section-label"><H3Icon name="sliders" /> <span>{h3Label(locale, "settings")}</span><span title={h3Label(locale, "selectedVideoModelHint")} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 16, fontWeight: 600, whiteSpace: "nowrap" }}><Switch size="small" checked={selectedVideoModelEnabled} disabled={!videoModels.length && !selectedVideoModelEnabled} onChange={(checked) => patchVideoModelSettings({ selectedVideoModelEnabled: checked })} /><span>{h3Label(locale, "selectedVideoModel")}</span></span>{selectedVideoModelEnabled ? <Select size="small" value={selectedVideoModel || undefined} options={videoModels} allowClear placeholder={h3Label(locale, videoModels.length ? "chooseVideoModel" : "noVideoModels")} onChange={(value) => patchVideoModelSettings({ selectedVideoModel: String(value || "") })} style={{ width: 220, flexShrink: 0 }} /> : null}<span className="nfh3-settings-transfer"><button type="button" title="导入参数设置" onClick={() => fileRef.current?.click()}><H3Icon name="restore" /></button><button type="button" title="导出参数设置" onClick={downloadSettings}><H3Icon name="download" /></button><button type="button" title="设为默认参数（新建 H3 节点将自动携带当前参数）" onClick={saveAsDefault}><H3Icon name="database" /></button><input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void readSettings(file); event.currentTarget.value = ""; }} /></span><small className="nfh3-transfer-message">{transferMessage}</small><small className="nfh3-panel-status">{status === "awaiting_confirmation" ? "待确认" : busy ? "运行中" : "就绪"}</small></div>
         <div className={`nfh3-settings-scope${globalScope ? " is-global" : ""}`}>
             <div className="nfh3-settings-scope-control"><strong>{h3Label(locale, "settingsScope")}</strong><button type="button" className={!globalScope ? "active" : ""} aria-pressed={!globalScope} onClick={() => ctx.updateMetadata({ h3SettingsScope: "clip" })}>{h3Label(locale, "currentClip")}</button><button type="button" className={globalScope ? "active" : ""} aria-pressed={globalScope} onClick={() => ctx.updateMetadata({ h3SettingsScope: "global" })}>{h3Label(locale, "globalSettings")}</button></div>
             <p role="status">{h3Label(locale, globalScope ? "globalScopeNotice" : "clipScopeNotice")}</p>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { previewH3Generation } from '@/services/backend-api';
 import { useTranslation } from "react-i18next";
 
 import { storeGeneratedVideo } from "@/services/api/video";
@@ -157,8 +158,16 @@ export function usePluginHost(params: PluginHostParams) {
                     throw error;
                 }
             },
+            previewH3Generation,
             runCanvasGeneration: async (command: CanvasGenerationCommand) => {
-                const data = await startCanvasGeneration(command);
+                let checkedCommand = command;
+                if (command.operation === 'h3-run') {
+                    await flushCanvasProjectBeforeGeneration(projectId);
+                    const preview = await previewH3Generation(command);
+                    if (!preview.ready) throw new Error(preview.diagnostics.map(issue => issue.message).join('；') || 'H3 预检未就绪');
+                    checkedCommand = { ...command, expectedPlanHash: command.expectedPlanHash || preview.planHash };
+                }
+                const data = await startCanvasGeneration(checkedCommand);
                 if (!data.task) throw new Error("画布生成失败：Backend 未返回任务");
                 return data.task;
             },

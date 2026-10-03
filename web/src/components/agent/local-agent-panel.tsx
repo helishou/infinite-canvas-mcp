@@ -7,7 +7,7 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { readAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
-import { CANVAS_CREATIVE_SKILL_NAME, creativeLaunchPrompt } from "@/lib/agent/creative-launch";
+import { ACHENG_DIRECTOR_SKILL_NAME, findProjectAchengDirectorSkill, creativeLaunchPrompt } from "@/lib/agent/creative-launch";
 import { selectAvailableAgentModel } from "@/lib/agent/agent-model-selection";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
@@ -175,6 +175,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     const productionPresentation = useProductionFollowStore(state => state.presentation);
     const followingProduction = useProductionFollowStore(state => state.following);
     const conversationReady = conversation.status === "ready" || conversation.status === "warning";
+    const conversationCanAcceptInput = conversationReady || conversation.status === "running";
     const conversationBusy = conversation.status === "preparing" || conversation.status === "running";
     const closePanel = useAgentStore((state) => state.closePanel);
     const pushMessage = useAgentStore((state) => state.addMessage);
@@ -644,13 +645,13 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         const text = scopedTaskInput?.text.trim() || launch?.text.trim() || prompt.trim();
         const files = scopedTaskInput ? [] : attachments;
         const skillState = useAgentSkillStore.getState();
-        const inheritedSkill = useAgentStore.getState().messages.some((item) => item.role === "user" && item.skill?.name === CANVAS_CREATIVE_SKILL_NAME)
-            ? skillState.skills.find((item) => item.name === CANVAS_CREATIVE_SKILL_NAME && item.enabled) || null
+        const inheritedSkill = useAgentStore.getState().messages.some((item) => item.role === "user" && item.skill?.name === ACHENG_DIRECTOR_SKILL_NAME)
+            ? findProjectAchengDirectorSkill(skillState.skills)
             : null;
         const selectedSkill = scopedTaskInput
-            ? skillState.skills.find((item) => item.name === "canvas-video-production-sop" && item.enabled) || null
+            ? findProjectAchengDirectorSkill(skillState.skills)
             : launch
-            ? skillState.skills.find((item) => item.name === CANVAS_CREATIVE_SKILL_NAME && item.enabled) || null
+            ? findProjectAchengDirectorSkill(skillState.skills)
             : skillState.selectedSkill || inheritedSkill;
         const selectedSkillRevision = skillState.selectionRevision;
         const currentState = useAgentStore.getState();
@@ -791,7 +792,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             return;
         }
         if (creativeLaunch.phase === "send" && !skillsLoaded) return;
-        if (creativeLaunch.phase === "send" && skillsLoaded && !useAgentSkillStore.getState().skills.some((skill) => skill.name === CANVAS_CREATIVE_SKILL_NAME && skill.enabled)) {
+        if (creativeLaunch.phase === "send" && skillsLoaded && !findProjectAchengDirectorSkill(useAgentSkillStore.getState().skills)) {
             setAgentState({ creativeLaunch: null, loadingThreads: false, prompt: useAgentStore.getState().prompt || creativeLaunch.text });
             message.warning(i18n.t("productionHub.creative.skillUnavailable"));
             return;
@@ -1192,6 +1193,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         const reject = (error: string) => setAgentState({ scopedTask: null, scopedTaskResult: { id: scopedTask.id, status: "failed", error } });
         if (!current.enabled || !current.connected) { reject(current.connectError || rt("connectionRequired")); return; }
         if (!clientReady || !useAgentSkillStore.getState().loaded) return;
+        if (!findProjectAchengDirectorSkill(useAgentSkillStore.getState().skills)) { reject(i18n.t("productionHub.creative.skillUnavailable")); return; }
         if (current.sending || current.waiting || current.loadingThreads || !["ready", "warning"].includes(current.conversation.status)) { reject(rt("codexRunning")); return; }
         scopedTaskOperationRef.current = scopedTask.id;
         void (async () => {
@@ -1556,7 +1558,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                     <AgentChatComposer
                         prompt={prompt}
                         attachments={attachments.map((attachment) => agentAttachmentToChatAttachment(attachment, endpoint, token))}
-                        disabled={!connected || !conversationReady || loadingThreads || Boolean(creativeLaunch)}
+                        disabled={!connected || !conversationCanAcceptInput || loadingThreads || Boolean(creativeLaunch)}
                         sending={sending || waiting || Boolean(creativeLaunch)}
                         placeholder={conversation.status === "idle" || conversation.status === "preparing"
                             ? t("agent.panel.mcpInitializing")

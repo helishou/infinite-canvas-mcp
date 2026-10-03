@@ -1,3 +1,4 @@
+import { inspectH3Result } from "../canvas/h3-execution-contract.js";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -247,6 +248,12 @@ export class RunningHubBackend {
             const supplied = media[kind].filter(Boolean).length;
             if (used[kind].size !== supplied) throw new Error(`RunningHub ${kind}输入映射未覆盖本轮全部 ${supplied} 个参考素材`);
         }
+        if (task.params.h3ExecutionContract) {
+            const critical = ['modelName', 'textEncoder', 'videoVae', 'audioVae', 'aspectRatio', 'megapixels', 'sampler', 'scheduler', 'loraSlots', 'latentUpscaleEnabled'];
+            if (task.params.latentUpscaleEnabled === true) critical.push('latentUpscaleModel', 'latentUpscaleMegapixels', 'h3FirstSteps', 'h3SecondSteps', 'h3FullSigma');
+            const missing = critical.filter(key => !fields.some(field => field.enabled !== false && fieldSource(field) === 'param' && field.paramKey === key));
+            if (missing.length) throw new Error(`RunningHub 映射无法证明冻结参数生效：${missing.join('、')}；请补齐映射后再提交`);
+        }
         return values;
     }
     private async upload(file: string, config: RunConfig, signal: AbortSignal) {
@@ -283,7 +290,8 @@ export class RunningHubBackend {
                 if (signal.aborted || this.tasks.get(task.id)?.status === "cancelled") return;
                 const result = { media, ...(texts.length ? { texts } : {}), taskId: config.remoteId, backend: "runninghub", mode: config.mode };
                 this.tasks.addEvent(task.id, "result", result);
-                this.update(task.id, { status: "succeeded", progress: 1, result });
+                const checked: Record<string, any> = this.media ? await inspectH3Result(result, task.params, this.media) : result;
+                this.update(task.id, { status: checked.specification?.status === 'mismatch' ? 'failed' : 'succeeded', progress: 1, result: checked, ...(checked.specification?.status === 'mismatch' ? { error: checked.specification.issues.join('；') } : {}) });
                 return;
             }
             if (["FAILED", "FAIL", "ERROR", "CANCELLED", "CANCELED"].includes(data.status)) throw new Error(redact(data.error || `RunningHub 任务${data.status}`, config));

@@ -4,6 +4,7 @@ import { BackendDatabase } from "../db.js";
 import { BackendEventBus } from "../events.js";
 import { createStores } from "../stores/index.js";
 import { CanvasH3Runner } from "./h3-runner.js";
+const localProvider = () => ({ ready: () => false, queue: { select: () => "local", unreserve() {} } });
 
 function fixture(t: TestContext, count = 1, previousOutput = false, failSecondPass = false, withoutCheckpoint = false) {
     const db = new BackendDatabase(":memory:");
@@ -23,7 +24,7 @@ function fixture(t: TestContext, count = 1, previousOutput = false, failSecondPa
         },
         cancel() {},
     };
-    const runner = new CanvasH3Runner(stores, events, comfy as never, {} as never);
+    const runner = new CanvasH3Runner(stores, events, comfy as never, localProvider() as never);
     const segment = (id = "clip-1") => (((db.getCanvasProject("p")!.nodes as unknown as Array<{ metadata: { segments: Array<Record<string, unknown>> } }>)[0]).metadata.segments).find((item) => item.id === id)!;
     const node = () => ((db.getCanvasProject("p")!.nodes as unknown as Array<{ metadata: Record<string, unknown> }>)[0]).metadata;
     const settle = async (id: string, expected: string) => {
@@ -105,7 +106,7 @@ test("启动恢复找回丢失的待确认投影，只恢复按钮状态而不�
     stores.projects.applyOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: {
         status: "success", firstPassReady: false, runtimeTaskId: "", parentTaskId: "",
     } }], { runtimeWrite: true });
-    const replacement = new CanvasH3Runner(stores, events, comfy as never, {} as never);
+    const replacement = new CanvasH3Runner(stores, events, comfy as never, localProvider() as never);
     for (const task of db.listStartupRecoveryTasks([], 10)) replacement.resume(task);
     assert.equal(segment().status, "awaiting_confirmation");
     assert.equal(segment().firstPassReady, true);
@@ -156,7 +157,7 @@ test("潜空间确认先暂停，重启后沿用快照二采且重复确认不�
     assert.equal(first.params.latentConfirmationPhase, "first");
     assert.equal(first.params.latentUpscaleEnabled, true);
     assert.match(String(first.params.latentCheckpointId), /^[a-f0-9]{64}$/);
-    const replacement = new CanvasH3Runner(stores, events, comfy as never, {} as never);
+    const replacement = new CanvasH3Runner(stores, events, comfy as never, localProvider() as never);
     replacement.resume(db.getTask(task.id)!);
     assert.equal(submitted.length, 1);
     const request = { ...decision(db, task.id, "confirm"), postpassParams: { latentUpscaleEnabled: false, h3FirstSteps: 20, h3SecondSteps: 12, latentUpscaleMegapixels: 2 } };
@@ -257,7 +258,7 @@ test("跳过已完成模式一采暂停后仍锁住原 Clip，不会因一采回
     await settle(task.id, "awaiting_confirmation");
     const repeat = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", skipCompleted: true }, "different-parent");
     assert.equal(repeat.id, task.id);
-    const replacement = new CanvasH3Runner(stores, events, comfy as never, {} as never);
+    const replacement = new CanvasH3Runner(stores, events, comfy as never, localProvider() as never);
     await replacement.reconcileTerminal(db.getTask(task.id)!);
     replacement.resolveConfirmation(task.id, decision(db, task.id, "keep_first_pass"));
     await settle(task.id, "succeeded");
@@ -317,7 +318,7 @@ test("重启后保留一采沿用原任务，决议幂等且节点收口", async
     const { db, stores, events, comfy, runner, submitted, segment, node, settle } = fixture(t);
     const task = runner.start({ projectId: "p", nodeId: "n" }, "parent");
     await settle(task.id, "awaiting_confirmation");
-    const replacement = new CanvasH3Runner(stores, events, comfy as never, {} as never);
+    const replacement = new CanvasH3Runner(stores, events, comfy as never, localProvider() as never);
     await replacement.reconcileTerminal(db.getTask(task.id)!);
     assert.equal(replacement.resume(db.getTask(task.id)!).status, "awaiting_confirmation");
     const firstPassResult = String(segment().firstPassResult);
@@ -345,7 +346,7 @@ test("重启时重放已持久化但尚未提交的二采决议，不重新生�
             inFlight: { nodeId: "n", segmentId: "clip-1", action: "confirm", attempt: 1, childTaskId: "recovered-second", postpassParams: { confirmSecondPass: true } },
         } },
     }, { type: "h3_decision", payload: { action: "confirm", nodeId: "n", segmentId: "clip-1", childTaskId: "recovered-second" } }));
-    const replacement = new CanvasH3Runner(stores, events, comfy as never, {} as never);
+    const replacement = new CanvasH3Runner(stores, events, comfy as never, localProvider() as never);
     replacement.resume(db.getTask(task.id)!);
     await settle(task.id, "succeeded");
     assert.deepEqual(submitted.map((item) => item.id), [submitted[0].id, "recovered-second"]);

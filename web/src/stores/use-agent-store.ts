@@ -163,7 +163,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         // Debounced 持久化到 backend settings
         debouncedSaveAgentSettings(patch);
     },
-    openPanel: () => set({ panelOpen: true, panelMounted: true, panelClosing: false }),
+    openPanel: () => set((state) => ({
+        panelOpen: true,
+        panelMounted: true,
+        panelClosing: false,
+        ...(state.connected || state.activeThreadId ? { activeTab: "chat" as const } : {}),
+    })),
     closePanel: () => {
         if (!get().panelMounted || get().panelClosing) return;
         set({ panelOpen: false, panelClosing: true });

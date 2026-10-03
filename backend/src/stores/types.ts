@@ -37,7 +37,9 @@ export type H3NodeMaterial = {
     createdAt: string;
 };
 export type CanvasProjectFilter = { episodeId?: string; id?: string };
+export type H3ProductionRequirements = { ownerId: string; revision: number; version: number; videoAspectRatio?: string; clips: Array<{ nodeId: string; segmentId: string; storyboardRequired: boolean; promptContentHash?: string; sourceHash?: string; literalDialogues?: Array<{ blockId: string; speaker: string; text: string }>; shots: Array<{ id: string; duration: number }> }> };
 export type CanvasProjectStore = {
+    getH3ProductionRequirements?(projectId: string): H3ProductionRequirements | null;
     list(): CanvasProject[];
     listSummaries(filter?: CanvasProjectFilter): CanvasProject[];
     get(id: string): CanvasProject | null;

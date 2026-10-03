@@ -3,6 +3,14 @@ import { useSyncExternalStore } from "@infinite-canvas/plugin-sdk";
 export type H3Locale = "zh-CN" | "en-US";
 
 const labels = {
+    parameterPolicy: ["参数来源", "Parameter policy"],
+    inheritDefaults: ["沿用保存默认", "Use saved defaults"],
+    explicitOverrides: ["使用明确覆盖", "Use explicit overrides"],
+    effectiveParameters: ["当前生效值", "Effective parameters"],
+    parameterSources: ["展开查看参数与来源", "Show parameters and sources"],
+    upscaleOff: ["放大关闭", "Upscale off"],
+    checkSavedExecution: ["检查已保存稿的执行配置", "Check saved execution settings"],
+    preflightReady: ["参数与参考预检通过", "Parameters and references ready"],
     executionMode: ["运行方式", "Execution mode"],
     executionAuto: ["自动分流", "Automatic routing"],
     executionLocal: ["本地", "Local"],
@@ -10,6 +18,11 @@ const labels = {
     executionHint: ["本地同时运行 1 个任务；RunningHub 工作流与并发数在 ComfyUI → 运行环境中设置。Motion Context 与分阶段确认使用本地。云端参数以已启用的工作流映射为准。", "Local runs one task at a time. Configure the RunningHub workflow and concurrency under ComfyUI → Runtime. Motion Context and staged confirmation use Local. Cloud parameters follow the enabled workflow mappings."],
     prompt: ["提示词", "Prompt"],
     settings: ["参数设置", "Settings"],
+    selectedVideoModel: ["自选视频模型", "Choose video model"],
+    selectedVideoModelHint: ["开启后使用下方所选视频模型及其已配置的渠道/工作流；H3 参数按该模型的工作流映射传递。关闭时使用 H3 默认执行流。", "Use the selected video model and its configured channel/workflow. H3 parameters follow that workflow's field mappings. Turn off to use the default H3 execution path."],
+    selectedVideoRouteHint: ["自选模式下，执行渠道和工作流由所选视频模型决定。", "The selected video model determines the execution channel and workflow."],
+    chooseVideoModel: ["选择视频模型", "Select a video model"],
+    noVideoModels: ["请先在模型设置中配置视频模型", "Configure a video model in Model Settings first"],
     settingsScope: ["设置范围", "Settings scope"],
     currentClip: ["当前 Clip", "Current Clip"],
     globalSettings: ["全局配置", "Global settings"],

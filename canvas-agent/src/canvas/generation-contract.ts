@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+export type H3ExecutionPreview = {
+    ready: boolean; revision: number; planHash: string;
+    clips: Array<{ nodeId: string; segmentId: string; savedRuntime: Record<string, unknown>; effectiveRuntime: Record<string, unknown>; parameterSources: Record<string, string>; policy: string;
+        expectedDimensions: { firstPass: { width: number; height: number } | null; final: { width: number; height: number } | null }; promptHash: string; referenceMap: Array<Record<string, unknown>> }>;
+    diagnostics: Array<{ code: string; nodeId: string; segmentId: string; message: string }>;
+};
+
 export const h3ExecutionModeSchema = z.enum(["auto", "local", "runninghub"]);
 export const runningHubFieldSchema = z.object({
   id: z.string().optional(), nodeId: z.string().min(1), fieldName: z.string().min(1),
@@ -48,6 +55,7 @@ export const canvasGenerationCommandSchema = z
     runFromCurrent: z.boolean().optional(),
     skipCompleted: z.boolean().optional(),
     forceRegenerate: z.boolean().optional(),
+    expectedPlanHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     model: z.string().optional(),
     prompt: z.string().optional(),
     references: z.array(z.record(z.string(), z.unknown())).optional(),

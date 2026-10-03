@@ -24,6 +24,9 @@ export type CanvasVideoGenerationInput = {
     prompt: string;
     references?: CanvasImageReference[];
     videoReferences?: CanvasVideoReference[];
+    audioReferences?: CanvasVideoReference[];
+    /** H3 can bind videos/audio as workflow refs; ordinary video calls route by image refs only. */
+    workflowReferenceCount?: number;
     size?: string;
     seconds?: string;
     resolution?: string;
@@ -45,7 +48,7 @@ export class CanvasVideoDispatcher {
     constructor(private readonly stores: Stores, private readonly comfy: ComfyUiBackend, private readonly workflows: WorkflowStore,
         private readonly workflowExecutor: WorkflowExecutor, private readonly concat: VideoConcatBackend, private readonly directVideo?: DirectVideoBackend) {}
 
-    start(raw: CanvasVideoGenerationInput) {
+    start(raw: CanvasVideoGenerationInput, onCreated?: (task: RuntimeTask) => void) {
         let input = this.prepare(raw);
         let plan = this.plan(input);
         const taskId = input.clientTaskId || `canvas-video-${crypto.randomUUID()}`;
@@ -66,8 +69,11 @@ export class CanvasVideoDispatcher {
         const task = this.stores.tasks.create(taskId, "canvas-video", input, {
             projectId: input.projectId, nodeId: input.nodeId, executor: plan.kind, model: input.model,
             videoTargetSize: project ? { width: targetSize.width, height: targetSize.height } : undefined,
+            ...(input.params?.parentTaskId ? { parentTaskId: input.params.parentTaskId } : {}),
+            ...(input.params?.canvasBinding ? { canvasBinding: input.params.canvasBinding } : {}),
         });
         try {
+            onCreated?.(task);
             if (project) this.stores.projects.applyOperations(input.projectId!, Number(project.revision || 0), [
                 ...prepared.createOperations,
                 { type: "update_node", id: input.nodeId!, metadata: { runtimeTaskId: task.id, status: "loading", runProgress: 0 }, metadataDelete: ["errorDetails"] },
@@ -176,8 +182,19 @@ export class CanvasVideoDispatcher {
         const fields = detail.config?.fields || [];
         const values: Record<string, unknown> = { ...(plan.input.params || {}) };
         for (const field of fields) if (field.type === "text" && (field.isPrompt || field.id.toLowerCase() === "prompt")) values[field.id] = plan.input.prompt;
-        await this.fillMediaFields(values, fields.filter((field) => isImageField(field, detail.workflow)), plan.input.references || []);
-        await this.fillMediaFields(values, fields.filter((field) => isVideoField(field, detail.workflow)), plan.input.videoReferences || []);
+        const imageFields = fields.filter((field) => isImageField(field, detail.workflow));
+        const videoFields = fields.filter((field) => isVideoField(field, detail.workflow));
+        const audioFields = fields.filter((field) => isAudioField(field, detail.workflow));
+        await this.fillMediaFields(values, imageFields, plan.input.references || []);
+        await this.fillMediaFields(values, videoFields, plan.input.videoReferences || []);
+        await this.fillMediaFields(values, audioFields, plan.input.audioReferences || []);
+        for (const [kind, supplied, mapped] of [
+            ["图片", plan.input.references || [], imageFields],
+            ["视频", plan.input.videoReferences || [], videoFields],
+            ["音频", plan.input.audioReferences || [], audioFields],
+        ] as const) {
+            if (supplied.length > mapped.length) throw new Error(`所选视频模型的工作流没有映射全部${kind}参考（收到 ${supplied.length} 个，映射 ${mapped.length} 个）`);
+        }
         const childId = `video-workflow-child-${taskId}`;
         this.assertActive(taskId);
         this.track(taskId, childId);
@@ -202,7 +219,7 @@ export class CanvasVideoDispatcher {
         if (input.model === CANVAS_VIDEO_CONCAT_MODEL) return { input, kind: "concat" };
         const config = this.stores.settings.get("ai.config");
         if (usesWorkflowExecutor(config, input.model)) {
-            const resolved = resolveWorkflowForModel(config, input.model, (input.references || []).length);
+            const resolved = resolveWorkflowForModel(config, input.model, Number.isSafeInteger(input.workflowReferenceCount) ? Number(input.workflowReferenceCount) : (input.references || []).length);
             if (!resolved.ok) throw new Error(`${workflowResolutionMessage(resolved)}（模型=${input.model}）`);
             return { input: { ...input, params: { ...resolved.params, ...(input.params || {}) } }, kind: "workflow", workflow: resolved.workflow };
         }
@@ -210,7 +227,10 @@ export class CanvasVideoDispatcher {
         if (workflow) return { input, kind: "workflow", workflow };
         if (input.preset) return { input, kind: "preset", preset: input.preset };
         const selected = findChannelModel(this.stores.settings.get("ai.config"), input.model);
-        if (this.directVideo && selected && String(selected.channel.kind || "") !== "comfyui" && String((selected.model as Record<string, unknown>).capability || "") === "video") return { input, kind: "direct" };
+        if (this.directVideo && selected && String(selected.channel.kind || "") !== "comfyui" && String((selected.model as Record<string, unknown>).capability || "") === "video") {
+            if (input.videoReferences?.length || input.audioReferences?.length) throw new Error("所选直连视频模型目前只接受图片参考；请移除视频/音频参考或选择 ComfyUI 视频工作流模型");
+            return { input, kind: "direct" };
+        }
         throw new Error(`当前 Backend 没有视频模型执行器：${modelOptionName(input.model)}`);
     }
 
@@ -240,7 +260,7 @@ export class CanvasVideoDispatcher {
 
     private prepare(input: CanvasVideoGenerationInput): CanvasVideoGenerationInput {
         const keep = (reference: CanvasVideoReference) => reference.dataUrl ? this.storeInline(reference) : reference;
-        return { ...input, prompt: String(input.prompt || ""), references: input.references?.map(keep), videoReferences: input.videoReferences?.map(keep) };
+        return { ...input, prompt: String(input.prompt || ""), references: input.references?.map(keep), videoReferences: input.videoReferences?.map(keep), audioReferences: input.audioReferences?.map(keep) };
     }
     private storeInline(reference: CanvasVideoReference) {
         const match = /^data:([^;,]+);base64,(.+)$/s.exec(reference.dataUrl || "");
@@ -281,6 +301,7 @@ function bindSource(project: CanvasProject, input: CanvasVideoGenerationInput, t
 }
 function isImageField(field: WorkflowField, workflow: Record<string, unknown>) { return field.type === "image" || field.node.split(",").some((id) => (workflow[id] as any)?.class_type === "LoadImage"); }
 function isVideoField(field: WorkflowField, workflow: Record<string, unknown>) { return field.type === "video" || field.node.split(",").some((id) => /(?:^|_)LoadVideo/.test((workflow[id] as any)?.class_type || "")); }
+function isAudioField(field: WorkflowField, workflow: Record<string, unknown>) { return field.type === "audio" || field.node.split(",").some((id) => /(?:^|_)LoadAudio/.test((workflow[id] as any)?.class_type || "")); }
 function emptyWorkflowConfig(name: string): WorkflowConfig { return { title: name, backend: "", operation: "", description: "", fields: [] }; }
 function messageOf(error: unknown) { return error instanceof Error ? error.message : String(error); }
 async function waitForTask(tasks: TaskStore, id: string) { for (;;) { const task = tasks.get(id); if (!task) throw new Error(`生成任务不存在：${id}`); if (task.status === "succeeded") return task; if (["failed", "cancelled"].includes(task.status)) throw new Error(task.error || `生成任务${task.status}`); await new Promise((resolve) => setTimeout(resolve, 500)); } }

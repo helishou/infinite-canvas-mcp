@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/plugins/minimax-h3/character-groups";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
@@ -82,10 +83,21 @@ export class EpisodeProductionRunner {
             if (!taskMode) throw new Error(`未知 Acheng 模式 ${planned.mode}`);
             const prompt = authored.prompt;
             const boundary = d.boundaries.find(b => b.from === group.id);
+            const storyboardShots = shots.some(shot => d.shotInputs[shot.id]?.keyframeAssetId) ? shots.map(shot => {
+                const input = d.shotInputs[shot.id];
+                const asset = input?.keyframeAssetId && d.assets[input.keyframeAssetId];
+                const sourceNodeId = asset && asset.nodeId || input?.keyframeAssetId;
+                const binding = bindings.find(ref => ref.sourceNodeId === sourceNodeId);
+                if (!binding) throw new Error(`镜头 ${shot.id} 的正式关键帧未进入本段参考绑定`);
+                binding.role = 'storyboard';
+                return { id: shot.id, referenceBindingId: String(binding.id), duration: shot.duration };
+            }) : undefined;
             const segment = { id: segmentId, sourceShotId: group.shotIds.join("~"), title: shots.map(shot => shot.title).join(" / "),
                 duration: shots.reduce((sum, shot) => sum + shot.duration, 0), taskMode, prompt, referenceBindings: bindings,
                 tailFrameContinuation: boundary?.tailFrame === true, motionContextEnabled: boundary?.motionContext === true,
                 directorEngine: d.engine, directorSourceHash: d.sourceHash, styleTemplateId: null, h3CharacterGroups: characterGroups,
+                ...(storyboardShots ? { storyboardShots } : {}),
+                ...(settings.videoAspectRatio ? { aspectRatio: settings.videoAspectRatio } : {}),
                 ...(h3Model ? { modelName: h3Model } : {}) };
             const preflight = compileReferenceSubmission(project, segment);
             assertReferenceCompilation(preflight);
@@ -94,9 +106,9 @@ export class EpisodeProductionRunner {
             if (node && !isH3NodeType(node.type)) throw new Error(`映射节点 ${nodeId} 不是 H3`);
             const exists = node && Array.isArray(object(node.metadata).segments) && (object(node.metadata).segments as Array<Record<string, unknown>>).some((item) => item.id === segmentId);
             const operations = exists
-                ? [{ type: "update_h3_segment", nodeId, segmentId, patch: { sourceShotId: segment.sourceShotId, title: segment.title, duration: segment.duration, taskMode: segment.taskMode, prompt, referenceBindings: bindings, tailFrameContinuation: segment.tailFrameContinuation, motionContextEnabled: segment.motionContextEnabled, directorEngine: segment.directorEngine, directorSourceHash: segment.directorSourceHash, styleTemplateId: null, h3CharacterGroups: characterGroups, ...(h3Model ? { modelName: h3Model } : {}) } }]
+                ? [{ type: "update_h3_segment", nodeId, segmentId, patch: { sourceShotId: segment.sourceShotId, title: segment.title, duration: segment.duration, taskMode: segment.taskMode, prompt, referenceBindings: bindings, tailFrameContinuation: segment.tailFrameContinuation, motionContextEnabled: segment.motionContextEnabled, directorEngine: segment.directorEngine, directorSourceHash: segment.directorSourceHash, styleTemplateId: null, h3CharacterGroups: characterGroups, ...(storyboardShots ? { storyboardShots } : {}), } }]
                 : node ? [{ type: "add_h3_segment", nodeId, segment }]
-                : [{ type: "add_node", id: nodeId, nodeType: "minimax-h3:video", title: `单集 H3 Clips`, position: { x: 0, y: 680 }, width: 1960, height: 1080, metadata: createH3NodeMetadata({}, { segments: [segment] }) }];
+                : [{ type: "add_node", id: nodeId, nodeType: "minimax-h3:video", title: `单集 H3 Clips`, position: { x: 0, y: 680 }, width: 1960, height: 1080, metadata: createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }) }];
             this.stores.projects.applyOperations(episode.canvasId, Number(project.revision || 0), operations, { operationId: stableId("production-sync", episodeId, String(version), group.id, String(project.revision || 0), crypto.createHash("sha256").update(prompt + JSON.stringify(bindings)).digest("hex")), source: { clientId: "episode-production", kind: "system", label: "同步单集 Clip" } });
             this.service.bindRuntime(episodeId, version, { groupId: group.id, nodeId, segmentId });
         }

@@ -44,6 +44,31 @@ function publish(service: EpisodeProductionService, director: DirectorProduction
     return service.publish(id, { operationId: `publish-${current.revision}`, expectedRevision: current.revision + 1, stage: "director" });
 }
 
+test('Clip sync loads saved defaults, persists episode aspect and keeps existing user parameters and history', async t => {
+    const { db, stores, service } = fixture(t);
+    db.setSetting('plugin:minimax-h3:defaults:v1', { modelName: 'test-model', sampler: 'er_sde', megapixels: 0.6, latentUpscaleEnabled: true, loraSlots: [{ name: 'turbo', strength: 0.75, enabled: true }] });
+    const current = service.get('ep');
+    service.edit('ep', { operationId: 'settings-first', expectedRevision: current.revision, ops: [{ type: 'set_settings', patch: { videoAspectRatio: '9:16' } }] });
+    publish(service, doc());
+    const runner = new EpisodeProductionRunner(service, stores, {} as CanvasGenerationService);
+    await runner.syncClips('ep', 1);
+    const group = service.get('ep').published!.clipGroups[0];
+    const node = () => (db.getCanvasProject('canvas')!.nodes as any[]).find(item => item.id === group.nodeId);
+    assert.equal(node().metadata.sampler, 'er_sde');
+    assert.equal(node().metadata.megapixels, 0.6);
+    assert.equal(node().metadata.segments[0].aspectRatio, '9:16');
+    assert.equal(node().metadata.latentUpscaleEnabled, true);
+    db.applyCanvasProjectOperations('canvas', undefined, [{ type: 'update_h3_segment', nodeId: group.nodeId!, segmentId: group.segmentId!, patch: { modelName: 'user-model', sampler: 'euler', loraSlots: [{ name: 'user-lora', strength: 0.4, enabled: true }] } }]);
+    db.applyCanvasProjectOperations('canvas', undefined, [{ type: 'update_h3_segment', nodeId: group.nodeId!, segmentId: group.segmentId!, patch: { resultStorageKey: 'old-result' } }], { runtimeWrite: true });
+    await runner.syncClips('ep', 1);
+    assert.equal(node().metadata.segments[0].modelName, 'user-model');
+    assert.equal(node().metadata.segments[0].sampler, 'euler');
+    assert.equal(node().metadata.segments[0].resultStorageKey, 'old-result');
+    const requirements = stores.projects.getH3ProductionRequirements!('canvas');
+    assert.equal(requirements!.videoAspectRatio, '9:16');
+    assert.equal(requirements!.clips.length, 2);
+});
+
 test("successful generation preflight preserves currentWork and creates no run or receipt", async t => {
     const { db, service, stores } = fixture(t);
     const d = doc(1);

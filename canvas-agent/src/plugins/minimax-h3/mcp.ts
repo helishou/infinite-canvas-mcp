@@ -1,3 +1,4 @@
+import { H3_PARAM_KEYS } from "./runtime-params.js";
 import type { AgentCanvasNode, McpToolHandler, PluginMcpContext, PluginMcpModule, PluginMcpToolWire } from "../../server/plugin-mcp.js";
 import { H3_PLUGIN_VERSION } from "./version.js";
 import { normalizeH3GenerationSettings, normalizePlannedSegment, validateVideoPlan, type H3PlannedSegment } from "./video-plan.js";
@@ -18,23 +19,7 @@ type H3Segment = Record<string, unknown>;
 
 // 与 H3 前端 Settings 面板的可持久化字段保持同一份有序协议；领域字段使用 videoSteps，
 // 仅在提交 ComfyUI 时映射为它要求的 steps。
-const H3_PARAM_KEYS = [
-    "minimaxEngine",
-    "mode", "taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "steps", "denoise", "noiseSeedMode", "noiseSeed", "seed",
-    "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sizeMultiple", "sampler", "scheduler",
-    "loraSlots", "constantTriggerWord", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd",
-    "solAttnEnabled", "solAttnTau", "solAttnThresholdType", "solAttnExactMode", "solAttnDenseSteps", "solAttnStepOff", "solAttnSinkTokens",
-    "t8Enabled", "t8ResidualThreshold", "t8StartPercent", "t8EndPercent", "t8MaxConsecutiveHits", "t8CacheDevice", "t8MetricStride", "t8Verbose",
-    "sigmaEnabled", "videoSigmaShift", "audioSigmaShift", "sigmaMode", "lowSigmaStart", "lowSigmaEnd", "sigmaRefineSteps", "sigmaCurve", "manualSigma", "dualSampling", "dualSamplingRatio", "dualSampler",
-    "secondPassEnabled", "firstPassSteps", "secondPassSteps", "secondPassMegapixels", "secondPassUpscaleMethod", "secondPassDenoise", "secondPassSampler", "secondPassScheduler", "secondPassModel", "secondPassSigma",
-    "dedicatedAttention", "startupMode", "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "lowMemoryAttentionHeads", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "keepModelCache",
-    "latentUpscaleEnabled", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
-    "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality",
-    "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
-    "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion",
-    "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "teAccel", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
-    "referenceVideoPolicy", "trimIn", "trimOut", "motionContextEnabled", "tailFrameContinuation", "motionContextNoiseEnabled", "motionContextNoiseAlpha", "motionContextNoiseAlphaEnd", "motionContextNoiseRampFrames", "combatLoraWeight", "cinematicLoraWeight",
-] as const;
+
 
 // 节点根级是 H3 面板/新建片段的配置投影；运行状态、结果历史、提示词和参考图不在此列，
 // 避免 MCP 更新片段时把后台回写的运行态或用户正在编辑的内容覆盖掉。
@@ -169,15 +154,21 @@ const TOOLS: PluginMcpToolWire[] = [
         inputJsonSchema: {
             type: "object",
             properties: {
+                expectedPlanHash: { type: "string", description: "本次相同运行范围的 h3_preview_run planHash" },
+                idempotencyKey: { type: "string", description: "稳定运行幂等键；未知结果使用原键恢复" },
                 nodeId: { type: "string", description: "画布节点 id" },
                 projectId: { type: "string", description: "画布项目 id" },
                 segmentId: { type: "string", description: "片段稳定 id；优先使用它定位片段" },
                 segmentIndex: { type: "integer", description: "兼容旧调用的片段下标；省略则运行首个未完成的片段" },
                 params: { type: "object", description: "覆盖片段自带参数的生成参数" },
-                idempotencyKey: { type: "string", description: "幂等提交键，重复提交复用原任务" },
             },
             required: ["projectId", "nodeId"],
         },
+    },
+    {
+        id: 'h3_preview_run', version: '1.0.0', name: 'H3 执行预检', annotations: { readOnlyHint: true },
+        description: '只读预检与正式运行相同的范围和参数，返回最终生效值、来源、预计尺寸、参考映射、阻断项及 planHash；不写草稿、不生成。提交时传 expectedPlanHash，过期版本或默认值变化会拒绝。',
+        inputJsonSchema: { type: 'object', properties: { projectId: { type: 'string' }, nodeId: { type: 'string' }, nodeIds: { type: 'array', items: { type: 'string' } }, segmentId: { type: 'string' }, endSegmentId: { type: 'string' }, runFromCurrent: { type: 'boolean' }, skipCompleted: { type: 'boolean' }, forceRegenerate: { type: 'boolean' }, params: { type: 'object' } }, required: ['projectId'] },
     },
     {
         id: "h3_get_defaults", annotations: { readOnlyHint: true },
@@ -230,7 +221,7 @@ const TOOLS: PluginMcpToolWire[] = [
     },
     {
         id: "h3_write_storyboard_prompt",
-        version: "1.3.0",
+        version: "1.3.1",
         name: "H3 写入结构化分镜提示词",
         description: "按分镜编辑器的新结构写入单个 Clip：开场总体描述、逐镜描述/切换时间/切换方式/已绑定分镜图、声景和配乐；Ref2VA 模式另写 summary，并由当前人物引用按规则生成 subject_definitions 与 retention_analysis，使用共享 SHA-256 缓存。",
         inputJsonSchema: {
@@ -248,13 +239,20 @@ const TOOLS: PluginMcpToolWire[] = [
                     items: {
                         type: "object",
                         properties: {
+                            id: { type: "string", description: "稳定 Shot ID；可传来源剧本的 sourceShotId，用于绑定分镜轨" },
                             description: { type: "string", description: "分镜描述，可包含 <Subject N> 与 <Picture N> 等 H3 引用标签" },
+                            duration: { type: "number", description: "本镜在分镜轨中的精确时长（秒），可选" },
                             switchTime: { type: "string", description: "本镜头相对 Clip 开始的切换时间；第一镜忽略" },
                             transitionType: { type: "string", enum: ["continuous", "cut", "dissolve", "fade_black"], description: "从上一镜到本镜的方式：连续镜头不切镜、硬切、叠化、淡出至黑场再淡入；第一镜忽略" },
                             pictureBindingId: { type: "string", description: "当前 Clip 中已绑定的 storyboard 图片 binding id" },
                         },
                         required: ["description"],
                     },
+                },
+                referenceBindings: {
+                    type: "array",
+                    description: "可选地原子替换本 Clip 的手工参考绑定；角色组参考仍从 h3CharacterGroups 派生。",
+                    items: { type: "object", properties: { id: { type: "string" }, assetId: { type: "string" }, label: { type: "string" }, role: { type: "string" }, storageKey: { type: "string" } }, required: ["id", "assetId", "label", "role"] },
                 },
                 overallSoundscape: { type: "string" },
                 nonDiegeticMusic: { type: "string" },
@@ -332,6 +330,8 @@ const TOOLS: PluginMcpToolWire[] = [
         inputJsonSchema: {
             type: "object",
             properties: {
+                expectedPlanHash: { type: "string", description: "本次相同运行范围的 h3_preview_run planHash" },
+                idempotencyKey: { type: "string", description: "稳定运行幂等键；未知结果使用原键恢复" },
                 projectId: { type: "string", description: "画布项目 id" },
                 nodeIds: { type: "array", items: { type: "string" }, description: "限定运行的节点 id;省略则运行全部 H3 节点" },
                 endSegmentId: { type: "string", description: "本次运行包含的最后一个 Clip；限定连续组范围" },
@@ -579,6 +579,10 @@ export const pluginMcp: PluginMcpModule = {
     tools: TOOLS,
     createHandler(context: PluginMcpContext): Record<string, McpToolHandler> {
         return {
+            h3_preview_run: async (input) => {
+                if (!context.backend.previewH3Generation) throw new Error('Backend 缺少 H3 执行预检能力');
+                return context.backend.previewH3Generation({ ...input, mode: 'video', operation: 'h3-run' } as import('../../canvas/generation-contract.js').CanvasGenerationCommand);
+            },
             h3_get_defaults: async () => context.backend.getH3Defaults(),
             h3_set_defaults: async (input) => {
                 const settings = input.settings && typeof input.settings === "object" && !Array.isArray(input.settings) ? input.settings as Record<string, unknown> : {};
@@ -850,7 +854,8 @@ export const pluginMcp: PluginMcpModule = {
                 // `ok` 会被 MCP 观测层当成“工具执行失败”，而预检跑通本身就是成功；
                 // 校验结论用 ready 表达，避免把“发现阻断项”记成一次工具失败。
                 const ready = validation.issues.every((issue) => issue.severity !== "error");
-                return { ready, blockingIssues: validation.issues.filter((issue) => issue.severity === "error"), projectId, nodeId, segmentId, validation, snapshot: buildH3ClipSnapshot(segment, validation) };
+                const executionPreview = await context.backend.previewH3Generation?.({ mode: 'video', operation: 'h3-run', projectId, nodeId, segmentId, skipCompleted: false, params: input.params as Record<string, unknown> | undefined });
+                return { ready: ready && (executionPreview?.ready ?? true), blockingIssues: [...validation.issues.filter((issue) => issue.severity === "error"), ...(executionPreview?.diagnostics || [])], projectId, nodeId, segmentId, validation, snapshot: buildH3ClipSnapshot(segment, validation), executionPreview };
             },
             h3_apply_video_plan: async (input) => {
                 const projectId = String(input.projectId || "");
@@ -914,7 +919,7 @@ export const pluginMcp: PluginMcpModule = {
                 const promptStarted = Date.now();
                 const generated = writeStoryboardPrompt(project, segment, input);
                 const promptBuildMs = Date.now() - promptStarted;
-                if (input.dryRun === true) return { ok: true, dryRun: true, applied: false, unchanged: generated.unchanged, projectId, nodeId, segmentId, revision: Number(project.revision || 0), fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, prompt: generated.prompt, promptLength: generated.prompt.length, timings: { promptBuildMs, applyMs: 0 } };
+                if (input.dryRun === true) return { ok: true, dryRun: true, applied: false, unchanged: generated.unchanged, projectId, nodeId, segmentId, revision: Number(project.revision || 0), fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, prompt: generated.prompt, promptLength: generated.prompt.length, referenceBindings: generated.referenceBindings || [], storyboardShots: generated.storyboardShots || [], storyboardDurations: generated.storyboardDurations, timings: { promptBuildMs, applyMs: 0 } };
                 if (generated.unchanged) return { ok: true, unchanged: true, projectId, nodeId, segmentId, fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, promptLength: String(segment.prompt || "").length, timings: { promptBuildMs, applyMs: 0 } };
                 const applyStarted = Date.now();
                 const result = await context.backend.applyCanvasOperations(projectId, [{ type: "update_h3_segment", nodeId, segmentId, patch: {
@@ -986,7 +991,8 @@ export const pluginMcp: PluginMcpModule = {
             },
             h3_get_clip_runtime: async (input) => {
                 const { projectId, nodeId, segmentId, segment, revision, timings } = await readH3Clip(context, input, undefined, false);
-                return { ok: true, projectId, nodeId, segmentId, revision, runtime: runtimeValuesOf(segment), timings };
+                const preview = await context.backend.previewH3Generation?.({ mode: 'video', operation: 'h3-run', projectId, nodeId, segmentId, skipCompleted: false });
+                return { ok: true, projectId, nodeId, segmentId, revision, runtime: runtimeValuesOf(segment), ...(preview ? { ...preview.clips[0], planHash: preview.planHash, diagnostics: preview.diagnostics, ready: preview.ready } : {}), timings };
             },
             h3_get_node: async (input) => {
                 const nodeId = String(input.nodeId || "");
@@ -1011,6 +1017,7 @@ export const pluginMcp: PluginMcpModule = {
                     ...(typeof input.segmentId === "string" ? { segmentId: input.segmentId } : {}),
                     ...(typeof input.segmentIndex === "number" ? { segmentIndex: input.segmentIndex } : {}),
                     params: (input.params as Record<string, unknown>) || {},
+                    ...(typeof input.expectedPlanHash === "string" ? { expectedPlanHash: input.expectedPlanHash } : {}),
                     ...(typeof input.idempotencyKey === "string" ? { idempotencyKey: input.idempotencyKey } : {}),
                 });
                 if (!result.task) throw new Error("Backend H3 运行未返回任务");
@@ -1222,7 +1229,7 @@ export const pluginMcp: PluginMcpModule = {
                 if (startSegmentId && (nodes.length !== 1 || !segmentsOf(nodes[0]).some((segment) => segment.id === startSegmentId))) {
                     throw new Error("指定 startSegmentId 时必须精确选择一个包含该 Clip 的 H3 节点");
                 }
-                const result = await context.backend.canvasRunGeneration({ mode: "video", operation: "h3-run", projectId, nodeIds: nodes.map((node) => node.id), ...(startSegmentId ? { segmentId: startSegmentId } : {}), ...(input.endSegmentId ? { endSegmentId: String(input.endSegmentId) } : {}), runFromCurrent: true, skipCompleted, params: override });
+                const result = await context.backend.canvasRunGeneration({ mode: "video", operation: "h3-run", projectId, nodeIds: nodes.map((node) => node.id), ...(startSegmentId ? { segmentId: startSegmentId } : {}), ...(input.endSegmentId ? { endSegmentId: String(input.endSegmentId) } : {}), runFromCurrent: true, skipCompleted, params: override, ...(typeof input.expectedPlanHash === "string" ? { expectedPlanHash: input.expectedPlanHash } : {}), ...(typeof input.idempotencyKey === "string" ? { idempotencyKey: input.idempotencyKey } : {}) });
                 if (!result.task) throw new Error("Backend H3 批量运行未返回任务");
                 return summarizeRuntimeTask(result.task);
             },

@@ -73,6 +73,10 @@ export class CanvasGenerationService {
         return prepareCanvasLoopRun(this.stores, input);
     }
 
+    previewH3(command: CanvasGenerationCommand) {
+        return this.h3.preview(command as Parameters<CanvasH3Runner['preview']>[0]);
+    }
+
     private startH3(command: CanvasGenerationCommand) {
         if (!command.projectId || (!command.nodeId && !command.nodeIds?.length)) throw new Error("H3 生成缺少 projectId 或节点 ID");
         const task = this.h3.start({
@@ -85,6 +89,7 @@ export class CanvasGenerationService {
             ...(command.runFromCurrent !== undefined ? { runFromCurrent: command.runFromCurrent } : {}),
             ...(command.skipCompleted !== undefined ? { skipCompleted: command.skipCompleted } : {}),
             ...(command.forceRegenerate !== undefined ? { forceRegenerate: command.forceRegenerate } : {}),
+            ...(command.expectedPlanHash ? { expectedPlanHash: command.expectedPlanHash } : {}),
             ...(command.params ? { params: command.params } : {}),
         }, command.idempotencyKey || command.clientTaskId);
         return { task, taskId: task.id, executor: "h3" };

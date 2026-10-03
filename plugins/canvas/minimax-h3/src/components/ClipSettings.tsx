@@ -1,3 +1,5 @@
+import { resolveH3Runtime } from "../../../../../canvas-agent/src/plugins/minimax-h3/runtime-params";
+import { readDefaultParams } from "../services/h3-defaults";
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { AutoComplete, Input, InputNumber, Switch, Select, Tooltip } from "antd";
@@ -58,7 +60,18 @@ function H3LoraPicker({ values, value, onChange }: { values: string[]; value: st
     return <span ref={dropdown.rootRef} style={{ display: "block", width: "100%", minWidth: 0 }}><AutoComplete className="nfh3-select" size="middle" value={draft} options={values.filter(Boolean).map((item) => ({ value: item, label: item }))} filterOption open={dropdown.open} onOpenChange={dropdown.onOpenChange} onChange={changeDraft} onSelect={(next) => { changeDraft(next); committedRef.current = next; onChange(next); }} onBlur={commit} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); event.currentTarget.blur(); } }} allowClear placeholder="选择或输入 LoRA 文件名" onMouseDown={(event) => event.stopPropagation()} style={{ width: "100%" }} /></span>;
 }
 
-export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
+export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: savePatch }: Props) {
+    const raw = (Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : []).find(item => item.id === inputSegment?.id) || inputSegment || {};
+    const resolved = resolveH3Runtime(raw as Record<string, unknown>, {}, metadata, readDefaultParams());
+    const segment = inputSegment ? { ...inputSegment, ...resolved.params, videoSteps: resolved.params.steps } as H3Segment : undefined;
+    const patch = (value: Partial<H3Segment>) => savePatch({ ...value, ...(!('h3ParameterPolicy' in value) && Object.keys(value).some(key => !['duration', 'aspectRatio', 'mode', 'taskMode', 'motionContextEnabled', 'tailFrameContinuation'].includes(key)) ? { h3ParameterPolicy: 'overrides' } : {}) });
+    const [executionPreview, setExecutionPreview] = useState<import('@basketikun/canvas-agent/generation-contract').H3ExecutionPreview | null>(null);
+    const [previewError, setPreviewError] = useState('');
+    const refreshPreview = async () => {
+        if (!inputSegment) return;
+        try { setExecutionPreview(await ctx.ai.previewH3Generation({ mode: 'video', operation: 'h3-run', projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: inputSegment.id, skipCompleted: false })); setPreviewError(''); }
+        catch (error) { setExecutionPreview(null); setPreviewError(error instanceof Error ? error.message : String(error)); }
+    };
     const locale = useH3Locale();
     const [catalog, setCatalog] = useState<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng: Record<string, unknown[]> }>({ models: [], loras: [], textEncoders: [], videoVaes: [], audioVaes: [], latentUpscaleModels: [], nanfeng: {} });
     const [refreshingLoras, setRefreshingLoras] = useState(false);
@@ -73,18 +86,6 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         return () => { active = false; };
     }, [ctx.ai, segment?.id]);
     useEffect(() => { setLoraSearch(""); }, [segment?.id]);
-    // 潜空间放大模型兜底：启用后若未选择且列表已加载，自动写入第一个可用模型。
-    // 之前 discover 回调里写 segment 的时机不可靠（catalog 异步更新后组件已渲染），
-    // 导致 UI 看着像是选了第一项，但 segment.latentUpscaleModel 实际为空，后端报无模型。
-    // 注意：这里只能用 catalog.latentUpscaleModels（useState），不能用下方声明的
-    // latentUpscaleModelChoices（const 在 TDZ 中会在依赖数组求值时抛错）。
-    useEffect(() => {
-        if (segment?.latentUpscaleEnabled !== true) return;
-        const current = String(segment.latentUpscaleModel || "").trim();
-        if (current) return;
-        const first = catalog.latentUpscaleModels[0];
-        if (first) patch({ latentUpscaleModel: String(first) });
-    }, [segment?.latentUpscaleEnabled, segment?.latentUpscaleModel, catalog.latentUpscaleModels, patch]);
     useEffect(() => {
         let active = true;
         const legacy = metadata.h3SigmaPresets && typeof metadata.h3SigmaPresets === "object" ? metadata.h3SigmaPresets as Record<string, unknown> : {};
@@ -201,17 +202,25 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         patch(next);
     };
     return <div className="nfh3-settings">
+        <div style={{ color: 'var(--h3-text)', fontSize: 22, padding: '10px 14px' }}>
+            <label>{h3Label(locale, 'parameterPolicy')} <Select size="middle" value={resolved.policy} onChange={(value: 'defaults' | 'overrides') => patch({ h3ParameterPolicy: value })} options={[{ value: 'defaults', label: h3Label(locale, 'inheritDefaults') }, { value: 'overrides', label: h3Label(locale, 'explicitOverrides') }]} /></label>
+            <p>{h3Label(locale, 'effectiveParameters')}: {String(segment.aspectRatio)} · {String(segment.megapixels)} MP · {String(segment.sampler)} · {segment.latentUpscaleEnabled ? `${String(segment.latentUpscaleMegapixels)} MP` : h3Label(locale, 'upscaleOff')}</p>
+            <details><summary>{h3Label(locale, 'parameterSources')}</summary><table style={{ width: '100%', tableLayout: 'fixed', fontSize: 18 }}><tbody>{['aspectRatio', 'modelName', 'textEncoder', 'videoVae', 'audioVae', 'megapixels', 'sampler', 'scheduler', 'steps', 'h3FirstSteps', 'h3SecondSteps', 'loraSlots', 'latentUpscaleEnabled', 'latentUpscaleModel', 'latentUpscaleMegapixels'].map(key => <tr key={key}><td>{key}</td><td style={{ overflowWrap: 'anywhere' }}>{typeof resolved.params[key] === 'object' ? JSON.stringify(resolved.params[key]) : String(resolved.params[key] ?? '')}</td><td>{resolved.sources[key]}</td></tr>)}</tbody></table></details>
+            <button type="button" onClick={() => void refreshPreview()}>{h3Label(locale, 'checkSavedExecution')}</button>
+            {executionPreview && <p>{executionPreview.ready ? h3Label(locale, 'preflightReady') : executionPreview.diagnostics.map(issue => issue.message).join('；')} · {executionPreview.clips[0]?.expectedDimensions.final?.width}×{executionPreview.clips[0]?.expectedDimensions.final?.height}</p>}
+            {previewError && <p role="alert">{previewError}</p>}
+        </div>
         <div className="nfh3-control-grid">
-            {control(h3Label(locale, "executionMode"), <H3Dropdown values={["auto", "local", "runninghub"]} value={segment.minimaxEngine || String(metadata.minimaxEngine || "local")} format={(value) => h3Label(locale, value === "auto" ? "executionAuto" : value === "local" ? "executionLocal" : "executionRunningHub")} onChange={(value) => patch({ minimaxEngine: value as H3Segment["minimaxEngine"] })} />, true)}
+            {segment.selectedVideoModelEnabled === true ? <div className="nfh3-control wide"><span>{h3Label(locale, "executionMode")}</span><small>{h3Label(locale, "selectedVideoRouteHint")}</small></div> : control(h3Label(locale, "executionMode"), <H3Dropdown values={["auto", "local", "runninghub"]} value={segment.minimaxEngine || String(metadata.minimaxEngine || "local")} format={(value) => h3Label(locale, value === "auto" ? "executionAuto" : value === "local" ? "executionLocal" : "executionRunningHub")} onChange={(value) => patch({ minimaxEngine: value as H3Segment["minimaxEngine"] })} />, true)}
             <div className="nfh3-hint">{h3Label(locale, "executionHint")}</div>
         </div>
         <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" data-mode={key} className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b></button>)}</div>
         {section("model", "模型与基础参数", String(segment.modelName || "未选择模型").replace(/^.*[\\/]/, ""), <div className="nfh3-control-grid">
             {control("模型", <H3Dropdown values={modelOptions.map((item) => item.value)} value={segment.modelName || modelOptions[0]?.value} onChange={(value) => patch({ modelName: String(value) })} placeholder="选择模型" />, true)}
             {choice("视觉风格模板", H3_STYLE_TEMPLATES.map((template) => template.id), styleTemplateId, (value) => patch({ styleTemplateId: value ? String(value) : null }), (value) => H3_STYLE_TEMPLATES.find((template) => template.id === value)?.label || String(value), true, true, "不加模板", true)}
-            {control("文本编码器", <H3Dropdown values={catalog.textEncoders.filter((value) => /minimax/i.test(value))} value={segment.textEncoder || catalog.textEncoders.find((value) => /minimax/i.test(value))} onChange={(value) => patch({ textEncoder: String(value) })} placeholder="选择文本编码器" />, true)}
-            {control("视频 VAE", <H3Dropdown values={catalog.videoVaes} value={segment.videoVae || catalog.videoVaes[0]} onChange={(value) => patch({ videoVae: String(value) })} placeholder="选择视频 VAE" />, true)}
-            {control("音频 VAE", <H3Dropdown values={catalog.audioVaes} value={segment.audioVae || catalog.audioVaes[0]} onChange={(value) => patch({ audioVae: String(value) })} placeholder="选择音频 VAE" />, true)}
+            {control("文本编码器", <H3Dropdown values={catalog.textEncoders.filter((value) => /minimax/i.test(value))} value={segment.textEncoder} onChange={(value) => patch({ textEncoder: String(value) })} placeholder="选择文本编码器" />, true)}
+            {control("视频 VAE", <H3Dropdown values={catalog.videoVaes} value={segment.videoVae} onChange={(value) => patch({ videoVae: String(value) })} placeholder="选择视频 VAE" />, true)}
+            {control("音频 VAE", <H3Dropdown values={catalog.audioVaes} value={segment.audioVae} onChange={(value) => patch({ audioVae: String(value) })} placeholder="选择音频 VAE" />, true)}
             {control("启用 TRT 视频 VAE", <Switch checked={segment.trtVideoVaeEnabled === true} onChange={(checked) => patch({ trtVideoVaeEnabled: checked })} />)}
             {segment.trtVideoVaeEnabled ? <>{choice("TRT 视频解码引擎", trtDecoderChoices, segment.trtDecoderEngine || "None", (value) => patch({ trtDecoderEngine: String(value) }), undefined, true)}{choice("TRT 视频编码引擎", trtEncoderChoices, segment.trtEncoderEngine || "None", (value) => patch({ trtEncoderEngine: String(value) }), undefined, true)}</> : null}
             {choice("编码器类型", encoderTypeChoices, segment.textEncoderType || "minimax", (value) => patch({ textEncoderType: String(value) }))}

@@ -59,6 +59,9 @@ export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number;
 export type H3Pane = "library" | "preview" | "video" | "refs";
 
 export type H3Segment = {
+    h3ParameterPolicy?: "defaults" | "overrides";
+    selectedVideoModelEnabled?: boolean;
+    selectedVideoModel?: string;
     id: string;
     minimaxEngine?: "auto" | "local" | "runninghub";
     start?: number;

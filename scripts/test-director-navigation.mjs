@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import { chromium } from 'playwright';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -11,7 +12,13 @@ const req = createRequire(path.join(root, 'web/package.json'));
 const { createServer } = await import(pathToFileURL(req.resolve('vite')).href);
 const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'director-entry-'));
 process.env.CANVAS_TEST_VITE_CACHE = cache;
-const server = await createServer({ root: path.join(root, 'web'), configFile: path.join(root, 'web/vite.config.ts'), server: { port: 0, host: '127.0.0.1' }, cacheDir: cache });
+const portProbe = net.createServer();
+await new Promise((resolve, reject) => { portProbe.once('error', reject); portProbe.listen(0, '127.0.0.1', resolve); });
+const probeAddress = portProbe.address();
+if (!probeAddress || typeof probeAddress === 'string') throw new Error('Could not allocate a local browser-test port');
+const testPort = probeAddress.port;
+await new Promise((resolve, reject) => portProbe.close(error => error ? reject(error) : resolve()));
+const server = await createServer({ root: path.join(root, 'web'), configFile: path.join(root, 'web/vite.config.ts'), server: { port: testPort, strictPort: true, host: '127.0.0.1' }, cacheDir: cache });
 let browser, page;
 const projects = [{ id: 'standalone', title: '独立角色制作', nodes: [], connections: [], updatedAt: '2026-10-01T00:00:00Z' }, { id: 'linked', title: '分集画布', nodes: [], connections: [], updatedAt: '2026-10-02T00:00:00Z' }];
 const episode = { id: 'ep', title: '第一集', episodeNumber: 1, canvasId: 'linked' };
@@ -51,7 +58,11 @@ try {
         if (method === 'OPTIONS') return route.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' } });
         requests.push({ pathname, method }); let data = { ok: true };
         if (pathname === '/agent/codex/turn' && method === 'POST') { turnRequests.push(request.postDataJSON()); data = { ok: true, threadId: 'workbench-thread' }; }
-        else if (pathname === '/agent/codex/skills') data = { ok: true, data: [{ name: 'canvas-video-production-sop', description: 'Acheng workbench', path: 'C:/skills/canvas-video-production-sop/SKILL.md', scope: 'user', enabled: true, managed: true }] };
+        else if (pathname === '/agent/codex/skills') data = { ok: true, data: [
+            { name: 'acheng-director', description: 'Personal Acheng Director', path: 'C:/Users/wxy/.codex/skills/acheng-director/SKILL.md', scope: 'user', enabled: true, managed: true },
+            { name: 'canvas-video-production-sop', description: 'Canvas production adapter', path: 'E:/workspace/.agents/skills/canvas-video-production-sop/SKILL.md', scope: 'repo', enabled: true, managed: true },
+            { name: 'acheng-director', description: 'Acheng Director', path: 'E:/workspace/.agents/skills/acheng-director/SKILL.md', scope: 'repo', enabled: true, managed: true },
+        ] };
         else if (pathname === '/agent/codex/threads') data = { ok: true, data: [{ id: 'workbench-thread', preview: 'Director session' }], workspace: { workspacePath: 'E:/workspace', activeThreadId: 'workbench-thread' }, conversation: { revision: 1, conversationId: 'workbench-conversation', threadId: 'workbench-thread', status: 'ready', mcpStatuses: {} } };
         else if (/\/agent\/codex\/threads\/[^/]+$/.test(pathname)) data = { ok: true, thread: { id: 'workbench-thread' }, messages: [], settledTurnIds: [], historyReady: true };
         if (pathname === '/canvas/projects/retry/production' && failRead) { failRead = false; return route.fulfill({ status: 503, json: { error: 'temporary fixture failure' }, headers: { 'access-control-allow-origin': '*' } }); }
@@ -111,7 +122,7 @@ try {
         else if (/\/canvas\/projects\/[^/]+$/.test(pathname)) data.project = projects.find(p => p.id === decodeURIComponent(pathname.split('/')[3]));
         return route.fulfill({ json: data, headers: { 'access-control-allow-origin': '*' } });
     });
-    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/tests/director-navigation.html?start=%2Fdirector`);
+    await page.goto(`http://127.0.0.1:${testPort}/tests/director-navigation.html?start=%2Fdirector`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.getByRole('heading', { name: '制作', exact: true }).waitFor();
     assert.ok(await page.getByRole('link', { name: '制作', exact: true }).count());
     await page.getByRole('heading', { name: '从一个想法开始', exact: true }).waitFor();
@@ -131,8 +142,12 @@ try {
     const creativeRequest = creativeResponse.request();
     assert.equal(creativeResponse.ok(), true);
     const creativePrompt = creativeRequest.postDataJSON().prompt;
+    assert.equal(creativeRequest.postDataJSON().skill.name, 'acheng-director');
+    assert.match(creativeRequest.postDataJSON().skill.path, /\.agents\/skills\/acheng-director\/SKILL\.md$/);
     assert.match(creativePrompt, /雨夜机械师/);
     assert.match(creativePrompt, /制作中心创意入口/);
+    assert.match(creativePrompt, /\$acheng-director/);
+    assert.match(creativePrompt, /canvas-video-production-sop/);
     assert.match(creativePrompt, /workflow\.currentWork/);
     assert.match(creativePrompt, /site_navigate\(\{production:/);
     assert.match(creativePrompt, /凭聊天内容自行拼路由/);
@@ -169,6 +184,13 @@ try {
     await page.screenshot({ path: path.join(artifacts, 'desktop.png'), fullPage: true });
     await page.getByRole('link').filter({ hasText: '独立角色制作' }).click();
     await page.getByRole('heading', { name: '独立角色制作', exact: true }).waitFor();
+    const workspaceNavigation = page.getByRole('navigation', { name: '制作工作区', exact: true });
+    await workspaceNavigation.waitFor();
+    assert.equal(await page.getByRole('button', { name: '总览', exact: true }).getAttribute('aria-current'), 'page');
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'the workspace layout fits a narrow screen');
+    assert.equal(await workspaceNavigation.isVisible(), true);
+    await page.setViewportSize({ width: 1440, height: 960 });
     const brief = page.getByPlaceholder('描述故事、角色、场景或想继续完成的内容。已有素材可以在画布或右侧对话中添加。');
     await page.evaluate(async () => {
         const { useAgentStore } = await import('/src/stores/use-agent-store.ts');
@@ -181,6 +203,8 @@ try {
     await brief.fill('制作一个侦探角色');
     await page.getByRole('button', { name: '推进当前工作', exact: true }).click();
     await page.getByText('草稿修订 1', { exact: true }).waitFor();
+    await page.getByRole('region', { name: '现在需要你处理', exact: true }).waitFor();
+    assert.equal(await workspaceNavigation.getByRole('button', { name: '故事', exact: true }).count(), 1, 'workspace navigation remains unambiguous');
     assert.equal(await page.getByLabel('agent draft').textContent(), '保留的聊天草稿');
     assert.deepEqual(JSON.parse(await page.getByLabel('agent preservation').textContent()), { prompt: '保留的聊天草稿', attachmentCount: 1, referenceCount: 1 });
     await brief.fill('第二段需求写回 Backend，但不得覆盖聊天草稿');
@@ -191,7 +215,7 @@ try {
     assert.equal(turnRequests.length, 1, "only the single automatic creative-entry request was dispatched; an offline scoped request must stop without retry");
     const standaloneProduction = records.get('canvas:standalone') || records.get('standalone');
     assert.match(String(standaloneProduction?.draft.director?.source.brief), /第二段需求写回 Backend/);
-    await page.getByRole('tab', { name: '生产与交付', exact: true }).click();
+    await page.getByRole('button', { name: '生产与交付', exact: true }).click();
     await page.getByRole('button', { name: '生成此 Segment', exact: true }).click();
     await page.getByText(/生产启动尚未取得回执/).waitFor();
     await page.waitForTimeout(250);
@@ -202,7 +226,7 @@ try {
     await page.getByRole('heading', { name: '独立角色制作', exact: true }).waitFor();
     await page.getByText(lostRunId, { exact: true }).waitFor();
     await page.getByRole('button', { name: '用原请求取回执', exact: true }).click();
-    await page.getByRole('tab', { name: '生产与交付', exact: true }).click();
+    await page.getByRole('button', { name: '生产与交付', exact: true }).click();
     await page.getByText('pending · ' + lostRunId, { exact: true }).waitFor();
     assert.equal(runStarts.length, 1, 'recovery reads the original runId and does not create another production batch');
     assert.equal(runRecords.size, 1);
@@ -260,7 +284,7 @@ try {
         useProductionFollowStore.getState().setTarget({ kind: 'canvas', id: 'standalone', workId });
     });
     await page.waitForFunction(() => document.querySelector('output[aria-label="location"]')?.textContent?.includes('/director/standalone?workspace=assets'));
-    assert.equal(await page.getByRole('tab', { name: 'Style & Assets', exact: true }).getAttribute('aria-selected'), 'true');
+    assert.equal(await page.getByRole('button', { name: 'Style & Assets', exact: true }).getAttribute('aria-current'), 'page');
     await page.getByRole('button', { name: 'test production hub', exact: true }).click();
     await page.getByRole('heading', { name: 'Production', exact: true }).waitFor();
     await page.waitForFunction(async () => !(await import('/src/stores/use-production-follow-store.ts')).useProductionFollowStore.getState().following);
@@ -280,7 +304,7 @@ try {
     assert.equal(await returnToProduction.count(), 1, 'collapsed Agent controls stay out of the accessibility tree');
     await returnToProduction.click();
     await page.waitForFunction(() => document.querySelector('output[aria-label="location"]')?.textContent?.includes('/director/standalone?workspace=story'));
-    assert.equal(await page.getByRole('tab', { name: 'Story', exact: true }).getAttribute('aria-selected'), 'true');
+    assert.equal(await page.getByRole('button', { name: 'Story', exact: true }).getAttribute('aria-current'), 'page');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ passed: true, creationCount, scope: 'unified production entry and object views, creative entry handoff, legacy routes, independent canvas, episode alias, shared draft, canvas shortcut, new production, Agent disconnected draft protection, runId receipt recovery, active-target duplicate prevention, follow presentation, manual pause and return, mobile navigation, no media generation' }));
 } catch (error) { console.error("Production requests:", JSON.stringify(requests.filter(item => /production/.test(item.pathname)))); console.error("Rendered page:", await page?.locator("body").innerText()); throw error; } finally { await browser?.close(); await server.close(); if (path.dirname(cache) === os.tmpdir() && path.basename(cache).startsWith('director-entry-')) fs.rmSync(cache, { recursive: true, force: true }); }

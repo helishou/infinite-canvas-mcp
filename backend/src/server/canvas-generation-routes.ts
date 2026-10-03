@@ -1,6 +1,6 @@
 import type { Request, Response, Router } from "express";
 import { canvasGenerationCommandSchema, canvasLoopPrepareSchema, type CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
-import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH } from "@basketikun/canvas-agent/generation-api";
+import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH, H3_EXECUTION_PREVIEW_PATH } from "@basketikun/canvas-agent/generation-api";
 import { CanvasGenerationService } from "../canvas/generation-service.js";
 
 function generationErrorBody(error: unknown) {
@@ -11,6 +11,8 @@ function generationErrorBody(error: unknown) {
         ...(typeof details.code === "string" ? { code: details.code } : {}),
         ...(typeof details.taskId === "string" ? { taskId: details.taskId } : {}),
         ...(Array.isArray(details.issues) ? { issues: details.issues } : {}),
+        ...(Array.isArray(details.diagnostics) ? { diagnostics: details.diagnostics } : {}),
+        ...(details.preview ? { preview: details.preview } : {}),
     };
 }
 
@@ -44,4 +46,11 @@ export function registerCanvasGenerationRoutes(router: Router, service: CanvasGe
             res.status(400).json(generationErrorBody(error));
         }
     });
+    router.post(H3_EXECUTION_PREVIEW_PATH, (req: Request, res: Response) => {
+        const parsed = canvasGenerationCommandSchema.safeParse(req.body || {});
+        if (!parsed.success || parsed.data.operation !== 'h3-run') return void res.status(400).json({ ok: false, error: 'H3 预检需要有效的 h3-run 请求' });
+        try { res.json({ ok: true, ...service.previewH3(parsed.data) }); }
+        catch (error) { res.status(400).json(generationErrorBody(error)); }
+    });
+
 }

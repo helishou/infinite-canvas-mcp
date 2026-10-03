@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { productionEditSchema, productionPreflightSchema, productionContractQuerySchema } from "../drama/production-contract.js";
+import { productionEditSchema, productionPreflightSchema, productionContractQuerySchema, productionCompileSchema, productionApplyCompilationSchema, productionReadSchema } from "../drama/production-contract.js";
 import {
   collaborationDescriptions,
   collaborationSchemas,
@@ -99,6 +99,9 @@ export const toolNames = [
   "drama_delete_episode",
   "drama_get_production",
   "production_get_contract",
+  "production_compile",
+  "production_apply_compilation",
+  "production_diagnose_bindings",
   "canvas_preflight_production",
   "drama_preflight_production",
   "canvas_get_production",
@@ -828,11 +831,14 @@ export const toolInputSchemas = {
   drama_delete_episode: z.object({
     episodeId: z.string().min(1).describe("分集 ID；删除分集不会删除绑定画布"),
   }),
-  drama_get_production: z.object({ episodeId: z.string().min(1) }),
+  drama_get_production: productionReadSchema.extend({ episodeId: z.string().min(1) }),
   production_get_contract: productionContractQuerySchema,
+  production_compile: productionCompileSchema.extend({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
+  production_apply_compilation: productionApplyCompilationSchema.extend({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
+  production_diagnose_bindings: z.object({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
   canvas_preflight_production: productionPreflightSchema.extend({ projectId: z.string().min(1) }),
   drama_preflight_production: productionPreflightSchema.extend({ episodeId: z.string().min(1) }),
-  canvas_get_production: z.object({ projectId: z.string().min(1) }),
+  canvas_get_production: productionReadSchema.extend({ projectId: z.string().min(1) }),
   drama_get_workflow_readiness: z.object({ episodeId: z.string().min(1) }),
   canvas_get_workflow_readiness: z.object({ projectId: z.string().min(1) }),
   drama_start_production_run: z.object({ episodeId: z.string().min(1), runId: z.string().min(1), idempotencyKey: z.string().min(1), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional().describe("selected 固定为明确目标；all_ready 授权按依赖扩展当前就绪范围并在审核后沿同一 runId 继续") }),
@@ -964,11 +970,14 @@ export const toolDescriptions: Record<ToolName, string> = {
     "更新分集梗概、完整剧情或画布绑定。传 canvasId=null 可解除绑定，不会删除画布或分集剧情。",
   drama_delete_episode:
     "删除分集记录；不会删除其绑定的画布，画布会变成独立资产。",
-  drama_get_production: "读取分集结构化制作稿、修订号和已发布版本；正式剧本与镜头以这里为准。",
+  drama_get_production: "默认读取制作摘要与版本；view=source 读取一个 snapshot 的完整源稿；view=artifacts 可用 targetIds 定向读取完整正文；view=full 返回原完整记录。",
   production_get_contract: "查询完整制作操作 schema、合法示例、前置条件和固定引擎源稿模板；指定 runtimeId 后不回退其他版本。",
+  production_compile: "由 Backend 对当前 revision 或完整候选稿运行制作对象固定 Acheng 编译器；冻结正文、参考哈希与回执，返回 preparedId 和逐目标诊断。只准备，不编辑、发布或生成。",
+  production_apply_compilation: "用精确 preparedId 原子接入 Backend 编译产物；沿用冻结的 expectedRevision/operationId，重复调用恢复原回执，源稿或绑定冲突拒绝覆盖。保存草稿，不发布或生成。",
+  production_diagnose_bindings: "只读核对源资产版本、草稿绑定、发布版本绑定、节点活动媒体、归档字节哈希与消费者；明确指出新旧版本或活动媒体不一致，不修改数据。",
   canvas_preflight_production: "只读检查画布 edit/publish/generate 正式请求；返回错误路径、目标和版本，不提交编辑或生成。",
   drama_preflight_production: "只读检查分集 edit/publish/generate 正式请求；返回错误路径、目标和版本，不提交编辑或生成。",
-  canvas_get_production: "读取分集结构化制作稿、修订号和已发布版本；正式剧本与镜头以这里为准。",
+  canvas_get_production: "默认读取制作摘要与版本；view=source 读取一个 snapshot 的完整源稿；view=artifacts 可用 targetIds 定向读取完整正文；view=full 返回原完整记录。",
   drama_get_workflow_readiness: "按 Acheng 目标读取分集制作的依赖就绪、缺项与下一步；无关模块的 partial 不会阻塞可执行目标。",
   canvas_get_workflow_readiness: "按 Acheng 目标读取画布制作的依赖就绪、缺项与下一步；无关模块的 partial 不会阻塞可执行目标。",
   drama_start_production_run: "以稳定 runId/idempotencyKey 对指定已发布分集目标启动媒体生产；仅调用此工具才授权所选范围生成。",

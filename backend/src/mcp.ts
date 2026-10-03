@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { productionEditSchema } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionEditSchema, productionReadQuery, productionWriteReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 import crypto from "node:crypto";
 import {
   executeCollaborationTool,
@@ -126,6 +126,7 @@ async function createBackendMcpInstance(
     replacePluginDeclarations: (declarations) =>
       backendApi.replacePluginDeclarations(declarations),
     canvasRunGeneration: (input) => backendApi.canvasRunGeneration(input),
+    previewH3Generation: (input) => backendApi.previewH3Generation(input),
     getTask: (id) => backendApi.getTask(id),
     cancelTask: (id) => backendApi.cancelTask(id),
     getH3Defaults: () => backendApi.getH3Defaults(),
@@ -419,6 +420,9 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "drama_update_episode",
   "drama_delete_episode",
   "drama_get_production",
+  "production_compile",
+  "production_apply_compilation",
+  "production_diagnose_bindings",
   "canvas_get_production",
   "drama_get_workflow_readiness",
   "canvas_get_workflow_readiness",
@@ -1819,6 +1823,22 @@ function registerBackendCanvasTools(
     },
   );
   const productionPath = (episodeId: string) => `/drama/episodes/${encodeURIComponent(episodeId)}/production`;
+  for (const name of ["production_compile", "production_apply_compilation", "production_diagnose_bindings"] as const) {
+    server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (rawInput: Record<string, unknown>) => {
+      const input = toolInputSchemas[name].parse(rawInput);
+      const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(input.id)}/production` : productionPath(input.id);
+      if (name === "production_diagnose_bindings") return textResult(await backendApi.get(`${base}/bindings`));
+      if (name === "production_apply_compilation") {
+        const apply = toolInputSchemas.production_apply_compilation.parse(rawInput);
+        return textResult(await backendApi.post(`${base}/apply-compilation`, { preparedId: apply.preparedId }));
+      }
+      if (name === "production_compile") {
+        const compile = toolInputSchemas.production_compile.parse(rawInput);
+        return textResult(await backendApi.post(`${base}/compile`, { expectedRevision: compile.expectedRevision, director: compile.director }));
+      }
+      throw new Error("Invalid compilation request");
+    });
+  }
   server.registerTool("production_get_contract", { description: toolDescriptions.production_get_contract, inputSchema: toolInputSchemas.production_get_contract }, async rawInput => {
     const input = toolInputSchemas.production_get_contract.parse(rawInput);
     const query = new URLSearchParams();
@@ -1835,11 +1855,11 @@ function registerBackendCanvasTools(
   }
   const productionIdSchema = z.object({ episodeId: z.string().trim().min(1) });
   server.registerTool("drama_get_production", {
-    description: "读取单集结构化剧本、镜头表、关键帧与 H3 映射。fullPlot 仅为剧情概述。",
-    inputSchema: productionIdSchema,
+    description: toolDescriptions.drama_get_production,
+    inputSchema: toolInputSchemas.drama_get_production,
   }, async (rawInput: Record<string, unknown>) => {
-    const { episodeId } = productionIdSchema.parse(rawInput);
-    return textResult(await backendApi.get(productionPath(episodeId)));
+    const input = toolInputSchemas.drama_get_production.parse(rawInput);
+    return textResult(await backendApi.get(productionPath(input.episodeId) + productionReadQuery(input)));
   });
   server.registerTool("drama_get_workflow_readiness", {
     description: "按 Acheng 制作目标读取依赖就绪、缺项和下一步。",
@@ -1909,28 +1929,28 @@ function registerBackendCanvasTools(
     inputSchema: productionEditSchema.extend(productionIdSchema.shape),
   }, async (rawInput: Record<string, unknown>) => {
     const { episodeId, ...input } = rawInput;
-    return textResult(await backendApi.post(`${productionPath(String(episodeId))}/ops`, input));
+    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(episodeId))}/ops`, input)));
   });
   server.registerTool("drama_publish_production", {
     description: "发布 Acheng 导演稿的新正式版本并冻结回执；此操作不会生成媒体。用户授权后另调用 drama_start_production_run 指定范围。",
     inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }),
   }, async (rawInput: Record<string, unknown>) => {
     const { episodeId, ...input } = rawInput;
-    return textResult(await backendApi.post(`${productionPath(String(episodeId))}/publish`, input));
+    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(episodeId))}/publish`, input)));
   });
   server.registerTool("drama_restore_production", {
     description: "将历史发布版本恢复到草稿；不删除现有发布历史或媒体。",
     inputSchema: productionIdSchema.extend({ version: z.number().int().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0) }),
   }, async (rawInput: Record<string, unknown>) => {
     const { episodeId, ...input } = rawInput;
-    return textResult(await backendApi.post(`${productionPath(String(episodeId))}/restore`, input));
+    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(episodeId))}/restore`, input)));
   });
   server.registerTool("drama_sync_production_clips", {
     description: "同步当前已发布镜头的 H3 Clip 草稿，不发起视频生成。",
     inputSchema: productionIdSchema,
   }, async (rawInput: Record<string, unknown>) => {
     const { episodeId } = productionIdSchema.parse(rawInput);
-    return textResult(await backendApi.post(`${productionPath(episodeId)}/sync-clips`, {}));
+    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(episodeId)}/sync-clips`, {})));
   });
   server.registerTool("drama_get_production_run", {
     description: "读取发布版本自动生产状态、暂停原因和已提交的精确任务 ID。",
@@ -1950,11 +1970,11 @@ function registerBackendCanvasTools(
   const productionPath = (projectId: string) => `/canvas/projects/${encodeURIComponent(projectId)}/production`;
   const productionIdSchema = z.object({ projectId: z.string().trim().min(1) });
   server.registerTool("canvas_get_production", {
-    description: "读取单集结构化剧本、镜头表、关键帧与 H3 映射。fullPlot 仅为剧情概述。",
-    inputSchema: productionIdSchema,
+    description: toolDescriptions.canvas_get_production,
+    inputSchema: toolInputSchemas.canvas_get_production,
   }, async (rawInput: Record<string, unknown>) => {
-    const { projectId } = productionIdSchema.parse(rawInput);
-    return textResult(await backendApi.get(productionPath(projectId)));
+    const input = toolInputSchemas.canvas_get_production.parse(rawInput);
+    return textResult(await backendApi.get(productionPath(input.projectId) + productionReadQuery(input)));
   });
   server.registerTool("canvas_get_workflow_readiness", {
     description: "按 Acheng 制作目标读取依赖就绪、缺项和下一步。",
@@ -2024,28 +2044,28 @@ function registerBackendCanvasTools(
     inputSchema: productionEditSchema.extend(productionIdSchema.shape),
   }, async (rawInput: Record<string, unknown>) => {
     const { projectId, ...input } = rawInput;
-    return textResult(await backendApi.post(`${productionPath(String(projectId))}/ops`, input));
+    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(projectId))}/ops`, input)));
   });
   server.registerTool("canvas_publish_production", {
     description: "发布 Acheng 导演稿的新正式版本并冻结回执；此操作不会生成媒体。用户授权后另调用 canvas_start_production_run 指定范围。",
     inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }),
   }, async (rawInput: Record<string, unknown>) => {
     const { projectId, ...input } = rawInput;
-    return textResult(await backendApi.post(`${productionPath(String(projectId))}/publish`, input));
+    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(projectId))}/publish`, input)));
   });
   server.registerTool("canvas_restore_production", {
     description: "将历史发布版本恢复到草稿；不删除现有发布历史或媒体。",
     inputSchema: productionIdSchema.extend({ version: z.number().int().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0) }),
   }, async (rawInput: Record<string, unknown>) => {
     const { projectId, ...input } = rawInput;
-    return textResult(await backendApi.post(`${productionPath(String(projectId))}/restore`, input));
+    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(projectId))}/restore`, input)));
   });
   server.registerTool("canvas_sync_production_clips", {
     description: "同步当前已发布镜头的 H3 Clip 草稿，不发起视频生成。",
     inputSchema: productionIdSchema,
   }, async (rawInput: Record<string, unknown>) => {
     const { projectId } = productionIdSchema.parse(rawInput);
-    return textResult(await backendApi.post(`${productionPath(projectId)}/sync-clips`, {}));
+    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(projectId)}/sync-clips`, {})));
   });
   server.registerTool("canvas_get_production_run", {
     description: "读取发布版本自动生产状态、暂停原因和已提交的精确任务 ID。",

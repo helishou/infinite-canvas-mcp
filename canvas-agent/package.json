@@ -25,7 +25,8 @@
     "./plugins/minimax-h3/node-factory": "./dist/plugins/minimax-h3/node-factory.js",
     "./plugins/minimax-h3/character-groups": "./dist/plugins/minimax-h3/character-groups.js",
     "./plugins/minimax-h3/prompt-sections": "./dist/plugins/minimax-h3/prompt-sections.js",
-    "./plugins/minimax-h3/style-templates": "./dist/plugins/minimax-h3/style-templates.js"
+    "./plugins/minimax-h3/style-templates": "./dist/plugins/minimax-h3/style-templates.js",
+    "./plugins/minimax-h3/runtime-params": "./dist/plugins/minimax-h3/runtime-params.js"
   },
   "types": "./dist/index.d.ts",
   "bin": {

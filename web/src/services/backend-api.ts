@@ -93,6 +93,10 @@ export function startCanvasGeneration(input: CanvasGenerationCommand, signal?: A
     return request<{ ok: boolean } & CanvasGenerationStartResult>("POST", CANVAS_GENERATION_PATH, input, { signal });
 }
 
+export function previewH3Generation(input: CanvasGenerationCommand) {
+    return request<import('@basketikun/canvas-agent/generation-contract').H3ExecutionPreview>('POST', '/canvas/generation/h3-preview', input);
+}
+
 export type CanvasLoopPrepareResult = { runId: string; outputGroupId: string; slotNodeIds: string[]; totalRounds: number };
 export function prepareCanvasLoop(input: CanvasLoopPrepare) {
     return request<{ ok: boolean } & CanvasLoopPrepareResult>("POST", CANVAS_LOOP_PREPARE_PATH, input);

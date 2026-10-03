@@ -383,6 +383,10 @@ export class BackendClient {
     return data;
   }
 
+  async previewH3Generation(input: CanvasGenerationCommand) {
+    return this.post<import('../canvas/generation-contract.js').H3ExecutionPreview>('/canvas/generation/h3-preview', input);
+  }
+
   // ── Assets ───────────────────────────────────────────────────────────
 
   async listAssets(options: { kind?: string; folderId?: string } = {}) {

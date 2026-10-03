@@ -6,8 +6,13 @@ import type { EpisodeProductionRunner } from "../drama/production-runner.js";
 import { getProductionContract } from "@basketikun/canvas-agent/skills/acheng";
 import { productionContractQuerySchema } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
+import { productionCompileSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead } from "@basketikun/canvas-agent/drama/production-contract";
+import { ProductionCompilationService } from "../drama/compilation.js";
+import { DATA_DIR } from "../config.js";
+import path from "node:path";
 
 export function registerDramaProductionRoutes(router: Router, service: EpisodeProductionService, runner?: EpisodeProductionRunner, base = "/drama/episodes/:episodeId/production") {
+    const compilations = new ProductionCompilationService(service, path.join(DATA_DIR, "production-compilations"));
     const handle = (res: { status: (code: number) => { json: (body: unknown) => void } }, error: unknown) => {
         if (error instanceof ProductionValidationError) return res.status(400).json({ ok: false, error: error.message, diagnostics: error.diagnostics });
         if (error instanceof ZodError) return res.status(400).json({ ok: false, error: error.message, diagnostics: error.issues.map(issue => ({ code: "INVALID_SCHEMA", path: issue.path.join("."), message: issue.message, severity: "error" })) });
@@ -15,6 +20,22 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         return res.status(error instanceof ZodError ? 400 : /不存在|找不到/.test(String(error)) ? 404 : 400)
             .json({ ok: false, error: error instanceof Error ? error.message : String(error) });
     };
+    router.post<Record<string, string>>(`${base}/compile`, (req, res) => {
+        try {
+            const input = productionCompileSchema.parse(req.body);
+            res.json({ ok: true, compilation: compilations.prepare(req.params.episodeId, base, input.expectedRevision, input.director) });
+        } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/apply-compilation`, (req, res) => {
+        try {
+            const input = productionApplyCompilationSchema.parse(req.body);
+            res.json({ ok: true, receipt: compilations.apply(req.params.episodeId, base, input.preparedId) });
+        } catch (error) { handle(res, error); }
+    });
+    router.get<Record<string, string>>(`${base}/bindings`, (req, res) => {
+        try { res.json({ ok: true, bindings: service.diagnoseBindings(req.params.episodeId) }); }
+        catch (error) { handle(res, error); }
+    });
     if (base === "/drama/episodes/:episodeId/production") router.get("/production/contract", (req, res) => {
         try { const input = productionContractQuerySchema.parse(req.query); res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType) }); }
         catch (error) { handle(res, error); }
@@ -24,7 +45,12 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}`, (req, res) => {
-        try { res.json({ ok: true, production: service.get(req.params.episodeId) }); } catch (error) { handle(res, error); }
+        try {
+            const production = service.get(req.params.episodeId);
+            // Existing Web consumers still receive the full record unless selecting a view.
+            const query = productionReadSchema.parse({ ...req.query, view: req.query.view || "full", targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds });
+            res.json({ ok: true, production: projectProductionRead(production, query) });
+        } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/readiness`, (req, res) => {
         try {

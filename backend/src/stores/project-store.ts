@@ -1,4 +1,6 @@
 import type { BackendDatabase, CanvasProject } from "../db.js";
+import { createHash } from 'node:crypto';
+import { h3PromptContent, h3ExpectedDialogues } from '@basketikun/canvas-agent/plugins/minimax-h3/runtime-params';
 import type { CanvasProjectFilter, CanvasProjectStore, H3NodeMaterial } from "./types.js";
 
 /** 画布项目 store。 */
@@ -8,6 +10,21 @@ export function createProjectStore(db: BackendDatabase): CanvasProjectStore {
         list: () => db.listCanvasProjects(),
         listSummaries: (filter?: CanvasProjectFilter) => db.listCanvasProjectSummaries(filter),
         get: (id) => db.getCanvasProject(id),
+        getH3ProductionRequirements: (projectId) => {
+            const row = db.db.prepare(`SELECT p.episode_id AS ownerId, p.revision, p.published_version AS version, p.published_json AS snapshot
+                FROM episode_productions p JOIN drama_episodes e ON e.id=p.episode_id WHERE e.canvas_id=?
+                UNION ALL SELECT project_id AS ownerId, revision, published_version AS version, published_json AS snapshot
+                FROM canvas_productions WHERE project_id=?`).get(projectId, projectId) as { ownerId: string; revision: number; version: number; snapshot: string | null } | undefined;
+            if (!row?.snapshot) return null;
+            const snapshot = JSON.parse(row.snapshot);
+            return { ownerId: row.ownerId, revision: row.revision, version: row.version, videoAspectRatio: snapshot.settings?.videoAspectRatio,
+                clips: (snapshot.clipGroups || []).filter((group: any) => group.nodeId && group.segmentId).map((group: any) => ({ nodeId: group.nodeId, segmentId: group.segmentId,
+                    storyboardRequired: group.shotIds.some((id: string) => snapshot.director?.shotInputs?.[id]?.keyframeAssetId),
+                    sourceHash: snapshot.director?.sourceHash,
+                    literalDialogues: h3ExpectedDialogues(snapshot.director?.source || {}, group.shotIds),
+                    promptContentHash: (() => { const artifact = snapshot.director?.artifacts?.find((item: any) => item.kind === 'h3' && item.targetId === group.id); return artifact ? createHash('sha256').update(h3PromptContent(artifact.prompt)).digest('hex') : undefined; })(),
+                    shots: group.shotIds.map((id: string) => snapshot.shots.find((shot: any) => shot.id === id)).filter(Boolean).map((shot: any) => ({ id: shot.id, duration: shot.duration })) })) };
+        },
         create: (project) => db.createCanvasProject(project),
         delete: (id) => db.deleteCanvasProject(id),
         applyOperations: (id, expectedRevision, operations, context) => db.applyCanvasProjectOperations(id, expectedRevision, operations, context),

@@ -26,6 +26,7 @@ import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch 
 
 import { directorHash, projectDirector, validateDirectorMedia, assertDirectorEngine } from "./director.js";
 import { DATA_DIR } from "../config.js";
+import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 
@@ -47,6 +48,7 @@ export type DirectorPresentation = {
 export type DirectorReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; targets: DirectorReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; presentation?: DirectorPresentation };
 
 const fingerprint = (value: unknown) => crypto.createHash("sha256").update(JSON.stringify(value ?? null)).digest("hex");
+const promptHashBytes = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 
 export class ProductionConflictError extends Error {
     constructor(readonly current: ProductionRecord) { super("制作稿版本已变化，请核对当前版本后重试"); }
@@ -69,6 +71,55 @@ export class EpisodeProductionService {
     }
 
     episodeInfo(episodeId: string): { id: string; canvasId?: string | null; fullPlot?: string | null } { const linked = this.linked(episodeId); return linked ? linked.service.episodeInfo(linked.id) : this.episode(episodeId); }
+
+    verifyCompilationBindings(id: string, director: DirectorProduction) {
+        const canvasId = this.episodeInfo(id).canvasId;
+        const rawNodes = canvasId ? this.db.getCanvasProject(canvasId)?.nodes : undefined;
+        if (!Array.isArray(rawNodes)) throw new Error("Production canvas does not exist");
+        const nodes = rawNodes as Array<Record<string, any>>;
+        const bindings = [...Object.values(director.assets), ...director.artifacts.flatMap(a => a.references)];
+        for (const binding of bindings) {
+            if (!binding.storageKey) continue;
+            const node = nodes.find(n => n.id === binding.nodeId);
+            const meta = node?.metadata as Record<string, unknown> | undefined;
+            const keys = node ? [...resolveCanvasImageReferenceNode(node).map(r => r.storageKey), (node as any).storageKey, meta?.storageKey, meta?.resultStorageKey] : [];
+            if (!node || !keys.includes(binding.storageKey)) throw new Error(`Compilation media is not bound to the production canvas: ${binding.nodeId}`);
+            const media = this.db.getMediaFile(binding.storageKey);
+            if (!media || !fs.existsSync(media.filePath) || promptHashBytes(media.filePath) !== binding.sha256) throw new Error(`Compilation reference bytes changed: ${binding.storageKey}`);
+        }
+    }
+
+    compilationReferenceFile(id: string, director: DirectorProduction, targetId: string, label: string) {
+        this.verifyCompilationBindings(id, director);
+        if (label === "asset") return this.db.getMediaFile(director.assets[targetId]?.storageKey || "")?.filePath;
+        const ref = director.artifacts.find(a => a.targetId === targetId)?.references.find(r => r.label === label);
+        return ref ? this.db.getMediaFile(ref.storageKey)?.filePath : undefined;
+    }
+
+    diagnoseBindings(id: string) {
+        const current = this.get(id), draft = current.draft.director, published = current.published?.director;
+        const canvasId = this.episodeInfo(id).canvasId;
+        const rawNodes = canvasId ? this.db.getCanvasProject(canvasId)?.nodes : undefined;
+        const nodes = (Array.isArray(rawNodes) ? rawNodes : []) as Array<Record<string, any>>;
+        const plans = Array.isArray(draft?.source.asset_plan) ? draft.source.asset_plan as Array<Record<string, any>> : [];
+        const assetIds = [...new Set([...plans.map(p => String(p.id || p.asset_id)), ...Object.keys(draft?.assets || {}), ...Object.keys(published?.assets || {})])];
+        return { revision: current.revision, publishedVersion: current.publishedVersion, canvasId, sourceHash: draft?.sourceHash, currentWork: draft?.workflow.currentWork,
+            assets: assetIds.map(assetId => {
+                const plan = plans.find(p => (p.id || p.asset_id) === assetId), active = draft?.assets[assetId], old = published?.assets[assetId];
+                const node = nodes.find(n => n.id === active?.nodeId);
+                const activeMedia = node ? resolveCanvasImageReferenceNode(node).map(r => r.storageKey) : [];
+                const media = active?.storageKey ? this.db.getMediaFile(active.storageKey) : undefined;
+                const actualHash = media && fs.existsSync(media.filePath) ? promptHashBytes(media.filePath) : null;
+                const issues: string[] = [];
+                if (active?.nodeId && !node) issues.push("MISSING_NODE");
+                if (plan?.version && active && plan.version !== active.version) issues.push("SOURCE_BINDING_VERSION_MISMATCH");
+                if (active?.storageKey && !activeMedia.includes(active.storageKey)) issues.push("ACTIVE_MEDIA_MISMATCH");
+                if (active?.sha256 && active.sha256 !== actualHash) issues.push("MEDIA_HASH_MISMATCH");
+                if (old && active && (old.nodeId !== active.nodeId || old.storageKey !== active.storageKey || old.version !== active.version)) issues.push("PUBLISHED_BINDING_DIFFERS");
+                return { assetId, sourceVersion: plan?.version, sourceStatus: plan?.status, draftBinding: active, publishedBinding: old, nodeTitle: node?.title, activeStorageKeys: activeMedia, actualSha256: actualHash, issues,
+                    consumers: draft?.artifacts.filter(a => a.references.some(r => r.nodeId === active?.nodeId || r.nodeId === old?.nodeId)).map(a => ({ targetId: a.targetId, references: a.references.filter(r => r.nodeId === active?.nodeId || r.nodeId === old?.nodeId) })) || [] };
+            }) };
+    }
 
     validateExecution(episodeId: string, version: number, targetIds?: string[]): void {
         const record = this.get(episodeId);

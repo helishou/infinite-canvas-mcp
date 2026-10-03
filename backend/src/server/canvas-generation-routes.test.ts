@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH } from "@basketikun/canvas-agent/generation-api";
+import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH, H3_EXECUTION_PREVIEW_PATH } from "@basketikun/canvas-agent/generation-api";
 import { validateLoopGenerationCommand } from "../canvas/generation-service.js";
 import { registerCanvasGenerationRoutes } from "./canvas-generation-routes.js";
 
@@ -23,7 +23,7 @@ test("统一生成路由转发已校验的 command", async () => {
     const task = { id: "task-1", kind: "canvas-image", status: "queued", progress: 0, input: {}, params: {}, createdAt: "", updatedAt: "" };
     registerCanvasGenerationRoutes({ post(path: string, handler: (req: unknown, res: ResponseStub) => unknown) { routes.push({ path, handler }); } } as never, { start: async (command: unknown) => { received = command; return { taskId: task.id, task, executor: "direct-image" }; } } as never);
 
-    assert.deepEqual(routes.map((route) => route.path), [CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH]);
+    assert.deepEqual(routes.map((route) => route.path), [CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH, H3_EXECUTION_PREVIEW_PATH]);
     const command = { mode: "image", model: "gpt-image-2", prompt: "a cat", params: { count: 2 }, idempotencyKey: "key-1" };
     const response = responseStub();
     await routes[0].handler({ body: command }, response);

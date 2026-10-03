@@ -1,4 +1,5 @@
 import path from "node:path";
+import { assertH3WorkflowContract, inspectH3Result } from '../canvas/h3-execution-contract.js';
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
@@ -379,8 +380,8 @@ export class ComfyUiBackend {
                     const hasOutputs = !!(item?.outputs && typeof item.outputs === "object" && Object.keys(item.outputs).length > 0);
                     if (statusStr === "success" || item?.status?.completed || hasOutputs) {
                         if (!hasOutputs) throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item?.status)}`);
-                        const result = attachH3ActualSubmission({ promptId, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, submitted?.actualSubmission, promptId);
-                        this.updateTask(taskId, { status: "succeeded", progress: 1, result });
+                        const result = await inspectH3Result(attachH3ActualSubmission({ promptId, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, submitted?.actualSubmission, promptId), this.deps.tasks.get(taskId)!.params, this.deps.media);
+                        this.updateTask(taskId, { status: result.specification?.status === 'mismatch' ? 'failed' : 'succeeded', progress: 1, result, ...(result.specification?.status === 'mismatch' ? { error: result.specification.issues.join('；') } : {}) });
                         this.deps.tasks.addEvent(taskId, "result", result);
                         return;
                     }
@@ -412,8 +413,9 @@ export class ComfyUiBackend {
                 await this.clearComfyExecutionCache(comfyUrl);
                 executionCacheCleared = true;
             }
-            this.updateTask(task.id, { status: "succeeded", progress: 1, result });
-            this.deps.tasks.addEvent(task.id, "result", result);
+            const checked = await inspectH3Result(result, task.params, this.deps.media);
+            this.updateTask(task.id, { status: checked.specification?.status === 'mismatch' ? 'failed' : 'succeeded', progress: 1, result: checked, ...(checked.specification?.status === 'mismatch' ? { error: checked.specification.issues.join('；') } : {}) });
+            this.deps.tasks.addEvent(task.id, "result", checked);
             executionCompleted = true;
         } finally {
             if (preset.id === "minimax-h3" && !executionCacheCleared && (!keepModelCache || !executionCompleted)) {
@@ -491,6 +493,7 @@ export class ComfyUiBackend {
             const workflow = preset === "minimax-h3"
                 ? await buildNativeNanFengV15Workflow(prepared.input, params, uploadFn, comfyUrl, controller.signal)
                 : await buildWorkflow(preset, prepared.input, params, uploadFn);
+            if (preset === 'minimax-h3' && params.h3ExecutionContract) assertH3WorkflowContract(workflow, (params.h3ExecutionContract as any).expectedRuntime);
             const actualSubmission = preset === "minimax-h3" ? summarizeH3Workflow(workflow, "") : undefined;
             const withActualSubmission = (result: Record<string, any>, promptId: string) => attachH3ActualSubmission(result, actualSubmission, promptId);
 
@@ -1660,11 +1663,12 @@ async function refreshNanFengCatalog(comfyUrl: string, signal: AbortSignal) {
     return false;
 }
 
-async function resolveNanFengWorkflowParams(comfyUrl: string, params: Record<string, unknown>, signal: AbortSignal) {
+export async function resolveNanFengWorkflowParams(comfyUrl: string, params: Record<string, unknown>, signal: AbortSignal) {
+    const strict = !!params.h3ExecutionContract;
     let resolved = await resolveH3ModelParams(comfyUrl, params, signal);
     try {
         const response = await fetch(`${comfyUrl}/object_info/${encodeURIComponent(NANFENG_H3_CLASS)}`, { signal });
-        if (!response.ok) return resolved;
+        if (!response.ok) { if (strict) throw new Error(`无法读取 H3 节点能力：HTTP ${response.status}`); return resolved; }
         const body = await response.json() as Record<string, any>;
         const required = body[NANFENG_H3_CLASS]?.input?.required || {};
         const choices = (name: string) => Array.isArray(required[name]?.[0]) ? required[name][0].map(String) : [];
@@ -1675,21 +1679,27 @@ async function resolveNanFengWorkflowParams(comfyUrl: string, params: Record<str
         const next: Record<string, unknown> = { ...resolved, nativeLoaderCacheSupported: Object.hasOwn(required, "复用加载器缓存") || Object.hasOwn(body[NANFENG_H3_CLASS]?.input?.optional || {}, "复用加载器缓存") };
         for (const [paramName, inputName] of pathFields) {
             const available = choices(inputName);
-            if (!available.length) continue;
+            if (paramName === 'latentUpscaleModel' && next.latentUpscaleEnabled !== true) continue;
+            if (!available.length) { if (strict) throw new Error(`H3 节点没有 ${inputName} 可用选项`); continue; }
             const configuredDefault = String(required[inputName]?.[1]?.default || available[0]);
             const current = String(next[paramName] || "").trim();
-            next[paramName] = current ? resolveComfyChoice(current, available, inputName !== "模型") : configuredDefault;
+            const selected = current ? resolveComfyChoice(current, available, !strict && inputName !== "模型") : configuredDefault;
+            if (strict && (!current || !available.includes(selected))) throw new Error(`H3 所选 ${inputName} 不可用：${current || '未选择'}`);
+            next[paramName] = selected;
         }
         if (Array.isArray(next.loraSlots)) {
             next.loraSlots = next.loraSlots.map((slot: any, index: number) => {
                 const available = choices(`LoRA${index + 1}`);
-                if (!available.length || !slot || String(slot.name || "").trim() === "") return slot;
+                if (!slot || String(slot.name || "").trim() === "") return slot;
+                if (!available.length) { if (strict && slot.enabled !== false) throw new Error(`H3 所选 LoRA 不可用：${slot.name}`); return slot; }
                 const name = resolveComfyChoice(slot.name, available, false);
-                return { ...slot, name: available.includes(name) ? name : "未选择", enabled: available.includes(name) && slot.enabled !== false };
+                if (strict && slot.enabled !== false && !available.includes(name)) throw new Error(`H3 所选 LoRA 不可用：${slot.name}`);
+                return strict ? { ...slot, name } : { ...slot, name: available.includes(name) ? name : "未选择", enabled: available.includes(name) && slot.enabled !== false };
             });
         }
         resolved = next;
-    } catch {
+    } catch (error) {
+        if (strict) throw error;
         // object_info 不可达时保留旧兼容值；/prompt 会继续返回 ComfyUI 的具体校验错误。
     }
     return resolved;
@@ -1720,7 +1730,7 @@ async function resolveH3ModelParams(comfyUrl: string, params: Record<string, unk
             const score = tokens.reduce((sum, token) => sum + (candidate.includes(token) ? 1 : 0), 0);
             return { name, score };
         }).sort((a, b) => b.score - a.score);
-        if (ranked[0] && ranked[0].score >= Math.max(3, Math.ceil(tokens.length * 0.55))) return { ...params, modelName: ranked[0].name };
+        if (!params.h3ExecutionContract && ranked[0] && ranked[0].score >= Math.max(3, Math.ceil(tokens.length * 0.55))) return { ...params, modelName: ranked[0].name };
         throw new Error(`ComfyUI 未找到 H3 模型 “${requested}”。可用模型：${available.filter((name) => /h3|minimax/i.test(name)).slice(0, 20).join("、") || available.slice(0, 20).join("、")}`);
     } catch (error) {
         if (error instanceof Error && /未找到 H3 模型/.test(error.message)) throw error;

@@ -54,7 +54,8 @@ export function ref2vaPromptDiagnostics(director: DirectorProduction, maximum: n
     const segments = Array.isArray(director.source.segments) ? director.source.segments as Array<Record<string, unknown>> : [];
     return (director.artifacts || []).flatMap((artifact, index) => {
         if (artifact.kind !== "h3" || artifact.status !== "ready" || segments.find(item => item.id === artifact.targetId)?.mode !== "Ref2VA") return [];
-        const body = artifact.prompt.split("detailed_description:\n")[1]?.split("\n\noverall_soundscape:")[0] || "";
+        // Inspect normalized newlines without changing the authored bytes/hash.
+        const body = artifact.prompt.replace(/\r\n?/g, "\n").split("detailed_description:\n")[1]?.split("\n\noverall_soundscape:")[0] || "";
         const words = body.match(/\b[A-Za-z]+(?:[-'][A-Za-z]+)*\b/g)?.length || 0;
         return words < 2200 || (maximum !== null && words > maximum) ? [{ code: "INVALID_PROMPT_LENGTH", path: `director.artifacts.${index}.prompt`, targetId: artifact.targetId, message: `Ref2VA 正文词数不符合固定引擎要求 (${words}, minimum 2200, maximum ${maximum ?? "unbounded"})`, severity: "error" as const }] : [];
     });

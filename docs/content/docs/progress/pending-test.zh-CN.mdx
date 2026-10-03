@@ -5,6 +5,22 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+## H3 默认参数与制作规格
+
+- 制作页可保存视频交付画幅；单集同步新 H3 节点读取 Backend 默认参数，更新已有 Clip 保留用户设置与旧结果。画幅与角色四视图的用途分别记录。
+- H3 设置显示生效值及来源，支持沿用保存默认或明确覆盖。`h3_preview_run` 与现有预检返回生效参数、参考映射、预计一采/二采尺寸及 planHash；修改版本或默认值后，旧 expectedPlanHash 提交应被拒绝。
+- 单集经画布直接提交也检查正式画幅、分镜轨稳定镜头 ID/顺序/时长、完整导演正文和逐字对白。缺模型或启用的 LoRA 不应静默换值、关闭或降规格。
+- 工作流输入与冻结参数在提交前核对，归档视频经 ffprobe 实测。一采/二采分别校验；规格不符保留任务和媒体历史，旧活动成片不被替换，批次剩余任务停止。ffprobe 不可用不能标为通过。
+
+## Backend 编译与绑定诊断
+
+- 制作 MCP 读取默认 `view=summary`；`view=source` 返回一个完整源稿快照，`view=artifacts` 配合 `targetIds` 返回指定完整提示词。编辑、发布和恢复返回 revision/哈希短回执。验证大型制作不再因重复返回源稿、正文和发布历史而失败；网页 API 的完整记录默认行为保持。
+
+- `production_compile` 接受 `kind`（`canvas` 或 `episode`）、`id`、`expectedRevision` 和可选完整候选 `director`；运行制作对象固定的 Acheng 编译器，冻结 `preparedId`、逐目标诊断、正文哈希和真实媒体引用。准备操作不保存、不发布、不生成媒体。
+- `production_apply_compilation` 用相同对象和精确 `preparedId` 原子保存草稿。验证只增加一次 revision、重复调用恢复原回执；并发编辑、结果字节改变、对象不符或媒体失效应拒绝，且没有生成任务。冻结结果沿用原 revision 和 operationId，不能通过修改请求重定基线。
+- `production_diagnose_bindings` 应分别呈现源版本/状态、草稿绑定、发布绑定、节点活动图片、实际归档哈希和依赖提示词。纠正后的草稿可能与旧发布版本不同，应指出差异，不删除历史或替代媒体审核。
+- 验证 Windows CRLF H3 正文与 LF 的词数一致，原始正文和哈希保持不变；旧 `py` 路径失效及 Microsoft Store Python 应可正确发现和调用。显式配置 `ACHENG_PYTHON` 后不得静默换解释器。
+
 ## 制作契约查询与只读预检
 
 - HTTP MCP `tools/list` 中制作编辑工具应展示完整操作结构；`production_get_contract` 支持指定固定 runtimeId 和单项 operationType，返回 schema、合法示例及源稿模板。未知运行版本不得回退。
@@ -788,8 +804,10 @@ Canvas Agent 配置权限
 
 ## Acheng 对象工作区导演工作台
 
+- 在本机 Agent 的 Skill 管理页确认项目作用域同时列出 `acheng-director` 与 `canvas-video-production-sop`；`acheng-director` 指向当前固定 runtime，创意入口和导演阶段请求优先选择该项目 Skill，画布适配仍用于 Backend/MCP。刷新项目 Skill 后，模拟 runtime 更新与本地文件修改，确认未修改文件更新、用户修改保留，runtime 的生成输出与 `.git` 不复制进项目工作区。
 - 确认一级导航只有「制作」入口，内部统一浏览画布项目与剧目分集，创意入口位于制作页而不在画布库；旧 `/director` 与 `/drama` 路径分别转入对应视图。从剧目分集进入对象工作台，再打开该对象画布，应保持同一画布及制作记录；返回按钮应回到来源对象视图。
 - 创意对话确认并创建或选定对象后，验证 Agent 进入对应工作台：独立资产项目为 `/director/<projectId>`，剧目分集为 `/drama/episodes/<episodeId>/production`。默认不得跳到 `/canvas/:id`；用户明确要求媒体操作时仍可直接进入画布。
+- 桌面检查导演工作区使用左侧对象导航，手机使用可横向浏览的紧凑导航且页面不横向溢出；总览应突出 Backend 当前待办、负责人模块和制作对象摘要，审核操作跳到目标卡片，“推进当前工作”只发起创作请求，不授予媒体生成权限。
 - 在工作台推进 story、assets、shots、model 与 continuity 目标，确认 `currentWork` 与 `pendingDecisions` 绑定正式 workId/sourceHash，回答问题后先回读持久答复再继续；Backend readiness 的展示目标应引导到正确模块、生产节点或 Clip。
 - 编辑 STYLE_MOTHER、风格策略、资产版本和依赖，确认影响范围只阻塞相关产物。资产/关键帧审核必须打开并成功加载原图后才出现批准/退回动作；音频和视频参考使用对应媒体预览，导出上传卡的分类编号与真实输入相符。
 - 在「镜头与片段」查看按帧窗的 Shot/Segment 时间线与扩展表演、对白、视效事实；按 Shot ID/Segment ID 从跟随导航定位对应卡片，不改写原始逐字对白。

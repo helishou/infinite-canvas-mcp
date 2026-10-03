@@ -36,3 +36,20 @@ test("new word policy accepts 2901 and 6500 words without truncation, while the 
         assert.equal(director.artifacts[0].prompt, prompt);
     }
 });
+
+test("Ref2VA CRLF validation counts the same words while preserving prompt bytes", () => {
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    director.source.segments = [{ id: "segment", mode: "Ref2VA" }];
+    for (const newline of ["\n", "\r\n", "\r"]) {
+        const prompt = `detailed_description:${newline}${"authored ".repeat(2400)}${newline}${newline}overall_soundscape:${newline}Wind.`;
+        director.artifacts = [{ id: "prompt", targetId: "segment", kind: "h3", status: "ready", prompt, sha256: "0".repeat(64), sourceHash: "0".repeat(64), references: [], receipt: { sourceHash: "0".repeat(64), promptHash: "0".repeat(64), engineRuntimeId: director.engine.runtimeId, validator: "fixture" } }];
+        assert.deepEqual(ref2vaPromptDiagnostics(director, 2900), []);
+        assert.equal(director.artifacts[0].prompt, prompt);
+    }
+});
+
+test("production compilation tools have explicit owner, revision and frozen handle contracts", () => {
+    assert.ok(toolInputSchemas.production_compile.safeParse({ kind: "canvas", id: "canvas", expectedRevision: 1 }).success);
+    assert.equal(toolInputSchemas.production_compile.safeParse({ kind: "canvas", id: "canvas" }).success, false);
+    assert.equal(toolInputSchemas.production_apply_compilation.safeParse({ kind: "episode", id: "episode", preparedId: "../../packet" }).success, false);
+});

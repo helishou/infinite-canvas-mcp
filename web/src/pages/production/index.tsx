@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useAgentSkillStore } from "@/stores/use-agent-skill-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
-import { CANVAS_CREATIVE_SKILL_NAME } from "@/lib/agent/creative-launch";
+import { findProjectAchengDirectorSkill } from "@/lib/agent/creative-launch";
 import { cn } from "@/lib/utils";
 
 const CanvasProjects = lazy(() => import("@/pages/director"));
@@ -84,9 +84,9 @@ export default function ProductionHubPage() {
             return;
         }
         const skillStore = useAgentSkillStore.getState();
-        if (!skillStore.skills.some((skill) => skill.name === CANVAS_CREATIVE_SKILL_NAME && skill.enabled)) {
+        if (!findProjectAchengDirectorSkill(skillStore.skills)) {
             await skillStore.loadSkills(agent.url, agent.token, true);
-            if (!useAgentSkillStore.getState().skills.some((skill) => skill.name === CANVAS_CREATIVE_SKILL_NAME && skill.enabled)) {
+            if (!findProjectAchengDirectorSkill(useAgentSkillStore.getState().skills)) {
                 message.warning(t("productionHub.creative.skillUnavailable"));
                 return;
             }

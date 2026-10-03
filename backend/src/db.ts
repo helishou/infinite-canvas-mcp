@@ -1730,8 +1730,10 @@ export class BackendDatabase {
             ...(task.error ? { errorDetails: task.error } : {}),
         };
         if (output) {
-            segmentPatch.result = output.url;
-            segmentPatch.resultStorageKey = output.storageKey;
+            if ((task.result?.specification as Record<string, unknown> | undefined)?.status !== 'mismatch') {
+                segmentPatch.result = output.url;
+                segmentPatch.resultStorageKey = output.storageKey;
+            }
             const previousResults = Array.isArray(segments[index].results) ? segments[index].results as Array<Record<string, unknown>> : [];
             segmentPatch.results = [
                 ...previousResults.filter((item) => String(item.url || "") !== String(output.url || "")),

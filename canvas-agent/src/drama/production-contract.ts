@@ -68,6 +68,9 @@ export const directorProductionSchema = z.object({
     workflow: directorWorkflowSchema.default({}),
 }).passthrough();
 export type DirectorProduction = z.infer<typeof directorProductionSchema>;
+export const productionCompileSchema = z.object({ expectedRevision: z.number().int().nonnegative(), director: directorProductionSchema.optional() }).strict();
+export const productionApplyCompilationSchema = z.object({ preparedId: z.string().uuid() }).strict();
+export { productionReadSchema, productionReadQuery, projectProductionRead, productionWriteReceipt } from "./production-read.js";
 
 /** Stable wire hashing input shared by offline adapters and Backend. */
 export function canonicalProduction(value: unknown): string {
@@ -115,6 +118,7 @@ export const clipGroupSchema = z.object({
 });
 
 export const productionSettingsSchema = z.object({
+    videoAspectRatio: z.string().regex(/^[1-9]\d*:[1-9]\d*$/).nullable().optional(),
     mode: z.enum(["manual", "auto"]),
     imageModel: z.string(),
     h3Model: z.string(),

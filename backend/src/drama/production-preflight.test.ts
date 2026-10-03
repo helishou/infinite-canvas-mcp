@@ -76,6 +76,7 @@ test("offline and Backend share the activated engine source diagnostics", t => {
     const offline = preflightDirector(director);
     const online = service.preflight("episode", { action: "edit", request: { operationId: "check", expectedRevision: 0, ops: [{ type: "set_director_production", director }] } });
     assert.equal(offline.valid, false); assert.equal(online.valid, false);
+    assert.ok(offline.diagnostics.some(item => item.code === "INVALID_SOURCE"), JSON.stringify(offline.diagnostics));
     assert.deepEqual(online.diagnostics.filter(item => item.code === "INVALID_SOURCE"), offline.diagnostics.filter(item => item.code === "INVALID_SOURCE"));
     assert.equal(offline.generationReady, false);
     assert.equal(service.get("episode").revision, 0);

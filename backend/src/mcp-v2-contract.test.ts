@@ -8,6 +8,7 @@ import { KNOWN_FIRST_PARTY } from "@basketikun/canvas-agent/plugin-mcp";
 import { BackendDatabase } from "./db.js";
 import { registerBackendMcpHttpRoutes } from "./mcp.js";
 import { registerMcpCommandTestRoutes } from "./mcp-command-test-routes.js";
+import { projectProductionRead } from "@basketikun/canvas-agent/drama/production-contract";
 
 function textOf(result: any) { return String(result.content?.find((entry: any) => entry.type === "text")?.text || ""); }
 
@@ -15,6 +16,10 @@ test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent wri
   const db = new BackendDatabase(":memory:");
   const backend = express();
   backend.use(express.json());
+  const largePrompt = "保留完整正文\r\n".repeat(100000);
+  const largeProduction = { episodeId: "large", revision: 1, publishedVersion: 1, draft: { director: { engine: { runtimeId: "pinned" }, sourceHash: "full-source-hash", modules: {}, workflow: {}, assets: {}, source: { brief: "sample", script: largePrompt }, artifacts: [{ id: "h3-segment", targetId: "segment", prompt: largePrompt, sha256: "prompt-hash" }] }, scenes: [], shots: [], clipGroups: [] } };
+  backend.get("/canvas/projects/large/production", (req, res) => res.json({ ok: true, production: projectProductionRead(largeProduction, req.query) }));
+  backend.post("/canvas/projects/large/production/ops", (_req, res) => res.json({ ok: true, production: { ...largeProduction, revision: 2, replayed: false } }));
   registerMcpCommandTestRoutes(backend, db);
   backend.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [{ id: "minimax-h3", enabled: true, version: KNOWN_FIRST_PARTY["minimax-h3"].version, tools: [] }] }));
   backend.post("/mcp/observability/events", (req, res) => { db.createMcpObservabilityEvent(req.body); res.json({ ok: true }); });
@@ -51,6 +56,17 @@ test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent wri
   const tool = (name: string) => catalog.tools.find(entry => entry.name === name)!;
   assert.ok(tool("mcp_get_command_receipt"));
   assert.ok(tool("assets_get"));
+  for (const name of ["production_compile", "production_apply_compilation", "production_diagnose_bindings"]) assert.ok(tool(name));
+  assert.ok((tool("production_compile").inputSchema as any).required.includes("expectedRevision"));
+  assert.ok((tool("production_apply_compilation").inputSchema as any).required.includes("preparedId"));
+  const largeRead = await client.callTool({ name: "canvas_get_production", arguments: { projectId: "large" } });
+  assert.equal(largeRead.isError, undefined);
+  assert.ok(textOf(largeRead).length < 5000);
+  assert.equal(JSON.parse(textOf(largeRead)).production.revision, 1);
+  const largeWrite = await client.callTool({ name: "canvas_edit_production", arguments: { projectId: "large", operationId: "large-write", expectedRevision: 1, ops: [{ type: "set_director_brief", brief: "sample" }] } });
+  assert.ok(textOf(largeWrite).length < 2000);
+  assert.equal(JSON.parse(textOf(largeWrite)).production.revision, 2);
+  assert.equal(JSON.parse(textOf(largeWrite)).production.sourceHash, "full-source-hash");
   assert.ok((tool("assets_add").inputSchema as any).required.includes("operationId"));
   assert.ok((tool("assets_upsert_batch").inputSchema as any).required.includes("operationId"));
   assert.ok((tool("h3_update_clips").inputSchema as any).allOf.some((entry: any) => entry.then?.required?.includes("operationId") && entry.then?.required?.includes("expectedRevision")));

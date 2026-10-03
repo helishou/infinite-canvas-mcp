@@ -76,6 +76,7 @@ export type PluginMcpBackend = {
     applyCanvasOperations(projectId: string, operations: Record<string, unknown>[], expectedRevision?: number, operationId?: string, strictRevision?: boolean, mcpCommand?: { tool: string; targetId: string; request: unknown }, signal?: AbortSignal): Promise<{ project: Record<string, unknown>; revision: number; operationResults: unknown[]; duplicated?: boolean }>;
     replacePluginDeclarations(declarations: unknown[]): Promise<unknown[]>;
     canvasRunGeneration(input: CanvasGenerationCommand): Promise<{ ok?: boolean } & CanvasGenerationStartResult>;
+    previewH3Generation?(input: CanvasGenerationCommand): Promise<import('../canvas/generation-contract.js').H3ExecutionPreview>;
     getTask(id: string): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;
     cancelTask(id: string): Promise<import("../runtime/types.js").RuntimeTask>;
     getH3Defaults(): Promise<Record<string, unknown>>;

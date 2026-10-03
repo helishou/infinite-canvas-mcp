@@ -369,8 +369,8 @@ function ProductionEditor() {
     const followTarget = useProductionFollowStore.getState().target;
     const workId = scope.workId || (followTarget?.kind === ownerKind && followTarget.id === key ? followTarget.workId : nanoid());
     const text = [
-      "$canvas-video-production-sop",
-      "这是导演工作台发起的独立阶段任务。按 Acheng 七模块职责完成本次范围，不把七个模块当成顺序关卡，不启动其他代理。",
+      "$acheng-director",
+      "这是导演工作台发起的独立阶段任务。按 Acheng 七模块规范完成本次范围，不把七个模块当成顺序关卡，不启动其他代理。涉及画布数据或媒体时，先读取项目 Skill canvas-video-production-sop 作为 Backend 与原生 MCP 适配；适配层不替代 Acheng 创作权属。",
       `制作对象：${key}；对象类型：${projectId ? "canvas" : "episode"}`,
       `Backend 正式 revision：${currentProduction.revision}；已发布版本：${currentProduction.publishedVersion}`,
       `固定引擎：${director.engine.version} / ${director.engine.runtimeId} / commit ${director.engine.commit}`,
@@ -595,12 +595,12 @@ function ProductionEditor() {
           <aside className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
             <nav aria-label={t("director.workspace.navigation")} className="flex w-full gap-1 overflow-x-auto p-2 lg:flex-col lg:overflow-visible lg:p-3">
               {workspaces.filter(item => item.key !== "advanced").map(({ key, icon: Icon, roles }) => <button
-                key={key} type="button" aria-current={workspace === key ? "page" : undefined}
+                key={key} type="button" aria-label={t(`director.workspace.tab.${key}`)} aria-current={workspace === key ? "page" : undefined}
                 onClick={() => selectWorkspace(key)}
                 className={`flex min-h-11 shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors lg:w-full ${workspace === key ? "border-border bg-muted font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"}`}
               ><Icon className="size-4 shrink-0" /><span className="min-w-0"><span className="block whitespace-nowrap">{t(`director.workspace.tab.${key}`)}</span>{roles && <span className="hidden truncate text-[10px] font-normal opacity-70 lg:block">{roles}</span>}</span></button>)}
               <div className="mx-2 hidden border-t border-border lg:block" />
-              <button type="button" aria-current={workspace === "advanced" ? "page" : undefined} onClick={() => selectWorkspace("advanced")}
+              <button type="button" aria-label={t("director.workspace.tab.advanced")} aria-current={workspace === "advanced" ? "page" : undefined} onClick={() => selectWorkspace("advanced")}
                 className={`flex min-h-11 shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors lg:w-full ${workspace === "advanced" ? "border-border bg-muted font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"}`}
               ><Settings2 className="size-4 shrink-0" /><span className="whitespace-nowrap">{t("director.workspace.tab.advanced")}</span></button>
             </nav>
@@ -610,7 +610,7 @@ function ProductionEditor() {
               workspace={workspace} director={production.draft.director} production={production} readiness={readiness || undefined} run={run} batches={batches}
               canvasNodes={canvasNodes} legacy={legacy} versions={versions} busy={busy} canvasId={canvasId}
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
-              onBrief={saveBrief} onPatch={patchSource} onRegroup={regroupSegment} onWorkflow={setWorkflow} onBindAsset={(assetId, nodeId) => void bindAsset(assetId, nodeId)}
+              onBrief={saveBrief} onPatch={patchSource} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={(assetId, nodeId) => void bindAsset(assetId, nodeId)}
               onBoundary={setBoundary} onReview={reviewAsset} onPublish={() => void publish()}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onNavigate={navigateWorkspace}
               onAnswerDecision={answerDecision}

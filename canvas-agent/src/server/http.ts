@@ -48,9 +48,10 @@ import {
   type CanvasAgentConfig,
 } from "../config.js";
 import { logger } from "../utils/logger.js";
+import { productionReadQuery, productionWriteReceipt } from "../drama/production-read.js";
 import { checkVersions } from "../version-check.js";
 import { SkillStore, SkillStoreError } from "../skills/store.js";
-import { bundledProductionSkillWarnings } from "../skills/bundled.js";
+import { bundledSkillWarnings } from "../skills/bundled.js";
 import {
   backendComfyUi,
   createBackendClient,
@@ -717,13 +718,20 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         if (input.operationType) query.set("operationType", String(input.operationType));
         return void res.json({ ok: true, result: await backend.get(`/production/contract?${query}`) });
       }
+      if (["production_compile", "production_apply_compilation", "production_diagnose_bindings"].includes(name)) {
+        const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(String(input.id))}/production` : `/drama/episodes/${encodeURIComponent(String(input.id))}/production`;
+        const result = name === "production_diagnose_bindings" ? await backend.get(`${base}/bindings`)
+          : name === "production_apply_compilation" ? await backend.post(`${base}/apply-compilation`, { preparedId: input.preparedId })
+          : await backend.post(`${base}/compile`, { expectedRevision: input.expectedRevision, director: input.director });
+        return void res.json({ ok: true, result });
+      }
       if (name === "canvas_preflight_production" || name === "drama_preflight_production") {
         const base = name === "canvas_preflight_production" ? `/canvas/projects/${encodeURIComponent(String(input.projectId))}/production` : `/drama/episodes/${encodeURIComponent(String(input.episodeId))}/production`;
         return void res.json({ ok: true, result: await backend.post(`${base}/preflight`, { action: input.action, request: input.request }) });
       }
       if (["drama_get_production", "drama_get_workflow_readiness", "drama_start_production_run", "drama_get_production_batch", "drama_pause_production_run", "drama_resume_production_run", "drama_edit_production", "drama_preview_production_impact", "drama_publish_production", "drama_list_production_versions", "drama_get_production_version", "drama_list_production_legacy", "drama_restore_production", "drama_sync_production_clips", "drama_get_production_run", "drama_export_production_markdown"].includes(name)) {
         const path = `/drama/episodes/${encodeURIComponent(String(input.episodeId || ""))}/production`;
-        const result = name === "drama_get_production" ? await backend.get(path)
+        const result = name === "drama_get_production" ? await backend.get(path + productionReadQuery(input))
           : name === "drama_get_workflow_readiness" ? await backend.get(`${path}/readiness`)
           : name === "drama_start_production_run" ? await backend.post(`${path}/runs`, { runId: input.runId, idempotencyKey: input.idempotencyKey, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope })
           : name === "drama_get_production_batch" ? await backend.get(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}`)
@@ -739,11 +747,11 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           : name === "drama_restore_production" ? await backend.post(`${path}/restore`, { version: input.version, operationId: input.operationId, expectedRevision: input.expectedRevision })
           : name === "drama_sync_production_clips" ? await backend.post(`${path}/sync-clips`, {})
           : await backend.post(`${path}/publish`, { operationId: input.operationId, expectedRevision: input.expectedRevision, stage: input.stage });
-        return void res.json({ ok: true, result });
+        return void res.json({ ok: true, result: ["drama_edit_production", "drama_publish_production", "drama_restore_production", "drama_sync_production_clips"].includes(name) ? productionWriteReceipt(result) : result });
       }
       if (["canvas_get_production", "canvas_get_workflow_readiness", "canvas_start_production_run", "canvas_get_production_batch", "canvas_pause_production_run", "canvas_resume_production_run", "canvas_edit_production", "canvas_preview_production_impact", "canvas_publish_production", "canvas_list_production_versions", "canvas_get_production_version", "canvas_list_production_legacy", "canvas_restore_production", "canvas_sync_production_clips", "canvas_get_production_run", "canvas_export_production_markdown"].includes(name)) {
         const path = `/canvas/projects/${encodeURIComponent(String(input.projectId || ""))}/production`;
-        const result = name === "canvas_get_production" ? await backend.get(path)
+        const result = name === "canvas_get_production" ? await backend.get(path + productionReadQuery(input))
           : name === "canvas_get_workflow_readiness" ? await backend.get(`${path}/readiness`)
           : name === "canvas_start_production_run" ? await backend.post(`${path}/runs`, { runId: input.runId, idempotencyKey: input.idempotencyKey, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope })
           : name === "canvas_get_production_batch" ? await backend.get(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}`)
@@ -759,7 +767,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           : name === "canvas_restore_production" ? await backend.post(`${path}/restore`, { version: input.version, operationId: input.operationId, expectedRevision: input.expectedRevision })
           : name === "canvas_sync_production_clips" ? await backend.post(`${path}/sync-clips`, {})
           : await backend.post(`${path}/publish`, { operationId: input.operationId, expectedRevision: input.expectedRevision, stage: input.stage });
-        return void res.json({ ok: true, result });
+        return void res.json({ ok: true, result: ["canvas_edit_production", "canvas_publish_production", "canvas_restore_production", "canvas_sync_production_clips"].includes(name) ? productionWriteReceipt(result) : result });
       }
       return void res.json({
         ok: true,
@@ -809,11 +817,12 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
   app.get(
     agentRoute("/codex/skills"),
     route(async (req, res) => {
-      const workspace = ensureSiteWorkspace(config);
+      const forceReload = String(req.query.forceReload || "") === "1" && !session.codexBusy;
+      const workspace = ensureSiteWorkspace(config, forceReload);
       const result = await listCodexSkills(
         emit,
         workspace.workspacePath,
-        String(req.query.forceReload || "") === "1",
+        forceReload,
       );
       res.json({
         ok: true,
@@ -821,7 +830,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           ...skill,
           managed: skillStore.isManagedPath(skill.path),
         })),
-        errors: [...result.errors, ...bundledProductionSkillWarnings(workspace.workspacePath)],
+        errors: [...result.errors, ...bundledSkillWarnings(workspace.workspacePath)],
       });
     }),
   );

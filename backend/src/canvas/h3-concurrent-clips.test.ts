@@ -5,6 +5,7 @@ import { BackendDatabase } from "../db.js";
 import { BackendEventBus } from "../events.js";
 import { createStores } from "../stores/index.js";
 import { CanvasH3Runner } from "./h3-runner.js";
+const localProvider = () => ({ ready: () => false, queue: { select: () => "local", unreserve() {} } });
 
 test("同一 H3 节点的两个 Clip 可同时运行，并各自保存父任务与子任务绑定", async (t: TestContext) => {
     const db = new BackendDatabase(":memory:");
@@ -27,7 +28,7 @@ test("同一 H3 节点的两个 Clip 可同时运行，并各自保存父任务�
         },
         cancel() {},
     };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, localProvider() as never);
     const taskA = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-a" }, "parent-a");
     const taskB = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-b" }, "parent-b");
     for (let i = 0; i < 100 && releases.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -73,7 +74,7 @@ test("父任务失败只清理自己仍在 loading 的 Clip，另一 Clip 可继
         },
         cancel() {},
     };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, localProvider() as never);
     runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-a", forceRegenerate: true }, "parent-a");
     runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-b" }, "parent-b");
     for (let i = 0; i < 100 && db.getTask("parent-a")?.status !== "failed"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -115,7 +116,7 @@ test("一个 Clip 的参考素材绑定不完整时，只跳过它自己，其�
         },
         cancel() {},
     };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, localProvider() as never);
     const task = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-bad", runFromCurrent: true }, "parent-skip");
     const plans = (task.result?.plans || []) as Array<{ segmentId: string }>;
     assert.deepEqual(plans.map((plan) => plan.segmentId), ["clip-ok"], "只应把坏 Clip 排除出执行计划");
@@ -134,7 +135,7 @@ test("单独生成坏 Clip 时错误使用前端 Clip 序号并给出具体原�
         { id: "internal-first", prompt: "正常镜头", mode: "t2v" },
         { id: "internal-second", prompt: "缺少首帧", mode: "i2v" },
     ] } }], connections: [] });
-    const runner = new CanvasH3Runner(createStores(db), new BackendEventBus(), {} as never, {} as never);
+    const runner = new CanvasH3Runner(createStores(db), new BackendEventBus(), {} as never, localProvider() as never);
     assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "internal-second" }), (error: Error) => {
         assert.match(error.message, /Clip 2：/);
         assert.match(error.message, /首帧|图片/i);
@@ -171,7 +172,7 @@ test("潜空间续写从组首继承画幅尺寸，并在新链中重新生成�
         },
         cancel() {},
     };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, localProvider() as never);
     const runChain = async (id: string) => {
         runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-a", runFromCurrent: true, skipCompleted: false }, id);
         for (let i = 0; i < 200 && !["succeeded", "failed"].includes(db.getTask(id)?.status || ""); i++) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -230,7 +231,7 @@ test("本段开关只控制通往下一段的边界，独立连续组不互相�
         },
         cancel() {},
     };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, localProvider() as never);
     const task = runner.start({ projectId: "p", nodeId: "n", segmentId: "a", runFromCurrent: true, skipCompleted: false }, "edge-chain");
     const plans = (task.result?.plans || []) as Array<{ segmentId: string; continuation?: { group: string; index: number } }>;
     assert.deepEqual(plans.map((plan) => [plan.segmentId, plan.continuation?.index ?? null]), [["a", null], ["b", 1], ["c", 2], ["d", 1], ["e", 2]]);
@@ -265,7 +266,7 @@ test("Clip3 从当前 Clip2 的 AV 潜变量继续，拒绝尺寸不匹配", asy
         },
         cancel() {},
     };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, localProvider() as never);
     const wait = async (id: string) => {
         for (let i = 0; i < 200 && !["succeeded", "failed"].includes(db.getTask(id)?.status || ""); i++) await new Promise((resolve) => setTimeout(resolve, 5));
         assert.equal(db.getTask(id)?.status, "succeeded", db.getTask(id)?.error || "H3 未成功");
@@ -307,6 +308,6 @@ test("潜空间续写不能绕过参考不完整的中间 Clip", (t: TestContext
         { id: "missing-image", prompt: "B", mode: "i2v" },
         { id: "tail", prompt: "C", mode: "t2v" },
     ] } }], connections: [] });
-    const runner = new CanvasH3Runner(createStores(db), new BackendEventBus(), {} as never, {} as never);
+    const runner = new CanvasH3Runner(createStores(db), new BackendEventBus(), {} as never, localProvider() as never);
     assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "head", runFromCurrent: true }), /不能跳过连续组中的 Clip/);
 });
