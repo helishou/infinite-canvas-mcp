@@ -5,6 +5,8 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+- 制作跟随的“回到当前制作／打开 Agent”浮动按钮固定在页面右下角，不被 Ant Design 按钮的相对定位样式覆盖。核对窄窗口、页面滚动、深浅主题及点击后打开 Agent 的行为。
+
 ## H3 默认参数与制作规格
 
 - 制作页可保存视频交付画幅；单集同步新 H3 节点读取 Backend 默认参数，更新已有 Clip 保留用户设置与旧结果。画幅与角色四视图的用途分别记录。
@@ -13,6 +15,8 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 工作流输入与冻结参数在提交前核对，归档视频经 ffprobe 实测。一采/二采分别校验；规格不符保留任务和媒体历史，旧活动成片不被替换，批次剩余任务停止。ffprobe 不可用不能标为通过。
 
 ## Backend 编译与绑定诊断
+
+- 从关联分集的画布启动批次，确认只在正式分集存储一份；相同请求恢复回执，暂停/恢复/状态回写共享同一批次。批次缺失应在提交前拒绝，回滚错误不能掩盖原始错误；旧画布侧关联记录不得作为第二个恢复批次执行。
 
 - 制作 MCP 读取默认 `view=summary`；`view=source` 返回一个完整源稿快照，`view=artifacts` 配合 `targetIds` 返回指定完整提示词。编辑、发布和恢复返回 revision/哈希短回执。验证大型制作不再因重复返回源稿、正文和发布历史而失败；网页 API 的完整记录默认行为保持。
 
@@ -804,6 +808,7 @@ Canvas Agent 配置权限
 
 ## Acheng 对象工作区导演工作台
 
+- 验证仓库 `.agents/skills/acheng-director` 包含完整固定提交的上游文件及来源清单；`npm run acheng:vendor` 同步当前固定提交，`acheng:update` 与 `acheng:rollback` 同步更新/回退该副本。`acheng:update -- --check` 不修改文件；手动修改或新增 Skill 文件后，更新应停止并保留现场。
 - 在本机 Agent 的 Skill 管理页确认项目作用域同时列出 `acheng-director` 与 `canvas-video-production-sop`；`acheng-director` 指向当前固定 runtime，创意入口和导演阶段请求优先选择该项目 Skill，画布适配仍用于 Backend/MCP。刷新项目 Skill 后，模拟 runtime 更新与本地文件修改，确认未修改文件更新、用户修改保留，runtime 的生成输出与 `.git` 不复制进项目工作区。
 - 确认一级导航只有「制作」入口，内部统一浏览画布项目与剧目分集，创意入口位于制作页而不在画布库；旧 `/director` 与 `/drama` 路径分别转入对应视图。从剧目分集进入对象工作台，再打开该对象画布，应保持同一画布及制作记录；返回按钮应回到来源对象视图。
 - 创意对话确认并创建或选定对象后，验证 Agent 进入对应工作台：独立资产项目为 `/director/<projectId>`，剧目分集为 `/drama/episodes/<episodeId>/production`。默认不得跳到 `/canvas/:id`；用户明确要求媒体操作时仍可直接进入画布。

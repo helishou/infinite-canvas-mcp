@@ -2,9 +2,9 @@
 
 ## 加载与版本
 
-先读取本机 Codex home 下 `skill-runtimes/acheng-director/active.json`（未配置 CODEX_HOME 时为用户 `.codex`）。使用 `active.path` 下的 SKILL 与对应模块，不从下载目录、干净源码或另一份 H3 同名 Skill 混装。运行开始记录 commit、patchVersion、runtimeId、version；恢复沿用原运行版本。缺失版本或兼容检查失败时报告，不能退回旧画布制作方法。
+完整上游 Skill 文件固定在项目 `.agents/skills/acheng-director`；创作时使用这套项目 Skill 及其模块。编译和制作记录另按本机 `skill-runtimes/acheng-director/active.json` 解析固定引擎，不从下载目录或另一份 H3 同名 Skill 混装。运行开始记录 commit、patchVersion、runtimeId、version；恢复沿用原运行版本。缺失版本或兼容检查失败时报告，不能退回旧画布制作方法。
 
-项目命令 `npm run acheng:status` 查看状态；`npm run acheng:update -- --check` 检查候选；`npm run acheng:update` 验证后激活；`npm run acheng:rollback` 回退。更新只管理引擎，不启动生成、不修改项目。
+项目命令 `npm run acheng:status` 查看活动运行时和仓库上游副本；`npm run acheng:update -- --check` 检查候选而不修改文件；`npm run acheng:update` 验证后更新固定运行时与仓库副本；`npm run acheng:vendor` 将当前已固定提交同步到仓库；`npm run acheng:rollback` 同时回退运行时和仓库副本。同步不会启动媒体生成；若检测到仓库副本的本地改动则拒绝覆盖。
 
 ## 创作权属
 

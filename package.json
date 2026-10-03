@@ -26,7 +26,8 @@
         "typecheck": "npm run typecheck --workspaces --if-present",
         "acheng:status": "node scripts/acheng-engine.mjs status",
         "acheng:update": "node scripts/acheng-engine.mjs update",
-        "acheng:rollback": "node scripts/acheng-engine.mjs rollback"
+        "acheng:rollback": "node scripts/acheng-engine.mjs rollback",
+        "acheng:vendor": "node scripts/acheng-engine.mjs vendor"
     },
     "devDependencies": {
         "@infinite-canvas/plugin-sdk": "file:plugins/canvas/sdk",

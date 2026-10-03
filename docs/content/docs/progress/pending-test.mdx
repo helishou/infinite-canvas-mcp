@@ -5,6 +5,8 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- The production-follow “Return to current production / Open Agent” button stays fixed at the bottom-right of the viewport despite Ant Design's relative button positioning. Check narrow windows, scrolling, both themes and opening the Agent panel.
+
 ## H3 defaults and production specifications
 
 - Save the delivery aspect ratio on the production page. New episode H3 nodes load Backend defaults; syncing existing Clips preserves user parameters and prior results. Video and character-sheet ratios have separate purposes.
@@ -13,6 +15,8 @@ description: Implemented changes that still need manual verification
 - Check frozen parameters against executable workflow inputs before submission, then measure archived video with ffprobe. Validate first and second passes separately. A specification mismatch keeps task/media history and the previous active result, and stops remaining submissions. Unavailable probing must not count as a pass.
 
 ## Backend compilation and binding diagnostics
+
+- Start a production batch through a canvas linked to an episode. Confirm it is stored once under the canonical episode, identical requests replay, and pause/resume/status writes share that same batch. A missing batch must fail before commit; a rollback error must not hide the original failure. Old canvas-side alias rows must not be executed as a second recovery batch.
 
 - Production MCP reads default to `view=summary`; use `view=source` for one complete source snapshot and `view=artifacts` with `targetIds` for complete selected prompts. Edits/publications/restores return compact revision/hash receipts. Verify a large production no longer fails merely because the tool repeats source, prompt text and published history; Web API consumers retain their full-record default.
 
@@ -2272,7 +2276,8 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ## Acheng object-oriented Director Workbench
 
-- In the local Agent Skill manager, confirm Project scope lists both `acheng-director` and `canvas-video-production-sop`. The project Acheng entry should follow the currently pinned runtime, and creative/stage requests should select it while retaining the Canvas adapter for Backend/MCP. After a Skill refresh, simulate a runtime update and local file edits: update untouched files, preserve user edits, and exclude generated runtime output and `.git` metadata from the project workspace.
+- Verify `.agents/skills/acheng-director` contains the complete upstream tree for the pinned commit and its provenance manifest. `npm run acheng:vendor` syncs the pinned commit; `acheng:update` and `acheng:rollback` update or restore the repository copy with the runtime. `acheng:update -- --check` must not modify files, and a local edit or added Skill file must block overwriting it.
+- In the local Agent's site-workspace Skill manager, confirm Project scope lists both `acheng-director` and `canvas-video-production-sop`. This workspace mirror follows the active runtime, and creative/stage requests should select it while retaining the Canvas adapter for Backend/MCP. After a Skill refresh, simulate a runtime update and local file edits: update untouched files, preserve user edits, and exclude generated runtime output and `.git` metadata from the site workspace; the repository copy is separately pinned by the upstream manifest.
 - Confirm the only production entry opens one object browser with Canvas Projects and Series & Episodes views, and the idea-first creative entry appears there rather than in the Canvas library. Legacy `/director` and `/drama` paths should open the matching view; opening an object's workbench and then its Canvas must retain the same project, and the workbench Back action should return to the originating object view.
 - After the creative conversation confirms and creates or selects an object, verify Agent navigates to `/director/<projectId>` for an independent asset project or `/drama/episodes/<episodeId>/production` for a drama episode. It must not default to `/canvas/:id`; a direct Canvas visit remains available when the user explicitly requests media operations.
 - On desktop, verify the workbench uses a left-side object workspace navigation; on narrow screens, it becomes a horizontally scrollable row without page overflow. Overview should highlight the formal next task, owning module and object statuses. Review actions should focus the right target card, while “Continue current work” sends only a creative request and does not authorize media generation.
