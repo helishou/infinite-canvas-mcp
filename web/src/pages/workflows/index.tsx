@@ -676,8 +676,10 @@ function RunningHubWorkflowsPanel({ onOpenRuntime }: { onOpenRuntime: () => void
     };
     const run = async (fields: Record<string, string>) => {
         if (!selected) return;
-        setRunning(true); setTaskResult(null); setError("");
+        setRunning(true); setTaskResult(null); setError(""); setTaskId("");
         try {
+            const { workflow: savedProfile } = await saveRunningHubWorkflow(selected);
+            setProfiles((current) => current.map((item) => item.id === savedProfile.id ? savedProfile : item));
             const input: Record<string, unknown> = {};
             const values: Record<string, unknown> = {};
             const params: Record<string, unknown> = {};
