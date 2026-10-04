@@ -587,11 +587,29 @@ export function modelOptionName(value: string) {
     return decodeChannelModel(value)?.model || value;
 }
 
+/**
+ * 模型实际使用的实现来源：任一输入场景绑定到 RunningHub 档案就算云端。
+ * ComfyUI 渠道本身可以挂云端实现，只显示渠道名会让人以为跑的是本地工作流。
+ */
+export function modelImplementationSource(config: AiConfig, value: string): "runninghub" | "comfyui" | null {
+    const decoded = decodeChannelModel(value);
+    if (!decoded) return null;
+    const channel = config.channels.find((item) => item.id === decoded.channelId);
+    const model = channel?.models?.find((item) => item.name === decoded.model);
+    if (!model) return null;
+    const bindings = Object.values(model.workflowBindings || {});
+    return bindings.some((binding) => binding?.provider === "runninghub") ? "runninghub" : "comfyui";
+}
+
 export function modelOptionLabel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
     if (!decoded) return value;
     const channel = config.channels.find((item) => item.id === decoded.channelId);
-    return channel ? `${decoded.model}（${channel.name}）` : decoded.model;
+    if (!channel) return decoded.model;
+    // 云端实现优先说明真实执行来源，否则沿用渠道名。
+    const source = modelImplementationSource(config, value);
+    if (source === "runninghub") return `${decoded.model}（RunningHub）`;
+    return `${decoded.model}（${channel.name}）`;
 }
 
 export function modelOptionsFromChannels(channels: ModelChannel[]) {
