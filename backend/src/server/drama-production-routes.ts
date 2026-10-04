@@ -10,6 +10,7 @@ import { productionCompileSchema, productionApplyCompilationSchema, productionRe
 import { ProductionCompilationService } from "../drama/compilation.js";
 import { DATA_DIR } from "../config.js";
 import path from "node:path";
+import { z } from "zod";
 
 export function registerDramaProductionRoutes(router: Router, service: EpisodeProductionService, runner?: EpisodeProductionRunner, base = "/drama/episodes/:episodeId/production") {
     const compilations = new ProductionCompilationService(service, path.join(DATA_DIR, "production-compilations"));
@@ -42,6 +43,33 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     });
     router.post<Record<string, string>>(`${base}/preflight`, (req, res) => {
         try { res.json({ ok: true, preflight: service.preflight(req.params.episodeId, req.body) }); }
+        catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/prepare-targets`, (req, res) => {
+        try {
+            const input = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1), targets: z.array(z.string().min(1)).min(1) }).parse(req.body);
+            if (!runner) throw new Error("制作执行器不可用");
+            res.json({ ok: true, production: runner.prepareTargets(req.params.episodeId, input.expectedRevision, input.targets, input.operationId), mediaSubmitted: false });
+        } catch (error) { handle(res, error); }
+    });
+    router.get<Record<string, string>>(`${base}/shared-assets`, (req, res) => {
+        try { res.json({ ok: true, ...service.sharedAssets(req.params.episodeId) }); } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/arrange-scene`, (req, res) => {
+        try {
+            const input = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1), sceneId: z.string().min(1) }).parse(req.body);
+            if (!runner) throw new Error("制作执行器不可用");
+            res.json({ ok: true, production: runner.arrangeScene(req.params.episodeId, input.sceneId, input.expectedRevision, input.operationId), mediaSubmitted: false });
+        } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/shared-assets/adopt`, (req, res) => {
+        try {
+            const input = z.object({ assetId: z.string().min(1), approvedId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1) }).parse(req.body);
+            res.json({ ok: true, production: service.adoptSharedAsset(req.params.episodeId, input), mediaSubmitted: false });
+        } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/shared-assets/updates/:adoptionId/retry`, (req, res) => {
+        try { const input = z.object({ expectedRevision: z.number().int().nonnegative() }).parse(req.body); res.json({ ok: true, ...service.retrySharedUpdate(req.params.episodeId, req.params.adoptionId, input.expectedRevision) }); }
         catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}`, (req, res) => {

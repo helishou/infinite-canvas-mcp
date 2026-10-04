@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { productionOperationContract, ref2vaPromptDiagnostics } from "./production-validation.js";
-import { productionEditSchema, type DirectorProduction } from "./production-contract.js";
+import { productionEditSchema, productionSettingsSchema, type DirectorProduction } from "./production-contract.js";
 import { toolInputSchemas } from "../canvas/schemas.js";
 
 test("all published operation examples use the actual edit contract", () => {
@@ -23,6 +23,19 @@ test("MCP edit schemas reject formerly opaque invalid operations", () => {
             assert.equal(schema.safeParse({ projectId: "canvas", episodeId: "episode", operationId: "op", expectedRevision: 0, ops: [op] }).success, false);
         }
     }
+});
+
+test("video aspect kickoff distinguishes an explicit canvas-inherit choice from an unanswered setting", () => {
+    const inherited = productionSettingsSchema.safeParse({ mode: "manual", imageModel: "", h3Model: "", videoAspectRatio: null, videoAspectRatioConfirmed: true });
+    assert.equal(inherited.success, true);
+    if (inherited.success) {
+        assert.equal(inherited.data.videoAspectRatio, null);
+        assert.equal(inherited.data.videoAspectRatioConfirmed, true);
+    }
+    const selected = productionEditSchema.safeParse({ operationId: "ratio", expectedRevision: 0, ops: [{ type: "set_settings", patch: { videoAspectRatio: "16:9", videoAspectRatioConfirmed: true } }] });
+    assert.equal(selected.success, true);
+    const unanswered = productionSettingsSchema.parse({ mode: "manual", imageModel: "", h3Model: "" });
+    assert.equal(unanswered.videoAspectRatioConfirmed, undefined);
 });
 
 test("new word policy accepts 2901 and 6500 words without truncation, while the historical policy retains its ceiling", () => {

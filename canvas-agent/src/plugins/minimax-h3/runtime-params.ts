@@ -18,6 +18,10 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
     // steps is an execution alias; videoSteps is the persisted domain field.
     if (override.steps === undefined && values.videoSteps !== undefined) { values.steps = values.videoSteps; sources.steps = sources.videoSteps; }
     delete values.videoSteps;
+    const parameterIssues: string[] = [];
+    const requestedSlots = Array.isArray(values.loraSlots) && values.loraSlots.length ? values.loraSlots as Array<Record<string, unknown>> : values.loraName ? [{ name: values.loraName, strength: values.loraStrength ?? 1, enabled: true }] : [];
+    for (const slot of requestedSlots) if (slot.enabled !== false && slot.name && slot.strength !== undefined && (!Number.isFinite(Number(slot.strength)) || Number(slot.strength) < H3_LORA_STRENGTH_MIN || Number(slot.strength) > H3_LORA_STRENGTH_MAX)) parameterIssues.push(`LoRA ${slot.name} 的强度超出当前 H3 节点已声明的范围 ${H3_LORA_STRENGTH_MIN}–${H3_LORA_STRENGTH_MAX}，拒绝静默夹紧`);
+    if (!Number.isFinite(Number(values.megapixels)) || Number(values.megapixels) <= 0) parameterIssues.push('H3 分辨率必须为有效正数');
     if (sources.loraSlots === 'builtIn' && values.loraName) values.loraSlots = normalizeH3LoraSlots({ ...values, loraSlots: undefined });
     const params = normalizeH3Params({ ...values, ...override }, false);
     delete params.videoSteps;
@@ -26,7 +30,7 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
     const rawMode = String(requestedMode || 'ref2va').toLowerCase();
     params.mode = params.taskMode = aliases[rawMode] || rawMode;
     if (sources.loraSlots === 'builtIn' && String(values.loraName || '').trim()) sources.loraSlots = sources.loraName;
-    return { params, sources, policy: useDefaults ? 'defaults' as const : 'overrides' as const };
+    return { params, sources, parameterIssues, policy: useDefaults ? 'defaults' as const : 'overrides' as const };
 }
 
 export function canonicalH3AspectRatio(value: unknown) {
@@ -90,7 +94,7 @@ function record(value: unknown): Record<string, unknown> { return value && typeo
 
 export const H3_PARAM_KEYS = [
     "minimaxEngine",
-    "selectedVideoModelEnabled", "selectedVideoModel",
+    "selectedVideoModelEnabled", "selectedVideoModel", "selectedVideoModelFieldValues",
     "mode", "taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "steps", "denoise", "noiseSeedMode", "noiseSeed", "seed",
     "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sizeMultiple", "sampler", "scheduler",
     "loraSlots", "constantTriggerWord", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd",

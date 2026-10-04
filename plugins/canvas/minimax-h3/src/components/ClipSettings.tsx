@@ -1,7 +1,7 @@
 import { resolveH3Runtime } from "../../../../../canvas-agent/src/plugins/minimax-h3/runtime-params";
 import { readDefaultParams } from "../services/h3-defaults";
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
+import type { CanvasNodeContext, CanvasVideoModelField, CanvasVideoModelSchema } from "@infinite-canvas/plugin-sdk";
 import { AutoComplete, Input, InputNumber, Switch, Select, Tooltip } from "antd";
 import { Search } from "lucide-react";
 import { h3LoraOptions, h3ModelOptions, H3_LORA_STRENGTH_MIN, H3_LORA_STRENGTH_MAX } from "../constants";
@@ -64,14 +64,11 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
     const raw = (Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : []).find(item => item.id === inputSegment?.id) || inputSegment || {};
     const resolved = resolveH3Runtime(raw as Record<string, unknown>, {}, metadata, readDefaultParams());
     const segment = inputSegment ? { ...inputSegment, ...resolved.params, videoSteps: resolved.params.steps } as H3Segment : undefined;
+    const selectedVideoReferenceCount = selectedVideoWorkflowReferenceCount(segment);
     const patch = (value: Partial<H3Segment>) => savePatch({ ...value, ...(!('h3ParameterPolicy' in value) && Object.keys(value).some(key => !['duration', 'aspectRatio', 'mode', 'taskMode', 'motionContextEnabled', 'tailFrameContinuation'].includes(key)) ? { h3ParameterPolicy: 'overrides' } : {}) });
-    const [executionPreview, setExecutionPreview] = useState<import('@basketikun/canvas-agent/generation-contract').H3ExecutionPreview | null>(null);
-    const [previewError, setPreviewError] = useState('');
-    const refreshPreview = async () => {
-        if (!inputSegment) return;
-        try { setExecutionPreview(await ctx.ai.previewH3Generation({ mode: 'video', operation: 'h3-run', projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: inputSegment.id, skipCompleted: false })); setPreviewError(''); }
-        catch (error) { setExecutionPreview(null); setPreviewError(error instanceof Error ? error.message : String(error)); }
-    };
+    const [selectedVideoModelSchema, setSelectedVideoModelSchema] = useState<CanvasVideoModelSchema | null>(null);
+    const [selectedVideoModelLoading, setSelectedVideoModelLoading] = useState(false);
+    const [selectedVideoModelError, setSelectedVideoModelError] = useState('');
     const locale = useH3Locale();
     const [catalog, setCatalog] = useState<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng: Record<string, unknown[]> }>({ models: [], loras: [], textEncoders: [], videoVaes: [], audioVaes: [], latentUpscaleModels: [], nanfeng: {} });
     const [refreshingLoras, setRefreshingLoras] = useState(false);
@@ -86,6 +83,24 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
         return () => { active = false; };
     }, [ctx.ai, segment?.id]);
     useEffect(() => { setLoraSearch(""); }, [segment?.id]);
+    useEffect(() => {
+        const model = String(segment?.selectedVideoModel || "").trim();
+        if (segment?.selectedVideoModelEnabled !== true || !model) {
+            setSelectedVideoModelSchema(null);
+            setSelectedVideoModelError("");
+            setSelectedVideoModelLoading(false);
+            return;
+        }
+        let active = true;
+        setSelectedVideoModelSchema(null);
+        setSelectedVideoModelError("");
+        setSelectedVideoModelLoading(true);
+        void ctx.ai.describeVideoModel(model, selectedVideoReferenceCount)
+            .then((schema) => { if (active) setSelectedVideoModelSchema(schema); })
+            .catch((error) => { if (active) setSelectedVideoModelError(error instanceof Error ? error.message : String(error)); })
+            .finally(() => { if (active) setSelectedVideoModelLoading(false); });
+        return () => { active = false; };
+    }, [ctx.ai, segment?.id, segment?.selectedVideoModelEnabled, segment?.selectedVideoModel, selectedVideoReferenceCount]);
     useEffect(() => {
         let active = true;
         const legacy = metadata.h3SigmaPresets && typeof metadata.h3SigmaPresets === "object" ? metadata.h3SigmaPresets as Record<string, unknown> : {};
@@ -138,6 +153,51 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
     const samplerChoices = nfChoices("采样器", samplers);
     const schedulerChoices = nfChoices("调度器", schedulers);
     const seedMode = segment.noiseSeedMode === "fixed" ? "fixed" : "random";
+    const field = { width: "100%" } as const;
+    const hintMark = (hint: string) => <Tooltip title={hint}><span className="nfh3-hint-mark" aria-label={hint} role="img">?</span></Tooltip>;
+    const control = (label: string, value: ReactNode, wide = false, hint?: string) => <label key={`nfh3-ctl-${label}`} className={`nfh3-control${wide ? " wide" : ""}`} data-control={label}><span>{label}{hint ? hintMark(hint) : null}</span>{value}</label>;
+    const selectedModelSchemaKey = selectedVideoModelSchema?.kind === "direct"
+        ? `direct:${String(segment.selectedVideoModel || "")}`
+        : selectedVideoModelSchema?.workflow ? `${String(segment.selectedVideoModel || "")}::${selectedVideoModelSchema.workflow}` : "";
+    const allSelectedModelValues = segment.selectedVideoModelFieldValues || {};
+    const selectedModelValues = selectedModelSchemaKey ? allSelectedModelValues[selectedModelSchemaKey] || {} : {};
+    const selectedModelFields = (selectedVideoModelSchema?.fields || []).filter((item) =>
+        !item.isPrompt && item.id.toLowerCase() !== "prompt" && !["image", "video", "audio"].includes(item.type));
+    const defaultSelectedModelFieldValue = (item: CanvasVideoModelField) => {
+        if (Object.prototype.hasOwnProperty.call(selectedModelValues, item.id)) return selectedModelValues[item.id];
+        if (["duration", "seconds"].includes(item.id)) return segment.duration ?? selectedVideoModelSchema?.defaultValues?.[item.id] ?? item.default;
+        if (["mode", "taskMode"].includes(item.id)) return segment.mode || segment.taskMode || item.default;
+        return selectedVideoModelSchema?.defaultValues?.[item.id] ?? item.default;
+    };
+    const patchSelectedModelField = (item: CanvasVideoModelField, value: unknown) => {
+        const next = { ...selectedModelValues, [item.id]: value };
+        patch({
+            selectedVideoModelFieldValues: { ...allSelectedModelValues, [selectedModelSchemaKey]: next },
+            ...(["duration", "seconds"].includes(item.id) && Number.isFinite(Number(value)) ? { duration: Number(value) } : {}),
+        });
+    };
+    const renderSelectedModelField = (item: CanvasVideoModelField) => {
+        const value = defaultSelectedModelFieldValue(item);
+        const label = `${item.name || item.id}${item.required ? " *" : ""}`;
+        if (item.type === "boolean") return control(label, <Switch checked={value === true || String(value).toLowerCase() === "true"} onChange={(next) => patchSelectedModelField(item, next)} />);
+        if (item.type === "number" || item.type === "slider") return control(label, <InputNumber style={field} min={item.min} max={item.max} step={item.step || (item.type === "slider" ? 0.01 : 1)} value={value !== undefined && value !== null && value !== "" && Number.isFinite(Number(value)) ? Number(value) : undefined} onChange={(next) => patchSelectedModelField(item, next ?? "")} />);
+        if (item.type === "dropdown" && item.options?.length) return control(label, <H3Dropdown values={item.options} value={value === undefined || value === null ? undefined : String(value)} onChange={(next) => patchSelectedModelField(item, String(next))} allowClear placeholder={label} searchable />);
+        return control(label, <Input value={value === undefined || value === null ? "" : String(value)} placeholder={item.default === undefined ? label : String(item.default)} onChange={(event) => patchSelectedModelField(item, event.target.value)} />);
+    };
+    const selectedVideoModelPanel = <section className="nfh3-section nfh3-selected-model-parameters" data-section="selected-model-parameters">
+        <div className="nfh3-section-head"><b>{h3Label(locale, "selectedVideoModelParameters")}</b><small>{String(segment.selectedVideoModel || "")}</small></div>
+        <div className="nfh3-section-body">
+            {selectedVideoModelLoading ? <div className="nfh3-hint">{h3Label(locale, "selectedVideoModelLoading")}</div> : null}
+            {selectedVideoModelError ? <div className="nfh3-hint" role="alert">{selectedVideoModelError}</div> : null}
+            {selectedVideoModelSchema?.error ? <div className="nfh3-hint" role="alert">{h3Label(locale, "selectedVideoModelModeWarning")} {selectedVideoModelSchema.error}</div> : null}
+            <div className="nfh3-control-grid">
+                {control("视觉风格模板", <H3Dropdown values={H3_STYLE_TEMPLATES.map((template) => template.id)} value={styleTemplateId || undefined} onChange={(value) => patch({ styleTemplateId: value ? String(value) : null })} format={(value) => H3_STYLE_TEMPLATES.find((template) => template.id === value)?.label || String(value)} placeholder="不加模板" searchable allowClear />, true)}
+                {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked })} />, false, "下一段运行时截取本段尾帧，追加到已有图片参考最后，作为下一段的首帧状态基准。" )}
+            </div>
+            {!selectedVideoModelLoading && !selectedVideoModelError && selectedVideoModelSchema && !selectedModelFields.length ? <div className="nfh3-hint">{h3Label(locale, "selectedVideoModelNoFields")}</div> : null}
+            {selectedModelFields.length ? <div className="nfh3-control-grid">{selectedModelFields.map((item) => <div key={item.id} className="nfh3-dynamic-model-field">{renderSelectedModelField(item)}</div>)}</div> : null}
+        </div>
+    </section>;
     const sageChoices = nfChoices("SageAttention", attentionModes);
     const slaBackendChoices = nfChoices("SLA稠密后端", ["comfy_kitchen", "pytorch", "auto"]);
     const rtxQualityChoices = nfChoices("RTX质量", rtxQualities);
@@ -154,12 +214,8 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
     // 画布节点会在父层监听 pointer/mousedown 做拖拽；Select 的文字区域通常能
     // 先触发打开，但右侧箭头区域会被父层抢走。阻止事件继续冒泡，保证整个
     // selector（包括箭头）都是同一个下拉触发热区。
-    const field = { width: "100%" } as const;
     const section = (key: SectionKey, title: string, summary: ReactNode, content: ReactNode, className = "") => <section key={`nfh3-sec-${key}`} className={`nfh3-section ${className}`} data-section={key}><button type="button" className="nfh3-section-head" onClick={() => setOpen(key)}><span className={`nfh3-chevron${expanded[key] === true ? " is-open" : ""}`} aria-hidden="true" /><b>{title}</b><small>{summary}</small></button>{expanded[key] === true ? <div className="nfh3-section-body">{content}</div> : null}</section>;
     const enabledSummary = (text: string) => <span className="nfh3-enabled-summary">{text}</span>;
-    // hint 走 Tooltip：说明文字只在悬停时出现，不常驻占版面。需要 import { Tooltip } from "antd"。
-    const hintMark = (hint: string) => <Tooltip title={hint}><span className="nfh3-hint-mark" aria-label={hint} role="img">?</span></Tooltip>;
-    const control = (label: string, value: ReactNode, wide = false, hint?: string) => <label key={`nfh3-ctl-${label}`} className={`nfh3-control${wide ? " wide" : ""}`} data-control={label}><span>{label}{hint ? hintMark(hint) : null}</span>{value}</label>;
     const choice = (label: string, values: Array<string | number>, value: unknown, onChange: (value: string | number) => void, format?: (value: string | number) => string, wide = false, searchable = false, placeholder?: string, allowClear = false) => control(label, <H3Dropdown values={values} value={value as string | number} onChange={onChange} format={format} searchable={searchable} placeholder={placeholder} allowClear={allowClear} listId={`nfh3-${label}-options`} />, wide);
     const loraSlots = (segment.loraSlots?.length ? segment.loraSlots : [{ name: segment.loraName || "", strength: Number(segment.loraStrength ?? 1), enabled: !!segment.loraName }]).slice(0, 8);
     while (loraSlots.length < 3) loraSlots.push({ name: "", strength: 1, enabled: false });
@@ -202,19 +258,9 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
         patch(next);
     };
     return <div className="nfh3-settings">
-        <div style={{ color: 'var(--h3-text)', fontSize: 22, padding: '10px 14px' }}>
-            <label>{h3Label(locale, 'parameterPolicy')} <Select size="middle" value={resolved.policy} onChange={(value: 'defaults' | 'overrides') => patch({ h3ParameterPolicy: value })} options={[{ value: 'defaults', label: h3Label(locale, 'inheritDefaults') }, { value: 'overrides', label: h3Label(locale, 'explicitOverrides') }]} /></label>
-            <p>{h3Label(locale, 'effectiveParameters')}: {String(segment.aspectRatio)} · {String(segment.megapixels)} MP · {String(segment.sampler)} · {segment.latentUpscaleEnabled ? `${String(segment.latentUpscaleMegapixels)} MP` : h3Label(locale, 'upscaleOff')}</p>
-            <details><summary>{h3Label(locale, 'parameterSources')}</summary><table style={{ width: '100%', tableLayout: 'fixed', fontSize: 18 }}><tbody>{['aspectRatio', 'modelName', 'textEncoder', 'videoVae', 'audioVae', 'megapixels', 'sampler', 'scheduler', 'steps', 'h3FirstSteps', 'h3SecondSteps', 'loraSlots', 'latentUpscaleEnabled', 'latentUpscaleModel', 'latentUpscaleMegapixels'].map(key => <tr key={key}><td>{key}</td><td style={{ overflowWrap: 'anywhere' }}>{typeof resolved.params[key] === 'object' ? JSON.stringify(resolved.params[key]) : String(resolved.params[key] ?? '')}</td><td>{resolved.sources[key]}</td></tr>)}</tbody></table></details>
-            <button type="button" onClick={() => void refreshPreview()}>{h3Label(locale, 'checkSavedExecution')}</button>
-            {executionPreview && <p>{executionPreview.ready ? h3Label(locale, 'preflightReady') : executionPreview.diagnostics.map(issue => issue.message).join('；')} · {executionPreview.clips[0]?.expectedDimensions.final?.width}×{executionPreview.clips[0]?.expectedDimensions.final?.height}</p>}
-            {previewError && <p role="alert">{previewError}</p>}
-        </div>
-        <div className="nfh3-control-grid">
-            {segment.selectedVideoModelEnabled === true ? <div className="nfh3-control wide"><span>{h3Label(locale, "executionMode")}</span><small>{h3Label(locale, "selectedVideoRouteHint")}</small></div> : control(h3Label(locale, "executionMode"), <H3Dropdown values={["auto", "local", "runninghub"]} value={segment.minimaxEngine || String(metadata.minimaxEngine || "local")} format={(value) => h3Label(locale, value === "auto" ? "executionAuto" : value === "local" ? "executionLocal" : "executionRunningHub")} onChange={(value) => patch({ minimaxEngine: value as H3Segment["minimaxEngine"] })} />, true)}
-            <div className="nfh3-hint">{h3Label(locale, "executionHint")}</div>
-        </div>
+        {segment.selectedVideoModelEnabled === true ? <div className="nfh3-control-grid">{control(h3Label(locale, "executionMode"), <H3Dropdown values={["auto", "local", "runninghub"]} value={segment.minimaxEngine || String(metadata.minimaxEngine || "local")} format={(value) => h3Label(locale, value === "auto" ? "executionAuto" : value === "local" ? "executionLocal" : "executionRunningHub")} onChange={(value) => patch({ minimaxEngine: value as H3Segment["minimaxEngine"] })} />, true)}<div className="nfh3-hint">{h3Label(locale, "executionHint")}</div></div> : null}
         <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" data-mode={key} className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b></button>)}</div>
+        {segment.selectedVideoModelEnabled === true ? selectedVideoModelPanel : <>
         {section("model", "模型与基础参数", String(segment.modelName || "未选择模型").replace(/^.*[\\/]/, ""), <div className="nfh3-control-grid">
             {control("模型", <H3Dropdown values={modelOptions.map((item) => item.value)} value={segment.modelName || modelOptions[0]?.value} onChange={(value) => patch({ modelName: String(value) })} placeholder="选择模型" />, true)}
             {choice("视觉风格模板", H3_STYLE_TEMPLATES.map((template) => template.id), styleTemplateId, (value) => patch({ styleTemplateId: value ? String(value) : null }), (value) => H3_STYLE_TEMPLATES.find((template) => template.id === value)?.label || String(value), true, true, "不加模板", true)}
@@ -320,5 +366,16 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
             <div className="nfh3-hint">也可输入 ComfyUI `models/loras` 下的相对文件名，按回车应用。</div>
         </div>)}
         {mode === "ref2va" ? section("audio", "数字人 · MV · 锁音频", segment.audioDrive ? enabledSummary("智能音频驱动") : segment.lockAudio ? enabledSummary("锁定音频") : "未启用", <div className="nfh3-audio-workspace">{control("开启锁音频", <Switch checked={segment.lockAudio === true} onChange={(checked) => patch({ lockAudio: checked })} />)}{control("开启音频驱动模式", <Switch checked={segment.audioDrive === true} onChange={(checked) => patch({ audioDrive: checked, lockAudio: checked ? true : segment.lockAudio })} />)}{segment.audioDrive ? <>{control("驱动文件", <input value={String(segment.audioDriveFile || "")} onChange={(event) => patch({ audioDriveFile: event.target.value })} placeholder="音频文件名或拖入" />, true)}{control("当前起点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveStart != null ? Number(segment.audioDriveStart) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveStart: value ?? undefined })} />)}{control("当前终点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveEnd != null ? Number(segment.audioDriveEnd) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveEnd: value ?? undefined })} />)}{control("打点数据", <textarea value={String(segment.audioDriveMarkers || "")} onChange={(event) => patch({ audioDriveMarkers: event.target.value })} placeholder="JSON" />, true)}{control("分段图片", <textarea value={String(segment.audioDriveSegmentImages || "")} onChange={(event) => patch({ audioDriveSegmentImages: event.target.value })} placeholder="JSON" />, true)}{control("分段分镜", <textarea value={String(segment.audioDriveSegmentStoryboards || "")} onChange={(event) => patch({ audioDriveSegmentStoryboards: event.target.value })} placeholder="JSON" />, true)}{control("创意描述", <textarea value={String(segment.audioDriveCreative || "")} onChange={(event) => patch({ audioDriveCreative: event.target.value })} />, true)}{control("排除范围", <textarea value={String(segment.audioDriveExclude || "")} onChange={(event) => patch({ audioDriveExclude: event.target.value })} />, true)}</> : null}</div>) : null}
+        </>}
     </div>;
+}
+
+function selectedVideoWorkflowReferenceCount(segment?: H3Segment) {
+    const mode = String(segment?.mode || segment?.taskMode || "ref2va").toLowerCase();
+    if (mode === "t2v" || mode === "t2va") return 0;
+    if (mode === "i2v" || mode === "i2va") return 1;
+    if (mode === "fl2v" || mode === "fl2va") return 2;
+    const bindings = Array.isArray(segment?.referenceBindings) ? segment.referenceBindings.filter((item) => item.enabled !== false).length : 0;
+    const items = Array.isArray(segment?.refItems) ? segment.refItems.filter((item) => item.enabled !== false).length : 0;
+    return Math.max(1, bindings, items);
 }

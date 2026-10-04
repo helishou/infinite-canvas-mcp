@@ -1,4 +1,4 @@
-import { useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { lazy, Suspense, useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -6,6 +6,8 @@ import { LocalAgentPanel } from "./local-agent-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { CANVAS_AGENT_PANEL_MOTION_MS, useAgentStore } from "@/stores/use-agent-store";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
+const ProductionEditor = lazy(() => import("@/pages/drama/production").then(module => ({ default: module.ProductionEditor })));
 
 const PANEL_MOTION_SECONDS = CANVAS_AGENT_PANEL_MOTION_MS / 1000;
 
@@ -19,6 +21,8 @@ export function AgentPanel() {
     const panelClosing = useAgentStore((state) => state.panelClosing);
     const setAgentState = useAgentStore((state) => state.setAgentState);
     const closePanel = useAgentStore((state) => state.closePanel);
+    const owner = useProductionWorkspaceStore(state => state.context?.owner);
+    const panelTab = useProductionWorkspaceStore(state => state.panelTab);
     const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches);
     useEffect(() => {
         const media = window.matchMedia("(max-width: 767px)");
@@ -75,7 +79,14 @@ export function AgentPanel() {
                 style={{ width: narrow ? Math.min(window.innerWidth, 600) : width, height: narrow ? Math.min(window.innerHeight * .88, 720) : "100%", maxWidth: "100dvw", display: panelMounted || panelClosing ? "flex" : "none", background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
             >
                 {!narrow && <button type="button" className="absolute inset-y-0 left-0 z-40 w-4 -translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label={t("agent.panel.resize")} />}
-                <LocalAgentPanel embedded headless={!panelMounted} autoConnect />
+                {owner && <div className="flex shrink-0 items-center gap-4 border-b px-3 py-2" style={{ borderColor: theme.node.stroke }}>
+                    {(["director", "object"] as const).map(tab => <button key={tab} type="button" aria-pressed={panelTab === tab} className="text-sm hover:opacity-80" style={{ opacity: panelTab === tab ? 1 : .55 }} onClick={() => useProductionWorkspaceStore.getState().setPanelTab(tab)}>{t(`productionCanvas.${tab}`)}</button>)}
+                    <button type="button" className="ml-auto text-xs" onClick={closePanel}>{t("productionCanvas.close")}</button>
+                </div>}
+                <div className="min-h-0 flex-1 flex-col" style={{ display: !owner || panelTab === "director" ? "flex" : "none" }}><LocalAgentPanel embedded headless={!panelMounted} autoConnect /></div>
+                {owner && <div className="min-h-0 flex-1 overflow-auto" style={{ display: panelTab === "object" ? "block" : "none" }}>
+                    <Suspense fallback={null}><ProductionEditor key={`${owner.kind}:${owner.id}`} owner={owner} embedded /></Suspense>
+                </div>}
             </motion.aside>
         </motion.div>
     );

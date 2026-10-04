@@ -332,6 +332,18 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${target}px)`;
         persistScroll(target);
     }, [persistScroll]);
+    const focusRequest = Number(ctx.node.metadata?.h3FocusRequest || 0);
+    useLayoutEffect(() => {
+        if (!focusRequest || !selected) return;
+        const track = trackScrollRef.current;
+        const clip = track && Array.from(track.querySelectorAll<HTMLElement>(".minimax-tl-clip[data-segment-id]")).find(element => element.dataset.segmentId === selected.id);
+        if (!track || !clip) return;
+        const left = clip.offsetLeft, right = left + clip.offsetWidth;
+        const target = left < track.scrollLeft ? left : right > track.scrollLeft + track.clientWidth ? right - track.clientWidth : track.scrollLeft;
+        track.scrollLeft = Math.max(0, target);
+        if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${track.scrollLeft}px)`;
+        persistScroll(track.scrollLeft);
+    }, [focusRequest, selected?.id, persistScroll]);
     // 新增 Clip 后，在 DOM 提交（内容宽度已更新）后确定性地把时间轴滚到该 Clip 最右侧
     useLayoutEffect(() => {
         const id = pendingScrollIdRef.current;
@@ -345,6 +357,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     useLayoutEffect(() => {
         if (restoredRef.current) return;
         restoredRef.current = true;
+        if (Number(ctx.node.metadata?.h3FocusRequest || 0) > 0) return;
         const left = Number(ctx.node.metadata?.timelineScrollLeft || 0);
         if (left > 0 && trackScrollRef.current) {
             trackScrollRef.current.scrollLeft = left;

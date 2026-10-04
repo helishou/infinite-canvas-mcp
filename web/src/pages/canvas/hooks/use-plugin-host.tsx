@@ -3,20 +3,21 @@ import { previewH3Generation } from '@/services/backend-api';
 import { useTranslation } from "react-i18next";
 
 import { storeGeneratedVideo } from "@/services/api/video";
+import { fetchWorkflowDetail } from "@/services/api/workflows";
 import { getLocalH3Task, getRunningHubH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
 import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, resolveBackendH3Confirmation, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
 import { observeCanvasGenerationTask } from "@/services/api/canvas-generation-task";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
-import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { decodeChannelModel, resolveModelWorkflow, resolveModelWorkflowParams, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { createCanvasReferenceService } from "@/lib/canvas/reference-service";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
-import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasMediaPreview, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost, CanvasReferenceService } from "@/types/canvas-plugin";
+import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasMediaPreview, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost, CanvasReferenceService, CanvasVideoModelSchema } from "@/types/canvas-plugin";
 import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 import { flushCanvasProjectBeforeGeneration, useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -214,6 +215,30 @@ export function usePluginHost(params: PluginHostParams) {
             // List configured models for a capability; labels use the model name without the channel prefix.
             listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: decodeChannelModel(value)?.model || value })),
             defaultModel: (capability) => buildGenerationConfig(effectiveConfig, undefined, capability).model,
+            describeVideoModel: async (model: string, referenceCount: number): Promise<CanvasVideoModelSchema> => {
+                const resolved = resolveModelWorkflow(effectiveConfig, model, referenceCount);
+                const decoded = decodeChannelModel(model);
+                const modelName = decoded?.model || model;
+                const channel = effectiveConfig.channels.find((item) => decoded?.channelId ? item.id === decoded.channelId : item.models.some((candidate) => candidate.name === modelName));
+                const declaration = channel?.models.find((candidate) => candidate.name === modelName);
+                if (resolved) {
+                    const detail = await fetchWorkflowDetail(resolved);
+                    return { model, kind: "workflow", workflow: resolved, supported: true, fields: detail.config?.fields || [], defaultValues: resolveModelWorkflowParams(effectiveConfig, model, referenceCount) };
+                }
+                const fallback = declaration?.workflows?.[0];
+                if (fallback) {
+                    const detail = await fetchWorkflowDetail(fallback);
+                    return { model, kind: "workflow", workflow: fallback, supported: false, fields: detail.config?.fields || [], error: `该视频模型不支持当前输入数量（${referenceCount} 个参考）` };
+                }
+                if (channel?.kind !== "comfyui" && declaration?.capability === "video") return {
+                    model, kind: "direct", supported: true, fields: [
+                        { id: "seconds", name: "时长（秒）", type: "number", default: 6, min: 1, max: 20, step: 1 },
+                        { id: "size", name: "视频尺寸", type: "text", default: "1280x720" },
+                        { id: "resolution", name: "清晰度", type: "text", default: "720p" },
+                    ],
+                };
+                return { model, kind: "unsupported", supported: false, fields: [], error: `当前输入模式没有可用的视频模型工作流（${referenceCount} 个参考）` };
+            },
         };
     }, [effectiveConfig, generationLogs, isAiConfigReady, openConfigDialog, projectId, t]);
 

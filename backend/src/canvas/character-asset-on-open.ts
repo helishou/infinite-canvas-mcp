@@ -13,6 +13,7 @@ export function syncCharacterAssetsForProject(stores: Stores, projectId: string)
     const allProjects = stores.projects.list();
     const operations: CanvasOperation[] = nodes.flatMap((node) => {
         if (node.type !== "character") return [];
+        if (node.metadata?.sharedAssetOrigin) return [];
         const linked = byId.get(String(node.metadata?.characterAssetId || ""));
         const legacy = !linked && !node.metadata?.characterAssetId
             ? assets.filter((asset) => asset.metadata?.source === "canvas" && asset.metadata.nodeId === node.id && (!asset.metadata.projectId || asset.metadata.projectId === projectId))

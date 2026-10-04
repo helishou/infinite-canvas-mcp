@@ -6,12 +6,16 @@ export function productionTarget(owner: ProductionPresentation["owner"]): Produc
 
 export function productionPresentationPath(presentation: ProductionPresentation) {
     const canvasId = presentation.canvasId || (presentation.owner.kind === "canvas" ? presentation.owner.id : "");
-    const isCanvasProduction = presentation.workspace === "production" && Boolean(presentation.nodeId && canvasId);
+    const isCanvasProduction = Boolean(canvasId);
     if (isCanvasProduction) {
         const query = new URLSearchParams();
-        query.set("nodeId", presentation.nodeId!);
+        if (presentation.nodeId) query.set("nodeId", presentation.nodeId);
         if (presentation.segmentId) query.set("segmentId", presentation.segmentId);
         query.set("workId", presentation.workId);
+        query.set("productionKind", presentation.owner.kind);
+        query.set("productionId", presentation.owner.id);
+        query.set("workspace", presentation.workspace);
+        if (presentation.targetKind && presentation.targetId) query.set("target", `${presentation.targetKind}:${presentation.targetId}`);
         if (presentation.runId) query.set("runId", presentation.runId);
         return `/canvas/${encodeURIComponent(canvasId)}?${query.toString()}`;
     }

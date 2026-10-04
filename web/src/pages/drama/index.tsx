@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { flushSync } from "react-dom";
 import { App, Button, Input, Modal, Select, Tag } from "antd";
-import { ArrowLeft, ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, PencilLine, Plus, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, PencilLine, Plus, Trash2, Upload, Search } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
 import { loadCanvasProjectPage } from "@/lib/canvas-project-loader";
 import { cn } from "@/lib/utils";
-import { backendMediaUrl, createBackendDramaEpisode, createBackendProject, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, type DramaCustomAsset, type DramaEpisode } from "@/services/backend-api";
+import { backendMediaUrl, createBackendDramaEpisode, createBackendProject, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, type DramaCustomAsset, type DramaEpisode } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useCanvasStore, type CanvasFolder, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 
@@ -39,7 +39,7 @@ type DramaViewTransitionDocument = Document & {
     startViewTransition?: (update: () => void) => { finished: Promise<unknown> };
 };
 
-export default function DramaPage() {
+export default function DramaPage({ embedded = false }: { embedded?: boolean }) {
     const { message, modal } = App.useApp();
     const { t } = useTranslation();
     const navigate = useNavigate();
@@ -50,6 +50,8 @@ export default function DramaPage() {
     const createProject = useCanvasStore((state) => state.createProject);
     const updateFolder = useCanvasStore((state) => state.updateFolder);
     const deleteDramaProject = useCanvasStore((state) => state.deleteDramaProject);
+    const [libraryQuery, setLibraryQuery] = useState("");
+    const TitleHeading = embedded ? "h2" : "h1";
     const [activeView, setActiveView] = useState(DRAMA_LIBRARY);
     const [transitionDramaId, setTransitionDramaId] = useState<string | null>(null);
     const [editorOpen, setEditorOpen] = useState(false);
@@ -66,6 +68,7 @@ export default function DramaPage() {
     const assetInputRef = useRef<HTMLInputElement>(null);
 
     const dramaFolders = folders.filter((folder) => folder.isDrama);
+    const shownDramaFolders = dramaFolders.filter(folder => folder.name.toLocaleLowerCase().includes(libraryQuery.trim().toLocaleLowerCase()));
     const activeFolder = dramaFolders.find((folder) => folder.id === activeView);
     useEffect(() => {
         if (activeView !== DRAMA_LIBRARY && !activeFolder) setActiveView(DRAMA_LIBRARY);
@@ -303,18 +306,19 @@ export default function DramaPage() {
     };
 
     return (
-        <main className="h-full overflow-y-auto bg-background text-stone-950 dark:text-stone-100">
-            <div className="mx-auto max-w-7xl px-6 py-8 lg:px-10">
-                <header className="flex flex-wrap items-start justify-between gap-5 border-b border-stone-200 pb-6 dark:border-stone-800">
+        <main className={cn("bg-background text-foreground", !embedded && "h-full overflow-y-auto")}>
+            <div className={cn(!embedded && "mx-auto max-w-7xl px-6 py-8 lg:px-10")}>
+                <header className="flex flex-wrap items-start justify-between gap-5 border-b border-border pb-4">
                         <div className="min-w-0 max-w-2xl">
-                            <div className="flex items-center gap-2 text-sm font-semibold tracking-[0.12em] text-orange-600 dark:text-orange-400">
+                            <div className={cn("flex items-center gap-2 text-sm font-semibold text-muted-foreground", embedded && "hidden")}>
                                 <Clapperboard className="size-5" />
                                 {t("drama.eyebrow")}
                             </div>
-                            <h1 className="mt-2 truncate text-2xl font-semibold tracking-tight sm:text-3xl" style={activeFolder && transitionDramaId === activeFolder.id ? { viewTransitionName: "drama-title" } : undefined}>{activeFolder?.name || t("drama.libraryTitle")}</h1>
-                            <p className="mt-1.5 max-w-xl truncate text-sm text-stone-500 dark:text-stone-400" style={activeFolder && transitionDramaId === activeFolder.id ? { viewTransitionName: "drama-summary" } : undefined}>{activeFolder ? activeFolder.description || t("drama.detailDescription") : t("drama.libraryDescription")}</p>
+                            <TitleHeading className={cn("truncate font-semibold tracking-tight", embedded ? "text-lg" : "mt-2 text-2xl sm:text-3xl")} style={activeFolder && transitionDramaId === activeFolder.id ? { viewTransitionName: "drama-title" } : undefined}>{activeFolder?.name || t("drama.libraryTitle")}</TitleHeading>
+                            <p className="mt-1.5 max-w-xl truncate text-sm text-stone-500 dark:text-stone-400" style={activeFolder && transitionDramaId === activeFolder.id ? { viewTransitionName: "drama-summary" } : undefined}>{activeFolder ? activeFolder.description || t("drama.detailDescription") : t(embedded ? "landing.seriesHint" : "drama.libraryDescription")}</p>
                         </div>
                         <div className="flex flex-wrap gap-2">
+                            {!activeFolder && <Input className="!w-48 sm:!w-56" allowClear prefix={<Search className="size-4 text-muted-foreground" />} aria-label={t("landing.searchSeries")} placeholder={t("landing.searchSeries")} value={libraryQuery} onChange={event => setLibraryQuery(event.target.value)} />}
                             {activeFolder
                                 ? <Button type="primary" onClick={() => openEpisodeEditor()} icon={<Plus className="size-4" />}>{t("drama.newEpisode")}</Button>
                                 : <Button type="primary" onClick={createDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>}
@@ -327,7 +331,8 @@ export default function DramaPage() {
                                 <div className="flex min-h-72 items-center justify-center border-y border-stone-200 text-sm text-stone-500 dark:border-stone-800">{t("canvas.loading")}</div>
                             ) : dramaFolders.length ? (
                                 <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
-                                    {dramaFolders.map((folder) => <DramaCard key={folder.id} folder={folder} episodes={episodesByDrama[folder.id] || []} transitioning={transitionDramaId === folder.id} onOpen={() => changeDramaView(folder.id, folder.id)} t={t} />)}
+                                    {shownDramaFolders.map((folder) => <DramaCard key={folder.id} folder={folder} episodes={episodesByDrama[folder.id] || []} transitioning={transitionDramaId === folder.id} onOpen={() => changeDramaView(folder.id, folder.id)} t={t} />)}
+                                    {!shownDramaFolders.length && <p className="py-12 text-center text-sm text-muted-foreground sm:col-span-2 xl:col-span-3">{t("landing.noSeriesMatches")}</p>}
                                 </div>
                             ) : (
                                 <div className="flex min-h-72 flex-col items-center justify-center rounded-2xl border border-dashed border-stone-300 px-6 text-center dark:border-stone-700">
@@ -364,7 +369,7 @@ export default function DramaPage() {
                                     <h2 className="mt-2 text-2xl font-semibold tracking-tight">{t("drama.episodeListTitle")}</h2>
                                 </div>
                                 <div className="flex items-center gap-3">
-                                    <span className="text-sm text-stone-400">{visibleEpisodes.length} {t("drama.episodeUnit")}</span>
+                                    <Button type="text" onClick={async () => { try { const { project } = await ensureSharedAssetCanvas(activeFolder.id); navigate(`/canvas/${encodeURIComponent(String(project.id))}`); } catch (error) { message.error(String(error)); } }}>{t("productionCanvas.sharedCanvas")}</Button><span className="text-sm text-stone-400">{visibleEpisodes.length} {t("drama.episodeUnit")}</span>
                                 </div>
                             </div>
                             {visibleEpisodes.length ? (
@@ -415,7 +420,7 @@ export default function DramaPage() {
                     </div>
                     <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.episodeSynopsis")}</span><Input.TextArea rows={4} value={episodeDraft.synopsis} onChange={(event) => setEpisodeDraft({ ...episodeDraft, synopsis: event.target.value })} placeholder={t("drama.episodeSynopsisPlaceholder")} /></label>
                     <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.episodeFullPlot")}</span><Input.TextArea autoSize={{ minRows: 8, maxRows: 18 }} value={episodeDraft.fullPlot} onChange={(event) => setEpisodeDraft({ ...episodeDraft, fullPlot: event.target.value })} placeholder={t("drama.episodeFullPlotPlaceholder")} /></label>
-                    <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.bindCanvas")}</span><Select className="w-full" value={episodeDraft.createCanvas ? CREATE_EPISODE_CANVAS : episodeDraft.canvasId || NO_EPISODE_CANVAS} onChange={(value) => setEpisodeDraft({ ...episodeDraft, createCanvas: value === CREATE_EPISODE_CANVAS, canvasId: value === CREATE_EPISODE_CANVAS || value === NO_EPISODE_CANVAS ? null : value })} options={[{ label: t("drama.canvasActions"), options: [{ label: t("drama.noCanvas"), value: NO_EPISODE_CANVAS }, { label: t("drama.createAndBindCanvas"), value: CREATE_EPISODE_CANVAS }] }, ...(projects.length ? [{ label: t("drama.existingCanvases"), options: projects.map((project) => ({ label: project.title, value: project.id })) }] : [])]} showSearch optionFilterProp="label" /></label>
+                    <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.bindCanvas")}</span><Select className="w-full" disabled={Boolean(episodeDraft.id && (episodesByDrama[activeFolder?.id || ""] || []).find(item => item.id === episodeDraft.id)?.canvasId)} value={episodeDraft.createCanvas ? CREATE_EPISODE_CANVAS : episodeDraft.canvasId || NO_EPISODE_CANVAS} onChange={(value) => setEpisodeDraft({ ...episodeDraft, createCanvas: value === CREATE_EPISODE_CANVAS, canvasId: value === CREATE_EPISODE_CANVAS || value === NO_EPISODE_CANVAS ? null : value })} options={[{ label: t("drama.canvasActions"), options: [{ label: t("drama.noCanvas"), value: NO_EPISODE_CANVAS }, { label: t("drama.createAndBindCanvas"), value: CREATE_EPISODE_CANVAS }] }, ...(projects.length ? [{ label: t("drama.existingCanvases"), options: projects.map((project) => ({ label: project.title, value: project.id })) }] : [])]} showSearch optionFilterProp="label" /></label>
                 </div> : null}
             </Modal>
             <Modal title={t("drama.editProject")} open={editorOpen} onCancel={() => setEditorOpen(false)} onOk={saveFolder} okText={t("drama.saveProject")} cancelText={t("common.cancel")} confirmLoading={uploadingCover} width={680} footer={(originNode) => <div className="flex w-full items-center justify-between"><Button danger type="text" icon={<Trash2 className="size-4" />} onClick={deleteDrama}>{t("drama.deleteProject")}</Button><div className="flex gap-2">{originNode}</div></div>}>
@@ -458,11 +463,11 @@ function DramaCard({ folder, episodes, transitioning, onOpen, t }: { folder: Can
         return () => { disposed = true; };
     }, [folder.coverStorageKey]);
     const boundCanvases = episodes.filter((episode) => episode.canvasId).length;
-    return <button type="button" className="group overflow-hidden rounded-2xl border border-stone-200 bg-background text-left transition hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:border-stone-800 dark:hover:border-orange-900" onClick={onOpen}>
-        <div className="relative aspect-[16/9] overflow-hidden rounded-2xl bg-stone-100 dark:bg-stone-900" style={transitioning ? { viewTransitionName: "drama-cover" } : undefined}>
-            {coverUrl ? <img src={coverUrl} alt={folder.name} className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.025]" /> : <div className="grid h-full place-items-center text-orange-500"><Clapperboard className="size-10 stroke-[1.2]" /></div>}
-            <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/45 to-transparent" />
-            <span className="absolute bottom-3 left-4 text-xs font-medium text-white">{t("drama.episodeCount", { count: episodes.length })}</span>
+    return <button type="button" className="group overflow-hidden rounded-xl border border-border bg-card text-left transition-colors hover:border-foreground/40" onClick={onOpen}>
+        <div className="relative aspect-[16/9] overflow-hidden bg-muted/30" style={transitioning ? { viewTransitionName: "drama-cover" } : undefined}>
+            {coverUrl ? <img src={coverUrl} alt={folder.name} className="h-full w-full object-cover" /> : <div className="grid h-full place-items-center text-orange-500"><Clapperboard className="size-10 stroke-[1.2]" /></div>}
+
+            <span className="absolute bottom-3 left-4 rounded bg-background/90 px-2 py-1 text-xs font-medium text-foreground">{t("drama.episodeCount", { count: episodes.length })}</span>
         </div>
         <div className="p-5">
             <div className="flex items-start justify-between gap-3">

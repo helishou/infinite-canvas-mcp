@@ -5,11 +5,40 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Canvas production and shared assets
+
+- Episode production opens its fixed canvas. Unbound episodes and drama shared assets prepare their canvas idempotently on entry. Established bindings cannot be reassigned; ordinary canvas deletion protects bound objects.
+- The production directory uses formal script occurrences, assets, shots and segments. Repeated visits to one environment retain their narrative identities. Director and object editing share the right panel and preserve drafts, unknown command receipts, legacy sources and version recovery.
+- Approved assets belong to the drama asset canvas; episodes adopt verified versions from the same drama. Backend persists and propagates newly approved versions, recompiles inputs and exposes conflicts for explicit recovery. Historical media and submitted inputs remain intact; reference updates do not regenerate media.
+- Target preparation creates nodes and Clips without generation. Repeated requests recover their receipts and preserve user layouts. Video appears in H3 Output; navigation selects the specific Clip without autoplay.
+- Manual view changes, other targets and canvas switching pause following. Return to production resumes it. Check that progress does not steal focus, stale responses do not navigate backwards, side panels leave targets visible, and themes, narrow screens and refreshed drafts behave correctly.
+- Existing media enters through the asset canvas and object image binding, with approval required for shared production inputs. Generation still requires its existing explicit authorization; automated verification uses temporary data without real model requests.
+
+## Returned assets and workflow prompts
+
+- Returning an asset or keyframe ends a settled batch with no tasks in flight and permits a new generation run. Previous tasks and media remain available. Tasks in flight retain their target reservations.
+- Image requests with a prompt require a configured prompt field. Missing bindings must fail instead of executing residual template content.
+
+## Production and canvas home pages
+
+- Production starts with an idea composer, characters/assets versus stories/dramas, and a project gallery. Examples only fill the composer; they never send automatically. Changing modes or project categories retains the idea. Existing Agent connection, busy protection and approvals remain in effect.
+- Cards expose separate actions to continue production or open a canvas. Covers are queried only for displayed projects without loading full canvases. Series support name search and compact subsection headings.
+- Canvas home shows the latest edited project, a creative conversation entry and image/video tool links. Covers and titles open canvases; preview and production are separate actions available in both grid and list views. Pins, results and task dialogs use existing data.
+- Check both languages/themes, narrow screens, empty search results, project navigation, previews and creation dialogs. Browsing or selecting an idea example must not create media tasks.
+
+## Director workbench reading and editing
+
+- Navigation now uses Overview, Script, Characters & assets, Storyboard, Generate & deliver, and Settings & history. Regular views prioritize text, images and task status; raw records, hashes and full mappings are kept in Settings & history.
+- Read scripts scene by scene and open fields only when editing. Adjacent dialogue blocks share a scene; returning to a location later remains a separate scene. Check scene navigation, target focus and retained drafts after failed saves. User-authored names and dialogue keep their original text.
+- Filter/search assets and preview originals, with descriptions and canvas links expanded on demand. Storyboard cards show order, seconds and actual media, distinguishing formal keyframes from registered composition references. Missing links stay visible and are not created automatically.
+- The generation view shows video results and task status with collapsed settings. Publication and media generation remain separate actions. Check both languages/themes, narrow windows, editor expansion and media previews; viewing or switching tabs must not submit media tasks.
+- For Chinese users, new workbench source copy and Agent explanations default to Simplified Chinese. Scene names/text, character display names/appearance, asset descriptions and shot summaries appear in Chinese; model compiler fields keep Acheng's required language and dialogue remains verbatim. Existing confirmed English source is not translated automatically.
+
 - The production-follow “Return to current production / Open Agent” button stays fixed at the bottom-right of the viewport despite Ant Design's relative button positioning. Check narrow windows, scrolling, both themes and opening the Agent panel.
 
 ## H3 defaults and production specifications
 
-- Save the delivery aspect ratio on the production page. New episode H3 nodes load Backend defaults; syncing existing Clips preserves user parameters and prior results. Video and character-sheet ratios have separate purposes.
+- Save the video delivery aspect ratio on the production page. For a new video, the first creative turn must ask for a missing ratio before story breakdown or prompt writing; an explicit brief or confirmed production setting must not be asked again. Choosing “Use canvas settings” persists `videoAspectRatio=null` with `videoAspectRatioConfirmed=true`. Asset-only work skips the question, and character-sheet/keyframe ratios stay independent. New episode H3 nodes load Backend defaults; syncing existing Clips preserves user parameters and prior results.
 - H3 settings show effective values and sources, with saved-default and explicit-override policies. `h3_preview_run` and existing preflight return effective parameters, reference maps, estimated first/second-pass sizes and a planHash. Revision or defaults changes must reject a stale expectedPlanHash.
 - Direct canvas submissions also check published aspect ratio, stable storyboard shot IDs/order/durations, complete director prompts and literal dialogue. Missing selected models or enabled LoRAs must not silently change settings or downgrade output.
 - Check frozen parameters against executable workflow inputs before submission, then measure archived video with ffprobe. Validate first and second passes separately. A specification mismatch keeps task/media history and the previous active result, and stops remaining submissions. Unavailable probing must not count as a pass.
@@ -20,7 +49,7 @@ description: Implemented changes that still need manual verification
 
 - Production MCP reads default to `view=summary`; use `view=source` for one complete source snapshot and `view=artifacts` with `targetIds` for complete selected prompts. Edits/publications/restores return compact revision/hash receipts. Verify a large production no longer fails merely because the tool repeats source, prompt text and published history; Web API consumers retain their full-record default.
 
-- `production_compile` accepts `kind` (`canvas` or `episode`), `id`, `expectedRevision`, and an optional complete candidate `director`. It runs the production's pinned Acheng compiler and freezes a `preparedId`, per-target diagnostics, prompt hashes and real media references. It does not save, publish or generate media.
+- `production_compile` accepts `kind` (`canvas` or `episode`), `id`, `expectedRevision`, and an optional complete candidate `director`. It runs the production's pinned `compile_assets.py` / `compile_h3.py` and validation scripts, then freezes a `preparedId`, per-target diagnostics, prompt hashes and real media references. It does not save, publish or generate media.
 - `production_apply_compilation` accepts the same owner and the exact `preparedId`. Check one atomic draft revision, identical replay receipts, rejection after concurrent edits, changed packet bytes, wrong owner or missing media, and no generation task. The packet retains its original revision and operation ID; it cannot be rebased by changing request fields.
 - `production_diagnose_bindings` should distinguish source version/status, draft binding, published binding, active node images, actual archived hashes and dependent prompts. A corrected draft can differ from an old published version; diagnostics must identify that difference without deleting history or approving media.
 - Confirm Windows CRLF H3 prompts produce the same word counts as LF while prompt bytes and hashes remain unchanged. Check interpreter discovery with a stale `py` launcher and Microsoft Store Python; a configured `ACHENG_PYTHON` must not silently switch interpreters.
@@ -31,7 +60,7 @@ description: Implemented changes that still need manual verification
 - Call `canvas_preflight_production` or `drama_preflight_production` with action and the original formal request. Invalid brief types, missing entity, invalid module states, missing patch targets and malformed source fields should return diagnostic paths. Preflight must not change revision, receipts, tasks or execution authorization.
 - Incomplete planning drafts remain editable; publication and generation enforce their own requirements. A revision change after preflight must still reject the stale formal request. Formal request replay remains idempotent.
 - After building the shared package, run `node scripts/acheng/preflight.mjs director.json edit` for offline checks; publish/generate stages are also supported. Online ownership and model configuration remain unverified, so offline checks cannot establish generation readiness. Canvas exports retain preflight.json and compiler diagnostics.
-- Build and activate the new compatibility runtime through the runtime manager. Ref2VA prompts above 2900 words should retain all bytes and pass length checks when their minimum detail requirements are met. Existing productions retain their pinned runtime and receipts until an explicit upgrade and recompilation. No shot, Segment grouping or generated media is changed.
+- Build and activate the new compatibility runtime through the runtime manager. Ref2VA prompts above 2900 words should retain all bytes and pass length checks when their minimum detail requirements are met. Existing productions retain their pinned runtime and receipts until an explicit upgrade; after upgrade, rerun the compiler/validator scripts to rebuild affected prompt artifacts and receipts. No source is rewritten and no media is generated by this step.
 
 
 ## Smart image thumbnails in canvas overview
@@ -97,6 +126,8 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 - Add more than one RunningHub workflow ID from the ComfyUI → RunningHub Workflows tab. Verify each saved profile retains its own node input mappings and instance type after switching tabs and reloading. The API Key remains shared with the H3 RunningHub settings in Runtime.
 - Map text, constant, and image/video/audio inputs; leave unrelated workflow links disabled. Run with mapped values and with the workflow's defaults, then verify each task is queued under the shared RunningHub limit, image/video/audio or text outputs are retained, and history remains scoped to its workflow profile.
+- Open a workflow whose saved output selection contains a removed node ID. Verify checkboxes, the selected-node summary, and submitted task parameters contain only outputs available in the current graph. Change the graph and confirm stale IDs are cleared.
+- For image/video/audio run fields stored as Backend `/media/` URLs, verify the submission uploads them and sends RunningHub filenames. Empty `SaveImageToLocal.file_path` and a uniquely inferable `SamplerCustomAdvanced.noise` link should be patched only in the submitted copy; ambiguous noise links must remain untouched.
 - Cancel a queued and a submitted workflow task. Restart Backend with a RunningHub workflow active and confirm it resumes by the saved remote task ID without running H3 Clip writeback.
 
 
@@ -130,7 +161,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 - Use `npm run acheng:status`, `acheng:update -- --check`, `acheng:update`, and `acheng:rollback` to inspect, validate, activate, and revert engine versions. Dirty sources, contract changes and patch conflicts must leave the active version intact.
 - The episode Acheng tab shows seven modules, asset states, complete prompts and continuity boundaries. Import through native production tools and publish the director stage; Clips follow authored Segments, with no implicit one-shot grouping. Only authorized automatic production advances ready tasks.
-- Independent asset canvases use the same production contract through canvas production tools. Keep legacy drafts/media recoverable and require recompilation after source changes.
+- Independent asset canvases use the same production contract through canvas production tools. Keep legacy drafts/media recoverable and, after source changes, rerun the production's pinned compiler/validator scripts for affected prompts and receipts. This step does not regenerate media.
 - Tail-frame references and Motion Context remain independent. Bounded groups must stop at the specified last Clip. Legacy previousVideoAsReference no longer injects the preceding MP4; explicit ordinary video references remain supported.
 - Video completion defaults to technical checks. Tests use temporary databases, task doubles and isolated UI; they do not establish real model visual or audio quality.
 
@@ -2280,7 +2311,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - In the local Agent's site-workspace Skill manager, confirm Project scope lists both `acheng-director` and `canvas-video-production-sop`. This workspace mirror follows the active runtime, and creative/stage requests should select it while retaining the Canvas adapter for Backend/MCP. After a Skill refresh, simulate a runtime update and local file edits: update untouched files, preserve user edits, and exclude generated runtime output and `.git` metadata from the site workspace; the repository copy is separately pinned by the upstream manifest.
 - Confirm the only production entry opens one object browser with Canvas Projects and Series & Episodes views, and the idea-first creative entry appears there rather than in the Canvas library. Legacy `/director` and `/drama` paths should open the matching view; opening an object's workbench and then its Canvas must retain the same project, and the workbench Back action should return to the originating object view.
 - After the creative conversation confirms and creates or selects an object, verify Agent navigates to `/director/<projectId>` for an independent asset project or `/drama/episodes/<episodeId>/production` for a drama episode. It must not default to `/canvas/:id`; a direct Canvas visit remains available when the user explicitly requests media operations.
-- On desktop, verify the workbench uses a left-side object workspace navigation; on narrow screens, it becomes a horizontally scrollable row without page overflow. Overview should highlight the formal next task, owning module and object statuses. Review actions should focus the right target card, while “Continue current work” sends only a creative request and does not authorize media generation.
+- Verify the workbench uses top workspace navigation that scrolls horizontally on narrow screens without page overflow. Overview should highlight the current task and production progress. Review actions should focus the right target card, while “Continue current work” sends only a creative request and does not authorize media generation.
 - Advance story, assets, shots, model and continuity targets and confirm `currentWork` and `pendingDecisions` bind the formal workId/sourceHash. Save a user's answer before continuing; readiness must direct the UI to the correct workspace, production node or Clip.
 - Edit STYLE_MOTHER, style policy, asset versions and dependencies and confirm only related outputs are blocked. Original image review must load successfully before approval actions appear; audio/video references use their respective media players, and upload-card labels match actual input ordering.
 - Review the frame-based Shot/Segment timeline and expanded dialogue, performance and effects facts. Navigate by Shot/Segment ID and confirm exact dialogue is preserved.

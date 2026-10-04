@@ -73,8 +73,10 @@ export const useProductionFollowStore = create<ProductionFollowStore>((set, get)
     lastPath: initial.lastPath,
     expectedPath: "",
     setTarget: (target) => {
-        set({ target, presentation: null, pendingPresentation: null, following: true, pauseReason: "" });
-        persist({ target, following: true, pauseReason: "", lastPath: get().lastPath });
+        const prior = get().target;
+        const sameWork = prior?.kind === target.kind && prior?.id === target.id && prior?.workId === target.workId;
+        set(sameWork ? { target } : { target, presentation: null, pendingPresentation: null, following: true, pauseReason: "" });
+        persist({ target, following: get().following, pauseReason: get().pauseReason, lastPath: get().lastPath });
     },
     setPresentation: (presentation) => set({ presentation }),
     setPendingPresentation: (pendingPresentation) => set({ pendingPresentation }),
@@ -86,6 +88,7 @@ export const useProductionFollowStore = create<ProductionFollowStore>((set, get)
         if (!guardReason && get().pendingPresentation && typeof window !== "undefined") window.dispatchEvent(new Event("production-follow-resume"));
     },
     pause: (reason) => {
+        if (!get().target || !get().following) return;
         set({ following: false, pauseReason: reason || "已暂停自动跟随" });
         persist({ target: get().target, following: false, pauseReason: get().pauseReason, lastPath: get().lastPath });
     },

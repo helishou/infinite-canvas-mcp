@@ -1,4 +1,15 @@
 export default {
+    productionCanvas: {
+        director: "Director", object: "Current object", close: "Collapse", directory: "Production", switchCanvas: "Switch production canvas", sharedCanvas: "Shared asset canvas",
+        episode: "Episode {{number}}", ready: "Develop the production with the director or select a target from the directory", manualPause: "Canvas view taken over; following paused",
+        pauseFollow: "Pause following", follow: "Return to production", tasks: "Tasks and delivery", prepare: "Prepare node", story: "Story and brief", script: "Scene script",
+        assets: "Characters and assets", advanced: "Advanced and history", adoptShared: "Use shared drama assets", targetAsset: "Episode asset target", approvedAsset: "Approved shared version",
+        adopt: "Use this version", updateBlocked: "Shared asset update needs attention", retryUpdate: "Resume reviewed update", sharedReference: "Shared asset reference", source: "View source asset",
+        fixedBinding: "Canvas binding is fixed", arrange: "Arrange scene", awaitingUpdate: "Waiting for shared asset update and prompt validation",
+        outdatedMedia: "This media uses an earlier shared input. The original is preserved; review it before accepting or returning it for regeneration.",
+        tools: "Canvas tools and settings",
+        approvedHistory: "Shared asset approval history",
+    },
     runningHub: {
         description: "Configure a RunningHub workflow for canvas H3 nodes. Automatic routing prefers an available local slot and queues further tasks according to local and cloud capacity.",
         site: "RunningHub site", global: "Global · runninghub.ai", china: "China · runninghub.cn", workflowId: "H3 workflow ID", instance: "Instance type",
@@ -11,6 +22,7 @@ export default {
         inviteHint: "Register on RunningHub through the links below to claim new-user RH coins; your own link also earns referral rewards.",
         inviteChina: "China · runninghub.cn",
         inviteGlobal: "Global · runninghub.ai",
+        import: { button: "Import from RunningHub", title: "Import RunningHub workflow", description: "The workflow is saved as a local ComfyUI API workflow. Edit nodes, configure fields, and run it from the shared workflow library.", savedProfile: "Import an existing RunningHub profile (optional)", idPlaceholder: "Or enter a RunningHub workflowId", selectRequired: "Select a saved profile or enter a RunningHub workflowId", success: "Imported into the workflow library. Manage and run it with the local ComfyUI workflow tools.", submit: "Import to workflow library", savedProfileLabel: "Saved RunningHub workflows" },
     },
     h3Video: { durationError: "H3 duration must be an integer between 1 and 15 seconds", missingField: "Missing H3 workflow parameter mapping: {{field}}", preview: "H3 input: {{size}} · {{seconds}} s · {{megapixels}} MP. Dimensions follow native aspect ratios and grid alignment.", autoPreview: "Automatic size: image-to-video and first/last frames follow the first frame aspect ratio; text-to-video and multi-reference use the workflow aspect ratio. Resolution controls pixel count; duration is 1–15 seconds." },
     meta: {
@@ -592,7 +604,7 @@ export default {
         projectPage: {
             svgFileInvalid: "Could not parse the SVG file; nothing was imported",
             svgPluginUnavailable: "SVG node plugin is disabled; importing as a regular image",
-stopTitle: "Stop generation?", stopDescription: "The current request will be interrupted. Completed results will be kept.", stop: "Stop", continue: "Continue generating", configConnection: "Configuration nodes cannot be connected to each other", notFound: "Current canvas not found", exporting: "Exporting current canvas…", exported: "Current canvas exported", clipboardText: "Clipboard text", clipboardImageAdded: "Added image from clipboard", clipboardVideoAdded: "Added video from clipboard", clipboardAudioAdded: "Added audio from clipboard", clipboardTextAdded: "Added text from clipboard", clipboardCopyFailed: "This content could not be written to the system clipboard", clipboardPasteFailed: "Clipboard content could not be added to the canvas", noTextToSave: "No text to save", canvasText: "Canvas text", noVideoToSave: "No video to save", canvasVideo: "Canvas video", noImageToSave: "No image to save", canvasImage: "Canvas image", emptyReverse: "The image node is empty, so its prompt cannot be inferred", reverseTitle: "Reverse prompt", reverseConfigTitle: "Reverse prompt configuration", splitTitle: "{{name}} {{row}}-{{column}}", splitSuccess: "Split into {{count}} child nodes", maskResult: "Local edit result", maskFailed: "Local edit failed", generationFailed: "Generation failed", partialFailed: "Some images failed to generate", partialTextFailed: "Some text alternatives failed to generate", allFailed: "All images failed to generate", retryPromptMissing: "No prompt found for retry", referenceMissing: "The reference image is missing, so retry cannot continue", emptyTextImage: "The text node is empty, so an image cannot be generated", untitledCanvas: "Untitled canvas", superResolve: "AI super resolution", notImplemented: "Not implemented yet", imageDetails: "Image details", clearTitle: "Clear canvas?", clear: "Clear", clearDescription: "This will delete every node and connection on the current canvas.", reversePreset: "Infer a prompt suitable for AI image generation from the reference image.\n\nRequirements:\n1. Output only the prompt, with no explanation.\n2. Cover the subject, composition, style, lighting, color, materials, lens, and atmosphere.\n3. Write a complete prompt that can be used directly with an image model.", maskPrompt: "{{source}} is the original image. {{mask}} marks the area to edit with a translucent blue overlay on the original image. Only modify the area covered by the blue overlay, keep everything else identical to the original, output a full image with the same size as the original, and do not keep any blue overlay in the result. Edit request: {{prompt}}", maskNodeTitle: "Mask annotation", editTextPrompt: "Revise the text according to the instructions.\n\nOriginal:\n{{source}}\n\nInstructions:\n{{prompt}}"
+stopTitle: "Stop generation?", stopDescription: "The current request will be interrupted. Completed results will be kept.", stop: "Stop", continue: "Continue generating", configConnection: "Configuration nodes cannot be connected to each other", notFound: "Current canvas not found", exporting: "Exporting current canvas…", exported: "Current canvas exported", clipboardText: "Clipboard text", clipboardImageAdded: "Added image from clipboard", clipboardVideoAdded: "Added video from clipboard", clipboardAudioAdded: "Added audio from clipboard", clipboardTextAdded: "Added text from clipboard", clipboardCopyFailed: "This content could not be written to the system clipboard", clipboardPasteFailed: "Clipboard content could not be added to the canvas", noTextToSave: "No text to save", canvasText: "Canvas text", noVideoToSave: "No video to save", canvasVideo: "Canvas video", noImageToSave: "No image to save", canvasImage: "Canvas image", emptyReverse: "The image node is empty, so its prompt cannot be inferred", reverseTitle: "Reverse prompt", reverseConfigTitle: "Reverse prompt configuration", splitTitle: "{{name}} {{row}}-{{column}}", splitSuccess: "Split into {{count}} child nodes", maskResult: "Local edit result", maskFailed: "Local edit failed", generationFailed: "Generation failed", partialFailed: "Some images failed to generate", partialTextFailed: "Some text alternatives failed to generate", allFailed: "All images failed to generate", retryPromptMissing: "No prompt found for retry", referenceMissing: "The reference image is missing, so retry cannot continue", emptyTextImage: "The text node is empty, so an image cannot be generated", untitledCanvas: "Untitled canvas", superResolve: "AI super resolution", notImplemented: "Not implemented yet", imageDetails: "Image details", clearTitle: "Clear canvas?", clear: "Clear", clearDescription: "This will delete every node and connection on the current canvas.", reversePreset: "Analyse the image using the structure below. Be accurate and concise, avoid repetition and over-speculation,For anything that is not visible in the image, write \"Cannot be determined\". \n\n1. Style and mood \n   Style: one sentence naming the overall type and its specific sub-style (for example cinematic photography, cyberpunk, minimalist illustration, product render). \n   Mood and narrative: the emotion the image conveys, and whether it shows a clear story or situation. \n\n2. Subject and figure \n   Subject: the most important person, object or visual theme in the frame, together with its action, pose or state. \n   Figure traits: if a person is present, describe the apparent age range, gender presentation, hairstyle, face shape and notable facial features; do not infer identity or anything the image cannot confirm. \n   Expression and makeup: describe the expression, the direction of the gaze and the mood; if the makeup is clearly visible, note the base, eye and lip makeup. \n   Materials and detail: describe the surface texture of the subject, the clothing or key accessories, and any text, logo, symbol and texture detail in the frame. \n\n3. Environment and composition \n   Space and background: state whether it is indoors, outdoors, a virtual space or a plain background, and name any recognisable environmental elements. \n   Colour and light: summarise the dominant palette, the colour relationships, the direction of the light source and the quality of the light, and describe the overall key. \n   Viewpoint and layout: state the shot size and viewing angle, plus the subject's placement, the compositional approach, the foreground / midground / background relationships and the visual focus. \n\n4. Technical and aesthetic character \n   Technical: only when the image is clearly photographic or a 3D render, briefly infer aspect ratio, focal length, aperture, depth of field, shutter effect, noise and post-processing. Do not guess any parameter that cannot be judged reliably. \n   Aesthetic: summarise the visual aesthetic and design tendency — for example cinematic, retro, futuristic, documentary, premium, minimalist, Japanese light-and-airy, dark gothic, cyberpunk, luxury fashion or surreal — and say what mainly produces it: colour, light and shadow, composition, materials, styling or the overall atmosphere. \n\nOutput requirements: answer under the headings above; put what is directly observable first; keep the language concrete and compact; do not stack up adjectives. Total length under 600 words. Always write the whole answer in English.", maskPrompt: "{{source}} is the original image. {{mask}} marks the area to edit with a translucent blue overlay on the original image. Only modify the area covered by the blue overlay, keep everything else identical to the original, output a full image with the same size as the original, and do not keep any blue overlay in the result. Edit request: {{prompt}}", maskNodeTitle: "Mask annotation", editTextPrompt: "Revise the text according to the instructions.\n\nOriginal:\n{{source}}\n\nInstructions:\n{{prompt}}"
         },
         reverseComposer: "Reference image: @[node:{{imageId}}]\nTask: @[node:{{textId}}]",
         editors: {
@@ -632,6 +644,78 @@ stopTitle: "Stop generation?", stopDescription: "The current request will be int
             click: "Click",
         },
     },
+    landing: {
+        searchSeries: "Search series names", seriesHint: "Choose a series to continue its story, episodes and production.", noSeriesMatches: "No matching series",
+        "productionTitle": "Production studio",
+        "productionSubtitle": "Start or continue your work, from characters and locations to scripts and storyboards.",
+        "canvasHome": "Canvas workspace",
+        "ideaTitle": "What would you like to create?",
+        "withDirector": "Talk with the director",
+        "assetPlaceholder": "Describe a character, location or prop you want to design, or tell us about your existing assets.",
+        "dramaPlaceholder": "Write down a story, a conflict, or a short drama you want to make.",
+        "conversationHint": "Discuss your idea first, then develop a production draft. Ask for images or video when you need them.",
+        "startConversation": "Start a creative conversation",
+        "whatToMake": "Create something new",
+        "mode": {
+            "asset": "Characters, locations & props",
+            "drama": "Stories & short dramas"
+        },
+        "modeHint": {
+            "asset": "Start with designs and references to build your asset library.",
+            "drama": "Develop a story into a script and storyboard."
+        },
+        "modeHintFooter": "Continue an existing project below without starting over.",
+        "examples": {
+            "asset": [
+                {
+                    "label": "Design a character",
+                    "text": "I want to design an original character. First discuss their identity, personality and appearance with me."
+                },
+                {
+                    "label": "Imagine a location",
+                    "text": "I want to design a location for my story. First work out its space, mood and required references."
+                },
+                {
+                    "label": "Plan a set of props",
+                    "text": "I want to prepare props for my project. First discuss their story purpose and design direction."
+                }
+            ],
+            "drama": [
+                {
+                    "label": "Start with a story idea",
+                    "text": "I have a story idea. First discuss the characters, conflict and ending with me, then draft a script."
+                },
+                {
+                    "label": "Create an opening",
+                    "text": "I want to design a short drama opening. First discuss relationships, conflict and the opening hook."
+                },
+                {
+                    "label": "Continue a script",
+                    "text": "I want to improve an existing script. First confirm its source and the parts that need revision."
+                }
+            ]
+        },
+        "library": {
+            "canvases": "My production projects",
+            "dramas": "Series & episodes"
+        },
+        "continueProduction": "Continue production",
+        "projectCount": "{{count}} projects · Recently updated first",
+        "blankProduction": "New blank project",
+        "openProductionNamed": "Continue production: {{name}}",
+        "openCanvasNamed": "Open canvas: {{name}}",
+        "openProduction": "Open production",
+        "noPreview": "No preview image yet",
+        "updated": "Updated {{date}}",
+        "continue": "Continue production",
+        "canvasTitle": "Canvas workspace",
+        "canvasSubtitle": "Pick up where you left off, or begin something new.",
+        "yourStudio": "Your creative space",
+        "canvasHero": "Give your ideas room to grow.",
+        "canvasHeroHint": "Discuss characters, locations or stories with the director, or organize your assets freely on a canvas.",
+        "yourCanvases": "My canvases",
+        "preview": "Preview"
+    },
     director: {
         "title": "Canvas projects",
         "open": "Open production",
@@ -669,22 +753,109 @@ stopTitle: "Stop generation?", stopDescription: "The current request will be int
         "keepAgentDraft": "The chat has an unsent draft or an active task. It has been preserved; finish it before handing off.",
         "requestPrepared": "Your request is in the chat input, ready for you to review and send.",
         "agentRequest": "Use Acheng to lead this production. Read the target production and existing assets below, and continue its current progress. Do not create duplicate projects. Start with creative planning; submit image or video tasks only when I explicitly authorize generation. My request:",
+        studio: {
+            unlinkedShot: "Unlinked shot", unlinkedClip: "Historical clip",
+            openShot: "View shot {{number}}", structuredState: "Structured state is recorded. Add a prose description; full state is in Settings & history.",
+            referenceImage: "Composition reference",
+            "script": "Script",
+            "scriptSummary": "{{scenes}} scenes · {{characters}} characters",
+            "readScript": "Read script",
+            "editScript": "Edit script",
+            "collaborate": "Discuss with director",
+            "creativeNotes": "Creative notes",
+            "sceneDirectory": "Scenes",
+            "sceneNumber": "Scene {{number}}",
+            "blockCount": "Text blocks: {{count}}",
+            "dialogue": "Dialogue",
+            "unsavedText": "This block has unsaved changes",
+            "autosaveHint": "Saved when you leave a field; local edits are retained",
+            "originalText": "Original script text is preserved",
+            "reviseScene": "Discuss this scene",
+            "previousScene": "Previous scene",
+            "nextScene": "Next scene",
+            "characters": "Characters",
+            "characterNumber": "Character {{number}}",
+            "detailsInAssets": "Character details in the asset library",
+            "viewAssets": "View characters and assets",
+            "locations": "Locations",
+            "storyBeats": "Story beats",
+            "assets": "Characters & assets",
+            "assetsHint": "View character art, locations, props and frame references. Open the original before reviewing.",
+            "assetNumber": "Asset {{number}}",
+            "imageNumber": "Canvas image {{number}}",
+            "keyframe": "Keyframe",
+            "previewAsset": "View original: {{title}}",
+            "noImage": "No image yet",
+            "revise": "Discuss changes",
+            "assetDetails": "Edit description and image link",
+            "linkImage": "Linked canvas image",
+            "styleSettings": "Art direction & style references",
+            "searchAssets": "Search assets",
+            "filter": {
+                        "all": "All",
+                        "characters": "Characters",
+                        "locations": "Locations",
+                        "props": "Props & style",
+                        "frames": "Storyboard frames"
+            },
+            "storyboard": "Storyboard",
+            "shotsSummary": "{{shots}} shots · {{clips}} clips · {{seconds}} seconds",
+            "shotNumber": "Shot {{number}}",
+            "clipNumber": "Clip {{number}}",
+            "missingFrame": "No linked storyboard frame",
+            "ungrouped": "Not grouped into a clip",
+            "noVisual": "No visual description yet",
+            "editShot": "Edit this shot",
+            "viewFrame": "View frame",
+            "exactTiming": "Exact frame timing",
+            "shotField": {
+                        "visual": "Picture & action",
+                        "camera": "Camera & movement",
+                        "state_in": "At the start",
+                        "state_out": "At the end"
+            },
+            "settings": "Generation settings",
+            "noResults": "No video results yet",
+            "noResultsHint": "Publish the production draft and prepare references, then generate individual items below.",
+            "rawSource": "Source data & mapping records",
+            "runStatus": {
+                succeeded: "Completed",
+                        "pending": "Queued",
+                        "running": "Generating",
+                        "paused": "Paused",
+                        "awaiting_review": "Awaiting review",
+                        "failed": "Failed",
+                        "completed": "Completed",
+                        "complete": "Completed",
+                        "cancelled": "Cancelled"
+            },
+            "saved": "Draft saved",
+            "localDraft": "Unsaved changes",
+            "published": "Published version {{number}}",
+            "technicalDetails": "Technical details",
+            "needsAttention": "Needs attention",
+            "editHint": "Select a shot to view details and edit",
+            "emptySearch": "No matching assets",
+            "totalDuration": "Planned duration",
+            "productionSummary": "View progress and video results. Publishing a draft and generating media are separate actions.",
+            "runSummary": "Version {{version}} · {{count}} tasks"
+},
         workspace: {
-            videoAspectRatio: 'Video delivery aspect ratio', inheritVideoAspectRatio: 'Use canvas settings', videoAspectRatioHint: 'Checked against generation settings after publication. Character sheets and other references retain their own aspect ratios.',
-            tab: { overview: "Overview", story: "Story", assets: "Style & Assets", shots: "Shots & Segments", production: "Production & Delivery", advanced: "Advanced & History" },
+            videoAspectRatio: 'Video delivery aspect ratio', inheritVideoAspectRatio: 'Use canvas settings', videoAspectRatioHint: 'Confirm at video-production kickoff; checked against generation settings after publication. Character sheets and other references retain their own aspect ratios.',
+            tab: {"overview": "Overview", "story": "Script", "assets": "Characters & assets", "shots": "Storyboard", "production": "Generate & deliver", "advanced": "Settings & history"},
             refresh: "Refresh", currentBrief: "Formal brief", saveBrief: "Save brief", progressCurrent: "Continue current work", continueInstruction: "Continue from current gaps and recovery cursors; complete only the requested creative scope.",
-            revision: "Revision {{revision}}", readiness: "Dependency readiness", noNextAction: "Waiting for a production draft", readinessCount: { ready: "Ready", blocked: "Blocked", review: "Needs review", done: "Complete" },
+            revision: "Revision {{revision}}", readiness: "Production progress", noNextAction: "Waiting for a production draft", readinessCount: { ready: "Ready", blocked: "Blocked", review: "Needs review", done: "Complete" },
             navigation: "Production workspaces", moduleStatus: { planned: "Planned", partial: "In progress", committed: "Confirmed", blocked: "Blocked" }, presentationStatus: { ready: "Ready to continue", working: "In progress", needs_review: "Needs review", blocked: "Needs attention", complete: "Complete" },
             overview: { currentTask: "Your next step", owner: "Responsible module: {{module}}", currentTarget: "current production target", startFromBrief: "Save the formal brief to start an Acheng production", startFromBriefAction: "Enter production brief", reviewFocus: "Review and confirm “{{target}}”", blockedFocus: "Resolve the missing inputs for “{{target}}”", produceFocus: "“{{target}}” is ready for production", deliverFocus: "Review the production result for “{{target}}”", continueFocus: "Continue {{module}} work", viewAndReview: "Review media", askDirectorToRevise: "Ask the director to revise this target", openWorkspace: "Open current workspace", reviseCurrentTask: "Revise only this target and preserve all other confirmed content.", objectStatus: "Production object progress", waitingBrief: "Waiting for a formal brief and module plan", targetSummary: "{{done}} / {{total}} complete · {{review}} to review · {{blocked}} blocked", rowStatus: { current: "Current work", waiting: "Not started", done: "Confirmed", blocked: "Needs input", working: "In progress" }, footerHint: "The director leads creation · Canvas produces and stores media" },
-            targetsNeedingWork: "Next targets", openIssues: "Other unresolved items (only block related targets)", targetKind: { asset: "Asset", keyframe: "Keyframe", segment: "Segment" }, targetStatus: { ready: "Ready", blocked: "Needs input", needs_review: "Needs review", complete: "Complete" },
+            targetsNeedingWork: "Next targets", openIssues: "Other unresolved items (only block related targets)", targetKind: { asset: "Asset", keyframe: "Keyframe", segment: "Video clip" }, targetStatus: { ready: "Ready", blocked: "Needs input", needs_review: "Needs review", complete: "Complete" },
             internalModules: "Internal responsibilities", moduleRoles: "Acheng seven-module status", modulesNotGates: "Modules are specialist responsibilities, not sequential gates.", askDirector: "Continue with director", reviewInAssets: "Review in Assets", reviewInProduction: "Review in Production",
             storyTitle: "Story and dialogue", storyHint: "Revise scene text directly; ask the director for local changes that span character arcs, knowledge or foreshadowing.", storyBrief: "Complete story brief", storyStartsFromBrief: "Save the brief in Overview to initialize the Acheng source draft.",
             scene: "Scene {{number}}", sceneName: "Scene name", reviseScene: "Revise only the selected scene and preserve all other confirmed content.", reviseWithDirector: "Ask director to revise", scriptText: "Scene text and exact dialogue", storyNotDrafted: "No scene-by-scene story yet", storyNotDraftedHint: "Ask the director to continue the story module; existing text will be preserved.",
-            assetsTitle: "Style, space and assets", assetsHint: "STYLE_MOTHER, characters, scene space, props and keyframes share dependencies. Review the real media before approving a version.", assetsNeedDirector: "Asset plans and dependencies will appear after Acheng's assets module registers them.", untitledAsset: "Untitled asset", description: "Asset description and reference role", canvasBinding: "Canvas media binding", bindCanvasImage: "Choose an image node on this canvas", realMedia: "Archived media", keyframeFor: "Keyframe for", approvalEvidence: "Reviewed the media; identity, style and use match this production.", reviewReason: "Review reason", reviewReasonRequired: "Add a reason when returning an asset.", mediaReadFailed: "Could not read archived Backend media.", approve: "Approve this version", returnAsset: "Return with reason", compiledStatus: "Compile status", assetStatus: { planned: "Planned", generated: "Needs review", approved: "Approved", rejected: "Returned" },
+            assetsTitle: "Style, space and assets", assetsHint: "STYLE_MOTHER, characters, scene space, props and keyframes share dependencies. Review the real media before approving a version.", assetsNeedDirector: "Asset plans and dependencies will appear after Acheng's assets module registers them.", untitledAsset: "Untitled asset", description: "Asset description and reference role", canvasBinding: "Canvas media binding", bindCanvasImage: "Choose an image node on this canvas", realMedia: "Archived media", keyframeFor: "Keyframe for", approvalEvidence: "Reviewed the media; identity, style and use match this production.", reviewReason: "Review reason", reviewReasonRequired: "Add a reason when returning an asset.", reviewQueue: "Review list", noPendingReviews: "No assets match the current filters.", mediaReadFailed: "Could not read archived Backend media.", approve: "Approve this version", returnAsset: "Return with reason", compiledStatus: "Compile status", assetStatus: { planned: "Planned", generated: "Needs review", approved: "Approved", rejected: "Returned" },
             noAssets: "No asset cards yet", noAssetsHint: "Acheng will plan assets from the story and spatial dependencies; canvas nodes can be bound later.",
-            shotsTitle: "Shots and Segments", shotsHint: "Review narrative shots and Acheng Segments, including space, camera, action, keyframe anchors and Clip boundaries.", visual: "Visual", camera: "Camera and movement", startFrame: "Start frame", endFrame: "End frame", openingState: "Opening state", endingState: "Ending state", keyframePolicy: "Keyframe policy: {{policy}}", segmentTag: "Segment {{id}}", reviseShot: "Revise this Shot's camera and action causality while preserving confirmed neighbors.", noShots: "No shot plan yet", noShotsHint: "Ask the Acheng shots module to plan shots and Segments from the confirmed story and spatial causality.", segmentsTitle: "Generation groups", segmentsHint: "A Segment can contain multiple adjacent Shots. Keep the 4–15 second window without compressing dialogue or action.", untitledSegment: "Untitled Segment", noShotInSegment: "No Shots grouped yet", frameRange: "Frames {{start}}–{{end}}", continuityTitle: "Adjacent Segment continuity", continuityHint: "Tail-frame reference and Motion Context are independent. The first carries a still image of the previous ending; the second carries AV latent within the same run.", continuityBoundary: "Continuity boundary", undecided: "Undecided", tailFrame: "Tail-frame image reference", motionContext: "Motion Context latent", continuityReason: "Why continuity is kept or broken", saveBoundary: "Save boundary", motionGroupHint: "This chain runs together; if reusable latent is unavailable, rerun from {{from}} through {{to}}.",
+            shotsTitle: "Shots and Segments", shotsHint: "Review narrative shots and Acheng Segments, including space, camera, action, keyframe anchors and Clip boundaries.", visual: "Visual", camera: "Camera and movement", startFrame: "Start frame", endFrame: "End frame", openingState: "Opening state", endingState: "Ending state", keyframePolicy: "Keyframe policy: {{policy}}", segmentTag: "Segment {{id}}", reviseShot: "Revise this Shot's camera and action causality while preserving confirmed neighbors.", noShots: "No shot plan yet", noShotsHint: "Ask the Acheng shots module to plan shots and Segments from the confirmed story and spatial causality.", segmentsTitle: "Generation groups", segmentsHint: "A Segment can contain multiple adjacent Shots. Keep the 4–15 second window without compressing dialogue or action.", untitledSegment: "Untitled Segment", noShotInSegment: "No Shots grouped yet", frameRange: "Frames {{start}}–{{end}}", continuityTitle: "Adjacent Segment continuity", continuityHint: "Tail-frame reference and Motion Context are independent. The first carries a still image of the previous ending; the second carries AV latent within the same run.", continuityBoundary: "Continuity boundary", undecided: "Undecided", tailFrame: "Tail-frame image reference", motionContext: "Continue motion and audio", continuityReason: "Why continuity is kept or broken", saveBoundary: "Save boundary", motionGroupHint: "This chain runs together; if reusable latent is unavailable, rerun from {{from}} through {{to}}.",
             productionTitle: "Prompts, production tasks and delivery", productionHint: "Full prompts and actual references come from Acheng compile receipts. Publishing freezes a version; generation needs separate authorization.", contentDelivery: "Content delivery", autoFileBatch: "Automatic file batches", interactiveSegment: "Interactive per Segment", mediaProduction: "Media production", promptOnly: "Prompts only", perItem: "Generate one item at a time", automatic: "Automatic by dependency", settingsNextRun: "These settings apply to the next new run. Running or resumed batches keep their fixed settings.", activeRun: "Latest production batch", pause: "Pause", resume: "Resume same batch", runScope: "Published v{{version}} · scope {{targets}}", submittedTasks: "exact tasks", startAutomatic: "Start automatic production for ready targets", promptOnlyHint: "This mode will not submit media tasks. Choose per-item or automatic production to generate media.", productionTargets: "Readiness and generation scope", generateClip: "Generate this Segment", generateItem: "Generate this item", completePrompts: "Full compiled prompts", promptRevision: "Source revision {{sourceHash}} · prompt {{promptHash}}", actualReferences: "Actual image, video or audio references", noReadiness: "Waiting for the dependency readiness view.",
-            advancedTitle: "Advanced and history", advancedHint: "Legacy compatibility, pinned engine version, history restore and JSON import live here.", editJson: "Import or edit Acheng JSON", engineVersion: "Pinned Acheng engine for this draft", history: "Production version history", restore: "Restore as draft", noHistory: "No published versions yet", runHistory: "Production run history", legacyTitle: "Legacy compatibility", legacyHint: "Original text and media remain intact. Ask the director to fill this round's gaps; historical media will not be regenerated automatically.", adaptLegacy: "Ask director to connect to Acheng", noLegacy: "No legacy drafts were found for this object.", impactAssets: "{{count}} asset prompts or dependencies also changed.",
+            advancedTitle: "Settings & history", advancedHint: "Legacy compatibility, pinned engine version, history restore and JSON import live here.", editJson: "Import or edit Acheng JSON", engineVersion: "Pinned Acheng engine for this draft", history: "Production version history", restore: "Restore as draft", noHistory: "No published versions yet", runHistory: "Production run history", legacyTitle: "Legacy compatibility", legacyHint: "Original text and media remain intact. Ask the director to fill this round's gaps; historical media will not be regenerated automatically.", adaptLegacy: "Ask director to connect to Acheng", noLegacy: "No legacy drafts were found for this object.", impactAssets: "{{count}} asset prompts or dependencies also changed.",
             segmentEdit: { shots: "Choose adjacent Shots", save: "Save grouping", needsShots: "Select at least one registered Shot.", adjacentOnly: "A Segment can contain only adjacent Shots in the authored order.", frameGap: "The Shot frame windows are discontinuous; they will not be compressed or reordered.", window: "The regrouped duration is {{duration}} seconds. Keep it within 4–15 seconds and ask the director to rebox it if needed.", mergeWhole: "Segment {{id}} still contains unselected Shots and cannot be silently removed. Ask the director to rebox it.", mergeTitle: "Merge existing Segments?", mergeDescription: "These Segments will merge into the selected group with all Shots preserved: {{ids}}. Their continuity boundaries will be cleared for a new decision." },
             runStarted: "Production batch started.", runReceiptUnknown: "The production start has no receipt yet. Its original runId is preserved; recover it before starting another batch.", runNotFound: "The production batch could not be found.", runTargetMissing: "The production batch has no locatable target.", runTargetActive: "This target is already in active run {{runId}}. Resume or finish that batch before submitting it again.", runTargetActiveInline: "An active run already owns this target", engineUnavailable: "Acheng runtime is unavailable. Check engine status before continuing.", briefSaveFailed: "The brief was not saved to the formal Backend production record, so no Agent request was sent.", agentDisconnected: "Agent is disconnected or its session is not ready. Your input is preserved; connect Agent before continuing.", agentBusy: "Agent is handling another request. Production data is preserved and no automatic resend occurred.", agentTaskFailed: "The Agent stage request was not sent.", decisionSaved: "Your choice is saved: {{answer}}", continueDecision: "Continue with director", decisionAnswer: "Add a decision", submitDecision: "Submit and continue", decisionStale: "This question is based on an older production revision. Ask the director to recheck it before answering.", decisionChoiceInvalid: "Choose one of the listed options, or enter a free-text answer when enabled.", registeredStoryFacts: "Registered character, relationship, knowledge, and foreshadowing facts", reviseStoryFacts: "Revise only the selected character, knowledge, foreshadowing, or ledger facts; preserve all other confirmed fields.", assetContract: "Asset version, dependencies, reference roles, and card", reviseAssetContract: "Update this asset card's version, dependencies, or reference roles while preserving unedited fields.", assetVersion: "Asset version", assetDependencies: "Prerequisites", styleMother: "STYLE_MOTHER style anchor", chooseStyleMother: "Choose a registered STYLE_MOTHER", stylePolicy: "Cross-asset style policy", styleRequired: "Required", styleWaived: "Explicitly waived for this production", styleWaiverReason: "Reason for waiving style consistency", spatialFacts: "Scene space design and state", reviseSpatialFacts: "Revise confirmed scene geometry, entrances, exits, occlusion, or spatial state without changing unauthorized facts.", extendedShotFacts: "Dialogue, performance, effects, references, and other Shot fields", timeline: "Shot and Segment timeline", timelineScale: "Frames {{start}}–{{end}} · {{fps}} fps", segmentExecutionDetails: "Segment mode, sound, and references", segmentAudioReferences: "Generation mode, audio, music, and reference bindings", validateCompile: "Validate and compile", validateCompileCurrent: "Use the fixed Acheng engine to validate and compile missing or stale prompts from the current source; record the real receipt and do not generate media.", viewOriginal: "View original for review", viewOriginalBeforeReview: "Open and load the original image before reviewing this version.", currentWorkAction: { author: "Author", compile: "Compile", produce: "Produce", review: "Review", deliver: "Deliver", blocked: "Needs attention" }, moduleName: { story: "Story", assets: "Assets", shots: "Shots", performance: "Performance", effects: "Effects", model: "Model", continuity: "Continuity" }, deliveredVideos: "Archived videos", technicalCloseout: "Review this run's archived media and task receipts.", exportBundle: "Export prompts and delivery bundle", includeGeneratedMedia: "Include generated output copies in ZIP", bundleDownloaded: "Acheng delivery bundle downloaded.",
         },

@@ -39,6 +39,16 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const selected = segments.find((item) => item.id === storedSelectedId) || segments[0];
     const selectedIndex = Math.max(0, segments.findIndex((item) => item.id === selected?.id));
     const appliedDeepLinkRef = useRef("");
+    const emittedFocusRef = useRef(0);
+    const focusRequest = Number(metadata.h3FocusRequest || 0);
+    useEffect(() => {
+        if (!focusRequest || emittedFocusRef.current === focusRequest) return;
+        const frame = requestAnimationFrame(() => {
+            emittedFocusRef.current = focusRequest;
+            window.dispatchEvent(new CustomEvent("minimax-h3-focus-preview", { detail: { projectId: sharedContext.projectId, nodeId: sharedContext.node.id, requestId: focusRequest } }));
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [focusRequest, sharedContext.projectId, sharedContext.node.id]);
     useEffect(() => {
         const query = new URLSearchParams(window.location.search);
         const segmentId = query.get("segmentId") || "";

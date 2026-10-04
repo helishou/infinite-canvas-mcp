@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState, type FormEvent } from "react";
 import { App, Button } from "antd";
-import { ArrowUp, Clapperboard, Images, Sparkles } from "lucide-react";
-import { useLocation, useSearchParams } from "react-router-dom";
+import { ArrowUp, ArrowRight, Clapperboard, Images, Sparkles, LayoutGrid } from "lucide-react";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useAgentSkillStore } from "@/stores/use-agent-skill-store";
@@ -99,52 +99,26 @@ export default function ProductionHubPage() {
         queueCreativeLaunch(text, true);
     };
 
-    return <div className="min-h-full bg-background">
-        <header className="mx-auto max-w-7xl px-4 pb-4 pt-7 sm:px-6 lg:px-10">
-            <p className="text-xs font-medium uppercase tracking-[0.16em] text-orange-600 dark:text-orange-400">{t("productionHub.eyebrow")}</p>
-            <h1 className="mt-2 text-3xl font-semibold tracking-tight">{t("productionHub.title")}</h1>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">{t("productionHub.description")}</p>
-        </header>
-        <section className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-10" aria-labelledby="production-creative-title">
-            <div className="rounded-2xl border border-stone-200 bg-white p-5 dark:border-stone-800 dark:bg-stone-950 sm:p-6">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div>
-                        <p className="flex items-center gap-2 text-xs font-medium text-stone-500 dark:text-stone-400"><Sparkles className="size-3.5" />{t("productionHub.creative.eyebrow")}</p>
-                        <h2 id="production-creative-title" className="mt-2 text-xl font-semibold">{t("productionHub.creative.title")}</h2>
-                        <p className="mt-1 text-sm text-stone-500 dark:text-stone-400">{t("productionHub.creative.description")}</p>
-                    </div>
-                    <div className="flex rounded-lg border border-stone-200 p-1 dark:border-stone-800" role="group" aria-label={t("productionHub.creative.modeLabel")}>
-                        <button type="button" aria-pressed={creativeMode === "asset"} onClick={() => setCreativeMode("asset")} className={cn("flex items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors", creativeMode === "asset" ? "bg-foreground !text-background" : "text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-900")}><Images className="size-4" />{t("productionHub.creative.asset")}</button>
-                        <button type="button" aria-pressed={creativeMode === "drama"} onClick={() => setCreativeMode("drama")} className={cn("flex items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors", creativeMode === "drama" ? "bg-foreground !text-background" : "text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-900")}><Clapperboard className="size-4" />{t("productionHub.creative.drama")}</button>
-                    </div>
+    return <main className="min-h-full bg-background text-foreground" data-testid="production-home">
+        <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">
+            <header className="mb-6 flex flex-wrap items-center justify-between gap-3"><div><h1 className="text-2xl font-semibold tracking-tight">{t("landing.productionTitle")}</h1><p className="mt-1 text-sm text-muted-foreground">{t("landing.productionSubtitle")}</p></div><Link to="/" className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"><LayoutGrid className="size-4" />{t("landing.canvasHome")}<ArrowRight className="size-4" /></Link></header>
+            <section aria-labelledby="production-creative-title" className="mb-8 grid gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+                <div className="min-w-0 rounded-2xl border border-border bg-card p-5">
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-2"><h2 id="production-creative-title" className="text-xl font-semibold">{t("landing.ideaTitle")}</h2><span className="flex items-center gap-1.5 text-xs text-muted-foreground"><Sparkles className="size-3.5" />{t("landing.withDirector")}</span></div>
+                    <form onSubmit={startCreativeConversation}>
+                        <textarea id="production-idea" value={creativeDraft} disabled={Boolean(queuedCreativeLaunch)} onChange={event => setCreativeDraft(event.target.value)} rows={2} placeholder={t(creativeMode === "drama" ? "landing.dramaPlaceholder" : "landing.assetPlaceholder")} aria-label={t("productionHub.creative.ideaLabel")} className="min-h-20 w-full resize-y rounded-xl border border-border bg-background px-4 py-3 text-base leading-7 text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-foreground/50 disabled:opacity-70" />
+                        {!creativeDraft.trim() && <div className="mt-2 flex flex-wrap gap-2">{[0, 1, 2].map(index => <button key={index} type="button" className="rounded-lg border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => { setCreativeDraft(t(`landing.examples.${creativeMode}.${index}.text`)); document.getElementById("production-idea")?.focus(); }}>{t(`landing.examples.${creativeMode}.${index}.label`)}</button>)}</div>}
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-3"><p className="max-w-md text-xs leading-5 text-muted-foreground">{queuedCreativeLaunch ? t(agentConnected ? "productionHub.creative.sending" : "productionHub.creative.connecting") : t("landing.conversationHint")}</p><Button type="primary" htmlType="submit" disabled={!creativeDraft.trim() || Boolean(creativeLaunch) || Boolean(queuedCreativeLaunch)} icon={<ArrowUp className="size-4" />}>{queuedCreativeLaunch ? t("productionHub.creative.sending") : t("landing.startConversation")}</Button></div>
+                    </form>
                 </div>
-                <form onSubmit={startCreativeConversation} className="mt-5 rounded-xl border border-stone-200 bg-stone-50 p-3 focus-within:border-stone-400 dark:border-stone-800 dark:bg-stone-900/60 dark:focus-within:border-stone-600">
-                        <textarea value={creativeDraft} disabled={Boolean(queuedCreativeLaunch)} onChange={(event) => setCreativeDraft(event.target.value)} rows={3} placeholder={t(creativeMode === "drama" ? "productionHub.creative.dramaPlaceholder" : "productionHub.creative.assetPlaceholder")} aria-label={t("productionHub.creative.ideaLabel")} className="w-full resize-y bg-transparent text-sm leading-6 text-stone-900 outline-none placeholder:text-stone-400 dark:text-stone-100 dark:placeholder:text-stone-500 disabled:opacity-70" />
-                    <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
-                        <span className="text-xs text-stone-500 dark:text-stone-400">{queuedCreativeLaunch ? t(agentConnected ? "productionHub.creative.sending" : "productionHub.creative.connecting") : t("productionHub.creative.hint")}</span>
-                        <Button type="primary" htmlType="submit" disabled={!creativeDraft.trim() || Boolean(creativeLaunch) || Boolean(queuedCreativeLaunch)} icon={<ArrowUp className="size-4" />}>{queuedCreativeLaunch ? t("productionHub.creative.sending") : t("productionHub.creative.start")}</Button>
-                    </div>
-                </form>
-            </div>
-        </section>
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-10">
-            <nav className="mb-2 flex gap-1 border-b border-border" role="tablist" aria-label={t("productionHub.objectViews")}>
-                {(["canvases", "dramas"] as const).map(view => <button
-                    key={view}
-                    type="button"
-                    role="tab"
-                    id={`production-tab-${view}`}
-                    aria-selected={activeView === view}
-                    aria-controls={`production-view-${view}`}
-                    onClick={() => selectView(view)}
-                    className={`relative -mb-px inline-flex items-center border-b-2 px-4 py-3 text-sm transition ${activeView === view ? "border-foreground font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
-                >{t(`productionHub.${view === "canvases" ? "canvasProjects" : "seriesAndEpisodes"}`)}</button>)}
+                <div className="order-first min-w-0 lg:order-none" role="group" aria-label={t("productionHub.creative.modeLabel")}><p className="mb-3 text-xs font-medium text-muted-foreground">{t("landing.whatToMake")}</p><div className="grid grid-cols-2 gap-3 lg:grid-cols-1">
+                    {(["asset", "drama"] as const).map(mode => { const Icon = mode === "asset" ? Images : Clapperboard; return <button key={mode} type="button" aria-pressed={creativeMode === mode} onClick={() => setCreativeMode(mode)} className={cn("flex min-w-0 items-start gap-3 rounded-xl border p-4 text-left transition-colors", creativeMode === mode ? "border-foreground/40 bg-muted/60" : "border-border hover:bg-muted/30")}><Icon className="mt-0.5 size-5 shrink-0" /><span><strong className="block text-sm font-medium">{t(`landing.mode.${mode}`)}</strong><span className="mt-1 hidden text-xs leading-5 text-muted-foreground sm:block">{t(`landing.modeHint.${mode}`)}</span></span></button>; })}
+                </div><p className="mt-3 hidden text-xs leading-5 text-muted-foreground lg:block">{t("landing.modeHintFooter")}</p></div>
+            </section>
+            <nav className="mb-5 flex gap-1 border-b border-border" role="tablist" aria-label={t("productionHub.objectViews")}>
+                {(["canvases", "dramas"] as const).map(view => <button key={view} type="button" role="tab" id={`production-tab-${view}`} aria-selected={activeView === view} aria-controls={`production-view-${view}`} tabIndex={activeView === view ? 0 : -1} onKeyDown={event => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); const next = view === "canvases" ? "dramas" : "canvases"; selectView(next); document.getElementById(`production-tab-${next}`)?.focus(); } }} onClick={() => selectView(view)} className={`-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-3 text-sm transition-colors ${activeView === view ? "border-foreground font-medium" : "border-transparent text-muted-foreground hover:text-foreground"}`}>{view === "canvases" ? <Images className="size-4" /> : <Clapperboard className="size-4" />}{t(`landing.library.${view}`)}</button>)}
             </nav>
-            <div id={`production-view-${activeView}`} role="tabpanel" aria-labelledby={`production-tab-${activeView}`}>
-                <Suspense fallback={<div className="py-12 text-center text-sm text-muted-foreground">{t("canvas.loading")}</div>}>
-                    {activeView === "canvases" ? <CanvasProjects /> : <SeriesEpisodes />}
-                </Suspense>
-            </div>
+            <div id={`production-view-${activeView}`} role="tabpanel" aria-labelledby={`production-tab-${activeView}`}><Suspense fallback={<div className="py-12 text-center text-sm text-muted-foreground">{t("canvas.loading")}</div>}>{activeView === "canvases" ? <CanvasProjects /> : <SeriesEpisodes embedded />}</Suspense></div>
         </div>
-    </div>;
+    </main>;
 }

@@ -196,6 +196,11 @@ export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeTyp
 // 一个可选模型:value 传回给 generateXxx({ model }),label 用于展示
 export type ModelCapability = "image" | "video" | "text" | "audio";
 export type ModelOption = { value: string; label: string };
+export type CanvasVideoModelField = {
+    id: string; name: string; type: "text" | "number" | "slider" | "boolean" | "dropdown" | "image" | "audio" | "video";
+    required?: boolean; default?: unknown; min?: number; max?: number; step?: number; options?: string[]; randomEnabled?: boolean; isPrompt?: boolean;
+};
+export type CanvasVideoModelSchema = { model: string; kind: "workflow" | "direct" | "unsupported"; workflow?: string; supported: boolean; fields: CanvasVideoModelField[]; defaultValues?: Record<string, unknown>; error?: string };
 
 // 宿主注入的 AI 生成能力,挂在 ctx.ai 下。任何插件均可调用。
 export type CanvasPluginAi = {
@@ -224,6 +229,7 @@ export type CanvasPluginAi = {
     listModels: (capability?: ModelCapability) => ModelOption[];
     // 该能力当前默认选中的模型 value(可作为下拉框初始值)
     defaultModel: (capability: ModelCapability) => string;
+    describeVideoModel: (model: string, referenceCount: number) => Promise<CanvasVideoModelSchema>;
 };
 export type CanvasH3Defaults = {
     get: () => Promise<Record<string, unknown>>;

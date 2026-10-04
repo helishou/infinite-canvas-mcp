@@ -20,14 +20,23 @@ export function ProductionFollowController() {
     const pending = useProductionFollowStore(state => state.pendingPresentation);
     const currentPath = productionLocationKey(location.pathname, location.search);
     const priorPath = useRef("");
+    const requestSequence = useRef(0);
+    const forceFocus = useRef(false);
+    const lastFocusKey = useRef("");
 
     const refreshPresentation = useCallback(async () => {
         const follow = useProductionFollowStore.getState();
         const active = follow.target;
         if (!active || !active.kind || !active.id || !connected) return;
         const owner = { kind: active.kind, id: active.id } as const;
+        const sequence = ++requestSequence.current;
+        const stillCurrent = () => {
+            const target = useProductionFollowStore.getState().target;
+            return Boolean(target && sequence === requestSequence.current && target.kind === active.kind && target.id === active.id && target.workId === active.workId && target.runId === active.runId);
+        };
         try {
             const { readiness } = await fetchProductionReadiness(productionTarget(owner), { runId: active.runId });
+            if (!stillCurrent()) return;
             const presentation = readiness.presentation;
             if (!presentation) return;
             if (presentation.owner.kind !== owner.kind || presentation.owner.id !== owner.id || presentation.workId !== active.workId) {
@@ -45,10 +54,16 @@ export function ProductionFollowController() {
             if (path !== productionLocationKey(location.pathname, location.search)) {
                 latest.expectPath(path);
                 navigate(path, { replace: true });
+            } else {
+                const focusKey = `${presentation.workId}:${presentation.canvasId}:${presentation.nodeId}:${presentation.segmentId}`;
+                if (presentation.nodeId && (forceFocus.current || lastFocusKey.current !== focusKey)) window.dispatchEvent(new CustomEvent("production-focus", { detail: presentation }));
             }
+            lastFocusKey.current = `${presentation.workId}:${presentation.canvasId}:${presentation.nodeId}:${presentation.segmentId}`;
+            forceFocus.current = false;
             latest.setLastPath(path);
             latest.setPendingPresentation(null);
         } catch (error) {
+            if (!stillCurrent()) return;
             const message = error instanceof Error ? error.message : t("productionHub.follow.readFailed");
             useProductionFollowStore.getState().setPendingPresentation(useProductionFollowStore.getState().presentation);
             useProductionFollowStore.getState().setGuardReason("backend", message);
@@ -77,12 +92,14 @@ export function ProductionFollowController() {
         if (!target || !connected) return;
         void refreshPresentation();
         const refresh = (event: Event) => {
-            const payload = (event as CustomEvent<{ type?: string; entityId?: string }>).detail;
+            const payload = (event as CustomEvent<{ type?: string; entityId?: string; payload?: { status?: string; operations?: Array<{ nodeId?: string; segmentId?: string; patch?: { status?: string } }> } }>).detail;
             const current = useProductionFollowStore.getState().target;
             const latestPresentation = useProductionFollowStore.getState().presentation;
             if (payload?.type === "drama-production.updated" && current && (payload.entityId === current.id || latestPresentation?.aliases?.includes(String(payload.entityId || "")) || latestPresentation?.canvasId === payload.entityId)) void refreshPresentation();
+            if (latestPresentation?.taskId && payload?.type === "task.updated" && payload.entityId === latestPresentation.taskId && payload.payload?.status && !["queued", "running"].includes(payload.payload.status)) void refreshPresentation();
+            if (latestPresentation?.taskId && payload?.type === "canvas.updated" && payload.entityId === latestPresentation.canvasId && payload.payload?.operations?.some(op => op.nodeId === latestPresentation.nodeId && op.segmentId !== latestPresentation.segmentId && ["running", "loading"].includes(op.patch?.status || ""))) void refreshPresentation();
         };
-        const resume = () => void refreshPresentation();
+        const resume = () => { forceFocus.current = true; void refreshPresentation(); };
         window.addEventListener("backend-event", refresh);
         window.addEventListener("backend-connected", resume);
         window.addEventListener("production-follow-resume", resume);
@@ -121,7 +138,7 @@ export function ProductionFollowController() {
         void refreshPresentation();
     };
     return target?.kind && target.id && !panelOpen ? (
-        <Button className="fixed bottom-4 right-4 z-[80] shadow-lg" type="primary" onClick={returnToWork}>
+        <Button className="bottom-4 right-4 z-[80] shadow-lg" style={{ position: "fixed" }} type="primary" onClick={returnToWork}>
             {following && !pending ? t("productionHub.follow.openAgent") : t("productionHub.follow.return")}
         </Button>
     ) : null;

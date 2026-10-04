@@ -10,7 +10,7 @@ const STORAGE_PREFIX = "canvas-plugin-view:";
 // 存下来只会在下次打开时误触发播放或让时间轴卡住。h3PromptJobs 同理——上游 LLM 请求超时
 // 或失败后若把 running 落盘，刷新会让按钮永远卡在「增强中…」，再次点击又因为
 // H3PromptSection 的 early-return 静默吞掉，新请求发不出去。
-const EPHEMERAL_VIEW_KEYS = new Set(["h3PlayRequest", "h3PlaybackAll", "h3Scrubbing", "h3PromptJobs"]);
+const EPHEMERAL_VIEW_KEYS = new Set(["h3PlayRequest", "h3PlaybackAll", "h3Scrubbing", "h3PromptJobs", "h3FocusRequest"]);
 const pendingWrites = new Map<string, Record<string, unknown>>();
 let flushTimer: number | undefined;
 

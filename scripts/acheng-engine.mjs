@@ -13,8 +13,29 @@ const projectSkillDirectory = path.join(projectRoot, '.agents', 'skills', 'achen
 const projectSkillManifest = '.canvas-upstream.json';
 const sha = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 const read = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
+const projectOverlayPath = path.join(scripts, 'acheng', 'canvas-kickoff.md');
+const projectOverlayVersion = () => sha(fs.readFileSync(projectOverlayPath)).slice(0, 16);
 const run = (cmd, args, cwd, env) => execFileSync(cmd, args, { cwd, ...(env ? { env: { ...process.env, ...env } } : {}), encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
 const ignored = new Set(['.git', '__pycache__', '.pytest_cache', 'output']);
+function applyProjectSkillOverlay(directory) {
+  const entry = path.join(directory, 'SKILL.md');
+  const fragment = fs.readFileSync(projectOverlayPath, 'utf8').trim();
+  const newline = fs.readFileSync(entry, 'utf8').includes('\r\n') ? '\r\n' : '\n';
+  let text = fs.readFileSync(entry, 'utf8').replaceAll('\r\n', '\n');
+  const heading = fragment.split('\n', 1)[0];
+  if (text.includes(heading)) {
+    if (!text.includes(fragment)) throw new Error('Canvas kickoff overlay exists with different content; review before replacing');
+    return;
+  }
+  const marker = '你是总导演及生产合同的唯一写入者。';
+  if (text.split(marker).length !== 2) throw new Error('Acheng director entry changed; cannot place the Canvas kickoff overlay');
+  const start = text.indexOf(marker);
+  const paragraphEnd = text.indexOf('\n\n', start);
+  const end = paragraphEnd >= 0 ? paragraphEnd : text.indexOf('\n', start);
+  if (end < 0) throw new Error('Acheng director entry has no paragraph boundary for the Canvas kickoff overlay');
+  text = `${text.slice(0, end)}\n\n${fragment}${text.slice(end)}`;
+  fs.writeFileSync(entry, text.replaceAll('\n', newline), 'utf8');
+}
 export function inventory(root, directory = root) {
   return Object.fromEntries(fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
     if (ignored.has(entry.name) || entry.name === 'canvas-engine.json') return [];
@@ -69,7 +90,7 @@ export class AchengEngine {
     try { metadata = read(metadataPath); } catch {}
     const expected = metadata?.files && typeof metadata.files === 'object' ? metadata.files : {};
     const modifiedFiles = metadata ? diffInventory(actual, expected) : Object.keys(actual).sort((a, b) => a.localeCompare(b));
-    return { path: this.projectSkill, installed: true, managed: Boolean(metadata?.commit), commit: metadata?.commit || null, version: metadata?.version || null, modifiedFiles };
+    return { path: this.projectSkill, installed: true, managed: Boolean(metadata?.commit), commit: metadata?.commit || null, version: metadata?.version || null, patchVersion: metadata?.patchVersion || null, modifiedFiles };
   }
   prepareProjectSkill(commit, version) {
     const current = this.projectSkillStatus();
@@ -81,7 +102,7 @@ export class AchengEngine {
       const details = localChanges.slice(0, 10).join(', ');
       throw new Error(`Project Acheng Skill has local changes; preserve or review them before syncing${details ? `: ${details}` : ''}`);
     }
-    if (current.managed && current.commit === commit && current.version === version && !current.modifiedFiles.length) {
+    if (current.managed && current.commit === commit && current.version === version && current.patchVersion === projectOverlayVersion() && !current.modifiedFiles.length) {
       return { status: () => current, rollback() {}, finalize() {} };
     }
     const parent = path.dirname(this.projectSkill);
@@ -98,8 +119,9 @@ export class AchengEngine {
       run('git', ['checkout-index', '--all', '--force', `--prefix=${staged}${path.sep}`], this.source, indexEnv);
       const skillVersion = fs.readFileSync(path.join(staged, 'SKILL.md'), 'utf8').match(/version:\s*"([^"]+)"/)?.[1] || version || 'unknown';
       if (version && skillVersion !== version) throw new Error(`Upstream Skill version differs from candidate: expected ${version}, found ${skillVersion}`);
+      applyProjectSkillOverlay(staged);
       const files = projectSkillInventory(staged);
-      fs.writeFileSync(path.join(staged, projectSkillManifest), JSON.stringify({ upstream: this.upstream, branch: 'main', commit, version: skillVersion, files }, null, 2), 'utf8');
+      fs.writeFileSync(path.join(staged, projectSkillManifest), JSON.stringify({ upstream: this.upstream, branch: 'main', commit, version: skillVersion, patchVersion: projectOverlayVersion(), files }, null, 2), 'utf8');
       if (fs.existsSync(this.projectSkill)) {
         backup = `${this.projectSkill}.previous-${crypto.randomUUID()}`;
         fs.renameSync(this.projectSkill, backup);
@@ -151,7 +173,7 @@ export class AchengEngine {
     if (local && !old?.active) throw new Error('Local overlay update requires an activated runtime');
     const commit = local ? old.active.commit : this.fetch();
     const changes = old ? run('git', ['diff', '--name-only', old.active.commit, commit], this.source).trim().split('\n').filter(Boolean) : ['initial managed installation'];
-    const overlayFiles = ['compat.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py'];
+    const overlayFiles = ['compat.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py', 'canvas-kickoff.md'];
     const patchVersion = sha(Buffer.concat(overlayFiles.map(file => fs.readFileSync(path.join(scripts, 'acheng', file))))).slice(0, 16);
     const runtimeId = `${commit}-${patchVersion}`;
     const runtime = path.join(this.base, 'versions', runtimeId);

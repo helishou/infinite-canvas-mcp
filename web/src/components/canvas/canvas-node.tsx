@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useNavigate } from "react-router-dom";
 import type { ReactNode } from "react";
 import { ChevronRight, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Music2, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
 
@@ -957,6 +958,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         } as React.CSSProperties
                     }
                 >
+                    {data.metadata?.sharedAssetOrigin && <SharedReferenceSource origin={data.metadata.sharedAssetOrigin as { sourceProjectId: string; sourceNodeId: string }} theme={theme} />}
                     <NodeContent
                         node={data}
                         theme={theme}
@@ -2208,4 +2210,13 @@ function ConnectionHandleDot({ side, visible, onMouseDown }: { side: "left" | "r
             <div className="size-3 rounded-full border-2 transition-all hover:scale-125" style={{ background: theme.node.panel, borderColor: theme.node.muted }} />
         </div>
     );
+}
+
+function SharedReferenceSource({ origin, theme }: { origin: { sourceProjectId: string; sourceNodeId: string }; theme: CanvasTheme }) {
+    const navigate = useNavigate();
+    const { t } = useTranslation();
+    return <button type="button" className="absolute left-1 top-1 z-20 px-1 text-[10px]" style={{ color: theme.node.text, background: theme.node.panel, pointerEvents: "auto" }}
+        title={t("productionCanvas.sharedReference")} onMouseDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); navigate(`/canvas/${encodeURIComponent(origin.sourceProjectId)}?nodeId=${encodeURIComponent(origin.sourceNodeId)}`); }}>
+        {t("productionCanvas.sharedReference")} · {t("productionCanvas.source")}
+    </button>;
 }

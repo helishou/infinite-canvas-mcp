@@ -19,6 +19,12 @@ export function createProjectStore(db: BackendDatabase): CanvasProjectStore {
             const snapshot = JSON.parse(row.snapshot);
             return { ownerId: row.ownerId, revision: row.revision, version: row.version, videoAspectRatio: snapshot.settings?.videoAspectRatio,
                 clips: (snapshot.clipGroups || []).filter((group: any) => group.nodeId && group.segmentId).map((group: any) => ({ nodeId: group.nodeId, segmentId: group.segmentId,
+                    sharedAssetsCurrent: group.shotIds.every((shotId: string) => (snapshot.director?.shotInputs?.[shotId]?.assetIds || []).every((assetId: string) => {
+                        const source = snapshot.director?.assets?.[assetId]?.sharedSource;
+                        if (!source) return true;
+                        const latest = db.db.prepare("SELECT id FROM drama_asset_versions WHERE drama_id=? AND asset_id=? ORDER BY rowid DESC LIMIT 1").get(source.dramaId, source.assetId);
+                        return latest?.id === source.approvedId;
+                    })),
                     storyboardRequired: group.shotIds.some((id: string) => snapshot.director?.shotInputs?.[id]?.keyframeAssetId),
                     sourceHash: snapshot.director?.sourceHash,
                     literalDialogues: h3ExpectedDialogues(snapshot.director?.source || {}, group.shotIds),

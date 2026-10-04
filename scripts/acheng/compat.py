@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 import sys
 
-PATCH_VERSION = "canvas-2"
+PATCH_VERSION = "canvas-4"
 
 
 def replace(path, before, after):
@@ -60,6 +60,23 @@ def apply(root):
         raise RuntimeError("Acheng director entry changed; review the Canvas routing hook")
     text = text.replace(marker, "涉及无限画布项目时，先读取项目提供的 `canvas-video-production-sop` 适配入口与 [本机兼容说明](CANVAS-COMPATIBILITY.md)。创作仍由本 Skill 主导；已获用户生成授权时，适配层通过原生画布 MCP 负责实际生成和正式存储。下文纯提示词交付限制不禁止该独立执行层。运行固定引擎版本，不混装另一套同名 H3 规范。\n\n" + marker, 1)
     entry.write_text(text, encoding="utf-8")
+    kickoff = Path(__file__).with_name("canvas-kickoff.md").read_text(encoding="utf-8").strip()
+    kickoff_heading = kickoff.splitlines()[0]
+    text = entry.read_text(encoding="utf-8")
+    if kickoff_heading in text:
+        if kickoff not in text:
+            raise RuntimeError("Canvas kickoff overlay exists with different content; review before replacing")
+    else:
+        marker = "你是总导演及生产合同的唯一写入者。"
+        if text.count(marker) != 1:
+            raise RuntimeError("Acheng director entry changed; cannot place the Canvas kickoff overlay")
+        start = text.index(marker)
+        paragraph_end = text.find("\n\n", start)
+        end = paragraph_end if paragraph_end >= 0 else text.find("\n", start)
+        if end < 0:
+            raise RuntimeError("Acheng director entry has no paragraph boundary for the Canvas kickoff overlay")
+        text = text[:end] + "\n\n" + kickoff + text[end:]
+        entry.write_text(text, encoding="utf-8")
     for path in [root / "SKILL.md", root / "modules/model/SKILL.md", root / "references/90-production-contract.md", root / "templates/h3-prompt-package.md"]:
         text = path.read_text(encoding="utf-8")
         text = re.sub(r"极限值\s*2900\s*词硬性封顶[^；。\n]*", "正文无硬性词数上限，保留固定运行版本的最低细节要求", text)
@@ -69,6 +86,7 @@ def apply(root):
         "Upstream is retained in the clean Git checkout. Local overlay: " + PATCH_VERSION + ".\n"
         "Canvas production uses the project canvas-video-production-sop adapter. "
         "Its authorized generation/storage integration overrides prompt-only delivery in that context. "
+        "Video production asks and records the final aspect ratio before creative breakdown; asset ratios stay independent. "
         "H3 uses <Picture N>/<Subject N>; style references occupy the final asset slot. "
         "New Ref2VA output retains its duration/complexity detail floor, without a hard maximum word count. "
         "Historical legacy_fixture is for shipped examples only.\n", encoding="utf-8")

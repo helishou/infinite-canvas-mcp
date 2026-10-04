@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { productionWorkspaceSchemas, productionWorkspaceDescriptions, productionWorkspaceToolNames } from "../drama/production-workspace-contract.js";
 import { productionEditSchema, productionPreflightSchema, productionContractQuerySchema, productionCompileSchema, productionApplyCompilationSchema, productionReadSchema } from "../drama/production-contract.js";
 import {
   collaborationDescriptions,
@@ -99,6 +100,7 @@ export const toolNames = [
   "drama_delete_episode",
   "drama_get_production",
   "production_get_contract",
+  ...productionWorkspaceToolNames,
   "production_compile",
   "production_apply_compilation",
   "production_diagnose_bindings",
@@ -833,6 +835,7 @@ export const toolInputSchemas = {
   }),
   drama_get_production: productionReadSchema.extend({ episodeId: z.string().min(1) }),
   production_get_contract: productionContractQuerySchema,
+  ...productionWorkspaceSchemas,
   production_compile: productionCompileSchema.extend({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
   production_apply_compilation: productionApplyCompilationSchema.extend({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
   production_diagnose_bindings: z.object({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
@@ -972,6 +975,7 @@ export const toolDescriptions: Record<ToolName, string> = {
     "删除分集记录；不会删除其绑定的画布，画布会变成独立资产。",
   drama_get_production: "默认读取制作摘要与版本；view=source 读取一个 snapshot 的完整源稿；view=artifacts 可用 targetIds 定向读取完整正文；view=full 返回原完整记录。",
   production_get_contract: "查询完整制作操作 schema、合法示例、前置条件和固定引擎源稿模板；指定 runtimeId 后不回退其他版本。",
+  ...productionWorkspaceDescriptions,
   production_compile: "由 Backend 对当前 revision 或完整候选稿运行制作对象固定 Acheng 编译器；冻结正文、参考哈希与回执，返回 preparedId 和逐目标诊断。只准备，不编辑、发布或生成。",
   production_apply_compilation: "用精确 preparedId 原子接入 Backend 编译产物；沿用冻结的 expectedRevision/operationId，重复调用恢复原回执，源稿或绑定冲突拒绝覆盖。保存草稿，不发布或生成。",
   production_diagnose_bindings: "只读核对源资产版本、草稿绑定、发布版本绑定、节点活动媒体、归档字节哈希与消费者；明确指出新旧版本或活动媒体不一致，不修改数据。",

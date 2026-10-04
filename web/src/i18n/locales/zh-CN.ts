@@ -1,4 +1,15 @@
 export default {
+    productionCanvas: {
+        director: "导演", object: "当前对象", close: "收起", directory: "制作", switchCanvas: "切换制作画布", sharedCanvas: "共享资产画布",
+        episode: "第 {{number}} 集", ready: "在导演面板完善制作内容，或从目录选择当前目标", manualPause: "已接管画布视角；自动跟随已暂停",
+        pauseFollow: "暂停跟随", follow: "回到当前制作", tasks: "任务与交付", prepare: "准备节点", story: "故事与制作需求", script: "本场剧本",
+        assets: "角色与资产", advanced: "高级与历史", adoptShared: "采用剧目共享资产", targetAsset: "本集资产目标", approvedAsset: "共享批准版本",
+        adopt: "采用此版本", updateBlocked: "共享资产更新待处理", retryUpdate: "核对后恢复更新", sharedReference: "共享资产引用", source: "查看源资产",
+        fixedBinding: "画布绑定已固定", arrange: "整理本场", awaitingUpdate: "等待共享资产更新与提示词校验",
+        outdatedMedia: "此媒体来自旧共享输入。原结果已保留；请查看后明确继续采用或退回重做。",
+        tools: "画布工具与设置",
+        approvedHistory: "共享资产批准历史",
+    },
     runningHub: {
         description: "为画布 H3 节点配置 RunningHub 工作流。自动分流优先使用空闲本地槽位，其余任务按本地和云端容量排队。",
         site: "RunningHub 站点", global: "海外站 · runninghub.ai", china: "国内站 · runninghub.cn", workflowId: "H3 工作流 ID", instance: "运行实例",
@@ -11,6 +22,7 @@ export default {
         inviteHint: "从下面的邀请链接注册 RunningHub，可领取新人 RH 币；通过你的链接注册，你也能获得邀请奖励。",
         inviteChina: "国内站 · runninghub.cn",
         inviteGlobal: "海外站 · runninghub.ai",
+        import: { button: "从 RunningHub 导入", title: "导入 RunningHub 工作流", description: "导入后保存为本地 ComfyUI API 工作流，在工作流库中统一编辑节点、配置字段并运行。", savedProfile: "导入已有 RunningHub 配置（可选）", idPlaceholder: "或输入 RunningHub workflowId", selectRequired: "请选择已有配置，或输入 RunningHub workflowId", success: "已导入工作流库；后续由本地 ComfyUI 节点图和运行配置管理", submit: "导入到工作流库", savedProfileLabel: "已有 RunningHub 工作流配置" },
     },
     h3Video: { durationError: "H3 时长必须是 1–15 秒之间的整数", missingField: "H3 工作流缺少参数映射：{{field}}", preview: "H3 实际输入：{{size}} · {{seconds}} 秒 · {{megapixels}} MP。尺寸按原生比例和网格对齐。", autoPreview: "自动尺寸：图生和首尾帧沿用首帧比例；文生和多参使用工作流比例。清晰度决定像素量，时长为 1–15 秒。" },
     meta: {
@@ -592,7 +604,7 @@ export default {
         projectPage: {
             svgFileInvalid: "SVG 文件无法解析，未导入画布",
             svgPluginUnavailable: "SVG 节点插件未启用，将按普通图片导入",
-stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断，已经生成完成的内容会保留。", stop: "停止", continue: "继续生成", configConnection: "配置节点之间不能连接", notFound: "未找到当前画布", exporting: "正在导出当前画布…", exported: "已导出当前画布", clipboardText: "剪切板文本", clipboardImageAdded: "已从剪切板添加图片", clipboardVideoAdded: "已从剪切板添加视频", clipboardAudioAdded: "已从剪切板添加音频", clipboardTextAdded: "已从剪切板添加文本", clipboardCopyFailed: "当前内容无法写入系统剪切板", clipboardPasteFailed: "剪切板内容无法添加到画布", noTextToSave: "没有可保存的文本", canvasText: "画布文本", noVideoToSave: "没有可保存的视频", canvasVideo: "画布视频", noImageToSave: "没有可保存的图片", canvasImage: "画布图片", emptyReverse: "图片节点为空，无法反推提示词", reverseTitle: "反推提示词", reverseConfigTitle: "反推提示词配置", splitTitle: "{{name}} {{row}}-{{column}}", splitSuccess: "已切分为 {{count}} 个子节点", maskResult: "局部编辑结果", maskFailed: "局部修改失败", generationFailed: "生成失败", partialFailed: "部分图片生成失败", partialTextFailed: "部分文本生成失败", allFailed: "全部图片生成失败", retryPromptMissing: "找不到提示词，无法重试", referenceMissing: "参考图片已丢失，无法继续重试", emptyTextImage: "文本节点为空，无法生图", untitledCanvas: "未命名画布", superResolve: "AI 超分", notImplemented: "暂未实现", imageDetails: "图片详情", clearTitle: "清空画布？", clear: "清空", clearDescription: "这会删除当前画布上的所有节点和连线。", reversePreset: "请根据参考图片反推一段适合用于 AI 生图的提示词。\n\n要求：\n1. 只输出提示词正文，不要解释。\n2. 覆盖主体、构图、风格、光线、色彩、材质、镜头和氛围。\n3. 尽量写成可直接用于生图模型的完整提示词。", maskPrompt: "参考{{source}}为原图，{{mask}}是在原图上用蓝色半透明标注出的待修改区域。请只修改蓝色标注覆盖的区域，其余区域与原图保持完全一致，输出与原图相同尺寸的完整图片，并且结果中不要保留任何蓝色标注。修改要求：{{prompt}}", maskNodeTitle: "遮罩标注", editTextPrompt: "请根据要求修改以下文本。\n\n原文：\n{{source}}\n\n修改要求：\n{{prompt}}"
+stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断，已经生成完成的内容会保留。", stop: "停止", continue: "继续生成", configConnection: "配置节点之间不能连接", notFound: "未找到当前画布", exporting: "正在导出当前画布…", exported: "已导出当前画布", clipboardText: "剪切板文本", clipboardImageAdded: "已从剪切板添加图片", clipboardVideoAdded: "已从剪切板添加视频", clipboardAudioAdded: "已从剪切板添加音频", clipboardTextAdded: "已从剪切板添加文本", clipboardCopyFailed: "当前内容无法写入系统剪切板", clipboardPasteFailed: "剪切板内容无法添加到画布", noTextToSave: "没有可保存的文本", canvasText: "画布文本", noVideoToSave: "没有可保存的视频", canvasVideo: "画布视频", noImageToSave: "没有可保存的图片", canvasImage: "画布图片", emptyReverse: "图片节点为空，无法反推提示词", reverseTitle: "反推提示词", reverseConfigTitle: "反推提示词配置", splitTitle: "{{name}} {{row}}-{{column}}", splitSuccess: "已切分为 {{count}} 个子节点", maskResult: "局部编辑结果", maskFailed: "局部修改失败", generationFailed: "生成失败", partialFailed: "部分图片生成失败", partialTextFailed: "部分文本生成失败", allFailed: "全部图片生成失败", retryPromptMissing: "找不到提示词，无法重试", referenceMissing: "参考图片已丢失，无法继续重试", emptyTextImage: "文本节点为空，无法生图", untitledCanvas: "未命名画布", superResolve: "AI 超分", notImplemented: "暂未实现", imageDetails: "图片详情", clearTitle: "清空画布？", clear: "清空", clearDescription: "这会删除当前画布上的所有节点和连线。", reversePreset: "Analyse the image using the structure below. Be accurate and concise, avoid repetition and over-speculation,For anything that is not visible in the image, write \"Cannot be determined\". \n\n1. Style and mood \n   Style: one sentence naming the overall type and its specific sub-style (for example cinematic photography, cyberpunk, minimalist illustration, product render). \n   Mood and narrative: the emotion the image conveys, and whether it shows a clear story or situation. \n\n2. Subject and figure \n   Subject: the most important person, object or visual theme in the frame, together with its action, pose or state. \n   Figure traits: if a person is present, describe the apparent age range, gender presentation, hairstyle, face shape and notable facial features; do not infer identity or anything the image cannot confirm. \n   Expression and makeup: describe the expression, the direction of the gaze and the mood; if the makeup is clearly visible, note the base, eye and lip makeup. \n   Materials and detail: describe the surface texture of the subject, the clothing or key accessories, and any text, logo, symbol and texture detail in the frame. \n\n3. Environment and composition \n   Space and background: state whether it is indoors, outdoors, a virtual space or a plain background, and name any recognisable environmental elements. \n   Colour and light: summarise the dominant palette, the colour relationships, the direction of the light source and the quality of the light, and describe the overall key. \n   Viewpoint and layout: state the shot size and viewing angle, plus the subject's placement, the compositional approach, the foreground / midground / background relationships and the visual focus. \n\n4. Technical and aesthetic character \n   Technical: only when the image is clearly photographic or a 3D render, briefly infer aspect ratio, focal length, aperture, depth of field, shutter effect, noise and post-processing. Do not guess any parameter that cannot be judged reliably. \n   Aesthetic: summarise the visual aesthetic and design tendency — for example cinematic, retro, futuristic, documentary, premium, minimalist, Japanese light-and-airy, dark gothic, cyberpunk, luxury fashion or surreal — and say what mainly produces it: colour, light and shadow, composition, materials, styling or the overall atmosphere. \n\nOutput requirements: answer under the headings above; put what is directly observable first; keep the language concrete and compact; do not stack up adjectives. Total length under 600 words. Always write the whole answer in English.", maskPrompt: "参考{{source}}为原图，{{mask}}是在原图上用蓝色半透明标注出的待修改区域。请只修改蓝色标注覆盖的区域，其余区域与原图保持完全一致，输出与原图相同尺寸的完整图片，并且结果中不要保留任何蓝色标注。修改要求：{{prompt}}", maskNodeTitle: "遮罩标注", editTextPrompt: "请根据要求修改以下文本。\n\n原文：\n{{source}}\n\n修改要求：\n{{prompt}}"
         },
         reverseComposer: "参考图片：@[node:{{imageId}}]\n任务说明：@[node:{{textId}}]",
         editors: {
@@ -632,6 +644,78 @@ stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断�
             click: "点击",
         },
     },
+    landing: {
+        searchSeries: "搜索剧目名称", seriesHint: "选择一部剧目，继续剧本、分集与制作。", noSeriesMatches: "没有匹配的剧目",
+        "productionTitle": "制作工作室",
+        "productionSubtitle": "从角色和场景，到故事与分镜，开始或继续你的作品。",
+        "canvasHome": "画布工作台",
+        "ideaTitle": "今天想创作什么？",
+        "withDirector": "与导演聊一聊",
+        "assetPlaceholder": "描述你想设计的角色、场景或道具，也可以说说已有素材。",
+        "dramaPlaceholder": "写下一段故事、一个冲突，或你想制作的短剧。",
+        "conversationHint": "先聊清楚想法，再整理成制作稿；需要出图或视频时，在对话中提出。",
+        "startConversation": "开始创作对话",
+        "whatToMake": "这次想做",
+        "mode": {
+            "asset": "角色、场景与道具",
+            "drama": "故事与短剧"
+        },
+        "modeHint": {
+            "asset": "从设定和参考图开始，建立你的素材。",
+            "drama": "从故事开始，逐步写剧本、设计分镜。"
+        },
+        "modeHintFooter": "已有项目可直接从下方继续，不必重新开始。",
+        "examples": {
+            "asset": [
+                {
+                    "label": "设计一个角色",
+                    "text": "我想设计一个原创角色，先和我聊聊人物身份、性格与外观。"
+                },
+                {
+                    "label": "构思一处场景",
+                    "text": "我想为故事设计一处场景，先整理空间、氛围和需要的参考素材。"
+                },
+                {
+                    "label": "准备一组道具",
+                    "text": "我想为作品准备一组道具，先根据故事梳理用途和设计方向。"
+                }
+            ],
+            "drama": [
+                {
+                    "label": "从一句故事开始",
+                    "text": "我有一个故事想法，请先和我聊聊人物、冲突和结局，再整理剧本草稿。"
+                },
+                {
+                    "label": "设计短剧开场",
+                    "text": "我想设计一段短剧开场，先聊清人物关系、冲突和开场钩子。"
+                },
+                {
+                    "label": "继续已有剧本",
+                    "text": "我想继续完善一份已有剧本，先和我确认内容来源与需要修改的部分。"
+                }
+            ]
+        },
+        "library": {
+            "canvases": "我的制作项目",
+            "dramas": "剧目与分集"
+        },
+        "continueProduction": "继续制作",
+        "projectCount": "{{count}} 个项目 · 按最近更新排序",
+        "blankProduction": "新建空白项目",
+        "openProductionNamed": "继续制作：{{name}}",
+        "openCanvasNamed": "打开画布：{{name}}",
+        "openProduction": "进入制作",
+        "noPreview": "还没有预览图",
+        "updated": "更新于 {{date}}",
+        "continue": "继续制作",
+        "canvasTitle": "画布工作台",
+        "canvasSubtitle": "继续上次的作品，或开启新的创作。",
+        "yourStudio": "你的创作空间",
+        "canvasHero": "把想法展开，做成作品。",
+        "canvasHeroHint": "和导演聊角色、场景或故事，或打开画布，自由组织你的素材。",
+        "yourCanvases": "我的画布",
+        "preview": "预览"
+    },
     director: {
         "title": "画布项目",
         "open": "进入制作",
@@ -669,23 +753,110 @@ stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断�
         "keepAgentDraft": "右侧还有未发送内容或正在进行的任务，已保留，请先处理后再交接。",
         "requestPrepared": "创作请求已放入右侧输入框，确认后即可发送。",
         "agentRequest": "请以 Acheng 主导这次制作。先读取下面目标的正式制作稿与已有资产，继续当前进度；不要重复创建已存在的项目。先做创作规划，只有我明确授权生成图片或视频时才提交媒体任务。我的需求：",
+        studio: {
+            unlinkedShot: "未关联镜头", unlinkedClip: "历史片段",
+            openShot: "查看镜头 {{number}}", structuredState: "结构状态已记录，可补充文字说明；完整状态见设置与历史",
+            referenceImage: "参考画面",
+            "script": "剧本",
+            "scriptSummary": "{{scenes}} 场 · {{characters}} 位角色",
+            "readScript": "阅读正文",
+            "editScript": "编辑剧本",
+            "collaborate": "与导演讨论",
+            "creativeNotes": "创作说明",
+            "sceneDirectory": "场次目录",
+            "sceneNumber": "第 {{number}} 场",
+            "blockCount": "{{count}} 段正文",
+            "dialogue": "对白",
+            "unsavedText": "这段有尚未保存的修改",
+            "autosaveHint": "离开输入框时保存，修改草稿会保留",
+            "originalText": "正文保留原稿内容",
+            "reviseScene": "讨论这一场",
+            "previousScene": "上一场",
+            "nextScene": "下一场",
+            "characters": "人物",
+            "characterNumber": "角色 {{number}}",
+            "detailsInAssets": "人物设定见素材页",
+            "viewAssets": "查看人物与素材",
+            "locations": "场景",
+            "storyBeats": "剧情节点",
+            "assets": "角色与素材",
+            "assetsHint": "查看设定图、场景、道具与分镜参考，打开原图后审核。",
+            "assetNumber": "素材 {{number}}",
+            "imageNumber": "画布图片 {{number}}",
+            "keyframe": "关键帧",
+            "previewAsset": "查看{{title}}原图",
+            "noImage": "还没有图片",
+            "revise": "讨论修改",
+            "assetDetails": "编辑描述与图片关联",
+            "linkImage": "关联画布图片",
+            "styleSettings": "画风与风格参考设置",
+            "searchAssets": "搜索素材名称",
+            "filter": {
+                        "all": "全部",
+                        "characters": "角色",
+                        "locations": "场景",
+                        "props": "道具与风格",
+                        "frames": "分镜图"
+            },
+            "storyboard": "分镜",
+            "shotsSummary": "{{shots}} 个镜头 · {{clips}} 个片段 · {{seconds}} 秒",
+            "shotNumber": "镜头 {{number}}",
+            "clipNumber": "片段 {{number}}",
+            "missingFrame": "还没有关联分镜图",
+            "ungrouped": "尚未编入片段",
+            "noVisual": "尚未填写画面描述",
+            "editShot": "编辑这个镜头",
+            "viewFrame": "查看分镜图",
+            "exactTiming": "精确帧数",
+            "shotField": {
+                        "visual": "画面与动作",
+                        "camera": "机位与运镜",
+                        "state_in": "镜头开始时",
+                        "state_out": "镜头结束时"
+            },
+            "settings": "生成设置",
+            "noResults": "还没有视频结果",
+            "noResultsHint": "发布制作稿并完成参考素材后，可在下方逐项生成。",
+            "rawSource": "原始制作数据与关联记录",
+            "runStatus": {
+                succeeded: "已完成",
+                        "pending": "排队中",
+                        "running": "正在生成",
+                        "paused": "已暂停",
+                        "awaiting_review": "等待审核",
+                        "failed": "生成失败",
+                        "completed": "已完成",
+                        "complete": "已完成",
+                        "cancelled": "已取消"
+            },
+            "saved": "草稿已保存",
+            "localDraft": "有未保存修改",
+            "published": "已发布第 {{number}} 版",
+            "technicalDetails": "技术明细",
+            "needsAttention": "待处理事项",
+            "editHint": "点击镜头查看细节并编辑",
+            "emptySearch": "没有匹配的素材",
+            "totalDuration": "计划时长",
+            "productionSummary": "查看生成进度与视频结果；生成任务和发布稿件分开操作。",
+            "runSummary": "第 {{version}} 版 · {{count}} 项任务"
+},
         workspace: {
-            videoAspectRatio: '视频交付画幅', inheritVideoAspectRatio: '沿用画布配置', videoAspectRatioHint: '发布后用于生成规格校验。角色四视图和其他参考素材保留各自用途的比例。',
-            tab: { overview: "总览", story: "故事", assets: "风格与资产", shots: "镜头与片段", production: "生产与交付", advanced: "高级与历史" },
+            videoAspectRatio: '视频交付画幅', inheritVideoAspectRatio: '沿用画布配置', videoAspectRatioHint: '视频制作启动时先确认，发布后用于生成规格校验。角色四视图和其他参考素材保留各自用途的比例。',
+            tab: {"overview": "概览", "story": "剧本", "assets": "角色与素材", "shots": "分镜", "production": "生成与交付", "advanced": "设置与历史"},
             refresh: "刷新", currentBrief: "正式需求", saveBrief: "保存需求", progressCurrent: "推进当前工作", continueInstruction: "从当前缺项和恢复游标继续，只完成已指定创作范围。",
-            revision: "修订 {{revision}}", readiness: "依赖就绪", noNextAction: "等待制作稿", readinessCount: { ready: "可执行", blocked: "有缺项", review: "待审核", done: "已完成" },
+            revision: "修订 {{revision}}", readiness: "制作进度", noNextAction: "等待制作稿", readinessCount: { ready: "可执行", blocked: "有缺项", review: "待审核", done: "已完成" },
             navigation: "制作工作区", moduleStatus: { planned: "待规划", partial: "进行中", committed: "已确认", blocked: "有阻塞" }, presentationStatus: { ready: "可继续", working: "进行中", needs_review: "待审核", blocked: "待处理", complete: "已完成" },
             overview: { currentTask: "现在需要你处理", owner: "负责模块：{{module}}", currentTarget: "当前制作目标", startFromBrief: "先保存正式需求，建立 Acheng 制作稿", startFromBriefAction: "去填写制作需求", reviewFocus: "查看并确认「{{target}}」", blockedFocus: "先补齐「{{target}}」的缺项", produceFocus: "「{{target}}」已就绪，可以进入生产", deliverFocus: "查看「{{target}}」的生产结果", continueFocus: "继续{{module}}工作", viewAndReview: "查看并审核", askDirectorToRevise: "让导演调整当前目标", openWorkspace: "打开当前工作区", reviseCurrentTask: "只调整当前目标，保留其他已确认内容。", objectStatus: "制作对象进度", waitingBrief: "等待正式需求与模块规划", targetSummary: "{{done}} / {{total}} 项完成 · {{review}} 项待审核 · {{blocked}} 项待补齐", rowStatus: { current: "当前工作", waiting: "待开始", done: "已确认", blocked: "有缺项", working: "进行中" }, footerHint: "导演负责创作 · 画布负责媒体生产与保存" },
-            targetsNeedingWork: "下一步目标", openIssues: "其他未决项（仅阻塞相关目标）", targetKind: { asset: "资产", keyframe: "关键帧", segment: "Segment" }, targetStatus: { ready: "就绪", blocked: "待补齐", needs_review: "待审核", complete: "完成" },
+            targetsNeedingWork: "下一步目标", openIssues: "其他未决项（仅阻塞相关目标）", targetKind: { asset: "资产", keyframe: "关键帧", segment: "视频片段" }, targetStatus: { ready: "就绪", blocked: "待补齐", needs_review: "待审核", complete: "完成" },
             internalModules: "内部职责", moduleRoles: "Acheng 七模块状态", modulesNotGates: "模块是专业职责，不是顺序关卡。", askDirector: "让导演继续", reviewInAssets: "去资产页审核", reviewInProduction: "去生产页查看",
             storyTitle: "故事与对白", storyHint: "直接修订场景内容；跨人物弧光、知情关系或伏笔联动可交给导演局部修改。", storyBrief: "完整故事需求", storyStartsFromBrief: "先在总览中保存需求，建立 Acheng 源稿。",
             scene: "场景 {{number}}", sceneName: "场景名称", reviseScene: "只修订选中场景，保留其他已确认内容。", reviseWithDirector: "让导演修改", scriptText: "场景正文与逐字对白", storyNotDrafted: "尚无分场故事稿", storyNotDraftedHint: "让导演依据正式需求继续 story 模块；已有文本会保留。",
-            assetsTitle: "风格、空间与资产", assetsHint: "STYLE_MOTHER、角色、场景空间、道具和关键帧共享依赖；先查看真实媒体，再批准版本。", assetsNeedDirector: "让 Acheng assets 模块登记资产计划后，这里会显示依赖和版本。", untitledAsset: "未命名资产", description: "资产描述与引用职责", canvasBinding: "画布媒体绑定", bindCanvasImage: "选择画布中的图片节点", realMedia: "归档媒体", keyframeFor: "关键帧", approvalEvidence: "已查看媒体，身份、风格和用途符合本轮制作。", reviewReason: "审核理由", reviewReasonRequired: "退回资产时请填写原因。", mediaReadFailed: "无法读取 Backend 归档媒体。", approve: "批准此版本", returnAsset: "退回并说明原因", compiledStatus: "编译状态", assetStatus: { planned: "已规划", generated: "待审核", approved: "已批准", rejected: "已退回" },
+            assetsTitle: "风格、空间与资产", assetsHint: "STYLE_MOTHER、角色、场景空间、道具和关键帧共享依赖；先查看真实媒体，再批准版本。", assetsNeedDirector: "让 Acheng assets 模块登记资产计划后，这里会显示依赖和版本。", untitledAsset: "未命名资产", description: "资产描述与引用职责", canvasBinding: "画布媒体绑定", bindCanvasImage: "选择画布中的图片节点", realMedia: "归档媒体", keyframeFor: "关键帧", approvalEvidence: "已查看媒体，身份、风格和用途符合本轮制作。", reviewReason: "审核理由", reviewReasonRequired: "退回资产时请填写原因。", reviewQueue: "审核列表", noPendingReviews: "没有符合当前筛选条件的资产。", mediaReadFailed: "无法读取 Backend 归档媒体。", approve: "批准此版本", returnAsset: "退回并说明原因", compiledStatus: "编译状态", assetStatus: { planned: "已规划", generated: "待审核", approved: "已批准", rejected: "已退回" },
             noAssets: "尚无资产卡", noAssetsHint: "由 Acheng 根据故事和空间依赖建立资产计划；画布节点可稍后绑定。",
-            shotsTitle: "Shot 与 Segment", shotsHint: "按叙事镜头和 Acheng Segment 查看空间、机位、动作、关键帧锚点与 Clip 边界。", visual: "基本画面", camera: "机位与运动", startFrame: "起始帧", endFrame: "结束帧", openingState: "入镜状态", endingState: "出镜状态", keyframePolicy: "关键帧策略：{{policy}}", segmentTag: "Segment {{id}}", reviseShot: "修订此 Shot 的镜头与动作因果，保留相邻已确认内容。", noShots: "尚无镜头规划", noShotsHint: "让 Acheng shots 模块结合已确认故事和空间因果规划 Shot 与 Segment。", segmentsTitle: "生成片段编组", segmentsHint: "单个 Segment 可包含多个相邻 Shot；保持 4–15 秒窗口，不压缩对白或动作。", untitledSegment: "未命名 Segment", noShotInSegment: "尚未编组 Shot", frameRange: "帧窗 {{start}}–{{end}}", continuityTitle: "相邻 Segment 连续性", continuityHint: "尾帧参考与 Motion Context 分开控制。只有前项开关控制前段末帧图片，后项开关控制同组 AV latent。", continuityBoundary: "连续性边界", undecided: "尚未决定", tailFrame: "尾帧图片参考", motionContext: "Motion Context 潜空间", continuityReason: "说明保留或切断连续性的理由", saveBoundary: "保存边界决定", motionGroupHint: "这组会在同一运行中提交；缺少可复用 latent 时从 {{from}} 起重渲至 {{to}}。",
+            shotsTitle: "Shot 与 Segment", shotsHint: "按叙事镜头和 Acheng Segment 查看空间、机位、动作、关键帧锚点与 Clip 边界。", visual: "基本画面", camera: "机位与运动", startFrame: "起始帧", endFrame: "结束帧", openingState: "入镜状态", endingState: "出镜状态", keyframePolicy: "关键帧策略：{{policy}}", segmentTag: "Segment {{id}}", reviseShot: "修订此 Shot 的镜头与动作因果，保留相邻已确认内容。", noShots: "尚无镜头规划", noShotsHint: "让 Acheng shots 模块结合已确认故事和空间因果规划 Shot 与 Segment。", segmentsTitle: "视频片段编组", segmentsHint: "将相邻镜头编成 4–15 秒的视频片段，保持完整对白与动作。", untitledSegment: "未命名 Segment", noShotInSegment: "尚未选择镜头", frameRange: "帧窗 {{start}}–{{end}}", continuityTitle: "片段之间的衔接", continuityHint: "分别选择是否沿用上一段的末帧，以及是否延续动作和声音。", continuityBoundary: "相邻片段", undecided: "尚未决定", tailFrame: "沿用上一段末帧", motionContext: "延续动作与声音", continuityReason: "说明保留或切断连续性的理由", saveBoundary: "保存衔接设置", motionGroupHint: "这组会在同一运行中提交；缺少可复用 latent 时从 {{from}} 起重渲至 {{to}}。",
             productionTitle: "提示词、生产任务与交付", productionHint: "完整提示词和实际参考来自 Acheng 编译回执；发布稿只冻结版本，生成需单独授权。", contentDelivery: "内容交付", autoFileBatch: "自动文件批处理", interactiveSegment: "逐 Segment 互动", mediaProduction: "媒体生产", promptOnly: "仅提示词", perItem: "逐项生成", automatic: "按依赖自动生产", settingsNextRun: "这些设置只影响下一次新任务；已运行或恢复中的批次继续使用其固定设置。", activeRun: "最近生产批次", pause: "暂停", resume: "继续原批次", runScope: "发布版本 v{{version}} · 范围 {{targets}}", submittedTasks: "个精确任务", startAutomatic: "开始自动生产就绪目标", promptOnlyHint: "此模式不会提交媒体任务；切换媒体生产模式后，才能使用逐项或自动生产。", productionTargets: "目标就绪与生成范围", generateClip: "生成此 Segment", generateItem: "生成此项目", completePrompts: "完整编译提示词", promptRevision: "源 revision {{sourceHash}} · 提示词 {{promptHash}}", actualReferences: "本次实际图片、视频或音频参考", noReadiness: "等待依赖就绪视图。",
-            advancedTitle: "高级与历史", advancedHint: "旧稿兼容、引擎固定版本、历史恢复与 JSON 导入集中在这里。", editJson: "导入或编辑 Acheng JSON", engineVersion: "本次固定的 Acheng 引擎", history: "制作版本历史", restore: "恢复为草稿", noHistory: "尚无已发布版本", runHistory: "生产批次历史", legacyTitle: "旧稿兼容区", legacyHint: "原文和媒体保持不变；选中内容后让导演补齐本轮缺项，不会自动重生成历史媒体。", adaptLegacy: "让导演接入 Acheng", noLegacy: "当前对象没有检测到旧稿。", impactAssets: "另有 {{count}} 项资产提示词或依赖发生变化。",
-            segmentEdit: { shots: "选择相邻 Shot", save: "保存编组", needsShots: "至少选择一个已登记 Shot。", adjacentOnly: "Segment 只能包含原镜头顺序中的相邻 Shot。", frameGap: "Shot 帧窗不连续；不会自动压缩或重排。", window: "编组后时长为 {{duration}} 秒，须在 4–15 秒内；请让导演重新装箱。", mergeWhole: "Segment {{id}} 还有未选中的 Shot；不能静默移除，请让导演重新装箱。", mergeTitle: "合并已有 Segment？", mergeDescription: "以下 Segment 将并入当前编组并保留各 Shot：{{ids}}。连续性边界会清除并要求重新决定。" },
+            advancedTitle: "设置与历史", advancedHint: "旧稿兼容、引擎固定版本、历史恢复与 JSON 导入集中在这里。", editJson: "导入或编辑 Acheng JSON", engineVersion: "本次固定的 Acheng 引擎", history: "制作版本历史", restore: "恢复为草稿", noHistory: "尚无已发布版本", runHistory: "生产批次历史", legacyTitle: "旧稿兼容区", legacyHint: "原文和媒体保持不变；选中内容后让导演补齐本轮缺项，不会自动重生成历史媒体。", adaptLegacy: "让导演接入 Acheng", noLegacy: "当前对象没有检测到旧稿。", impactAssets: "另有 {{count}} 项资产提示词或依赖发生变化。",
+            segmentEdit: { shots: "选择相邻镜头", save: "保存编组", needsShots: "至少选择一个已登记 Shot。", adjacentOnly: "Segment 只能包含原镜头顺序中的相邻 Shot。", frameGap: "Shot 帧窗不连续；不会自动压缩或重排。", window: "编组后时长为 {{duration}} 秒，须在 4–15 秒内；请让导演重新装箱。", mergeWhole: "Segment {{id}} 还有未选中的 Shot；不能静默移除，请让导演重新装箱。", mergeTitle: "合并已有 Segment？", mergeDescription: "以下 Segment 将并入当前编组并保留各 Shot：{{ids}}。连续性边界会清除并要求重新决定。" },
             runStarted: "生产批次已启动。", runReceiptUnknown: "生产启动尚未取得回执；原 runId 已保留，先恢复回执再启动新批次。", runNotFound: "找不到该生产批次。", runTargetMissing: "生产批次缺少可定位的目标。", runTargetActive: "目标已属于活动运行 {{runId}}；请恢复或结束该批次后再提交。", runTargetActiveInline: "已有运行占用此目标", engineUnavailable: "Acheng 运行版本不可用；检查引擎状态后再继续。", briefSaveFailed: "需求没有写入 Backend 正式制作稿，尚未发送导演请求。", agentDisconnected: "Agent 未连接或会话未就绪。已保留当前输入，请先连接 Agent 再推进。", agentBusy: "Agent 会话正在处理其他请求；当前制作数据已保留，未自动重发。", agentTaskFailed: "Agent 阶段请求未发送完成。", decisionSaved: "已保存你的选择：{{answer}}", continueDecision: "继续导演工作", decisionAnswer: "补充决定", submitDecision: "提交并继续", decisionStale: "该问题基于旧制作版本；请让导演重新检查后再选择。", decisionChoiceInvalid: "请选择当前问题提供的选项，或填写允许的补充答案。", registeredStoryFacts: "已登记的人物、关系、知情与伏笔事实", reviseStoryFacts: "只修订所选人物、知情关系、伏笔或账本事实，保留其他已确认字段。", assetContract: "版本、依赖、参考职责与资产卡", reviseAssetContract: "更新此资产卡的版本、依赖或参考职责，保留未提及的字段。", assetVersion: "资产版本", assetDependencies: "前置依赖", styleMother: "STYLE_MOTHER 风格锚点", chooseStyleMother: "选择已登记的 STYLE_MOTHER", stylePolicy: "跨资产风格策略", styleRequired: "必须保持一致", styleWaived: "本轮明确豁免", styleWaiverReason: "风格豁免理由", spatialFacts: "场景空间设计与状态", reviseSpatialFacts: "按确认范围修订场景几何、入口出口、遮挡或空间状态，不改变未授权字段。", extendedShotFacts: "对白、表演、视效、参考与其他 Shot 字段", timeline: "Shot 与 Segment 时间线", timelineScale: "帧 {{start}}–{{end}} · {{fps}} fps", segmentExecutionDetails: "Segment 模式、声音与引用事实", segmentAudioReferences: "生成模式、音频、音乐和参考绑定", validateCompile: "验证并编译", validateCompileCurrent: "使用固定 Acheng 引擎验证并编译当前正式源稿中缺失或过期的提示词；只保存真实回执，不生成媒体。", viewOriginal: "查看审核原图", viewOriginalBeforeReview: "查看并加载原图后，才能提交版本审核。", currentWorkAction: { author: "创作", compile: "编译", produce: "生产", review: "审核", deliver: "交付", blocked: "待处理" }, moduleName: { story: "故事", assets: "资产", shots: "镜头", performance: "表演", effects: "视效", model: "模型", continuity: "连续性" }, deliveredVideos: "已归档视频", technicalCloseout: "查看本轮真实媒体与任务回执。", exportBundle: "导出提示词与交付包", includeGeneratedMedia: "把生成结果副本放进 ZIP", bundleDownloaded: "Acheng 交付包已下载。",
         },
         "advanced": "高级：制作稿导入与编辑"

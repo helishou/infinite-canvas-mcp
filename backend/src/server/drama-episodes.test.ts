@@ -59,11 +59,15 @@ test("drama episode REST：剧目、分集、画布三层关系可读写", async
     assert.equal(read.status, 200);
     assert.equal((read.body.canvas as Record<string, unknown>).id, "canvas-1");
 
-    const updated = await request("PATCH", `/drama/episodes/${episode.id}`, { synopsis: "退婚夜与实名求见", fullPlot: "沈昭宁与谢临渊在南茶楼达成合作。", canvasId: "canvas-2" });
+    const rebound = await request("PATCH", `/drama/episodes/${episode.id}`, { canvasId: "canvas-2" });
+    assert.equal(rebound.status, 409);
+    assert.equal(db.getDramaEpisodeByCanvasId("canvas-1")?.id, episode.id);
+    const unbound = await request("PATCH", `/drama/episodes/${episode.id}`, { canvasId: null });
+    assert.equal(unbound.status, 409);
+    const updated = await request("PATCH", `/drama/episodes/${episode.id}`, { synopsis: "退婚夜与实名求见", fullPlot: "沈昭宁与谢临渊在南茶楼达成合作。" });
     assert.equal(updated.status, 200);
-    assert.equal((updated.body.episode as Record<string, unknown>).canvasId, "canvas-2");
+    assert.equal((updated.body.episode as Record<string, unknown>).canvasId, "canvas-1");
     assert.equal((updated.body.episode as Record<string, unknown>).fullPlot, "沈昭宁与谢临渊在南茶楼达成合作。");
-    assert.equal(db.getDramaEpisodeByCanvasId("canvas-1"), null);
 
     const deleted = await request("DELETE", `/drama/episodes/${episode.id}`);
     assert.equal(deleted.status, 200);

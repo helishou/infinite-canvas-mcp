@@ -73,7 +73,13 @@ try {
             if (!project) { project = input; projects.push(project); creationCount++; }
             if (loseCreationResponse) { loseCreationResponse = false; return route.abort(); }
             data = { ok: true, project, created: true };
-        } else if (/\/production/.test(pathname)) {
+        } else if (pathname.endsWith('/production-context')) {
+            const id = decodeURIComponent(pathname.split('/')[3]);
+            data.context = id === 'linked' ? { role: 'episode', canvasId: id, episodeId: 'ep', dramaId: 'drama', owner: { kind: 'episode', id: 'ep' } } : { role: 'standalone', canvasId: id, owner: { kind: 'canvas', id } };
+        } else if (pathname.endsWith('/canvas/ensure')) data = { ok: true, project: projects[1], context: { role: 'episode', canvasId: 'linked', episodeId: 'ep', owner: { kind: 'episode', id: 'ep' } } };
+        else if (pathname.endsWith('/shared-assets')) data = { ok: true, assets: [], versions: [], updates: [] };
+        else if (pathname.includes('/drama/projects/') && pathname.endsWith('/episodes')) data = { ok: true, episodes: [episode] };
+        else if (/\/production/.test(pathname)) {
             const id = decodeURIComponent(pathname.split('/')[3]); const production = record(id);
             if (pathname.endsWith('/readiness')) {
                 const currentWork = production.draft.director?.workflow?.currentWork;
@@ -147,6 +153,12 @@ try {
     assert.match(creativePrompt, /雨夜机械师/);
     assert.match(creativePrompt, /制作中心创意入口/);
     assert.match(creativePrompt, /\$acheng-director/);
+    assert.match(creativePrompt, /制作语言默认简体中文/);
+    assert.match(creativePrompt, /display_summary/);
+    assert.match(creativePrompt, /视频制作启动时的必确认项/);
+    assert.match(creativePrompt, /videoAspectRatioConfirmed=true/);
+    assert.match(creativePrompt, /set_settings/);
+    assert.match(creativePrompt, /纯独立资产包且不交付视频时不问视频画幅/);
     assert.match(creativePrompt, /canvas-video-production-sop/);
     assert.match(creativePrompt, /workflow\.currentWork/);
     assert.match(creativePrompt, /site_navigate\(\{production:/);
@@ -283,7 +295,7 @@ try {
         useBackendStore.setState({ connected: true, checking: false });
         useProductionFollowStore.getState().setTarget({ kind: 'canvas', id: 'standalone', workId });
     });
-    await page.waitForFunction(() => document.querySelector('output[aria-label="location"]')?.textContent?.includes('/director/standalone?workspace=assets'));
+    await page.waitForFunction(() => document.querySelector('output[aria-label="location"]')?.textContent?.includes('/canvas/standalone?') && document.querySelector('output[aria-label="location"]')?.textContent?.includes('workspace=assets'));
     assert.equal(await page.getByRole('button', { name: 'Style & Assets', exact: true }).getAttribute('aria-current'), 'page');
     await page.getByRole('button', { name: 'test production hub', exact: true }).click();
     await page.getByRole('heading', { name: 'Production', exact: true }).waitFor();
@@ -303,7 +315,7 @@ try {
     const returnToProduction = page.getByRole('button', { name: 'Return to current production', exact: true });
     assert.equal(await returnToProduction.count(), 1, 'collapsed Agent controls stay out of the accessibility tree');
     await returnToProduction.click();
-    await page.waitForFunction(() => document.querySelector('output[aria-label="location"]')?.textContent?.includes('/director/standalone?workspace=story'));
+    await page.waitForFunction(() => document.querySelector('output[aria-label="location"]')?.textContent?.includes('/canvas/standalone?') && document.querySelector('output[aria-label="location"]')?.textContent?.includes('workspace=story'));
     assert.equal(await page.getByRole('button', { name: 'Story', exact: true }).getAttribute('aria-current'), 'page');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ passed: true, creationCount, scope: 'unified production entry and object views, creative entry handoff, legacy routes, independent canvas, episode alias, shared draft, canvas shortcut, new production, Agent disconnected draft protection, runId receipt recovery, active-target duplicate prevention, follow presentation, manual pause and return, mobile navigation, no media generation' }));

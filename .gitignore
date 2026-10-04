@@ -34,3 +34,6 @@ tmp
 .local-backups
 .tmp
 .learnings
+
+# 第三方输入法缓存（非项目产物，曾被误提交）
+Tencent/

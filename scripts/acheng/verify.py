@@ -50,5 +50,10 @@ assert any(i["path"].endswith("mode_lock") and i["severity"] == "error" for i in
 assert any(i["path"].endswith("recipe") for i in issues)
 assert any(i["path"].endswith("exclude_scope.0") for i in issues)
 assert "STYLE_MOTHER must be the final uploaded reference slot" in (root / "scripts/style_anchor.py").read_text(encoding="utf-8")
-assert "@图片1" not in (root / "SKILL.md").read_text(encoding="utf-8")
+skill = (root / "SKILL.md").read_text(encoding="utf-8")
+assert "@图片1" not in skill
+assert "Infinite Canvas 集成：视频制作启动确认" in skill
+assert "videoAspectRatioConfirmed=true" in skill
+assert "Infinite Canvas 集成：制作内容语言" in skill
+assert "display_summary" in skill
 print("Canvas Acheng compatibility: PASS")

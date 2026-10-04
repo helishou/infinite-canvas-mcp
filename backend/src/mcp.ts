@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { productionEditSchema, productionReadQuery, productionWriteReceipt } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionEditSchema, productionReadQuery, productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames } from "@basketikun/canvas-agent/drama/production-contract";
 import crypto from "node:crypto";
 import {
   executeCollaborationTool,
@@ -1823,6 +1823,12 @@ function registerBackendCanvasTools(
     },
   );
   const productionPath = (episodeId: string) => `/drama/episodes/${encodeURIComponent(episodeId)}/production`;
+  for (const name of productionWorkspaceToolNames) {
+    server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (raw: Record<string, unknown>) => {
+      const request = productionWorkspaceRequest(name, raw)!;
+      return textResult(request.method === "GET" ? await backendApi.get(request.path) : await backendApi.post(request.path, request.body));
+    });
+  }
   for (const name of ["production_compile", "production_apply_compilation", "production_diagnose_bindings"] as const) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (rawInput: Record<string, unknown>) => {
       const input = toolInputSchemas[name].parse(rawInput);

@@ -13,6 +13,17 @@ const ROLE_OPTIONS: Array<{ value: H3ReferenceRole; label: string }> = [
     ["style", "风格参考"], ["palette", "色卡"], ["prop", "道具"], ["other", "其他"],
 ].map(([value, label]) => ({ value: value as H3ReferenceRole, label }));
 
+const REFERENCE_ROLES = new Set(ROLE_OPTIONS.map((item) => item.value));
+
+function editableReferenceRole(ref: H3Ref): H3ReferenceRole {
+    const storedRole = String(ref.role || "").trim().toLowerCase().replace(/[ -]+/g, "_");
+    // Older reference records used this descriptive label outside the shared role enum.
+    if (storedRole === "source_video_temporal_structure") return "motion_reference";
+    return REFERENCE_ROLES.has(ref.role as H3ReferenceRole)
+        ? ref.role as H3ReferenceRole
+        : inferReferenceRole({ ...ref, role: undefined });
+}
+
 type Props = {
     ctx: CanvasNodeContext;
     refItem: H3Ref;
@@ -29,8 +40,9 @@ type Props = {
 export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onReplaceFromCanvas, onRemoveRef, onRemoveStoryboardImage, onDeleteGroup, onClose }: Props) {
     const characterReference = Boolean(group) || Boolean(refItem.nodeId && ctx.getNode(refItem.nodeId)?.type === "character");
     const characterVoice = Boolean(group && refItem.type === "audio");
-    const sourceRole = refItem.role || "character_turnaround";
-    const [role, setRole] = useState<H3ReferenceRole>(characterReference ? sourceRole : inferReferenceRole(refItem));
+    const sourceRole = editableReferenceRole(refItem);
+    const mediaUrl = refItem.url || (refItem.storageKey ? ctx.mediaUrl(refItem.storageKey) : "");
+    const [role, setRole] = useState<H3ReferenceRole>(characterReference ? sourceRole : editableReferenceRole(refItem));
     const [usage, setUsage] = useState<H3ReferenceUsage>(characterReference ? "reference" : refItem.usage || "reference");
     const [description, setDescription] = useState(refItem.description || "");
     const [storyboardSubjectIds, setStoryboardSubjectIds] = useState<string[]>(refItem.storyboardSubjectIds || []);
@@ -46,7 +58,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const persistedAnalysis = useRef<Record<string, unknown>>(refItem.analysis || {});
 
     useEffect(() => {
-        setRole(characterReference ? sourceRole : inferReferenceRole(refItem));
+        setRole(characterReference ? sourceRole : editableReferenceRole(refItem));
         setUsage(characterReference ? "reference" : refItem.usage || "reference");
         setDescription(refItem.description || "");
         setStoryboardSubjectIds(refItem.storyboardSubjectIds || []);
@@ -119,7 +131,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     };
 
     // 放大预览走宿主的统一预览弹窗（ctx.openMediaPreview），插件不自带灯箱。
-    const openPreview = () => ctx.openMediaPreview({ url: refItem.url, name: refItem.name, type: refItem.type });
+    const openPreview = () => ctx.openMediaPreview({ url: mediaUrl, name: refItem.name, type: refItem.type });
     const selectedOutfitCount = group?.outfits.filter((outfit) => outfitEnabledById[outfit.id]).length || 0;
     const toggleOutfit = (id: string, checked: boolean) => {
         const next = { ...outfitEnabledById, [id]: checked };
@@ -137,8 +149,8 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
         <Modal open title="参考素材职责" onCancel={onClose} onOk={() => void apply()} confirmLoading={saving} okText="应用到当前 Clip" cancelText="取消" width={560} destroyOnHidden>
             <div style={{ display: "grid", gridTemplateColumns: "144px 1fr", gap: 18, paddingTop: 8 }}>
                 <div style={{ position: "relative", alignSelf: "start", border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 8, overflow: "hidden", background: ctx.theme.node.panel, minHeight: 110 }}>
-                    {refItem.type === "image" ? <img src={refItem.url} alt={refItem.name} style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }} /> : refItem.type === "video" && refItem.url ? <video src={`${refItem.url}${refItem.url.includes("?") ? "&" : "?"}t=0.001`} preload="metadata" muted playsInline style={{ width: "100%", height: 110, objectFit: "cover", display: "block", background: "#000" }} /> : <div style={{ display: "grid", placeItems: "center", height: 110, fontSize: 12, opacity: 0.65 }}>{refItem.type === "video" ? "视频参考" : "音频参考"}</div>}
-                    {refItem.url ? <button type="button" className="minimax-outfit-zoom" title="放大预览" aria-label={`放大预览 ${refItem.name}`} onClick={openPreview}><H3Icon name="zoom" /></button> : null}
+                    {refItem.type === "image" && mediaUrl ? <img src={mediaUrl} alt={refItem.name} style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }} /> : refItem.type === "video" && mediaUrl ? <video src={mediaUrl} preload="auto" muted playsInline onLoadedMetadata={(event) => { const video = event.currentTarget; if (video.duration > 0) video.currentTime = Math.min(0.001, video.duration / 2); }} style={{ width: "100%", height: 110, objectFit: "cover", display: "block", background: "#000" }} /> : <div style={{ display: "grid", placeItems: "center", height: 110, fontSize: 12, opacity: 0.65 }}>{refItem.type === "video" ? "视频参考" : refItem.type === "audio" ? "音频参考" : "图片参考"}</div>}
+                    {mediaUrl ? <button type="button" className="minimax-outfit-zoom" title="放大预览" aria-label={`放大预览 ${refItem.name}`} onClick={openPreview}><H3Icon name="zoom" /></button> : null}
                     {canRemoveStoryboardImage ? <button type="button" className="minimax-outfit-remove" title="删除分镜图，保留分镜" aria-label={`删除分镜图 ${refItem.name}，保留分镜`} onClick={onRemoveStoryboardImage}><Trash2 /></button> : null}
                     <div style={{ padding: "7px 8px", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{refItem.name}</div>
                     <div style={{ display: "grid", gap: 6, padding: "0 8px 8px" }}>

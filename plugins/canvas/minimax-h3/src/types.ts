@@ -62,6 +62,7 @@ export type H3Segment = {
     h3ParameterPolicy?: "defaults" | "overrides";
     selectedVideoModelEnabled?: boolean;
     selectedVideoModel?: string;
+    selectedVideoModelFieldValues?: Record<string, Record<string, unknown>>;
     id: string;
     minimaxEngine?: "auto" | "local" | "runninghub";
     start?: number;

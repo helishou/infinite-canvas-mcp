@@ -3,6 +3,7 @@
   "branch": "main",
   "commit": "287b5ac27c3790c665029eb4fdf94628070b2ac8",
   "version": "4.3.9",
+  "patchVersion": "0a5867f04f6f3675",
   "files": {
     ".gitignore": "f5e8f5f1df9d6dc1e58d5344cf77433936eb863de73096cec312065a945a7faf",
     "3.5.4简便操作指南.md": "ef6ed78593d550683eb23cae545922e1e08e73e4b4cf9c729007b801badab5b0",
@@ -910,7 +911,7 @@
     "scripts/verify_previs_media.py": "0ad36a554fa7732fd33843bd2d29716184b2df8fc5e5f1784f4f5f1ad7b1c019",
     "scripts/workflow_state.py": "c22b31088836e111ce5a9822e86cc1c1b6e774a5f0e8188de10fe445f86ad905",
     "SECURITY.md": "6059c93aa72c86eb9b46bc3acbce592ee3c5afc72133291c82ca679e1ac4c5c6",
-    "SKILL.md": "a17aff7cd96a9906471e03371b526f66cc8e8264ea7d004f54d582ba3c2b9d18",
+    "SKILL.md": "9a7cedf5bcd80af63d3436b05794ebf12705d4bf8d41c98ef7fa4994def3b96a",
     "templates/asset-stage.json": "de6ee9bfd88629e27644278ce6c6b2797fe21edbfb1240979171ff0a29d5108e",
     "templates/body-spec.yaml": "959494542d4c701f1c0f1298af2b7c59fdc1f7edc45a6d857c55949cf1f789f2",
     "templates/character-bible.yaml": "69eb541146239cc18e746f14b994bb671124ecb3536ec934eb4f7a48bbb722c6",

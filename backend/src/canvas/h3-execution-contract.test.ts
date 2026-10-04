@@ -52,6 +52,12 @@ test('direct canvas run rejects an episode aspect mismatch before creating any t
     assert.equal(stores.tasks.list().length, 0);
 });
 
+test('an out-of-range enabled LoRA is rejected rather than silently clamped in a production run', t => {
+    const { stores, runner } = fixture(t);
+    assert.throws(() => runner.start({ projectId: 'p', nodeId: 'n', segmentId: 'a', params: { loraSlots: [{ name: 'turbo', strength: 11, enabled: true }] } }), /拒绝静默夹紧/);
+    assert.equal(stores.tasks.list().length, 0);
+});
+
 test('an omitted literal script line blocks generation even when the reference structure is valid', t => {
     const { stores, runner } = fixture(t);
     stores.projects.getH3ProductionRequirements = () => ({ ownerId: 'ep', revision: 1, version: 1, clips: [{ nodeId: 'n', segmentId: 'a', storyboardRequired: false, shots: [], literalDialogues: [{ blockId: 'line', speaker: '张伟', text: '我想重新开始。' }] }] });

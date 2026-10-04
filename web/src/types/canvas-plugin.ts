@@ -29,6 +29,11 @@ export type LocalH3Task = { id: string; status: "queued" | "running" | "awaiting
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 export type PluginModelCapability = "image" | "video" | "text" | "audio";
 export type ModelOption = { value: string; label: string };
+export type CanvasVideoModelField = {
+    id: string; name: string; type: "text" | "number" | "slider" | "boolean" | "dropdown" | "image" | "audio" | "video";
+    required?: boolean; default?: unknown; min?: number; max?: number; step?: number; options?: string[]; randomEnabled?: boolean; isPrompt?: boolean;
+};
+export type CanvasVideoModelSchema = { model: string; kind: "workflow" | "direct" | "unsupported"; workflow?: string; supported: boolean; fields: CanvasVideoModelField[]; defaultValues?: Record<string, unknown>; error?: string };
 export type CanvasGenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 export type CanvasGenerationLog = {
     id: string; projectId: string; nodeId?: string; segmentId?: string; status: CanvasGenerationLogStatus;
@@ -61,6 +66,7 @@ export type CanvasPluginAi = {
     getRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
     listModels: (capability?: PluginModelCapability) => ModelOption[];
     defaultModel: (capability: PluginModelCapability) => string;
+    describeVideoModel: (model: string, referenceCount: number) => Promise<CanvasVideoModelSchema>;
 };
 export type CanvasH3Defaults = {
     get: () => Promise<Record<string, unknown>>;

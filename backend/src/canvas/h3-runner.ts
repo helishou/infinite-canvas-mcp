@@ -123,6 +123,7 @@ export class CanvasH3Runner {
             const expectedRatio = canonicalH3AspectRatio(requirements?.videoAspectRatio);
             const actualRatio = canonicalH3AspectRatio(effective.params.aspectRatio);
             const issue = (code: string, message: string) => diagnostics.push({ code, nodeId: plan.nodeId, segmentId: plan.segmentId, message });
+            for (const message of effective.parameterIssues) issue('INVALID_H3_PARAMETERS', message);
             if (effective.params.selectedVideoModelEnabled === true && !String(effective.params.selectedVideoModel || "").trim()) issue("SELECTED_VIDEO_MODEL_REQUIRED", "已启用自选视频模型，请先选择一个已配置的视频模型");
             if (effective.params.selectedVideoModelEnabled === true && h3LocalOnlyReason(effective.params)) issue("SELECTED_VIDEO_MODEL_UNSUPPORTED_MODE", "当前 H3 专用的潜空间连续或分阶段确认功能不能与自选视频模型一起使用");
             if (segment.directorEngine && required?.promptContentHash && createHash('sha256').update(h3PromptContent(String(segment.prompt || ''))).digest('hex') !== required.promptContentHash) issue('DIRECTOR_PROMPT_CHANGED', 'Clip 正文与正式导演稿不一致；请保留完整对白、动作与镜头描述并重新编译发布');
@@ -1026,7 +1027,12 @@ export class CanvasH3Runner {
                     audioReferences: actualReferences.filter((reference) => String(reference.mediaType || reference.type || "").startsWith("audio")).map(videoModelReference),
                     workflowReferenceCount: actualReferences.length,
                     seconds: String(params.duration || segment.duration || 5),
-                    params: { ...selectedVideoModelParams(params), parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id } },
+                    params: {
+                        mode: runtimeTaskMode, taskMode: runtimeTaskMode, duration: Number(params.duration || segment.duration || 5),
+                        selectedVideoModelFieldValues: params.selectedVideoModelFieldValues,
+                        parentTaskId: parent.id,
+                        canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id },
+                    },
                     clientTaskId: childId,
                 }, bind);
                 const created = this.stores.tasks.get(started.taskId);
@@ -1323,14 +1329,6 @@ function videoModelReference(reference: Record<string, unknown>) {
         ...(stringValue("storageKey") ? { storageKey: stringValue("storageKey") } : {}),
         ...(stringValue("mimeType") ? { mimeType: stringValue("mimeType") } : {}),
     };
-}
-
-function selectedVideoModelParams(params: Record<string, unknown>) {
-    const values = { ...params };
-    for (const [target, source] of [["model", "modelName"], ["text_encoder", "textEncoder"], ["aspect_ratio", "aspectRatio"], ["video_vae", "videoVae"], ["audio_vae", "audioVae"], ["noise_seed", "seed"]] as const) {
-        if (values[target] === undefined && values[source] !== undefined) values[target] = values[source];
-    }
-    return values;
 }
 
 function confirmationOf(task: RuntimeTask): H3Confirmation {

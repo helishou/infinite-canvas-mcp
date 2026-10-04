@@ -31,6 +31,11 @@ import type { Stores } from "../stores/types.js";
  * 适配，不再给每个入口各写一套分支。
  */
 export class CanvasGenerationService {
+    private productionObserver?: {
+        prepare(command: CanvasGenerationCommand): { command: CanvasGenerationCommand; context?: unknown };
+        submitted(taskId: string, context: unknown): void;
+    };
+    observeProduction(observer: NonNullable<CanvasGenerationService["productionObserver"]>) { this.productionObserver = observer; }
     constructor(
         private readonly image: CanvasImageDispatcher,
         private readonly h3: CanvasH3Runner,
@@ -44,8 +49,33 @@ export class CanvasGenerationService {
         private readonly browserScript?: CanvasBrowserScriptDispatcher,
     ) {}
 
-    async start(command: CanvasGenerationCommand) {
+    async start(command: CanvasGenerationCommand, options?: { productionManaged: boolean }) {
+        const prepared = options?.productionManaged ? { command } : this.productionObserver?.prepare(command) || { command };
+        const result = await this.dispatch(prepared.command);
+        if (prepared.context) this.productionObserver?.submitted(result.taskId, prepared.context);
+        return result;
+    }
+
+    private async dispatch(command: CanvasGenerationCommand) {
+        const project = command.projectId ? this.stores.projects?.get?.(command.projectId) : undefined;
+        const node = (project?.nodes as Array<Record<string, any>> || []).find(item => item.id === command.nodeId);
+        if (node?.metadata?.sharedAssetOrigin && command.params?.writeBackToTarget) throw new Error("共享引用不能原位生成，请到源资产画布编辑");
         const operation = command.operation || "generate";
+        if (operation === "h3-run" && command.projectId) {
+            const requirements = this.stores.projects?.getH3ProductionRequirements?.(command.projectId);
+            const ids = command.nodeIds || (command.nodeId ? [command.nodeId] : []);
+            const clips = (requirements?.clips || []).filter(clip => ids.includes(clip.nodeId));
+            const start = command.segmentId ? clips.findIndex(clip => clip.segmentId === command.segmentId) : 0;
+            const end = command.endSegmentId ? clips.findIndex(clip => clip.segmentId === command.endSegmentId) : command.runFromCurrent || command.nodeIds?.length ? clips.length - 1 : start;
+            if (clips.slice(Math.max(0, start), Math.max(start, end) + 1).some(clip => clip.sharedAssetsCurrent === false)) throw Object.assign(new Error("共享资产已更新，等待提示词重新校验"), { code: "SHARED_ASSET_UPDATE" });
+        }
+        const referenceIds = new Set((command.references || []).map(ref => ref.sourceNodeId).filter(Boolean));
+        for (const reference of project?.nodes as Record<string, any>[] || []) {
+            const origin = reference.metadata?.sharedAssetOrigin;
+            if (!origin || !referenceIds.has(reference.id)) continue;
+            const latest = this.stores.assets.list({ dramaId: origin.dramaId }).find(asset => asset.source === "production-shared" && asset.metadata.assetId === origin.assetId);
+            if (!latest || latest.metadata.approvedId !== origin.approvedId) throw Object.assign(new Error("共享引用正在等待批准版本更新"), { code: "SHARED_ASSET_UPDATE" });
+        }
         // H3 uses its own runner validation and does not participate in generic loop slots.
         if (operation === "h3-run") return this.startH3(command);
         validateLoopGenerationCommand(command, command.projectId ? this.stores.projects.get(command.projectId) : null);

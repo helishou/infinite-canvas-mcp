@@ -48,8 +48,9 @@ test('Clip sync loads saved defaults, persists episode aspect and keeps existing
     const { db, stores, service } = fixture(t);
     db.setSetting('plugin:minimax-h3:defaults:v1', { modelName: 'test-model', sampler: 'er_sde', megapixels: 0.6, latentUpscaleEnabled: true, loraSlots: [{ name: 'turbo', strength: 0.75, enabled: true }] });
     const current = service.get('ep');
-    service.edit('ep', { operationId: 'settings-first', expectedRevision: current.revision, ops: [{ type: 'set_settings', patch: { videoAspectRatio: '9:16' } }] });
+    service.edit('ep', { operationId: 'settings-first', expectedRevision: current.revision, ops: [{ type: 'set_settings', patch: { videoAspectRatio: '9:16', videoAspectRatioConfirmed: true } }] });
     publish(service, doc());
+    assert.equal(service.get('ep').draft.settings.videoAspectRatioConfirmed, true);
     const runner = new EpisodeProductionRunner(service, stores, {} as CanvasGenerationService);
     await runner.syncClips('ep', 1);
     const group = service.get('ep').published!.clipGroups[0];
@@ -84,6 +85,28 @@ test("successful generation preflight preserves currentWork and creates no run o
     const batch = service.startBatch("ep", request);
     assert.equal(service.get("ep").draft.director?.workflow.currentWork?.runId, "run");
     assert.equal(service.startBatch("ep", request).runId, batch.runId);
+});
+
+test("canvas aliases create, replay and control the canonical episode batch", async t => {
+    const { db, service, stores } = fixture(t);
+    const director = doc(1);
+    director.workflow = { mediaProductionMode: "automatic" };
+    publish(service, director);
+    await new EpisodeProductionRunner(service, stores, {} as CanvasGenerationService).syncClips("ep", 1);
+    const canvas = new EpisodeProductionService(db, undefined, undefined, true, () => {});
+    const input = { runId: "alias-run", idempotencyKey: "alias-run", expectedRevision: canvas.get("canvas").revision, version: 1, targets: ["segment:seg0"] };
+    const run = canvas.startBatch("canvas", input);
+    assert.equal(run.episodeId, "ep");
+    assert.equal(service.getBatch("ep", "alias-run")?.runId, run.runId);
+    assert.equal(canvas.startBatch("canvas", input).runId, run.runId);
+    assert.equal(db.db.prepare("SELECT count(*) n FROM canvas_production_batches").get()?.n, 0);
+    assert.equal(canvas.pauseBatch("canvas", "alias-run").status, "paused");
+    assert.equal(canvas.resumeBatch("canvas", "alias-run").status, "pending");
+    const executing = canvas.batchForRun("canvas", "alias-run")!;
+    assert.equal(executing.episodeId, "canvas", "runner retains the caller alias while its service delegates persistence");
+    canvas.updateBatch({ ...executing, status: "succeeded" });
+    assert.equal(service.getBatch("ep", "alias-run")?.status, "succeeded");
+    assert.deepEqual(canvas.pendingBatches(), []);
 });
 
 test("director source, complete prompt, partial cursor and stable IDs round-trip without implicit Clips", async t => {
@@ -192,15 +215,15 @@ test("version 16 migration backs up data and creates run history without rewriti
     const reopened = new BackendDatabase(file);
     assert.equal(reopened.getDramaEpisode("ep")?.title, "Episode");
     assert.ok(reopened.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_production_batches'").get());
-    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v22"))); reopened.close();
+    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v24"))); reopened.close();
 });
 
 test("version 21 databases add production batch storage in schema version 22", t => {
     const { db, file } = fixture(t);
-    db.db.exec("DELETE FROM schema_migrations WHERE version=22; DROP TABLE canvas_production_batches; DROP TABLE episode_production_batches");
+    db.db.exec("DELETE FROM schema_migrations WHERE version>=22; DROP TABLE canvas_production_batches; DROP TABLE episode_production_batches");
     const upgraded = new BackendDatabase(file);
     const version = upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
-    assert.equal(version.version, 22);
+    assert.equal(version.version, 24);
     assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='episode_production_batches'").get());
     assert.equal(upgraded.getDramaEpisode("ep")?.title, "Episode");
     upgraded.close();

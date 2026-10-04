@@ -81,7 +81,7 @@ test('candidate validation does not activate or change a pinned run', t => {
 test('project vendor installs the full upstream tree with a pinned commit manifest', t => {
   const engine = fixture(t); initUpstream(engine);
   const commit = commitFiles(engine, {
-    'SKILL.md': '---\nversion: "4.3.9"\n---\nAcheng\n',
+    'SKILL.md': '---\nversion: "4.3.9"\n---\nAcheng\n\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n',
     'modules/story/SKILL.md': 'story module',
     'references/camera.mp4': Buffer.from([0, 1, 2, 255]),
     'references/中文指南/操作规则.md': 'UTF-8 upstream filename',
@@ -91,6 +91,12 @@ test('project vendor installs the full upstream tree with a pinned commit manife
   const metadata = JSON.parse(fs.readFileSync(path.join(engine.projectSkill, '.canvas-upstream.json'), 'utf8'));
   assert.equal(metadata.commit, commit);
   assert.equal(metadata.version, '4.3.9');
+  assert.ok(metadata.patchVersion);
+  const projectSkill = fs.readFileSync(path.join(engine.projectSkill, 'SKILL.md'), 'utf8');
+  assert.match(projectSkill, /Infinite Canvas 集成：视频制作启动确认/);
+  assert.match(projectSkill, /内容交付默认自动文件批处理，媒体生产默认逐项生成/);
+  assert.match(projectSkill, /Infinite Canvas 集成：制作内容语言/);
+  assert.match(projectSkill, /镜头 `display_summary`/);
   assert.equal(fs.readFileSync(path.join(engine.projectSkill, 'modules/story/SKILL.md'), 'utf8'), 'story module');
   assert.deepEqual(fs.readFileSync(path.join(engine.projectSkill, 'references/camera.mp4')), Buffer.from([0, 1, 2, 255]));
   assert.equal(fs.readFileSync(path.join(engine.projectSkill, 'references/中文指南/操作规则.md'), 'utf8'), 'UTF-8 upstream filename');
@@ -101,14 +107,14 @@ test('project vendor installs the full upstream tree with a pinned commit manife
 test('project vendor refuses to overwrite local edits and can sync a clean upstream revision', t => {
   const engine = fixture(t); initUpstream(engine);
   const firstCommit = commitFiles(engine, {
-    'SKILL.md': '---\nversion: "4.3.9"\n---\nAcheng\n',
+    'SKILL.md': '---\nversion: "4.3.9"\n---\nAcheng\n\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n',
     'modules/story/SKILL.md': 'story v1',
   });
   engine.prepareProjectSkill(firstCommit, '4.3.9').finalize();
   fs.writeFileSync(path.join(engine.projectSkill, 'modules/story/SKILL.md'), 'local edit');
   fs.rmSync(path.join(engine.source, 'modules/story/SKILL.md'));
   const secondCommit = commitFiles(engine, {
-    'SKILL.md': '---\nversion: "4.4.0"\n---\nAcheng updated\n',
+    'SKILL.md': '---\nversion: "4.4.0"\n---\nAcheng updated\n\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n',
     'modules/assets/SKILL.md': 'assets v2',
   });
   assert.throws(() => engine.prepareProjectSkill(secondCommit, '4.4.0'), /local changes/);
@@ -123,9 +129,9 @@ test('project vendor refuses to overwrite local edits and can sync a clean upstr
 });
 test('runtime rollback restores the matching full project Skill commit', t => {
   const engine = fixture(t); initUpstream(engine);
-  const firstCommit = commitFiles(engine, { 'SKILL.md': '---\nversion: "4.3.9"\n---\nAcheng v1\n', 'modules/story/SKILL.md': 'story v1' });
+  const firstCommit = commitFiles(engine, { 'SKILL.md': '---\nversion: "4.3.9"\n---\nAcheng v1\n\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n', 'modules/story/SKILL.md': 'story v1' });
   const first = version(engine, 'runtime-v1', firstCommit, '4.3.9');
-  const secondCommit = commitFiles(engine, { 'SKILL.md': '---\nversion: "4.4.0"\n---\nAcheng v2\n', 'modules/story/SKILL.md': 'story v2' });
+  const secondCommit = commitFiles(engine, { 'SKILL.md': '---\nversion: "4.4.0"\n---\nAcheng v2\n\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n', 'modules/story/SKILL.md': 'story v2' });
   const second = version(engine, 'runtime-v2', secondCommit, '4.4.0');
   engine.activate(first, null);
   engine.activate(second, first);

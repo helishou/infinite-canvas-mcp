@@ -39,7 +39,8 @@ export function projectDirector(data: EpisodeProductionData) {
     const prior = new Map(data.clipGroups.map(g => [g.id, g]));
     const shotIds = new Set(shots.map(s => String(s.id)));
     data.clipGroups = list(source.segments).filter(s => Array.isArray(s.shot_ids) && s.shot_ids.length && s.shot_ids.every((id: unknown) => shotIds.has(String(id))))
-        .map(s => ({ id: String(s.id), shotIds: s.shot_ids.map(String), nodeId: prior.get(String(s.id))?.nodeId || null, segmentId: prior.get(String(s.id))?.segmentId || null, sourceVersion: prior.get(String(s.id))?.sourceVersion || 0 }));
+        .map(s => ({ id: String(s.id), shotIds: s.shot_ids.map(String), nodeId: prior.get(String(s.id))?.nodeId || null, segmentId: prior.get(String(s.id))?.segmentId || null, sourceVersion: prior.get(String(s.id))?.sourceVersion || 0,
+            ...(prior.get(String(s.id))?.inputOutdated === undefined ? {} : { inputOutdated: prior.get(String(s.id))!.inputOutdated }) }));
     if (new Set(d.artifacts.map(a => `${a.kind}:${a.targetId}`)).size !== d.artifacts.length) throw new Error("同一目标只能有一个当前编译产物");
     for (const artifact of d.artifacts) {
         if (artifact.sha256 !== promptHash(artifact.prompt)) throw new Error(`产物 ${artifact.id} 正文字节摘要不一致`);
@@ -73,6 +74,7 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
         for (const id of dependencies) visit(String(id));
         for (const id of dependencies) {
             const asset = d.assets[String(id)];
+            if (asset?.inputOutdated) throw new Error(`依赖 ${id} 的媒体来自旧共享输入，请明确处理后继续`);
             if (!asset || asset.status !== "approved" || !asset.evidence?.trim() || (plan.get(String(id))?.version && plan.get(String(id))?.version !== asset.version)) throw new Error(`产物 ${artifact.id} 依赖未批准或版本不一致：${id}`);
         }
         if (d.source.style_policy === "waived" && !String(d.source.style_policy_reason || "").trim()) throw new Error("风格豁免缺少用户决定与理由");

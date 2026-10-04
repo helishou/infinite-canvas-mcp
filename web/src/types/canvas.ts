@@ -88,6 +88,8 @@ export type CanvasNodeModeResult = {
 };
 
 export type CanvasNodeMetadata = {
+    productionSceneId?: string;
+    sharedAssetOrigin?: { dramaId: string; assetId: string; approvedId: string; sourceProjectId: string; sourceNodeId: string };
     content?: string;
     url?: string;
     composerContent?: string;

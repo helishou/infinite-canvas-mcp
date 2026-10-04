@@ -7,6 +7,7 @@ import express, {
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { ensureProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
 
 import {
   type ResolvedConfig,
@@ -555,6 +556,18 @@ export function startServer(
       : null;
     res.json({ ok: true, projectId: req.params.id, episode, drama });
   });
+  app.get("/canvas/projects/:id/production-context", (req, res) => {
+    try { res.json({ ok: true, context: productionCanvasContext(db, req.params.id) }); }
+    catch (error) { res.status(404).json({ ok: false, error: String(error) }); }
+  });
+  app.post("/drama/episodes/:episodeId/canvas/ensure", (req, res) => {
+    try { res.json({ ok: true, ...ensureProductionCanvas(db, "episode", req.params.episodeId, events) }); }
+    catch (error) { res.status(409).json({ ok: false, error: String(error) }); }
+  });
+  app.post("/drama/projects/:dramaId/asset-canvas/ensure", (req, res) => {
+    try { res.json({ ok: true, ...ensureProductionCanvas(db, "shared-assets", req.params.dramaId, events) }); }
+    catch (error) { res.status(409).json({ ok: false, error: String(error) }); }
+  });
   app.get("/canvas/projects/:id/changes", (req, res) => {
     try {
       res.json({
@@ -795,12 +808,14 @@ export function startServer(
     }
   });
   app.delete("/canvas/projects/:id", (req, res) => {
+    try {
     const deleted = stores.projects.delete(req.params.id);
     events.publishCanvasSnapshot({
       entityId: req.params.id,
       payload: { deleted },
     });
     res.json({ ok: true, deleted });
+    } catch (error) { res.status(409).json({ ok: false, error: String(error) }); }
   });
   // ── H3 节点历史运行产物（按需取，替代 metadata.materials 字段）──
   app.get("/canvas/projects/:id/nodes/:nodeId/materials", (req, res) => {

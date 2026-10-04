@@ -9,6 +9,7 @@ import { createBackendClient } from "../runtime/comfy-client.js";
 import { logger } from "../utils/logger.js";
 import { field, type JsonRecord, errorMessage } from "../utils/value.js";
 import { codexEventHistory, type CodexEventHistory } from "./codex-event-history.js";
+import { beginTurnTrace, countTurnEvent, endTurnTrace, markFirstEvent, markTurnCompleted } from "./codex-perf.js";
 import type { CodexNotificationParams, CodexPlanUpdate, CodexReasoningEffort, CodexRequestMethod, CodexRequestParams, CodexRequestResult, CodexSkillSelector, CodexThreadItemEntry, CodexTurnInput } from "./codex-protocol.js";
 import type { AgentEmit, AgentPermissionMode } from "./types.js";
 import { requireCodexLaunch } from "./codex-executable.js";
@@ -36,6 +37,7 @@ export class CodexAppClient {
     private buffer = "";
     private currentThreadId = "";
     private currentTurnId = "";
+    private turnRequestStartedAt = new Map<string, number>();
     private pendingTurnStart?: PendingTurnStart;
     private startedTurnKeys = new Set<string>();
     private textByItem = new Map<string, string>();
@@ -281,6 +283,8 @@ export class CodexAppClient {
         this.currentThreadId = threadId;
         this.currentTurnId = "";
         this.lastUsage = null;
+        const turnRequestStartedAt = Date.now();
+        this.turnRequestStartedAt.set(threadId, turnRequestStartedAt);
         const pendingStart: PendingTurnStart = { threadId, prompt, messageText, onTurn };
         this.pendingTurnStart = pendingStart;
         try {
@@ -289,6 +293,7 @@ export class CodexAppClient {
             if (!turnId) throw new Error("Codex app-server 没有返回 turn id");
             pendingStart.turnId = turnId;
             this.currentTurnId = turnId;
+            beginTurnTrace(turnCacheKey(threadId, turnId), turnRequestStartedAt);
             this.notifyTurnStarted(threadId, turnId, pendingStart);
             const turnKey = turnCacheKey(threadId, turnId);
             const completed = this.completedTurns.get(turnKey);
@@ -307,6 +312,7 @@ export class CodexAppClient {
             throw error;
         } finally {
             if (this.pendingTurnStart === pendingStart) this.pendingTurnStart = undefined;
+            if (this.turnRequestStartedAt.get(threadId) === turnRequestStartedAt) this.turnRequestStartedAt.delete(threadId);
             if (pendingStart.turnId) this.startedTurnKeys.delete(turnCacheKey(threadId, pendingStart.turnId));
         }
     }
@@ -482,6 +488,14 @@ export class CodexAppClient {
         const event = normalizeCodexNotification(method, params);
         if (!event) return;
         const eventScope = codexEventScope(params);
+        const traceThreadId = String(field(event, "thread_id") || field(params, "threadId") || this.currentThreadId);
+        const traceTurnId = String(field(event, "turn_id") || field(params, "turnId") || this.currentTurnId);
+        if (traceThreadId && traceTurnId) {
+            const traceKey = turnCacheKey(traceThreadId, traceTurnId);
+            beginTurnTrace(traceKey, this.turnRequestStartedAt.get(traceThreadId) ?? Date.now());
+            markFirstEvent(traceKey);
+            countTurnEvent(traceKey);
+        }
         if (event.type === "item.started" || event.type === "item.completed") {
             const item = field(event, "item") as JsonRecord | undefined;
             const id = String(field(item, "id") || "");
@@ -524,6 +538,7 @@ export class CodexAppClient {
             const turnId = String(field(turn, "id") || field(params, "turnId") || "");
             const threadId = String(field(params, "threadId") || field(event, "thread_id") || "");
             const planKey = turnCacheKey(threadId, turnId);
+            markTurnCompleted(planKey);
             const plan = this.plansByTurn.get(planKey);
             if (plan) this.plansByTurn.set(planKey, { ...plan, turnStatus: String(field(turn, "status") || "completed") });
             if (threadId && turnId) {
@@ -643,6 +658,7 @@ export class CodexAppClient {
             this.currentThreadId = "";
             this.currentTurnId = "";
         }
+        endTurnTrace(turnKey);
         this.emit("agent_done", { agent: "codex", usage: event.usage, ...eventScope });
     }
 

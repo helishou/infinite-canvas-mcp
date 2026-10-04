@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import fs from "node:fs";
+import { productionWorkspaceRequest } from "../drama/production-workspace-contract.js";
 import path from "node:path";
 import express, {
   type NextFunction,
@@ -648,6 +649,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     route(async (req, res) => {
       const name = String(req.body?.name || "");
       const input = objectBody(req.body?.input);
+      const workspaceRequest = productionWorkspaceRequest(name, input);
+      if (workspaceRequest) return void res.json({ ok: true, result: workspaceRequest.method === "GET" ? await backend.get(workspaceRequest.path) : await backend.post(workspaceRequest.path, workspaceRequest.body) });
       if (isCollaborationTool(name))
         return void res.json({
           ok: true,

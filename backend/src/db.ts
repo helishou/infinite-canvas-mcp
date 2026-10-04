@@ -80,6 +80,7 @@ export type CanvasFolder = {
     outline?: string; description?: string; coverStorageKey?: string | null; tags?: string[];
     /** 画布侧创建的普通文件夹为 false；旧客户端未传时按短剧兼容。 */
     isDrama?: boolean;
+    sharedAssetCanvasId?: string | null;
 };
 export type Asset = {
     id: string; kind: string; title: string; coverUrl: string; tags: string[];
@@ -619,6 +620,71 @@ export class BackendDatabase {
                     CREATE INDEX IF NOT EXISTS canvas_production_batches_status ON canvas_production_batches(status, updated_at);
                 `);
                 this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (22, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 23) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                if (!(this.db.prepare("PRAGMA table_info(drama_projects)").all() as Array<{ name: string }>).some(column => column.name === "shared_asset_canvas_id")) this.db.exec("ALTER TABLE drama_projects ADD COLUMN shared_asset_canvas_id TEXT REFERENCES canvas_projects(id)");
+                this.db.exec(`
+                    CREATE UNIQUE INDEX IF NOT EXISTS drama_shared_asset_canvas ON drama_projects(shared_asset_canvas_id);
+                    CREATE TABLE IF NOT EXISTS drama_asset_versions (
+                        id TEXT PRIMARY KEY, drama_id TEXT NOT NULL REFERENCES drama_projects(folder_id) ON DELETE CASCADE,
+                        asset_id TEXT NOT NULL, source_project_id TEXT NOT NULL, source_node_id TEXT NOT NULL,
+                        source_version INTEGER NOT NULL, storage_key TEXT NOT NULL, sha256 TEXT NOT NULL,
+                        snapshot_json TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL,
+                        UNIQUE(drama_id, asset_id, source_version, storage_key)
+                    );
+                    CREATE TABLE IF NOT EXISTS drama_asset_adoptions (
+                        id TEXT PRIMARY KEY, approved_id TEXT NOT NULL REFERENCES drama_asset_versions(id) ON DELETE CASCADE,
+                        episode_id TEXT NOT NULL REFERENCES drama_episodes(id) ON DELETE CASCADE,
+                        target_asset_id TEXT NOT NULL, expected_revision INTEGER NOT NULL,
+                        status TEXT NOT NULL, error TEXT, updated_at TEXT NOT NULL,
+                        UNIQUE(approved_id, episode_id, target_asset_id)
+                    );
+                    CREATE TRIGGER IF NOT EXISTS fixed_episode_canvas BEFORE UPDATE OF canvas_id ON drama_episodes
+                    WHEN OLD.canvas_id IS NOT NULL AND NEW.canvas_id IS NOT OLD.canvas_id
+                    BEGIN SELECT RAISE(ABORT, '分集画布已固定，不允许改绑或解绑'); END;
+                    CREATE TRIGGER IF NOT EXISTS fixed_shared_canvas BEFORE UPDATE OF shared_asset_canvas_id ON drama_projects
+                    WHEN OLD.shared_asset_canvas_id IS NOT NULL AND NEW.shared_asset_canvas_id IS NOT OLD.shared_asset_canvas_id
+                    BEGIN SELECT RAISE(ABORT, '共享资产画布已固定，不允许改绑或解绑'); END;
+                    CREATE TRIGGER IF NOT EXISTS episode_canvas_role_insert BEFORE INSERT ON drama_episodes
+                    WHEN NEW.canvas_id IS NOT NULL AND (
+                        EXISTS(SELECT 1 FROM drama_projects WHERE shared_asset_canvas_id=NEW.canvas_id) OR
+                        EXISTS(SELECT 1 FROM canvas_productions WHERE project_id=NEW.canvas_id))
+                    BEGIN SELECT RAISE(ABORT, '画布已有其他制作归属，不能覆盖'); END;
+                    CREATE TRIGGER IF NOT EXISTS episode_canvas_role_update BEFORE UPDATE OF canvas_id ON drama_episodes
+                    WHEN NEW.canvas_id IS NOT NULL AND NEW.canvas_id IS NOT OLD.canvas_id AND (
+                        EXISTS(SELECT 1 FROM drama_projects WHERE shared_asset_canvas_id=NEW.canvas_id) OR
+                        EXISTS(SELECT 1 FROM canvas_productions WHERE project_id=NEW.canvas_id))
+                    BEGIN SELECT RAISE(ABORT, '画布已有其他制作归属，不能覆盖'); END;
+                    CREATE TRIGGER IF NOT EXISTS shared_canvas_role BEFORE UPDATE OF shared_asset_canvas_id ON drama_projects
+                    WHEN NEW.shared_asset_canvas_id IS NOT NULL AND EXISTS(SELECT 1 FROM drama_episodes WHERE canvas_id=NEW.shared_asset_canvas_id)
+                    BEGIN SELECT RAISE(ABORT, '画布已属于分集'); END;
+                `);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (23, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 24) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`
+                    CREATE TABLE IF NOT EXISTS production_preparations (
+                        operation_id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+                        bindings_json TEXT, receipt_json TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS production_task_bindings (
+                        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                        owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, version INTEGER NOT NULL,
+                        source_hash TEXT NOT NULL, target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
+                        project_id TEXT NOT NULL, node_id TEXT NOT NULL, targets_json TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'submitted', error TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS production_task_bindings_owner ON production_task_bindings(owner_kind, owner_id, target_id);
+                `);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (24, ?)").run(new Date().toISOString());
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
@@ -1625,6 +1691,16 @@ export class BackendDatabase {
             }
             const committedOperations: CanvasOperation[] = [];
             const operationResults = operations.flatMap((operation, index) => {
+                if (!context?.runtimeWrite) {
+                    const node = (Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).find(item => item.id === (operation.id || operation.nodeId));
+                    const metadata = operation.metadata as Record<string, unknown> | undefined;
+                    if (metadata?.sharedAssetOrigin && commandFingerprint(metadata.sharedAssetOrigin) !== commandFingerprint(node?.metadata?.sharedAssetOrigin || null)) throw new Error("共享资产来源由 Backend 登记，不能直接修改");
+                    if (node?.metadata?.sharedAssetOrigin && operation.type === "update_node") {
+                        const protectedKeys = ["content", "storageKey", "sharedAssetOrigin", "characterImages", "characterPrimaryIndex", "sceneImages", "resultStorageKey", "imageResults"];
+                        if (protectedKeys.some(key => metadata && Object.hasOwn(metadata, key) && commandFingerprint(metadata[key]) !== commandFingerprint(node.metadata[key] ?? null)) ||
+                            (operation.metadataDelete as string[] || []).some(key => protectedKeys.includes(key)) || Object.keys(operation.patch as object || {}).some(key => ["content", "type", "metadata", "storageKey"].includes(key))) throw new Error("共享引用内容只在资产画布编辑，请查看源资产");
+                    }
+                }
                 if (operation.type === "text_suggestion") throw new Error("text_suggestion 是服务端回执，不能直接提交");
                 // 文本增量与候选通知必须由本次事务计算，不能信任客户端夹带的回执字段。
                 delete operation.textUpdate;
@@ -1966,12 +2042,15 @@ export class BackendDatabase {
     }
 
     deleteCanvasProject(id: string): number {
+        if (this.getDramaEpisodeByCanvasId(id) || this.db.prepare("SELECT 1 FROM drama_projects WHERE shared_asset_canvas_id=?").get(id)) {
+            throw new Error("画布仍绑定制作对象，不能从画布库删除");
+        }
         return Number(this.db.prepare("DELETE FROM canvas_projects WHERE id = ?").run(id).changes);
     }
 
     listCanvasFolders(): CanvasFolder[] {
         const rows = this.db.prepare(
-            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.updated_at AS drama_updated_at, CASE WHEN d.folder_id IS NULL THEN 0 ELSE 1 END AS is_drama FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id ORDER BY f.created_at ASC"
+            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.shared_asset_canvas_id, d.updated_at AS drama_updated_at, CASE WHEN d.folder_id IS NULL THEN 0 ELSE 1 END AS is_drama FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id ORDER BY f.created_at ASC"
         ).all() as Array<Record<string, unknown>>;
         return rows.map((row) => {
             const value = JSON.parse(String(row.tags_json || "[]"));
@@ -1982,11 +2061,16 @@ export class BackendDatabase {
                 outline: String(row.outline || ""), description: String(row.description || ""),
                 coverStorageKey: row.cover_storage_key ? String(row.cover_storage_key) : null, tags,
                 isDrama: Number(row.is_drama) === 1,
+                sharedAssetCanvasId: row.shared_asset_canvas_id ? String(row.shared_asset_canvas_id) : null,
             };
         });
     }
 
     upsertCanvasFolder(folder: CanvasFolder) {
+        if (folder.sharedAssetCanvasId !== undefined) {
+            const current = this.db.prepare("SELECT shared_asset_canvas_id FROM drama_projects WHERE folder_id=?").get(folder.id);
+            if ((current?.shared_asset_canvas_id || null) !== folder.sharedAssetCanvasId) throw new Error("共享资产画布绑定由正式准备接口维护，不能改绑");
+        }
         const updatedAt = String(folder.updatedAt || new Date().toISOString());
         const tags = Array.isArray(folder.tags) ? folder.tags.map(String) : [];
         this.db.exec("BEGIN IMMEDIATE");
@@ -2017,7 +2101,7 @@ export class BackendDatabase {
         const id = input.id || `episode-${input.dramaId}-${input.episodeNumber}-${Math.random().toString(36).slice(2, 8)}`;
         const existing = this.getDramaEpisodeByNumber(input.dramaId, input.episodeNumber);
         const createdAt = existing?.createdAt || now;
-        const canvasId = input.canvasId ?? null;
+        const canvasId = input.canvasId === undefined ? existing?.canvasId ?? null : input.canvasId;
         const fullPlot = input.fullPlot ?? "";
         if (existing) {
             this.db.prepare(

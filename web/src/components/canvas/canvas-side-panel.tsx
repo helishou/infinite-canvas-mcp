@@ -26,13 +26,15 @@ import { useBackendStore } from "@/stores/use-backend-store";
 import { CANVAS_SIDE_PANEL_MAX_WIDTH, CANVAS_SIDE_PANEL_MIN_WIDTH, CANVAS_SIDE_PANEL_MOTION_MS, useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
+import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
+import { ProductionDirectory } from "@/components/production/canvas-production-workspace";
 
 import type { InsertAssetPayload } from "./asset-picker-modal";
 
 const PANEL_MOTION_SECONDS = CANVAS_SIDE_PANEL_MOTION_MS / 1000;
 const PANEL_EASE = [0.22, 1, 0.36, 1] as const;
 
-type PanelTab = "canvas" | "assets" | "prompts";
+type PanelTab = "production" | "canvas" | "assets" | "prompts";
 
 type Props = {
     onSelectionChange: (ids: Set<string>) => void;
@@ -67,6 +69,8 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
+    const productionOwner = useProductionWorkspaceStore(state => state.context?.owner);
+    useEffect(() => { setTab(productionOwner ? "production" : "canvas"); }, [productionOwner?.id]);
     const width = useCanvasSidePanelStore((state) => state.width);
     const panelOpen = useCanvasSidePanelStore((state) => state.panelOpen);
     const panelMounted = useCanvasSidePanelStore((state) => state.panelMounted);
@@ -117,12 +121,13 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
                 data-canvas-no-zoom
             >
                 <div className="flex items-center gap-5 px-4 pt-3.5">
+                    {productionOwner && <TabButton label={t("productionCanvas.directory")} active={tab === "production"} theme={theme} onClick={() => setTab("production")} />}
                     <TabButton label={t("canvas.sidePanel.canvas")} active={tab === "canvas"} theme={theme} onClick={() => setTab("canvas")} />
                     <TabButton label={t("canvas.sidePanel.assets")} active={tab === "assets"} theme={theme} onClick={() => setTab("assets")} />
                     <TabButton label={t("canvas.sidePanel.prompts")} active={tab === "prompts"} theme={theme} onClick={() => setTab("prompts")} />
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
-                    {tab === "canvas" ? (
+                    {tab === "production" ? <ProductionDirectory /> : tab === "canvas" ? (
                         <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onSelectionChange={onSelectionChange} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} theme={theme} focusSearchRequest={nodeSearchFocusRequest} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab projectId={projectId} onInsert={onInsertAsset} theme={theme} />

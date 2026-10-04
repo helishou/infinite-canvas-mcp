@@ -1,4 +1,6 @@
 import { z } from "zod";
+export { productionSceneEntries } from "./production-directory.js";
+export { productionWorkspaceSchemas, productionWorkspaceDescriptions, productionWorkspaceToolNames, productionWorkspaceRequest } from "./production-workspace-contract.js";
 
 const id = z.string().trim().min(1);
 
@@ -15,6 +17,7 @@ export const directorPatchFields = {
 export const directorModules = ["story", "assets", "shots", "performance", "effects", "model", "continuity"] as const;
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 export const directorBoundarySchema = z.object({ from: id, to: id, tailFrame: z.boolean(), motionContext: z.boolean(), reason: z.string() });
+export const sharedAssetSourceSchema = z.object({ dramaId: id, assetId: id, approvedId: id, sourceProjectId: id, sourceNodeId: id });
 export const directorCurrentWorkSchema = z.object({
     workId: id,
     module: z.enum(directorModules),
@@ -24,6 +27,7 @@ export const directorCurrentWorkSchema = z.object({
     inputRevision: z.number().int().nonnegative(),
     sourceHash: hash.optional(),
     runId: id.optional(),
+    taskId: id.optional(),
 }).passthrough();
 export const directorDecisionSchema = z.object({
     id,
@@ -60,7 +64,7 @@ export const directorProductionSchema = z.object({
         receipt: z.object({ sourceHash: hash, promptHash: hash, engineRuntimeId: id, validator: id }).passthrough(),
     })),
     // Planning drafts may precede canvas node creation and asset approval.
-    assets: z.record(id, z.object({ nodeId: id.optional(), assetId: z.string().optional(), storageKey: z.string().optional(), sha256: hash.optional(), version: id, status: z.enum(["planned", "generated", "approved", "rejected"]), evidence: z.string().optional() }).passthrough()),
+    assets: z.record(id, z.object({ nodeId: id.optional(), assetId: z.string().optional(), storageKey: z.string().optional(), sha256: hash.optional(), version: id, status: z.enum(["planned", "generated", "approved", "rejected"]), evidence: z.string().optional(), sharedSource: sharedAssetSourceSchema.optional(), inputOutdated: z.boolean().optional() }).passthrough()),
     shotInputs: z.record(id, z.object({ keyframePolicy: z.enum(["new", "reuse", "none"]).default("none"), assetIds: z.array(id).default([]), keyframeAssetId: id.optional() }).passthrough()),
     boundaries: z.array(directorBoundarySchema),
     executionAuthorized: z.boolean().default(false),
@@ -115,10 +119,12 @@ export const clipGroupSchema = z.object({
     segmentId: id.nullable(),
     sourceVersion: z.number().int().min(0),
     continuityReason: z.string().optional(),
+    inputOutdated: z.boolean().optional(),
 });
 
 export const productionSettingsSchema = z.object({
     videoAspectRatio: z.string().regex(/^[1-9]\d*:[1-9]\d*$/).nullable().optional(),
+    videoAspectRatioConfirmed: z.boolean().optional(),
     mode: z.enum(["manual", "auto"]),
     imageModel: z.string(),
     h3Model: z.string(),
@@ -146,6 +152,8 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "asset", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }),
     z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }),
     z.object({ type: z.literal("bind_director_asset"), assetId: id, nodeId: id }),
+    z.object({ type: z.literal("adopt_shared_asset"), assetId: id, approvedId: id, nodeId: id }),
+    z.object({ type: z.literal("bind_director_segment"), targetId: id, nodeId: id, segmentId: id }),
     z.object({ type: z.literal("set_director_boundary"), boundary: directorBoundarySchema }),
     z.object({ type: z.literal("set_director_segment_group"), segmentId: id, shotIds: z.array(id).min(1), removeSegmentIds: z.array(id).default([]) }),
     z.object({ type: z.literal("review_director_asset"), assetId: id, version: z.number().int().min(1), sourceHash: hash, nodeId: id, storageKey: id, sha256: hash, verdict: z.enum(["approved", "rejected"]), evidence: z.string().trim().min(1) }),

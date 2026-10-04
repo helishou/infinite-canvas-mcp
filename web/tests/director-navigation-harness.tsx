@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { App, ConfigProvider } from "antd";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
@@ -6,13 +6,19 @@ import { ensureCanvasDraftLease } from "../src/lib/canvas/canvas-draft-session";
 import "../src/styles/globals.css";
 
 await ensureCanvasDraftLease();
+const { useCanvasProductionContext } = await import("../src/components/production/canvas-production-workspace");
+const { useProductionWorkspaceStore } = await import("../src/stores/use-production-workspace-store");
+const { fetchBackendProject } = await import("../src/services/backend-api");
 const [{ default: ProductionPage }, { default: ProductionHubPage }, { default: CanvasLibraryPage }, { AppTopNav }, { AgentPanel }, { ProductionFollowController }, { CanvasTopBar }, { useAgentStore }, { useBackendStore }, { useProductionFollowStore }, { editEpisodeProduction, fetchEpisodeProduction }, { default: i18n }] = await Promise.all([
     import("../src/pages/drama/production"), import("../src/pages/production"), import("../src/pages/canvas"), import("../src/components/layout/app-top-nav"), import("../src/components/agent/agent-panel"),
     import("../src/components/production/production-follow-controller"), import("../src/components/canvas/canvas-top-bar"), import("../src/stores/use-agent-store"), import("../src/stores/use-backend-store"), import("../src/stores/use-production-follow-store"), import("../src/services/backend-api"), import("../src/i18n"),
 ]);
 function Canvas() {
     const { id = "" } = useParams(); const noop = () => {};
-    return <div className="relative h-64"><CanvasTopBar projectId={id} title="Canvas" titleDraft="" isTitleEditing={false} onTitleDraftChange={noop} onStartTitleEditing={noop} onFinishTitleEditing={noop} onCancelTitleEditing={noop} canUndo={false} canRedo={false} onHome={noop} onProjects={noop} onCreateProject={noop} onDeleteProject={noop} onExportProject={noop} exporting={false} transferBusy={false} onImportImage={noop} onOpenPlugins={noop} onUndo={noop} onRedo={noop} agentOpen={false} compactAgentStatus={{ connected: false, enabled: false, activity: "" }} onToggleAgent={noop} globalPrompt="" onOpenGenerationLogs={noop} collaborators={[]} onFindNode={noop} /></div>;
+    useCanvasProductionContext(id);
+    const [title, setTitle] = useState("Canvas");
+    useEffect(() => { let active = true; void fetchBackendProject(id).then(({ project }) => { if (active) setTitle(String(project?.title || "Canvas")); }); useProductionWorkspaceStore.getState().setPanelTab("object"); return () => { active = false; }; }, [id]);
+    return <div className="relative min-h-64"><h1 className="pt-20">{title}</h1><CanvasTopBar projectId={id} title="Canvas" titleDraft="" isTitleEditing={false} onTitleDraftChange={noop} onStartTitleEditing={noop} onFinishTitleEditing={noop} onCancelTitleEditing={noop} canUndo={false} canRedo={false} onHome={noop} onProjects={noop} onCreateProject={noop} onDeleteProject={noop} onExportProject={noop} exporting={false} transferBusy={false} onImportImage={noop} onOpenPlugins={noop} onUndo={noop} onRedo={noop} agentOpen={false} compactAgentStatus={{ connected: false, enabled: false, activity: "" }} onToggleAgent={noop} globalPrompt="" onOpenGenerationLogs={noop} collaborators={[]} onFindNode={noop} /></div>;
 }
 function Shell() {
     const location = useLocation(), navigate = useNavigate();

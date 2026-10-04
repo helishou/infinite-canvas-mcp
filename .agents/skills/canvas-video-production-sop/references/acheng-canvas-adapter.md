@@ -16,6 +16,10 @@ Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.a
 
 story、assets、shots、performance、effects、model、continuity 按 Acheng 原合同协作。空间设计在 assets 的 scene-design 支路，shots 消费空间事实；站位图是按需资产。多资产新制作采用 STYLE_MOTHER，新四视图采用正脸近景、正面全身、侧面全身、背面全身和空手；色卡为辅助信息，不另建强制前置阶段。旧批准资产可保留并登记适用范围，缺项只补本轮所需。
 
+### 制作内容语言
+
+中文用户未指定其他语言时，Agent 对话、问题与说明，以及导演工作台可读的制作源稿使用简体中文：`story` 与 `script_scenes` 的非对白内容、角色/场景/资产显示名称和说明、Shot 标题与中文 `display_summary`、阻塞原因及审核说明。对应地填写 `character_registry[].name`/`appearance`、`scene_registry[].name`、`asset_plan[].asset_name`/`description` 等显示字段。对白、歌词和画面内文字逐字保留原语言。`prompt_description`、`state_description` 与最终 H3 正文属于编译字段，按固定 Acheng/模型合同使用英文；不得把它们作为唯一的中文界面说明。已有确认稿不自动翻译，局部修改只按用户指定范围更新。
+
 Shot 是叙事镜头，Segment 是请求，Clip 对应 Segment。按题材、对白和动作容量规划，沿已有镜头边界装箱至 4–15 秒。不得自动一镜一段、强制正反打或仅允许动作镜合并。关键帧依真实锚点需要制作。
 
 保留 Acheng 的内容完整性、模块检查、partial/commit、风格及版本规则。Ref2VA 最低细节要求按本次制作锁定的编译脚本版本计算；新兼容版本取消正文硬上限，词数只作诊断，不截断、压缩或按词数重装箱。旧稿沿用原脚本版本；显式升级后重新生成提示词产物与校验回执。H3 引用使用 `<Picture N>/<Subject N>`，风格母图在资产参考最后槽。上游宣传文案不是生成提示词。
@@ -50,7 +54,11 @@ assets 映射保存实际 nodeId、assetId、storageKey、sha256、version 和�
 
 导演工作台按制作对象展示「总览、故事、风格与资产、镜头与片段、生产与交付」，JSON、旧稿接入、引擎和版本恢复集中在高级与历史。七模块仍是内部职责；不要把页面标签、partial 或模块顺序解释为必须依次通过的生产关卡。首页、独立画布和单集入口引用同一 Backend 制作记录。
 
-产品导航只有一个「制作」入口，创意入口也放在这里；分别浏览画布项目与剧目分集。点击剧目分集进入既有剧目/集管理；点击制作对象使用统一导演工作台；从对象页面进入画布是在同一项目上进行视觉媒体生产，不创建第二份制作稿。画布库保留文件夹、导入导出与项目整理，不承载 idea-first 的创意对话入口。创意对话确认并创建/选定制作对象后，先保存 brief 与当前 `workflow.currentWork`，再回读 Backend `workflow/readiness`，最后通过 `site_navigate({ production: { kind, id, workId, runId? } })` 呈现实际工作台/节点/Clip。推进阶段时沿用同一制作 workId；只有明确开始另一份制作才新建 workId。待决定项写入 `workflow.pendingDecisions` 并绑定源哈希，用户选择先保存再继续。不要凭聊天文字自行拼接路由或默认打开 `/canvas/:id`；只有当前正式运行映射到实际节点/Clip 后才切入对象画布。历史 `/director`、`/drama` 入口仍路由到统一制作页的对应对象视图。
+产品导航只有一个「制作」入口，创意入口也放在这里；分别浏览独立画布与剧目分集。进入具体制作对象默认打开固定画布：每集一个制作画布，每个剧目一个共享资产画布，场次只做集内目录和分组。故事、资产、镜头、生产与历史在画布对象面板编辑，仍使用原 Backend 制作记录。已有绑定不改绑；首次进入未绑定对象调用 `production_ensure_canvas`，需要识别画布归属时调用 `production_get_canvas_context`。历史 `/director` 与分集制作地址保留为画布兼容入口，恢复原草稿与回执。
+
+创意对话确认对象后，先保存 brief 与 `workflow.currentWork`，回读 Backend `workflow/readiness`，再通过 `site_navigate({ production: { kind, id, workId, runId? } })` 呈现正式画布目标；无节点时打开对象编辑面板。需要节点时用 `production_prepare_targets` 幂等准备 asset/frame/segment，不把准备或跟随视为生成授权。推进同一制作沿用 workId；待决定项绑定源哈希，用户答复先保存再继续，不凭聊天文字或同名节点推断导航位置。
+
+跨集共享素材在资产画布经真实媒体审核后登记批准版本；分集调用 `production_get_shared_assets`、`production_adopt_shared_asset` 采用。Backend 对新批准版本持久传播并重新编译校验，保留历史与在途任务输入；发生冲突先回读草稿和更新原因，用户核对后用 `production_retry_shared_update` 恢复。输入变化的旧媒体不自动重做。画布权威和版本边界见画布数据契约，跟随与手动接管见画布交互约束。
 
 早期 brief 和 partial 可保存，且不要求先创建全部画布节点。首次需求使用 `set_director_brief` 写入 `source.brief`；常见场景、风格策略、资产、Shot 与 Segment 编辑使用 `patch_director_source`，只改声明的源字段并保留其他 Acheng 字段；边界用 `set_director_boundary`，工作模式、稳定 workId、currentWork 和待决定事项用 `set_director_workflow`，资产节点映射用 `bind_director_asset`。完整模块回包仍可使用 `set_director_production`，但常见 UI 编辑不能整稿覆盖。`currentWork` 绑定源 revision/hash；用户决定卡绑定同一 workId 和源哈希，答复先保存再交回导演。
 
@@ -62,7 +70,7 @@ assets 映射保存实际 nodeId、assetId、storageKey、sha256、version 和�
 
 ## 生成参数与交付规格
 
-制作对象的视频画幅以已发布 settings.videoAspectRatio 为准；角色四视图用 2:3，关键帧按镜头用途准备，不用参考卡比例决定视频画幅。没有明确视频画幅的历史对象沿用既有配置，不自动重置。
+视频制作在 kickoff 阶段、进入故事拆解和提示词编写前先确认成片画幅。检查用户 brief 与正式 `settings`：若 brief 已写明比例或 `videoAspectRatio` 已有非空值，直接采用；若 `videoAspectRatioConfirmed=true` 且值为 null，表示用户明确选择“沿用画布配置”，不重复询问；只有值为空且未确认时才询问。确认后通过正式 `set_settings` 保存 `videoAspectRatio`（沿用画布时为 null）和 `videoAspectRatioConfirmed=true`，读回 revision 再继续。纯资产交付且不制作视频时不问视频画幅。成片比例只控制视频规格；角色四视图用 2:3，关键帧及其他参考按各自镜头用途定比例，不用参考卡比例决定视频画幅。
 
 用户要求沿用默认参数时，H3 Clip 采用 h3ParameterPolicy=defaults，仅按制作稿指定画幅、时长、模式和连续性边界；模型、VAE、LoRA、采样、分辨率与放大消费 Backend 保存默认值。用户明确调整生成参数时采用 overrides。新节点须加载保存默认值；同步正文和参考不覆盖已有用户配置。每次新运行冻结默认快照，途中修改默认值不改变原批次。
 

@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, App, Button, Empty, Input, Modal, Skeleton } from "antd";
-import { ArrowRight, Clapperboard, ExternalLink, Images, Plus, RefreshCw, Search } from "lucide-react";
+import { ArrowRight, ExternalLink, Plus, RefreshCw, Search } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { useBackendStore } from "@/stores/use-backend-store";
+import { projectCover } from "@/pages/home/workbench-data";
+import { WorkbenchMediaPreview } from "@/pages/home/workbench-media";
+import { useProjectCoverResults, useStableProjectCovers } from "@/pages/home/use-workbench-data";
 import { createBackendProject, fetchBackendProjects } from "@/services/backend-api";
 
 type Project = { id: string; title: string; updatedAt: string };
@@ -11,6 +16,10 @@ export default function DirectorPage() {
     const { t, i18n } = useTranslation();
     const { message } = App.useApp();
     const navigate = useNavigate();
+    const canvasProjects = useCanvasStore(state => state.projects);
+    const folders = useCanvasStore(state => state.folders);
+    const backendUrl = useBackendStore(state => state.url);
+    const [visibleCount, setVisibleCount] = useState(12);
     const [projects, setProjects] = useState<Project[]>([]);
     const [query, setQuery] = useState("");
     const [loading, setLoading] = useState(true);
@@ -31,6 +40,11 @@ export default function DirectorPage() {
     }, [reload]);
     const visible = useMemo(() => projects.filter(p => p.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
         .sort((a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0)), [projects, query]);
+    const displayed = visible.slice(0, visibleCount);
+    const existingCover = (id: string) => { const project = canvasProjects.find(item => item.id === id); return project ? projectCover(project, [], folders.find(folder => folder.id === project.folderId)) : null; };
+    const extraCover = useProjectCoverResults(displayed.filter(project => !existingCover(project.id)).map(project => [project.id, project.updatedAt]));
+    const coverKey = (project: Project) => JSON.stringify([backendUrl, project.id, project.updatedAt]);
+    const covers = useStableProjectCovers(displayed.map(project => ({ key: coverKey(project), media: existingCover(project.id) || extraCover(project.id, project.updatedAt) })));
     const begin = () => { requestId.current = crypto.randomUUID(); submittedName.current = ""; setName(""); setCreateOpen(true); };
     const create = async () => {
         if (creating || !name.trim()) return;
@@ -44,39 +58,16 @@ export default function DirectorPage() {
         } catch (cause) { message.error(cause instanceof Error ? cause.message : String(cause)); }
         finally { setCreating(false); }
     };
-    return <main className="min-h-full bg-background px-4 py-8 text-foreground sm:px-6 lg:px-10" data-testid="director-home">
-        <div className="mx-auto max-w-6xl">
-            <header className="mb-8 flex flex-wrap items-start justify-between gap-4">
-                <div><p className="mb-2 text-xs font-medium uppercase tracking-widest text-muted-foreground">Acheng Director</p>
-                    <h1 className="text-3xl font-semibold tracking-tight">{t("director.title")}</h1>
-                    <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{t("director.subtitle")}</p></div>
-                <div className="flex flex-wrap gap-2">
-                    <Link to="/canvas"><Button icon={<Images className="size-4" />}>{t("director.canvasLibrary")}</Button></Link>
-                    <Button type="primary" icon={<Plus className="size-4" />} onClick={begin}>{t("director.new")}</Button>
-                </div>
-            </header>
-            <div className="mb-8 grid gap-4 border-y border-border py-5 sm:grid-cols-3">
-                {["assets", "film", "episode"].map(kind => <div key={kind}><h2 className="text-sm font-semibold">{t(`director.${kind}`)}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">{t(`director.${kind}Hint`)}</p></div>)}
-            </div>
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><h2 className="text-lg font-semibold">{t("director.projects")}</h2>
-                <div className="flex gap-2"><Input aria-label={t("director.search")} prefix={<Search className="size-4 text-muted-foreground" />} placeholder={t("director.search")} value={query} onChange={e => setQuery(e.target.value)} allowClear />
-                    <Button aria-label={t("director.refresh")} icon={<RefreshCw className="size-4" />} onClick={() => setReload(n => n + 1)} disabled={loading} /></div></div>
-            {error ? <Alert type="error" showIcon message={t("director.loadFailed")} description={error} /> : loading ? <Skeleton active /> : !visible.length ? <Empty description={query ? t("director.noMatch") : t("director.empty")} /> :
-                <div className="divide-y divide-border">{visible.map(project => <article key={project.id} className="flex min-w-0 items-center gap-3 py-3 sm:gap-4">
-                    <Link to={`/director/${encodeURIComponent(project.id)}`} className="group flex min-w-0 flex-1 items-center gap-4 py-1 transition-colors hover:text-foreground">
-                        <Clapperboard className="size-5 shrink-0 text-muted-foreground" /><div className="min-w-0 flex-1"><h3 className="truncate font-medium">{project.title}</h3>
-                            <p className="mt-1 text-xs text-muted-foreground">{Number.isFinite(Date.parse(project.updatedAt)) ? new Date(project.updatedAt).toLocaleString(i18n.resolvedLanguage) : t("director.ready")}</p></div>
-                        <span className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground group-hover:text-foreground">{t("director.continue")}<ArrowRight className="size-4" /></span>
-                    </Link>
-                    <Link to={`/canvas/${encodeURIComponent(project.id)}`} aria-label={`${t("director.openCanvas")}: ${project.title}`} title={t("director.openCanvas")} className="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground">
-                        <ExternalLink className="size-4" /><span className="hidden sm:inline">{t("director.openCanvas")}</span>
-                    </Link>
-                </article>)}</div>}
-            <p className="mt-7 text-sm text-muted-foreground">{t("director.sharedData")} <Link className="underline underline-offset-4" to="/production?view=dramas">{t("director.manageDrama")}</Link></p>
-        </div>
+    return <section className="min-w-0" data-testid="director-home">
+        <header className="mb-5 flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">{t("landing.continueProduction")}</h2><p className="mt-1 text-xs text-muted-foreground">{t("landing.projectCount", { count: projects.length })}</p></div><div className="flex flex-wrap items-center gap-2"><Input className="!w-48 sm:!w-56" aria-label={t("director.search")} prefix={<Search className="size-4 text-muted-foreground" />} placeholder={t("director.search")} value={query} onChange={event => { setQuery(event.target.value); setVisibleCount(12); }} allowClear /><Button type="text" aria-label={t("director.refresh")} icon={<RefreshCw className="size-4" />} onClick={() => setReload(value => value + 1)} disabled={loading} /><Button icon={<Plus className="size-4" />} onClick={begin}>{t("landing.blankProduction")}</Button></div></header>
+        {error ? <Alert type="error" showIcon message={t("director.loadFailed")} description={error} /> : loading ? <Skeleton active /> : !visible.length ? <Empty description={query ? t("director.noMatch") : t("director.empty")} /> : <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">{displayed.map(project => <article key={project.id} className="group min-w-0 overflow-hidden rounded-xl border border-border bg-card transition-colors hover:border-foreground/40">
+            <Link to={`/director/${encodeURIComponent(project.id)}`} aria-label={t("landing.openProductionNamed", { name: project.title })} className="block text-foreground"><div className="aspect-[16/9] overflow-hidden bg-muted/30"><WorkbenchMediaPreview media={covers[coverKey(project)] || null} label={covers[coverKey(project)] ? project.title : t("landing.noPreview")} /></div><div className="p-4"><h3 className="line-clamp-2 min-h-6 text-base font-semibold">{project.title}</h3><p className="mt-2 text-xs text-muted-foreground">{Number.isFinite(Date.parse(project.updatedAt)) ? t("landing.updated", { date: new Date(project.updatedAt).toLocaleDateString(i18n.resolvedLanguage, { month: "short", day: "numeric" }) }) : t("director.ready")}</p></div></Link>
+            <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-3"><Link to={`/director/${encodeURIComponent(project.id)}`} className="inline-flex items-center gap-1.5 text-sm font-medium text-foreground">{t("landing.continue")}<ArrowRight className="size-3.5" /></Link><Link to={`/canvas/${encodeURIComponent(project.id)}`} aria-label={t("landing.openCanvasNamed", { name: project.title })} className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"><ExternalLink className="size-3.5" />{t("director.openCanvas")}</Link></div>
+        </article>)}</div>}
+        {visibleCount < visible.length && <div className="mt-6 text-center"><Button onClick={() => setVisibleCount(count => count + 12)}>{t("home.workbench.moreProjects")}</Button></div>}
         <Modal title={t("director.new")} open={createOpen} onCancel={() => { if (!creating) setCreateOpen(false); }} onOk={() => void create()} confirmLoading={creating} okButtonProps={{ disabled: !name.trim() }} okText={t("director.enter")}>
             <p className="mb-4 text-sm text-muted-foreground">{t("director.newHint")}</p>
             <Input aria-label={t("director.name")} placeholder={t("director.name")} value={name} disabled={creating || Boolean(submittedName.current)} onChange={e => setName(e.target.value)} onPressEnter={() => void create()} />
         </Modal>
-    </main>;
+    </section>;
 }
