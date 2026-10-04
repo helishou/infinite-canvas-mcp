@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Alert, Button, Input, Modal, Select, message } from "antd";
+import { Alert, Button, Input, Modal, Select, Tooltip, message } from "antd";
 import { DownloadCloud } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { fetchRunningHubWorkflows, inspectRunningHubWorkflow, type RunningHubField, type RunningHubWorkflowGraph, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
@@ -91,7 +91,7 @@ export function RunningHubWorkflowImport({ workflows, onImported }: { workflows:
                 config,
             };
             const uploaded = await importWorkflowPackage(fileName, workflowPackage);
-            message.success(t("runningHub.import.success"));
+            message.success(`已生成本地副本 ${uploaded.name}；云端档案与本地副本此后各自独立`);
             setOpen(false);
             onImported(uploaded.name);
         } catch (reason) {
@@ -102,7 +102,9 @@ export function RunningHubWorkflowImport({ workflows, onImported }: { workflows:
     };
 
     return <>
-        <Button icon={<DownloadCloud className="size-3.5" />} onClick={show}>{t("runningHub.import.button")}</Button>
+        <Tooltip title="把云端工作流抓成一份本地 ComfyUI JSON，与云端各自独立；云端后续改动不会同步到本地副本">
+            <Button icon={<DownloadCloud className="size-3.5" />} onClick={show}>转换为本地副本</Button>
+        </Tooltip>
         <Modal
             title={t("runningHub.import.title")}
             open={open}

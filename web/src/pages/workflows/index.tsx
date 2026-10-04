@@ -10,7 +10,9 @@ import { WorkflowWorkbench, type WorkbenchTab } from "./workflow-workbench";
 import { RunHistoryList } from "./run-history-list";
 import { normalizeOutputNodeSelection, OutputNodePicker } from "./output-node-picker";
 import { RunningHubWorkflowImport } from "./runninghub-workflow-import";
+import { RunningHubProfileActions } from "./runninghub-profile-actions";
 import { fetchRunningHubWorkflows, fetchRunningHubStatus, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
+import { useConfigStore } from "@/stores/use-config-store";
 import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
 import "../../styles/workflow-graph.css";
 
@@ -40,6 +42,7 @@ export default function WorkflowsPage() {
     const [section, setSection] = useState("workflows");
     // 本地库与 RunningHub 库共用同一页面壳，数据源与选中项各自独立。
     const [library, setLibrary] = useState<"local" | "runninghub">("local");
+    const aiConfig = useConfigStore((state) => state.config);
     const [profiles, setProfiles] = useState<RunningHubWorkflowProfile[]>([]);
     const [profilesLoading, setProfilesLoading] = useState(false);
     const [rhConfigured, setRhConfigured] = useState<{ hasApiKey: boolean } | null>(null);
@@ -76,6 +79,26 @@ export default function WorkflowsPage() {
     }, []);
 
     useEffect(() => { void fetchProfiles(); void fetchRunningHubStatus().then(setRhConfigured).catch(() => setRhConfigured(null)); }, [fetchProfiles]);
+
+    /**
+     * 档案 id → 引用它的模型名。删除档案前用它提示影响面；模型绑定用的是档案
+     * 稳定 id，所以展示名变化不影响这里的判断。
+     */
+    const usedByModels = useMemo(() => {
+        const usage = new Map<string, string[]>();
+        const channels = (aiConfig?.channels || []) as Array<{ models?: Array<Record<string, any>> }>;
+        for (const channel of channels) {
+            for (const model of channel.models || []) {
+                for (const binding of Object.values((model.workflowBindings || {}) as Record<string, any>)) {
+                    if (binding?.provider !== "runninghub" || !binding.profileId) continue;
+                    const list = usage.get(binding.profileId) || [];
+                    list.push(String(model.name || "未命名模型"));
+                    usage.set(binding.profileId, list);
+                }
+            }
+        }
+        return usage;
+    }, [aiConfig]);
 
     /** 档案列表项：副标题是 workflowId，徽标显示已启用映射数 / 总字段数。 */
     const profileItems = useMemo<WorkflowLibraryItem[]>(
@@ -434,12 +457,21 @@ export default function WorkflowsPage() {
                                 />
                             </>
                         ) : (
-                            <WorkflowLibraryList
-                                items={profileItems}
-                                selectedId={selectedProfile?.id}
-                                onSelect={(item) => setSelectedProfile(profiles.find((profile) => profile.id === item.id) || null)}
-                                emptyText={rhConfigured?.hasApiKey === false ? "未配置 API Key" : "暂无 RunningHub 工作流档案"}
-                            />
+                            <>
+                                <RunningHubProfileActions
+                                    profiles={profiles}
+                                    selected={selectedProfile}
+                                    onChanged={fetchProfiles}
+                                    onSelected={setSelectedProfile}
+                                    usedByModels={usedByModels}
+                                />
+                                <WorkflowLibraryList
+                                    items={profileItems}
+                                    selectedId={selectedProfile?.id}
+                                    onSelect={(item) => setSelectedProfile(profiles.find((profile) => profile.id === item.id) || null)}
+                                    emptyText={rhConfigured?.hasApiKey === false ? "未配置 API Key" : "暂无 RunningHub 工作流档案"}
+                                />
+                            </>
                         )}
                     </div>
                 </div>
