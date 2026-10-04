@@ -1,5 +1,13 @@
 export default {
     productionCanvas: {
+        enter: "Enter production", backHome: "Back to production", find: "Find a frame", findPlaceholder: "Find a character, scene or shot",
+        editObject: "Edit description", editNamed: "Edit {{name}}", discussObject: "Discuss with director", openChat: "Talk with the director", chatDialog: "Director conversation",
+        locateChatObject: "Locate conversation object", returnToDraft: "This draft still belongs to the original production object. Click its label above the conversation to return to that canvas before sending.",
+        chatCoversCanvas: "Conversation is open; close it to focus the latest production object",
+        clip: "Clip {{number}}", h3Context: "H3 · Clip {{number}}", generationLogs: "Generation logs", recovery: "An edit or request needs recovery; click to review",
+        videoTarget: "Video segment",
+        chatPlaceholder: "Describe a change, or ask the director to continue…",
+        progress: { ready: "Ready to continue", working: "In production", needs_review: "Ready for your review", complete: "Complete", blocked: "Needs attention" },
         director: "Director", object: "Current object", close: "Collapse", directory: "Production", switchCanvas: "Switch production canvas", sharedCanvas: "Shared asset canvas",
         episode: "Episode {{number}}", ready: "Develop the production with the director or select a target from the directory", manualPause: "Canvas view taken over; following paused",
         pauseFollow: "Pause following", follow: "Return to production", tasks: "Tasks and delivery", prepare: "Prepare node", story: "Story and brief", script: "Scene script",
@@ -60,7 +68,7 @@ export default {
     settingsPanels: {
         common: { auto: "Auto", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high" },
         image: { title: "Image settings", quality: "Quality", size: "Size", align16: "Align to multiples of 16", align16Hint: "Round dimensions up to the next multiple of 16 after input", aspectRatio: "Aspect ratio", transparent: "Transparent background", transparentHint: "Generate an image without a background when supported by the model", count: "Image count", images: "{{count}} images", workflowFields: "Workflow parameters" },
-        video: { title: "Video settings", quality: "Quality", size: "Size", seconds: "Seconds", resolution: "Resolution", ratio: "Aspect ratio", duration: "Duration", smart: "Smart", output: "Output", generateAudio: "Generate audio", watermark: "Add watermark", adaptive: "Adaptive", sizes: { landscape: "Landscape", portrait: "Portrait", square: "Square", widescreen: "Widescreen", tall: "Tall", auto: "Auto" }, ratios: { landscape: "Landscape", portrait: "Portrait", square: "Square", standardLandscape: "Standard landscape", standardPortrait: "Standard portrait", cinematic: "Cinematic", adaptive: "Adaptive" } },
+        video: { title: "Video settings", quality: "Quality", size: "Size", seconds: "Seconds", workflowFields: "Workflow parameters", workflowFieldsMissing: "This model's workflow parameters cannot be read yet; check the field configuration in workflow management", workflowFieldsScenarioUnsupported: "This model does not support the current reference count; pick another model or adjust the input-scenario routing in model settings", resolution: "Resolution", ratio: "Aspect ratio", duration: "Duration", smart: "Smart", output: "Output", generateAudio: "Generate audio", watermark: "Add watermark", adaptive: "Adaptive", sizes: { landscape: "Landscape", portrait: "Portrait", square: "Square", widescreen: "Widescreen", tall: "Tall", auto: "Auto" }, ratios: { landscape: "Landscape", portrait: "Portrait", square: "Square", standardLandscape: "Standard landscape", standardPortrait: "Standard portrait", cinematic: "Cinematic", adaptive: "Adaptive" } },
         audio: { title: "Audio settings", voice: "Voice", format: "Format", speed: "Speed", instructions: "Voice instructions", instructionsPlaceholder: "For example: natural, warm, and suitable for narration.", workflowFields: "Workflow parameters" },
         text: { title: "Text settings", reasoning: "Reasoning effort", count: "Generation count" },
         model: { select: "Select model", assign: "Assign a model for {{capability}} in the provider settings", noMatch: "No matching {{capability}} models", addFirst: "Add a provider and models in Settings first", capabilities: { image: "image generation", video: "video", text: "text", audio: "audio" } },

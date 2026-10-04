@@ -10,6 +10,8 @@ import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSizeLabel } from "@/components/video-settings-panel";
 import { isLocalH3VideoModel } from "@/lib/h3-video-settings";
+import { initialVideoParamValues, resolveVideoImplementation, videoParamKey, videoScenarioBlocked, type VideoImplementation } from "@/lib/video-implementation";
+import { resolveModelChannel } from "@/stores/use-config-store";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { deleteStoredMedia } from "@/services/file-storage";
@@ -22,6 +24,11 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
 import { deleteWorkbenchLogs, readWorkbenchLogs, saveWorkbenchLog } from "@/services/workbench-logs";
+
+/** 把未知值收敛成可展开的字典；字段参数在配置里是可选的，缺失时按空字典处理。 */
+function recordOf(value: unknown): Record<string, unknown> {
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
 
 type GeneratedVideo = {
     id: string;
@@ -100,6 +107,9 @@ export default function VideoPage() {
     const agentTaskIdRef = useRef<string | undefined>(undefined);
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
+    // 内部实现字段值：面板编辑后要随生成请求一起提交，因此放在页面级而非面板内部。
+    const [videoParamValues, setVideoParamValues] = useState<Record<string, unknown>>({});
+    const [implementation, setImplementation] = useState<VideoImplementation | null>(null);
     const canGenerate = Boolean(prompt.trim());
 
     useEffect(() => {
@@ -190,7 +200,20 @@ export default function VideoPage() {
         const batchStartedAt = performance.now();
         setStartedAt(batchStartedAt);
         try {
-            const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references);
+            // 面板填的内部实现字段值随请求下发；后端按 `model::workflow` 取值合并进图，
+            // 所以键要和 video-dispatcher 读的形状一致。
+            const implementationId = implementation?.id || "";
+            const fieldValuesKey = implementationId ? videoParamKey(model, implementationId) : "";
+            const requestConfig = fieldValuesKey
+                ? ({
+                      ...snapshot.config,
+                      selectedVideoModelFieldValues: {
+                          ...recordOf(snapshot.config.selectedVideoModelFieldValues),
+                          [fieldValuesKey]: videoParamValues,
+                      },
+                  } as AiConfig)
+                : snapshot.config;
+            const task = await createVideoGenerationTask(requestConfig, snapshot.text, snapshot.references);
             const log = buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, durationMs: 0, status: "pending", task });
             await saveLog(log, false);
             void pollGenerationLog(log, snapshot.config, agentTaskId);
@@ -457,7 +480,16 @@ export default function VideoPage() {
                             </div>
 
                             <div className="hidden gap-4 sm:grid sm:grid-cols-2">
-                                <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                                <GenerationSettings
+                        config={effectiveConfig}
+                        model={model}
+                        updateConfig={updateConfig}
+                        openConfigDialog={openConfigDialog}
+                        referenceCount={references.length}
+                        paramValues={videoParamValues}
+                        onParamValuesChange={setVideoParamValues}
+                        onImplementationChange={setImplementation}
+                    />
                             </div>
                         </div>
 
@@ -502,7 +534,16 @@ export default function VideoPage() {
             </Drawer>
             <Drawer title={t("workbench.settings")} placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
-                    <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                    <GenerationSettings
+                        config={effectiveConfig}
+                        model={model}
+                        updateConfig={updateConfig}
+                        openConfigDialog={openConfigDialog}
+                        referenceCount={references.length}
+                        paramValues={videoParamValues}
+                        onParamValuesChange={setVideoParamValues}
+                        onImplementationChange={setImplementation}
+                    />
                 </div>
             </Drawer>
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
@@ -514,9 +555,47 @@ export default function VideoPage() {
     );
 }
 
-function GenerationSettings({ config, model, updateConfig, openConfigDialog }: { config: AiConfig; model: string; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void }) {
+function GenerationSettings({ config, model, updateConfig, openConfigDialog, referenceCount = 0, paramValues, onParamValuesChange, onImplementationChange }: { config: AiConfig; model: string; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void; referenceCount?: number; paramValues: Record<string, unknown>; onParamValuesChange: (values: Record<string, unknown>) => void; onImplementationChange: (implementation: VideoImplementation | null) => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
+    const [implementation, setImplementation] = useState<VideoImplementation | null>(null);
+    // 参数值由父组件持有：提交时要和提示词、参考图一起发出去，不能只留在面板里。
+    const [loadedKey, setLoadedKey] = useState("");
+    const publish = onImplementationChange;
+    const blocked = videoScenarioBlocked(config, model, referenceCount);
+    const isImplementationChannel = resolveModelChannel(config, model).kind === "comfyui";
+
+    // 命中的内部实现（本地工作流或 RunningHub 档案）决定面板渲染哪些字段。
+    // 换模型、换场景或换参考图数量都要重新解析，否则会沿用上一个实现的字段。
+    useEffect(() => {
+        if (!isImplementationChannel || !model) {
+            setImplementation(null);
+            publish?.(null);
+            return;
+        }
+        let cancelled = false;
+        void resolveVideoImplementation(config, model, referenceCount).then((next) => {
+            if (cancelled) return;
+            setImplementation(next);
+            publish?.(next);
+            const key = next ? videoParamKey(model, next.id) : "";
+            if (key === loadedKey) return;
+            setLoadedKey(key);
+            // 渠道里按场景配的值作为初值；换实现时不沿用上一个实现的字段值。
+            onParamValuesChange(next ? initialVideoParamValues(config, model, referenceCount, next.fields) : {});
+        });
+        return () => {
+            cancelled = true;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [config, model, referenceCount, isImplementationChannel]);
+
+    // 场景被标记不支持与「读不到字段」是两回事，不能共用一句话。
+    const implementationMissing =
+        !isImplementationChannel || !model ? null
+        : blocked ? t("settingsPanels.video.workflowFieldsScenarioUnsupported")
+        : implementation ? null
+        : t("settingsPanels.video.workflowFieldsMissing");
 
     return (
         <>
@@ -525,7 +604,17 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
-                <VideoSettingsPanel config={{ ...config, model }} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
+                <VideoSettingsPanel
+                    config={{ ...config, model }}
+                    onConfigChange={(key, value) => updateConfig(key, value)}
+                    theme={theme}
+                    showTitle={false}
+                    className="space-y-4"
+                    customFields={implementation?.fields}
+                    customFieldValues={paramValues}
+                    onCustomFieldChange={(id, value) => onParamValuesChange({ ...paramValues, [id]: value })}
+                    implementationMissing={implementationMissing}
+                />
             </div>
         </>
     );

@@ -30,6 +30,10 @@ function aiApiUrl(config: AiConfig, path: string) {
     return buildApiUrl(config.baseUrl, path);
 }
 
+function recordOf(value: unknown): Record<string, unknown> {
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
 function aiHeaders(config: AiConfig, contentType?: string) {
     return {
         Authorization: `Bearer ${config.apiKey}`,
@@ -109,6 +113,14 @@ async function createComfyVideoWorkflowTask(config: AiConfig, selectedModel: str
         if (!reference) continue;
         const dataUrl = await imageToDataUrl(reference);
         if (dataUrl) workflowFields[imageFields[index].id] = dataUrl;
+    }
+    // 面板上填的内部实现字段值：与媒体、提示词一起提交。只接受工作流里真实声明的
+    // 字段 id，避免把面板残留的陈旧参数塞进图。
+    const configured = detail.config?.fields || [];
+    const supplied = (config as { selectedVideoModelFieldValues?: Record<string, unknown> }).selectedVideoModelFieldValues;
+    for (const [id, value] of Object.entries(recordOf(supplied))) {
+        if (!configured.some((field) => field.id === id) || value === undefined || value === null || value === "") continue;
+        workflowFields[id] = value;
     }
     const { taskId } = await runWorkflow(workflowName, workflowFields, detail.config);
     return { id: taskId, provider: "comfyui", model: selectedModel, ...(parameters ? { parameters } : {}) };

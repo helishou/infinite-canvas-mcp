@@ -6,6 +6,8 @@ import { WORKFLOW_ROUTE_UNSUPPORTED, builtinWorkflowName, resolveWorkflowForMode
 import i18n from "@/i18n";
 import { fetchStructuredSetting, saveStructuredSetting } from "@/services/settings-api";
 
+import { resolveWorkflowBindingForModel } from "@basketikun/canvas-agent/model-workflow";
+
 export { WORKFLOW_ROUTE_UNSUPPORTED, builtinWorkflowName, scenarioFromReferenceCount } from "@basketikun/canvas-agent/model-workflow";
 export type { ModelInputScenario } from "@basketikun/canvas-agent/model-workflow";
 
@@ -74,6 +76,11 @@ export type AiConfig = {
     audioSpeed: string;
     audioInstructions: string;
     videoSeconds: string;
+    /**
+     * 视频工作台内部实现字段的本次取值，key = `模型::实现`（部分调用方用扁平 key）。
+     * 后端 video-dispatcher 按 `model::workflow` 取值合并进工作流图。
+     */
+    selectedVideoModelFieldValues?: Record<string, Record<string, unknown>>;
     vquality: string;
     videoGenerateAudio: string;
     videoWatermark: string;
@@ -278,7 +285,9 @@ export function modelHasWorkflowConfig(config: AiConfig, value: string) {
  * 调用方把它作为字段默认值：节点/工作台上手填的值优先级更高。
  */
 export function resolveModelWorkflowParams(config: AiConfig, value: string, referenceCount: number): Record<string, unknown> {
-    const result = resolveWorkflowForModel(config, value, referenceCount);
+    // 必须走绑定版解析：RunningHub 档案的参数按场景存在 workflowBindings 对应的
+    // workflowParams 里，用旧的只认本地工作流名的解析会读不到这些值。
+    const result = resolveWorkflowBindingForModel(config, value, referenceCount);
     return result.ok ? result.params : {};
 }
 

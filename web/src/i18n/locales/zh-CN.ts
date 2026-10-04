@@ -1,5 +1,13 @@
 export default {
     productionCanvas: {
+        enter: "进入制作", backHome: "返回制作首页", find: "找画面", findPlaceholder: "查找角色、场次或镜头",
+        editObject: "编辑说明", editNamed: "编辑 {{name}}", discussObject: "和导演讨论", openChat: "与导演对话", chatDialog: "导演对话",
+        locateChatObject: "定位当前对话对象", returnToDraft: "输入仍关联原制作对象。请点击对话顶部的对象标签，回到原画布后发送。",
+        chatCoversCanvas: "对话浮窗已展开；收起后继续定位最新制作目标",
+        clip: "片段 {{number}}", h3Context: "H3 · 片段 {{number}}", generationLogs: "生成日志", recovery: "有待恢复的编辑或请求，点击处理",
+        videoTarget: "视频片段",
+        chatPlaceholder: "说说你想怎么改，或让导演继续下一步…",
+        progress: { ready: "可以继续", working: "正在制作", needs_review: "等你确认", complete: "已完成", blocked: "需要处理" },
         director: "导演", object: "当前对象", close: "收起", directory: "制作", switchCanvas: "切换制作画布", sharedCanvas: "共享资产画布",
         episode: "第 {{number}} 集", ready: "在导演面板完善制作内容，或从目录选择当前目标", manualPause: "已接管画布视角；自动跟随已暂停",
         pauseFollow: "暂停跟随", follow: "回到当前制作", tasks: "任务与交付", prepare: "准备节点", story: "故事与制作需求", script: "本场剧本",
@@ -60,7 +68,7 @@ export default {
     settingsPanels: {
         common: { auto: "自动", low: "低", medium: "中", high: "高", xhigh: "极高" },
         image: { title: "图像设置", quality: "质量", size: "尺寸", align16: "16 倍数对齐", align16Hint: "输入完成后自动向上补成 16 的倍数", aspectRatio: "宽高比", transparent: "透明背景", transparentHint: "开启后生成无背景的透明图像（仅部分模型可用）", count: "生成张数", images: "{{count}} 张", workflowFields: "工作流参数", workflowFieldsMissing: "该模型的工作流参数暂时读取不到，可在工作流管理里检查字段配置", workflowFieldsScenarioUnsupported: "该模型不支持当前参考图数量，改用其它模型或到模型设置里调整输入场景路由" },
-        video: { title: "视频设置", quality: "清晰度", size: "尺寸", seconds: "秒数", resolution: "分辨率", ratio: "比例", duration: "时长", smart: "智能", output: "输出", generateAudio: "生成声音", watermark: "添加水印", adaptive: "自适应", sizes: { landscape: "横屏", portrait: "竖屏", square: "方形", widescreen: "宽屏", tall: "长图", auto: "自动" }, ratios: { landscape: "横屏", portrait: "竖屏", square: "方形", standardLandscape: "标准横屏", standardPortrait: "标准竖屏", cinematic: "宽银幕", adaptive: "自适应" } },
+        video: { title: "视频设置", quality: "清晰度", size: "尺寸", seconds: "秒数", workflowFields: "工作流参数", workflowFieldsMissing: "该模型的工作流参数暂时读取不到，可在工作流管理里检查字段配置", workflowFieldsScenarioUnsupported: "该模型不支持当前参考图数量，改用其它模型或到模型设置里调整输入场景路由", resolution: "分辨率", ratio: "比例", duration: "时长", smart: "智能", output: "输出", generateAudio: "生成声音", watermark: "添加水印", adaptive: "自适应", sizes: { landscape: "横屏", portrait: "竖屏", square: "方形", widescreen: "宽屏", tall: "长图", auto: "自动" }, ratios: { landscape: "横屏", portrait: "竖屏", square: "方形", standardLandscape: "标准横屏", standardPortrait: "标准竖屏", cinematic: "宽银幕", adaptive: "自适应" } },
         audio: { title: "音频设置", voice: "声音", format: "格式", speed: "语速", instructions: "声音指令", instructionsPlaceholder: "例如：自然、温暖、适合旁白。", workflowFields: "工作流参数" },
         text: { title: "文本设置", reasoning: "推理强度", count: "生成次数" },
         model: { select: "选择模型", assign: "请先在渠道里为{{capability}}指定模型", noMatch: "暂无匹配的{{capability}}模型", addFirst: "请先到配置里添加渠道和模型", capabilities: { image: "生图", video: "视频", text: "文本", audio: "音频" } },
