@@ -4,12 +4,24 @@ const CHANNEL_MODEL_SEPARATOR = "::";
 
 export type ModelInputScenario = "text" | "single" | "multi";
 
+/**
+ * 一个输入场景实际使用的内部实现。
+ *
+ * `comfyui` 用本地工作流文件名，`runninghub` 用 RunningHub 工作流档案的稳定 id；
+ * 两者不能用同一个字符串表达，否则无法区分执行器、字段 schema 和失效原因。
+ * 旧的 `workflows` / `workflowRouting` 只存文件名，继续按 comfyui 解析。
+ */
+export type WorkflowBinding =
+  | { provider: "comfyui"; workflow: string }
+  | { provider: "runninghub"; profileId: string };
+
 type ChannelModel = {
   name?: unknown;
   script?: unknown;
   workflows?: unknown;
   workflowRouting?: unknown;
   workflowParams?: unknown;
+  workflowBindings?: unknown;
 };
 
 type ModelChannel = {
@@ -133,8 +145,128 @@ export function usesWorkflowExecutor(
   return (
     String(found.channel.kind || "") === "comfyui" ||
     asStringArray(found.model.workflows).length > 0 ||
-    Object.keys(asRecord(found.model.workflowRouting)).length > 0
+    Object.keys(asRecord(found.model.workflowRouting)).length > 0 ||
+    // 只挂 RunningHub 绑定的模型没有本地工作流，但仍要走模型路由到云端执行器。
+    Object.keys(asRecord(found.model.workflowBindings)).length > 0
   );
+}
+
+/** 读取单个场景的显式绑定；旧 routing 里的文件名不算 RunningHub 绑定。 */
+function workflowBindingFor(
+  model: ChannelModel,
+  scenario: ModelInputScenario,
+): WorkflowBinding | null {
+  const bindings = asRecord(model.workflowBindings);
+  const raw = bindings[scenario];
+  if (!isRecord(raw)) return null;
+  const provider = String(raw.provider || "");
+  if (provider === "runninghub") {
+    const profileId = String(raw.profileId || "").trim();
+    return profileId ? { provider: "runninghub", profileId } : null;
+  }
+  if (provider === "comfyui") {
+    const workflow = String(raw.workflow || "").trim();
+    return workflow ? { provider: "comfyui", workflow } : null;
+  }
+  return null;
+}
+
+function asBinding(value: unknown): WorkflowBinding | null {
+  if (!isRecord(value)) return null;
+  const provider = String(value.provider || "");
+  if (provider === "runninghub") {
+    const profileId = String(value.profileId || "").trim();
+    return profileId ? { provider: "runninghub", profileId } : null;
+  }
+  if (provider === "comfyui") {
+    const workflow = String(value.workflow || "").trim();
+    return workflow ? { provider: "comfyui", workflow } : null;
+  }
+  return null;
+}
+
+export { asBinding };
+
+/**
+ * 场景 → 内部实现的统一解析：显式绑定优先，未绑定时回落到旧的本地工作流路由。
+ * RunningHub 档案不在这里校验存在性，由 Backend 执行器确认并给出可诊断错误。
+ */
+export function resolveWorkflowBindingForModel(
+  aiConfig: unknown,
+  model: string,
+  referenceCount: number,
+):
+  | {
+      ok: true;
+      binding: WorkflowBinding;
+      scenario: ModelInputScenario;
+      params: Record<string, unknown>;
+      channelId?: string;
+    }
+  | {
+      ok: false;
+      reason: "unsupported" | "no-workflow";
+      scenario: ModelInputScenario;
+      channelId?: string;
+      modelName: string;
+    } {
+  const scenario = scenarioFromReferenceCount(referenceCount);
+  const decoded = decodeChannelModel(String(model || ""));
+  const found = findChannelModel(aiConfig, String(model || ""));
+  const modelName = modelOptionName(String(model || ""));
+  const channelId =
+    decoded?.channelId || (found ? String(found.channel.id || "") : undefined);
+  const params = found ? workflowParamsFor(found.model, scenario) : {};
+  if (found) {
+    const explicit = workflowBindingFor(found.model, scenario);
+    if (explicit) return { ok: true, binding: explicit, scenario, channelId, params };
+    const routed = String(
+      asRecord(found.model.workflowRouting)[scenario] || "",
+    ).trim();
+    if (routed === WORKFLOW_ROUTE_UNSUPPORTED)
+      return { ok: false, reason: "unsupported", scenario, channelId, modelName };
+    if (routed)
+      return {
+        ok: true,
+        binding: { provider: "comfyui", workflow: routed },
+        scenario,
+        channelId,
+        params,
+      };
+    const workflows = asStringArray(found.model.workflows);
+    if (workflows.length)
+      return {
+        ok: true,
+        binding: { provider: "comfyui", workflow: workflows[0] },
+        scenario,
+        channelId,
+        params,
+      };
+  }
+  const builtin = builtinWorkflowName(model);
+  if (builtin)
+    return {
+      ok: true,
+      binding: { provider: "comfyui", workflow: builtin },
+      scenario,
+      channelId,
+      params: {},
+    };
+  return { ok: false, reason: "no-workflow", scenario, channelId, modelName };
+}
+
+/** 模型是否把某个输入场景指向 RunningHub 工作流档案。 */
+export function usesRunningHubBinding(
+  aiConfig: unknown,
+  model: string,
+  referenceCount: number,
+): boolean {
+  const resolved = resolveWorkflowBindingForModel(
+    aiConfig,
+    model,
+    referenceCount,
+  );
+  return resolved.ok && resolved.binding.provider === "runninghub";
 }
 
 export function workflowParamsFor(

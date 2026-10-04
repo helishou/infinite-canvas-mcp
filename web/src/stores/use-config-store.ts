@@ -36,7 +36,16 @@ export type ChannelModel = {
     workflowRouting?: ModelWorkflowRouting;
     /** ComfyUI 渠道：三种输入场景各自的工作流参数覆盖（该场景走哪个工作流就用它的字段）。 */
     workflowParams?: ModelWorkflowParams;
+    /**
+     * 场景 → 内部实现的显式绑定。RunningHub 工作流档案用 profileId，本地工作流用文件名；
+     * 旧的 workflows / workflowRouting 仍按本地文件解析，两者可共存。
+     */
+    workflowBindings?: ModelWorkflowBindings;
 };
+
+/** 场景绑定的内部实现：comfyui 指本地工作流文件，runninghub 指云端工作流档案。 */
+export type ModelWorkflowBinding = { provider: "comfyui"; workflow: string } | { provider: "runninghub"; profileId: string };
+export type ModelWorkflowBindings = Partial<Record<ModelInputScenario, ModelWorkflowBinding>>;
 
 export type ModelChannel = {
     id: string;
@@ -439,7 +448,8 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         const workflows = typeof item === "string" ? [] : normalizeWorkflowList(item.workflows);
         const workflowRouting = typeof item === "string" ? undefined : normalizeWorkflowRouting(item.workflowRouting, workflows);
         const workflowParams = typeof item === "string" ? undefined : normalizeModelWorkflowParams(item.workflowParams, workflows, workflowRouting);
-        result.push({ name, capability, script, ...(workflows.length ? { workflows } : {}), ...(workflowRouting ? { workflowRouting } : {}), ...(workflowParams ? { workflowParams } : {}) });
+        const workflowBindings = typeof item === "string" ? undefined : normalizeWorkflowBindings(item.workflowBindings);
+        result.push({ name, capability, script, ...(workflows.length ? { workflows } : {}), ...(workflowRouting ? { workflowRouting } : {}), ...(workflowParams ? { workflowParams } : {}), ...(workflowBindings ? { workflowBindings } : {}) });
     }
     return result;
 }
@@ -447,6 +457,31 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
 function normalizeWorkflowList(value: unknown): string[] {
     if (!Array.isArray(value)) return [];
     return Array.from(new Set(value.map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
+/**
+ * 显式绑定只保留结构完整的项：provider 必须是已知的两个之一，且带上对应标识。
+ * 半成品绑定会让场景既没有本地工作流、也没有可执行的云端档案。
+ */
+function normalizeWorkflowBindings(value: unknown): ModelWorkflowBindings | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const source = value as Record<string, unknown>;
+    const bindings: ModelWorkflowBindings = {};
+    for (const scenario of MODEL_INPUT_SCENARIOS) {
+        const raw = source[scenario];
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+        const provider = String((raw as Record<string, unknown>).provider || "");
+        if (provider === "runninghub") {
+            const profileId = String((raw as Record<string, unknown>).profileId || "").trim();
+            if (profileId) bindings[scenario] = { provider: "runninghub", profileId };
+            continue;
+        }
+        if (provider === "comfyui") {
+            const workflow = String((raw as Record<string, unknown>).workflow || "").trim();
+            if (workflow) bindings[scenario] = { provider: "comfyui", workflow };
+        }
+    }
+    return Object.keys(bindings).length ? bindings : undefined;
 }
 
 /** 路由里的工作流必须在挂载列表内；工作流被移除时回落到列表第一个。 */

@@ -6,6 +6,7 @@ import { imageSlotStatus, imageSourceStatus } from "./image-result-slots.js";
 import type { ResolvedConfig } from "../config.js";
 import type { RuntimeTask, WorkflowConfig, WorkflowField } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
+import type { RunningHubBackend } from "../runtime/runninghub.js";
 import {
   DirectImageBackend,
   type ChatGptImageReference,
@@ -14,7 +15,7 @@ import {
   builtinWorkflowName,
   decodeChannelModel,
   modelOptionName,
-  resolveWorkflowForModel,
+  resolveWorkflowBindingForModel,
   usesWorkflowExecutor,
   workflowResolutionMessage,
 } from "./model-workflow.js";
@@ -66,6 +67,8 @@ type CanvasImageExecutionPlan = {
   input: CanvasImageGenerationInput;
   workflow?: string;
   preset?: string;
+  /** RunningHub 工作流档案 id；与 workflow 二选一，决定走云端还是本地执行器。 */
+  runninghubProfileId?: string;
 };
 
 export type CanvasImageGenerationResult = {
@@ -105,6 +108,8 @@ export class CanvasImageDispatcher {
     private readonly workflows: WorkflowStore,
     private readonly workflowExecutor: WorkflowExecutor,
     private readonly events?: BackendEventBus,
+    /** 可选注入：未配置 RunningHub 时该能力整体不可用，不影响本地执行器。 */
+    private readonly runningHub?: RunningHubBackend,
   ) {}
 
   private get logs(): GenerationLogStore {
@@ -506,7 +511,7 @@ export class CanvasImageDispatcher {
       ...(Object.keys(params).length ? { params } : {}),
     };
     if (usesWorkflowExecutor(aiConfig, selectedModel)) {
-      const resolved = resolveWorkflowForModel(
+      const resolved = resolveWorkflowBindingForModel(
         aiConfig,
         selectedModel,
         executionImageInputs(input).length,
@@ -515,10 +520,22 @@ export class CanvasImageDispatcher {
         throw new Error(
           `${workflowResolutionMessage(resolved)}（模型=${input.model}）`,
         );
+      const planInput = { ...normalized, params: { ...resolved.params, ...params } };
+      if (resolved.binding.provider === "runninghub") {
+        if (!this.runningHub)
+          throw new Error(
+            `模型「${input.model}」绑定了 RunningHub 工作流，但当前 Backend 未初始化 RunningHub 执行器`,
+          );
+        return {
+          executor: "runninghub-workflow",
+          input: planInput,
+          runninghubProfileId: resolved.binding.profileId,
+        };
+      }
       return {
         executor: "comfy-workflow",
-        input: { ...normalized, params: { ...resolved.params, ...params } },
-        workflow: resolved.workflow,
+        input: planInput,
+        workflow: resolved.binding.workflow,
       };
     }
 
@@ -553,9 +570,11 @@ export class CanvasImageDispatcher {
       const suffix = count > 1 ? `-${index}` : "";
       const result = plan.executor === "builtin-comfy" && plan.preset
         ? await this.dispatchBuiltin(plan.input, taskId, plan.preset, suffix)
-        : plan.executor === "comfy-workflow" && plan.workflow
-          ? await this.dispatchWorkflow(plan.input, taskId, plan.workflow, suffix)
-          : (() => { throw new Error(`画布图片执行计划不完整：${plan.input.model}`); })();
+        : plan.executor === "runninghub-workflow" && plan.runninghubProfileId
+          ? await this.dispatchRunningHub(plan.input, taskId, plan.runninghubProfileId, suffix)
+          : plan.executor === "comfy-workflow" && plan.workflow
+            ? await this.dispatchWorkflow(plan.input, taskId, plan.workflow, suffix)
+            : (() => { throw new Error(`画布图片执行计划不完整：${plan.input.model}`); })();
       return result.media.map((media) => ({ ...media, ...(plan.input.imageIds ? { imageId: plan.input.imageIds[index] } : {}) }));
     }));
     const rejected = results.filter((result) => result.status === "rejected");
@@ -628,6 +647,12 @@ export class CanvasImageDispatcher {
       } catch {
         /* 子任务可能已经结束 */
       }
+      try {
+        // RunningHub 子任务是远端任务，必须显式取消，否则云端仍会跑完并计费。
+        this.runningHub?.cancel(childId);
+      } catch {
+        /* 子任务可能已经结束 */
+      }
     }
     const task = this.stores.tasks.get(id);
     if (!task || !["queued", "running"].includes(task.status))
@@ -694,6 +719,9 @@ export class CanvasImageDispatcher {
     const detail = await this.workflows.get(workflowName);
     const fields = detail.config?.fields || [];
     const fieldValues: Record<string, unknown> = { ...(input.params || {}) };
+    if (input.prompt?.trim() && !fields.some(field => field.type === "text" && (field.isPrompt || field.id.toLowerCase() === "prompt"))) {
+      throw new Error(`工作流 ${workflowName} 未配置提示词入口；请将实际正向提示词字段标记为 isPrompt，不能使用模板残留正文执行本次请求`);
+    }
     const dimensions = requestedImageDimensions(input);
     const expectedRatio = requestedImageRatio(input);
     for (const field of fields) {
@@ -776,6 +804,46 @@ export class CanvasImageDispatcher {
         taskId,
       );
       return { taskId, media: result.media };
+    } finally {
+      this.untrackChild(taskId, childTaskId);
+    }
+  }
+
+  /**
+   * RunningHub 图片：档案自带字段映射，这里只把画布输入翻译成平台输入。
+   * 平台调用、任务状态、媒体归档都由 RunningHubBackend 负责，本方法不碰 HTTP。
+   */
+  private async dispatchRunningHub(
+    input: CanvasImageGenerationInput,
+    taskId: string,
+    profileId: string,
+    suffix = "",
+  ) {
+    const runningHub = this.runningHub;
+    if (!runningHub) throw new Error("Backend 未初始化 RunningHub 执行器，无法运行绑定的 RunningHub 工作流");
+    const references = executionImageInputs(input);
+    const values: Record<string, unknown> = { ...(input.params || {}) };
+    const childTaskId = `runninghub-child-${taskId}${suffix}`;
+    this.assertNotCancelled(taskId);
+    this.trackChild(taskId, childTaskId);
+    try {
+      const task = await runningHub.runWorkflow(
+        profileId,
+        { prompt: input.prompt, references, loopInputImages: input.loopInputImages },
+        values,
+        {
+          parentTaskId: taskId,
+          projectId: input.projectId,
+          nodeId: input.nodeId,
+          model: input.model,
+          ...(input.width && input.height ? { width: input.width, height: input.height } : {}),
+          ...(input.size ? { size: input.size } : {}),
+          ...(input.count ? { count: input.count } : {}),
+        },
+        childTaskId,
+      );
+      const completed = await waitForTask(this.stores.tasks, task.id);
+      return { taskId, media: mediaFromTask(completed) };
     } finally {
       this.untrackChild(taskId, childTaskId);
     }

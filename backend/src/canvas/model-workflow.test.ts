@@ -12,8 +12,10 @@ import {
   decodeChannelModel,
   findChannelModel,
   modelOptionName,
+  resolveWorkflowBindingForModel,
   resolveWorkflowForModel,
   scenarioFromReferenceCount,
+  usesRunningHubBinding,
   usesWorkflowExecutor,
   workflowResolutionMessage,
 } from "../canvas/model-workflow.js";
@@ -174,4 +176,138 @@ test("usesWorkflowExecutor：ComfyUI 渠道统一走工作流，API 渠道保持
   );
   assert.equal(usesWorkflowExecutor(config, "gpt-image-2"), false);
   assert.equal(usesWorkflowExecutor(config, "gpt-5-6"), false);
+});
+
+const RH_CHANNEL_ID = "rh-channel";
+const RH_PROFILE_ID = "2efeb650-2c9f-494b-80af-1e5c661c4730";
+
+test("只挂 RunningHub 绑定的模型也算走工作流路由，不被当直连模型", () => {
+  const onlyCloud = {
+    channels: [
+      {
+        id: RH_CHANNEL_ID,
+        name: "RunningHub",
+        kind: "comfyui",
+        models: [
+          {
+            name: "纯云端",
+            capability: "image",
+            workflowBindings: {
+              text: { provider: "runninghub", profileId: RH_PROFILE_ID },
+            },
+          },
+        ],
+      },
+    ],
+  };
+  assert.equal(usesWorkflowExecutor(onlyCloud, "纯云端"), true);
+});
+
+test("显式 comfyui 绑定与旧路由解析结果一致", () => {
+  const resolved = resolveWorkflowBindingForModel(config, "krea2", 2);
+  assert.equal(resolved.ok, true);
+  assert.deepEqual(resolved.ok && resolved.binding, {
+    provider: "comfyui",
+    workflow: "custom/krea2双图编辑.json",
+  });
+  assert.equal(resolved.ok && resolved.scenario, "multi");
+  assert.deepEqual(resolved.ok && resolved.params, { f_demo: 16 });
+});
+
+test("旧 routing 的不支持哨兵仍然优先于回落", () => {
+  const resolved = resolveWorkflowBindingForModel(config, "四视图", 2);
+  assert.equal(resolved.ok, false);
+  assert.equal(!resolved.ok && resolved.reason, "unsupported");
+});
+
+test("RunningHub 绑定解析出 profileId，且不当作本地工作流", () => {
+  const rhConfig = {
+    channels: [
+      {
+        id: RH_CHANNEL_ID,
+        name: "RunningHub",
+        kind: "comfyui",
+        models: [
+          {
+            name: "云端生视频",
+            capability: "video",
+            workflows: ["custom/h3-local-t2va.json"],
+            workflowBindings: {
+              text: { provider: "runninghub", profileId: RH_PROFILE_ID },
+              single: { provider: "comfyui", workflow: "custom/h3-local-t2va.json" },
+            },
+            workflowParams: { text: { seed: 7 } },
+          },
+        ],
+      },
+    ],
+  };
+  const text = resolveWorkflowBindingForModel(rhConfig, "云端生视频", 0);
+  assert.deepEqual(text.ok && text.binding, {
+    provider: "runninghub",
+    profileId: RH_PROFILE_ID,
+  });
+  assert.deepEqual(text.ok && text.params, { seed: 7 });
+
+  const single = resolveWorkflowBindingForModel(rhConfig, "云端生视频", 1);
+  assert.deepEqual(single.ok && single.binding, {
+    provider: "comfyui",
+    workflow: "custom/h3-local-t2va.json",
+  });
+
+  // 未显式绑定的 multi 场景回落到旧 workflows[0]，仍是 comfyui。
+  const multi = resolveWorkflowBindingForModel(rhConfig, "云端生视频", 2);
+  assert.deepEqual(multi.ok && multi.binding, {
+    provider: "comfyui",
+    workflow: "custom/h3-local-t2va.json",
+  });
+
+  assert.equal(usesRunningHubBinding(rhConfig, "云端生视频", 0), true);
+  assert.equal(usesRunningHubBinding(rhConfig, "云端生视频", 1), false);
+});
+
+test("绑定的 provider 缺失或为空时忽略，不产生半成品绑定", () => {
+  const broken = {
+    channels: [
+      {
+        id: RH_CHANNEL_ID,
+        name: "RunningHub",
+        kind: "comfyui",
+        models: [
+          {
+            name: "坏配置",
+            capability: "video",
+            workflows: ["custom/a.json"],
+            workflowBindings: {
+              text: { provider: "runninghub" },
+              single: { provider: "unknown", workflow: "custom/a.json" },
+              multi: "custom/a.json",
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const text = resolveWorkflowBindingForModel(broken, "坏配置", 0);
+  assert.deepEqual(text.ok && text.binding, {
+    provider: "comfyui",
+    workflow: "custom/a.json",
+  });
+  const single = resolveWorkflowBindingForModel(broken, "坏配置", 1);
+  assert.deepEqual(single.ok && single.binding, {
+    provider: "comfyui",
+    workflow: "custom/a.json",
+  });
+  const multi = resolveWorkflowBindingForModel(broken, "坏配置", 2);
+  assert.deepEqual(multi.ok && multi.binding, {
+    provider: "comfyui",
+    workflow: "custom/a.json",
+  });
+});
+
+test("没有实现时仍返回 no-workflow，不误判成 RunningHub", () => {
+  const resolved = resolveWorkflowBindingForModel(config, "某个没配的模型", 0);
+  assert.equal(resolved.ok, false);
+  assert.equal(!resolved.ok && resolved.reason, "no-workflow");
+  assert.equal(usesRunningHubBinding(config, "某个没配的模型", 0), false);
 });

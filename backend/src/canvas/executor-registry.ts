@@ -3,6 +3,7 @@ export type CanvasExecutorId =
   | "direct-image"
   | "builtin-comfy"
   | "comfy-workflow"
+  | "runninghub-workflow"
   | "h3"
   | "plugin";
 

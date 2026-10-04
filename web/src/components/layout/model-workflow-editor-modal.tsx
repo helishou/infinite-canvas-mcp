@@ -1,12 +1,14 @@
-// 渠道模型的工作流配置：一个对外暴露的模型可以挂多个 ComfyUI 工作流，
-// 并按输入场景（文生 / 单图 / 多图）分别指定走哪个工作流、以及该工作流的参数；
-// 只挂一个工作流时三份活都用它，不希望某个场景可用时该场景选「不支持」。
-import { App, Button, Checkbox, Input, Modal, Segmented, Select } from "antd";
+// 渠道模型的工作流配置：一个对外暴露的模型可以挂多个内部实现（本地 ComfyUI
+// 工作流或 RunningHub 云端工作流档案），并按输入场景（文生 / 单图 / 多图）
+// 分别指定走哪个实现、以及该实现的参数；只挂一个实现时三份活都用它，
+// 不希望某个场景可用时该场景选「不支持」。
+import { App, Button, Checkbox, Input, Modal, Segmented, Select, Tag } from "antd";
 import { Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
 import { fetchWorkflowDetail, fetchWorkflows, isWorkflowImageField, type WorkflowDetail, type WorkflowField, type WorkflowItem } from "@/services/api/workflows";
+import { fetchRunningHubWorkflows, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
 import {
     effectiveWorkflowRouting,
     MODEL_INPUT_SCENARIOS,
@@ -16,6 +18,7 @@ import {
     type ChannelModel,
     type ModelCapability,
     type ModelInputScenario,
+    type ModelWorkflowBindings,
     type ModelWorkflowParams,
     type ModelWorkflowRouting,
 } from "@/stores/use-config-store";
@@ -23,6 +26,40 @@ import {
 const CAPABILITIES: ModelCapability[] = ["image", "video", "text", "audio"];
 const CAPABILITY_LABELS: Record<ModelCapability, string> = { image: "图片", video: "视频", text: "文本", audio: "音频" };
 const UNSUPPORTED_LABEL = "不支持";
+const RUNNINGHUB_PREFIX = "runninghub::";
+const LOCAL_PREFIX = "local::";
+
+/** 列表里的一项内部实现：本地工作流与 RunningHub 档案共用一套勾选/路由交互。 */
+type Implementation = {
+    /** 列表与路由使用的稳定键；provider 与标识分开存，改显示名不影响引用。 */
+    key: string;
+    provider: "comfyui" | "runninghub";
+    label: string;
+    /** provider=comfyui 时是工作流文件名；runninghub 时是档案 id。 */
+    id: string;
+};
+
+const localKey = (workflow: string) => `${LOCAL_PREFIX}${workflow}`;
+const runningHubKey = (profileId: string) => `${RUNNINGHUB_PREFIX}${profileId}`;
+
+function parseImplementationKey(key: string): { provider: "comfyui" | "runninghub"; id: string } | null {
+    if (key.startsWith(RUNNINGHUB_PREFIX)) {
+        const profileId = key.slice(RUNNINGHUB_PREFIX.length).trim();
+        return profileId ? { provider: "runninghub", id: profileId } : null;
+    }
+    if (key.startsWith(LOCAL_PREFIX)) {
+        const workflow = key.slice(LOCAL_PREFIX.length).trim();
+        return workflow ? { provider: "comfyui", id: workflow } : null;
+    }
+    // 旧配置与 builtin 只有裸文件名，一律按本地工作流解释。
+    return key.trim() ? { provider: "comfyui", id: key.trim() } : null;
+}
+
+function toBinding(key: string): { provider: "comfyui"; workflow: string } | { provider: "runninghub"; profileId: string } | null {
+    const parsed = parseImplementationKey(key);
+    if (!parsed) return null;
+    return parsed.provider === "runninghub" ? { provider: "runninghub", profileId: parsed.id } : { provider: "comfyui", workflow: parsed.id };
+}
 
 /** 面板里展示的字段：非参考图输入、非提示词（与生成侧的取字段口径一致）。 */
 function editableFields(detail: WorkflowDetail | null) {
@@ -42,8 +79,10 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
     const { message } = App.useApp();
     const [name, setName] = useState("");
     const [capability, setCapability] = useState<ModelCapability>("image");
-    const [available, setAvailable] = useState<string[]>([]);
+    const [localWorkflows, setLocalWorkflows] = useState<string[]>([]);
+    const [cloudProfiles, setCloudProfiles] = useState<RunningHubWorkflowProfile[]>([]);
     const [selected, setSelected] = useState<string[]>([]);
+    const [bindings, setBindings] = useState<ModelWorkflowBindings>({});
     const [routing, setRouting] = useState<ModelWorkflowRouting>({});
     const [params, setParams] = useState<ModelWorkflowParams>({});
     const [paramScenario, setParamScenario] = useState<ModelInputScenario | null>(null);
@@ -54,42 +93,85 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
         if (!open) return;
         setName(model?.name || "");
         setCapability(model?.capability || "image");
-        setSelected(model?.workflows || []);
         setRouting(model?.workflowRouting || {});
         setParams(model?.workflowParams || {});
         setParamScenario(null);
         setSearch("");
         setLoading(true);
-        fetchWorkflows()
-            .then((data) => setAvailable(data.workflows.map((item: WorkflowItem) => item.name)))
-            .catch((error) => message.error(error instanceof Error ? error.message : "加载模型实现失败"))
+        // 已有绑定的实现即使后端列表里暂时读不到，也要留在列表中，避免保存时静默丢失。
+        const legacySelected = (model?.workflows || []).map(localKey);
+        setSelected([...new Set([...legacySelected, ...Object.values(model?.workflowBindings || {}).map((binding) => (binding.provider === "runninghub" ? runningHubKey(binding.profileId) : localKey(binding.workflow)))])]);
+        setBindings(model?.workflowBindings || {});
+        void Promise.allSettled([fetchWorkflows(), fetchRunningHubWorkflows()])
+            .then(([local, cloud]) => {
+                if (local.status === "fulfilled") setLocalWorkflows(local.value.workflows.map((item: WorkflowItem) => item.name));
+                else message.error(local.reason instanceof Error ? local.reason.message : "加载本地工作流失败");
+                if (cloud.status === "fulfilled") setCloudProfiles(cloud.value.workflows || []);
+                else message.error(cloud.reason instanceof Error ? cloud.reason.message : "加载 RunningHub 工作流失败");
+            })
             .finally(() => setLoading(false));
     }, [open, model]);
 
-    // 列表带上去重，已选但已不在后端列表里的工作流仍显示，避免配置静默丢失。
-    const list = useMemo(() => {
-        const names = [...available, ...selected].filter((item, index, all) => all.indexOf(item) === index);
-        const keyword = search.trim().toLowerCase();
-        return keyword ? names.filter((item) => item.toLowerCase().includes(keyword)) : names;
-    }, [available, selected, search]);
+    /** 本地工作流与 RunningHub 档案合并成一份实现列表。 */
+    const implementations = useMemo<Implementation[]>(() => {
+        const items: Implementation[] = localWorkflows.map((workflow) => ({ key: localKey(workflow), provider: "comfyui", label: workflow, id: workflow }));
+        for (const profile of cloudProfiles) items.push({ key: runningHubKey(profile.id), provider: "runninghub", label: profile.name, id: profile.id });
+        return items;
+    }, [localWorkflows, cloudProfiles]);
 
-    // 展示口径与保存口径一致：未显式配置的场景实际就是「回落用第一个工作流」。
-    const effectiveRouting: ModelWorkflowRouting = selected.length ? effectiveWorkflowRouting(selected, routing) : {};
+    // 列表带上去重，已选但已不在后端列表里的实现仍显示，避免配置静默丢失。
+    const list = useMemo(() => {
+        const names = [...implementations.map((item) => item.key), ...selected].filter((item, index, all) => all.indexOf(item) === index);
+        const keyword = search.trim().toLowerCase();
+        const matched = keyword ? names.filter((key) => (implementations.find((item) => item.key === key)?.label || key).toLowerCase().includes(keyword) || key.toLowerCase().includes(keyword)) : names;
+        return matched.map((key) => implementations.find((item) => item.key === key) || { key, provider: parseImplementationKey(key)?.provider || "comfyui", label: parseImplementationKey(key)?.id || key, id: parseImplementationKey(key)?.id || key });
+    }, [implementations, selected, search]);
+
+    // 场景的生效实现：显式绑定优先，否则沿用旧 routing（第一个工作流回落）。
+    const effectiveKeys = useMemo<ModelWorkflowRouting>(() => {
+        const legacy = effectiveWorkflowRouting((model?.workflows || []), routing);
+        const next: ModelWorkflowRouting = {};
+        for (const scenario of MODEL_INPUT_SCENARIOS) {
+            const bound = bindings[scenario];
+            if (bound) next[scenario] = bound.provider === "runninghub" ? runningHubKey(bound.profileId) : localKey(bound.workflow);
+            else next[scenario] = legacy[scenario] ? localKey(legacy[scenario]!) : "";
+        }
+        return next;
+    }, [bindings, routing, model?.workflows]);
+    const effectiveRouting = effectiveKeys;
     const labels = MODEL_SCENARIO_LABELS[capability];
 
-    const toggle = (workflow: string, checked: boolean) => {
-        const workflows = checked ? [...selected, workflow] : selected.filter((item) => item !== workflow);
-        const nextRouting = effectiveWorkflowRouting(workflows, routing);
-        setSelected(workflows);
-        setRouting(nextRouting);
-        // 该场景实际走的工作流变了（含变成「不支持」/无工作流）→ 上一个工作流的参数作废，避免张冠李戴。
-        setParams((current) => {
-            const next: ModelWorkflowParams = {};
+    const toggle = (key: string, checked: boolean) => {
+        const next = checked ? [...selected, key] : selected.filter((item) => item !== key);
+        setSelected(next);
+        // 取消勾选实现时，同时清掉指向它的场景绑定与旧路由，避免留下悬空引用。
+        const parsed = parseImplementationKey(key);
+        setBindings((current) => {
+            const result: ModelWorkflowBindings = { ...current };
             for (const scenario of MODEL_INPUT_SCENARIOS) {
-                const routed = nextRouting[scenario];
-                if (routed && routed !== WORKFLOW_ROUTE_UNSUPPORTED && routed === effectiveRouting[scenario] && current[scenario]) next[scenario] = current[scenario];
+                const bound = result[scenario];
+                const pointsHere = bound && (bound.provider === "runninghub" ? runningHubKey(bound.profileId) : localKey(bound.workflow)) === key;
+                if (pointsHere) delete result[scenario];
+                else if (bound?.provider === "comfyui" && !next.includes(localKey(bound.workflow))) delete result[scenario];
             }
-            return next;
+            return result;
+        });
+        setRouting((current) => {
+            const result: ModelWorkflowRouting = { ...current };
+            for (const scenario of MODEL_INPUT_SCENARIOS) {
+                const routed = result[scenario];
+                if (routed && routed !== WORKFLOW_ROUTE_UNSUPPORTED && !next.includes(localKey(routed))) delete result[scenario];
+            }
+            return result;
+        });
+        // 该场景实际走的实现变了 → 上一个实现的参数作废，避免张冠李戴。
+        setParams((current) => {
+            const kept: ModelWorkflowParams = {};
+            for (const scenario of MODEL_INPUT_SCENARIOS) {
+                const previous = effectiveRouting[scenario];
+                if (previous && effectiveKeys[scenario] === previous && current[scenario]) kept[scenario] = current[scenario];
+            }
+            return kept;
         });
     };
 
@@ -99,9 +181,29 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
             message.warning("请填写对外暴露的模型名");
             return;
         }
-        const finalRouting = selected.length ? effectiveWorkflowRouting(selected, routing) : undefined;
-        const workflowParams = selected.length ? normalizeModelWorkflowParams(params, selected, routing) : undefined;
-        onSave({ name: trimmed, capability, workflows: selected, workflowRouting: finalRouting, workflowParams });
+        const localSelected = selected.map((key) => parseImplementationKey(key)).filter((item): item is { provider: "comfyui"; id: string } => item?.provider === "comfyui").map((item) => item.id);
+        const cloudSelected = new Set(selected.map((key) => parseImplementationKey(key)).filter((item) => item?.provider === "runninghub").map((item) => (item as { id: string }).id));
+        // 只挂了云端实现的场景不需要本地工作流列表；两者都挂时保留本地列表供回落。
+        const finalBindings: ModelWorkflowBindings = {};
+        for (const scenario of MODEL_INPUT_SCENARIOS) {
+            const key = effectiveRouting[scenario];
+            if (!key || key === WORKFLOW_ROUTE_UNSUPPORTED) continue;
+            const parsed = parseImplementationKey(key);
+            const binding = toBinding(key);
+            if (!parsed || !binding) continue;
+            if (binding.provider === "runninghub" && !cloudSelected.has(binding.profileId)) continue;
+            finalBindings[scenario] = binding;
+        }
+        const finalRouting = localSelected.length ? effectiveWorkflowRouting(localSelected, routing) : undefined;
+        const workflowParams = selected.length ? normalizeModelWorkflowParams(params, localSelected.length ? localSelected : [effectiveRouting.text || ""].filter(Boolean), finalRouting) : undefined;
+        onSave({
+            name: trimmed,
+            capability,
+            ...(localSelected.length ? { workflows: localSelected } : {}),
+            ...(finalRouting ? { workflowRouting: finalRouting } : {}),
+            ...(workflowParams ? { workflowParams } : {}),
+            ...(Object.keys(finalBindings).length ? { workflowBindings: finalBindings } : {}),
+        });
         onClose();
     };
 
@@ -145,16 +247,21 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
             <div className="max-h-56 overflow-y-auto rounded-lg border border-stone-200 p-2 dark:border-stone-800">
                 {list.length ? (
                     <div className="grid grid-cols-1 gap-x-6 gap-y-2 md:grid-cols-2">
-                        {list.map((workflow) => (
-                            <Checkbox key={workflow} checked={selected.includes(workflow)} onChange={(event) => toggle(workflow, event.target.checked)}>
-                                <span className="truncate" title={workflow}>
-                                    {workflow}
+                        {list.map((item) => (
+                            <Checkbox key={item.key} checked={selected.includes(item.key)} onChange={(event) => toggle(item.key, event.target.checked)}>
+                                <span className="inline-flex min-w-0 items-center gap-1">
+                                    <span className="truncate" title={item.label}>
+                                        {item.label}
+                                    </span>
+                                    <Tag className="m-0 shrink-0" color={item.provider === "runninghub" ? "blue" : "default"}>
+                                        {item.provider === "runninghub" ? "RunningHub" : "ComfyUI"}
+                                    </Tag>
                                 </span>
                             </Checkbox>
                         ))}
                     </div>
                 ) : (
-                    <div className="py-8 text-center text-sm text-stone-500">{loading ? "加载中…" : "暂无本地实现，请先在模型页导入模型"}</div>
+                    <div className="py-8 text-center text-sm text-stone-500">{loading ? "加载中…" : "暂无内部实现，请先在模型页导入模型或在运行环境登记 RunningHub 工作流"}</div>
                 )}
             </div>
 
@@ -175,11 +282,37 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                                 disabled={!selected.length}
                                 value={routed || undefined}
                                 placeholder={selected.length ? "选择内部实现" : "先选内部实现"}
-                                options={[...selected.map((workflow) => ({ label: workflow, value: workflow })), { label: UNSUPPORTED_LABEL, value: WORKFLOW_ROUTE_UNSUPPORTED }]}
+                                options={[
+                                    ...selected.map((key) => {
+                                        const item = list.find((entry) => entry.key === key);
+                                        const label = item?.label || parseImplementationKey(key)?.id || key;
+                                        const tag = item?.provider === "runninghub" || key.startsWith(RUNNINGHUB_PREFIX) ? "RunningHub" : "ComfyUI";
+                                        return { label: `${label}（${tag}）`, value: key };
+                                    }),
+                                    { label: UNSUPPORTED_LABEL, value: WORKFLOW_ROUTE_UNSUPPORTED },
+                                ]}
                                 onChange={(value) => {
                                     if (value === routed) return;
-                                    setRouting((current) => ({ ...current, [scenario]: value }));
-                                    // 工作流换了 → 旧参数属于旧工作流的字段，直接丢弃。
+                                    const binding = toBinding(value);
+                                    // 显式绑定与旧 routing 同时维护：本地实现继续写 routing 以兼容旧配置，云端实现写 bindings。
+                                    if (binding?.provider === "runninghub") {
+                                        setBindings((current) => ({ ...current, [scenario]: binding }));
+                                        setRouting((current) => {
+                                            const next = { ...current };
+                                            delete next[scenario];
+                                            return next;
+                                        });
+                                    } else if (value !== WORKFLOW_ROUTE_UNSUPPORTED && binding) {
+                                        setBindings((current) => {
+                                            const next = { ...current };
+                                            delete next[scenario];
+                                            return next;
+                                        });
+                                        setRouting((current) => ({ ...current, [scenario]: binding.workflow }));
+                                    } else {
+                                        setRouting((current) => ({ ...current, [scenario]: value }));
+                                    }
+                                    // 实现换了 → 旧参数属于旧实现的字段，直接丢弃。
                                     setParams((current) => {
                                         if (!current[scenario]) return current;
                                         const next = { ...current };
@@ -204,6 +337,7 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
             <ScenarioWorkflowParamsModal
                 open={Boolean(paramScenario)}
                 workflow={paramScenario ? effectiveRouting[paramScenario] || "" : ""}
+                profiles={cloudProfiles}
                 scenarioLabel={paramScenario ? labels[paramScenario] : ""}
                 value={paramScenario ? params[paramScenario] : undefined}
                 onSave={(next) => {
@@ -221,10 +355,15 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
     );
 }
 
-/** 单个输入场景的工作流参数：按该场景实际走的工作流拉字段，填的覆盖值随模型一起保存。 */
+/**
+ * 单个输入场景的参数：按该场景实际走的实现拉字段。
+ * 本地实现读 ComfyUI 工作流详情；RunningHub 实现的输入映射由运行环境档案管理，
+ * 这里只提示去哪里改，不在模型弹窗里复制一份映射。
+ */
 function ScenarioWorkflowParamsModal({
     open,
     workflow,
+    profiles,
     scenarioLabel,
     value,
     onSave,
@@ -232,6 +371,7 @@ function ScenarioWorkflowParamsModal({
 }: {
     open: boolean;
     workflow: string;
+    profiles: RunningHubWorkflowProfile[];
     scenarioLabel: string;
     value?: Record<string, unknown>;
     onSave: (value?: Record<string, unknown>) => void;
@@ -242,13 +382,20 @@ function ScenarioWorkflowParamsModal({
     const [values, setValues] = useState<Record<string, unknown>>({});
     const [loading, setLoading] = useState(false);
     const fields = editableFields(detail);
+    const cloud = workflow.startsWith(RUNNINGHUB_PREFIX) ? profiles.find((profile) => profile.id === parseImplementationKey(workflow)?.id) : undefined;
 
     useEffect(() => {
         if (!open || !workflow) return;
         let cancelled = false;
         setLoading(true);
         setValues({});
-        fetchWorkflowDetail(workflow)
+        // RunningHub 档案没有本地工作流详情可读，字段映射在运行环境里维护。
+        if (workflow.startsWith(RUNNINGHUB_PREFIX)) {
+            setDetail(null);
+            setLoading(false);
+            return;
+        }
+        fetchWorkflowDetail(parseImplementationKey(workflow)?.id || workflow)
             .then((next) => {
                 if (cancelled) return;
                 setDetail(next);
@@ -278,39 +425,50 @@ function ScenarioWorkflowParamsModal({
             open={open}
             centered
             width={560}
-            title={`${scenarioLabel}参数 · ${workflow}`}
+            title={`${scenarioLabel}参数 · ${cloud ? `${cloud.name}（RunningHub）` : parseImplementationKey(workflow)?.id || workflow}`}
             onCancel={onClose}
             styles={{ body: { maxHeight: "60vh", overflowY: "auto" } }}
-            footer={[
-                applied ? (
-                    <Button
-                        key="clear"
-                        danger
-                        type="text"
-                        onClick={() => {
-                            onSave(undefined);
-                            onClose();
-                        }}
-                    >
-                        清除该场景参数
-                    </Button>
-                ) : null,
-                <Button key="cancel" onClick={onClose}>
-                    取消
-                </Button>,
-                <Button
-                    key="save"
-                    type="primary"
-                    onClick={() => {
-                        onSave(values);
-                        onClose();
-                    }}
-                >
-                    保存
-                </Button>,
-            ]}
+            footer={
+                cloud
+                    ? [<Button key="close" type="primary" onClick={onClose}>
+                          知道了
+                      </Button>]
+                    : [
+                          applied ? (
+                              <Button
+                                  key="clear"
+                                  danger
+                                  type="text"
+                                  onClick={() => {
+                                      onSave(undefined);
+                                      onClose();
+                                  }}
+                              >
+                                  清除该场景参数
+                              </Button>
+                          ) : null,
+                          <Button key="cancel" onClick={onClose}>
+                              取消
+                          </Button>,
+                          <Button
+                              key="save"
+                              type="primary"
+                              onClick={() => {
+                                  onSave(values);
+                                  onClose();
+                              }}
+                          >
+                              保存
+                          </Button>,
+                      ]
+            }
         >
-            {loading ? (
+            {cloud ? (
+                <div className="py-6 text-center text-sm text-stone-500">
+                    <div>「{cloud.name}」是 RunningHub 云端工作流，其节点输入映射在「运行环境 → RunningHub 工作流」里配置。</div>
+                    <div className="mt-2 text-xs text-stone-400">勾选状态：{cloud.fields.filter((field) => field.enabled !== false).length}/{cloud.fields.length} 个字段已启用</div>
+                </div>
+            ) : loading ? (
                 <div className="py-8 text-center text-sm text-stone-500">加载中…</div>
             ) : fields.length ? (
                 <WorkflowCustomFields fields={fields} values={values} onChange={(id, next) => setValues((current) => ({ ...current, [id]: next }))} />

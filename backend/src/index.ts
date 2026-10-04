@@ -39,6 +39,8 @@ import { acquireBackendInstanceLock } from "./instance-lock.js";
 import { CanvasReferenceService } from "./canvas/reference-service.js";
 import { registerCanvasReferenceRoutes } from "./server/canvas-reference-routes.js";
 import { EpisodeProductionService } from "./drama/production.js";
+import { SharedAssetCoordinator } from "./drama/shared-assets.js";
+import { NativeProductionGeneration } from "./drama/native-generation.js";
 import { EpisodeProductionRunner } from "./drama/production-runner.js";
 import { registerDramaProductionRoutes } from "./server/drama-production-routes.js";
 import { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
@@ -122,10 +124,11 @@ async function startBackendHttpServer() {
     workflowStore,
     workflowExecutor,
     runtime.events,
+    runningHub,
   );
   const canvasTextDispatcher = new CanvasTextDispatcher(config, runtime.stores);
   const directVideo = new DirectVideoBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
-  const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo);
+  const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo, runningHub);
   const canvasH3Runner = new CanvasH3Runner(
     runtime.stores,
     runtime.events,
@@ -239,6 +242,10 @@ async function startBackendHttpServer() {
   const canvasProduction = new EpisodeProductionService(runtime.db, runtime.events, undefined, true);
   const canvasProductionRunner = new EpisodeProductionRunner(canvasProduction, runtime.stores, canvasGeneration);
   registerDramaProductionRoutes(app, canvasProduction, canvasProductionRunner, "/canvas/projects/:episodeId/production");
+  const nativeProductionGeneration = new NativeProductionGeneration(runtime.db, runtime.stores, episodeProduction, canvasProduction, runtime.events);
+  nativeProductionGeneration.start();
+  canvasGeneration.observeProduction(nativeProductionGeneration);
+  new SharedAssetCoordinator(runtime.db, episodeProduction, runtime.events, (id, runId) => { void episodeProductionRunner.runBatch(id, runId); }, undefined, id => episodeProductionRunner.syncUnsubmittedInputs(id)).start();
   registerCanvasBrowserScriptRoutes(app, canvasBrowserScriptDispatcher);
   registerCanvasReferenceRoutes(app, canvasReferences);
   registerAgentRuntimeRoutes(
