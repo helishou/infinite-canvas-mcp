@@ -294,7 +294,13 @@ test("视频任务：重复 clientTaskId 复用既有任务，不重复提交云
       tasks.set(id, created);
       return created;
     },
-    update: () => undefined,
+    update: (id: string, patch: Record<string, unknown>) => {
+      const current = tasks.get(id);
+      if (!current) return undefined;
+      const next = { ...current, ...patch };
+      tasks.set(id, next);
+      return next;
+    },
     addEvent: () => {},
     cancel: () => undefined,
     events: () => [],
@@ -303,6 +309,7 @@ test("视频任务：重复 clientTaskId 复用既有任务，不重复提交云
     {
       settings: { get: () => aiConfig([cloudModel]) },
       tasks: taskStore,
+      logs: { create: () => ({ id: "log-1" }), list: () => [] },
       projects: { get: () => undefined, applyOperations: () => {}, writeBackCanvasVideoTask: () => true, markCanvasVideoTaskFailed: () => {} },
     } as never,
     {} as never,

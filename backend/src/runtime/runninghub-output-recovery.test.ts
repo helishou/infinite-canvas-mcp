@@ -80,7 +80,7 @@ test("FAILED workflow is rescued from a WS intermediate even with no selected ou
         set: () => {},
         delete: () => {},
     } as SettingStore;
-    const backend = new RunningHubBackend(tasks, settings, undefined, {} as never, undefined, {} as never);
+    const backend = new RunningHubBackend(tasks, settings, undefined, {} as never, {} as never);
     const runtime = backend as unknown as {
         poll(task: RuntimeTask, config: { baseUrl: string; apiKey: string; mode: "workflow"; workflowId: string; fields: []; instanceType: string; concurrency: number; remoteId: string }, signal: AbortSignal): Promise<void>;
     };
@@ -132,7 +132,7 @@ test("constant image fields backed by Backend media are uploaded before RunningH
         read: async (key: string) => { mediaKeys.push(key); return Buffer.from("test image"); },
         meta: () => ({ filePath: "reference.png" }),
     };
-    const backend = new RunningHubBackend(tasks, settings, undefined, media as never, undefined, {} as never);
+    const backend = new RunningHubBackend(tasks, settings, undefined, media as never, {} as never);
     const runtime = backend as unknown as {
         resolveFields(task: RuntimeTask, config: { baseUrl: string; apiKey: string; workflowId: string; mode: "workflow"; fields: Array<Record<string, unknown>> }, signal: AbortSignal): Promise<Array<{ nodeId: string; fieldName: string; fieldValue: unknown }>>;
     };

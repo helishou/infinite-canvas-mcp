@@ -258,7 +258,6 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
         patch(next);
     };
     return <div className="nfh3-settings">
-        {segment.selectedVideoModelEnabled === true ? <div className="nfh3-control-grid">{control(h3Label(locale, "executionMode"), <H3Dropdown values={["auto", "local", "runninghub"]} value={segment.minimaxEngine || String(metadata.minimaxEngine || "local")} format={(value) => h3Label(locale, value === "auto" ? "executionAuto" : value === "local" ? "executionLocal" : "executionRunningHub")} onChange={(value) => patch({ minimaxEngine: value as H3Segment["minimaxEngine"] })} />, true)}<div className="nfh3-hint">{h3Label(locale, "executionHint")}</div></div> : null}
         <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" data-mode={key} className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b></button>)}</div>
         {segment.selectedVideoModelEnabled === true ? selectedVideoModelPanel : <>
         {section("model", "模型与基础参数", String(segment.modelName || "未选择模型").replace(/^.*[\\/]/, ""), <div className="nfh3-control-grid">

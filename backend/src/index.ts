@@ -83,14 +83,7 @@ async function startBackendHttpServer() {
     h3Queue,
   });
   const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
-  const runningHub = new RunningHubBackend(
-    runtime.tasks,
-    runtime.stores.settings,
-    runtime.events,
-    runtime.media,
-    writeBackStandaloneH3Task,
-    h3Queue,
-  );
+  const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events, runtime.media, h3Queue);
   const videoConcat = new VideoConcatBackend(
     runtime.tasks,
     undefined,
@@ -199,8 +192,6 @@ async function startBackendHttpServer() {
         );
       if (task.kind === "runninghub:workflow")
         return runningHub.runWorkflow(String(task.params.runninghubProfileId || ""), task.input, task.params.runninghubParams && typeof task.params.runninghubParams === "object" ? task.params.runninghubParams as Record<string, unknown> : {}, params, clientTaskId);
-      if (task.kind === "runninghub:minimax-h3")
-        return runningHub.run(task.input, params, clientTaskId);
       if (task.kind === "direct-video") return directVideo.retry(task);
       if (task.kind === "direct-audio") return directAudio.retry(task);
       throw new Error(`任务类型 ${task.kind} 没有注册重试执行器`);
@@ -293,7 +284,7 @@ async function startBackendHttpServer() {
     }
     const binding = task.params?.canvasBinding as { generationLogId?: string } | undefined;
     const pendingLog = binding?.generationLogId ? stores.logs.get(binding.generationLogId) : null;
-    if (["comfyui:minimax-h3", "runninghub:minimax-h3"].includes(task.kind)
+    if (task.kind === "comfyui:minimax-h3"
       && ["succeeded", "failed", "cancelled"].includes(task.status)
       && pendingLog && ["queued", "running"].includes(pendingLog.status)) {
       void writeBackH3Task(stores, runtime.events, task).catch((error) =>

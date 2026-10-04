@@ -24,7 +24,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 const childId = String(result.currentChildTaskId || "");
                 const childKind = String(result.currentChildKind || "");
                 if (childId && childKind !== "canvas-video") {
-                    const child = childKind === "runninghub:minimax-h3" ? await ctx.ai.getRunningHubH3Task(childId) : await ctx.ai.getLocalH3Task(childId);
+                    const child = await ctx.ai.getLocalH3Task(childId);
                     if (!stopped && child.preview?.dataUrl && typeof window !== "undefined") {
                         window.dispatchEvent(new CustomEvent("minimax-h3-preview", { detail: { parentTaskId: taskId, sourceTaskId: childId, url: child.preview.dataUrl, mime: child.preview.mime, promptId: child.preview.promptId, step: child.preview.step, total: child.preview.total } }));
                     }

@@ -63,8 +63,7 @@ export type CanvasPluginAi = {
     restoreH3Output: (input: { nodeId: string; segmentId: string; generationLogId: string; storageKey?: string; settings: Record<string, unknown> }) => Promise<void>;
     runVideoConcat: (videos: Array<{ name: string; url?: string; storageKey?: string }>, options?: LocalH3Options) => Promise<LocalVideoConcatResult>;
     listLocalH3Models: () => Promise<{ models: string[]; loras: string[]; textEncoders?: string[]; videoVaes?: string[]; audioVaes?: string[]; latentUpscaleModels?: string[] }>;
-    getRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
-    listModels: (capability?: PluginModelCapability) => ModelOption[];
+      listModels: (capability?: PluginModelCapability) => ModelOption[];
     defaultModel: (capability: PluginModelCapability) => string;
     describeVideoModel: (model: string, referenceCount: number) => Promise<CanvasVideoModelSchema>;
 };

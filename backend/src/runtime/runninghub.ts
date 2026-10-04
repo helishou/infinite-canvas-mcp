@@ -7,7 +7,7 @@ import { runningHubConfigPatchSchema, runningHubWorkflowProfileSchema, type Runn
 import type { RuntimeTask } from "../db.js";
 import type { MediaStore, SettingStore, TaskStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
-import { H3ExecutionQueue, h3CanResumeQueued, h3LocalOnlyReason } from "./h3-queue.js";
+import { H3ExecutionQueue, h3CanResumeQueued } from "./h3-queue.js";
 
 export type { RunningHubField, RunningHubConfig } from "@basketikun/canvas-agent/generation-contract";
 export type { RunningHubWorkflowProfile } from "@basketikun/canvas-agent/generation-contract";
@@ -23,7 +23,7 @@ export class RunningHubBackend {
     private readonly wsDownloads = new Map<string, Set<Promise<void>>>();
     readonly queue: H3ExecutionQueue;
 
-    constructor(private readonly tasks: TaskStore, private readonly settings: SettingStore, private readonly events?: BackendEventBus, private readonly media?: MediaStore, private readonly onTaskTerminal?: (task: RuntimeTask) => void | Promise<void>, queue?: H3ExecutionQueue) {
+    constructor(private readonly tasks: TaskStore, private readonly settings: SettingStore, private readonly events?: BackendEventBus, private readonly media?: MediaStore, queue?: H3ExecutionQueue) {
         this.queue = queue || new H3ExecutionQueue(tasks, settings);
     }
     getConfig(): RunningHubConfig {
@@ -96,14 +96,6 @@ export class RunningHubBackend {
         if (!profile) throw new Error("RunningHub 工作流配置不存在");
         return this.tasks.list({ kind: "runninghub:workflow", model: `runninghub-workflow:${profile.id}`, limit: 50 });
     }
-    async run(input: Record<string, unknown>, params: Record<string, unknown>, clientTaskId?: string, onCreated?: (task: RuntimeTask) => void | Promise<void>) {
-        const existing = clientTaskId ? this.tasks.get(clientTaskId) : null;
-        if (existing) return existing;
-        const reason = h3LocalOnlyReason(params);
-        if (reason) throw new Error(reason);
-        if (!this.ready(params)) throw new Error("RunningHub 未配置 API Key、工作流 ID 或输入映射");
-        return this.startTask("runninghub:minimax-h3", input, params, clientTaskId, true, onCreated);
-    }
     async runWorkflow(profileId: string, input: Record<string, unknown>, values: Record<string, unknown>, overrides: Record<string, unknown> = {}, clientTaskId?: string) {
         const profile = this.listWorkflowProfiles().find((item) => item.id === profileId);
         if (!profile) throw new Error("RunningHub 工作流配置不存在，请重新添加");
@@ -161,7 +153,6 @@ export class RunningHubBackend {
         const task = this.tasks.cancel(id);
         this.queue.cancel(id);
         this.events?.publish({ type: "task.updated", entityId: id, payload: task });
-        if (task.kind === "runninghub:minimax-h3") void this.onTaskTerminal?.(task);
         return task;
     }
     private enqueue(task: RuntimeTask, config: RunConfig) {
@@ -322,7 +313,6 @@ export class RunningHubBackend {
                 const texts = results.flatMap((item) => typeof item.text === "string" ? [{ nodeId: String(item.nodeId || ""), content: item.text }] : []);
                 // WS 中间产物与轮询成品常常是同一个文件，按 storageKey 去重后再合并。
                 const all = dedupeByStorageKey([...media, ...(outputNodesOf(task.params).length ? [] : this.wsIntermediates(task.id))]);
-                if (task.kind === "runninghub:minimax-h3" && !all.some((item) => item.mimeType.startsWith("video/"))) throw new Error("RunningHub H3 任务完成但没有可归档的视频");
                 if (task.kind === "runninghub:workflow" && !all.length && !texts.length) throw new Error(outputNodesOf(task.params).length ? `指定的输出节点没有产物：${outputNodesOf(task.params).join("、")}` : "RunningHub 工作流完成但没有可归档的媒体或文本结果");
                 if (signal.aborted || this.tasks.get(task.id)?.status === "cancelled") return;
                 const result = { media: all, ...(texts.length ? { texts } : {}), taskId: config.remoteId, backend: "runninghub", mode: config.mode };
@@ -499,7 +489,6 @@ export class RunningHubBackend {
     private update(id: string, patch: Parameters<TaskStore["update"]>[1]) {
         const task = this.tasks.update(id, patch);
         this.events?.publish({ type: task.status === "succeeded" ? "task.completed" : task.status === "failed" ? "task.failed" : "task.updated", entityId: id, payload: task });
-        if (TERMINAL.has(task.status) && task.kind === "runninghub:minimax-h3") void this.onTaskTerminal?.(task);
         return task;
     }
     private fail(id: string, error: unknown) {

@@ -224,8 +224,7 @@ export type CanvasPluginAi = {
         latentUpscaleModels?: string[];
         nanfeng?: Record<string, unknown[]>;
     }>;
-    getRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
-    // 列出某能力下用户已配置的可选模型;不传能力则返回全部
+      // 列出某能力下用户已配置的可选模型;不传能力则返回全部
     listModels: (capability?: ModelCapability) => ModelOption[];
     // 该能力当前默认选中的模型 value(可作为下拉框初始值)
     defaultModel: (capability: ModelCapability) => string;

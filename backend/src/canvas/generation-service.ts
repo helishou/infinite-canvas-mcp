@@ -256,9 +256,7 @@ export class CanvasGenerationService {
         const onCreated = binding && binding.bindOnStart !== false
             ? (created: RuntimeTask) => bindCanvasTask(this.stores, binding, created.id)
             : undefined;
-        const task = engine === "runninghub"
-            ? await this.runningHub.run(command.input || {}, params, clientTaskId, onCreated)
-            : await this.comfy.run(command.preset || "minimax-h3", command.input || {}, params, command.comfyUrl, clientTaskId, onCreated);
+        const task = await this.comfy.run(command.preset || "minimax-h3", command.input || {}, params, command.comfyUrl, clientTaskId, onCreated);
         return { ok: true, task, taskId: task.id, executor };
     }
 

@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { storeGeneratedVideo } from "@/services/api/video";
 import { fetchWorkflowDetail } from "@/services/api/workflows";
-import { getLocalH3Task, getRunningHubH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
+import { getLocalH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
 import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, resolveBackendH3Confirmation, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
 import { observeCanvasGenerationTask } from "@/services/api/canvas-generation-task";
@@ -204,13 +204,6 @@ export function usePluginHost(params: PluginHostParams) {
             listLocalH3Models: async () => {
                 const result = await fetchComfyModels(getBackendUrl(), getBackendTokenShared());
                 return { models: result.data?.models || [], loras: result.data?.loras || [], textEncoders: result.data?.textEncoders || [], videoVaes: result.data?.videoVaes || [], audioVaes: result.data?.audioVaes || [], latentUpscaleModels: result.data?.latentUpscaleModels || [], nanfeng: result.data?.nanfeng || {} };
-            },
-            getRunningHubH3Task: async (taskId) => {
-                const task = await getRunningHubH3Task(getBackendUrl(), getBackendTokenShared(), taskId) as Awaited<ReturnType<typeof getRunningHubH3Task>>;
-                if (task.status === "succeeded" && task.result?.url && !task.result.storageKey) {
-                    return { ...task, result: await persistH3Result(task.result) };
-                }
-                return task;
             },
             // List configured models for a capability; labels use the model name without the channel prefix.
             listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: decodeChannelModel(value)?.model || value })),

@@ -12,6 +12,7 @@ import type { CanvasVideoDispatcher } from "./video-dispatcher.js";
 import { h3ExecutionMode, h3CanResumeQueued, h3LocalOnlyReason } from "../runtime/h3-queue.js";
 import type { Stores } from "../stores/types.js";
 import { writeBackH3Task } from "./h3-task-writeback.js";
+import { generationSettingsSnapshot } from "./generation-settings.js";
 import { createLogger } from "../logger.js";
 import { h3ClipCacheFingerprint, h3ClipCacheFingerprintV1, h3ConfirmationKind, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, pickH3PostpassParams, stableH3Fingerprint } from "./h3-cache.js";
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
@@ -625,7 +626,6 @@ export class CanvasH3Runner {
                 } else if (["queued", "running"].includes(child.status)) {
                     const submitted = this.stores.tasks.events(child.id).some((event) => event.type === "submitted");
                     if (!submitted && !h3CanResumeQueued(this.stores.tasks, child.id)) child = this.stores.tasks.update(child.id, { status: "failed", error: "子任务创建后未记录远端提交，拒绝重复提交" });
-                    else if (child.kind === "runninghub:minimax-h3") this.runningHub.resume(child.id);
                     else this.comfy.resume(child.id);
                 }
                 this.currentChildren.set(task.id, child.id);
@@ -999,7 +999,10 @@ export class CanvasH3Runner {
         const log = this.stores.logs.create({
             projectId: String(parent.input.projectId), nodeId: plan.nodeId, segmentId: plan.segmentId,
             status: "queued", platform: engine || "comfyui", workflow: useSelectedVideoModel ? selectedVideoModel : "MiniMax H3", model: useSelectedVideoModel ? selectedVideoModel : String(params.modelName || ""), taskMode: String(params.taskMode || segment.taskMode || "r2v"),
-            prompt, references: actualReferences, inputCounts: { image: images.length, video: referenceVideos.length, audio: audios.length }, startedAt: new Date().toISOString(), durationMs: 0, outputs: [], params: { ...params, submission },
+            prompt, references: actualReferences, inputCounts: { image: images.length, video: referenceVideos.length, audio: audios.length }, startedAt: new Date().toISOString(), durationMs: 0, outputs: [],
+            params: { ...params, submission, generationSettings: generationSettingsSnapshot(params, {
+                engine, workflow: useSelectedVideoModel ? selectedVideoModel : "MiniMax H3", taskMode: String(params.taskMode || segment.taskMode || "r2v"),
+            }) },
         });
         this.events.publish({ type: "generation-log.created", entityId: log.id, payload: log });
         const childParams = { ...params, h3ExecutionContract: { version: 1, expectedRuntime: { ...params }, production: input.runPlan?.requirements || null }, ...(compositeTempDir ? { storyboardCompositeTempDir: compositeTempDir } : {}), parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id, bindOnStart: false } };
@@ -1039,9 +1042,7 @@ export class CanvasH3Runner {
                 if (!created) throw new Error("自选视频模型执行器创建任务后未返回任务记录");
                 child = created;
             } else {
-                child = engine === "runninghub"
-                    ? await this.runningHub.run(childInput, childParams, childId, bind)
-                    : await this.comfy.run("minimax-h3", childInput, childParams, undefined, childId, bind);
+                child = await this.comfy.run("minimax-h3", childInput, childParams, undefined, childId, bind);
             }
         } finally { this.runningHub.queue?.unreserve(childId); }
         if (compositeTempDir) {
@@ -1193,8 +1194,7 @@ export class CanvasH3Runner {
     private cancelChild(id: string) {
         const child = this.stores.tasks.get(id);
         if (!child || ["succeeded", "failed", "cancelled"].includes(child.status)) return;
-        if (child.kind === "runninghub:minimax-h3") this.runningHub.cancel(id);
-        else if (child.kind === "canvas-video") this.videoDispatcher?.cancel(id);
+        if (child.kind === "canvas-video") this.videoDispatcher?.cancel(id);
         else this.comfy.cancel(id);
     }
 
