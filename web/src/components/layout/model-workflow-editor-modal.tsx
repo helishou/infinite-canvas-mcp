@@ -127,14 +127,18 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
         return matched.map((key) => implementations.find((item) => item.key === key) || { key, provider: parseImplementationKey(key)?.provider || "comfyui", label: parseImplementationKey(key)?.id || key, id: parseImplementationKey(key)?.id || key });
     }, [implementations, selected, search]);
 
-    // 场景的生效实现：显式绑定优先，否则沿用旧 routing（第一个工作流回落）。
+    // 场景的生效实现：「不支持」优先，其次显式绑定，最后沿用旧 routing 回落。
     const effectiveKeys = useMemo<ModelWorkflowRouting>(() => {
         const legacy = effectiveWorkflowRouting((model?.workflows || []), routing);
         const next: ModelWorkflowRouting = {};
         for (const scenario of MODEL_INPUT_SCENARIOS) {
+            // 「不支持」是显式声明的场景状态，优先于任何绑定；
+            // 否则用户在下拉里选了不支持，会被下面的绑定立刻覆盖回该实现，表现为「点不了」。
+            const routed = legacy[scenario];
             const bound = bindings[scenario];
-            if (bound) next[scenario] = bound.provider === "runninghub" ? runningHubKey(bound.profileId) : localKey(bound.workflow);
-            else next[scenario] = legacy[scenario] ? localKey(legacy[scenario]!) : "";
+            if (routed === WORKFLOW_ROUTE_UNSUPPORTED) next[scenario] = WORKFLOW_ROUTE_UNSUPPORTED;
+            else if (bound) next[scenario] = bound.provider === "runninghub" ? runningHubKey(bound.profileId) : localKey(bound.workflow);
+            else next[scenario] = routed ? localKey(routed) : "";
         }
         return next;
     }, [bindings, routing, model?.workflows]);
@@ -310,6 +314,12 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                                         });
                                         setRouting((current) => ({ ...current, [scenario]: binding.workflow }));
                                     } else {
+                                        // 「不支持」不绑定任何实现：清掉该场景的绑定，保存时才会真正写入不支持。
+                                        setBindings((current) => {
+                                            const next = { ...current };
+                                            delete next[scenario];
+                                            return next;
+                                        });
                                         setRouting((current) => ({ ...current, [scenario]: value }));
                                     }
                                     // 实现换了 → 旧参数属于旧实现的字段，直接丢弃。

@@ -218,13 +218,15 @@ export function resolveWorkflowBindingForModel(
     decoded?.channelId || (found ? String(found.channel.id || "") : undefined);
   const params = found ? workflowParamsFor(found.model, scenario) : {};
   if (found) {
-    const explicit = workflowBindingFor(found.model, scenario);
-    if (explicit) return { ok: true, binding: explicit, scenario, channelId, params };
+    // 「不支持」是显式声明的场景状态，必须先于绑定判定：否则一个残留的绑定
+    // 会把标记为不支持的场景重新路由到某个实现，用户改了也没有效果。
     const routed = String(
       asRecord(found.model.workflowRouting)[scenario] || "",
     ).trim();
     if (routed === WORKFLOW_ROUTE_UNSUPPORTED)
       return { ok: false, reason: "unsupported", scenario, channelId, modelName };
+    const explicit = workflowBindingFor(found.model, scenario);
+    if (explicit) return { ok: true, binding: explicit, scenario, channelId, params };
     if (routed)
       return {
         ok: true,
