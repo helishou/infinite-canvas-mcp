@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Checkbox, Input, InputNumber, Spin, Table, Tabs, message, Select } from "antd";
+import { Alert, Button, Checkbox, Input, InputNumber, Segmented, Spin, Table, Tabs, message, Select } from "antd";
 import { Upload as UploadIcon, Download, Play, Trash2, Workflow } from "lucide-react";
 import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs } from "@/services/backend-api";
 import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, pollWorkflowTask, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
@@ -10,6 +10,7 @@ import { WorkflowWorkbench, type WorkbenchTab } from "./workflow-workbench";
 import { RunHistoryList } from "./run-history-list";
 import { normalizeOutputNodeSelection, OutputNodePicker } from "./output-node-picker";
 import { RunningHubWorkflowImport } from "./runninghub-workflow-import";
+import { fetchRunningHubWorkflows, fetchRunningHubStatus, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
 import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
 import "../../styles/workflow-graph.css";
 
@@ -33,9 +34,15 @@ export default function WorkflowsPage() {
     const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [selected, setSelected] = useState<WorkflowDetail | null>(null);
+    const [selectedProfile, setSelectedProfile] = useState<RunningHubWorkflowProfile | null>(null);
     const [running, setRunning] = useState(false);
     const [taskResult, setTaskResult] = useState<TaskResult | null>(null);
     const [section, setSection] = useState("workflows");
+    // 本地库与 RunningHub 库共用同一页面壳，数据源与选中项各自独立。
+    const [library, setLibrary] = useState<"local" | "runninghub">("local");
+    const [profiles, setProfiles] = useState<RunningHubWorkflowProfile[]>([]);
+    const [profilesLoading, setProfilesLoading] = useState(false);
+    const [rhConfigured, setRhConfigured] = useState<{ hasApiKey: boolean } | null>(null);
     const [activeTab, setActiveTab] = useState<WorkbenchTab>("graph");
     const [historyLogs, setHistoryLogs] = useState<Array<{ id: string; workflow: string; prompt: string; status: string; createdAt: string; outputs: Array<{ url: string; mimeType: string }>; error?: string }>>([]);
     const [loadingHistory, setLoadingHistory] = useState(false);
@@ -54,6 +61,36 @@ export default function WorkflowsPage() {
     }, []);
 
     useEffect(() => { fetchWorkflows(); }, [fetchWorkflows]);
+
+    /** RunningHub 档案列表；未配置 API Key 时仍可浏览，只是不能运行。 */
+    const fetchProfiles = useCallback(async () => {
+        setProfilesLoading(true);
+        try {
+            const { workflows } = await fetchRunningHubWorkflows();
+            setProfiles(workflows || []);
+        } catch (err) {
+            message.error(err instanceof Error ? err.message : "加载 RunningHub 工作流失败");
+        } finally {
+            setProfilesLoading(false);
+        }
+    }, []);
+
+    useEffect(() => { void fetchProfiles(); void fetchRunningHubStatus().then(setRhConfigured).catch(() => setRhConfigured(null)); }, [fetchProfiles]);
+
+    /** 档案列表项：副标题是 workflowId，徽标显示已启用映射数 / 总字段数。 */
+    const profileItems = useMemo<WorkflowLibraryItem[]>(
+        () =>
+            profiles.map((profile) => {
+                const enabled = (profile.fields || []).filter((field) => field.enabled !== false).length;
+                return {
+                    id: profile.id,
+                    title: profile.name,
+                    meta: profile.workflowId,
+                    badge: `${enabled}/${(profile.fields || []).length} 字段`,
+                };
+            }),
+        [profiles],
+    );
 
     const handleUpload = async (file: File) => {
         setLoading(true);
@@ -344,6 +381,25 @@ export default function WorkflowsPage() {
                 </div>
 
                 <div className="col-span-4 flex min-h-0 flex-col gap-3">
+                    <Segmented
+                        block
+                        value={library}
+                        onChange={(value) => setLibrary(value as "local" | "runninghub")}
+                        options={[
+                            { label: `本地 ComfyUI (${workflows.length})`, value: "local" },
+                            { label: `RunningHub (${profiles.length})`, value: "runninghub" },
+                        ]}
+                    />
+                    {library === "runninghub" ? (
+                        <div className="flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs dark:border-stone-700 dark:bg-stone-900">
+                            {profilesLoading ? <Spin size="small" /> : null}
+                            <span className="flex-1 text-stone-600 dark:text-stone-300">
+                                {rhConfigured?.hasApiKey
+                                    ? "云端工作流库：档案与平台节点图保持一致。"
+                                    : "未配置 RunningHub API Key，可浏览档案但无法运行。"}
+                            </span>
+                        </div>
+                    ) : (
                     <div className="relative flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-900">
                         {loading ? <Spin size="small" /> : <UploadIcon className="size-4 shrink-0 text-stone-400" />}
                         <span className="text-sm text-stone-600 dark:text-stone-300">{loading ? "正在导入…" : "导入本地 ComfyUI JSON / 工作流包"}</span>
@@ -358,18 +414,33 @@ export default function WorkflowsPage() {
                             className="absolute inset-0 cursor-pointer opacity-0"
                         />
                     </div>
-                    <RunningHubWorkflowImport workflows={workflows} onImported={(name) => { void fetchWorkflows().then(() => handleLoadDetail(name)); }} />
+                    )}
 
                     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
                         <div className="shrink-0 border-b border-stone-200 px-3 py-2.5 dark:border-stone-700">
-                            <h2 className="text-sm font-medium">工作流列表</h2>
+                            <h2 className="text-sm font-medium">{library === "local" ? "本地工作流列表" : "RunningHub 工作流列表"}</h2>
                         </div>
-                        <WorkflowLibraryList
-                            items={libraryItems}
-                            selectedId={selected?.name}
-                            onSelect={(item) => void handleLoadDetail(item.id)}
-                            onRename={(item, title) => void handleRename(item.id, title)}
-                        />
+                        {library === "local" ? (
+                            <>
+                                <div className="shrink-0 px-3 pt-2.5">
+                                    <RunningHubWorkflowImport workflows={workflows} onImported={(name) => { void fetchWorkflows().then(() => handleLoadDetail(name)); }} />
+                                </div>
+                                <WorkflowLibraryList
+                                    items={libraryItems}
+                                    selectedId={selected?.name}
+                                    onSelect={(item) => void handleLoadDetail(item.id)}
+                                    onRename={(item, title) => void handleRename(item.id, title)}
+                                    emptyText="暂无本地工作流"
+                                />
+                            </>
+                        ) : (
+                            <WorkflowLibraryList
+                                items={profileItems}
+                                selectedId={selectedProfile?.id}
+                                onSelect={(item) => setSelectedProfile(profiles.find((profile) => profile.id === item.id) || null)}
+                                emptyText={rhConfigured?.hasApiKey === false ? "未配置 API Key" : "暂无 RunningHub 工作流档案"}
+                            />
+                        )}
                     </div>
                 </div>
             </div> : section === "models" ? <ComfyChannelsPanel /> : <ComfyRuntimePanel />}
