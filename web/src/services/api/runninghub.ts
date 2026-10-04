@@ -5,7 +5,7 @@ export type { RunningHubConfig, RunningHubField, RunningHubWorkflowGraph, Runnin
 export const fetchRunningHubConfig = () => request<{ config: RunningHubConfig }>("GET", "/agent/runninghub/config");
 export const saveRunningHubConfig = (config: Partial<RunningHubConfig>) => request<{ config: RunningHubConfig }>("PUT", "/agent/runninghub/config", config);
 export const inspectRunningHubWorkflow = (workflowId: string) => request<{ workflowId: string; workflowJson: RunningHubWorkflowGraph; fields: RunningHubField[] }>("POST", "/agent/runninghub/workflow/inspect", { workflowId });
-export const fetchRunningHubStatus = () => request<{ hasApiKey: boolean }>("GET", "/agent/runninghub/status");
+export const fetchRunningHubStatus = () => request<{ hasApiKey: boolean; url?: string; configured?: boolean }>("GET", "/agent/runninghub/status");
 export const fetchRunningHubWorkflows = () => request<{ workflows: RunningHubWorkflowProfile[] }>("GET", "/agent/runninghub/workflows");
 export const saveRunningHubWorkflow = (profile: RunningHubWorkflowProfile) => request<{ workflow: RunningHubWorkflowProfile }>("PUT", `/agent/runninghub/workflows/${encodeURIComponent(profile.id)}`, profile);
 export const resyncRunningHubWorkflow = (profileId: string) => request<{ workflow: RunningHubWorkflowProfile }>("POST", `/agent/runninghub/workflows/${encodeURIComponent(profileId)}/resync`);
