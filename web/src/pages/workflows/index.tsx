@@ -1,9 +1,10 @@
-import { useEffect, useState, useCallback } from "react";
-import { Alert, Button, Checkbox, Empty, Input, InputNumber, Spin, Table, Tabs, Tag, message, Select } from "antd";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Button, Checkbox, Input, InputNumber, Spin, Table, Tabs, message, Select } from "antd";
 import { Upload as UploadIcon, Download, Play, Trash2, Workflow } from "lucide-react";
 import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs } from "@/services/backend-api";
 import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, pollWorkflowTask, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
+import { WorkflowLibraryList, type WorkflowLibraryItem } from "./workflow-library-list";
 import { RunTab } from "./run-panel";
 import { WorkflowWorkbench, type WorkbenchTab } from "./workflow-workbench";
 import { RunHistoryList } from "./run-history-list";
@@ -104,8 +105,9 @@ export default function WorkflowsPage() {
         }
     };
 
-    const handleRename = async (name: string) => {
-        const trimmed = editValue.trim();
+    // title 由列表壳传入：重命名输入态是壳内部状态，页面不再持有 editValue。
+    const handleRename = async (name: string, title: string) => {
+        const trimmed = title.trim();
         setEditingName(null);
         if (!trimmed) return;
         const item = workflows.find((w) => w.name === name);
@@ -215,6 +217,19 @@ export default function WorkflowsPage() {
         handleSaveConfig(updatedConfig);
     };
 
+    /** 本地工作流库列表项：标题取配置标题，副标题是文件名，徽标是字段数。 */
+    const libraryItems = useMemo<WorkflowLibraryItem[]>(
+        () =>
+            workflows.map((wf) => ({
+                id: wf.name,
+                title: wf.title,
+                meta: wf.name.replace(/^custom\//, ""),
+                badge: `${wf.fieldCount} 字段`,
+                builtin: wf.builtin,
+            })),
+        [workflows],
+    );
+
     return (
         <div className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-6 py-4">
             <div className="shrink-0">
@@ -255,8 +270,8 @@ export default function WorkflowsPage() {
                                         size="small"
                                         value={editValue}
                                         onChange={(e) => setEditValue(e.target.value)}
-                                        onPressEnter={() => handleRename(selected.name)}
-                                        onBlur={() => handleRename(selected.name)}
+                                        onPressEnter={() => handleRename(selected.name, editValue)}
+                                        onBlur={() => handleRename(selected.name, editValue)}
                                         className="w-full"
                                     />
                                 ) : (
@@ -349,51 +364,12 @@ export default function WorkflowsPage() {
                         <div className="shrink-0 border-b border-stone-200 px-3 py-2.5 dark:border-stone-700">
                             <h2 className="text-sm font-medium">工作流列表</h2>
                         </div>
-                        {workflows.length === 0 ? (
-                            <div className="flex flex-1 items-center justify-center p-6"><Empty description="暂无工作流" /></div>
-                        ) : (
-                            <div className="min-h-0 flex-1 divide-y divide-stone-200 overflow-y-auto dark:divide-stone-700">
-                                {workflows.map((wf) => (
-                                    <div
-                                        key={wf.name}
-                                        className={`cursor-pointer px-3 py-2.5 transition hover:bg-stone-50 dark:hover:bg-stone-800 ${selected?.name === wf.name ? "bg-stone-100 dark:bg-stone-800" : ""}`}
-                                        onClick={() => { if (editingName !== wf.name) handleLoadDetail(wf.name); }}
-                                    >
-                                        <div className="flex items-center justify-between">
-                                            <div className="min-w-0 flex-1">
-                                                {editingName === wf.name ? (
-                                                    <Input
-                                                        autoFocus
-                                                        size="small"
-                                                        value={editValue}
-                                                        onChange={(e) => setEditValue(e.target.value)}
-                                                        onClick={(e) => e.stopPropagation()}
-                                                        onPressEnter={() => handleRename(wf.name)}
-                                                        onBlur={() => handleRename(wf.name)}
-                                                        className="w-full"
-                                                    />
-                                                ) : (
-                                                    <p
-                                                        className="truncate text-sm font-medium"
-                                                        title={wf.builtin ? "" : "双击重命名"}
-                                                        onDoubleClick={(e) => {
-                                                            e.stopPropagation();
-                                                            if (wf.builtin) return;
-                                                            setEditingName(wf.name);
-                                                            setEditValue(wf.title);
-                                                        }}
-                                                    >
-                                                        {wf.title}
-                                                    </p>
-                                                )}
-                                                <p className="mt-0.5 truncate text-xs text-stone-500">{wf.name.replace(/^custom\//, "")}</p>
-                                            </div>
-                                            <Tag color="blue">{wf.fieldCount} 字段</Tag>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
+                        <WorkflowLibraryList
+                            items={libraryItems}
+                            selectedId={selected?.name}
+                            onSelect={(item) => void handleLoadDetail(item.id)}
+                            onRename={(item, title) => void handleRename(item.id, title)}
+                        />
                     </div>
                 </div>
             </div> : section === "models" ? <ComfyChannelsPanel /> : <ComfyRuntimePanel />}
