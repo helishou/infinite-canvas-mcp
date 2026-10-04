@@ -289,8 +289,11 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                                 options={[
                                     ...selected.map((key) => {
                                         const item = list.find((entry) => entry.key === key);
-                                        const label = item?.label || parseImplementationKey(key)?.id || key;
-                                        const tag = item?.provider === "runninghub" || key.startsWith(RUNNINGHUB_PREFIX) ? "RunningHub" : "ComfyUI";
+                                        const parsed = parseImplementationKey(key);
+                                        const label = item?.label || parsed?.id || key;
+                                        // 不能只看 list：它经过搜索过滤，已勾选的实现常常不在其中，
+                                        // 那时 item 为 undefined，RunningHub 会被误标成 ComfyUI。
+                                        const tag = (item?.provider || parsed?.provider) === "runninghub" ? "RunningHub" : "ComfyUI";
                                         return { label: `${label}（${tag}）`, value: key };
                                     }),
                                     { label: UNSUPPORTED_LABEL, value: WORKFLOW_ROUTE_UNSUPPORTED },
@@ -392,7 +395,8 @@ function ScenarioWorkflowParamsModal({
     const [values, setValues] = useState<Record<string, unknown>>({});
     const [loading, setLoading] = useState(false);
     const fields = editableFields(detail);
-    const cloud = workflow.startsWith(RUNNINGHUB_PREFIX) ? profiles.find((profile) => profile.id === parseImplementationKey(workflow)?.id) : undefined;
+    const parsedKey = parseImplementationKey(workflow);
+    const cloud = parsedKey?.provider === "runninghub" ? profiles.find((profile) => profile.id === parsedKey.id) : undefined;
 
     useEffect(() => {
         if (!open || !workflow) return;
