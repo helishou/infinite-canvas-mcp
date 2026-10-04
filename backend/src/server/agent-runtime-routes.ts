@@ -14,6 +14,7 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, running
     app.put("/agent/runninghub/workflows/:id", (req, res) => res.json({ ok: true, workflow: runningHub.saveWorkflowProfile({ ...objectBody(req.body), id: String(req.params.id) }) }));
     app.delete("/agent/runninghub/workflows/:id", (req, res) => res.json({ ok: true, deleted: runningHub.removeWorkflowProfile(String(req.params.id)) }));
     app.get("/agent/runninghub/workflows/:id/tasks", (req, res) => res.json({ ok: true, tasks: runningHub.listWorkflowTasks(String(req.params.id)) }));
+    app.post("/agent/runninghub/workflows/:id/resync", async (req, res) => res.json({ ok: true, workflow: await runningHub.refreshProfileGraph(String(req.params.id)) }));
     app.post("/agent/runninghub/workflows/:id/run", async (req, res) => { const task = await runningHub.runWorkflow(String(req.params.id), objectBody(req.body?.input), objectBody(req.body?.values), objectBody(req.body?.params)); events?.publish({ type: "task.created", entityId: task.id, payload: task }); res.status(202).json({ ok: true, task }); });
     app.post("/agent/runninghub/tasks", async (req, res) => { const task = await runningHub.run(objectBody(req.body?.input), objectBody(req.body?.params)); events?.publish({ type: "task.created", entityId: task.id, payload: task }); res.status(202).json({ ok: true, task }); });
     app.get("/agent/runninghub/tasks/:id", (req, res) => { runningHub.resume(req.params.id); return taskResponse(req.params.id, "runninghub:", stores, req, res); });

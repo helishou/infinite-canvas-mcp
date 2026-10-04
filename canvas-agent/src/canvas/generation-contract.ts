@@ -27,9 +27,14 @@ export type RunningHubConfig = z.infer<typeof runningHubConfigPatchSchema> & {
   baseUrl: string; apiKey: string; mode: "workflow" | "app"; concurrency: number;
   workflowId: string; appId: string; fields: RunningHubField[]; useWallet: boolean; instanceType: "default" | "plus" | "ultra";
 };
+/** RunningHub API 格式工作流：节点 ID → 节点定义，与本地 ComfyUI 工作流 JSON 同形。 */
+export const runningHubWorkflowGraphSchema = z.record(z.string(), z.unknown());
+export type RunningHubWorkflowGraph = z.infer<typeof runningHubWorkflowGraphSchema>;
 export const runningHubWorkflowProfileSchema = z.object({
   id: z.string().min(1), name: z.string().min(1).max(120), workflowId: z.string().min(1),
   instanceType: z.enum(["default", "plus", "ultra"]).optional(), fields: z.array(runningHubFieldSchema),
+  /** 读取节点图时的原始图快照；只读展示，运行以平台当前工作流为准。 */
+  workflowJson: runningHubWorkflowGraphSchema.optional(),
   createdAt: z.string().optional(), updatedAt: z.string().optional(),
 });
 export type RunningHubWorkflowProfile = z.infer<typeof runningHubWorkflowProfileSchema>;

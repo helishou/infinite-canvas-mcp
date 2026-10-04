@@ -147,6 +147,8 @@ export type WorkflowConfig = {
     operation: string;
     description: string;
     fields: WorkflowField[];
+    /** 指定输出节点：只保留这些节点的产物；留空表示不过滤。 */
+    outputNodes?: string[];
     mediaInputs?: Record<string, unknown>;
     miniCards?: Record<string, unknown>;
 };
