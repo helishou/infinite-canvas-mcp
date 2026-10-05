@@ -1,5 +1,9 @@
 export default {
     productionCanvas: {
+        dismissWelcome: "Dismiss creative greeting", currentConversation: "Back to conversation",
+        planConfirmed: "Drama plan confirmed", planUnconfirmed: "Confirm the overall story and production requirements first", confirmPlan: "Save and confirm drama plan", planRequirements: "Drama production requirements", newEpisodeDefaults: "Defaults for new episodes and shared asset production. Existing production settings remain unchanged.", generalImageModel: "General image model", inheritImageModel: "Use general image model", videoModel: "Video model", assetModel: { character: "Character / outfit image model", scene: "Scene image model", prop: "Prop image model", style: "Style image model", keyframe: "Storyboard / keyframe image model" },
+        entryTitle: "Choose how to create", dramaEntry: "Drama production", dramaEntryHint: "Plan the whole drama first, then produce each episode in its canvas.", canvasEntry: "Free canvas", canvasEntryHint: "Open a canvas directly and freely arrange nodes, references and generated media.", dramaPlanning: "Drama planning", dramaPlanningHint: "Establish the overall story and production requirements before planning individual episodes.",
+        backDrama: "Back to this drama", dramaOverview: "{{name}} · Overview", sharedCanvasDescription: "Create characters, outfits, style, scenes and props shared across the drama.", sharedCanvasReady: "Episodes use approved assets from here in their own canvases.", sharedCanvasEmpty: "Open the shared asset canvas to start preparing reusable assets.", openSharedCanvas: "Open shared asset canvas", recentCanvases: "Recent canvases",
         selectResult: "Use this version", currentResult: "Current result", selectResultHint: "This replaces the displayed result for this object while keeping all history and task inputs. Restored images require review; results from different production inputs retain their previous-input flag.", imageResultSelected: "Historical image selected; view and review it", videoResultSelected: "Historical video selected; original task and inputs retained", resultSelectFailed: "Selection did not complete; check production or canvas conflicts",
         productionSettings: "Production settings, validation and publishing", taskCount: "{{count}} targets · {{submitted}} tasks submitted", noTasks: "No runs yet", needsAttention: "Objects needing attention", deliveries: "Delivery files", downloadPackage: "Download production package", locateResult: "Locate on canvas", noDeliveries: "Generated videos appear here for locating or downloading",
         historyInputs: "Generation inputs and record", historyStatus: { queued: "Queued", running: "Generating", confirmation: "Awaiting confirmation", success: "Completed", failed: "Failed", cancelled: "Cancelled" },
@@ -29,7 +33,7 @@ export default {
     },
     runningHub: {
         description: "Configure a RunningHub workflow for canvas H3 nodes. Automatic routing prefers an available local slot and queues further tasks according to local and cloud capacity.",
-        site: "RunningHub site", global: "Global · runninghub.ai", china: "China · runninghub.cn", workflowId: "H3 workflow ID", instance: "Instance type",
+        site: "RunningHub site", global: "Global · runninghub.ai", china: "China · runninghub.cn", instance: "Instance type",
         concurrency: "RunningHub concurrency", localConcurrency: "Local H3 concurrency (fixed)", capacityHint: "Defaults to 1. RunningHub account quotas still apply. Changing the limit does not interrupt active tasks.",
         save: "Save RunningHub settings", inspect: "Read workflow inputs", inspected: "Inputs loaded. Enable the mappings you need and save.", saved: "RunningHub settings saved",
         mappings: "H3 input mappings", mappingHint: "Enable the inputs to override: prompt, image/video/audio ordinals, or a fixed value per input. Disabled fields keep their workflow values. Map every reference used in a run.",
@@ -522,9 +526,6 @@ export default {
         agentDisconnected: "Codex disconnected",
         connecting: "Connecting",
         openAgent: "Open local Codex panel",
-        globalPrompt: "Global prompt",
-        globalPromptHint: "Set the global prompt for this canvas",
-        globalPromptPlaceholder: "Text automatically appended to image and video prompts on this canvas…",
         nodeTypes: { image: "Image", text: "Text", config: "Smart generation", video: "Video", audio: "Audio", loop: "Loop", group: "Group", character: "Character", scene: "Scene" },
         toolbar: {
             select: "Select", pan: "Move", text: "Text", image: "Image", video: "Video", audio: "Audio", config: "Smart generation", loop: "Loop", character: "Character", scene: "Scene", group: "Group", extensions: "Extension nodes", upload: "Upload assets", appearance: "Canvas appearance", clear: "Clear canvas", arrange: "Arrange",
@@ -665,7 +666,7 @@ stopTitle: "Stop generation?", stopDescription: "The current request will be int
         searchSeries: "Search series names", seriesHint: "Choose a series to continue its story, episodes and production.", noSeriesMatches: "No matching series",
         "productionTitle": "Production studio",
         "productionSubtitle": "Start or continue your work, from characters and locations to scripts and storyboards.",
-        "canvasHome": "Canvas workspace",
+        "canvasHome": "Canvas library",
         "ideaTitle": "What would you like to create?",
         "withDirector": "Talk with the director",
         "assetPlaceholder": "Describe a character, location or prop you want to design, or tell us about your existing assets.",
@@ -713,7 +714,7 @@ stopTitle: "Stop generation?", stopDescription: "The current request will be int
             ]
         },
         "library": {
-            "canvases": "My production projects",
+            "canvases": "Standalone production",
             "dramas": "Series & episodes"
         },
         "continueProduction": "Continue production",
@@ -898,6 +899,7 @@ stopTitle: "Stop generation?", stopDescription: "The current request will be int
         follow: { current: "Current production", pause: "Pause following", openAgent: "Open Agent", return: "Return to current production", readFailed: "Could not read the current production state. Your page and drafts are preserved.", pendingWrite: "A production write has no receipt yet. Recover it before navigating.", unknownRun: "The production start has no receipt yet. Recover the original runId first.", saveEditsFirst: "Save or resolve pending production edits before starting media generation.", modalOpen: "Finish the open dialog before automatic navigation continues.", exportInProgress: "The delivery bundle is being prepared. Navigation will resume when it finishes." },
     },
     navigation: {
+        canvas: "Canvas",
         production: "Production",
         image: "Image Studio",
         video: "Video Studio",

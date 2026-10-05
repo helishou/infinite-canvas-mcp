@@ -12,7 +12,7 @@ The root Compose configuration builds a Web gateway and Backend from this reposi
 Use Docker Engine/Desktop and Compose v2. The legacy include entrypoint requires Compose 2.20+.
 
 ```bash
-git clone --depth 1 https://github.com/helishou/infinite-canvas-mcp.git
+git clone --depth 1 --recurse-submodules https://github.com/helishou/infinite-canvas-mcp.git
 cd infinite-canvas-mcp
 cp .env.example .env
 docker compose up -d --build
@@ -84,7 +84,7 @@ COMFYUI_HOST_PATH=/srv/ComfyUI docker compose -f docker-compose.yml -f docker-co
 
 In PowerShell set `$env:COMFYUI_HOST_PATH = 'C:/ComfyUI'` and run the same docker compose command. Backend sees the installation at /opt/ComfyUI; configure that container path in the UI. Input/output caches need write access and canvas media must remain separate. A URL alone does not provide remote filesystem access.
 
-- Install and validate Acheng with docker compose exec backend node scripts/acheng-engine.mjs update; use status and rollback to inspect or revert. Versions persist in the volume. Startup does not download an engine automatically. Missing-engine warnings do not prevent other Backend functions.
+- Install and validate Acheng with docker compose exec backend node scripts/acheng-engine.mjs update; use status and rollback to inspect or revert. The explicit ACHENG_SOURCE setting selects a writable fork checkout in the persistent volume; runtime versions persist there too. Startup does not download an engine automatically. Missing-engine warnings do not prevent other Backend functions.
 - For sidebar Codex chat set BACKEND_IMAGE_TARGET=backend-codex, rebuild, and run docker compose exec backend codex login --device-auth. The container uses its own /data/codex state. External CLIs such as Claude Code need their own installation and configuration.
 
 ## Native hosting and frontend-only images

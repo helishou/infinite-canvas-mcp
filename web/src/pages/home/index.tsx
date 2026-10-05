@@ -77,9 +77,12 @@ export default function IndexPage() {
     return (
         <main className="min-h-full bg-background text-foreground" data-testid="home-workbench">
             <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">
+                <section className="mb-6 grid gap-4 sm:grid-cols-2" aria-label={t("productionCanvas.entryTitle")}>
+                    {[{ path: "/production", title: "dramaEntry", description: "dramaEntryHint", icon: Clapperboard }, { path: "/canvas", title: "canvasEntry", description: "canvasEntryHint", icon: LayoutGrid }].map(({ path, title, description, icon: Icon }) => <Link key={path} to={path} className="flex items-start gap-4 rounded-xl border border-border bg-card p-5 text-foreground hover:border-foreground/40"><Icon className="mt-1 size-6 shrink-0" /><div className="flex-1"><h2 className="text-lg font-semibold">{t(`productionCanvas.${title}`)}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">{t(`productionCanvas.${description}`)}</p></div><ArrowRight className="mt-1 size-4 shrink-0" /></Link>)}
+                </section>
                 <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
                     <div>
-                        <h1 className="text-2xl font-semibold tracking-tight">{t("landing.canvasTitle")}</h1>
+                        <h1 className="text-2xl font-semibold tracking-tight">{t("productionCanvas.entryTitle")}</h1>
                         <p className="mt-1.5 text-sm text-muted-foreground">{t("landing.canvasSubtitle")}</p>
                     </div>
                     <div className="flex items-center gap-2">
@@ -125,12 +128,11 @@ export default function IndexPage() {
                         }
                     />
                 )}
-                <section className="mb-8 grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" aria-label={t("home.workbench.continue")} data-testid="home-resume">
-                    <div className="flex min-w-0 flex-col items-start justify-center rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground"><Sparkles className="size-4" />{t("landing.yourStudio")}</p><h2 className="max-w-md text-2xl font-semibold leading-snug tracking-tight sm:text-3xl">{t("landing.canvasHero")}</h2><p className="mt-3 max-w-md text-sm leading-7 text-muted-foreground">{t("landing.canvasHeroHint")}</p><Link className="mt-5 inline-flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm !text-background hover:opacity-90" to="/production">{t("landing.withDirector")}<ArrowRight className="size-4" /></Link><div className="mt-6 flex flex-wrap gap-x-4 gap-y-2 border-t border-border pt-4 text-xs text-muted-foreground">{[{path:"/image",icon:ImagePlus,label:"imageStudio"},{path:"/video",icon:Clapperboard,label:"videoStudio"}].map(({path,icon:Icon,label})=><Link key={path} to={path} className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground"><Icon className="size-3.5" />{t(`home.workbench.${label}`)}<ArrowRight className="size-3" /></Link>)}</div></div>
+                <section className="mb-8" aria-label={t("home.workbench.continue")} data-testid="home-resume">
                     <div className={cn(surface, "flex min-h-60 min-w-0 overflow-hidden")}>
                         {!hydrated ? <div className="w-full p-5"><Skeleton active paragraph={{rows:3}} /></div> : latest ? <>
                             <button type="button" className="relative w-2/5 shrink-0 overflow-hidden bg-muted/30" onClick={() => openProject(latest.id)} aria-label={t("landing.openCanvasNamed",{name:latest.title})}><div className="absolute inset-0"><WorkbenchMediaPreview media={cover(latest)} label={cover(latest) ? latest.title : t("landing.noPreview")} /></div></button>
-                            <div className="flex min-w-0 flex-1 flex-col items-start justify-center gap-3 p-5 sm:p-6"><span className="text-xs text-muted-foreground">{t("home.workbench.lastEdited")}</span><h2 className="line-clamp-3 text-xl font-semibold leading-snug">{latest.title}</h2><p className="text-xs text-muted-foreground">{date(latest.updatedAt)}</p><Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => openProject(latest.id)}>{t("home.workbench.continue")}</Button><Link to={`/director/${encodeURIComponent(latest.id)}`} className="text-xs text-muted-foreground hover:text-foreground">{t("landing.openProduction")}<ArrowRight className="ml-1 inline size-3" /></Link></div>
+                            <div className="flex min-w-0 flex-1 flex-col items-start justify-center gap-3 p-5 sm:p-6"><span className="text-xs text-muted-foreground">{t("home.workbench.lastEdited")}</span><h2 className="line-clamp-3 text-xl font-semibold leading-snug">{latest.title}</h2><p className="text-xs text-muted-foreground">{date(latest.updatedAt)}</p><Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => openProject(latest.id)}>{t("home.workbench.continue")}</Button>{isDrama(latest) && <Link to={`/production?dramaId=${encodeURIComponent(folderFor(latest)?.id || "")}`} className="text-xs text-muted-foreground hover:text-foreground">{t("productionCanvas.backDrama")}<ArrowRight className="ml-1 inline size-3" /></Link>}</div>
                         </> : <div className="flex flex-col items-start justify-center p-6"><Workflow className="mb-4 size-8 text-muted-foreground" /><h2 className="text-lg font-medium">{t("home.workbench.firstProject")}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">{t("home.workbench.firstProjectHint")}</p></div>}
                     </div>
                 </section>
@@ -219,7 +221,7 @@ export default function IndexPage() {
                                                 />
                                             </Tooltip>
                                         </div>
-                                        <div className={cn("flex items-center justify-between gap-2 border-t border-border px-3.5 py-2.5", view === "list" && "w-full")}><Link className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground" to={`/director/${encodeURIComponent(p.id)}`}>{t("landing.openProduction")}<ArrowRight className="size-3" /></Link><Button type="text" size="small" icon={<Eye className="size-3.5" />} aria-label={t("home.workbench.previewNamed", { name: p.title })} onClick={() => setPreviewProject(p)}>{t("landing.preview")}</Button></div>
+                                        <div className={cn("flex items-center justify-between gap-2 border-t border-border px-3.5 py-2.5", view === "list" && "w-full")}>{isDrama(p) && <Link className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground" to={`/production?dramaId=${encodeURIComponent(folderFor(p)?.id || "")}`}>{t("productionCanvas.backDrama")}<ArrowRight className="size-3" /></Link>}<Button type="text" size="small" icon={<Eye className="size-3.5" />} aria-label={t("home.workbench.previewNamed", { name: p.title })} onClick={() => setPreviewProject(p)}>{t("landing.preview")}</Button></div>
                                     </article>
                                 );
                             })}

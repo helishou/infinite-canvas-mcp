@@ -39,13 +39,12 @@ export function stripGeneratedPromptSections(prompt: string | null | undefined):
 }
 
 /** 增强提示词必须收到编辑器中的完整原文；自由文本用于区分用户明确意图与旧生成稿。 */
-export function buildPromptEnhancementInput(input: { currentPrompt: string; globalPrompt?: string; manifest: string; transitionPlan?: string }): string {
+export function buildPromptEnhancementInput(input: { currentPrompt: string; manifest: string; transitionPlan?: string }): string {
     const original = input.currentPrompt.trim();
     const userText = stripGeneratedPromptSections(original);
     return [
         userText && userText !== original ? `User-authored free text (higher priority than the existing draft):\n${userText}` : "",
         `Original prompt from the editor (rewrite this complete draft):\n${original}`,
-        input.globalPrompt?.trim() ? `Global project instructions:\n${input.globalPrompt.trim()}` : "",
         `Reference manifest (fixed numbering; do not reorder):\n${input.manifest}`,
         input.transitionPlan ? `Transition plan (fixed image order; do not reorder):\n${input.transitionPlan}` : "",
     ].filter(Boolean).join("\n\n");

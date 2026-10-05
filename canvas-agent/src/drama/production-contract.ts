@@ -130,11 +130,32 @@ export const productionSettingsSchema = z.object({
     imageModel: z.string(),
     h3Model: z.string(),
     imageModels: z.record(id, z.string()).default({}),
+    imageModelsByKind: z.object({ character: z.string().optional(), scene: z.string().optional(), prop: z.string().optional(), style: z.string().optional(), keyframe: z.string().optional() }).default({}),
     h3Models: z.record(id, z.string()).default({}),
     // Retain legacy budgets when reading old drafts; execution no longer uses them.
     imageQuota: z.number().int().min(0).nullable().optional(),
     h3Quota: z.number().int().min(0).nullable().optional(),
 });
+
+export const dramaProductionPlanSchema = z.object({
+    requirements: z.string().default(""),
+    imageModel: z.string().default(""),
+    imageModelsByKind: productionSettingsSchema.shape.imageModelsByKind,
+    h3Model: z.string().default(""),
+    videoAspectRatio: productionSettingsSchema.shape.videoAspectRatio,
+    confirmedOutline: z.string().default(""),
+    confirmedAt: z.string().datetime().optional(),
+}).strict();
+export type DramaProductionPlan = z.infer<typeof dramaProductionPlanSchema>;
+
+/** Individual overrides take precedence over asset-category defaults and the general image model. */
+export function productionImageModel(settings: { imageModel?: unknown; imageModels?: Record<string, unknown>; imageModelsByKind?: Record<string, unknown> }, source: Record<string, any>, targetId: string, fallbackKind?: "keyframe"): string {
+    const plan = Array.isArray(source.asset_plan) ? source.asset_plan : [];
+    const item = plan.find((asset: any) => String(asset.asset_id || asset.id) === targetId);
+    const kind = String(item?.kind || fallbackKind || (Array.isArray(source.shots) && source.shots.some((shot: any) => shot.id === targetId) ? "keyframe" : "")).toLowerCase();
+    const category = ["character", "costume", "outfit", "role"].includes(kind) ? "character" : ["scene", "environment"].includes(kind) ? "scene" : ["prop", "object"].includes(kind) ? "prop" : ["style", "style_mother"].includes(kind) ? "style" : ["keyframe", "storyboard", "frame"].includes(kind) ? "keyframe" : undefined;
+    return [settings.imageModels?.[targetId], category ? settings.imageModelsByKind?.[category] : "", settings.imageModel].find((model): model is string => typeof model === "string" && Boolean(model)) || "";
+}
 
 export const episodeProductionDataSchema = z.object({
     director: directorProductionSchema.optional(),
@@ -201,5 +222,5 @@ export type ProductionEdit = z.infer<typeof productionEditSchema>;
 export type ProductionPublish = z.infer<typeof productionPublishSchema>;
 
 export function emptyEpisodeProduction(): EpisodeProductionData {
-    return { scenes: [], shots: [], keyframes: {}, keyframeReviews: {}, clipGroups: [], settings: { mode: "manual", imageModel: "", h3Model: "", imageModels: {}, h3Models: {} }, legacyImports: [] };
+    return { scenes: [], shots: [], keyframes: {}, keyframeReviews: {}, clipGroups: [], settings: { mode: "manual", imageModel: "", h3Model: "", imageModels: {}, imageModelsByKind: {}, h3Models: {} }, legacyImports: [] };
 }

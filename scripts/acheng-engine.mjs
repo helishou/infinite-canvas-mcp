@@ -6,25 +6,37 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolveAchengPython } from '@basketikun/canvas-agent/skills/acheng';
 
-export const UPSTREAM = 'https://github.com/AharaOoO/acheng-director-skill.git';
+export const UPSTREAM = 'https://github.com/helishou/acheng-director-skill.git';
 const scripts = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scripts, '..');
-const projectSkillDirectory = path.join(projectRoot, '.agents', 'skills', 'acheng-director');
-const projectSkillManifest = '.canvas-upstream.json';
 const sha = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 const read = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
 const projectOverlayPath = path.join(scripts, 'acheng', 'canvas-kickoff.md');
-const projectOverlayVersion = () => sha(fs.readFileSync(projectOverlayPath)).slice(0, 16);
 const run = (cmd, args, cwd, env) => execFileSync(cmd, args, { cwd, ...(env ? { env: { ...process.env, ...env } } : {}), encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
 const ignored = new Set(['.git', '__pycache__', '.pytest_cache', 'output']);
-function applyProjectSkillOverlay(directory) {
+export function applyRuntimeSkillOverlay(directory) {
   const entry = path.join(directory, 'SKILL.md');
   const fragment = fs.readFileSync(projectOverlayPath, 'utf8').trim();
   const newline = fs.readFileSync(entry, 'utf8').includes('\r\n') ? '\r\n' : '\n';
   let text = fs.readFileSync(entry, 'utf8').replaceAll('\r\n', '\n');
+  // Keep production choices while removing upstream's mandatory promotional output.
+  const opening = '### 首次会话固定响应与版权声明（首次交互唯一输出规则）';
+  if (text.includes(opening)) {
+    const question = '新建一次长内容生产运行时，首次响应在开场横幅下方发送以下固定长内容交付方式选择题，不开始正文生产：';
+    const footer = '首次响应（或首次交付包）末尾必须附加的固定版权与免责声明：';
+    const execution = '将选择写入本次请求的 `execution_mode`';
+    const start = text.indexOf(opening), questionStart = text.indexOf(question, start);
+    const footerStart = text.indexOf(footer, questionStart), executionStart = text.indexOf(execution, footerStart);
+    if (questionStart < start || footerStart < questionStart || executionStart < footerStart) {
+      throw new Error('Acheng promotional output section changed; review before applying the Canvas overlay');
+    }
+    text = `${text.slice(0, start)}### 长内容交付方式\n\n新建一次长内容生产运行时，首次响应发送以下长内容交付方式选择题，不开始正文生产：${text.slice(questionStart + question.length, footerStart)}${text.slice(executionStart)}`;
+    text = text.replace('后续所有输出严禁重复携带上述开场横幅与末尾免责声明。', '');
+  }
   const heading = fragment.split('\n', 1)[0];
   if (text.includes(heading)) {
     if (!text.includes(fragment)) throw new Error('Canvas kickoff overlay exists with different content; review before replacing');
+    fs.writeFileSync(entry, text.replaceAll('\n', newline), 'utf8');
     return;
   }
   const marker = '你是总导演及生产合同的唯一写入者。';
@@ -49,27 +61,17 @@ export function verifyRuntime(directory) {
   if (JSON.stringify(inventory(directory)) !== JSON.stringify(manifest.files)) throw new Error('Acheng runtime was modified; preserve local changes before updating');
   return manifest;
 }
-export function projectSkillInventory(root, directory = root) {
-  return Object.fromEntries(fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
-    if (directory === root && entry.name === projectSkillManifest) return [];
-    if (entry.name === '.git') return [];
-    const file = path.join(directory, entry.name);
-    if (entry.isSymbolicLink()) throw new Error(`Unexpected project Skill link: ${file}`);
-    return entry.isDirectory() ? Object.entries(projectSkillInventory(root, file)) : [[path.relative(root, file).replaceAll('\\', '/'), sha(fs.readFileSync(file))]];
-  }).sort(([a], [b]) => a.localeCompare(b)));
-}
-function diffInventory(actual, expected) {
-  return [...new Set([...Object.keys(actual), ...Object.keys(expected)])]
-    .filter(file => actual[file] !== expected[file])
-    .sort((a, b) => a.localeCompare(b));
+export function runtimePatchVersion(upstream) {
+  const files = ['compat.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py', 'canvas-kickoff.md'];
+  return sha(Buffer.concat([Buffer.from(upstream + '\n'), fs.readFileSync(path.join(scripts, 'acheng-engine.mjs')), ...files.map(file => fs.readFileSync(path.join(scripts, 'acheng', file)))])).slice(0, 16);
 }
 export class AchengEngine {
-  constructor(home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), upstream = UPSTREAM, repository = projectRoot) {
+  constructor(home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), upstream = UPSTREAM, repository = projectRoot, sourceDirectory = process.env.ACHENG_SOURCE) {
     this.home = path.resolve(home); this.upstream = upstream;
     this.repository = path.resolve(repository);
     this.projectSkill = path.join(this.repository, '.agents', 'skills', 'acheng-director');
     this.base = path.join(this.home, 'skill-runtimes', 'acheng-director');
-    this.source = path.join(this.home, 'skill-sources', 'acheng-director');
+    this.source = sourceDirectory ? path.resolve(sourceDirectory) : this.projectSkill;
     this.entry = path.join(this.home, 'skills', 'acheng-director');
     this.stateFile = path.join(this.base, 'active.json');
   }
@@ -82,75 +84,26 @@ export class AchengEngine {
       installed: fs.existsSync(this.entry), projectSkill: this.projectSkillStatus() };
   }
   projectSkillStatus() {
-    if (!fs.existsSync(this.projectSkill)) return { path: this.projectSkill, installed: false, managed: false, modifiedFiles: [] };
-    if (!fs.statSync(this.projectSkill).isDirectory() || fs.lstatSync(this.projectSkill).isSymbolicLink()) throw new Error('Project Acheng Skill path is not a plain directory');
-    const actual = projectSkillInventory(this.projectSkill);
-    const metadataPath = path.join(this.projectSkill, projectSkillManifest);
-    let metadata = null;
-    try { metadata = read(metadataPath); } catch {}
-    const expected = metadata?.files && typeof metadata.files === 'object' ? metadata.files : {};
-    const modifiedFiles = metadata ? diffInventory(actual, expected) : Object.keys(actual).sort((a, b) => a.localeCompare(b));
-    return { path: this.projectSkill, installed: true, managed: Boolean(metadata?.commit), commit: metadata?.commit || null, version: metadata?.version || null, patchVersion: metadata?.patchVersion || null, modifiedFiles };
+    const gitEntry = path.join(this.source, '.git');
+    if (!fs.existsSync(gitEntry)) return { path: this.source, installed: false, managed: false, modifiedFiles: [] };
+    if (!fs.statSync(this.source).isDirectory() || fs.lstatSync(this.source).isSymbolicLink()) throw new Error('Project Acheng Skill path is not a plain directory');
+    const root = run('git', ['rev-parse', '--show-toplevel'], this.source).trim();
+    if (fs.realpathSync(root) !== fs.realpathSync(this.source)) throw new Error('Acheng source must be an independent Git checkout');
+    const origin = run('git', ['remote', 'get-url', 'origin'], this.source).trim();
+    if (origin !== this.upstream) throw new Error('Unexpected Acheng origin');
+    const modifiedFiles = run('git', ['status', '--porcelain', '--untracked-files=all'], this.source).split(/\r?\n/).filter(Boolean).map(line => line.slice(3));
+    const commit = run('git', ['rev-parse', 'HEAD'], this.source).trim();
+    const branch = run('git', ['branch', '--show-current'], this.source).trim() || null;
+    const version = fs.readFileSync(path.join(this.source, 'SKILL.md'), 'utf8').match(/version:\s*"([^"]+)"/)?.[1] || 'unknown';
+    return { path: this.source, installed: true, managed: true, upstream: origin, commit, branch, version, modifiedFiles };
   }
-  prepareProjectSkill(commit, version) {
-    const current = this.projectSkillStatus();
-    const currentFiles = current.installed ? Object.keys(projectSkillInventory(this.projectSkill)) : [];
-    const bootstrap = current.installed && !current.managed && currentFiles.length === 1 && currentFiles[0] === 'SKILL.md'
-      && fs.readFileSync(path.join(this.projectSkill, 'SKILL.md'), 'utf8').includes('do not vendor or reconstruct their contents here');
-    const localChanges = bootstrap ? [] : current.modifiedFiles;
-    if (current.installed && (localChanges.length || (!current.managed && currentFiles.length > 0 && !bootstrap))) {
-      const details = localChanges.slice(0, 10).join(', ');
-      throw new Error(`Project Acheng Skill has local changes; preserve or review them before syncing${details ? `: ${details}` : ''}`);
-    }
-    if (current.managed && current.commit === commit && current.version === version && current.patchVersion === projectOverlayVersion() && !current.modifiedFiles.length) {
-      return { status: () => current, rollback() {}, finalize() {} };
-    }
-    const parent = path.dirname(this.projectSkill);
-    fs.mkdirSync(parent, { recursive: true });
-    const transaction = path.join(parent, `.acheng-director-sync-${crypto.randomUUID()}`);
-    const staged = path.join(transaction, 'skill');
-    fs.mkdirSync(staged, { recursive: true });
-    let applied = false;
-    let backup = null;
-    try {
-      const index = path.join(transaction, 'index');
-      const indexEnv = { GIT_INDEX_FILE: index };
-      run('git', ['read-tree', commit], this.source, indexEnv);
-      run('git', ['checkout-index', '--all', '--force', `--prefix=${staged}${path.sep}`], this.source, indexEnv);
-      const skillVersion = fs.readFileSync(path.join(staged, 'SKILL.md'), 'utf8').match(/version:\s*"([^"]+)"/)?.[1] || version || 'unknown';
-      if (version && skillVersion !== version) throw new Error(`Upstream Skill version differs from candidate: expected ${version}, found ${skillVersion}`);
-      applyProjectSkillOverlay(staged);
-      const files = projectSkillInventory(staged);
-      fs.writeFileSync(path.join(staged, projectSkillManifest), JSON.stringify({ upstream: this.upstream, branch: 'main', commit, version: skillVersion, patchVersion: projectOverlayVersion(), files }, null, 2), 'utf8');
-      if (fs.existsSync(this.projectSkill)) {
-        backup = `${this.projectSkill}.previous-${crypto.randomUUID()}`;
-        fs.renameSync(this.projectSkill, backup);
-      }
-      try {
-        fs.renameSync(staged, this.projectSkill);
-        applied = true;
-      } catch (error) {
-        if (backup && fs.existsSync(backup) && !fs.existsSync(this.projectSkill)) fs.renameSync(backup, this.projectSkill);
-        backup = null;
-        throw error;
-      }
-      return {
-        status: () => this.projectSkillStatus(),
-        rollback: () => {
-          if (!applied) return;
-          fs.rmSync(this.projectSkill, { recursive: true, force: true });
-          if (backup && fs.existsSync(backup)) fs.renameSync(backup, this.projectSkill);
-          backup = null;
-          applied = false;
-        },
-        finalize: () => {
-          if (backup && fs.existsSync(backup)) fs.rmSync(backup, { recursive: true, force: true });
-          backup = null;
-        },
-      };
-    } finally {
-      if (fs.existsSync(transaction)) fs.rmSync(transaction, { recursive: true, force: true });
-    }
+  cleanSource() {
+    const status = this.projectSkillStatus();
+    if (!status.installed) throw new Error(this.source === this.projectSkill
+      ? 'Acheng submodule is not initialized; run git submodule update --init -- .agents/skills/acheng-director'
+      : 'Configured Acheng source is not initialized; run update to clone the fork before building locally');
+    if (status.modifiedFiles.length) throw new Error('Acheng source has local changes; commit them in the submodule before building or updating. No files were overwritten.');
+    return status;
   }
   locked(fn) {
     fs.mkdirSync(this.base, { recursive: true });
@@ -160,21 +113,24 @@ export class AchengEngine {
     try { return fn(); } finally { fs.closeSync(handle); fs.unlinkSync(lock); }
   }
   fetch() {
-    fs.mkdirSync(path.dirname(this.source), { recursive: true });
-    if (!fs.existsSync(this.source)) run('git', ['clone', '--branch', 'main', '--single-branch', this.upstream, this.source]);
-    if (run('git', ['status', '--porcelain', '--untracked-files=all'], this.source).trim()) throw new Error('Upstream checkout has local changes; update aborted');
-    if (run('git', ['remote', 'get-url', 'origin'], this.source).trim() !== this.upstream) throw new Error('Unexpected Acheng origin');
+    // Deployment images explicitly select a writable checkout outside their packaged source.
+    if (this.source !== this.projectSkill && !fs.existsSync(path.join(this.source, '.git'))) {
+      fs.mkdirSync(path.dirname(this.source), { recursive: true });
+      run('git', ['clone', '--branch', 'main', '--single-branch', this.upstream, this.source]);
+    }
+    const current = this.cleanSource();
     run('git', ['fetch', 'origin', 'main'], this.source);
-    return run('git', ['rev-parse', 'origin/main'], this.source).trim();
+    const target = run('git', ['rev-parse', 'refs/remotes/origin/main'], this.source).trim();
+    try { run('git', ['merge-base', '--is-ancestor', current.commit, target], this.source); }
+    catch { throw new Error('Acheng source has local commits ahead of or diverged from origin/main; use update --local to build HEAD, or reconcile the branches explicitly.'); }
+    return target;
   }
   update(check = false, local = false) { return this.locked(() => {
     const old = this.state();
     if (old) this.status();
-    if (local && !old?.active) throw new Error('Local overlay update requires an activated runtime');
-    const commit = local ? old.active.commit : this.fetch();
+    const commit = local ? this.cleanSource().commit : this.fetch();
     const changes = old ? run('git', ['diff', '--name-only', old.active.commit, commit], this.source).trim().split('\n').filter(Boolean) : ['initial managed installation'];
-    const overlayFiles = ['compat.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py', 'canvas-kickoff.md'];
-    const patchVersion = sha(Buffer.concat(overlayFiles.map(file => fs.readFileSync(path.join(scripts, 'acheng', file))))).slice(0, 16);
+    const patchVersion = runtimePatchVersion(this.upstream);
     const runtimeId = `${commit}-${patchVersion}`;
     const runtime = path.join(this.base, 'versions', runtimeId);
     if (fs.existsSync(runtime)) verifyRuntime(runtime);
@@ -193,9 +149,10 @@ export class AchengEngine {
         if (actual !== expected) changedContracts.push(file);
       }
       let upstreamFixed = false;
-      if (changedContracts.length) {
+      const changedCodeContracts = changedContracts.filter(file => file !== 'SKILL.md');
+      if (changedCodeContracts.length) {
         const fixes = ['SKILL.md', 'scripts/h3_contract.py', 'scripts/h3_final_format.py', 'scripts/style_anchor.py'];
-        if (changedContracts.some(file => !fixes.includes(file))) throw new Error(`Upstream contract changed: ${changedContracts.join(', ')}. Review compatibility before activation. Candidate retained: ${candidate}`);
+        if (changedCodeContracts.some(file => !fixes.includes(file))) throw new Error(`Upstream contract changed: ${changedContracts.join(', ')}. Review compatibility before activation. Candidate retained: ${candidate}`);
         // Retire the local overlay only if the real upstream behavior already
         // satisfies its tests; a failed textual patch is never evidence of a fix.
         run(python, ['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'verify.py'), directory]);
@@ -208,6 +165,7 @@ export class AchengEngine {
       if (!upstreamFixed) run(python, ['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'compat.py'), directory]);
       run(python, ['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'verify.py'), directory]);
       run(python, ['-B', '-X', 'utf8', 'scripts/validate_director_contract.py'], directory);
+      applyRuntimeSkillOverlay(directory);
       const version = fs.readFileSync(path.join(directory, 'SKILL.md'), 'utf8').match(/version:\s*"([^"]+)"/)?.[1] || 'unknown';
       const manifest = { upstream: this.upstream, branch: 'main', commit, version, patchVersion, runtimeId, overlayApplied: !upstreamFixed, files: inventory(directory), verifiedAt: new Date().toISOString() };
       fs.writeFileSync(path.join(directory, 'canvas-engine.json'), JSON.stringify(manifest, null, 2));
@@ -216,31 +174,17 @@ export class AchengEngine {
     }
     const manifest = verifyRuntime(runtime);
     const active = { path: runtime, runtimeId, commit, patchVersion, version: manifest.version };
-    let projectPlan = null;
     if (!check) {
-      projectPlan = this.prepareProjectSkill(commit, manifest.version);
-      try {
-        if (old?.active.runtimeId !== runtimeId) this.activate(active, old?.active || null);
-      } catch (error) {
-        projectPlan.rollback();
-        throw error;
-      }
-      projectPlan.finalize();
+      const current = this.cleanSource();
+      if (local && current.commit !== commit) throw new Error('Acheng HEAD changed during verification; rerun against the current commit');
+      if (!local && current.commit !== commit) run('git', ['merge', '--ff-only', commit], this.source);
+      if (old?.active.runtimeId !== runtimeId) this.activate(active, old?.active || null);
     }
     return { ...active, changes, activated: !check, unchanged: old?.active.runtimeId === runtimeId,
       compatibility: 'verified', projectSkill: this.projectSkillStatus() };
   }); }
-  vendor() { return this.locked(() => {
-    const state = this.state();
-    if (!state?.active) throw new Error('No activated Acheng runtime; run npm run acheng:update first');
-    this.status();
-    if (run('git', ['status', '--porcelain', '--untracked-files=all'], this.source).trim()) throw new Error('Upstream checkout has local changes; project vendor sync aborted');
-    if (run('git', ['remote', 'get-url', 'origin'], this.source).trim() !== this.upstream) throw new Error('Unexpected Acheng origin');
-    run('git', ['cat-file', '-e', `${state.active.commit}^{commit}`], this.source);
-    const plan = this.prepareProjectSkill(state.active.commit, state.active.version);
-    plan.finalize();
-    return this.status();
-  }); }
+  // Retained for the existing npm command; local builds no longer vendor over source files.
+  vendor() { return this.update(false, true); }
   activate(active, previous) {
     verifyRuntime(active.path);
     fs.mkdirSync(path.dirname(this.entry), { recursive: true });
@@ -265,10 +209,7 @@ export class AchengEngine {
   rollback() { return this.locked(() => {
     const state = this.state(); if (!state?.previous) throw new Error('No previous verified Acheng runtime');
     verifyRuntime(state.active.path);
-    const projectPlan = fs.existsSync(this.source) ? this.prepareProjectSkill(state.previous.commit, state.previous.version) : null;
-    try { this.activate(state.previous, state.active); }
-    catch (error) { projectPlan?.rollback(); throw error; }
-    projectPlan?.finalize();
+    this.activate(state.previous, state.active);
     return this.status();
   }); }
 }

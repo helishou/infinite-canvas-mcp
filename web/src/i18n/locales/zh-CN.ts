@@ -1,5 +1,9 @@
 export default {
     productionCanvas: {
+        dismissWelcome: "关闭创作提示", currentConversation: "返回当前对话",
+        planConfirmed: "剧目规划已确认", planUnconfirmed: "请先确认全剧大纲与制作要求", confirmPlan: "保存并确认剧目规划", planRequirements: "全剧制作要求", newEpisodeDefaults: "以下参数作为新分集和新共享资产制作的默认值，已有制作设置保持原值。", generalImageModel: "通用图片模型", inheritImageModel: "沿用通用图片模型", videoModel: "视频模型", assetModel: { character: "角色／服装图片模型", scene: "场景图片模型", prop: "道具图片模型", style: "风格图模型", keyframe: "分镜／关键帧图片模型" },
+        entryTitle: "选择创作方式", dramaEntry: "剧目制作", dramaEntryHint: "先确认全剧大纲与制作规划，再进入分集画布制作。", canvasEntry: "自由画布", canvasEntryHint: "直接打开画布，自由放置节点、素材与生成内容。", dramaPlanning: "剧目规划", dramaPlanningHint: "先明确全剧大纲与制作要求，再安排各集的具体内容。",
+        backDrama: "返回当前剧目", dramaOverview: "{{name}} · 剧目总览", sharedCanvasDescription: "集中制作全剧共用的角色、服装、风格、场景与道具。", sharedCanvasReady: "各集在自己的画布里采用这里批准的素材。", sharedCanvasEmpty: "还没有共享资产画布，打开后即可开始准备共用素材。", openSharedCanvas: "进入共享资产画布", recentCanvases: "最近画布",
         selectResult: "选用这一版", currentResult: "当前结果", selectResultHint: "这会替换当前对象的显示结果，保留所有历史和任务输入。图片选回后仍需审核；不同制作输入产生的旧结果会保留旧输入标记。", imageResultSelected: "已选回历史图片，请查看并审核", videoResultSelected: "已选回历史视频，原任务与输入保留", resultSelectFailed: "选用未完成，请检查制作或画布冲突",
         productionSettings: "制作设置、校验与发布", taskCount: "{{count}} 个目标 · 已提交 {{submitted}} 个任务", noTasks: "还没有运行任务", needsAttention: "需要处理的对象", deliveries: "交付文件", downloadPackage: "下载制作包", locateResult: "定位画面", noDeliveries: "生成的视频会在这里列出，可以定位或下载",
         historyInputs: "生成输入与记录", historyStatus: { queued: "排队中", running: "生成中", confirmation: "等待确认", success: "已完成", failed: "失败", cancelled: "已取消" },
@@ -29,7 +33,7 @@ export default {
     },
     runningHub: {
         description: "为画布 H3 节点配置 RunningHub 工作流。自动分流优先使用空闲本地槽位，其余任务按本地和云端容量排队。",
-        site: "RunningHub 站点", global: "海外站 · runninghub.ai", china: "国内站 · runninghub.cn", workflowId: "H3 工作流 ID", instance: "运行实例",
+        site: "RunningHub 站点", global: "海外站 · runninghub.ai", china: "国内站 · runninghub.cn", instance: "运行实例",
         concurrency: "RunningHub 并发数", localConcurrency: "本地 H3 并发数（固定）", capacityHint: "默认 1；平台账号额度仍以 RunningHub 为准。调整上限不会中断已运行任务。",
         save: "保存 RunningHub 设置", inspect: "读取工作流参数", inspected: "已读取参数，请启用需要的映射并保存", saved: "RunningHub 设置已保存",
         mappings: "H3 输入映射", mappingHint: "读取后勾选需要覆盖的输入：提示词、图片/视频/音频序号，或在节点输入里填固定值。未启用的字段沿用工作流原值。每轮参考素材必须全部映射。",
@@ -522,9 +526,6 @@ export default {
         agentDisconnected: "Codex 未连接",
         connecting: "连接中",
         openAgent: "打开本地 Codex 面板",
-        globalPrompt: "全局提示词",
-        globalPromptHint: "设置当前画布的全局提示词",
-        globalPromptPlaceholder: "输入会自动附加到本画布生图和生视频提示词的内容…",
         nodeTypes: { image: "图片", text: "文本", config: "智能生成", video: "视频", audio: "音频", loop: "循环", group: "组", character: "角色", scene: "场景" },
         toolbar: {
             select: "选择", pan: "移动", text: "文本", image: "图片", video: "视频", audio: "音频", config: "智能生成", loop: "循环", character: "角色", scene: "场景", group: "组", extensions: "扩展节点", upload: "上传资产", appearance: "画布外观", clear: "清空画布", arrange: "整理布局",
@@ -665,7 +666,7 @@ stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断�
         searchSeries: "搜索剧目名称", seriesHint: "选择一部剧目，继续剧本、分集与制作。", noSeriesMatches: "没有匹配的剧目",
         "productionTitle": "制作工作室",
         "productionSubtitle": "从角色和场景，到故事与分镜，开始或继续你的作品。",
-        "canvasHome": "画布工作台",
+        "canvasHome": "画布库",
         "ideaTitle": "今天想创作什么？",
         "withDirector": "与导演聊一聊",
         "assetPlaceholder": "描述你想设计的角色、场景或道具，也可以说说已有素材。",
@@ -713,7 +714,7 @@ stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断�
             ]
         },
         "library": {
-            "canvases": "我的制作项目",
+            "canvases": "独立制作",
             "dramas": "剧目与分集"
         },
         "continueProduction": "继续制作",
@@ -898,6 +899,7 @@ stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断�
         follow: { current: "当前制作", pause: "暂停跟随", openAgent: "打开 Agent", return: "回到当前制作", readFailed: "暂时无法读取当前制作状态；当前页面和草稿已保留。", pendingWrite: "正式制作操作尚未取得回执；处理回执后再切页。", unknownRun: "生产启动尚未取得回执；先恢复原 runId。", saveEditsFirst: "先保存或处理未提交的制作修改，再开始媒体生产。", modalOpen: "请先完成当前弹窗操作，再继续自动跟随。", exportInProgress: "交付包正在打包，完成后再切页。" },
     },
     navigation: {
+        canvas: "画布",
         production: "制作",
         image: "生图工作台",
         video: "视频创作台",

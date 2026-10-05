@@ -12,7 +12,6 @@ import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-s
 import { useAgentStore } from "@/stores/use-agent-store";
 import { DOCS_URL } from "@/constant/env";
 import type { CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
-import { CanvasCollaborativeText } from "./canvas-collaborative-text";
 import { CanvasDraftsButton } from "./canvas-drafts-button";
 import { CanvasTaskCenterButton } from "./canvas-task-center";
 import { CanvasTextSuggestionsButton } from "./canvas-text-suggestions-button";
@@ -43,7 +42,6 @@ export function CanvasTopBar({
     agentOpen,
     compactAgentStatus,
     onToggleAgent,
-    globalPrompt,
     onOpenGenerationLogs,
     collaborators,
 }: {
@@ -71,7 +69,6 @@ export function CanvasTopBar({
     agentOpen: boolean;
     compactAgentStatus: { connected: boolean; enabled: boolean; activity: string };
     onToggleAgent: () => void;
-    globalPrompt: string;
     onOpenGenerationLogs: () => void;
     collaborators: CanvasCollaborator[];
 }) {
@@ -111,13 +108,12 @@ export function CanvasTopBar({
                             {sidePanelOpen ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
                         </button>
                     </Tooltip>
-                    {!productionOwner && <Link to={`/director/${encodeURIComponent(projectId)}${productionOrigin}`} className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }}><Sparkles className="size-4" />{t("director.open")}</Link>}
                     <Dropdown
                         trigger={["click"]}
                         menu={{
                             items: [
-                                ...(productionOwner ? [{ key: "production", icon: <Images className="size-4" />, label: <Link to="/production">{t("productionCanvas.backHome")}</Link> }] : []),
-                                { key: "home", icon: <Home className="size-4" />, label: t("canvas.home"), onClick: onHome },
+                                ...(productionDramaId ? [{ key: "drama", icon: <Images className="size-4" />, label: <Link to={`/production?dramaId=${encodeURIComponent(productionDramaId)}`}>{t("productionCanvas.backDrama")}</Link> }] : []),
+                                { key: "home", icon: <Home className="size-4" />, label: t("productionCanvas.backHome"), onClick: onHome },
                                 { key: "docs", icon: <BookOpen className="size-4" />, label: t("canvas.docs"), onClick: () => window.open(DOCS_URL, "_blank", "noopener,noreferrer") },
                                 { key: "projects", icon: <Images className="size-4" />, label: t("canvas.projects"), onClick: onProjects },
                                 { type: "divider" },
@@ -166,18 +162,6 @@ export function CanvasTopBar({
                     {!productionOwner && <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />}
                     <CanvasCollaborators collaborators={collaborators} />
                     {!productionOwner && <><CanvasDraftsButton /><CanvasTextSuggestionsButton projectId={projectId} /></>}
-                    <Popover
-                        trigger="click"
-                        placement="bottomLeft"
-                        content={<div className="w-80"><CanvasCollaborativeText projectId={projectId} target={{ field: "globalPrompt" }} placeholder={t("canvas.globalPromptPlaceholder")} /></div>}
-                    >
-                        <Tooltip title={t("canvas.globalPromptHint")}>
-                                <button type="button" aria-label={t("canvas.globalPrompt")} className={`${productionOwner ? "hidden sm:flex" : "flex"} h-8 items-center gap-1 rounded-lg px-2 text-xs transition hover:bg-black/5 dark:hover:bg-white/10`} style={{ color: globalPrompt.trim() ? theme.node.text : theme.node.muted }}>
-                                <Sparkles className="size-3.5" />
-                                {!productionOwner && <span>{t("canvas.globalPrompt")}</span>}
-                            </button>
-                        </Tooltip>
-                    </Popover>
                 </div>
 
                 <div className="pointer-events-auto flex shrink-0 items-center gap-1.5">

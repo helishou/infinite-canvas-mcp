@@ -4,7 +4,7 @@ import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/run
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/plugins/minimax-h3/character-groups";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
-import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionSceneEntries, productionImageModel } from "@basketikun/canvas-agent/drama/production-contract";
 
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import { resolveCanvasImageReferenceNode, type ResolvedCanvasImageReference } from "../canvas/image-references.js";
@@ -49,6 +49,10 @@ export class EpisodeProductionRunner {
             const [kind, ...parts] = target.split(":");
             const targetId = parts.join(":");
             if (!targetId) throw new Error("缺少准备目标 ID");
+            if (kind === "scene") {
+                if (!scenes.some(scene => scene.id === targetId)) throw new Error("正式剧本场次不存在");
+                continue; // commitPreparation materializes script nodes in the production transaction.
+            }
             if (kind === "asset" || kind === "frame") {
                 const assetId = kind === "frame" ? director.shotInputs[targetId]?.keyframeAssetId : targetId;
                 if (!assetId) throw new Error("镜头未规划关键帧资产");
@@ -65,7 +69,7 @@ export class EpisodeProductionRunner {
                     if (groupId && !group) operations.push({ type: "add_node", id: groupId, nodeType: "group", title: scene!.title, position: groupPosition, width: 1100, height: 650, metadata: { productionSceneId: scene!.id } });
                     operations.push({ type: "add_node", id: nodeId, nodeType: "image", title: kind === "frame" ? current.draft.shots.find(shot => shot.id === targetId)?.title || assetTitle(director.source, assetId) : assetTitle(director.source, assetId),
                         position: scene ? { x: groupPosition.x + 20 + scene.shotIds.indexOf(targetId) % 3 * 360, y: groupPosition.y + 70 + Math.floor(scene.shotIds.indexOf(targetId) / 3) * 290 } : { x: nodesOf(project).length * 360, y: 0 }, width: 340, height: 260,
-                        metadata: { productionAssetId: assetId, ...(kind === "frame" ? { productionShotId: targetId } : {}), ...(groupId ? { groupId } : {}), prompt: artifact?.prompt || "", status: "idle" } });
+                        metadata: { productionAssetId: assetId, ...(kind === "frame" ? { productionShotId: targetId } : {}), ...(groupId ? { groupId } : {}), prompt: artifact?.prompt || "", model: productionImageModel(current.draft.settings, director.source, assetId, kind === "frame" ? "keyframe" : undefined), status: "idle" } });
                     this.stores.projects.applyOperations(canvasId, Number(project.revision || 0), operations,
                         { operationId: `${operationId}:node:${assetId}`, source: { kind: "system", clientId: "production:prepare", label: "准备制作节点" } });
                 }
@@ -88,7 +92,7 @@ export class EpisodeProductionRunner {
                     this.stores.projects.applyOperations(canvasId, Number(project.revision || 0), operations, { operationId: `${operationId}:clip:${group.id}`, source: { kind: "system", clientId: "production:prepare", label: "准备 H3 Clip" } });
                 }
                 if (group.nodeId !== nodeId || group.segmentId !== segmentId) bindings.push({ type: "bind_director_segment", targetId: group.id, nodeId, segmentId });
-            } else throw new Error("准备目标必须为 asset、frame 或 segment");
+            } else throw new Error("准备目标必须为 scene、asset、frame 或 segment");
         }
         const result = this.service.commitPreparation(id, operationId, expectedRevision, bindings);
         const latest = this.service.get(id);
@@ -295,7 +299,7 @@ export class EpisodeProductionRunner {
         });
         this.service.validateExecution(episodeId, version, artifactTargets.length ? artifactTargets : undefined);
         this.checkPause(run);
-        const imageModelFor = (id: string) => String(imageModels[id] || runSettings.imageModel || "");
+        const imageModelFor = (id: string) => productionImageModel({ imageModels, imageModelsByKind: object(runSettings.imageModelsByKind), imageModel: String(runSettings.imageModel || "") }, snapshot.director!.source, id, Object.values(snapshot.director!.shotInputs).some(input => input.keyframeAssetId === id) ? "keyframe" : undefined);
         const h3ModelFor = (id: string) => String(h3Models[id] || runSettings.h3Model || "");
         const episode = this.storesEpisode(episodeId);
         if (!episode.canvasId) throw new Error("分集未绑定画布");
@@ -321,7 +325,7 @@ export class EpisodeProductionRunner {
                 node = assetProject ? nodesOf(assetProject).find(n => n.id === nodeId) : undefined;
             }
             if (!node) throw new Error(`资产 ${artifact.targetId} 画布节点创建失败`);
-            const model = String(runSettings.imageModel || object(node.metadata).model || "");
+            const model = imageModelFor(artifact.targetId) || String(object(node.metadata).model || "");
             if (!model) throw new Error(`资产 ${artifact.targetId} 缺少图片模型`);
             const taskId = stableId("production-asset-task", run.runId || `${episodeId}:${version}`, artifact.targetId);
             let task = this.stores.tasks.get(taskId);

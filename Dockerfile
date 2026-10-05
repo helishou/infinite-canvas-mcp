@@ -42,7 +42,8 @@ ENV NODE_ENV=production \
     INFINITE_CANVAS_DATA_DIR=/data/backend \
     INFINITE_CANVAS_AGENT_CONFIG_DIR=/data/agent \
     CODEX_HOME=/data/codex \
-    ACHENG_PYTHON=python3
+    ACHENG_PYTHON=/usr/bin/python3 \
+    ACHENG_SOURCE=/data/codex/skill-sources/acheng-director
 RUN mkdir -p /data/backend /data/agent /data/codex && chown -R node:node /data
 USER node
 EXPOSE 17370

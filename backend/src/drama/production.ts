@@ -4,6 +4,7 @@ import path from "node:path";
 
 import {
     emptyEpisodeProduction,
+    productionImageModel,
     episodeProductionDataSchema,
     directorRunStartSchema,
     directorModules,
@@ -32,6 +33,7 @@ import type { BackendEventBus } from "../events.js";
 import type { CanvasCommit } from "../canvas/collaboration.js";
 import { approvedSharedAsset, listApprovedSharedAssets, prepareSharedAssetProjection, registerApprovedSharedAsset, sharedAssetHistory, sharedProjectionNodeId, validateSharedAssetSource, type ApprovedSharedAsset } from "./shared-assets.js";
 import { productionCanvasContext } from "./production-canvas.js";
+import { scriptNodeOperations } from "./script-nodes.js";
 import type { NativeProductionTarget } from "./native-generation.js";
 
 type Row = { revision: number; draft_json: string; published_json: string | null; published_version: number; updated_at: string };
@@ -110,6 +112,15 @@ export class EpisodeProductionService {
     commitPreparation(id: string, operationId: string, expectedRevision: number, bindings: Record<string, unknown>[]) {
         this.db.db.prepare("UPDATE production_preparations SET bindings_json=? WHERE operation_id=?").run(JSON.stringify(bindings), operationId);
         const result = bindings.length ? this.edit(id, { operationId, expectedRevision, ops: bindings }) : this.get(id);
+        if (!bindings.length) {
+            if (result.revision !== expectedRevision) throw new ProductionConflictError(result);
+            const canvasId = this.episode(id).canvasId;
+            const canvas = canvasId && this.db.getCanvasProject(canvasId);
+            if (canvas) {
+                const operations = scriptNodeOperations(canvas, result.draft, { kind: this.projectScope ? "canvas" : "episode", id }, result.draft);
+                if (operations.length) this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: `${operationId}:scripts`, runtimeWrite: true, source: { kind: "system", clientId: "production:scripts", label: "准备剧本文本节点" } });
+            }
+        }
         this.db.db.prepare("UPDATE production_preparations SET receipt_json=? WHERE operation_id=?").run(JSON.stringify(result), operationId);
         return result;
     }
@@ -257,7 +268,16 @@ export class EpisodeProductionService {
         const linked = this.linked(episodeId); if (linked) return linked.service.get(linked.id);
         this.episode(episodeId);
         const row = this.prepare("SELECT * FROM episode_productions WHERE episode_id = ?").get(episodeId) as Row | undefined;
-        return row ? this.fromRow(episodeId, row) : { episodeId, revision: 0, draft: emptyEpisodeProduction(), published: null, publishedVersion: 0, updatedAt: "" };
+        if (row) return this.fromRow(episodeId, row);
+        const draft = emptyEpisodeProduction();
+        const dramaId = this.projectScope ? undefined : this.db.getDramaEpisode(episodeId)?.dramaId;
+        const drama = this.db.listCanvasFolders().find(folder => this.projectScope ? folder.sharedAssetCanvasId === episodeId : folder.id === dramaId);
+        const plan = drama?.productionPlan;
+        if (plan?.confirmedAt && plan.confirmedOutline === drama?.outline) Object.assign(draft.settings, {
+            imageModel: plan.imageModel, imageModelsByKind: structuredClone(plan.imageModelsByKind), h3Model: plan.h3Model,
+            ...(plan.videoAspectRatio !== undefined ? { videoAspectRatio: plan.videoAspectRatio, videoAspectRatioConfirmed: true } : {}),
+        });
+        return { episodeId, revision: 0, draft, published: null, publishedVersion: 0, updatedAt: "" };
     }
 
     preflight(episodeId: string, raw: unknown): ProductionPreflight {
@@ -394,7 +414,7 @@ export class EpisodeProductionService {
             const node = nodeId ? nodes?.find(item => item.id === nodeId) : undefined;
             return String(record(node?.metadata).model || "");
         };
-        const imageModelFor = (id: string, nodeId?: string) => data.settings.imageModels[id] || data.settings.imageModel || nodeModel(nodeId);
+        const imageModelFor = (id: string, nodeId?: string) => productionImageModel(data.settings, director.source, id, Object.values(director.shotInputs).some(input => input.keyframeAssetId === id) ? "keyframe" : undefined) || nodeModel(nodeId);
         const h3ModelFor = (id: string, nodeId?: string) => data.settings.h3Models[id] || data.settings.h3Model || nodeModel(nodeId);
         const compiled = (artifact: NonNullable<ReturnType<typeof artifactFor>> | undefined, id: string) => {
             const blockers: string[] = [];
@@ -643,6 +663,7 @@ export class EpisodeProductionService {
             }
         }
         if (!nodeId && targetId) {
+            if (targetKind === "scene" && canvasId) nodeId = (this.db.getCanvasProject(canvasId)?.nodes as Record<string, any>[] || []).find(node => node.type === "text" && (node.metadata?.productionScriptSceneId === targetId || node.metadata?.productionScriptId === targetId))?.id;
             if (targetKind === "asset") nodeId = director.assets[targetId]?.nodeId;
             if (targetKind === "keyframe" || targetKind === "shot") nodeId = current.draft.keyframes[targetId]?.nodeId || director.assets[director.shotInputs[targetId]?.keyframeAssetId || ""]?.nodeId;
             const group = current.draft.clipGroups.find(item => targetKind === "segment" ? item.id === targetId : targetKind === "shot" && item.shotIds.includes(targetId!));
@@ -1198,6 +1219,7 @@ export class EpisodeProductionService {
     }
 
     private commit(episodeId: string, operationId: string, expectedRevision: number, requestHash: string, mutate: (record: ProductionRecord) => ProductionRecord & { impact?: ProductionImpact }) {
+        const scriptCommits: CanvasCommit[] = [];
         this.db.db.exec("BEGIN IMMEDIATE");
         try {
             const prior = this.prepare("SELECT episode_id AS owner_id, request_hash, receipt_json FROM episode_production_operations WHERE operation_id = ?").get(operationId) as { owner_id: string; request_hash: string; receipt_json: string } | undefined;
@@ -1209,12 +1231,19 @@ export class EpisodeProductionService {
             const current = this.get(episodeId);
             if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
             const next = mutate(current);
+            const canvasId = this.episode(episodeId).canvasId;
+            const canvas = canvasId && this.db.getCanvasProject(canvasId);
+            if (canvas) {
+                const operations = scriptNodeOperations(canvas, next.draft, { kind: this.projectScope ? "canvas" : "episode", id: episodeId }, current.draft);
+                if (operations.length) this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: `${operationId}:scripts`, runtimeWrite: true, withinTransaction: true, deferredCommits: scriptCommits, source: { kind: "system", clientId: "production:scripts", label: "保存剧本文本节点" } });
+            }
             this.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET revision = excluded.revision, draft_json = excluded.draft_json, published_json = excluded.published_json, published_version = excluded.published_version, updated_at = excluded.updated_at")
                 .run(episodeId, next.revision, JSON.stringify(next.draft), next.published ? JSON.stringify(next.published) : null, next.publishedVersion, next.updatedAt);
             this.prepare("INSERT INTO episode_production_operations (operation_id, episode_id, request_hash, receipt_json, created_at) VALUES (?, ?, ?, ?, ?)")
                 .run(operationId, episodeId, requestHash, JSON.stringify(next), next.updatedAt);
             this.db.db.exec("COMMIT");
             this.events?.publish({ type: "drama-production.updated", entityId: episodeId, payload: { revision: next.revision, publishedVersion: next.publishedVersion } });
+            scriptCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
             return { ...next, replayed: false };
         } catch (error) { this.db.db.exec("ROLLBACK"); throw error; }
     }

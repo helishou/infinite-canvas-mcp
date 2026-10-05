@@ -53,6 +53,59 @@ function publish(service: EpisodeProductionService, id: string) {
     return service.publish(id, { operationId: crypto.randomUUID(), expectedRevision: service.get(id).revision, stage: "director" });
 }
 
+test("script text nodes persist original blocks, synchronize collaborative edits atomically and replay once", t => {
+    const f = fixture(t), canvasId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const d = director();
+    d.source.script_scenes = [{ id: "action", scene_id: "room", scene_name: "Morning", kind: "action", text: "原动作", beat_ids: ["b1"] }, { id: "dialogue", scene_id: "room", kind: "dialogue", text: "原对白", beat_ids: ["b1"] }];
+    d.sourceHash = directorHash(d.source); d.artifacts = d.artifacts.map(item => ({ ...item, status: "stale" }));
+    save(f.episode, "ep", d);
+    const project = f.db.getCanvasProject(canvasId)!;
+    const scripts = (project.nodes as any[]).filter(node => node.metadata.productionScriptId);
+    assert.equal(scripts.length, 2);
+    assert.deepEqual(scripts.map(node => node.metadata.content), ["原动作", "原对白"]);
+    const node = scripts[1], target = { nodeId: node.id, field: "content" as const };
+    const document = f.db.getCanvasText(canvasId, target), prior = f.episode.get("ep");
+    const request = [{ type: "text_replace", target, documentId: document.documentId, expectedText: "原对白", text: "新对白😀" }];
+    const changed = f.db.applyCanvasProjectOperations(canvasId, Number(project.revision), request, { operationId: "script-text-edit" });
+    const current = f.episode.get("ep"), blocks = current.draft.director!.source.script_scenes as any[];
+    assert.deepEqual(blocks.map(block => [block.id, block.kind, block.text, block.beat_ids]), [["action", "action", "原动作", ["b1"]], ["dialogue", "dialogue", "新对白😀", ["b1"]]]);
+    assert.equal(current.revision, prior.revision + 1);
+    assert.equal(current.draft.director!.sourceHash, directorHash(current.draft.director!.source));
+    assert.equal(current.draft.director!.executionAuthorized, false);
+    assert.deepEqual(current.published, prior.published);
+    assert.equal(f.db.applyCanvasProjectOperations(canvasId, Number(project.revision), request, { operationId: "script-text-edit" }).duplicated, true);
+    assert.deepEqual(f.episode.get("ep"), current);
+    assert.equal(changed.project.revision, Number(project.revision) + 1);
+    const beforeFailure = f.db.getCanvasProject(canvasId);
+    assert.throws(() => f.db.applyCanvasProjectOperations(canvasId, Number(beforeFailure!.revision), [{ type: "update_node", id: node.id, metadata: { content: "不能提交" } }, { type: "update_node", id: "missing", metadata: { content: "错误" } }], { operationId: "failed-script-edit" }));
+    assert.deepEqual(f.episode.get("ep"), current);
+    assert.deepEqual(f.db.getCanvasProject(canvasId), beforeFailure);
+});
+
+test("formal script edits update the same text node and document while preserving user layout and other scenes", t => {
+    const f = fixture(t), canvasId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    save(f.episode, "ep", director());
+    const scripts = (f.db.getCanvasProject(canvasId)!.nodes as any[]).filter(node => node.metadata.productionScriptId);
+    const node = scripts[0], other = scripts[1], target = { nodeId: node.id, field: "content" as const };
+    f.db.getCanvasText(canvasId, target);
+    f.db.applyCanvasProjectOperations(canvasId, undefined, [{ type: "update_node", id: node.id, patch: { position: { x: 300, y: 800 }, width: 700 } }]);
+    const current = f.episode.get("ep");
+    const request = { operationId: "source-script-edit", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "scene", id: "morning", patch: { text: "Changed scene" } }] };
+    f.episode.edit("ep", request);
+    const project = f.db.getCanvasProject(canvasId)!, edited = (project.nodes as any[]).find(item => item.id === node.id);
+    assert.equal(edited.metadata.content, "Changed scene");
+    assert.deepEqual(edited.position, { x: 300, y: 800 }); assert.equal(edited.width, 700);
+    assert.deepEqual((project.nodes as any[]).find(item => item.id === other.id), other);
+    assert.equal(f.db.getCanvasText(canvasId, target).text, "Changed scene");
+    assert.equal(f.episode.edit("ep", request).replayed, true);
+    assert.deepEqual(f.db.getCanvasProject(canvasId), project);
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const revision = f.episode.get("ep").revision;
+    runner.prepareTargets("ep", revision, ["scene:morning"], "prepare-script-nodes");
+    runner.prepareTargets("ep", revision, ["scene:morning"], "prepare-script-nodes");
+    assert.deepEqual(f.db.getCanvasProject(canvasId), project);
+});
+
 function historyFixture(t: test.TestContext) {
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     save(f.episode, "ep", director());
@@ -162,6 +215,7 @@ test("target preparation is recoverable, preserves layout, reuses frame IDs, and
     const f = fixture(t), { project } = ensureProductionCanvas(f.db, "episode", "ep");
     save(f.episode, "ep", director());
     let submissions = 0;
+    f.episode.edit("ep", { operationId: "category-models", expectedRevision: f.episode.get("ep").revision, ops: [{ type: "set_settings", patch: { imageModelsByKind: { keyframe: "frame-model" } } }] });
     const runner = new EpisodeProductionRunner(f.episode, f.stores, { start() { submissions++; throw new Error("Must not generate"); } } as unknown as CanvasGenerationService);
     const revision = f.episode.get("ep").revision;
     const prepared = runner.prepareTargets("ep", revision, ["frame:s1", "segment:seg1", "segment:seg2"], "prepare-1");
@@ -170,6 +224,7 @@ test("target preparation is recoverable, preserves layout, reuses frame IDs, and
     assert.equal(nodes.filter(node => node.metadata?.productionSceneId === "morning").length, 1);
     assert.equal(nodes.filter(node => node.metadata?.productionSceneId === "night").length, 0);
     const frame = nodes.find(node => node.id === prepared.draft.director!.assets.FRAME.nodeId);
+    assert.equal(frame.metadata.model, "frame-model");
     f.db.applyCanvasProjectOperations(project.id, Number(f.db.getCanvasProject(project.id)!.revision), [{ type: "update_node", id: frame.id, patch: { position: { x: 123, y: 456 }, width: 222 } }]);
     assert.equal(runner.prepareTargets("ep", revision, ["frame:s1", "segment:seg1", "segment:seg2"], "prepare-1").revision, prepared.revision);
     assert.deepEqual((f.db.getCanvasProject(project.id)!.nodes as any[]).find(node => node.id === frame.id).position, { x: 123, y: 456 });
@@ -327,14 +382,14 @@ test("native H3 tracking follows the active Clip while a pending decision keeps 
 test("version 23 installations gain preparation receipts and native bindings without rewriting shared versions", t => {
     const f = fixture(t), sharedId = ensureProductionCanvas(f.db, "shared-assets", "drama").project.id;
     const approved = approve(f, sharedId, 1);
-    f.db.db.exec("DELETE FROM schema_migrations WHERE version=24; DROP TABLE production_preparations; DROP TABLE production_task_bindings");
+    f.db.db.exec("DELETE FROM schema_migrations WHERE version>=24; DROP TABLE production_preparations; DROP TABLE production_task_bindings; ALTER TABLE drama_projects DROP COLUMN production_plan_json");
     const upgraded = new BackendDatabase(f.file);
     try {
-        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 24);
+        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 25);
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_preparations'").get());
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_task_bindings'").get());
         assert.equal(listApprovedSharedAssets(upgraded, "drama")[0].id, approved.id);
         assert.equal(upgraded.listCanvasFolders().find(folder => folder.id === "drama")?.sharedAssetCanvasId, sharedId);
-        assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v23-to-v24')));
+        assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v23-to-v25')));
     } finally { upgraded.close(); }
 });

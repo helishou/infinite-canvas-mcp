@@ -1318,7 +1318,6 @@ export function H3PromptSection({
       const system = systemParts.join("\n\n");
       const userPrompt = buildPromptEnhancementInput({
         currentPrompt: promptAtCall,
-        globalPrompt: String(request.metadata.globalPrompt || ""),
         manifest,
         transitionPlan,
       });

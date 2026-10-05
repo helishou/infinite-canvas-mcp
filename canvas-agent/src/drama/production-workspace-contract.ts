@@ -14,7 +14,7 @@ export const productionWorkspaceToolNames = Object.keys(productionWorkspaceSchem
 export const productionWorkspaceDescriptions = {
     production_ensure_canvas: "幂等准备分集固定画布或剧目共享资产画布；不改绑、不提交媒体生成。",
     production_get_canvas_context: "读取画布制作角色、所属剧目/分集与正式 production owner。",
-    production_prepare_targets: "在固定画布准备正式 asset/frame/segment 对应节点或 Clip；保留原布局，不发布或生成。",
+    production_prepare_targets: "在固定画布准备正式 scene 剧本文本节点、asset/frame 节点或 segment Clip；保留原布局，不发布或生成。",
     production_get_shared_assets: "读取同剧目最新批准共享资产及当前集持久更新状态。",
     production_adopt_shared_asset: "将同剧目批准资产采用到已登记的集内目标；核验来源、媒体和版本，不生成。",
     production_retry_shared_update: "核对当前 revision 后恢复一项被阻塞的共享引用更新；不授权新的生成范围。",

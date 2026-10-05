@@ -1,9 +1,10 @@
-import { lazy, Suspense, useEffect } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Badge, Button, Modal } from "antd";
-import { LoaderCircle, MessageSquare } from "lucide-react";
+import { LoaderCircle, MessageSquare, X } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { LocalAgentPanel } from "./local-agent-panel";
+import { AgentCreativeWelcome } from "./agent-creative-welcome";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { productionObjectForPresentation } from "@/lib/production-object";
 import { useAgentStore } from "@/stores/use-agent-store";
@@ -36,11 +37,22 @@ export function AgentPanel() {
     const presentation = useProductionFollowStore(state => state.presentation);
     const canvasPage = /^\/canvas\/[^/]+/.test(pathname);
     const owner = canvasPage ? context?.owner : undefined;
-    const objectOpen = Boolean(owner && panelOpen && panelTab === "object");
-    const scriptOpen = new URLSearchParams(search).get("workspace") === "story";
+    const sceneTextTarget = new URLSearchParams(search).get("workspace") === "story" && new URLSearchParams(search).get("target")?.startsWith("scene:");
+    const objectOpen = Boolean(owner && panelOpen && panelTab === "object" && !sceneTextTarget);
     const tasksOpen = new URLSearchParams(search).get("workspace") === "production" && !new URLSearchParams(search).has("target");
     const objectTitle = tasksOpen ? t("productionCanvas.tasks") : selectedObject?.targetKind === "segment" && selectedObject.clipIndex ? t("productionCanvas.clip", { number: selectedObject.clipIndex }) : selectedObject?.title;
-    const chatOpen = panelOpen && !objectOpen;
+    const chatOpen = panelOpen && (!canvasPage || panelTab !== "object");
+    const homePage = pathname === "/" || ["/production", "/drama"].includes(pathname) && !new URLSearchParams(search).has("dramaId");
+    const [welcomeDismissed, setWelcomeDismissed] = useState(false);
+    const [creativeEntryOpen, setCreativeEntryOpen] = useState(false);
+    const welcomeOpen = homePage && chatOpen && creativeEntryOpen;
+    useEffect(() => { if (homePage) setWelcomeDismissed(false); }, [homePage]);
+    useEffect(() => {
+        if (!homePage || !chatOpen) return;
+        setWelcomeDismissed(true);
+        const agent = useAgentStore.getState();
+        if (!agent.sending && !agent.waiting && !agent.creativeLaunch && !agent.prompt.trim() && !agent.attachments.length && !agent.canvasReferences.length) setCreativeEntryOpen(true);
+    }, [homePage, chatOpen]);
     const current = readiness?.presentation || (presentation?.canvasId === context?.canvasId ? presentation : null);
     const currentObject = current && productionObjectForPresentation(current, production);
     const label = currentObject?.targetKind === "segment" ? currentObject.clipIndex ? t("productionCanvas.clip", { number: currentObject.clipIndex }) : t("productionCanvas.videoTarget") : currentObject?.title;
@@ -69,6 +81,11 @@ export function AgentPanel() {
     };
     return <>
         <div className="fixed bottom-4 right-4 z-[80] flex max-w-[calc(100vw-32px)] flex-col items-end gap-2" data-canvas-shortcuts-ignore>
+            {homePage && !chatOpen && !welcomeDismissed && <div data-director-welcome-bubble className="relative flex max-w-[calc(100vw-32px)] items-center gap-1 rounded-xl border px-2 py-1.5 shadow-sm" style={{ background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}>
+                <span aria-hidden="true" data-director-welcome-tail className="pointer-events-none absolute -bottom-1.5 right-8 size-3 rotate-45 border-b border-r" style={{ background: theme.node.panel, borderColor: theme.node.stroke }} />
+                <button type="button" className="px-2 py-1.5 text-sm" onClick={() => { setWelcomeDismissed(true); setCreativeEntryOpen(true); useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>{t("landing.ideaTitle")}</button>
+                <button type="button" className="grid size-6 shrink-0 place-items-center rounded hover:bg-black/5 dark:hover:bg-white/10" aria-label={t("productionCanvas.dismissWelcome")} onClick={() => setWelcomeDismissed(true)}><X className="size-3.5" /></button>
+            </div>}
             {!chatOpen && canvasPage && owner && (current || recoveryPending) && <button type="button" className="max-w-[min(340px,calc(100vw-32px))] truncate bg-transparent text-xs" style={{ color: theme.node.muted }} onClick={() => {
                 const query = new URLSearchParams(search); query.set("workspace", "production"); query.delete("target"); query.delete("nodeId"); query.delete("segmentId");
                 navigate({ search: query.toString() }, { replace: true });
@@ -89,9 +106,10 @@ export function AgentPanel() {
             data-canvas-shortcuts-ignore data-canvas-no-zoom
             className="fixed bottom-20 right-4 z-[75] flex w-[min(460px,calc(100vw-32px))] flex-col overflow-hidden rounded-2xl border shadow-xl"
             style={{ height: "min(640px, calc(100dvh - 112px))", background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text, visibility: chatOpen ? "visible" : "hidden", pointerEvents: chatOpen ? "auto" : "none" }}>
-            <LocalAgentPanel embedded compact headless={!panelMounted} autoConnect />
+            <AgentCreativeWelcome active={welcomeOpen} onShowChat={() => setCreativeEntryOpen(false)} onClose={closePanel} />
+            <LocalAgentPanel embedded compact headless={!panelMounted || welcomeOpen} autoConnect />
         </section>
-        {owner && <Modal open={objectOpen} forceRender title={scriptOpen ? t("productionCanvas.script") : objectTitle || t("productionCanvas.object")} onCancel={closePanel} footer={null} width={scriptOpen || /^(asset|frame|shot|segment):/.test(new URLSearchParams(search).get("target") || "") ? "min(800px, calc(100vw - 32px))" : "min(1120px, calc(100vw - 32px))"} centered styles={{ body: { maxHeight: "calc(100dvh - 160px)", overflow: "auto" } }}>
+        {owner && <Modal open={objectOpen} forceRender title={objectTitle || t("productionCanvas.object")} onCancel={closePanel} footer={null} width={/^(asset|frame|shot|segment):/.test(new URLSearchParams(search).get("target") || "") ? "min(800px, calc(100vw - 32px))" : "min(1120px, calc(100vw - 32px))"} centered styles={{ body: { maxHeight: "calc(100dvh - 160px)", overflow: "auto" } }}>
             <Suspense fallback={null}><ProductionEditor key={`${owner.kind}:${owner.id}`} owner={owner} embedded dialog /></Suspense>
         </Modal>}
     </>;

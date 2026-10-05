@@ -5,18 +5,36 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Interrupted director turns
+
+- Interrupted turns retain completed tool calls and show an interruption notice. When the page regains focus, authoritative history covering the current turn clears the stale waiting indicator and stop button; live turns keep their running state. Recovery does not automatically resend prompts or repeat writes.
+
+## Director promotional output removed
+
+- Director source is a project Git submodule with `origin` set to `helishou/acheng-director-skill`. Develop, commit and push inside it; the parent repository records its commit pointer. `acheng:update -- --local` builds committed HEAD, dirty sources block updates, remote updates require a fast-forward, and rollback only changes the runtime. Existing productions retain their pinned versions and promotional output stays disabled.
+- New director conversations and stage deliveries show creative content or necessary questions without brand banners, capability advertising, author promotion, follow requests or fixed copyright disclaimers. Continuations follow the same rule.
+
+## Canvas global prompt removed
+
+- The top bar no longer offers a global prompt button or editor, in ordinary and production canvases, in either language or theme.
+- Image/video requests and H3 prompt enhancement use their explicit prompts and references. Legacy global prompt text is no longer injected. Existing project text and unsynced drafts remain recoverable; legacy rewrite suggestions can be copied or dismissed, but cannot be applied to the removed feature.
+
 ## Canvas production and shared assets
 
+- Separate Production and Canvas navigation: Production starts in a drama list or overview; ordinary canvases use native nodes without automatically opening the production SOP. Home offers distinct drama and free-canvas entries. Legacy standalone production links remain accessible.
+- Drama planning confirms the overall story, requirements, general image model, category models for characters/outfits, scenes, props, style and storyboards/keyframes, plus video model and aspect ratio. Defaults seed newly started production; existing episode settings and submitted inputs remain intact. Object overrides precede category defaults, which precede the general model.
+- A dedicated shared-asset card appears in the drama overview alongside episode entries. Canvases return directly to their drama; URLs retain the selected drama across refresh and navigation. Concurrent planning edits are rejected while the dialog draft remains available. Database upgrades create a backup and preserve previous outlines and bindings.
 - Episode production opens its fixed canvas. Unbound episodes and drama shared assets prepare their canvas idempotently on entry. Established bindings cannot be reassigned; ordinary canvas deletion protects bound objects.
 - Production opens with the full canvas. A lower-right director bubble opens a floating conversation; closing it preserves connection, input and messages. “Find a frame” opens the directory, while descriptions, scripts, tasks and history use an on-demand editor dialog. Drafts, unknown command receipts, legacy sources and version recovery remain available.
 - One drama/episode menu switches between episodes and the shared asset canvas and marks the current choice. Selected formal nodes expose editing, image adoption, regeneration and the shot's video action; other tools appear under “More.” Image adoption previews the original before formal version review. Video actions focus the corresponding H3 Clip; shots covered by multiple Clips require an explicit choice.
-- “Scene script” shows only the scene selector, complete text and optional editing, removing production navigation, character directories and creative notes. Explicit saving submits only the current scene text. Switching scenes or closing and reopening preserves unsaved drafts and leaves other scenes intact.
+- Selected-node production controls appear above the image with space for its name; near canvas edges, buttons remain visible. Check positioning during zoom, in both themes and on narrow screens, including the More menu.
+- Scene scripts are saved as canvas text nodes. The top bar no longer has a separate script button or dialog; directory script entries focus text nodes. Original scene/block identities remain intact. Ordinary collaborative text editing atomically updates the formal draft, invalidates compilation receipts and preserves published history, other scenes and node layout. Existing projects prepare missing text nodes without model requests; replay must not duplicate nodes.
 - Consecutive legacy action/dialogue blocks share one scene in both reading and the directory, including blocks with individual beats; shots do not repeat per dialogue. Whole-scene entries and later returns to the same environment retain separate identities. After closing the script or deselecting, clicking the same directory target must select it again and restore its menu; hovering other nodes must leave the selected production menu available.
-- Node editing opens only the selected asset, shot or Clip, with additional settings collapsed. Menus show formal review and object runtime states, hide adoption for adopted images and disable generation during execution. “More” opens object history or source and returns an image after viewing the original and entering a reason. History is filtered by node and Clip and does not replace the adopted version. Check that selecting another node or H3 Clip switches the scene script to its associated scene, while closing and reopening preserves the scene and its drafts.
+- Node editing opens only the selected asset, shot or Clip, with additional settings collapsed. Menus show formal review and object runtime states, hide adoption for adopted images and disable generation during execution. “More” opens object history or source and returns an image after viewing the original and entering a reason. History is filtered by node and Clip and does not replace the adopted version. Script text uses the ordinary node editor rather than the object dialog; existing unsaved drafts remain recoverable.
 - History supports explicit version selection after viewing the original image or video. Backend verifies the successful task, formal object and archived media; canvas and production mappings update atomically with rollback and stable receipt recovery. Selected images require review, previous-input flags remain, and original task inputs, prompts and continuity decisions are preserved. Legacy logs without a formal task source cannot serve as verified results.
 - Formal Clips use the node history selection entry; ordinary canvas restoration cannot bypass production verification. H3 output restoration remains available on ordinary independent canvases.
 - “Tasks and deliveries” shows batches, native node tasks, failures, locating and downloads. Validation, publishing, full prompts and settings remain in a collapsed Advanced section. Check individual Clip and package downloads, pause/resume of the same run, unsaved script recovery across episode switching and copied-tab draft isolation. Browser verification uses locally synthesized video and temporary tasks and does not certify real model quality.
-- Non-generating acceptance on existing projects uses `node scripts/test-production-live.mjs <episode-id> [...]`: an isolated browser checks entry, directory, node controls, script drafts, H3 focus and existing Clip downloads, and verifies unchanged production and canvas records. Production writes and media submissions are rejected. This does not certify newly generated media, and dramas with one episode cannot verify real cross-episode switching.
+- Non-generating acceptance on existing projects uses `node scripts/test-production-live.mjs <episode-id> [...]`: an isolated browser checks entry, directory, node controls, script text-node presence, H3 focus and existing Clip downloads, and verifies unchanged production and canvas records. Production writes and media submissions are rejected. This does not certify newly generated media, and dramas with one episode cannot verify real cross-episode switching.
 - Project cards have one “Enter production” action. Unbound episode cards can enter and prepare their fixed canvas. Legacy director links remain compatible; the canvas library opens the same canvas with its saved view.
 - Selecting a formal asset, storyboard or H3 Clip shows a locatable conversation label. Starting a draft freezes its object; viewing another Clip does not retarget it. Drafts belonging to another canvas require returning to their original object before sending. Generation retains its existing authorization flow.
 - Approved assets belong to the drama asset canvas; episodes adopt verified versions from the same drama. Backend persists and propagates newly approved versions, recompiles inputs and exposes conflicts for explicit recovery. Historical media and submitted inputs remain intact; reference updates do not regenerate media.
@@ -31,9 +49,9 @@ description: Implemented changes that still need manual verification
 
 ## Production and canvas home pages
 
-- Production starts with an idea composer, characters/assets versus stories/dramas, and a project gallery. Examples only fill the composer; they never send automatically. Changing modes or project categories retains the idea. Existing Agent connection, busy protection and approvals remain in effect.
+- Production shows project entries and the drama list; the creative composer and examples live inside the director popup. Entering home shows a dismissible “What would you like to create today?” greeting with a lower-right tail pointing to the director button. Closing the popup retains the creative draft; examples only fill it. An explicit start uses existing connection, busy protection and approval handling. Visiting home or opening the popup never submits a creative request.
 - Production cards use one “Enter production” action; the canvas library retains canvas opening and management. Covers are queried only for displayed projects without loading full canvases. Series support name search and compact subsection headings.
-- Canvas home shows the latest edited project, a creative conversation entry and image/video tool links. Covers and titles open canvases; preview and production are separate actions available in both grid and list views. Pins, results and task dialogs use existing data.
+- Home provides separate drama-production and free-canvas entries and retains recent projects, pins, outputs and tasks. Ordinary canvas cards do not expose a standalone production SOP entry; drama-related projects can return to their drama.
 - Check both languages/themes, narrow screens, empty search results, project navigation, previews and creation dialogs. Browsing or selecting an idea example must not create media tasks.
 
 ## Director workbench reading and editing
@@ -1523,16 +1541,6 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 - 独立无界面 Chrome 双上下文验收现累计 25 项通过，除中文输入、引用、切 Clip、H3 本地视图隔离、已删除目标候选管理及 MCP/Agent 实时显示外，已覆盖断网刷新、丢失回执、复制标签页身份、普通 HTTP Backend 草稿租约、关闭后恢复、冲突选择、IndexedDB 故障与备份续传。脚本为 `scripts/test-canvas-text-browser.mjs`，只使用临时画布；没有运行媒体生成或关闭用户标签页，异常中止遗留的测试夹具已按 `collaboration-test-` ID 核对后清理。
 - 尚待验收：操作系统真实中文输入法组合输入、触屏、文本缩略图点击预览、H3 模型强化实跑、真实双设备局域网异常断线接管及画布拖动性能。上述自动化通过不代表整套多人协作完成。
 
-## 多人实时画布：全局提示词协同编辑
-
-- 全局提示词现使用 CodeMirror 6 与 Yjs 13，[编辑器绑定采用 y-codemirror.next 稳定版](https://github.com/yjs/y-codemirror.next)。两窗口同时输入中文、Emoji、粘贴多行及使用输入法时，内容应合并而非整段覆盖；远端文字到达不应重建编辑器或抢走光标。远端文本光标可视化已在后续补齐，见上节。
-- 在全局提示词中 Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 只处理当前窗口的文本事务，不能撤销另一窗口文字或画布节点；关闭弹层重开后编辑器仍绑定同一份文档。浅/深色使用画布主题，弹层内滚轮和快捷键不应传给画布。
-- 网络中断时继续输入，未确认请求按 operationId 独立保存在 localforage；队首网络请求等待期间后续输入也必须落盘。刷新后打开同一目标，恢复未确认文本；连回 Backend 后读取 Yjs 状态并合并，不拿远端全文清掉草稿。
-- 后端已保存但响应丢失时，用同一 operationId 和原增量重试，只插入一次；确定性拒绝保留草稿并停止自动发送，显式“重试同步”后再尝试。文本可恢复草稿不是已确认保存提示，存储失败必须显示错误。
-- MCP 修改全局提示词后，已打开的编辑器通过 textUpdates 更新；WebSocket 重连或快照恢复应补读文本文档。生成前的项目保存屏障还会恢复并提交未打开编辑器的文本草稿，存在未确认文字时不能当作已保存继续生成。
-- 全局提示词为首批接入入口，其余正文编辑器及文档身份隔离现已补齐，见上节；离线首次打开没有草稿的文档及全部草稿管理仍待完成。
-- 定向测试与浏览器验收的最新结果见上节；全局提示词仍需人工确认真实输入法体验。
-
 ## 多人实时画布：H3 窗口状态与异步编辑保护
 
 - 两个窗口分别选 Clip 3/4、拖动播放头、滚动时间轴、调整预览/提示词/Refs 区域尺寸、展开南风设置和播放视频，彼此不应切段、跳时间、改变内部布局或自动播放；上述操作不得产生项目 ops。画布裁剪使 H3 节点卸载再挂载时，同一窗口仍保留这些本地状态；刷新后可重置。
@@ -2066,7 +2074,7 @@ The current release needs manual verification in these areas:
 + H3 提示词增强与运行取消：验证增强按钮会显示“增强中…”，模型返回后写回当前 Prompt；生成期间按钮显示 Reset，点击后本地 ComfyUI/RunningHub 任务均进入取消状态。
 + H3 Output 管理：验证全部/当前筛选只影响显示，单个输出下载/删除、清理未使用输出不会删除仍被 Clip 引用的结果。
 + H3 RunningHub 参数：验证 Workflow/App 模式、Workflow/App ID、字段 JSON 与参数 JSON 能写入节点并被运行器透传。
-+ H3 智能分镜追加：已有多个 Clip 时生成分镜，确认原 Clip 不被覆盖，新 Clip 继承当前 Clip 的 refs/参数并追加到时间轴末尾，全局提示词进入新 Clip Prompt。
++ H3 智能分镜追加：已有多个 Clip 时生成分镜，确认原 Clip 不被覆盖，新 Clip 继承当前 Clip 的 refs/参数并追加到时间轴末尾。
 + H3 当前 Clip 子面板：验证 Prompt 快捷标签、参考素材计数、Engine、Duration、MP、比例、Clip settings 和 Generate clip 仍保持原有布局及写回行为。
 + H3 素材库模块：验证 Assets/Output 列表、媒体卡片、删除和产物参数恢复仍正常。
 + H3 运行结果工具拆分：验证源视频自动分段、当前/后续 Clip 运行、Clip 顺序和 Output 素材收集保持一致。
@@ -2317,7 +2325,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ## Acheng object-oriented Director Workbench
 
-- Verify `.agents/skills/acheng-director` contains the complete upstream tree for the pinned commit and its provenance manifest. `npm run acheng:vendor` syncs the pinned commit; `acheng:update` and `acheng:rollback` update or restore the repository copy with the runtime. `acheng:update -- --check` must not modify files, and a local edit or added Skill file must block overwriting it.
+- Verify `.agents/skills/acheng-director` is an editable Git submodule pointing to the helishou fork. Build pinned runtimes from committed HEAD; check mode preserves source HEAD, and runtime rollback preserves source edits. Initialization, commit and push remain explicit Git operations; the updater does not commit or push automatically.
 - In the local Agent's site-workspace Skill manager, confirm Project scope lists both `acheng-director` and `canvas-video-production-sop`. This workspace mirror follows the active runtime, and creative/stage requests should select it while retaining the Canvas adapter for Backend/MCP. After a Skill refresh, simulate a runtime update and local file edits: update untouched files, preserve user edits, and exclude generated runtime output and `.git` metadata from the site workspace; the repository copy is separately pinned by the upstream manifest.
 - Confirm the only production entry opens one object browser with Canvas Projects and Series & Episodes views, and the idea-first creative entry appears there rather than in the Canvas library. Legacy `/director` and `/drama` paths should open the matching view; opening an object's workbench and then its Canvas must retain the same project, and the workbench Back action should return to the originating object view.
 - After the creative conversation confirms and creates or selects an object, verify Agent navigates to `/director/<projectId>` for an independent asset project or `/drama/episodes/<episodeId>/production` for a drama episode. It must not default to `/canvas/:id`; a direct Canvas visit remains available when the user explicitly requests media operations.

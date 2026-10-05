@@ -494,7 +494,6 @@ function InfiniteCanvasPage() {
         setBackgroundMode,
         showImageInfo,
         setShowImageInfo,
-        globalPrompt,
         project: currentProject,
         historyState,
         history: historyRef,
@@ -6005,7 +6004,6 @@ function InfiniteCanvasPage() {
                     agentOpen={agentPanelOpen}
                     compactAgentStatus={{ connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity }}
                     onToggleAgent={toggleAgentPanel}
-                    globalPrompt={globalPrompt}
                     projectId={projectId}
                     onOpenGenerationLogs={() => setGenerationLogsOpen(true)}
                     collaborators={collaborators}

@@ -1,9 +1,13 @@
-import { Clapperboard, FileText, ImagePlus, Images, Settings2, Video, Workflow } from "lucide-react";
+import { Clapperboard, FileText, ImagePlus, Images, LayoutGrid, Settings2, Video, Workflow } from "lucide-react";
 
 export const navigationTools = [
     {
         slug: "production",
         icon: Clapperboard,
+    },
+    {
+        slug: "canvas",
+        icon: LayoutGrid,
     },
     {
         slug: "image",

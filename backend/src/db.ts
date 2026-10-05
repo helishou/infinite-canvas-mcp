@@ -5,6 +5,8 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
+import { syncScriptNodeEdits } from "./drama/script-nodes.js";
+import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { normalizeSceneAsset } from "./canvas/asset-contract.js";
 import { completedImageSlots, dropImageSlots, imageSourceStatus } from "./canvas/image-result-slots.js";
 import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation } from "./canvas/project-ops.js";
@@ -81,6 +83,8 @@ export type CanvasFolder = {
     /** 画布侧创建的普通文件夹为 false；旧客户端未传时按短剧兼容。 */
     isDrama?: boolean;
     sharedAssetCanvasId?: string | null;
+    productionPlan?: DramaProductionPlan;
+    expectedPlanningUpdatedAt?: string;
 };
 export type Asset = {
     id: string; kind: string; title: string; coverUrl: string; tags: string[];
@@ -685,6 +689,14 @@ export class BackendDatabase {
                     CREATE INDEX IF NOT EXISTS production_task_bindings_owner ON production_task_bindings(owner_kind, owner_id, target_id);
                 `);
                 this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (24, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 25) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec("ALTER TABLE drama_projects ADD COLUMN production_plan_json TEXT");
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (25, ?)").run(new Date().toISOString());
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
@@ -1693,6 +1705,7 @@ export class BackendDatabase {
             }
             // getCanvasProject parses a fresh snapshot for this transaction; it has no shared owner.
             const project = current as Record<string, unknown>;
+            const scriptBaseline = context?.source?.clientId !== "production:scripts" ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionScriptId)) } : undefined;
             if (!this.db.prepare("SELECT 1 FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id)) {
                 this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
             }
@@ -1747,6 +1760,7 @@ export class BackendDatabase {
                 }
                 return result;
             });
+            const productionUpdates = scriptBaseline ? syncScriptNodeEdits(this, id, scriptBaseline, project) : [];
             const revision = currentRevision + 1;
             project.revision = revision;
             project.updatedAt = new Date().toISOString();
@@ -1763,7 +1777,7 @@ export class BackendDatabase {
                 this.completeMcpCommand(operationId, revision, committedOperations);
             }
             this.db.exec(commitSql);
-            commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations: committedOperations, operationResults, source, updatedAt: String(project.updatedAt) };
+            commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations: committedOperations, operationResults, source, updatedAt: String(project.updatedAt), ...(productionUpdates.length ? { productionUpdates } : {}) };
         } catch (error) {
             this.db.exec(rollbackSql);
             throw error;
@@ -2061,7 +2075,7 @@ export class BackendDatabase {
 
     listCanvasFolders(): CanvasFolder[] {
         const rows = this.db.prepare(
-            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.shared_asset_canvas_id, d.updated_at AS drama_updated_at, CASE WHEN d.folder_id IS NULL THEN 0 ELSE 1 END AS is_drama FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id ORDER BY f.created_at ASC"
+            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.shared_asset_canvas_id, d.production_plan_json, d.updated_at AS drama_updated_at, CASE WHEN d.folder_id IS NULL THEN 0 ELSE 1 END AS is_drama FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id ORDER BY f.created_at ASC"
         ).all() as Array<Record<string, unknown>>;
         return rows.map((row) => {
             const value = JSON.parse(String(row.tags_json || "[]"));
@@ -2073,11 +2087,13 @@ export class BackendDatabase {
                 coverStorageKey: row.cover_storage_key ? String(row.cover_storage_key) : null, tags,
                 isDrama: Number(row.is_drama) === 1,
                 sharedAssetCanvasId: row.shared_asset_canvas_id ? String(row.shared_asset_canvas_id) : null,
+                ...(row.production_plan_json ? { productionPlan: dramaProductionPlanSchema.parse(JSON.parse(String(row.production_plan_json))) } : {}),
             };
         });
     }
 
     upsertCanvasFolder(folder: CanvasFolder) {
+        const plan = folder.productionPlan === undefined ? undefined : dramaProductionPlanSchema.parse(folder.productionPlan);
         if (folder.sharedAssetCanvasId !== undefined) {
             const current = this.db.prepare("SELECT shared_asset_canvas_id FROM drama_projects WHERE folder_id=?").get(folder.id);
             if ((current?.shared_asset_canvas_id || null) !== folder.sharedAssetCanvasId) throw new Error("共享资产画布绑定由正式准备接口维护，不能改绑");
@@ -2086,6 +2102,14 @@ export class BackendDatabase {
         const tags = Array.isArray(folder.tags) ? folder.tags.map(String) : [];
         this.db.exec("BEGIN IMMEDIATE");
         try {
+            if (plan !== undefined && folder.expectedPlanningUpdatedAt !== undefined) {
+                const prior = this.db.prepare("SELECT updated_at FROM drama_projects WHERE folder_id=?").get(folder.id);
+                if (String(prior?.updated_at || "") !== folder.expectedPlanningUpdatedAt) throw new Error("剧目规划已被其他窗口修改，请保留草稿并重新读取后再保存");
+            }
+            if (plan !== undefined && folder.expectedPlanningUpdatedAt === undefined) {
+                const prior = this.db.prepare("SELECT production_plan_json FROM drama_projects WHERE folder_id=?").get(folder.id);
+                if (prior && String(prior.production_plan_json || "") !== JSON.stringify(plan)) throw new Error("修改剧目规划需要读取当前版本并显式确认");
+            }
             this.db.prepare(
                 "INSERT INTO canvas_folders (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name"
             ).run(folder.id, folder.name, folder.createdAt);
@@ -2095,12 +2119,14 @@ export class BackendDatabase {
                     "INSERT INTO drama_projects (folder_id, outline, description, cover_storage_key, tags_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id) DO UPDATE SET outline = excluded.outline, description = excluded.description, cover_storage_key = excluded.cover_storage_key, tags_json = excluded.tags_json, updated_at = excluded.updated_at"
                 ).run(folder.id, String(folder.outline || ""), String(folder.description || ""), folder.coverStorageKey || null, JSON.stringify(tags), updatedAt);
             }
+            if (plan !== undefined && folder.isDrama !== false) this.db.prepare("UPDATE drama_projects SET production_plan_json=? WHERE folder_id=?").run(JSON.stringify(plan), folder.id);
             this.db.exec("COMMIT");
         } catch (error) {
             this.db.exec("ROLLBACK");
             throw error;
         }
-        return { ...folder, updatedAt, outline: String(folder.outline || ""), description: String(folder.description || ""), coverStorageKey: folder.coverStorageKey || null, tags, isDrama: this.isDramaProject(folder.id) };
+        const { expectedPlanningUpdatedAt: _expected, ...savedFolder } = folder;
+        return { ...savedFolder, updatedAt, outline: String(folder.outline || ""), description: String(folder.description || ""), coverStorageKey: folder.coverStorageKey || null, tags, isDrama: this.isDramaProject(folder.id) };
     }
 
     // ── drama_episodes ───────────────────────────────────────────

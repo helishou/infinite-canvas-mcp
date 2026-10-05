@@ -8,6 +8,15 @@ import { appendReasoningDelta } from "./codex-client.js";
 import { CodexEventHistory } from "./codex-event-history.js";
 import { settledTurnIds, summarizeCodexThread, threadMessages } from "./codex-history.js";
 
+test("重启后恢复的中断回合保留已完成工具并明确显示中断", () => {
+    const messages = threadMessages({ id: "thread", turns: [{ id: "turn", status: "interrupted", items: [{ id: "intro", type: "agentMessage", text: "我会继续写第二场。", phase: "commentary" }, { id: "read", type: "mcpToolCall", tool: "drama_get_production", status: "completed", arguments: {}, result: {} }] }] });
+    assert.equal(messages.find(item => item.itemId === "read")?.role, "tool");
+    assert.equal(messages.find(item => item.itemId === "intro")?.text, "我会继续写第二场。");
+    assert.equal(messages.at(-1)?.title, "本轮已中断");
+    assert.equal(messages.at(-1)?.turnId, "turn");
+    assert.equal(threadMessages({ id: "thread", turns: [{ id: "turn", status: "inProgress", items: [] }] }).length, 0);
+});
+
 test("线程摘要提取结构化状态类型", () => {
     assert.equal(summarizeCodexThread({ id: "thread-1", status: { type: "notLoaded" } }).status, "notLoaded");
     assert.equal(summarizeCodexThread({ id: "thread-1", status: "idle" }).status, "idle");

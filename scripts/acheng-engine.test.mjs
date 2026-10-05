@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import test from 'node:test';
-import { AchengEngine, inventory, verifyRuntime } from './acheng-engine.mjs';
+import { AchengEngine, inventory, verifyRuntime, runtimePatchVersion, applyRuntimeSkillOverlay } from './acheng-engine.mjs';
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acheng-manager-'));
@@ -26,6 +26,8 @@ function initUpstream(engine) {
   git(engine.source, ['init']);
   git(engine.source, ['config', 'user.email', 'acheng-test@example.com']);
   git(engine.source, ['config', 'user.name', 'Acheng Test']);
+  git(engine.source, ['config', 'core.autocrlf', 'false']);
+  git(engine.source, ['remote', 'add', 'origin', engine.upstream]);
   return engine.source;
 }
 function commitFiles(engine, files) {
@@ -64,80 +66,138 @@ test('failed activation restores the entry and preserves the last state', t => {
   assert.equal(fs.realpathSync(engine.entry), fs.realpathSync(first.path));
   assert.equal(engine.state().active.runtimeId, 'v1');
 });
-test('dirty upstream and update locks fail closed', t => {
-  const engine = fixture(t); fs.mkdirSync(engine.source, { recursive: true });
-  execFileSync('git', ['init'], { cwd: engine.source, windowsHide: true, stdio: 'ignore' });
-  fs.writeFileSync(path.join(engine.source, 'local.txt'), 'keep');
-  assert.throws(() => engine.fetch(), /local changes/);
+
+const entry = '---\nname: acheng-director\ndescription: Test director\nmetadata:\n  version: "4.3.9"\n---\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n';
+function cachedVersion(engine, commit) {
+  return version(engine, `${commit}-${runtimePatchVersion(engine.upstream)}`, commit, '4.3.9');
+}
+
+test('source status uses the editable Git checkout and reports uncommitted files', t => {
+  const engine = fixture(t); initUpstream(engine);
+  const commit = commitFiles(engine, { 'SKILL.md': entry, 'scripts/example.py': 'original' });
+  assert.equal(engine.source, engine.projectSkill);
+  assert.equal(engine.projectSkillStatus().commit, commit);
+  fs.writeFileSync(path.join(engine.source, 'scripts/example.py'), 'user edit');
+  fs.writeFileSync(path.join(engine.source, 'draft.md'), 'user draft');
+  const status = engine.projectSkillStatus();
+  assert.deepEqual(status.modifiedFiles.sort(), ['draft.md', 'scripts/example.py']);
+  assert.throws(() => engine.update(false, true), /local changes/);
+  assert.equal(fs.readFileSync(path.join(engine.source, 'scripts/example.py'), 'utf8'), 'user edit');
+  assert.equal(fs.readFileSync(path.join(engine.source, 'draft.md'), 'utf8'), 'user draft');
+  assert.equal(engine.state(), null);
+});
+
+test('uninitialized source and unexpected origins cannot build a runtime', t => {
+  const engine = fixture(t);
+  fs.mkdirSync(engine.source, { recursive: true });
+  fs.writeFileSync(path.join(engine.source, 'SKILL.md'), entry);
+  assert.throws(() => engine.update(false, true), /submodule is not initialized/);
+  initUpstream(engine); commitFiles(engine, { 'SKILL.md': entry });
+  git(engine.source, ['remote', 'set-url', 'origin', 'https://example.invalid/other.git']);
+  assert.throws(() => engine.update(false, true), /Unexpected Acheng origin/);
+  assert.equal(engine.state(), null);
+});
+
+test('update locks fail closed without discarding source edits', t => {
+  const engine = fixture(t);
   engine.locked(() => assert.throws(() => engine.locked(() => {}), /EEXIST/));
   assert.equal(fs.existsSync(path.join(engine.base, 'update.lock')), false);
 });
-test('candidate validation does not activate or change a pinned run', t => {
-  const engine = fixture(t); const active = version(engine, 'v1'), candidate = version(engine, 'v2');
-  engine.activate(active, null); verifyRuntime(candidate.path);
-  assert.equal(engine.state().active.runtimeId, 'v1');
-  assert.equal(verifyRuntime(active.path).runtimeId, 'v1');
-});
-test('project vendor installs the full upstream tree with a pinned commit manifest', t => {
+
+test('local check and activation use committed HEAD without replacing the editable tree', t => {
   const engine = fixture(t); initUpstream(engine);
-  const commit = commitFiles(engine, {
-    'SKILL.md': '---\nversion: "4.3.9"\n---\nAcheng\n\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n',
-    'modules/story/SKILL.md': 'story module',
-    'references/camera.mp4': Buffer.from([0, 1, 2, 255]),
-    'references/中文指南/操作规则.md': 'UTF-8 upstream filename',
-    'output/upstream-example.json': '{"fixture":true}',
-  });
-  const plan = engine.prepareProjectSkill(commit, '4.3.9'); plan.finalize();
-  const metadata = JSON.parse(fs.readFileSync(path.join(engine.projectSkill, '.canvas-upstream.json'), 'utf8'));
-  assert.equal(metadata.commit, commit);
-  assert.equal(metadata.version, '4.3.9');
-  assert.ok(metadata.patchVersion);
-  const projectSkill = fs.readFileSync(path.join(engine.projectSkill, 'SKILL.md'), 'utf8');
-  assert.match(projectSkill, /Infinite Canvas 集成：视频制作启动确认/);
-  assert.match(projectSkill, /内容交付默认自动文件批处理，媒体生产默认逐项生成/);
-  assert.match(projectSkill, /Infinite Canvas 集成：制作内容语言/);
-  assert.match(projectSkill, /镜头 `display_summary`/);
-  assert.equal(fs.readFileSync(path.join(engine.projectSkill, 'modules/story/SKILL.md'), 'utf8'), 'story module');
-  assert.deepEqual(fs.readFileSync(path.join(engine.projectSkill, 'references/camera.mp4')), Buffer.from([0, 1, 2, 255]));
-  assert.equal(fs.readFileSync(path.join(engine.projectSkill, 'references/中文指南/操作规则.md'), 'utf8'), 'UTF-8 upstream filename');
-  assert.equal(fs.readFileSync(path.join(engine.projectSkill, 'output/upstream-example.json'), 'utf8'), '{"fixture":true}');
-  assert.deepEqual(engine.projectSkillStatus().modifiedFiles, []);
-  assert.doesNotThrow(() => engine.prepareProjectSkill(commit, '4.3.9').finalize());
-});
-test('project vendor refuses to overwrite local edits and can sync a clean upstream revision', t => {
-  const engine = fixture(t); initUpstream(engine);
-  const firstCommit = commitFiles(engine, {
-    'SKILL.md': '---\nversion: "4.3.9"\n---\nAcheng\n\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n',
-    'modules/story/SKILL.md': 'story v1',
-  });
-  engine.prepareProjectSkill(firstCommit, '4.3.9').finalize();
-  fs.writeFileSync(path.join(engine.projectSkill, 'modules/story/SKILL.md'), 'local edit');
-  fs.rmSync(path.join(engine.source, 'modules/story/SKILL.md'));
-  const secondCommit = commitFiles(engine, {
-    'SKILL.md': '---\nversion: "4.4.0"\n---\nAcheng updated\n\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n',
-    'modules/assets/SKILL.md': 'assets v2',
-  });
-  assert.throws(() => engine.prepareProjectSkill(secondCommit, '4.4.0'), /local changes/);
-  assert.equal(fs.readFileSync(path.join(engine.projectSkill, 'modules/story/SKILL.md'), 'utf8'), 'local edit');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(engine.projectSkill, '.canvas-upstream.json'), 'utf8')).commit, firstCommit);
-  fs.writeFileSync(path.join(engine.projectSkill, 'modules/story/SKILL.md'), 'story v1');
-  const plan = engine.prepareProjectSkill(secondCommit, '4.4.0'); plan.finalize();
-  assert.equal(fs.existsSync(path.join(engine.projectSkill, 'modules/story/SKILL.md')), false);
-  assert.equal(fs.readFileSync(path.join(engine.projectSkill, 'modules/assets/SKILL.md'), 'utf8'), 'assets v2');
-  assert.equal(engine.projectSkillStatus().commit, secondCommit);
+  const firstCommit = commitFiles(engine, { 'SKILL.md': entry, 'scripts/example.py': 'v1' });
+  const first = cachedVersion(engine, firstCommit); engine.activate(first, null);
+  const secondCommit = commitFiles(engine, { 'SKILL.md': entry, 'scripts/example.py': 'v2' });
+  const second = cachedVersion(engine, secondCommit);
+  const result = engine.update(true, true);
+  assert.equal(result.commit, secondCommit);
+  assert.equal(result.activated, false);
+  assert.equal(engine.state().active.runtimeId, first.runtimeId);
+  assert.equal(git(engine.source, ['rev-parse', 'HEAD']), secondCommit);
+  engine.update(false, true);
+  assert.equal(engine.state().active.runtimeId, second.runtimeId);
+  assert.equal(fs.readFileSync(path.join(engine.source, 'scripts/example.py'), 'utf8'), 'v2');
   assert.deepEqual(engine.projectSkillStatus().modifiedFiles, []);
 });
-test('runtime rollback restores the matching full project Skill commit', t => {
+
+test('remote check leaves HEAD intact; verified update fast-forwards and refuses local commits', t => {
+  const engine = fixture(t);
+  const remote = path.join(engine.home, 'remote.git');
+  fs.mkdirSync(remote); git(remote, ['init', '--bare']);
+  engine.upstream = remote; initUpstream(engine);
+  git(engine.source, ['branch', '-M', 'main']);
+  const firstCommit = commitFiles(engine, { 'SKILL.md': entry, 'scripts/example.py': 'v1' });
+  git(engine.source, ['push', '-u', 'origin', 'main']);
+  const first = cachedVersion(engine, firstCommit); engine.activate(first, null);
+  const secondCommit = commitFiles(engine, { 'SKILL.md': entry, 'scripts/example.py': 'v2' });
+  git(engine.source, ['push', 'origin', 'main']);
+  const second = cachedVersion(engine, secondCommit);
+  git(engine.source, ['checkout', '--detach', firstCommit]);
+  engine.update(true);
+  assert.equal(git(engine.source, ['rev-parse', 'HEAD']), firstCommit);
+  assert.equal(engine.state().active.runtimeId, first.runtimeId);
+  engine.update(false);
+  assert.equal(git(engine.source, ['rev-parse', 'HEAD']), secondCommit);
+  assert.equal(engine.state().active.runtimeId, second.runtimeId);
+  const localCommit = commitFiles(engine, { 'scripts/example.py': 'local v3' });
+  assert.throws(() => engine.update(false), /local commits ahead of or diverged/);
+  assert.equal(git(engine.source, ['rev-parse', 'HEAD']), localCommit);
+  assert.equal(engine.state().active.runtimeId, second.runtimeId);
+});
+
+test('runtime rollback preserves the source branch, local commits and uncommitted drafts', t => {
   const engine = fixture(t); initUpstream(engine);
-  const firstCommit = commitFiles(engine, { 'SKILL.md': '---\nversion: "4.3.9"\n---\nAcheng v1\n\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n', 'modules/story/SKILL.md': 'story v1' });
-  const first = version(engine, 'runtime-v1', firstCommit, '4.3.9');
-  const secondCommit = commitFiles(engine, { 'SKILL.md': '---\nversion: "4.4.0"\n---\nAcheng v2\n\n你是总导演及生产合同的唯一写入者。先读用户 brief。\n', 'modules/story/SKILL.md': 'story v2' });
-  const second = version(engine, 'runtime-v2', secondCommit, '4.4.0');
-  engine.activate(first, null);
-  engine.activate(second, first);
-  engine.prepareProjectSkill(secondCommit, '4.4.0').finalize();
+  const firstCommit = commitFiles(engine, { 'SKILL.md': entry, 'scripts/example.py': 'v1' });
+  const first = cachedVersion(engine, firstCommit); engine.activate(first, null);
+  const secondCommit = commitFiles(engine, { 'scripts/example.py': 'v2' });
+  const second = cachedVersion(engine, secondCommit); engine.activate(second, first);
+  fs.writeFileSync(path.join(engine.source, 'draft.md'), 'keep draft');
   engine.rollback();
-  assert.equal(engine.state().active.runtimeId, 'runtime-v1');
-  assert.equal(engine.projectSkillStatus().commit, firstCommit);
-  assert.match(fs.readFileSync(path.join(engine.projectSkill, 'SKILL.md'), 'utf8'), /Acheng v1/);
+  assert.equal(engine.state().active.runtimeId, first.runtimeId);
+  assert.equal(git(engine.source, ['rev-parse', 'HEAD']), secondCommit);
+  assert.equal(fs.readFileSync(path.join(engine.source, 'scripts/example.py'), 'utf8'), 'v2');
+  assert.equal(fs.readFileSync(path.join(engine.source, 'draft.md'), 'utf8'), 'keep draft');
+});
+
+test('deployment clones only an explicitly configured writable source', t => {
+  const engine = fixture(t); initUpstream(engine);
+  const commit = commitFiles(engine, { 'SKILL.md': entry });
+  git(engine.source, ['branch', '-M', 'main']);
+  const deployed = new AchengEngine(path.join(engine.home, 'deployed-home'), engine.source,
+    path.join(engine.home, 'packaged-app'), path.join(engine.home, 'writable-source'));
+  assert.equal(deployed.fetch(), commit);
+  assert.equal(deployed.cleanSource().commit, commit);
+  fs.writeFileSync(path.join(deployed.source, 'draft.md'), 'keep deployment draft');
+  assert.throws(() => deployed.fetch(), /local changes/);
+  assert.equal(fs.readFileSync(path.join(deployed.source, 'draft.md'), 'utf8'), 'keep deployment draft');
+});
+
+test('runtime adaptation removes promotions without altering source or license notices', t => {
+  const engine = fixture(t); initUpstream(engine);
+  const skill = [entry,
+    '### 首次会话固定响应与版权声明（首次交互唯一输出规则）',
+    '必须输出开场：🎬 Acheng 影视牛马竭诚为您服务！',
+    '新建一次长内容生产运行时，首次响应在开场横幅下方发送以下固定长内容交付方式选择题，不开始正文生产：',
+    '```text\n1. 自动文件批处理模式\n2. 交互制作模式\n```',
+    '首次响应（或首次交付包）末尾必须附加的固定版权与免责声明：',
+    '```text\n💡 认准唯一开源主页：关注 B站【Acheng琢影】\n```',
+    '将选择写入本次请求的 `execution_mode`：`autonomous_file_batch` 或 `interactive_segment`。后续所有输出严禁重复携带上述开场横幅与末尾免责声明。',
+    '### `/goal` 多轮执行合同\n保留完整生产正文。',
+  ].join('\n\n');
+  const notice = 'Copyright (c) 2026 Acheng';
+  commitFiles(engine, { 'SKILL.md': skill, NOTICE: notice });
+  const candidate = path.join(engine.home, 'candidate');
+  fs.mkdirSync(candidate); fs.cpSync(engine.source, candidate, { recursive: true, filter: file => path.basename(file) !== '.git' });
+  for (let pass = 0; pass < 2; pass++) {
+    applyRuntimeSkillOverlay(candidate);
+    const installed = fs.readFileSync(path.join(candidate, 'SKILL.md'), 'utf8');
+    assert.doesNotMatch(installed, /影视牛马|认准唯一开源主页|必须输出开场|必须附加的固定版权|开场横幅下方|上述开场横幅/);
+    assert.match(installed, /1\. 自动文件批处理模式\n2\. 交互制作模式/);
+    assert.match(installed, /`execution_mode`：`autonomous_file_batch` 或 `interactive_segment`/);
+    assert.match(installed, /### `\/goal` 多轮执行合同\n保留完整生产正文。/);
+    assert.equal(fs.readFileSync(path.join(candidate, 'NOTICE'), 'utf8'), notice);
+    assert.equal(fs.readFileSync(path.join(engine.source, 'SKILL.md'), 'utf8'), skill);
+    assert.deepEqual(engine.projectSkillStatus().modifiedFiles, []);
+  }
 });

@@ -80,7 +80,7 @@ export function startServer(
 ) {
   const stores: Stores = deps.stores ?? createStores(db);
   const events = deps.events ?? new BackendEventBus();
-  db.onCanvasCommit((commit) =>
+  db.onCanvasCommit((commit) => {
     events.publishCanvasDelta({
       entityId: commit.projectId,
       revision: commit.revision,
@@ -89,8 +89,9 @@ export function startServer(
       updatedAt: commit.updatedAt,
       operationId: commit.operationId,
       source: commit.source as CanvasEventSource,
-    }),
-  );
+    });
+    for (const update of commit.productionUpdates || []) events.publish({ type: "drama-production.updated", entityId: update.entityId, payload: { revision: update.revision } });
+  });
   const app = express();
   const draftSessionLeases = new CanvasDraftSessionLeases();
   const FRONTEND_SETTINGS_KEY = "frontend.settings";

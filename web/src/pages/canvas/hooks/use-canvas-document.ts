@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState, type SetStateAction } from "react";
 import { applyBackendCanvasDelta, detectCanvasConflicts, diffCanvasProject, useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 
-type EditableField = "nodes" | "connections" | "chatSessions" | "activeChatId" | "backgroundMode" | "showImageInfo" | "globalPrompt";
+type EditableField = "nodes" | "connections" | "chatSessions" | "activeChatId" | "backgroundMode" | "showImageInfo";
 type HistoryEntry = { before: CanvasProject; after: CanvasProject; at: number };
 const EMPTY_NODES: CanvasProject["nodes"] = [];
 const EMPTY_CONNECTIONS: CanvasProject["connections"] = [];
@@ -71,7 +71,7 @@ export function useCanvasDocument(projectId: string) {
         useCanvasStore.getState().updateProject(projectId, {
             nodes: next.nodes, connections: next.connections, chatSessions: next.chatSessions,
             activeChatId: next.activeChatId, backgroundMode: next.backgroundMode,
-            showImageInfo: next.showImageInfo, globalPrompt: next.globalPrompt,
+            showImageInfo: next.showImageInfo,
         });
         source.pop();
         (redo ? state.past : state.future).push(entry);
@@ -83,14 +83,12 @@ export function useCanvasDocument(projectId: string) {
         nodes: project?.nodes || EMPTY_NODES, connections: project?.connections || EMPTY_CONNECTIONS,
         chatSessions: project?.chatSessions || EMPTY_SESSIONS, activeChatId: project?.activeChatId || null,
         backgroundMode: project?.backgroundMode || "lines", showImageInfo: project?.showImageInfo || false,
-        globalPrompt: project?.globalPrompt || "",
         setNodes: useCallback((value: SetStateAction<CanvasProject["nodes"]>) => edit("nodes", value), [edit]),
         setConnections: useCallback((value: SetStateAction<CanvasProject["connections"]>) => edit("connections", value), [edit]),
         setChatSessions: useCallback((value: SetStateAction<CanvasProject["chatSessions"]>) => edit("chatSessions", value), [edit]),
         setActiveChatId: useCallback((value: SetStateAction<CanvasProject["activeChatId"]>) => edit("activeChatId", value), [edit]),
         setBackgroundMode: useCallback((value: SetStateAction<CanvasProject["backgroundMode"]>) => edit("backgroundMode", value), [edit]),
         setShowImageInfo: useCallback((value: SetStateAction<boolean>) => edit("showImageInfo", value), [edit]),
-        setGlobalPrompt: useCallback((value: SetStateAction<string>) => edit("globalPrompt", value), [edit]),
         historyState: history.current.projectId === projectId ? historyState : { canUndo: false, canRedo: false },
         history, undo: useCallback(() => applyHistory(false), [applyHistory]), redo: useCallback(() => applyHistory(true), [applyHistory]),
     };

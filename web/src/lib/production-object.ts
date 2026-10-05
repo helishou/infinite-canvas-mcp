@@ -18,11 +18,8 @@ export function productionObjectForNode(context: ProductionCanvasContext, produc
     if (!context.owner) return null;
     const director = production.draft.director;
     if (!director) return null;
+    if (node.metadata?.productionScriptId) return null; // Script text uses the ordinary canvas editor.
     const base = { owner: context.owner, canvasId: context.canvasId, nodeId: node.id };
-    const scenes = Array.isArray(director.source.script_scenes) ? director.source.script_scenes as Record<string, unknown>[] : [];
-    const sceneId = typeof node.metadata?.productionSceneId === "string" ? node.metadata.productionSceneId : undefined;
-    const scene = sceneId ? scenes.find(item => item.id === sceneId) : undefined;
-    if (scene) return { ...base, workspace: "story", targetKind: "scene", targetId: String(scene.id), title: String(scene.scene_name || scene.title || node.title || scene.id) };
     const group = production.draft.clipGroups.find(item => item.nodeId === node.id && Boolean(segmentId) && item.segmentId === segmentId);
     if (group) return { ...base, workspace: "production", targetKind: "segment", targetId: group.id, segmentId: group.segmentId || undefined, clipIndex: production.draft.clipGroups.indexOf(group) + 1, title: node.title || group.id };
     const frame = Object.entries(production.draft.keyframes).find(([, item]) => item.nodeId === node.id);

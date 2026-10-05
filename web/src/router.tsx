@@ -11,6 +11,7 @@ const CanvasProjectPage = lazy(loadCanvasProjectPage);
 const CanvasPerformanceFixture = lazy(() => import("@/pages/canvas/performance-fixture"));
 const EpisodeProductionPage = lazy(() => import("@/pages/drama/production"));
 const ProductionHubPage = lazy(() => import("@/pages/production"));
+const LegacyDirectorPage = lazy(() => import("@/pages/director"));
 const ConfigPage = lazy(() => import("@/pages/config"));
 const HomePage = lazy(() => import("@/pages/home"));
 const ImagePage = lazy(() => import("@/pages/image"));
@@ -41,7 +42,7 @@ export const router = createBrowserRouter([
         children: [
             { path: "/", element: lazyPage(HomePage) },
             { path: "/production", element: lazyPage(ProductionHubPage) },
-            { path: "/director", element: lazyPage(ProductionHubPage) },
+            { path: "/director", element: lazyPage(LegacyDirectorPage) },
             { path: "/director/:projectId", element: lazyPage(EpisodeProductionPage) },
             { path: "/image", element: lazyPage(ImagePage) },
             { path: "/video", element: lazyPage(VideoPage) },

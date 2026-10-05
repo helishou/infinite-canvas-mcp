@@ -150,6 +150,8 @@ export function threadMessages(thread: unknown, planUpdates: CodexPlanUpdate[] =
         if (itemError || turnError) {
             const error = userFacingCodexError(turnError || itemError);
             push({ id: "synthetic:error", role: "error", title: error.title, text: error.text });
+        } else if (String(field(turn, "status")) === "interrupted") {
+            push({ id: "synthetic:interrupted", role: "error", title: "本轮已中断", text: "本轮任务已中断，已保存的内容和对话保留；这不是仍在运行的任务。继续前请核对当前制作记录。" });
         }
     });
     return latestCompleteTurns(messages.filter((item) => item.text || item.role === "tool"), 120);

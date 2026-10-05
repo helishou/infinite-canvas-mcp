@@ -16,6 +16,7 @@ export type CanvasCommandContext = {
 };
 
 export type CanvasCommit = {
+    productionUpdates?: Array<{ entityId: string; revision: number }>;
     projectId: string;
     operationId: string;
     baseRevision: number;

@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { flushSync } from "react-dom";
 import { App, Button, Input, Modal, Select, Tag } from "antd";
-import { ArrowLeft, ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, PencilLine, Plus, Trash2, Upload, Search } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { ArrowLeft, ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, Images, PencilLine, Plus, Trash2, Upload, Search } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
@@ -11,12 +11,18 @@ import { cn } from "@/lib/utils";
 import { backendMediaUrl, createBackendDramaEpisode, createBackendProject, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, type DramaCustomAsset, type DramaEpisode } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useCanvasStore, type CanvasFolder, type CanvasProject } from "@/stores/canvas/use-canvas-store";
+import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { ModelPicker } from "@/components/model-picker";
+import { useConfigStore } from "@/stores/use-config-store";
+import { upsertBackendCanvasFolder } from "@/services/backend-api";
 
 const DRAMA_LIBRARY = "__drama-library__";
 const NO_EPISODE_CANVAS = "__no-episode-canvas__";
 const CREATE_EPISODE_CANVAS = "__create-episode-canvas__";
 
 type DramaDraft = {
+    productionPlan: DramaProductionPlan;
+    expectedPlanningUpdatedAt: string;
     name: string;
     outline: string;
     description: string;
@@ -52,12 +58,22 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
     const deleteDramaProject = useCanvasStore((state) => state.deleteDramaProject);
     const [libraryQuery, setLibraryQuery] = useState("");
     const TitleHeading = embedded ? "h2" : "h1";
-    const [activeView, setActiveView] = useState(DRAMA_LIBRARY);
+    const [query, setQuery] = useSearchParams();
+    const activeView = query.get("dramaId") || DRAMA_LIBRARY;
+    const setActiveView = (id: string) => {
+        const next = new URLSearchParams(query);
+        next.set("view", "dramas");
+        if (id === DRAMA_LIBRARY) next.delete("dramaId"); else next.set("dramaId", id);
+        setQuery(next);
+    };
+    const [openingSharedCanvas, setOpeningSharedCanvas] = useState(false);
     const [transitionDramaId, setTransitionDramaId] = useState<string | null>(null);
     const [editorOpen, setEditorOpen] = useState(false);
     const [draft, setDraft] = useState<DramaDraft | null>(null);
     const [activeCoverUrl, setActiveCoverUrl] = useState("");
     const [uploadingCover, setUploadingCover] = useState(false);
+    const [savingPlan, setSavingPlan] = useState(false);
+    const modelConfig = useConfigStore(state => state.config);
     const [episodesByDrama, setEpisodesByDrama] = useState<Record<string, DramaEpisode[]>>({});
     const [episodeEditorOpen, setEpisodeEditorOpen] = useState(false);
     const [episodeDraft, setEpisodeDraft] = useState<EpisodeDraft | null>(null);
@@ -67,12 +83,9 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
     const coverInputRef = useRef<HTMLInputElement>(null);
     const assetInputRef = useRef<HTMLInputElement>(null);
 
-    const dramaFolders = folders.filter((folder) => folder.isDrama);
+    const dramaFolders = useMemo(() => folders.filter((folder) => folder.isDrama), [folders]);
     const shownDramaFolders = dramaFolders.filter(folder => folder.name.toLocaleLowerCase().includes(libraryQuery.trim().toLocaleLowerCase()));
     const activeFolder = dramaFolders.find((folder) => folder.id === activeView);
-    useEffect(() => {
-        if (activeView !== DRAMA_LIBRARY && !activeFolder) setActiveView(DRAMA_LIBRARY);
-    }, [activeFolder, activeView]);
     useEffect(() => {
         let disposed = false;
         setActiveCoverUrl("");
@@ -213,6 +226,8 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
     const openFolderEditor = () => {
         if (!activeFolder) return;
         setDraft({
+            productionPlan: dramaProductionPlanSchema.parse(activeFolder.productionPlan || {}),
+            expectedPlanningUpdatedAt: activeFolder.updatedAt || activeFolder.createdAt,
             name: activeFolder.name,
             outline: activeFolder.outline || "",
             description: activeFolder.description || "",
@@ -222,17 +237,24 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
         });
         setEditorOpen(true);
     };
-    const saveFolder = () => {
+    const saveFolder = async () => {
         if (!activeFolder || !draft) return;
-        updateFolder(activeFolder.id, {
+        const patch = {
             name: draft.name.trim() || activeFolder.name,
             outline: draft.outline.trim(),
             description: draft.description.trim(),
             tags: draft.tags.split(",").map((tag) => tag.trim()).filter(Boolean),
             coverStorageKey: draft.coverStorageKey,
-        });
-        setEditorOpen(false);
-        message.success(t("drama.saved"));
+            productionPlan: { ...draft.productionPlan, confirmedOutline: draft.outline.trim(), confirmedAt: new Date().toISOString() },
+        };
+        setSavingPlan(true);
+        try {
+            const result = await upsertBackendCanvasFolder({ ...activeFolder, ...patch, expectedPlanningUpdatedAt: draft.expectedPlanningUpdatedAt, updatedAt: new Date().toISOString() });
+            useCanvasStore.setState(state => ({ folders: state.folders.map(folder => folder.id === activeFolder.id ? result.folder as unknown as CanvasFolder : folder) }));
+            setEditorOpen(false);
+            message.success(t("drama.saved"));
+        } catch (error) { message.error(String(error)); }
+        finally { setSavingPlan(false); }
     };
     const deleteDrama = () => {
         if (!activeFolder) return;
@@ -355,13 +377,26 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
                             </div>
                             <div className="min-w-0 p-6">
                                 <p className="text-xs font-medium uppercase tracking-[0.16em] text-orange-600 dark:text-orange-400">{t("drama.projectProfile")}</p>
-                                <h2 className="mt-2 text-lg font-semibold tracking-tight">{t("drama.outline")}</h2>
+                                <h2 className="mt-2 text-lg font-semibold tracking-tight">{t("productionCanvas.dramaPlanning")}</h2>
+                                <p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.dramaPlanningHint")}</p>
+                                <p className="mt-2 text-xs text-muted-foreground">{t(activeFolder.productionPlan?.confirmedAt && activeFolder.productionPlan.confirmedOutline === activeFolder.outline ? "productionCanvas.planConfirmed" : "productionCanvas.planUnconfirmed")}</p>
                                 <p className="mt-3 line-clamp-4 whitespace-pre-line text-sm leading-6 text-stone-500 dark:text-stone-400">{activeFolder.outline || t("drama.outlineEmpty")}</p>
                                 <div className="mt-4 flex flex-wrap gap-1.5">{(activeFolder.tags || []).map((tag) => <Tag key={tag} className="m-0 border-stone-300 bg-transparent text-xs text-stone-500 dark:border-stone-700 dark:text-stone-400">{tag}</Tag>)}</div>
                             </div>
-                            <div className="flex items-start p-5 md:justify-end"><Button icon={<PencilLine className="size-4" />} onClick={openFolderEditor}>{t("drama.editProject")}</Button></div>
+                            <div className="flex items-start p-5 md:justify-end"><Button icon={<PencilLine className="size-4" />} onClick={openFolderEditor}>{t("productionCanvas.dramaPlanning")}</Button></div>
                         </div>
 
+                        <section data-drama-shared-canvas className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border bg-card p-5">
+                            <div className="flex min-w-0 items-start gap-3"><Images className="mt-1 size-5 shrink-0 text-muted-foreground" /><div><h2 className="text-base font-semibold">{t("productionCanvas.sharedCanvas")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("productionCanvas.sharedCanvasDescription")}</p><p className="mt-2 text-xs text-muted-foreground">{t(activeFolder.sharedAssetCanvasId ? "productionCanvas.sharedCanvasReady" : "productionCanvas.sharedCanvasEmpty")}</p></div></div>
+                            <Button loading={openingSharedCanvas} onClick={async () => {
+                                if (openingSharedCanvas) return;
+                                if (!activeFolder.sharedAssetCanvasId && !(activeFolder.productionPlan?.confirmedAt && activeFolder.productionPlan.confirmedOutline === activeFolder.outline)) { openFolderEditor(); return; }
+                                setOpeningSharedCanvas(true);
+                                try { const { project } = await ensureSharedAssetCanvas(activeFolder.id); navigate(`/canvas/${encodeURIComponent(String(project.id))}`); }
+                                catch (error) { message.error(String(error)); }
+                                finally { setOpeningSharedCanvas(false); }
+                            }}>{t("productionCanvas.openSharedCanvas")}<ArrowUpRight className="ml-1 size-4" /></Button>
+                        </section>
                         <section>
                             <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
                                 <div>
@@ -369,12 +404,12 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
                                     <h2 className="mt-2 text-2xl font-semibold tracking-tight">{t("drama.episodeListTitle")}</h2>
                                 </div>
                                 <div className="flex items-center gap-3">
-                                    <Button type="text" onClick={async () => { try { const { project } = await ensureSharedAssetCanvas(activeFolder.id); navigate(`/canvas/${encodeURIComponent(String(project.id))}`); } catch (error) { message.error(String(error)); } }}>{t("productionCanvas.sharedCanvas")}</Button><span className="text-sm text-stone-400">{visibleEpisodes.length} {t("drama.episodeUnit")}</span>
+                                    <span className="text-sm text-stone-400">{visibleEpisodes.length} {t("drama.episodeUnit")}</span>
                                 </div>
                             </div>
                             {visibleEpisodes.length ? (
                                 <div className="grid gap-4 sm:grid-cols-2">
-                                    {visibleEpisodes.map((episode, index) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} index={index} onOpen={openProject} onProduce={() => navigate(`${episode.canvasId ? `/director/${encodeURIComponent(episode.canvasId)}` : `/drama/episodes/${encodeURIComponent(episode.id)}/production`}?from=dramas`)} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
+                                    {visibleEpisodes.map((episode, index) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} index={index} onOpen={openProject} onProduce={() => { if (!episode.canvasId && !(activeFolder.productionPlan?.confirmedAt && activeFolder.productionPlan.confirmedOutline === activeFolder.outline)) openFolderEditor(); else navigate(`/drama/episodes/${encodeURIComponent(episode.id)}/production?from=dramas`); }} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
                                 </div>
                             ) : (
                                 <div className="flex min-h-60 flex-col items-center justify-center rounded-2xl border border-dashed border-stone-300 px-6 text-center dark:border-stone-700">
@@ -423,7 +458,7 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
                     <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.bindCanvas")}</span><Select className="w-full" disabled={Boolean(episodeDraft.id && (episodesByDrama[activeFolder?.id || ""] || []).find(item => item.id === episodeDraft.id)?.canvasId)} value={episodeDraft.createCanvas ? CREATE_EPISODE_CANVAS : episodeDraft.canvasId || NO_EPISODE_CANVAS} onChange={(value) => setEpisodeDraft({ ...episodeDraft, createCanvas: value === CREATE_EPISODE_CANVAS, canvasId: value === CREATE_EPISODE_CANVAS || value === NO_EPISODE_CANVAS ? null : value })} options={[{ label: t("drama.canvasActions"), options: [{ label: t("drama.noCanvas"), value: NO_EPISODE_CANVAS }, { label: t("drama.createAndBindCanvas"), value: CREATE_EPISODE_CANVAS }] }, ...(projects.length ? [{ label: t("drama.existingCanvases"), options: projects.map((project) => ({ label: project.title, value: project.id })) }] : [])]} showSearch optionFilterProp="label" /></label>
                 </div> : null}
             </Modal>
-            <Modal title={t("drama.editProject")} open={editorOpen} onCancel={() => setEditorOpen(false)} onOk={saveFolder} okText={t("drama.saveProject")} cancelText={t("common.cancel")} confirmLoading={uploadingCover} width={680} footer={(originNode) => <div className="flex w-full items-center justify-between"><Button danger type="text" icon={<Trash2 className="size-4" />} onClick={deleteDrama}>{t("drama.deleteProject")}</Button><div className="flex gap-2">{originNode}</div></div>}>
+            <Modal title={t("productionCanvas.dramaPlanning")} open={editorOpen} onCancel={() => { if (!savingPlan) setEditorOpen(false); }} onOk={() => void saveFolder()} okText={t("productionCanvas.confirmPlan")} cancelText={t("common.cancel")} confirmLoading={uploadingCover || savingPlan} width={760} styles={{ body: { maxHeight: "70dvh", overflow: "auto" } }} footer={(originNode) => <div className="flex w-full items-center justify-between"><Button danger type="text" icon={<Trash2 className="size-4" />} onClick={deleteDrama}>{t("drama.deleteProject")}</Button><div className="flex gap-2">{originNode}</div></div>}>
                 {draft ? (
                     <div className="space-y-5">
                         <div className="grid gap-5 sm:grid-cols-[180px_minmax(0,1fr)]">
@@ -437,6 +472,14 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
                             </div>
                         </div>
                         <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.outline")}</span><Input.TextArea rows={7} placeholder={t("drama.outlinePlaceholder")} value={draft.outline} onChange={(event) => setDraft({ ...draft, outline: event.target.value })} /></label>
+                        <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("productionCanvas.planRequirements")}</span><Input.TextArea rows={3} value={draft.productionPlan.requirements} onChange={event => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, requirements: event.target.value } })} /></label>
+                        <p className="text-xs text-muted-foreground">{t("productionCanvas.newEpisodeDefaults")}</p>
+                        <div className="grid gap-4 sm:grid-cols-2">
+                            <div><p className="mb-2 text-sm">{t("productionCanvas.generalImageModel")}</p><ModelPicker config={modelConfig} capability="image" fullWidth value={draft.productionPlan.imageModel} onChange={imageModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModel } })} /></div>
+                            {(["character", "scene", "prop", "style", "keyframe"] as const).map(kind => <div key={kind}><p className="mb-2 text-sm">{t(`productionCanvas.assetModel.${kind}`)}</p><ModelPicker config={modelConfig} capability="image" fullWidth placeholder={t("productionCanvas.inheritImageModel")} value={draft.productionPlan.imageModelsByKind[kind]} onChange={model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: model } } })} /><Button type="text" size="small" disabled={!draft.productionPlan.imageModelsByKind[kind]} onClick={() => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: undefined } } })}>{t("productionCanvas.inheritImageModel")}</Button></div>)}
+                            <div><p className="mb-2 text-sm">{t("productionCanvas.videoModel")}</p><ModelPicker config={modelConfig} capability="video" fullWidth value={draft.productionPlan.h3Model} onChange={h3Model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, h3Model } })} /></div>
+                            <label><p className="mb-2 text-sm">{t("director.workspace.videoAspectRatio")}</p><Select className="w-full" allowClear value={draft.productionPlan.videoAspectRatio || undefined} onChange={videoAspectRatio => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, videoAspectRatio: videoAspectRatio || null } })} options={["9:16", "16:9", "1:1", "4:3", "3:4", "2:3", "3:2", "21:9"].map(value => ({ value, label: value }))} /></label>
+                        </div>
                         <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.description")}</span><Input.TextArea rows={3} placeholder={t("drama.descriptionPlaceholder")} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
                         <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => void handleCoverChange(event)} />
                     </div>

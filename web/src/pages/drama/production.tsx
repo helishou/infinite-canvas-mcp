@@ -5,7 +5,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { directorModules, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { directorModules, productionSceneEntries, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { backendConnection } from "@/lib/backend-connection";
 import { ensureCanvasDraftLease, getCanvasDraftSessionId } from "@/lib/canvas/canvas-draft-session";
 import { exportAchengDeliveryBundle } from "@/lib/acheng-delivery-export";
@@ -355,6 +355,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     finally { setBusy(false); }
   };
   const workspaceCommandInFlight = useRef(false);
+  const preparedScriptSource = useRef("");
   useEffect(() => {
     if (!embedded || !owner || !production || !draftKey) return;
     const receive = (event: Event) => {
@@ -371,6 +372,15 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     window.addEventListener("production-workspace-command", receive);
     return () => window.removeEventListener("production-workspace-command", receive);
   }, [embedded, owner?.kind, owner?.id, production, draftKey, busy, refreshRemote, message, t]);
+
+  useEffect(() => {
+    if (!embedded || !owner || !production?.draft.director || !draftKey || busy || pendingCommandRef.current || workspaceCommandInFlight.current) return;
+    const key = `${owner.kind}:${owner.id}:${production.draft.director.sourceHash}`;
+    if (preparedScriptSource.current === key) return;
+    const targets = productionSceneEntries(production.draft.director.source).filter(scene => !canvasNodes.some(node => node.type === "text" && node.metadata?.productionScriptSceneId === scene.id)).map(scene => `scene:${scene.id}`);
+    preparedScriptSource.current = key;
+    if (targets.length) window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner, command: { kind: "prepare", targets } } }));
+  }, [embedded, owner?.kind, owner?.id, production, draftKey, busy, canvasNodes]);
 
   const saveBrief = async (brief: string) => {
     if (busy || pendingCommandRef.current) return;
@@ -466,6 +476,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     const targetObject = scope.targetId ? readinessNow.targets.find(item => item.targetId === scope.targetId || item.id === scope.targetId) : undefined;
     const cursors = Object.fromEntries(moduleForWorkspace[scope.workspace].map(module => [module, director.modules[module]?.cursor ?? null]));
     const selectedModules = moduleForWorkspace[scope.workspace].join(", ");
+    const drama = useCanvasStore.getState().folders.find(folder => folder.id === episode?.dramaId || folder.sharedAssetCanvasId === canvasId);
     const key = projectId || episodeId;
     const id = nanoid();
     const ownerKind = projectId ? "canvas" : "episode";
@@ -487,6 +498,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
       "如需用户裁定创作选项，先回读当前 sourceHash，把问题、至少两个明确选项、目标、workId 和 sourceHash 写入 workflow.pendingDecisions；不要把问题只留在聊天中，也不要预选或自动批准。用户答复保存后，再从答复绑定的源稿继续。",
       `用户需求：${String(director.source.brief || requestedBrief)}`,
       scope.instruction ? `本次补充要求：${scope.instruction}` : "",
+      drama ? `所属剧目：${drama.name}。全剧大纲：${drama.outline || "尚未填写"}。全剧制作要求：${drama.productionPlan?.requirements || "尚未填写"}。本集沿用其已保存的制作设置；不要因全剧默认值变更改写已有分集、共享批准版本或在途任务输入。` : "",
       "保留项：不覆盖已确认的源稿和未编辑字段；完整保存对白、参考职责、资产版本与工作流游标。只提交本次模块产物和编译证据，使用 Backend expectedRevision/operationId 处理写入冲突。",
       "媒体权限：本请求只授权创作、修订和编译，不授权图片或视频生成。只有用户在工作台点击生成目标时，才使用对应生产 runId；前段 MP4 不得自动加入输入。",
       "请先读取 Backend 正式制作稿、缺项与运行记录，再从此游标继续。聊天中说已完成不算提交；完成后回读 Backend 版本回执。",

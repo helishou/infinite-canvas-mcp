@@ -247,12 +247,13 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact }: { 
             if (sequence !== loadThreadsSequenceRef.current || latest.activeThreadId !== threadId) return false;
             const historyTurns = authoritativeHistoryTurnKeys(threadId, thread.settledTurnIds || []);
             const hasExpectedTurn = !expectedTurnId || historyTurns.has(`${threadId}\0${expectedTurnId}`);
+            const activeTurnSettled = Boolean(latest.activeTurnId && historyTurns.has(`${threadId}\0${latest.activeTurnId}`));
             historyTurns.forEach((key) => liveTurnKeysRef.current.delete(key));
-            if (latest.activeTurnId) liveTurnKeysRef.current.add(`${threadId}\0${latest.activeTurnId}`);
+            if (latest.activeTurnId && !activeTurnSettled) liveTurnKeysRef.current.add(`${threadId}\0${latest.activeTurnId}`);
             authoritativeHistoryTurnsRef.current = historyTurns;
             const messages = mergeAgentMessages(history, latest.messages, threadId, liveTurnKeysRef.current);
             threadMessagesRef.current.set(threadId, messages);
-            setAgentState({ messages, connectError: "" });
+            setAgentState({ messages, connectError: "", ...(activeTurnSettled ? { waiting: false, sending: false, activeTurnId: "", pendingTool: null, pendingApprovals: [], activity: history.some(item => item.turnId === latest.activeTurnId && item.role === "error") ? rt("processingFailed") : rt("completed") } : {}) });
             const coveredTurnIds = [...historyTurns].map((key) => key.slice(threadId.length + 1));
             if (coveredTurnIds.length) void acknowledgeCodexHistory(endpoint, token, threadId, coveredTurnIds).catch(() => undefined);
             if (hasExpectedTurn && (thread.historyReady !== false || Boolean(expectedTurnId))) return true;
@@ -640,7 +641,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact }: { 
 
     useEffect(() => {
         if (!connected) return;
-        const activate = () => void activateAgentClient(endpoint, token, clientIdRef.current);
+        const activate = () => {
+            void activateAgentClient(endpoint, token, clientIdRef.current);
+            const current = useAgentStore.getState();
+            if (current.waiting && !current.sending && current.activeTurnId) void loadThreads(false, current.activeTurnId);
+        };
         const activateVisible = () => {
             if (document.visibilityState === "visible") activate();
         };
@@ -650,7 +655,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact }: { 
             window.removeEventListener("focus", activate);
             document.removeEventListener("visibilitychange", activateVisible);
         };
-    }, [connected, endpoint, token]);
+    }, [connected, endpoint, loadThreads, token]);
     const sendPrompt = async (launch?: AgentCreativeLaunch, scopedTaskInput?: AgentScopedTask): Promise<boolean> => {
         const text = scopedTaskInput?.text.trim() || launch?.text.trim() || prompt.trim();
         const files = scopedTaskInput ? [] : attachments;

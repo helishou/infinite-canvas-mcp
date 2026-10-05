@@ -47,7 +47,7 @@ H3 和导演制作是可选能力：需要相应模型、ComfyUI 自定义节点
 需要 Docker Engine/Desktop 与 Docker Compose v2。以下命令从本仓库源码构建，不依赖维护者的电脑或上游发布镜像：
 
 ```bash
-git clone --depth 1 https://github.com/helishou/infinite-canvas-mcp.git
+git clone --depth 1 --recurse-submodules https://github.com/helishou/infinite-canvas-mcp.git
 cd infinite-canvas-mcp
 cp .env.example .env
 docker compose up -d --build
@@ -79,7 +79,7 @@ npm run dev
 - **API 模型**：在设置中添加渠道地址、Key 与模型。渠道 Key 保存在 Backend SQLite，实际调用位置取决于执行器；自定义浏览器脚本需要网页保持打开。
 - **ComfyUI**：独立安装模型、节点和工作流，再配置 Backend 能访问的服务地址。Docker 中的 `127.0.0.1` 指向容器；宿主服务可使用 `host.docker.internal`，其他机器使用其实际网络地址。
 - **MiniMax H3**：模型、LoRA、VAE、TRT/DLSS 与自定义节点以自己的 ComfyUI 能力为准；本地潜变量续跑需要 Backend 能访问同一安装目录。视频工具与 Motion Context 需要 FFmpeg/FFprobe，Backend 镜像已包含它们。
-- **Acheng Director**：七模块覆盖剧情、资产、表演/动作、视效、镜头、模型提示词与连续性。运行 `npm run acheng:update` 安装并校验独立引擎，`npm run acheng:status` 查看版本，`npm run acheng:rollback` 回退。Docker 的对应命令和可选 Codex 镜像见部署说明。
+- **Acheng Director**：七模块覆盖剧情、资产、表演/动作、视效、镜头、模型提示词与连续性。`.agents/skills/acheng-director` 是指向 `helishou/acheng-director-skill` 的 Git 子模块，可在该目录直接开发、提交和推送。已有克隆先运行 `git submodule update --init -- .agents/skills/acheng-director`；提交修改后运行 `npm run acheng:update -- --local` 校验并启用当前提交，`npm run acheng:update` 获取远端更新，`npm run acheng:rollback` 仅回退运行包。Docker 的对应命令和可选 Codex 镜像见部署说明。
 - **插件**：Markdown、SVG、HTML、3D 全景等通过节点插件扩展，开发方式见[插件 SDK](plugins/canvas/README.md)。
 
 ## 数据与部署边界

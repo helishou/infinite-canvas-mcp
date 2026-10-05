@@ -50,8 +50,11 @@ export function RunningHubGraphPanel({
     const toggleField = useCallback((nodeId: string, inputKey: string) => {
         const key = `${nodeId}::${inputKey}`;
         const current = (fields || []).find((field) => `${field.nodeId}::${field.fieldName}` === key);
-        // 取消勾选 = 删掉这条映射，运行时不覆盖该输入，沿用平台原值。
-        if (current) onFieldsChange((fields || []).filter((field) => `${field.nodeId}::${field.fieldName}` !== key));
+        // 从平台读回来的字段一开始就躺在档案里（只是 enabled=false），
+        // 所以「取消勾选」只能改 enabled，不能删记录——删掉会把用户已经配好的
+        // 来源/序号/显示名一起弄丢，而且字段下次同步又会以未勾选状态回来。
+        // 删除只由浮窗里的「移除字段」负责。
+        if (current) onFieldsChange((fields || []).map((field) => (`${field.nodeId}::${field.fieldName}` === key ? { ...field, enabled: field.enabled === false } : field)));
         else updateField(nodeId, inputKey, {});
     }, [fields, onFieldsChange, updateField]);
 
@@ -94,9 +97,12 @@ export function RunningHubGraphPanel({
                                     onClose={close}
                                     rowState={(inputKey) => {
                                         const field = fieldMap.get(inputKey);
+                                        // 从平台读回来的字段全都躺在档案里，只是 enabled=false；
+                                        // 用「记录是否存在」判断会把每个输入都显示成已勾选。
+                                        const active = field?.enabled !== false;
                                         return {
-                                            active: Boolean(field),
-                                            editor: field ? (
+                                            active: Boolean(field) && active,
+                                            editor: field && active ? (
                                                 <FieldEditor
                                                     field={toLocalField(field)}
                                                     rawValue={node?.inputs?.[inputKey]}

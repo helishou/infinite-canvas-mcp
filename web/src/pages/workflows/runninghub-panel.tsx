@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Alert, App, Button, Checkbox, Form, Input, InputNumber, Select, Table } from "antd";
 import { useTranslation } from "react-i18next";
 import { fetchRunningHubConfig, inspectRunningHubWorkflow, saveRunningHubConfig, type RunningHubConfig, type RunningHubField } from "@/services/api/runninghub";
+import { keepTypedRunningHubSecret } from "@/lib/runninghub-secret-field";
 
 const initial: RunningHubConfig = { baseUrl: "https://www.runninghub.ai", apiKey: "", mode: "workflow", workflowId: "", appId: "", fields: [], useWallet: false, instanceType: "default", concurrency: 1 };
 
@@ -24,13 +25,16 @@ export function RunningHubPanel() {
         setBusy(true); setError("");
         try {
             const saved = await saveRunningHubConfig(config);
+            // The Backend keeps the stored key when it receives its own mask back, so the
+            // response carries no new secret: keep what is in the field instead of re-masking it.
+            const apiKey = keepTypedRunningHubSecret(config.apiKey, saved.config.apiKey);
             if (inspect) {
                 const result = await inspectRunningHubWorkflow(config.workflowId || "");
                 const oldFields = new Map((config.fields || []).map((field) => [`${field.nodeId}::${field.fieldName}`, field]));
                 const fields = result.fields.map((field) => ({ ...field, ...oldFields.get(`${field.nodeId}::${field.fieldName}`) }));
-                setConfig({ ...saved.config, fields });
+                setConfig({ ...saved.config, apiKey, fields });
                 message.success(t("runningHub.inspected"));
-            } else { setConfig(saved.config); message.success(t("runningHub.saved")); }
+            } else { setConfig({ ...saved.config, apiKey }); message.success(t("runningHub.saved")); }
         } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
         finally { setBusy(false); }
     };
@@ -52,7 +56,6 @@ export function RunningHubPanel() {
             <div className="grid gap-x-4 md:grid-cols-2">
                 <Form.Item label={t("runningHub.site")}><Select aria-label={t("runningHub.site")} value={config.baseUrl} onChange={(baseUrl) => patch({ baseUrl })} options={[{ value: "https://www.runninghub.ai", label: t("runningHub.global") }, { value: "https://www.runninghub.cn", label: t("runningHub.china") }]} /></Form.Item>
                 <Form.Item label="API Key"><Input.Password aria-label="RunningHub API Key" autoComplete="off" value={config.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} /></Form.Item>
-                <Form.Item label={t("runningHub.workflowId")}><Input aria-label={t("runningHub.workflowId")} value={config.workflowId} onChange={(event) => patch({ workflowId: event.target.value, fields: [], mode: "workflow" })} /></Form.Item>
                 <Form.Item label={t("runningHub.instance")}><Select aria-label={t("runningHub.instance")} value={config.instanceType || "default"} onChange={(instanceType) => patch({ instanceType })} options={[{ value: "default", label: "default · 24G" }, { value: "plus", label: "plus · 48G" }, { value: "ultra", label: "ultra" }]} /></Form.Item>
                 <Form.Item label={t("runningHub.concurrency")} extra={t("runningHub.capacityHint")}><InputNumber aria-label={t("runningHub.concurrency")} min={1} precision={0} value={config.concurrency} onChange={(concurrency) => patch({ concurrency: concurrency ?? undefined })} /></Form.Item>
                 <Form.Item label={t("runningHub.localConcurrency")}><InputNumber aria-label={t("runningHub.localConcurrency")} value={1} disabled /></Form.Item>

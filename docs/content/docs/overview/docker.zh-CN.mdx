@@ -12,7 +12,7 @@ description: 自托管前端、Backend、持久数据与可选制作能力
 需要 Docker Engine/Desktop 与 Docker Compose v2；旧兼容入口的 include 需要 Compose 2.20+。
 
 ```bash
-git clone --depth 1 https://github.com/helishou/infinite-canvas-mcp.git
+git clone --depth 1 --recurse-submodules https://github.com/helishou/infinite-canvas-mcp.git
 cd infinite-canvas-mcp
 cp .env.example .env
 docker compose up -d --build
@@ -84,7 +84,7 @@ COMFYUI_HOST_PATH=/srv/ComfyUI docker compose -f docker-compose.yml -f docker-co
 
 PowerShell：`$env:COMFYUI_HOST_PATH = 'C:/ComfyUI'`，然后运行相同的 `docker compose` 命令。
 
-- 安装 Acheng 导演引擎：`docker compose exec backend node scripts/acheng-engine.mjs update`。用 status 检查、rollback 回退；版本存入持久卷。基础 Backend 启动不自动下载引擎，缺少时会提示，其他功能可继续使用。
+- 安装 Acheng 导演引擎：`docker compose exec backend node scripts/acheng-engine.mjs update`。用 status 检查、rollback 回退；显式 ACHENG_SOURCE 指向持久卷中的可写 fork 克隆，固定运行版本也存入该卷。基础 Backend 启动不自动下载引擎，缺少时会提示，其他功能可继续使用。
 - 需要侧边栏 Codex 对话时设置 BACKEND_IMAGE_TARGET=backend-codex，再构建并运行 `docker compose exec backend codex login --device-auth`。登录与本机不同，容器使用 /data/codex 保存自身状态。Claude Code 等外部 CLI 同样需部署者另行安装配置。
 
 ## 原生部署与静态前端

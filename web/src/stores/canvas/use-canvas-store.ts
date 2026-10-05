@@ -34,6 +34,7 @@ export type CanvasProject = {
     activeChatId: string | null;
     backgroundMode: CanvasBackgroundMode;
     showImageInfo: boolean;
+    /** Legacy text retained for existing projects and draft recovery; no generation consumer. */
     globalPrompt: string;
     referenceCatalog?: Array<Record<string, unknown>>;
     viewport: ViewportTransform;
@@ -95,6 +96,8 @@ type CanvasStore = {
 };
 
 export type CanvasFolder = {
+    sharedAssetCanvasId?: string | null;
+    productionPlan?: import("@basketikun/canvas-agent/drama/production-contract").DramaProductionPlan;
     id: string; name: string; createdAt: string; updatedAt?: string;
     outline?: string; description?: string; coverStorageKey?: string | null; tags?: string[]; isDrama?: boolean;
 };

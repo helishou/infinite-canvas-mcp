@@ -24,6 +24,7 @@ const projects = [{ id: 'standalone', title: '独立角色制作', nodes: [], co
 const episode = { id: 'ep', title: '第一集', episodeNumber: 1, canvasId: 'linked' };
 projects.push({ id: 'retry', title: '重试画布', nodes: [], connections: [], updatedAt: '2026-10-01T00:00:00Z' });
 const records = new Map(); const requests = []; const turnRequests = []; const runStarts = []; const runRecords = new Map(); let creationCount = 0; let loseCreationResponse = true; let loseRunStartResponse = true; let failRead = true;
+let recoveredTurnFixture = "";
 const record = id => {
     const owner = id === 'linked' ? 'ep' : id;
     if (!records.has(owner)) records.set(owner, { episodeId: owner, revision: 0, publishedVersion: 0, published: null, updatedAt: '', draft: { director: undefined, scenes: [], shots: [], keyframes: {}, keyframeReviews: {}, clipGroups: [], settings: { mode: 'manual', imageModel: '', h3Model: '', imageModels: {}, h3Models: {} }, legacyImports: [] } });
@@ -64,7 +65,7 @@ try {
             { name: 'acheng-director', description: 'Acheng Director', path: 'E:/workspace/.agents/skills/acheng-director/SKILL.md', scope: 'repo', enabled: true, managed: true },
         ] };
         else if (pathname === '/agent/codex/threads') data = { ok: true, data: [{ id: 'workbench-thread', preview: 'Director session' }], workspace: { workspacePath: 'E:/workspace', activeThreadId: 'workbench-thread' }, conversation: { revision: 1, conversationId: 'workbench-conversation', threadId: 'workbench-thread', status: 'ready', mcpStatuses: {} } };
-        else if (/\/agent\/codex\/threads\/[^/]+$/.test(pathname)) data = { ok: true, thread: { id: 'workbench-thread' }, messages: [], settledTurnIds: [], historyReady: true };
+        else if (/\/agent\/codex\/threads\/[^/]+$/.test(pathname)) data = { ok: true, thread: { id: 'workbench-thread', status: 'idle' }, messages: recoveredTurnFixture ? [{ id: 'recovered-interruption', threadId: 'workbench-thread', turnId: recoveredTurnFixture, role: 'error', title: '本轮已中断', text: '任务已中断，已保存的内容保留。' }] : [], settledTurnIds: recoveredTurnFixture ? [recoveredTurnFixture] : [], historyReady: true };
         if (pathname === '/canvas/projects/retry/production' && failRead) { failRead = false; return route.fulfill({ status: 503, json: { error: 'temporary fixture failure' }, headers: { 'access-control-allow-origin': '*' } }); }
         if (pathname.endsWith('/text-suggestions')) data.suggestions = [];
         else if (pathname === '/canvas/projects' && method === 'GET') data.projects = projects;
@@ -128,10 +129,20 @@ try {
         else if (/\/canvas\/projects\/[^/]+$/.test(pathname)) data.project = projects.find(p => p.id === decodeURIComponent(pathname.split('/')[3]));
         return route.fulfill({ json: data, headers: { 'access-control-allow-origin': '*' } });
     });
-    await page.goto(`http://127.0.0.1:${testPort}/tests/director-navigation.html?start=%2Fdirector`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(`http://127.0.0.1:${testPort}/tests/director-navigation.html?start=%2Fproduction`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.getByRole('heading', { name: '制作工作室', exact: true }).waitFor();
     assert.ok(await page.getByRole('link', { name: '制作', exact: true }).count());
+    assert.equal(await page.locator('[data-testid="production-home"] textarea').count(), 0);
+    assert.equal(turnRequests.length, 0);
+    await page.getByRole('button', { name: '今天想创作什么？', exact: true }).click();
     await page.getByRole('heading', { name: '今天想创作什么？', exact: true }).waitFor();
+    await page.getByRole('button', { name: '从一句故事开始', exact: true }).click();
+    assert.equal(turnRequests.length, 0, 'selecting a creative example only fills the draft');
+    await page.getByRole('textbox', { name: '创意描述', exact: true }).fill('保留的创意草稿');
+    await page.getByRole('button', { name: '收起 Agent 面板', exact: true }).click();
+    await page.locator('#canvas-director-dialog').waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: '与导演对话', exact: true }).click();
+    assert.equal(await page.getByRole('textbox', { name: '创意描述', exact: true }).inputValue(), '保留的创意草稿');
     await page.getByRole('textbox', { name: '创意描述', exact: true }).fill('雨夜机械师：先设计角色、场景与制作对象。');
     const creativeTurnResponse = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/agent/codex/turn');
     await page.evaluate(async () => {
@@ -169,7 +180,7 @@ try {
         const { useAgentStore } = await import('/src/stores/use-agent-store.ts');
         return useAgentStore.getState().connected && !useAgentStore.getState().creativeLaunch;
     });
-    assert.equal(await page.getByRole('textbox', { name: '创意描述', exact: true }).inputValue(), '');
+    assert.equal(await page.locator('[data-director-creative-entry] textarea').inputValue(), '');
     await page.evaluate(async () => {
         const { useAgentStore } = await import('/src/stores/use-agent-store.ts');
         window.__directorTestEventSource.dispatchEvent({ type: 'codex_state', data: JSON.stringify({ threadId: 'creative-thread', turnId: 'creative-turn', busy: false }) });
@@ -183,14 +194,13 @@ try {
     await page.getByRole('heading', { name: '无限画布', exact: true }).waitFor();
     assert.equal(await page.getByRole('heading', { name: '今天想创作什么？', exact: true }).count(), 0);
     await page.getByRole('button', { name: 'test production hub', exact: true }).click();
-    await page.getByRole('heading', { name: '今天想创作什么？', exact: true }).waitFor();
-    await page.getByRole('tab', { name: '剧目与分集', exact: true }).click();
+    await page.getByRole('heading', { name: '制作工作室', exact: true }).waitFor();
+    assert.equal(await page.locator('[data-testid="production-home"] textarea').count(), 0);
+    assert.equal(await page.getByRole('tab', { name: '独立制作', exact: true }).count(), 0);
     await page.getByRole('heading', { name: '全部剧目', exact: true }).waitFor();
-    await page.getByRole('tab', { name: '我的制作项目', exact: true }).click();
-    await page.getByRole('heading', { name: '继续制作', exact: true }).waitFor();
     await page.getByRole('button', { name: 'test old drama route', exact: true }).click();
     await page.getByRole('heading', { name: '全部剧目', exact: true }).waitFor();
-    await page.getByRole('tab', { name: '我的制作项目', exact: true }).click();
+    await page.getByRole('button', { name: 'test legacy projects', exact: true }).click();
     await page.getByRole('heading', { name: '继续制作', exact: true }).waitFor();
     const artifacts = path.join(cache, 'artifacts'); fs.mkdirSync(artifacts, { recursive: true });
     await page.screenshot({ path: path.join(artifacts, 'desktop.png'), fullPage: true });
@@ -204,6 +214,7 @@ try {
         if (open && script) await page.locator('.ant-modal-wrap:not(.ant-modal-hidden) .ant-modal-close').click();
         if (!open || script) await page.getByRole('button', { name: /^(高级与历史|Advanced and history)$/ }).click();
         await page.getByRole('button', { name: label, exact: true }).click();
+        await page.waitForFunction(({ label, workspace }) => Array.from(document.querySelectorAll('nav button')).some(button => button.getAttribute('aria-label') === label && button.getAttribute('aria-current') === 'page') || workspace === 'production' && Boolean(document.querySelector('[data-production-tasks-panel]')?.getClientRects().length), { label, workspace });
     };
     const closeEditor = async () => {
         const close = page.locator('.ant-modal-wrap:not(.ant-modal-hidden) .ant-modal-close');
@@ -253,6 +264,8 @@ try {
     await page.waitForTimeout(250);
     const lostRunId = runStarts[0].runId;
     await page.reload();
+    await page.getByRole('heading', { name: '全部剧目', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'test legacy projects', exact: true }).click();
     await page.getByRole('heading', { name: '继续制作', exact: true }).waitFor();
     await page.getByRole('link').filter({ hasText: '独立角色制作' }).click();
     await page.getByRole('heading', { name: '独立角色制作', exact: true }).waitFor();
@@ -269,7 +282,7 @@ try {
     assert.equal(await page.getByRole('button', { name: '生成此 Segment', exact: true }).isDisabled(), true);
     await closeEditor();
     await page.getByRole('button', { name: 'test retry', exact: true }).click();
-    await page.getByRole('button', { name: '本场剧本', exact: true }).click();
+    assert.equal(await page.getByRole('button', { name: '本场剧本', exact: true }).count(), 0); await page.getByRole('button', { name: '高级与历史', exact: true }).click();
     await page.getByText('暂时无法读取制作数据', { exact: true }).waitFor();
     await page.getByRole('button', { name: /^刷\s*新$/ }).click();
     await page.getByRole('heading', { name: '重试画布', exact: true }).waitFor();
@@ -291,7 +304,7 @@ try {
     await openEditor();
     await page.getByRole('heading', { name: '独立角色制作', exact: true }).waitFor();
     await closeEditor();
-    await page.getByRole('button', { name: 'test production hub', exact: true }).click();
+    await page.getByRole('button', { name: 'test legacy projects', exact: true }).click();
     await page.getByRole('button', { name: '新建空白项目', exact: true }).click();
     await page.getByRole('textbox', { name: '制作名称', exact: true }).fill('新短片');
     await page.locator('.ant-modal-footer button.ant-btn-primary').click();
@@ -355,6 +368,23 @@ try {
     await returnToProduction.click();
     await page.waitForFunction(() => document.querySelector('output[aria-label="location"]')?.textContent?.includes('/canvas/standalone?') && document.querySelector('output[aria-label="location"]')?.textContent?.includes('workspace=story'));
     assert.equal(await page.locator('#canvas-director-dialog').isVisible(), false, 'resuming focus does not open the conversation');
+    recoveredTurnFixture = 'lost-completion';
+    await page.evaluate(async () => {
+        const { useAgentStore } = await import('/src/stores/use-agent-store.ts');
+        useAgentStore.setState({ activeThreadId: 'workbench-thread', activeTurnId: 'lost-completion', waiting: true, sending: false, connected: true });
+        window.dispatchEvent(new Event('focus'));
+    });
+    await page.waitForFunction(async () => { const state = (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState(); return !state.waiting && !state.activeTurnId && state.messages.some(item => item.title === '本轮已中断'); });
+    recoveredTurnFixture = '';
+    await page.evaluate(async () => {
+        const { useAgentStore } = await import('/src/stores/use-agent-store.ts');
+        useAgentStore.setState({ activeThreadId: 'workbench-thread', activeTurnId: 'still-running', waiting: true, sending: false });
+    });
+    const liveHistory = page.waitForResponse(response => new URL(response.url()).pathname === '/agent/codex/threads/workbench-thread');
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await liveHistory;
+    assert.equal(await page.evaluate(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().waiting), true, 'history without the active turn must not clear a real running turn');
+    await page.evaluate(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.setState({ activeTurnId: '', waiting: false }));
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ passed: true, creationCount, scope: 'unified production entry and object views, creative entry handoff, legacy routes, independent canvas, episode alias, shared draft, canvas shortcut, new production, Agent disconnected draft protection, runId receipt recovery, active-target duplicate prevention, follow presentation, manual pause and return, mobile navigation, no media generation' }));
 } catch (error) { console.error("Production requests:", JSON.stringify(requests.filter(item => /production/.test(item.pathname)))); console.error("Rendered page:", await page?.locator("body").innerText()); throw error; } finally { await browser?.close(); await server.close(); if (path.dirname(cache) === os.tmpdir() && path.basename(cache).startsWith('director-entry-')) fs.rmSync(cache, { recursive: true, force: true }); }

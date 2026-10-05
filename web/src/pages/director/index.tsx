@@ -8,7 +8,7 @@ import { useBackendStore } from "@/stores/use-backend-store";
 import { projectCover } from "@/pages/home/workbench-data";
 import { WorkbenchMediaPreview } from "@/pages/home/workbench-media";
 import { useProjectCoverResults, useStableProjectCovers } from "@/pages/home/use-workbench-data";
-import { createBackendProject, fetchBackendProjects } from "@/services/backend-api";
+import { createBackendProject, fetchBackendProjects, fetchBackendCanvasFolders, fetchBackendDramaEpisodes } from "@/services/backend-api";
 
 type Project = { id: string; title: string; updatedAt: string };
 
@@ -32,8 +32,11 @@ export default function DirectorPage() {
     const submittedName = useRef("");
     useEffect(() => {
         let active = true; setLoading(true); setError("");
-        void fetchBackendProjects(true).then(result => {
-            if (active) setProjects((result.projects || []).map(p => ({ id: String(p.id), title: String(p.title || p.id), updatedAt: String(p.updatedAt || "") })));
+        void Promise.all([fetchBackendProjects(true), fetchBackendCanvasFolders()]).then(async ([result, directory]) => {
+            const dramas = (directory.folders || []).filter(folder => folder.isDrama);
+            const episodes = await Promise.all(dramas.map(drama => fetchBackendDramaEpisodes(String(drama.id))));
+            const bound = new Set([...dramas.map(drama => drama.sharedAssetCanvasId), ...episodes.flatMap(result => (result.episodes || []).map(episode => episode.canvasId))].filter(Boolean));
+            if (active) setProjects((result.projects || []).filter(project => !bound.has(String(project.id))).map(p => ({ id: String(p.id), title: String(p.title || p.id), updatedAt: String(p.updatedAt || "") })));
         }).catch(cause => { if (active) setError(cause instanceof Error ? cause.message : String(cause)); })
             .finally(() => { if (active) setLoading(false); });
         return () => { active = false; };

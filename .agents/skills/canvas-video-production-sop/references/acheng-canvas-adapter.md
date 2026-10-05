@@ -4,7 +4,11 @@
 
 Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.agents/skills/acheng-director`。Skill 规定创作方法；`compile_assets.py`、`compile_h3.py` 及校验脚本是把制作源稿转换成提示词产物的可执行工具，不是另一个导演 Agent 或模型。脚本版本由本机 `skill-runtimes/acheng-director/active.json` 固定；制作开始记录上游 commit、patchVersion、runtimeId、Skill version，恢复时沿用该制作记录锁定的脚本版本。版本缺失或兼容检查失败时停止，不退回旧画布流程。
 
-项目命令 `npm run acheng:status` 查看活动运行时和仓库上游副本；`npm run acheng:update -- --check` 检查候选而不修改文件；`npm run acheng:update` 验证后更新固定运行时与仓库副本；`npm run acheng:vendor` 将当前已固定提交同步到仓库；`npm run acheng:rollback` 同时回退运行时和仓库副本。同步不会启动媒体生成；若检测到仓库副本的本地改动则拒绝覆盖。
+导演 Skill 的源码位于项目 Git 子模块 `.agents/skills/acheng-director`，`origin` 指向 [helishou/acheng-director-skill](https://github.com/helishou/acheng-director-skill)，跟踪 `main`。新克隆使用 `--recurse-submodules`，已有克隆使用 `git submodule update --init -- .agents/skills/acheng-director` 初始化。源码可直接修改并在子模块内提交、推送到 fork；父仓库只记录子模块提交指针，不代替子模块的提交或推送。
+
+项目命令 `npm run acheng:status` 查看源码 HEAD、未提交文件和活动运行包。`npm run acheng:update -- --local --check` 验证子模块当前已提交 HEAD；去掉 `--check` 后激活该版本。`npm run acheng:update` 验证远端 `origin/main`，成功后仅快进源码并激活运行包；存在未提交改动、领先或分叉的本地提交时拒绝覆盖，使用本地构建或自行处理分支。`--check` 不改变源码 HEAD 或活动运行包，但可获取 Git 对象和创建候选运行包。旧 `acheng:vendor` 命令等同于从当前 HEAD 本地构建，不再覆盖源码。`npm run acheng:rollback` 仅回退固定运行包，不切换源码分支、不丢弃修改。所有命令均不启动媒体生成。
+
+Canvas 兼容层仅应用于候选运行包，不写回源码。Docker 镜像通过显式 `ACHENG_SOURCE` 使用持久卷中的可写 Git 克隆，其他校验与运行包行为一致；不因开发子模块缺失而退回隐藏源码副本。
 
 ### Acheng 编译脚本做什么
 
@@ -40,7 +44,7 @@ Acheng 的纯提示词限制适用于创作职责；用户授权实际生成时�
 
 离线命令也接受 `{action,request,production?}` 的正式请求文件；`production` 可传 Backend 读取到的制作记录快照。操作 schema、源稿 patch 和锁定版本的脚本规则与 Backend 共用；需要在线对象、媒体或模型上下文的操作逐项标为 `unverified`，不能用离线快照替代在线提交检查。
 
-仅重建本地兼容层时使用 `npm run acheng:update -- --local --check` 验证候选，再用 `npm run acheng:update -- --local` 激活；保留同一上游 commit 和旧不可变运行版本。此操作不改制作稿、不提交生成。
+修改导演源码后先在子模块内提交，再使用 `npm run acheng:update -- --local --check` 验证该 HEAD，使用 `npm run acheng:update -- --local` 激活。仅重建 Canvas 兼容层时沿用当前源码 HEAD；旧不可变运行版本继续保留。此操作不改制作稿、不提交生成。
 
 source 原样保存 Acheng production 数据。sourceHash 是递归键排序、无空白、UTF-8 JSON 的 SHA-256；脚本使用项目导出工具，不能凭记忆拼哈希。artifacts 每项包含独立 prompt 字节、sha256、源哈希、参考标签/节点/storageKey/媒体哈希/职责及编译回执；draft 和 partial 不标 ready。接入包不填造 PASS，先执行本次制作锁定版本的真实离线编译与校验，再由 Backend 核对源与媒体。
 
@@ -54,7 +58,7 @@ assets 映射保存实际 nodeId、assetId、storageKey、sha256、version 和�
 
 导演工作台按制作对象展示「总览、故事、风格与资产、镜头与片段、生产与交付」，JSON、旧稿接入、引擎和版本恢复集中在高级与历史。七模块仍是内部职责；不要把页面标签、partial 或模块顺序解释为必须依次通过的生产关卡。首页、独立画布和单集入口引用同一 Backend 制作记录。
 
-产品导航只有一个「制作」入口，创意入口也放在这里；分别浏览独立画布与剧目分集。进入具体制作对象默认打开固定画布：每集一个制作画布，每个剧目一个共享资产画布，场次只做集内目录和分组。导演对话由右下角气泡展开，目录与对象编辑按需打开；交互约束统一见 `.agents/rules/canvas-ui.md`。故事、资产、镜头、生产与历史仍使用原 Backend 制作记录。已有绑定不改绑；首次进入未绑定对象调用 `production_ensure_canvas`，需要识别画布归属时调用 `production_get_canvas_context`。历史 `/director` 与分集制作地址保留为画布兼容入口，恢复原草稿与回执。
+产品导航分为「制作」和「画布」。制作先进入剧目总览，确认全剧规划及分类图片模型、视频模型与画幅，再由用户选择分集进入固定制作画布；共享资产画布作为剧目级独立入口显示。普通画布直接使用原生节点与生成，不自动进入制作 SOP。历史独立制作链接保留显式兼容访问。每集一张制作画布，每剧目一张共享资产画布，场次只做目录与分组；首次准备画布不授权生成，已开始制作的分集和已提交任务保留原设置。
 
 创意对话确认对象后，先保存 brief 与 `workflow.currentWork`，回读 Backend `workflow/readiness`，再通过 `site_navigate({ production: { kind, id, workId, runId? } })` 呈现正式画布目标；无节点时打开对象编辑面板。需要节点时用 `production_prepare_targets` 幂等准备 asset/frame/segment，不把准备或跟随视为生成授权。推进同一制作沿用 workId；待决定项绑定源哈希，用户答复先保存再继续，不凭聊天文字或同名节点推断导航位置。
 

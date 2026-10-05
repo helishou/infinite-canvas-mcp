@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { App, Dropdown, Input, Modal, Segmented, Tooltip } from "antd";
 import { Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, Lock, MapPinned, MessageSquare, Minus, Music2, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -111,6 +111,9 @@ export function CanvasNodeHoverToolbar({
     const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(quickImageToolIds);
     const [draftShowImageToolLabels, setDraftShowImageToolLabels] = useState(showImageToolLabels);
     const [imageToolSettingsOpen, setImageToolSettingsOpen] = useState(false);
+    const productionToolbarRef = useRef<HTMLDivElement>(null);
+    const [productionToolbarHeight, setProductionToolbarHeight] = useState(0);
+    const hasProductionActions = Boolean(productionActions);
     const { message } = App.useApp();
     const { t } = useTranslation();
     const copyText = useCopyText();
@@ -119,6 +122,16 @@ export function CanvasNodeHoverToolbar({
     useEffect(() => {
         setImageToolSettingsOpen(false);
     }, [node?.id]);
+
+    useLayoutEffect(() => {
+        const element = productionToolbarRef.current;
+        if (!element) return;
+        const measure = () => setProductionToolbarHeight(element.getBoundingClientRect().height);
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(element);
+        return () => observer.disconnect();
+    }, [node?.id, hasProductionActions, productionSelected]);
 
     if (!node || productionActions && !productionSelected) return null;
 
@@ -210,7 +223,7 @@ export function CanvasNodeHoverToolbar({
         closeImageToolSettings();
     };
 
-    if (productionActions) return <div data-production-node-actions className="absolute z-[70] flex flex-wrap items-center gap-1 rounded-lg border p-2 text-sm shadow-lg" style={{ left: Math.min(Math.max(16, left - 160), Math.max(16, (canvasSize?.width || window.innerWidth) - 336)), top: Math.min(Math.max(72, top + node.height * viewport.k + 24), Math.max(72, (canvasSize?.height || window.innerHeight) - ((canvasSize?.width || window.innerWidth) < 768 ? 320 : 180))), width: Math.min(320, (canvasSize?.width || window.innerWidth) - 32), background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }} onMouseDown={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()}>
+    if (productionActions) return <div ref={productionToolbarRef} data-production-node-actions className="absolute z-[70] flex flex-wrap items-center gap-1 rounded-lg border p-2 text-sm shadow-lg" style={{ left: Math.min(Math.max(16, left - 160), Math.max(16, (canvasSize?.width || window.innerWidth) - 336)), top: Math.min(Math.max(72, top - productionToolbarHeight - 24), Math.max(72, (canvasSize?.height || window.innerHeight) - productionToolbarHeight - 16)), width: Math.min(320, (canvasSize?.width || window.innerWidth) - 32), background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }} onMouseDown={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()}>
         {productionStatus && <span data-production-node-status className="w-full px-2 pb-1 text-xs" style={{ color: theme.node.muted }}>{productionStatus}</span>}
         {productionActions.map(action => <button key={action.id} type="button" disabled={action.disabled} className="rounded px-2 py-1.5 hover:bg-black/5 disabled:cursor-default disabled:opacity-40 dark:hover:bg-white/10" aria-label={action.title} onClick={action.onClick}>{action.label}</button>)}
         <Dropdown trigger={["click"]} menu={{ items: [...new Map([...extraTools, ...toolbarTools].map(tool => [tool.id, tool])).values()].map(tool => ({ key: tool.id, label: tool.label || tool.title, icon: tool.icon, danger: tool.danger, disabled: "disabled" in tool && tool.disabled === true, onClick: tool.onClick })) }}><button type="button" aria-label={t("productionCanvas.moreNodeActions")} className="inline-flex items-center gap-1 rounded px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/10">{t("productionCanvas.more")}<Ellipsis className="size-4" /></button></Dropdown>

@@ -91,3 +91,12 @@ test("自由文本与结构化旧稿同时存在时明确优先级，并保留�
     assert.match(input, /User-authored free text \(higher priority than the existing draft\):\n菲比先认出漂泊者。/);
     assert.ok(input.includes(`Original prompt from the editor (rewrite this complete draft):\n${currentPrompt}`));
 });
+
+test("旧节点保留的全局提示词不再进入增强请求", () => {
+    const legacyInput = { currentPrompt: "summary:\n海边重逢。", globalPrompt: "LEGACY_GLOBAL_PROMPT", manifest: "Picture 1: 角色参考", transitionPlan: "保持图片顺序" };
+    const input = buildPromptEnhancementInput(legacyInput);
+    assert.doesNotMatch(input, /LEGACY_GLOBAL_PROMPT|Global project instructions/);
+    assert.match(input, /summary:\n海边重逢。/);
+    assert.match(input, /Picture 1: 角色参考/);
+    assert.match(input, /保持图片顺序/);
+});

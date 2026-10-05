@@ -9,7 +9,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasTextSuggestion, CanvasTextTarget } from "@/types/canvas-plugin";
 
 export function canvasTextTargetExists(project: CanvasProject | undefined, target: CanvasTextTarget) {
-    if (!target.nodeId) return target.field === "globalPrompt";
+    if (!target.nodeId || target.field === "globalPrompt") return false;
     const node = project?.nodes.find((item) => item.id === target.nodeId);
     if (!node) return false;
     const metadata = (node.metadata || {}) as Record<string, unknown>;
@@ -19,7 +19,7 @@ export function canvasTextTargetExists(project: CanvasProject | undefined, targe
 }
 
 function targetLabel(project: CanvasProject | undefined, target: CanvasTextTarget) {
-    if (!target.nodeId) return "全局提示词";
+    if (!target.nodeId) return "旧画布文本（功能已移除）";
     const node = project?.nodes.find((item) => item.id === target.nodeId);
     return [node?.title || target.nodeId, target.segmentId, target.textItemId, target.field].filter(Boolean).join(" · ");
 }
@@ -61,7 +61,7 @@ export function CanvasTextSuggestionsButton({ projectId }: { projectId: string }
         finally { setBusy(false); }
     };
     const apply = (item: CanvasTextSuggestion) => run(async () => {
-        if (!canvasTextTargetExists(project, item.target)) throw new Error("目标已删除，不能采用；可忽略或复制候选内容");
+        if (!canvasTextTargetExists(project, item.target)) throw new Error("目标已删除或功能已移除，不能采用；可忽略或复制候选内容");
         const session = getCanvasTextSession(projectId, item.target);
         await session.initialize();
         const snapshot = session.getSnapshot();
@@ -89,7 +89,7 @@ export function CanvasTextSuggestionsButton({ projectId }: { projectId: string }
                     return <section key={item.id} className="border-t py-3" style={{ borderColor: theme.node.stroke }}>
                         <div className="flex items-center justify-between gap-4 text-xs">
                             <span className="min-w-0 truncate">{targetLabel(project, item.target)}</span>
-                            <span className={`shrink-0 ${exists ? "" : "text-red-500"}`} style={exists ? { color: theme.node.muted } : undefined}>{exists ? statusText[item.status] : `目标已删除 · ${statusText[item.status]}`}</span>
+                            <span className={`shrink-0 ${exists ? "" : "text-red-500"}`} style={exists ? { color: theme.node.muted } : undefined}>{exists ? statusText[item.status] : `${item.target.field === "globalPrompt" ? "功能已移除" : "目标已删除"} · ${statusText[item.status]}`}</span>
                         </div>
                         <p className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words text-sm">{item.text}</p>
                         <div className="mt-2 flex gap-1">

@@ -40,6 +40,18 @@ try {
     page.on('response', response => { if (response.status() >= 400) requestFailures.push({ path: new URL(response.url()).pathname, status: response.status() }); });
     const report = { title: episode.title, episodeId: item.id, checks: [], findings: [] }; reports.push(report);
     try {
+      await page.goto(`http://127.0.0.1:3001/production?dramaId=${encodeURIComponent(episode.dramaId)}`, { waitUntil: 'domcontentloaded' });
+      await page.locator('[data-drama-shared-canvas]').waitFor();
+      await page.getByRole('button', { name: '剧目规划', exact: true }).click();
+      const planning = page.getByRole('dialog', { name: '剧目规划', exact: true });
+      for (const label of ['角色／服装图片模型', '场景图片模型', '道具图片模型', '风格图模型', '分镜／关键帧图片模型']) assert.equal(await planning.getByText(label, { exact: true }).isVisible(), true);
+      await page.screenshot({ path: path.join(evidence, `${index}-plan-models.png`), animations: 'disabled' });
+      await closeEditor(page);
+      await page.reload();
+      await page.locator('[data-drama-shared-canvas]').waitFor();
+      assert.equal(new URL(page.url()).searchParams.get('dramaId'), episode.dramaId);
+      await page.screenshot({ path: path.join(evidence, `${index}-drama-overview.png`), animations: 'disabled' });
+      report.checks.push('drama planning precedes the canvas; category models and shared asset card are visible; refresh preserves the selected drama');
       await page.goto(`http://127.0.0.1:3001/drama/episodes/${item.id}/production`, { waitUntil: 'domcontentloaded' });
       await page.waitForURL(`**/canvas/${episode.canvasId}**`);
       await page.getByRole('button', { name: '找画面', exact: true }).waitFor();
@@ -53,18 +65,14 @@ try {
       await page.screenshot({ path: path.join(evidence, `${index}-switcher.png`), animations: 'disabled' });
       await page.keyboard.press('Escape'); await page.mouse.click(1000, 100);
       report.checks.push('episode and shared-asset menu is reachable');
-      await page.getByRole('button', { name: '本场剧本', exact: true }).click();
-      await page.locator('[data-production-scene-editor]').waitFor({ state: 'visible' });
-      assert.equal(await page.locator('[data-production-dialog] nav').count(), 0);
-      await page.screenshot({ path: path.join(evidence, `${index}-script.png`), animations: 'disabled' });
-      await page.getByRole('button', { name: '编辑剧本', exact: true }).click();
-      const text = page.locator('[data-production-scene-editor] textarea').first();
-      const original = await text.inputValue(), draft = original + '\n[独立验收窗口草稿]';
-      await text.fill(draft); await closeEditor(page);
-      await page.getByRole('button', { name: '本场剧本', exact: true }).click();
-      assert.equal(await text.inputValue(), draft);
-      await text.fill(original); await closeEditor(page);
-      report.checks.push('script reading is compact; unsaved text survives closing and reopening; original text restored locally');
+      assert.equal(await page.getByRole('button', { name: '本场剧本', exact: true }).count(), 0);
+      const scriptNodes = project.nodes.filter(node => node.type === 'text' && node.metadata?.productionScriptId);
+      report.scriptTextNodes = scriptNodes.length;
+      for (const node of scriptNodes) {
+        const block = before.draft.director?.source.script_scenes?.find(block => String(block.id || block.scene_id) === node.metadata.productionScriptId);
+        assert.equal(node.metadata.content, block?.text || '');
+      }
+      report.checks.push('no separate script button; existing script text nodes match the formal source');
       await page.getByRole('button', { name: '找画面', exact: true }).click();
       await page.locator('[data-production-directory-target]').first().waitFor();
       report.directoryScenes = await page.locator('[data-production-directory-target^="scene:"]').count();

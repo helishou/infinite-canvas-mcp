@@ -1238,7 +1238,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
             {batchExpanded ? texts.filter((text) => text.id !== primaryTextId).map((text, index) => <ExpandedTextCard key={text.id} node={node} text={text} index={index} onSetPrimary={() => onSetBatchPrimary?.(text.id)} />) : null}
             <div className="flex h-full w-full flex-col overflow-hidden rounded-3xl">
                 {isEditingContent ? (
-                    <div ref={textareaRef} className="h-full w-full">
+                    <div ref={textareaRef} className="h-full w-full" data-canvas-no-zoom>
                         <CanvasCollaborativeText
                             projectId={projectId}
                             target={{ nodeId: node.id, field: "content", ...(primaryText ? { textItemId: primaryText.id } : {}) }}
@@ -1251,7 +1251,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                         />
                     </div>
                 ) : content ? (
-                    <div className={`thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent font-mono ${paddingClass}`} style={textStyle} onWheel={(event) => event.stopPropagation()}>
+                    <div className={`thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent font-mono ${paddingClass}`} data-canvas-no-zoom style={textStyle} onWheel={(event) => event.stopPropagation()}>
                         {content}
                     </div>
                 ) : primaryText ? (
@@ -1316,7 +1316,7 @@ function ExpandedTextCard({ node, text, index, onSetPrimary }: { node: CanvasNod
         >
             {text.content ? (
                 <>
-                    <div className="thin-scrollbar h-full overflow-y-auto whitespace-pre-wrap break-words px-4 pb-4 pt-14 font-mono text-sm leading-6" style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
+                    <div className="thin-scrollbar h-full overflow-y-auto whitespace-pre-wrap break-words px-4 pb-4 pt-14 font-mono text-sm leading-6" data-canvas-no-zoom style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
                         {text.content}
                     </div>
                     <button
